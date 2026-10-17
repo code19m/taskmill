@@ -104,6 +104,14 @@ Notes on specific transitions:
 
 - **4 and 12.** The fetch query skips tasks whose deadline has passed, so a
   worker never starts a task late, even before the maintainer marks it dead.
+- **6 and 16.** A queue can be set to delete completed tasks at once instead
+  of keeping them for a retention period (requirement R10 in the
+  [scope document](scope.md)). Such a task is deleted by transition 6 itself
+  and never stays in `completed`.
+- **9.** A worker that has no handler for a task's kind snoozes it without
+  using an attempt, until a time limit passes, and then makes it dead. This
+  keeps tasks safe during rolling deploys, when some workers do not know a new
+  kind yet (requirement R5).
 - **11.** A lease that expires counts as a failed attempt on purpose. A task
   that crashes its worker every time (a "poison" task) must eventually stop
   being retried, not crash workers forever.
@@ -154,7 +162,8 @@ Each guarantee names the mechanism that provides it.
 
 5. **Database writes can be exactly-once.** A handler that writes only to the
    same PostgreSQL database can complete the task inside its own transaction.
-   The writes and the completion then commit together or not at all.
+   The writes and the completion then commit together or not at all. This is
+   opt-in: a handler that does not use it is completed by its worker as usual.
    *Mechanism: transition 6 runs in the handler's transaction and checks the
    lease token.*
 
