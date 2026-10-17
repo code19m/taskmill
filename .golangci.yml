@@ -104,7 +104,7 @@ linters:
 
     godot:
       scope: declarations
-      capital: true
+      capital: false # doc comments may start a sentence with an identifier, such as "opts may be nil."
 
     gocritic:
       enabled-tags:
