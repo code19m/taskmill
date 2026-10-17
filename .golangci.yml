@@ -1,0 +1,199 @@
+# golangci-lint configuration. The linter version is pinned in the Makefile.
+# Reference: https://golangci-lint.run/usage/configuration/
+version: "2"
+
+linters:
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
+  enable:
+    # Bugs and correctness.
+    - asasalint
+    - bidichk
+    - contextcheck
+    - durationcheck
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - forcetypeassert
+    - gocheckcompilerdirectives
+    - gocritic
+    - gosec
+    - makezero
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - reassign
+    - rowserrcheck
+    - sqlclosecheck
+    - unqueryvet
+
+    # API design and idioms.
+    - errname
+    - gochecknoinits
+    - inamedparam
+    - ireturn
+    - predeclared
+    - recvcheck
+    - revive
+    - sloglint
+    - tagliatelle
+    - unparam
+
+    # Simplicity and modern Go.
+    - copyloopvar
+    - exptostd
+    - gocognit
+    - intrange
+    - mirror
+    - modernize
+    - perfsprint
+    - unconvert
+    - usestdlibvars
+    - wastedassign
+
+    # Documentation and comments.
+    - dupword
+    - godoclint
+    - godot
+    - misspell
+
+    # Tests.
+    - testableexamples
+    - thelper
+    - tparallel
+    - usetesting
+
+    # Hygiene.
+    - asciicheck
+    - depguard
+    - forbidigo
+    - gomoddirectives
+    - goprintffuncname
+    - nolintlint
+
+  settings:
+    depguard:
+      # Only the standard library and this module may be imported. Adding a
+      # dependency means editing this list and recording why in an ADR; see
+      # docs/adr/0001-dependency-policy.md.
+      rules:
+        main:
+          list-mode: strict
+          allow:
+            - $gostd
+            - github.com/code19m/taskmill
+
+    errcheck:
+      check-type-assertions: true
+
+    exhaustive:
+      default-signifies-exhaustive: true
+
+    forbidigo:
+      forbid:
+        - pattern: ^(fmt\.Print(|f|ln)|print|println)$
+          msg: a library must not write to stdout; use an injected *slog.Logger
+
+    gocognit:
+      min-complexity: 20
+
+    godoclint:
+      default: basic # revive's exported rule already requires doc comments
+      enable:
+        - no-unused-link
+
+    godot:
+      scope: declarations
+      capital: true
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # struct layout is chosen for readability; tuned only where profiles show it matters
+
+    ireturn:
+      allow:
+        - error
+        - generic
+        - stdlib
+
+    misspell:
+      locale: US
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: early-return
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: error-strings
+        - name: errorf
+        - name: exported
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: unused-parameter
+        - name: unused-receiver
+        - name: use-any
+        - name: var-declaration
+        - name: var-naming
+
+    sloglint:
+      no-global: all
+      context: scope
+      static-msg: true
+      msg-style: lowercased
+      attr-only: true
+      no-raw-keys: true
+      key-naming-case: snake
+
+    staticcheck:
+      checks:
+        - all
+
+    tagliatelle:
+      case:
+        rules:
+          json: snake
+
+  exclusions:
+    generated: strict
+    warn-unused: true
+
+formatters:
+  enable:
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra:
+        group-params: true
+        clothe-returns: true
+        balance-calls: true
+    goimports:
+      local-prefixes:
+        - github.com/code19m/taskmill
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: false
