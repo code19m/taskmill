@@ -16,7 +16,8 @@ contract that the implementation and its tests are written against.
 | Queue | A named stream of tasks. A worker fetches from the queues it is configured for. |
 | Attempt | One run of a task's handler. |
 | Lease | The right of one attempt to run a task. It expires unless the worker renews it with heartbeats. |
-| Lease token | A value that changes every time a task is fetched. Every update a worker makes must present it. |
+| Lease token | A number that grows by one every time a task is fetched. Every update a worker makes must present it. |
+| FIFO group | Tasks that share a group key. They run one at a time, in enqueue order. |
 | Run time | The earliest time a task may start (`run_at`). |
 | Deadline | Optional. The latest time a task may start. |
 | Client | The API an application uses to enqueue, cancel, and retry tasks. |
@@ -28,6 +29,7 @@ contract that the implementation and its tests are written against.
 | State | Meaning | Terminal |
 |---|---|---|
 | `scheduled` | Waiting for its run time. | |
+| `pending` | Waiting for the tasks ahead of it in its FIFO group to finish. | |
 | `available` | Due, and waiting for a worker. | |
 | `running` | Leased by an attempt. | |
 | `retryable` | An attempt failed; waiting for its backoff to pass. | |
@@ -38,10 +40,11 @@ contract that the implementation and its tests are written against.
 A terminal task stays terminal unless an operator retries it. Terminal tasks
 are deleted when their retention period ends.
 
-Workers fetch only `available` tasks. Keeping `scheduled` and `retryable` as
-separate states means the fetch index holds only tasks that can run now, so
-millions of future tasks do not slow fetching down. Keeping `retryable` apart
-from `scheduled` shows operators at a glance how many tasks are failing.
+Workers fetch only `available` tasks. Keeping `scheduled`, `pending`, and
+`retryable` as separate states means the fetch index holds only tasks that can
+run now, so millions of future or waiting tasks do not slow fetching down.
+Keeping `retryable` apart from `scheduled` shows operators at a glance how many
+tasks are failing.
 
 ## Transitions
 
@@ -49,14 +52,17 @@ from `scheduled` shows operators at a glance how many tasks are failing.
 flowchart TD
     enqueue((enqueue)) -->|run later| scheduled
     enqueue -->|run now| available
+    enqueue -->|group busy| pending
 
     subgraph waiting [Waiting]
         scheduled
+        pending
         available
         retryable
     end
 
     scheduled -->|run time reached| available
+    pending -->|its turn in the group| available
     retryable -->|backoff passed| available
     available -->|fetch| running
 
@@ -78,46 +84,55 @@ flowchart TD
 The diagram shows the main flow. For readability it leaves out a few edges:
 a waiting task can also be cancelled or pass its deadline, an expired lease is
 rescued, and an operator can retry a dead or cancelled task. The table below
-is complete and is the authoritative definition. Each transition is a single
-atomic SQL statement.
+is complete and is the authoritative definition.
+
+Each transition is atomic. It is a single SQL statement, except when it
+finishes a task in a FIFO group: then it takes two statements in one
+transaction (see [FIFO groups](schema.md#fifo-groups) in the schema document).
 
 | # | From | To | Trigger | By |
 |---|---|---|---|---|
 | 1 | | `available` | Enqueued with a run time that is now or in the past. | Client |
 | 2 | | `scheduled` | Enqueued with a future run time. | Client |
-| 3 | `scheduled`, `retryable` | `available` | The run time is reached. | Maintainer |
-| 4 | `available` | `running` | Fetched. Uses one attempt, issues a new lease token, and starts a lease. | Worker |
-| 5 | `running` | `running` | A heartbeat extends the lease. | Worker |
-| 6 | `running` | `completed` | The handler returned no error. | Worker |
-| 7 | `running` | `retryable` | The handler failed and attempts remain. The run time becomes now plus a backoff. | Worker |
-| 8 | `running` | `dead` | The handler failed with no attempts left, or returned a permanent error. | Worker |
-| 9 | `running` | `scheduled` | The handler asked to run again later (snooze). Gives the attempt back. | Worker |
-| 10 | `running` | `available` | The worker released the task during graceful shutdown. Gives the attempt back. | Worker |
-| 11 | `running` | `retryable` or `dead` | The lease expired: the worker crashed or lost the database. Counts as a failed attempt. | Maintainer |
-| 12 | `scheduled`, `available`, `retryable` | `dead` | The deadline passed before the task started. | Maintainer |
-| 13 | `scheduled`, `available`, `retryable` | `cancelled` | Cancellation was requested. | Client |
-| 14 | `running` | `cancelled` | Cancellation was requested. The attempt's context is cancelled, and the task becomes `cancelled` when the attempt ends. | Worker |
-| 15 | `dead`, `cancelled` | `available` | An operator retried the task. It gets a fresh set of attempts. | Client |
-| 16 | Any terminal state | Deleted | The retention period ended. | Maintainer |
+| 3 | | `pending` | Enqueued into a FIFO group that already has an unfinished task. | Client |
+| 4 | `scheduled`, `retryable` | `available` | The run time is reached. | Maintainer |
+| 5 | `pending` | `available` or `scheduled` | The task ahead of it in its group finished. It becomes `scheduled` if its run time is still in the future. | Whoever finished that task |
+| 6 | `available` | `running` | Fetched. Uses one attempt, issues a new lease token, and starts a lease. | Worker |
+| 7 | `running` | `running` | A heartbeat extends the lease. | Worker |
+| 8 | `running` | `completed` | The handler returned no error. | Worker |
+| 9 | `running` | `retryable` | The handler failed and attempts remain. The run time becomes now plus a backoff. | Worker |
+| 10 | `running` | `dead` | The handler failed with no attempts left, or returned a permanent error. | Worker |
+| 11 | `running` | `scheduled` | The handler asked to run again later (snooze). Gives the attempt back. | Worker |
+| 12 | `running` | `available` | The worker released the task during graceful shutdown. Gives the attempt back. | Worker |
+| 13 | `running` | `retryable`, `dead`, or `cancelled` | The lease expired: the worker crashed or lost the database. Counts as a failed attempt. | Maintainer |
+| 14 | `scheduled`, `pending`, `available`, `retryable` | `dead` | The deadline passed before the task started. | Maintainer |
+| 15 | `scheduled`, `pending`, `available`, `retryable` | `cancelled` | Cancellation was requested. | Client |
+| 16 | `running` | `cancelled` | Cancellation was requested. The attempt's context is cancelled, and the task becomes `cancelled` when the attempt ends. | Worker |
+| 17 | `dead`, `cancelled` | `available` or `pending` | An operator retried the task. It gets a fresh set of attempts, and waits in `pending` if other tasks of its group are unfinished. | Client |
+| 18 | Any terminal state | Deleted | The retention period ended. | Maintainer |
 
 Notes on specific transitions:
 
-- **4 and 12.** The fetch query skips tasks whose deadline has passed, so a
+- **3 and 5.** Only the head of a FIFO group can be fetched. The tasks behind it
+  wait in `pending`, which no fetch reads, so a long group never slows fetching
+  down. When the head finishes (transitions 8, 10, 13, 14, 15, or 16), the next
+  task of its group is promoted.
+- **6 and 14.** The fetch query skips tasks whose deadline has passed, so a
   worker never starts a task late, even before the maintainer marks it dead.
-- **6 and 16.** A queue can be set to delete completed tasks at once instead
-  of keeping them for a retention period (requirement R10 in the
-  [scope document](scope.md)). Such a task is deleted by transition 6 itself
-  and never stays in `completed`.
-- **9.** A worker that has no handler for a task's kind snoozes it without
+- **8.** A completed task moves to a history table, where transition 18
+  deletes it after the retention period. A queue can keep no history at all
+  (requirement R10 in the [scope document](scope.md)); transition 8 then
+  deletes the task at once.
+- **11.** A worker that has no handler for a task's kind snoozes it without
   using an attempt, until a time limit passes, and then makes it dead. This
   keeps tasks safe during rolling deploys, when some workers do not know a new
   kind yet (requirement R5).
-- **11.** A lease that expires counts as a failed attempt on purpose. A task
+- **13.** A lease that expires counts as a failed attempt on purpose. A task
   that crashes its worker every time (a "poison" task) must eventually stop
-  being retried, not crash workers forever.
-- **14.** If the handler succeeds before it notices the cancellation, the task
-  becomes `completed`, because the work was done. If the lease expires while
-  cancellation is pending, the task becomes `cancelled`.
+  being retried, not crash workers forever. A task whose cancellation was
+  requested becomes `cancelled` instead.
+- **16.** If the handler succeeds before it notices the cancellation, the task
+  becomes `completed`, because the work was done.
 
 ## Invariants
 
@@ -125,14 +140,16 @@ These hold at all times. Tests check them after every operation.
 
 1. A task is in exactly one state.
 2. Only the attempt that holds the current lease token can move a task out of
-   `running`. The one exception is transition 11, which applies only after the
+   `running`. The one exception is transition 13, which applies only after the
    lease has expired.
-3. A task in `running` always has a lease token and a lease expiry time; a task
-   in any other state has neither.
+3. A task in `running` always has a lease expiry time, and a task in any other
+   state has none. A task's lease token only grows, so it never repeats.
 4. Attempts used never exceed the maximum attempts, and the maximum is at
    least 1.
 5. Every time taskmill records comes from the database clock (`now()`), never
    from an application server's clock.
+6. In a FIFO group, at most one task is neither `pending` nor finished: the
+   group's head.
 
 ## Guarantees
 
@@ -148,12 +165,12 @@ Each guarantee names the mechanism that provides it.
    once, until it completes or becomes dead, unless it is cancelled first. The
    only way a task ends without running is a deadline that passes before it
    starts, and it then becomes dead, where operators can see it. *Mechanism:
-   leases, rescue of expired leases (transition 11), and retries.*
+   leases, rescue of expired leases (transition 13), and retries.*
 
 3. **A lost worker does not lose tasks.** If a worker crashes or loses its
    connection, its tasks are rescued within one lease duration plus one
    maintainer interval, and then retried like any failed attempt.
-   *Mechanism: transition 11.*
+   *Mechanism: transition 13.*
 
 4. **A stale attempt cannot change a task.** An attempt that lost its lease
    cannot complete, fail, or snooze the task, and its result is discarded. The
@@ -164,13 +181,13 @@ Each guarantee names the mechanism that provides it.
    same PostgreSQL database can complete the task inside its own transaction.
    The writes and the completion then commit together or not at all. This is
    opt-in: a handler that does not use it is completed by its worker as usual.
-   *Mechanism: transition 6 runs in the handler's transaction and checks the
+   *Mechanism: transition 8 runs in the handler's transaction and checks the
    lease token.*
 
 6. **Retries are bounded and spread out.** A failed task is retried with
    exponential backoff and random jitter, up to its maximum attempts, and then
    becomes dead. The error of every attempt is kept with the task (the most
-   recent ones, up to a fixed limit). *Mechanism: transitions 7, 8 and 11.*
+   recent ones, up to a fixed limit). *Mechanism: transitions 9, 10, and 13.*
 
 7. **Tasks start in a predictable order.** Within a queue, workers fetch tasks
    by priority (higher first), then by run time, then by enqueue order. This is
@@ -179,7 +196,7 @@ Each guarantee names the mechanism that provides it.
    groups (milestone M4).
 
 8. **No task starts after its deadline.** *Mechanism: the fetch query filters
-   on the deadline, and transition 12.*
+   on the deadline, and transition 14.*
 
 9. **Delayed tasks start on time, within limits.** While a maintainer is
    running, a task becomes available within one maintainer interval after its
@@ -224,12 +241,13 @@ taskmill's guarantees hold only if handlers follow these rules:
 These questions were settled while drafting this document.
 
 1. **A dead task in a FIFO group.** By default the rest of the group continues
-   with its next task. A per-group option halts the group instead, until an
-   operator retries or deletes the dead task. Use it for streams where
+   with its next task. An option halts the group instead, until an operator
+   retries or deletes the dead task. The option is set per queue; see the
+   [schema document](schema.md#fifo-groups). Use it for streams where
    skipping a task would corrupt data, such as ledger events.
 2. **A passed deadline makes a task `dead`, not `cancelled`.** Missed deadlines
    then show up in the dead-letter queue and in alerts, because they usually
    signal a backlog that operators should know about.
 3. **Completed tasks cannot be retried in v1.** Only `dead` and `cancelled`
-   tasks can (transition 15). To run the same work again, enqueue a new task.
+   tasks can (transition 17). To run the same work again, enqueue a new task.
    This keeps re-running work an explicit choice.

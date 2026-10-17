@@ -85,11 +85,11 @@ delivered in later milestones.
 | R3 | No global state. One process can run several clients and workers. | U2 | M2 |
 | R4 | Queues route work and set capacity: each deployment chooses the queues it serves. Workers do not filter by kind when they fetch. | All | M2 |
 | R5 | A task whose kind has no handler in the worker that fetched it waits without using attempts, up to a time limit, and then becomes dead. This keeps tasks safe during rolling deploys. | U2, U3 | M3 |
-| R6 | FIFO groups: tasks with the same group key run one at a time, in enqueue order, for millions of distinct keys. A group can be set to halt when one of its tasks becomes dead. | U3 | M4 |
+| R6 | FIFO groups: tasks with the same group key run one at a time, in enqueue order, for millions of distinct keys. A queue can be set to halt a group when one of the group's tasks becomes dead. | U3 | M4 |
 | R7 | Batch handlers: one handler call receives up to N tasks and reports an outcome for each one. | U3 | M4 |
 | R8 | Concurrency limits: a cap on how many tasks of a queue run at once, across all workers. | U1, U3 | M4 |
-| R9 | Unique enqueue: at most one task per unique key, even when enqueued concurrently from several processes. | U3, U5 | M4 |
-| R10 | Completion policy per queue: keep completed tasks for a retention period, or delete them as soon as they complete. | U1, U3 | M2 |
+| R9 | Deduplicated enqueue: a key admits at most one task within a time window, even when enqueued concurrently from several processes. | U3, U5 | M4 |
+| R10 | Completion policy per queue: keep completed tasks in history for the retention period, or delete them as soon as they complete. | U1, U3 | M2 |
 | R11 | Every task has a stable identity that handlers can pass on, for example as a broker message ID. | U3 | M2 |
 | R12 | Enqueue accepts the caller's transaction, from pgx or `database/sql`. Handlers can opt in to completing their task inside their own transaction. | All | M2, M3 |
 | R13 | Every attempt's error is kept with the task, up to a fixed number of attempts. | U6 | M2 |
