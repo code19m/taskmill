@@ -43,6 +43,7 @@ match `^[a-z_][a-z0-9_]{0,62}$`, which makes it safe to use unquoted.
 | `groups` | One row per active FIFO group | Warm: grouped enqueues and completions only |
 | `dedupe_keys` | Deduplication keys and their windows | Warm: deduplicated enqueues only |
 | `queues` | Per-queue settings | Cold |
+| `settings` | Installation-wide settings, in a single row | Cold |
 | `schedules` | Recurring schedules | Cold |
 | `workers` | Live worker processes | Cold: a heartbeat every few seconds per process |
 | `leader` | The elected maintainer | Cold |
@@ -142,8 +143,9 @@ CREATE INDEX task_history_id_idx    ON taskmill.task_history (id);
 ```
 
 The history retention period is one setting for the whole installation
-(7 days by default), because dropping a day's partition removes every queue's
-rows for that day. A queue can still opt out of history entirely (R10).
+(7 days by default), stored in `settings`, because dropping a day's partition
+removes every queue's rows for that day. A queue can still opt out of history
+entirely (R10).
 
 ### `groups`
 
@@ -202,6 +204,15 @@ CREATE TABLE taskmill.queues (
     CONSTRAINT queues_max_running_check CHECK (max_running > 0)
 );
 
+CREATE TABLE taskmill.settings (
+    id                boolean PRIMARY KEY DEFAULT true,       -- always true: one row
+    history_retention interval NOT NULL DEFAULT '7 days',     -- completed tasks
+    dead_retention    interval NOT NULL DEFAULT '30 days',    -- dead and canceled tasks
+    updated_at        timestamptz NOT NULL DEFAULT now(),
+
+    CONSTRAINT settings_single_row_check CHECK (id)
+);
+
 CREATE TABLE taskmill.schedules (                      -- R14
     name        text PRIMARY KEY,
     queue       text NOT NULL,
@@ -252,6 +263,10 @@ CREATE TABLE taskmill.migrations (
     applied_at timestamptz NOT NULL DEFAULT now()
 );
 ```
+
+Installation-wide settings live in the database rather than in each
+process's configuration, so every worker that becomes the maintainer applies
+the same retention.
 
 The leader is elected with a lease row rather than an advisory lock. Session
 advisory locks need a dedicated connection and do not work behind
@@ -440,7 +455,7 @@ and `$2` the maximum.
 | Deadline sweep | Moves unfinished tasks whose deadline has passed to `dead`, through `tasks_deadline_idx`. |
 | Cancel | Cancels waiting tasks at once, and flags running ones with `cancel_requested_at`. |
 | Retry | Moves a `dead` or `canceled` task back to `available` with `attempt = 0`, keeping its error history. |
-| Retention | Drops history partitions older than the retention period, and deletes old dead and canceled tasks in batches through `tasks_finished_idx`. |
+| Retention | Drops history partitions older than `settings.history_retention`, and deletes dead and canceled tasks older than `settings.dead_retention` in batches through `tasks_finished_idx`. |
 | Leader election | An upsert on `leader` that succeeds only for the current leader or when the lease has expired. |
 
 Statements that end a grouped task (complete, dead, cancel, rescue, deadline)
@@ -627,7 +642,7 @@ Other results, identical on both versions:
 | R7 Batch handlers | Fetch takes a `LIMIT`; complete, fail, and heartbeat take arrays. |
 | R8 Concurrency limits | `queues.max_running`, the queue row lock, and `tasks_running_idx`. |
 | R9 Deduplicated enqueue | `dedupe_keys`, claimed atomically in the enqueue statement. |
-| R10 Completion policy | `queues.keep_history`; `task_history` partitions; complete with or without history. |
+| R10 Completion policy | `queues.keep_history`; `task_history` partitions; `settings.history_retention`; complete with or without history. |
 | R11 Stable identity | `tasks.id`, kept in history. Global message IDs are the outbox's job. |
 | R12 Caller's transactions | All statements are self-contained; complete works in the handler's transaction. |
 | R13 Error history | `tasks.errors`, bounded to 20 entries. |
