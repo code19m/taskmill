@@ -1,0 +1,27 @@
+name: PR title
+
+# Pull requests are squash-merged, so the title becomes the commit message on
+# main. This keeps history in Conventional Commits form; see CONTRIBUTING.md.
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  conventional-commits:
+    name: Conventional Commits
+    # Dependabot titles follow the convention but can exceed the length limit.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check the title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9/-]+\))?!?: [a-z].{0,70}[^.]$'
+          if [[ ! "$TITLE" =~ $pattern ]]; then
+            echo "::error::The title must look like 'feat(worker): add graceful drain'. See CONTRIBUTING.md#commit-messages."
+            exit 1
+          fi
