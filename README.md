@@ -24,6 +24,8 @@ taskmill aims to be:
   a dead-letter queue. A crashed worker never loses a task.
 - **Ordered when you need it.** Strict FIFO processing per group key, for any
   number of groups, and concurrency limits.
+- **An outbox, too.** Publish to Kafka, NATS, or RabbitMQ with the same
+  transactional guarantee, in order per key.
 - **Fast.** Low pickup latency through `LISTEN/NOTIFY`, batched round trips,
   and queries verified against their query plans.
 - **Observable.** Structured logging through `log/slog`, plus metrics and
@@ -44,12 +46,12 @@ See [ADR 0002](docs/adr/0002-supported-versions.md) for the support policy.
 |---|---|
 | M0 Foundations | Repository, tooling, CI, project policies |
 | M1 Design | Task lifecycle, schema, public API, guarantees, performance targets |
-| M2 Core engine | Migrations, enqueue, fetch, complete, retry, dead-letter queue |
-| M3 Worker runtime | Typed handlers, worker pool, `LISTEN/NOTIFY`, heartbeats, graceful shutdown |
+| M2 Core engine | Migrations, enqueue, fetch, complete, retry, cancellation, dead-letter queue |
+| M3 Worker runtime | Typed handlers, worker pool, `LISTEN/NOTIFY`, heartbeats, graceful shutdown, maintainer with leader election |
 | **v0.1.0** | First release |
-| M4 Ordering and control | FIFO groups, concurrency limits, uniqueness, cancellation, pausing |
-| M5 Scheduling and maintenance | Cron schedules, leader election, stuck-task rescue, retention |
-| M6 Observability and admin | Metrics, tracing, admin API, CLI |
+| M4 Ordering, batching, and outbox | FIFO groups, batch handlers, concurrency limits, unique enqueue, outbox and inbox |
+| M5 Scheduling and retention | Cron schedules, retention, statistics |
+| M6 Observability and operations | Metrics, tracing, inspect API, queue pausing, web interface, CLI |
 | M7 Hardening | Benchmarks, load and failure testing |
 | **v1.0.0** | Stable API and complete documentation |
 
