@@ -1,0 +1,45 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you see, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The smallest program or steps that show the problem.
+      render: go
+    validations:
+      required: true
+  - type: input
+    id: taskmill-version
+    attributes:
+      label: taskmill version
+      placeholder: v0.1.0 or a commit hash
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      placeholder: output of `go version`
+    validations:
+      required: true
+  - type: input
+    id: postgres-version
+    attributes:
+      label: PostgreSQL version
+      placeholder: output of `SELECT version();`
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Logs, connection poolers (e.g. PgBouncer), deployment details.
