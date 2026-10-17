@@ -124,10 +124,10 @@ busy production database.
 - **Exactly-once delivery across systems.** Through a broker, delivery is
   at-least-once, and consumers deduplicate by message ID (R9, R11).
 
-## Open questions
+## Decisions
 
-1. **A public SQL enqueue function.** A stable `enqueue` function in the
+1. **No public SQL enqueue function in v1.** A stable `enqueue` function in the
    taskmill schema would let services written in other languages, and database
-   triggers, enqueue tasks (U4). It would also make part of the schema a public
-   interface that must stay compatible across versions. *Proposal: decide in
-   the API document. The schema must not rule it out.*
+   triggers, enqueue tasks (U4), but it would also freeze part of the schema as
+   a public interface. The schema keeps it possible, and it can be added once
+   users need it. Decided in the [API document](api.md#decisions).
