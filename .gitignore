@@ -1,0 +1,17 @@
+# Pinned development tools, installed by the Makefile.
+/bin/
+
+# Test binaries, coverage reports and profiles.
+*.test
+*.out
+*.prof
+
+# Go workspaces are local to a developer's machine.
+go.work
+go.work.sum
+
+# Local environment overrides.
+.env
+.env.*
+
+# Editor and OS files belong in your global gitignore (git config core.excludesFile).
