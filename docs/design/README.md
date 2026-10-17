@@ -6,6 +6,7 @@ documented behavior updates the document in the same pull request.
 
 | Document | Covers | Status |
 |---|---|---|
+| [Scope and use cases](scope.md) | What taskmill is for, the architectures it serves, and the requirements that follow | Draft |
 | [Task lifecycle and guarantees](task-lifecycle.md) | Task states, transitions, and the promises taskmill makes | Draft |
 
 The storage schema, the public API, and the performance targets follow as
