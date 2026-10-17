@@ -647,14 +647,15 @@ This design changed two earlier documents:
 - **The scope's R9 is now "deduplicated enqueue within a time window",** and
   R6's halting is configured per queue.
 
-## Open questions
+## Decisions
 
-1. **Halting per queue or per group.** The lifecycle decision allowed halting
-   per group. Here it is a queue setting that applies to all of the queue's
-   groups, because groups are created on the fly and can number in the
-   millions. *Proposal: per queue. An outbox queue halts; a background-jobs
-   queue continues.*
-2. **One history retention period for the installation.** Per-queue periods
-   would need row deletes, which partitions exist to avoid. *Proposal: one
-   period for the installation, and queues that need nothing kept turn history
-   off.*
+These questions were settled while drafting this document.
+
+1. **Halting is a queue setting.** `halt_group_on_dead` applies to all groups
+   of a queue, because groups are created on the fly and can number in the
+   millions. An outbox queue halts its groups; a background-jobs queue lets
+   them continue.
+2. **History retention is one setting for the installation.** Dropping a day's
+   partition removes every queue's rows for that day, and per-queue periods
+   would need row deletes, which the partitions exist to avoid. A queue that
+   needs no history turns it off with `keep_history`.
