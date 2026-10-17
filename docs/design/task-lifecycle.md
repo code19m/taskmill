@@ -35,7 +35,7 @@ contract that the implementation and its tests are written against.
 | `retryable` | An attempt failed; waiting for its backoff to pass. | |
 | `completed` | The handler succeeded. | Yes |
 | `dead` | Will not run again: its attempts are used up, it failed with a permanent error, or its deadline passed. Dead tasks form the dead-letter queue. | Yes |
-| `cancelled` | Stopped on request. | Yes |
+| `canceled` | Stopped on request. | Yes |
 
 A terminal task stays terminal unless an operator retries it. Terminal tasks
 are deleted when their retention period ends.
@@ -73,17 +73,17 @@ flowchart TD
     subgraph terminal [Terminal]
         completed
         dead
-        cancelled
+        canceled
     end
 
     running -->|succeeded| completed
     running -->|failed, no attempts left| dead
-    running -->|cancel requested| cancelled
+    running -->|cancel requested| canceled
 ```
 
 The diagram shows the main flow. For readability it leaves out a few edges:
-a waiting task can also be cancelled or pass its deadline, an expired lease is
-rescued, and an operator can retry a dead or cancelled task. The table below
+a waiting task can also be canceled or pass its deadline, an expired lease is
+rescued, and an operator can retry a dead or canceled task. The table below
 is complete and is the authoritative definition.
 
 Each transition is atomic. It is a single SQL statement, except when it
@@ -104,11 +104,11 @@ transaction (see [FIFO groups](schema.md#fifo-groups) in the schema document).
 | 10 | `running` | `dead` | The handler failed with no attempts left, or returned a permanent error. | Worker |
 | 11 | `running` | `scheduled` | The handler asked to run again later (snooze). Gives the attempt back. | Worker |
 | 12 | `running` | `available` | The worker released the task during graceful shutdown. Gives the attempt back. | Worker |
-| 13 | `running` | `retryable`, `dead`, or `cancelled` | The lease expired: the worker crashed or lost the database. Counts as a failed attempt. | Maintainer |
+| 13 | `running` | `retryable`, `dead`, or `canceled` | The lease expired: the worker crashed or lost the database. Counts as a failed attempt. | Maintainer |
 | 14 | `scheduled`, `pending`, `available`, `retryable` | `dead` | The deadline passed before the task started. | Maintainer |
-| 15 | `scheduled`, `pending`, `available`, `retryable` | `cancelled` | Cancellation was requested. | Client |
-| 16 | `running` | `cancelled` | Cancellation was requested. The attempt's context is cancelled, and the task becomes `cancelled` when the attempt ends. | Worker |
-| 17 | `dead`, `cancelled` | `available` or `pending` | An operator retried the task. It gets a fresh set of attempts, and waits in `pending` if other tasks of its group are unfinished. | Client |
+| 15 | `scheduled`, `pending`, `available`, `retryable` | `canceled` | Cancellation was requested. | Client |
+| 16 | `running` | `canceled` | Cancellation was requested. The attempt's context is canceled, and the task becomes `canceled` when the attempt ends. | Worker |
+| 17 | `dead`, `canceled` | `available` or `pending` | An operator retried the task. It gets a fresh set of attempts, and waits in `pending` if other tasks of its group are unfinished. | Client |
 | 18 | Any terminal state | Deleted | The retention period ended. | Maintainer |
 
 Notes on specific transitions:
@@ -130,7 +130,7 @@ Notes on specific transitions:
 - **13.** A lease that expires counts as a failed attempt on purpose. A task
   that crashes its worker every time (a "poison" task) must eventually stop
   being retried, not crash workers forever. A task whose cancellation was
-  requested becomes `cancelled` instead.
+  requested becomes `canceled` instead.
 - **16.** If the handler succeeds before it notices the cancellation, the task
   becomes `completed`, because the work was done.
 
@@ -162,7 +162,7 @@ Each guarantee names the mechanism that provides it.
    transaction.*
 
 2. **No task is silently dropped.** A committed task keeps being run, at least
-   once, until it completes or becomes dead, unless it is cancelled first. The
+   once, until it completes or becomes dead, unless it is canceled first. The
    only way a task ends without running is a deadline that passes before it
    starts, and it then becomes dead, where operators can see it. *Mechanism:
    leases, rescue of expired leases (transition 13), and retries.*
@@ -227,8 +227,8 @@ taskmill's guarantees hold only if handlers follow these rules:
 
 - **Be idempotent.** Running a task twice must be safe, or the handler must use
   transactional completion.
-- **Respect the context.** Stop promptly when the context is cancelled. A
-  cancelled context means the task was cancelled, its lease was lost, or the
+- **Respect the context.** Stop promptly when the context is canceled. A
+  canceled context means the task was canceled, its lease was lost, or the
   worker is shutting down.
 - **Return errors, do not panic.** taskmill recovers panics and records them as
   failed attempts, but a returned error carries better information.
@@ -245,9 +245,9 @@ These questions were settled while drafting this document.
    retries or deletes the dead task. The option is set per queue; see the
    [schema document](schema.md#fifo-groups). Use it for streams where
    skipping a task would corrupt data, such as ledger events.
-2. **A passed deadline makes a task `dead`, not `cancelled`.** Missed deadlines
+2. **A passed deadline makes a task `dead`, not `canceled`.** Missed deadlines
    then show up in the dead-letter queue and in alerts, because they usually
    signal a backlog that operators should know about.
-3. **Completed tasks cannot be retried in v1.** Only `dead` and `cancelled`
+3. **Completed tasks cannot be retried in v1.** Only `dead` and `canceled`
    tasks can (transition 17). To run the same work again, enqueue a new task.
    This keeps re-running work an explicit choice.

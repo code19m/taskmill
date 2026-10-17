@@ -16,7 +16,7 @@ match `^[a-z_][a-z0-9_]{0,62}$`, which makes it safe to use unquoted.
 ## Principles
 
 1. **The hot table holds only unfinished work.** `tasks` holds tasks that can
-   still run, plus dead and cancelled tasks waiting for an operator. Completed
+   still run, plus dead and canceled tasks waiting for an operator. Completed
    tasks move to a history table that is partitioned by day, and retention
    drops whole partitions. The hot table stays small, so vacuum keeps up.
 2. **One partial index per access path.** Each index holds only the rows in the
@@ -38,7 +38,7 @@ match `^[a-z_][a-z0-9_]{0,62}$`, which makes it safe to use unquoted.
 
 | Table | Purpose | Write rate |
 |---|---|---|
-| `tasks` | Unfinished, dead, and cancelled tasks | Hot: every enqueue, fetch, heartbeat, and result |
+| `tasks` | Unfinished, dead, and canceled tasks | Hot: every enqueue, fetch, heartbeat, and result |
 | `task_history` | Completed tasks, one partition per day | Hot: one insert per completion; append-only |
 | `groups` | One row per active FIFO group | Warm: grouped enqueues and completions only |
 | `dedupe_keys` | Deduplication keys and their windows | Warm: deduplicated enqueues only |
@@ -57,7 +57,7 @@ widest to the narrowest, then variable-width ones.
 ```sql
 CREATE TYPE taskmill.task_state AS ENUM (
     'scheduled', 'pending', 'available', 'running',
-    'retryable', 'completed', 'dead', 'cancelled'
+    'retryable', 'completed', 'dead', 'canceled'
 );
 
 CREATE TABLE taskmill.tasks (
@@ -68,7 +68,7 @@ CREATE TABLE taskmill.tasks (
     lease_expires_at    timestamptz,                  -- set only while running
     attempted_at        timestamptz,                  -- start of the latest attempt
     cancel_requested_at timestamptz,
-    finalized_at        timestamptz,                  -- when it became dead or cancelled
+    finalized_at        timestamptz,                  -- when it became dead or canceled
     lease_token         integer NOT NULL DEFAULT 0,   -- grows by one on every fetch
     state               taskmill.task_state NOT NULL,
     priority            smallint NOT NULL DEFAULT 0,  -- higher runs first
@@ -89,7 +89,7 @@ CREATE TABLE taskmill.tasks (
     CONSTRAINT tasks_state_check     CHECK (state <> 'completed'),
     CONSTRAINT tasks_pending_check   CHECK (state <> 'pending' OR group_key IS NOT NULL),
     CONSTRAINT tasks_lease_check     CHECK ((state = 'running') = (lease_expires_at IS NOT NULL)),
-    CONSTRAINT tasks_finalized_check CHECK ((state IN ('dead', 'cancelled')) = (finalized_at IS NOT NULL))
+    CONSTRAINT tasks_finalized_check CHECK ((state IN ('dead', 'canceled')) = (finalized_at IS NOT NULL))
 ) WITH (fillfactor = 80);
 ```
 
@@ -267,7 +267,7 @@ transaction-pooling proxies; a lease row works everywhere.
 | `tasks_running_idx` | `queue` | `running` | Lease rescue; concurrency limits (R8) |
 | `tasks_pending_idx` | `queue, group_key, id` | `pending` | Promoting the next task of a group |
 | `tasks_deadline_idx` | `deadline` | Unfinished, with a deadline | The deadline sweep |
-| `tasks_finished_idx` | `queue, finalized_at` | `dead`, `cancelled` | The dead-letter queue view; retention |
+| `tasks_finished_idx` | `queue, finalized_at` | `dead`, `canceled` | The dead-letter queue view; retention |
 
 ```sql
 CREATE INDEX tasks_fetch_idx    ON taskmill.tasks (queue, priority DESC, run_at, id) WHERE state = 'available';
@@ -276,7 +276,7 @@ CREATE INDEX tasks_running_idx  ON taskmill.tasks (queue) WHERE state = 'running
 CREATE INDEX tasks_pending_idx  ON taskmill.tasks (queue, group_key, id) WHERE state = 'pending';
 CREATE INDEX tasks_deadline_idx ON taskmill.tasks (deadline)
     WHERE deadline IS NOT NULL AND state IN ('scheduled', 'pending', 'available', 'retryable');
-CREATE INDEX tasks_finished_idx ON taskmill.tasks (queue, finalized_at) WHERE state IN ('dead', 'cancelled');
+CREATE INDEX tasks_finished_idx ON taskmill.tasks (queue, finalized_at) WHERE state IN ('dead', 'canceled');
 ```
 
 The fetch index's key matches the fetch query's `ORDER BY` exactly. PostgreSQL
@@ -354,7 +354,7 @@ RETURNING id, cancel_requested_at IS NOT NULL AS cancel_requested;
 
 One statement renews every lease a worker holds. A task missing from the
 result has lost its lease, and the worker cancels that attempt's context. A
-task returned with `cancel_requested` is cancelled the same way (transition 16
+task returned with `cancel_requested` is canceled the same way (transition 16
 of the lifecycle).
 
 ### Complete
@@ -405,7 +405,7 @@ each kind's custom policy.
 ```sql
 UPDATE taskmill.tasks t
 SET state = CASE
-            WHEN t.cancel_requested_at IS NOT NULL THEN 'cancelled'
+            WHEN t.cancel_requested_at IS NOT NULL THEN 'canceled'
             WHEN t.attempt >= t.max_attempts THEN 'dead'
             ELSE 'retryable'
         END::taskmill.task_state,
@@ -439,8 +439,8 @@ and `$2` the maximum.
 | Promote | Moves `scheduled` and `retryable` tasks whose run time has passed to `available`, in batches, through `tasks_due_idx`. |
 | Deadline sweep | Moves unfinished tasks whose deadline has passed to `dead`, through `tasks_deadline_idx`. |
 | Cancel | Cancels waiting tasks at once, and flags running ones with `cancel_requested_at`. |
-| Retry | Moves a `dead` or `cancelled` task back to `available` with `attempt = 0`, keeping its error history. |
-| Retention | Drops history partitions older than the retention period, and deletes old dead and cancelled tasks in batches through `tasks_finished_idx`. |
+| Retry | Moves a `dead` or `canceled` task back to `available` with `attempt = 0`, keeping its error history. |
+| Retention | Drops history partitions older than the retention period, and deletes old dead and canceled tasks in batches through `tasks_finished_idx`. |
 | Leader election | An upsert on `leader` that succeeds only for the current leader or when the lease has expired. |
 
 Statements that end a grouped task (complete, dead, cancel, rescue, deadline)
@@ -578,7 +578,7 @@ laptop. The numbers show the shape of each plan, not throughput; M7 measures
 throughput.
 
 The test data had 1.7 million tasks: 300,000 due and 1,000,000 scheduled in one
-queue, 200,000 due in 9 other queues, 5,000 running, 70,000 dead or cancelled,
+queue, 200,000 due in 9 other queues, 5,000 running, 70,000 dead or canceled,
 and 10,000 FIFO groups of 11 tasks each. The heap was 243 MB and the fetch
 index 39 MB.
 
