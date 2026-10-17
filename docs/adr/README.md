@@ -9,6 +9,7 @@ the way it does.
 | [0001](0001-dependency-policy.md) | Dependency policy | Accepted |
 | [0002](0002-supported-versions.md) | Supported Go and PostgreSQL versions | Accepted |
 | [0003](0003-outbox-on-the-shared-engine.md) | Build the outbox on the shared engine | Accepted |
+| [0004](0004-pgx-as-the-postgresql-driver.md) | Use pgx as the PostgreSQL driver | Accepted |
 
 ## Writing an ADR
 

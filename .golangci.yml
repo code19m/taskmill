@@ -82,6 +82,7 @@ linters:
           allow:
             - $gostd
             - github.com/code19m/taskmill
+            - github.com/jackc/pgx/v5 # ADR 0004
 
     errcheck:
       check-type-assertions: true
