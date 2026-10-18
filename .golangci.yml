@@ -115,12 +115,14 @@ linters:
       enable-all: true
       disable:
         - fieldalignment # struct layout is chosen for readability; tuned only where profiles show it matters
+        - shadow # flags the idiomatic `if err := f(); err != nil` inside functions that declare err
 
     ireturn:
       allow:
         - error
         - generic
         - stdlib
+        - taskmill\.(querier|rows)$ # unexported adapters over pgx and database/sql
 
     misspell:
       locale: US

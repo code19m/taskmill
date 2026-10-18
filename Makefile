@@ -5,6 +5,10 @@ GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION   := v1.9.0
 ACTIONLINT_VERSION    := v1.7.12
 
+# The database that `make db` starts and `make test` uses.
+TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:54329/taskmill?sslmode=disable
+TEST_POSTGRES     ?= postgres:18-alpine
+
 BIN           := $(CURDIR)/bin
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 GOVULNCHECK   := $(BIN)/govulncheck-$(GOVULNCHECK_VERSION)
@@ -29,12 +33,12 @@ lint: $(GOLANGCI_LINT) $(ACTIONLINT) ## Run the Go and GitHub Actions linters.
 	$(ACTIONLINT)
 
 .PHONY: test
-test: ## Run all tests with the race detector, in random order.
-	go test -race -shuffle=on -count=1 ./...
+test: ## Run all tests with the race detector, in random order (needs `make db`).
+	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -shuffle=on -count=1 ./...
 
 .PHONY: cover
-cover: ## Run all tests and open the coverage report in a browser.
-	go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+cover: ## Run all tests and open the coverage report in a browser (needs `make db`).
+	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
 
 .PHONY: vuln
@@ -48,6 +52,17 @@ tidy: ## Tidy go.mod and go.sum.
 .PHONY: tidy-check
 tidy-check: ## Fail if go.mod or go.sum is not tidy.
 	go mod tidy -diff
+
+.PHONY: db
+db: ## Start a PostgreSQL container for the tests.
+	@docker start taskmill-test-db >/dev/null 2>&1 || docker run -d --name taskmill-test-db -p 54329:5432 \
+		-e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill $(TEST_POSTGRES) -c max_connections=500 >/dev/null
+	@until docker exec taskmill-test-db pg_isready -h 127.0.0.1 -U postgres -q; do sleep 0.2; done
+	@echo "PostgreSQL is ready at $(TEST_DATABASE_URL)"
+
+.PHONY: db-stop
+db-stop: ## Remove the test PostgreSQL container.
+	docker rm -f taskmill-test-db
 
 .PHONY: tools
 tools: $(GOLANGCI_LINT) $(GOVULNCHECK) $(ACTIONLINT) ## Install the pinned development tools into ./bin.
