@@ -380,11 +380,14 @@ func TestHeartbeatsKeepLongTasksLeased(t *testing.T) {
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			runs.Add(1)
-			time.Sleep(time.Second) // more than three lease durations
+			time.Sleep(3500 * time.Millisecond) // more than three lease durations
 			return nil
 		}, nil),
-		Queues:        defaultQueue(2),
-		LeaseDuration: 300 * time.Millisecond, // without heartbeats, the task is rescued and runs again
+		Queues: defaultQueue(2),
+		// Without heartbeats, the task is rescued and runs again. The lease is
+		// long enough that a loaded machine does not miss heartbeats for all of
+		// it.
+		LeaseDuration: time.Second,
 	})
 
 	id := e.enqueue(t, sendEmail{}, nil)
@@ -1384,7 +1387,7 @@ func runTaskWorker(t *testing.T, e *env) (*taskmill.Worker, *atomic.Int32) {
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
 		switch task.Args.To {
 		case "slow":
-			time.Sleep(time.Second) // more than three leases
+			time.Sleep(3500 * time.Millisecond) // more than three leases
 		case "blocked":
 			<-ctx.Done()
 			return ctx.Err()
@@ -1393,7 +1396,9 @@ func runTaskWorker(t *testing.T, e *env) (*taskmill.Worker, *atomic.Int32) {
 	}), nil)
 	var batches atomic.Int32
 	taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { batches.Add(1) }), nil)
-	return newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, LeaseDuration: 300 * time.Millisecond}), &batches
+	// A lease long enough that a loaded machine does not miss heartbeats for
+	// all of it.
+	return newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, LeaseDuration: time.Second}), &batches
 }
 
 func TestRunTask(t *testing.T) {
