@@ -44,6 +44,30 @@ type statements struct {
 	promoteGroup     string
 	enterGroup       string
 	resumeHaltedHead string
+
+	fetch          string
+	lockQueue      string
+	countRunning   string
+	heartbeat      string
+	fail           string
+	snooze         string
+	release        string
+	cancelRunning  string
+	queueSettings  string
+	upsertWorker   string
+	beatWorker     string
+	deleteWorker   string
+	electLeader    string
+	resignLeader   string
+	promoteDue     string
+	nextDue        string
+	rescue         string
+	expireDeadline string
+
+	retention        string
+	deleteFinished   string
+	deleteDedupeKeys string
+	deleteWorkers    string
 }
 
 // taskColumns are the columns that scanTaskInfo reads, in its order.
@@ -239,5 +263,187 @@ RETURNING tasks`),
 		resumeHaltedHead: q(`
 UPDATE {s}.groups SET halted_task_id = NULL, halted_at = NULL, updated_at = now()
 WHERE queue = $1 AND group_key = $2 AND halted_task_id = $3`),
+
+		// fetch leases up to $2 available tasks of queue $1 for $3
+		// microseconds, in priority, run time, and enqueue order.
+		fetch: q(`
+WITH picked AS (
+    SELECT id FROM {s}.tasks
+    WHERE state = 'available' AND queue = $1 AND (deadline IS NULL OR deadline > now())
+    ORDER BY priority DESC, run_at, id
+    LIMIT $2
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE {s}.tasks t
+SET state = 'running',
+    attempt = t.attempt + 1,
+    lease_token = t.lease_token + 1,
+    lease_expires_at = now() + $3 * interval '1 microsecond',
+    attempted_at = now(),
+    attempted_by = $4
+FROM picked
+WHERE t.id = picked.id
+RETURNING t.id, t.kind, t.priority, t.attempt, t.max_attempts, t.lease_token, coalesce(t.group_key, ''),
+          t.metadata, t.payload, t.errors, t.created_at, t.run_at, t.deadline, t.attempted_at`),
+
+		// lockQueue serializes fetches from a queue with a concurrency limit.
+		// countRunning then runs as its own statement, so it sees the tasks
+		// that fetches committed while lockQueue waited.
+		lockQueue:    q(`SELECT max_running FROM {s}.queues WHERE name = $1 FOR UPDATE`),
+		countRunning: q(`SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND state = 'running'`),
+
+		// heartbeat renews the leases of attempts that still own their tasks.
+		heartbeat: q(`
+UPDATE {s}.tasks
+SET lease_expires_at = now() + $3 * interval '1 microsecond'
+WHERE (id, lease_token) IN (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t))
+  AND state = 'running'
+RETURNING id, cancel_requested_at IS NOT NULL`),
+
+		// fail records a failed attempt: retryable after a delay of $4
+		// microseconds, or dead. $5 is the error as a JSON object.
+		fail: q(`
+UPDATE {s}.tasks
+SET state = $3::{s}.task_state,
+    run_at = CASE WHEN $3::{s}.task_state = 'retryable' THEN now() + $4 * interval '1 microsecond' ELSE run_at END,
+    finalized_at = CASE WHEN $3::{s}.task_state = 'dead' THEN now() END,
+    lease_expires_at = NULL,
+    errors = (CASE WHEN jsonb_array_length(errors) >= 20 THEN errors - 0 ELSE errors END)
+             || jsonb_build_array(jsonb_build_object('attempt', attempt, 'at', now()) || $5::jsonb)
+WHERE id = $1 AND lease_token = $2 AND state = 'running'
+RETURNING queue, coalesce(group_key, '')`),
+
+		// snooze runs the task again after $3 microseconds and gives the
+		// attempt back.
+		snooze: q(`
+UPDATE {s}.tasks
+SET state = CASE WHEN $3 > 0 THEN 'scheduled' ELSE 'available' END::{s}.task_state,
+    run_at = now() + $3 * interval '1 microsecond',
+    attempt = attempt - 1,
+    lease_expires_at = NULL
+WHERE id = $1 AND lease_token = $2 AND state = 'running'
+RETURNING queue`),
+
+		// release gives a task back during shutdown, attempt included.
+		release: q(`
+UPDATE {s}.tasks
+SET state = 'available', attempt = attempt - 1, lease_expires_at = NULL
+WHERE id = $1 AND lease_token = $2 AND state = 'running'
+RETURNING queue`),
+
+		cancelRunning: q(`
+UPDATE {s}.tasks
+SET state = 'canceled', finalized_at = now(), lease_expires_at = NULL
+WHERE id = $1 AND lease_token = $2 AND state = 'running'
+RETURNING queue, coalesce(group_key, '')`),
+
+		queueSettings: q(`SELECT name, paused_at IS NOT NULL, coalesce(max_running, 0) FROM {s}.queues WHERE name = ANY($1)`),
+
+		upsertWorker: q(`
+INSERT INTO {s}.workers (id, queues, hostname, version) VALUES ($1, $2, $3, $4)
+ON CONFLICT (id) DO UPDATE
+SET queues = EXCLUDED.queues, hostname = EXCLUDED.hostname, version = EXCLUDED.version,
+    started_at = now(), heartbeat_at = now()`),
+		beatWorker:   q(`UPDATE {s}.workers SET heartbeat_at = now() WHERE id = $1`),
+		deleteWorker: q(`DELETE FROM {s}.workers WHERE id = $1`),
+
+		// electLeader takes or renews the maintainer's lease for $2
+		// microseconds. It returns a row only if $1 is the leader.
+		electLeader: q(`
+INSERT INTO {s}.leader AS l (name, worker_id, elected_at, expires_at)
+VALUES ('maintainer', $1, now(), now() + $2 * interval '1 microsecond')
+ON CONFLICT (name) DO UPDATE
+SET worker_id = EXCLUDED.worker_id,
+    elected_at = CASE WHEN l.worker_id = EXCLUDED.worker_id THEN l.elected_at ELSE now() END,
+    expires_at = EXCLUDED.expires_at
+WHERE l.worker_id = EXCLUDED.worker_id OR l.expires_at < now()
+RETURNING worker_id`),
+		resignLeader: q(`DELETE FROM {s}.leader WHERE name = 'maintainer' AND worker_id = $1`),
+
+		promoteDue: q(`
+WITH due AS (
+    SELECT id FROM {s}.tasks
+    WHERE state IN ('scheduled', 'retryable') AND run_at <= now()
+    ORDER BY run_at
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+), promoted AS (
+    UPDATE {s}.tasks t SET state = 'available' FROM due WHERE t.id = due.id RETURNING t.queue
+)
+SELECT queue, count(*) FROM promoted GROUP BY queue`),
+
+		nextDue: q(`
+SELECT extract(epoch FROM min(run_at) - now()) FROM {s}.tasks WHERE state IN ('scheduled', 'retryable')`),
+
+		// rescue fails the attempts whose leases expired: their workers
+		// crashed or lost the database. $1 and $2 are the default backoff's
+		// base and maximum in seconds.
+		rescue: q(`
+WITH expired AS (
+    SELECT id FROM {s}.tasks
+    WHERE state = 'running' AND lease_expires_at < now()
+    ORDER BY id
+    LIMIT $3
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE {s}.tasks t
+SET state = CASE
+            WHEN t.cancel_requested_at IS NOT NULL THEN 'canceled'
+            WHEN t.attempt >= t.max_attempts THEN 'dead'
+            ELSE 'retryable'
+        END::{s}.task_state,
+    run_at = CASE
+            WHEN t.cancel_requested_at IS NULL AND t.attempt < t.max_attempts
+            THEN now() + make_interval(secs => least($1 * power(2, t.attempt - 1), $2) * (0.9 + random() * 0.2))
+            ELSE t.run_at
+        END,
+    finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
+    lease_expires_at = NULL,
+    errors = (CASE WHEN jsonb_array_length(t.errors) >= 20 THEN t.errors - 0 ELSE t.errors END)
+             || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', now(),
+                    'message', 'the worker lost its lease: it crashed, stopped, or lost the database',
+                    'code', 'lease_expired'))
+FROM expired
+WHERE t.id = expired.id
+RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text`),
+
+		// expireDeadline makes waiting tasks dead once their deadline passed.
+		expireDeadline: q(`
+WITH expired AS (
+    SELECT id, state FROM {s}.tasks
+    WHERE deadline < now() AND deadline IS NOT NULL
+      AND state IN ('scheduled', 'pending', 'available', 'retryable')
+    ORDER BY deadline
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE {s}.tasks t
+SET state = 'dead', finalized_at = now(),
+    errors = (CASE WHEN jsonb_array_length(t.errors) >= 20 THEN t.errors - 0 ELSE t.errors END)
+             || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', now(),
+                    'message', 'the deadline passed before the task started', 'code', 'deadline_exceeded'))
+FROM expired
+WHERE t.id = expired.id
+RETURNING t.id, t.queue, coalesce(t.group_key, ''), expired.state::text`),
+
+		retention: q(`
+SELECT extract(epoch FROM history_retention)::bigint, extract(epoch FROM dead_retention)::bigint FROM {s}.settings`),
+
+		// deleteFinished deletes dead and canceled tasks older than $1
+		// seconds, except the dead heads that keep their groups halted.
+		deleteFinished: q(`
+DELETE FROM {s}.tasks WHERE id IN (
+    SELECT t.id FROM {s}.tasks t
+    WHERE t.state IN ('dead', 'canceled') AND t.finalized_at < now() - $1 * interval '1 second'
+      AND NOT EXISTS (SELECT 1 FROM {s}.groups g WHERE g.halted_task_id = t.id)
+    LIMIT $2
+)`),
+
+		deleteDedupeKeys: q(`
+DELETE FROM {s}.dedupe_keys WHERE key IN (
+    SELECT key FROM {s}.dedupe_keys WHERE expires_at < now() LIMIT $1
+)`),
+
+		deleteWorkers: q(`DELETE FROM {s}.workers WHERE heartbeat_at < now() - $1 * interval '1 second'`),
 	}
 }

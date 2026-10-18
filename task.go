@@ -188,8 +188,8 @@ func scanTaskInfo(r rows) (*TaskInfo, error) {
 	if err := decodeMetadata(metadata, &info.Metadata); err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(errs, &info.Errors); err != nil {
-		return nil, fmt.Errorf("decode errors: %w", err)
+	if err := decodeErrors(errs, &info.Errors); err != nil {
+		return nil, err
 	}
 	info.Deadline = deref(deadline)
 	info.AttemptedAt = deref(attemptedAt)
@@ -203,6 +203,16 @@ func decodeMetadata(raw []byte, dst *map[string]string) error {
 	}
 	if err := json.Unmarshal(raw, dst); err != nil {
 		return fmt.Errorf("decode metadata: %w", err)
+	}
+	return nil
+}
+
+func decodeErrors(raw []byte, dst *[]AttemptError) error {
+	if len(raw) == 0 || string(raw) == "[]" {
+		return nil
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return fmt.Errorf("decode errors: %w", err)
 	}
 	return nil
 }
