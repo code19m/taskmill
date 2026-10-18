@@ -7,7 +7,9 @@ expect from every change, and how changes are merged.
 
 For anything larger than a small fix, open an issue first. Describe the problem
 and the approach you have in mind. Agreeing on the design before writing code
-saves time for everyone.
+saves time for everyone. Ask questions in
+[Discussions](https://github.com/code19m/taskmill/discussions/categories/q-a),
+not in issues.
 
 ## Development setup
 

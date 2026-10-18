@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Ask a question
+    url: https://github.com/code19m/taskmill/discussions/categories/q-a
+    about: Ask how to use taskmill, or share an idea before writing a feature request.
   - name: Report a security vulnerability
     url: https://github.com/code19m/taskmill/security/advisories/new
     about: Please report vulnerabilities privately, never in a public issue.
