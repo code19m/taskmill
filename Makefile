@@ -41,6 +41,10 @@ cover: ## Run all tests and open the coverage report in a browser (needs `make d
 	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -count=1 -covermode=atomic -coverprofile=coverage.out ./...
 	go tool cover -html=coverage.out
 
+.PHONY: bench
+bench: ## Run the benchmarks and the chaos test against the test database (needs `make db`).
+	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go run ./internal/cmd/bench
+
 .PHONY: vuln
 vuln: $(GOVULNCHECK) ## Scan for known vulnerabilities.
 	$(GOVULNCHECK) ./...

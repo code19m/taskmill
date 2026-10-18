@@ -52,9 +52,11 @@ worker's in-flight tasks run again after their leases expire.
 
 ```sh
 make db
-TASKMILL_TEST_DATABASE_URL=postgres://postgres:postgres@localhost:54329/taskmill?sslmode=disable \
-  go run ./internal/cmd/bench -scenarios enqueue,throughput,latency,chaos
+make bench
 ```
+
+`go run ./internal/cmd/bench -help` lists the flags for running single
+scenarios, longer runs, or another database.
 
 The program recreates its own schema, `taskmill_bench`, and prints a Markdown
 report. For the statement count (R1), install `pg_stat_statements` in the
