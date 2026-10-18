@@ -137,6 +137,7 @@ type enqueueBatch struct {
 	dedupeWindows         []int64
 	payloads, metadata    []string
 	due                   map[string]bool // queues with tasks due now
+	plain                 bool            // no task uses a dedupe key or a FIFO group
 }
 
 func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams) ([]EnqueueResult, error) {
@@ -144,7 +145,7 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 		return nil, nil
 	}
 
-	b := enqueueBatch{due: make(map[string]bool)}
+	b := enqueueBatch{due: make(map[string]bool), plain: true}
 	// sent[i] is the batch position of params[i], or -1 for a repeat of an
 	// earlier dedupe key in the same batch; firstOf maps it to that earlier one.
 	sent := make([]int, len(params))
@@ -192,7 +193,11 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		}
 	}
 
-	r, err := q.query(ctx, c.sql.enqueue,
+	stmt := c.sql.enqueue
+	if b.plain {
+		stmt = c.sql.enqueuePlain
+	}
+	r, err := q.query(ctx, stmt,
 		b.queues, b.kinds, b.priorities, b.runAts, b.deadlines, b.maxAttempts, nullable(b.groups),
 		b.dedupeKeys, b.dedupeWindows, b.payloads, b.metadata, c.schema, notify)
 	if err != nil {
@@ -388,6 +393,7 @@ func (b *enqueueBatch) add(t *resolvedTask) {
 	b.dedupeWindows = append(b.dedupeWindows, t.dedupeWindow.Microseconds())
 	b.payloads = append(b.payloads, string(t.payload))
 	b.metadata = append(b.metadata, string(t.metadata))
+	b.plain = b.plain && t.dedupeKey == nil && t.group == ""
 	if t.runAt.IsZero() || !t.runAt.After(time.Now()) {
 		b.due[t.queue] = true
 	}

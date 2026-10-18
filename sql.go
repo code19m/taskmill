@@ -26,6 +26,7 @@ type statements struct {
 	schemaVersion string
 
 	enqueue      string
+	enqueuePlain string
 	dedupeLookup string
 
 	complete string
@@ -109,7 +110,7 @@ WITH input AS (
         WITH ORDINALITY AS t(queue, kind, priority, run_at, deadline, max_attempts, group_key,
                              dedupe_key, dedupe_window_us, payload, metadata, ord)
 ), ids AS (
-    SELECT input.*, nextval(pg_get_serial_sequence('{s}.tasks', 'id')) AS id
+    SELECT input.*, nextval('{s}.tasks_id_seq') AS id
     FROM input
 ), claimed AS (
     INSERT INTO {s}.dedupe_keys AS d (key, task_id, expires_at)
@@ -163,6 +164,30 @@ LEFT JOIN inserted i ON i.id = ids.id
 LEFT JOIN {s}.dedupe_keys d ON i.id IS NULL AND d.key = ids.dedupe_key
 CROSS JOIN notified
 ORDER BY ids.ord`),
+
+		// enqueuePlain is enqueue for batches without dedupe keys or FIFO
+		// groups, the common case: it skips their bookkeeping. It takes the
+		// same parameters and returns the same rows.
+		enqueuePlain: q(`
+WITH ids AS (
+    SELECT queue, kind, priority, run_at, deadline, max_attempts, payload, metadata, ord,
+           nextval('{s}.tasks_id_seq') AS id
+    FROM unnest($1::text[], $2::text[], $3::smallint[], $4::timestamptz[], $5::timestamptz[],
+                $6::smallint[], $7::text[], $8::bytea[], $9::bigint[], $10::jsonb[], $11::jsonb[])
+        WITH ORDINALITY AS t(queue, kind, priority, run_at, deadline, max_attempts, group_key,
+                             dedupe_key, dedupe_window_us, payload, metadata, ord)
+), inserted AS (
+    INSERT INTO {s}.tasks (id, queue, kind, state, priority, run_at, deadline, payload, metadata, max_attempts)
+    OVERRIDING SYSTEM VALUE
+    SELECT id, queue, kind,
+           CASE WHEN coalesce(run_at, now()) > now() THEN 'scheduled' ELSE 'available' END::{s}.task_state,
+           priority, coalesce(run_at, now()), deadline, payload, metadata, max_attempts
+    FROM ids
+    ORDER BY ord
+), notified AS (
+    SELECT count(pg_notify($12, 'a|' || q)) AS n FROM unnest($13::text[]) AS q
+)
+SELECT ids.ord, ids.id, false FROM ids CROSS JOIN notified ORDER BY ids.ord`),
 
 		dedupeLookup: q(`SELECT key, task_id FROM {s}.dedupe_keys WHERE key = ANY($1::bytea[])`),
 
