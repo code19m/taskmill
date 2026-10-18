@@ -168,8 +168,12 @@ CREATE TABLE taskmill.groups (
     CONSTRAINT groups_halted_check CHECK ((halted_task_id IS NULL) = (halted_at IS NULL))
 ) WITH (fillfactor = 80);
 
-CREATE INDEX groups_halted_idx ON taskmill.groups (queue) WHERE halted_at IS NOT NULL;
+CREATE INDEX groups_halted_idx      ON taskmill.groups (queue) WHERE halted_at IS NOT NULL;
+CREATE INDEX groups_halted_task_idx ON taskmill.groups (halted_task_id) WHERE halted_task_id IS NOT NULL;
 ```
+
+`groups_halted_task_idx` lets retention skip the dead heads that keep their
+groups halted without scanning every group.
 
 ### `dedupe_keys`
 
@@ -367,17 +371,34 @@ serializes fetches for limited queues only.
 ### Heartbeat
 
 ```sql
-UPDATE taskmill.tasks
-SET lease_expires_at = now() + $3::interval
-WHERE (id, lease_token) IN (SELECT * FROM unnest($1::bigint[], $2::integer[]))
-  AND state = 'running'
-RETURNING id, cancel_requested_at IS NOT NULL AS cancel_requested;
+WITH attempts AS (
+    SELECT * FROM unnest($1::bigint[], $2::integer[]) AS u(id, token)
+), owned AS (
+    SELECT id, cancel_requested_at IS NOT NULL AS cancel_requested FROM taskmill.tasks
+    WHERE (id, lease_token) IN (SELECT * FROM attempts) AND state = 'running'
+), renewed AS (
+    UPDATE taskmill.tasks
+    SET lease_expires_at = now() + $3::interval
+    WHERE id IN (
+        SELECT id FROM taskmill.tasks
+        WHERE (id, lease_token) IN (SELECT * FROM attempts) AND state = 'running'
+        FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id
+)
+SELECT owned.id, renewed.id IS NOT NULL AS renewed, owned.cancel_requested
+FROM owned LEFT JOIN renewed USING (id);
 ```
 
 One statement renews every lease a worker holds. A task missing from the
 result has lost its lease, and the worker cancels that attempt's context. A
 task returned with `cancel_requested` is canceled the same way (transition 16
 of the lifecycle).
+
+`SKIP LOCKED` keeps one locked row, such as a task that an application
+transaction is canceling, from holding up the renewal of all the others. A
+skipped task is returned as not renewed: the worker keeps it until its lease
+could have expired, and renews it at the next heartbeat.
 
 ### Complete
 
@@ -406,9 +427,11 @@ run inside the handler's transaction, is transactional completion (R12).
 
 ```sql
 UPDATE taskmill.tasks
-SET state            = $3::taskmill.task_state,  -- 'retryable' or 'dead', from the kind's retry policy
-    run_at           = CASE WHEN $3::taskmill.task_state = 'retryable' THEN now() + $4::interval ELSE run_at END,
-    finalized_at     = CASE WHEN $3::taskmill.task_state = 'dead' THEN now() END,
+SET state            = CASE WHEN cancel_requested_at IS NOT NULL THEN 'canceled'
+                            ELSE $3::taskmill.task_state END,  -- 'retryable' or 'dead', from the kind's retry policy
+    run_at           = CASE WHEN cancel_requested_at IS NULL AND $3::taskmill.task_state = 'retryable'
+                            THEN now() + $4::interval ELSE run_at END,
+    finalized_at     = CASE WHEN cancel_requested_at IS NOT NULL OR $3::taskmill.task_state = 'dead' THEN now() END,
     lease_expires_at = NULL,
     errors           = (CASE WHEN jsonb_array_length(errors) >= 20 THEN errors - 0 ELSE errors END)
                        || jsonb_build_array(jsonb_build_object('attempt', attempt, 'at', now(), 'error', $5::jsonb))
@@ -416,7 +439,9 @@ WHERE id = $1 AND lease_token = $2 AND state = 'running';
 ```
 
 Snooze and graceful release are similar updates that also give the attempt
-back (`attempt = attempt - 1`).
+back (`attempt = attempt - 1`). All three cancel the task instead if its
+cancellation was requested, so a request whose notification was missed still
+takes effect when the attempt ends.
 
 ### Rescue expired leases
 
@@ -433,7 +458,7 @@ SET state = CASE
         END::taskmill.task_state,
     run_at = CASE
             WHEN t.cancel_requested_at IS NULL AND t.attempt < t.max_attempts
-            THEN now() + make_interval(secs => least($1 * power(2, t.attempt - 1), $2) * (0.9 + random() * 0.2))
+            THEN now() + make_interval(secs => least($1 * power(2, least(t.attempt - 1, 30)), $2) * (0.9 + random() * 0.2))
             ELSE t.run_at
         END,
     finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
@@ -452,7 +477,8 @@ RETURNING t.id, t.queue, t.group_key, t.state;
 ```
 
 The backoff is exponential with ±10% jitter: `$1` is the base delay in seconds
-and `$2` the maximum.
+and `$2` the maximum. The exponent is capped, so that a task with thousands of
+attempts cannot overflow it.
 
 ### Other statements
 

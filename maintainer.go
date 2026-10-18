@@ -1,10 +1,12 @@
 package taskmill
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +20,7 @@ const (
 	electionInterval   = 2 * time.Second  // how often other workers try to take over
 	retentionInterval  = time.Minute
 	staleWorkerAge     = 5 * time.Minute
+	detachTimeout      = 30 * time.Second
 	maintenanceBatch   = 1000
 )
 
@@ -212,6 +215,9 @@ type swept struct {
 	queue, group, state string
 }
 
+// collectSwept reads the tasks that a sweep changed, in a fixed order of queue
+// and group: updating their groups in that order cannot deadlock with
+// completions, which use the same order.
 func collectSwept(r rows) ([]swept, error) {
 	defer r.Close()
 	var out []swept
@@ -222,6 +228,9 @@ func collectSwept(r rows) ([]swept, error) {
 		}
 		out = append(out, x)
 	}
+	slices.SortFunc(out, func(a, b swept) int {
+		return cmp.Or(cmp.Compare(a.queue, b.queue), cmp.Compare(a.group, b.group), cmp.Compare(a.id, b.id))
+	})
 	return out, r.Err()
 }
 
@@ -252,32 +261,62 @@ func (m *maintainer) retain(ctx context.Context) {
 // older than the retention period.
 func (m *maintainer) dropHistory(ctx context.Context, retention time.Duration) error {
 	var names []string
+	pending := map[string]bool{}
 	err := pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
 		existing, err := historyPartitions(ctx, tx, m.c.schema)
+		if err != nil {
+			return err
+		}
 		for name := range existing {
 			names = append(names, name)
+		}
+		r, err := tx.Query(ctx, m.c.sql.pendingDetach)
+		if err != nil {
+			return err
+		}
+		detaching, err := pgx.CollectRows(r, pgx.RowTo[string])
+		for _, name := range detaching {
+			pending[name] = true
 		}
 		return err
 	})
 	if err != nil {
 		return err
 	}
+	slices.Sort(names)
+
 	cutoff := time.Now().Add(-retention)
 	for _, name := range names {
 		day, err := time.Parse("20060102", strings.TrimPrefix(name, "task_history_"))
 		if err != nil || !day.AddDate(0, 0, 1).Before(cutoff) {
 			continue
 		}
-		// DETACH ... CONCURRENTLY does not block completions, and must run
-		// outside a transaction.
-		detach := fmt.Sprintf("ALTER TABLE %[1]s.task_history DETACH PARTITION %[1]s.%[2]s CONCURRENTLY", m.c.schema, name)
-		if _, err := m.c.pool.Exec(ctx, detach); err != nil {
-			return fmt.Errorf("detach %s: %w", name, err)
-		}
-		if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE %s.%s", m.c.schema, name)); err != nil {
-			return fmt.Errorf("drop %s: %w", name, err)
+		if err := m.dropPartition(ctx, name, pending[name]); err != nil {
+			return err
 		}
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "dropped expired history", slog.String(logKeyPart, name))
+	}
+	return nil
+}
+
+// dropPartition detaches and drops one history partition. DETACH ...
+// CONCURRENTLY does not block completions, and must run outside a
+// transaction. It waits for transactions that use the history, so it is
+// bounded by a timeout; if it is interrupted, the partition stays pending
+// detach, and a later run finalizes the detach instead.
+func (m *maintainer) dropPartition(ctx context.Context, name string, pending bool) error {
+	ctx, cancel := context.WithTimeout(ctx, detachTimeout)
+	defer cancel()
+	mode := "CONCURRENTLY"
+	if pending {
+		mode = "FINALIZE"
+	}
+	detach := fmt.Sprintf("ALTER TABLE %[1]s.task_history DETACH PARTITION %[1]s.%[2]s %[3]s", m.c.schema, name, mode)
+	if _, err := m.c.pool.Exec(ctx, detach); err != nil {
+		return fmt.Errorf("detach %s: %w", name, err)
+	}
+	if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE %s.%s", m.c.schema, name)); err != nil {
+		return fmt.Errorf("drop %s: %w", name, err)
 	}
 	return nil
 }

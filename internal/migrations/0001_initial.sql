@@ -85,7 +85,8 @@ CREATE TABLE __SCHEMA__.groups (
     CONSTRAINT groups_halted_check CHECK ((halted_task_id IS NULL) = (halted_at IS NULL))
 ) WITH (fillfactor = 80);
 
-CREATE INDEX groups_halted_idx ON __SCHEMA__.groups (queue) WHERE halted_at IS NOT NULL;
+CREATE INDEX groups_halted_idx      ON __SCHEMA__.groups (queue) WHERE halted_at IS NOT NULL;
+CREATE INDEX groups_halted_task_idx ON __SCHEMA__.groups (halted_task_id) WHERE halted_task_id IS NOT NULL;
 
 CREATE TABLE __SCHEMA__.dedupe_keys (
     key        bytea PRIMARY KEY,

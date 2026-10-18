@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"reflect"
 	"time"
 )
 
@@ -38,7 +39,8 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 // without an entry.
 //
 // Batches hold the tasks of one fetch, so a batch kind works best in a queue
-// of its own.
+// of its own: a queue that carries a batch kind fetches up to BatchSize tasks
+// per free slot, and tasks of other kinds fetched with them wait for a slot.
 type BatchHandler[A Args] interface {
 	HandleBatch(ctx context.Context, tasks []*Task[A]) []error
 }
@@ -86,8 +88,12 @@ type registration struct {
 // AddHandler registers h for the kind of A. opts may be nil. Mistakes, such
 // as registering a kind twice, are reported by [NewWorker].
 func AddHandler[A Args](hs *Handlers, h Handler[A], opts *HandlerOptions) {
-	var zero A
-	reg := &registration{kind: zero.Kind()}
+	kind, err := argsKind[A]()
+	if err != nil {
+		hs.fail(err)
+		return
+	}
+	reg := &registration{kind: kind}
 	if opts != nil {
 		reg.opts = *opts
 	}
@@ -108,8 +114,12 @@ func AddHandler[A Args](hs *Handlers, h Handler[A], opts *HandlerOptions) {
 // AddBatchHandler registers h for the kind of A. opts may be nil. Mistakes,
 // such as registering a kind twice, are reported by [NewWorker].
 func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptions) {
-	var zero A
-	reg := &registration{kind: zero.Kind()}
+	kind, err := argsKind[A]()
+	if err != nil {
+		hs.fail(err)
+		return
+	}
+	reg := &registration{kind: kind}
 	if opts != nil {
 		reg.opts = *opts
 	}
@@ -144,6 +154,21 @@ func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptio
 		return errs
 	}
 	hs.add(reg)
+}
+
+// argsKind returns the kind of A, read from its zero value. For a pointer type
+// it reads it from a pointer to a zero value instead of a nil pointer.
+func argsKind[A Args]() (kind string, err error) {
+	var zero A
+	if t := reflect.TypeFor[A](); t.Kind() == reflect.Pointer {
+		zero, _ = reflect.TypeAssert[A](reflect.New(t.Elem()))
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v.Kind panicked on a zero value: %v", reflect.TypeFor[A](), r)
+		}
+	}()
+	return zero.Kind(), nil
 }
 
 func (hs *Handlers) add(reg *registration) {

@@ -130,8 +130,9 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 }
 
 // Cancel cancels a task. A waiting task is canceled at once; a running task's
-// context is canceled, and the task becomes canceled when its attempt ends.
-// It returns [ErrInvalidState] if the task already finished.
+// context is canceled, and the task becomes canceled when its attempt ends,
+// unless the handler completed it. It returns [ErrInvalidState] if the task
+// already finished.
 func (c *Client) Cancel(ctx context.Context, id int64) error {
 	return c.inTx(ctx, func(q querier) error { return c.cancel(ctx, q, id) })
 }
@@ -178,8 +179,7 @@ func (c *Client) Retry(ctx context.Context, id int64) error {
 
 func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	var state, queue, group string
-	var haltingHead bool
-	found, err := queryRow(ctx, q, c.sql.lockForRetry, []any{id}, &state, &queue, &group, &haltingHead)
+	found, err := queryRow(ctx, q, c.sql.lockForRetry, []any{id}, &state, &queue, &group)
 	if err != nil {
 		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
 	}
@@ -191,21 +191,11 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	}
 
 	pending := false
-	switch {
-	case group == "":
-	case haltingHead:
-		// The task still heads its halted group: resume the group.
-		if _, err := q.exec(ctx, c.sql.resumeHaltedHead, queue, group, id); err != nil {
+	if group != "" {
+		if pending, err = c.rejoinGroup(ctx, q, queue, group, id); err != nil {
 			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
 		}
-	default:
-		var tasks int
-		if _, err := queryRow(ctx, q, c.sql.enterGroup, []any{queue, group}, &tasks); err != nil {
-			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
-		}
-		pending = tasks > 1
 	}
-
 	if _, err := q.exec(ctx, c.sql.retry, id, pending); err != nil {
 		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
 	}
@@ -213,6 +203,33 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 		c.notifyAvailable(ctx, q, queue)
 	}
 	return nil
+}
+
+// rejoinGroup counts a retried task back into its FIFO group, and reports
+// whether it must wait behind the group's other tasks. A dead head that halts
+// its group is still counted: retrying it resumes the group.
+func (c *Client) rejoinGroup(ctx context.Context, q querier, queue, group string, id int64) (pending bool, err error) {
+	halting, err := c.haltedBy(ctx, q, queue, group, id)
+	if err != nil {
+		return false, err
+	}
+	if halting {
+		_, err = q.exec(ctx, c.sql.resumeHaltedHead, queue, group, id)
+		return false, err
+	}
+	var tasks int
+	if _, err := queryRow(ctx, q, c.sql.enterGroup, []any{queue, group}, &tasks); err != nil {
+		return false, err
+	}
+	return tasks > 1, nil
+}
+
+// haltedBy reports whether task id halts its group. The caller must hold the
+// task's lock.
+func (c *Client) haltedBy(ctx context.Context, q querier, queue, group string, id int64) (bool, error) {
+	var halting bool
+	_, err := queryRow(ctx, q, c.sql.haltedBy, []any{queue, group, id}, &halting)
+	return halting, err
 }
 
 // Delete deletes a task that is not running, including a completed task in
@@ -223,8 +240,7 @@ func (c *Client) Delete(ctx context.Context, id int64) error {
 
 func (c *Client) delete(ctx context.Context, q querier, id int64) error {
 	var state, queue, group string
-	var haltingHead bool
-	found, err := queryRow(ctx, q, c.sql.deleteTask, []any{id}, &state, &queue, &group, &haltingHead)
+	found, err := queryRow(ctx, q, c.sql.deleteTask, []any{id}, &state, &queue, &group)
 	if err != nil {
 		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
 	}
@@ -239,11 +255,20 @@ func (c *Client) delete(ctx context.Context, q querier, id int64) error {
 		return nil
 	}
 
+	if group == "" {
+		return nil
+	}
+	// Unfinished tasks are counted in their group, and so is a dead head that
+	// halts it.
 	s := State(state)
-	counted := !s.Finished() || haltingHead
-	if group != "" && counted {
-		head := s != StatePending
-		if err := c.leaveGroup(ctx, q, queue, group, id, head, false); err != nil {
+	counted := !s.Finished()
+	if !counted {
+		if counted, err = c.haltedBy(ctx, q, queue, group, id); err != nil {
+			return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+		}
+	}
+	if counted {
+		if err := c.leaveGroup(ctx, q, queue, group, id, s != StatePending, false); err != nil {
 			return fmt.Errorf("taskmill: delete task %d: %w", id, err)
 		}
 	}

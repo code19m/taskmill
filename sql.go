@@ -38,6 +38,7 @@ type statements struct {
 	deleteTask    string
 	deleteHistory string
 	taskExists    string
+	haltedBy      string
 
 	haltGroup        string
 	decrementGroup   string
@@ -65,6 +66,7 @@ type statements struct {
 	rescue         string
 	expireDeadline string
 
+	pendingDetach   string
 	retention       string
 	deleteFinished  string
 	loadSchedules   string
@@ -232,11 +234,7 @@ FROM old
 WHERE t.id = old.id AND old.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
 RETURNING old.state::text, t.queue, coalesce(t.group_key, '')`),
 
-		lockForRetry: q(`
-SELECT t.state::text, t.queue, coalesce(t.group_key, ''),
-       coalesce((SELECT g.halted_task_id = t.id FROM {s}.groups g
-                 WHERE g.queue = t.queue AND g.group_key = t.group_key), false)
-FROM {s}.tasks t WHERE t.id = $1 FOR UPDATE`),
+		lockForRetry: q(`SELECT state::text, queue, coalesce(group_key, '') FROM {s}.tasks WHERE id = $1 FOR UPDATE`),
 
 		retry: q(`
 UPDATE {s}.tasks
@@ -247,13 +245,22 @@ RETURNING queue`),
 
 		deleteTask: q(`
 DELETE FROM {s}.tasks WHERE id = $1 AND state <> 'running'
-RETURNING state::text, queue, coalesce(group_key, ''),
-          coalesce((SELECT g.halted_task_id = $1 FROM {s}.groups g
-                    WHERE g.queue = tasks.queue AND g.group_key = tasks.group_key), false)`),
+RETURNING state::text, queue, coalesce(group_key, '')`),
 
 		deleteHistory: q(`DELETE FROM {s}.task_history WHERE id = $1`),
 
-		taskExists: q(`SELECT state::text FROM {s}.tasks WHERE id = $1`),
+		taskExists: q(`
+SELECT state::text FROM {s}.tasks WHERE id = $1
+UNION ALL
+SELECT 'completed' FROM {s}.task_history WHERE id = $1
+LIMIT 1`),
+
+		// haltedBy reports whether task $3 halts its group. Callers run it as
+		// its own statement after locking the task, so that it sees the latest
+		// halt: only statements that hold the task's lock change whether the
+		// task halts its group.
+		haltedBy: q(`
+SELECT EXISTS (SELECT 1 FROM {s}.groups WHERE queue = $1 AND group_key = $2 AND halted_task_id = $3)`),
 
 		// haltGroup marks a group halted by its dead head, if the group's queue
 		// halts groups. The dead head stays counted.
@@ -334,43 +341,72 @@ RETURNING t.id, t.kind, t.priority, t.attempt, t.max_attempts, t.lease_token, co
 		countRunning: q(`SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND state = 'running'`),
 
 		// heartbeat renews the leases of attempts that still own their tasks.
+		// It skips rows that other transactions lock, so that one locked task
+		// cannot hold up the renewal of all the others. It returns each owned
+		// task, whether its lease was renewed, and whether its cancellation
+		// was requested; a task it does not return lost its lease.
 		heartbeat: q(`
-UPDATE {s}.tasks
-SET lease_expires_at = now() + $3 * interval '1 microsecond'
-WHERE (id, lease_token) IN (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t))
-  AND state = 'running'
-RETURNING id, cancel_requested_at IS NOT NULL`),
+WITH attempts AS (
+    SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t)
+), owned AS (
+    SELECT id, cancel_requested_at IS NOT NULL AS cancel_requested FROM {s}.tasks
+    WHERE (id, lease_token) IN (SELECT i, t FROM attempts) AND state = 'running'
+), locked AS (
+    SELECT id FROM {s}.tasks
+    WHERE (id, lease_token) IN (SELECT i, t FROM attempts) AND state = 'running'
+    FOR UPDATE SKIP LOCKED
+), renewed AS (
+    UPDATE {s}.tasks t
+    SET lease_expires_at = now() + $3 * interval '1 microsecond'
+    FROM locked
+    WHERE t.id = locked.id
+    RETURNING t.id, t.cancel_requested_at IS NOT NULL AS cancel_requested
+)
+SELECT owned.id, renewed.id IS NOT NULL, coalesce(renewed.cancel_requested, owned.cancel_requested)
+FROM owned LEFT JOIN renewed ON renewed.id = owned.id`),
 
 		// fail records a failed attempt: retryable after a delay of $4
-		// microseconds, or dead. $5 is the error as a JSON object.
+		// microseconds, or dead. $5 is the error as a JSON object. A task
+		// whose cancellation was requested is canceled instead.
 		fail: q(`
 UPDATE {s}.tasks
-SET state = $3::{s}.task_state,
-    run_at = CASE WHEN $3::{s}.task_state = 'retryable' THEN now() + $4 * interval '1 microsecond' ELSE run_at END,
-    finalized_at = CASE WHEN $3::{s}.task_state = 'dead' THEN now() END,
+SET state = CASE WHEN cancel_requested_at IS NOT NULL THEN 'canceled' ELSE $3::{s}.task_state END,
+    run_at = CASE WHEN cancel_requested_at IS NULL AND $3::{s}.task_state = 'retryable'
+                  THEN now() + $4 * interval '1 microsecond' ELSE run_at END,
+    finalized_at = CASE WHEN cancel_requested_at IS NOT NULL OR $3::{s}.task_state = 'dead' THEN now() END,
     lease_expires_at = NULL,
     errors = (CASE WHEN jsonb_array_length(errors) >= 20 THEN errors - 0 ELSE errors END)
              || jsonb_build_array(jsonb_build_object('attempt', attempt, 'at', now()) || $5::jsonb)
 WHERE id = $1 AND lease_token = $2 AND state = 'running'
-RETURNING queue, coalesce(group_key, '')`),
+RETURNING queue, coalesce(group_key, ''), state::text`),
 
 		// snooze runs the task again after $3 microseconds and gives the
-		// attempt back.
+		// attempt back. A task whose cancellation was requested is canceled
+		// instead.
 		snooze: q(`
 UPDATE {s}.tasks
-SET state = CASE WHEN $3 > 0 THEN 'scheduled' ELSE 'available' END::{s}.task_state,
-    run_at = now() + $3 * interval '1 microsecond',
-    attempt = attempt - 1,
+SET state = CASE
+            WHEN cancel_requested_at IS NOT NULL THEN 'canceled'
+            WHEN $3 > 0 THEN 'scheduled'
+            ELSE 'available'
+        END::{s}.task_state,
+    run_at = CASE WHEN cancel_requested_at IS NULL THEN now() + $3 * interval '1 microsecond' ELSE run_at END,
+    attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
+    finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
     lease_expires_at = NULL
 WHERE id = $1 AND lease_token = $2 AND state = 'running'
-RETURNING queue`),
+RETURNING queue, coalesce(group_key, ''), state::text`),
 
-		// release gives a task back during shutdown, attempt included.
+		// release gives a task back during shutdown, attempt included. A task
+		// whose cancellation was requested is canceled instead.
 		release: q(`
 UPDATE {s}.tasks
-SET state = 'available', attempt = attempt - 1, lease_expires_at = NULL
+SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'canceled' END::{s}.task_state,
+    attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
+    finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
+    lease_expires_at = NULL
 WHERE id = $1 AND lease_token = $2 AND state = 'running'
-RETURNING queue`),
+RETURNING queue, coalesce(group_key, ''), state::text`),
 
 		cancelRunning: q(`
 UPDATE {s}.tasks
@@ -418,7 +454,8 @@ SELECT extract(epoch FROM min(run_at) - now()) FROM {s}.tasks WHERE state IN ('s
 
 		// rescue fails the attempts whose leases expired: their workers
 		// crashed or lost the database. $1 and $2 are the default backoff's
-		// base and maximum in seconds.
+		// base and maximum in seconds; the exponent is capped so that tasks
+		// with thousands of attempts cannot overflow it.
 		rescue: q(`
 WITH expired AS (
     SELECT id FROM {s}.tasks
@@ -435,7 +472,7 @@ SET state = CASE
         END::{s}.task_state,
     run_at = CASE
             WHEN t.cancel_requested_at IS NULL AND t.attempt < t.max_attempts
-            THEN now() + make_interval(secs => least($1 * power(2, t.attempt - 1), $2) * (0.9 + random() * 0.2))
+            THEN now() + make_interval(secs => least($1 * power(2, least(t.attempt - 1, 30)), $2) * (0.9 + random() * 0.2))
             ELSE t.run_at
         END,
     finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
@@ -466,6 +503,12 @@ SET state = 'dead', finalized_at = now(),
 FROM expired
 WHERE t.id = expired.id
 RETURNING t.id, t.queue, coalesce(t.group_key, ''), expired.state::text`),
+
+		// pendingDetach lists the history partitions whose detach was
+		// interrupted, which must be finalized before they can be dropped.
+		pendingDetach: q(`
+SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = '{s}.task_history'::regclass AND i.inhdetachpending`),
 
 		retention: q(`
 SELECT extract(epoch FROM history_retention)::bigint, extract(epoch FROM dead_retention)::bigint FROM {s}.settings`),

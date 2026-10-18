@@ -201,7 +201,8 @@ func (a *PaymentApplier) Handle(ctx context.Context, t *taskmill.Task[ApplyPayme
 ```
 
 `CompleteTx` fails with `ErrLeaseLost` if another attempt took the task over,
-which rolls back the handler's writes.
+which rolls back the handler's writes. If the transaction rolls back for
+another reason, return the error: the attempt then fails as usual.
 
 ### Batch handlers
 
@@ -216,7 +217,9 @@ func (p *Publisher) HandleBatch(ctx context.Context, tasks []*taskmill.Task[Even
 taskmill.AddBatchHandler[Event](&handlers, p, &taskmill.HandlerOptions{BatchSize: 200})
 ```
 
-A batch holds the tasks of one fetch, so give a batch kind its own queue.
+A batch holds the tasks of one fetch, so give a batch kind its own queue: a
+queue that carries a batch kind fetches up to `BatchSize` tasks per free slot,
+and tasks of other kinds fetched with them wait for a slot.
 
 ## Running workers
 

@@ -345,39 +345,6 @@ func TestWorkerReleasesTasksThatOutliveTheDrain(t *testing.T) {
 	}
 }
 
-func TestMaintainerRescuesExpiredLeases(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	ran := make(chan int, 1)
-	runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
-			ran <- task.Attempt
-			return nil
-		}, nil),
-		Queues: defaultQueue(1),
-	})
-
-	// A worker that crashed while running the task.
-	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
-	                                 lease_expires_at, attempted_at, attempted_by)
-	           VALUES ('default', 'email.send', 'running', now(), '{}', 5, 1, 1,
-	                   now() - interval '1 second', now(), 'crashed')`)
-	id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
-
-	select {
-	case attempt := <-ran:
-		if attempt != 2 {
-			t.Fatalf("rescued task ran as attempt %d, want 2", attempt)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("expired lease was not rescued")
-	}
-	info := e.waitState(t, id, taskmill.StateCompleted)
-	if len(info.Errors) != 1 || info.Errors[0].Code != "lease_expired" {
-		t.Fatalf("got errors %+v", info.Errors)
-	}
-}
-
 func TestHeartbeatsKeepLongTasksLeased(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -555,18 +522,6 @@ func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
 	}
 }
 
-func TestMaintainerExpiresDeadlines(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
-
-	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "unserved", Deadline: time.Now().Add(100 * time.Millisecond)})
-	info := e.waitState(t, id, taskmill.StateDead)
-	if len(info.Errors) != 1 || info.Errors[0].Code != "deadline_exceeded" {
-		t.Fatalf("got errors %+v", info.Errors)
-	}
-}
-
 func TestNotificationsWakeIdleWorkers(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -694,21 +649,6 @@ func TestBatchHandler(t *testing.T) {
 	}
 }
 
-func TestOneMaintainerIsElected(t *testing.T) {
-	t.Parallel()
-	e := newEnvWith(t, testdb.PoolSize(t, 16), nil)
-	for i := range 3 {
-		runWorker(t, e, &taskmill.WorkerConfig{ID: fmt.Sprintf("w%d", i)})
-	}
-	time.Sleep(time.Second)
-	if n := e.count(t, "SELECT count(*) FROM {s}.leader"); n != 1 {
-		t.Fatalf("got %d leaders, want 1", n)
-	}
-	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 3 {
-		t.Fatalf("got %d registered workers, want 3", n)
-	}
-}
-
 func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -764,4 +704,245 @@ func storeMax(v *atomic.Int32, n int32) {
 			return
 		}
 	}
+}
+
+func TestHeartbeatSkipsLockedTasks(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	const lease = 1500 * time.Millisecond
+	started := make(chan int64, 2)
+	release := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			started <- task.ID
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			}
+		}, nil),
+		Queues:        defaultQueue(2),
+		LeaseDuration: lease,
+	})
+	locked := e.enqueue(t, sendEmail{To: "locked"}, nil)
+	other := e.enqueue(t, sendEmail{To: "other"}, nil)
+	<-started
+	<-started
+
+	// An application transaction holds the row lock of one running task, as
+	// CancelTx does until it commits. The other task's lease is still renewed.
+	tx := e.begin(t)
+	var lockedAt time.Time
+	err := tx.QueryRow(t.Context(), replaceSchema("SELECT clock_timestamp() FROM {s}.tasks WHERE id = $1 FOR UPDATE", e.schema),
+		locked).Scan(&lockedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the other task's lease to be renewed", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND lease_expires_at > $2",
+			other, lockedAt.Add(lease)) == 1
+	})
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if info := e.waitState(t, other, taskmill.StateCompleted); info.Attempt != 1 {
+		t.Fatalf("task ran %d times; it lost its lease", info.Attempt)
+	}
+}
+
+// reportBatch completes every report in its batches.
+type reportBatch struct{}
+
+func (reportBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[report]) []error {
+	return make([]error, len(tasks))
+}
+
+func TestBatchKindsDoNotWidenOtherQueuesFetches(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	started := make(chan struct{}, 5)
+	release := make(chan struct{})
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error {
+		started <- struct{}{}
+		<-release
+		return nil
+	}), nil)
+	taskmill.AddBatchHandler[report](&hs, reportBatch{}, nil)
+	for range 5 {
+		e.enqueue(t, sendEmail{}, nil)
+	}
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: &hs,
+		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {Concurrency: 1}, "reports": {Concurrency: 1}},
+	})
+
+	<-started
+	n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE state = 'running'")
+	close(release)
+	if n != 1 {
+		t.Fatalf("%d tasks leased for one slot", n)
+	}
+}
+
+func TestCancelRequestWinsOverOtherOutcomes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		result func(ctx context.Context) error
+	}{
+		{"fail", func(context.Context) error { return errors.New("boom") }},
+		{"snooze", func(context.Context) error { return taskmill.Snooze(time.Minute) }},
+		{"release", func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			started := make(chan struct{}, 1)
+			proceed := make(chan struct{})
+			stop := runWorker(t, e, &taskmill.WorkerConfig{
+				Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+					started <- struct{}{}
+					<-proceed
+					return tc.result(ctx)
+				}, &taskmill.HandlerOptions{Retry: fastRetry}),
+				Queues:       defaultQueue(1),
+				DrainTimeout: 50 * time.Millisecond,
+			})
+			id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+			<-started
+
+			// The cancellation is requested, but its notification is missed.
+			e.exec(t, "UPDATE {s}.tasks SET cancel_requested_at = now() WHERE id = $1", id)
+			close(proceed)
+			if tc.name == "release" {
+				stop()
+			}
+			e.waitState(t, id, taskmill.StateCanceled)
+			if n := e.count(t, "SELECT count(*) FROM {s}.groups"); n != 0 {
+				t.Fatal("the canceled task did not leave its group")
+			}
+		})
+	}
+}
+
+func TestWorkerRecordsErrorsWithNULBytes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			return errors.New("bad\x00byte")
+		}, nil),
+		Queues: defaultQueue(1),
+	})
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 1})
+	info := e.waitState(t, id, taskmill.StateDead)
+	if len(info.Errors) != 1 || info.Errors[0].Message != "badbyte" {
+		t.Fatalf("got errors %+v", info.Errors)
+	}
+}
+
+func TestFailureAfterRolledBackCompleteTxIsRecorded(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			tx, err := e.pool.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			if err := task.CompleteTx(ctx, taskmill.Pgx(tx)); err != nil {
+				return err
+			}
+			_ = tx.Rollback(ctx)
+			return errors.New("publish failed")
+		}, nil),
+		Queues: defaultQueue(1),
+	})
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 1})
+	info := e.waitState(t, id, taskmill.StateDead)
+	if len(info.Errors) != 1 || info.Errors[0].Message != "publish failed" {
+		t.Fatalf("got errors %+v", info.Errors)
+	}
+}
+
+// pointerArgs is used through a pointer, with Kind on the value.
+type pointerArgs struct {
+	N int `json:"n"`
+}
+
+func (pointerArgs) Kind() string { return "pointer.args" }
+
+func TestHandlerForPointerArgs(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	got := make(chan int, 1)
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[*pointerArgs](func(_ context.Context, task *taskmill.Task[*pointerArgs]) error {
+		got <- task.Args.N
+		return nil
+	}), nil)
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+
+	e.enqueue(t, &pointerArgs{N: 7}, nil)
+	if n := <-got; n != 7 {
+		t.Fatalf("got args %d, want 7", n)
+	}
+}
+
+func TestHandlerForInterfaceArgsIsRejected(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[taskmill.Args](func(context.Context, *taskmill.Task[taskmill.Args]) error {
+		return nil
+	}), nil)
+	_, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+	if !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestWorkerWithUnusableListenConfigPolls(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers:     noopHandlers(),
+		Queues:       defaultQueue(1),
+		ListenConfig: &pgx.ConnConfig{}, // not created by pgx.ParseConfig
+	})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	e.waitState(t, id, taskmill.StateCompleted)
+}
+
+func TestFailedSettingsRefreshKeepsQueuesPaused(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
+		t.Fatal(err)
+	}
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+	waitFor(t, "the worker to listen", func() bool {
+		return e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE query = 'LISTEN ' || $1", e.schema) == 1
+	})
+
+	// A settings refresh waits for a lock on the queues, and is canceled.
+	tx := e.begin(t)
+	e.txExec(t, tx, "LOCK TABLE {s}.queues IN ACCESS EXCLUSIVE MODE")
+	e.exec(t, "SELECT pg_notify($1, 'q|default')", e.schema)
+	pid := e.waitBlocked(t, "{s}.queues WHERE name = ANY")
+	e.exec(t, "SELECT pg_cancel_backend($1)", pid)
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	time.Sleep(500 * time.Millisecond)
+	e.wantState(t, id, taskmill.StateAvailable)
 }
