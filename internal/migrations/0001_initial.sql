@@ -128,7 +128,6 @@ CREATE TABLE __SCHEMA__.schedules (
     cron        text NOT NULL,
     timezone    text NOT NULL DEFAULT 'UTC',
     payload     jsonb NOT NULL DEFAULT '{}',
-    options     jsonb NOT NULL DEFAULT '{}',
     next_run_at timestamptz NOT NULL,
     last_run_at timestamptz,
     paused_at   timestamptz,
