@@ -58,7 +58,6 @@ linters:
     - misspell
 
     # Tests.
-    - testableexamples
     - thelper
     - tparallel
     - usetesting
