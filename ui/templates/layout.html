@@ -1,0 +1,29 @@
+{{define "head"}}<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · taskmill</title>
+<link rel="stylesheet" href="{{path "/static/style.css"}}">
+<script src="{{path "/static/app.js"}}" defer></script>
+</head>
+<body>
+<header>
+  <a class="brand" href="{{path "/"}}">taskmill</a>
+  <nav>
+    <a href="{{path "/"}}">Overview</a>
+    <a href="{{path "/tasks"}}">Tasks</a>
+    <a href="{{path "/tasks?state=dead"}}">Dead letters</a>
+  </nav>
+  {{if .ReadOnly}}<span class="badge">read-only</span>{{end}}
+</header>
+<main>
+{{end}}
+
+{{define "foot"}}
+</main>
+</body>
+</html>
+{{end}}
+
+{{define "state"}}<span class="state state-{{.}}">{{.}}</span>{{end}}

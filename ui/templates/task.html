@@ -1,0 +1,41 @@
+{{define "task.html"}}{{template "head" .}}
+{{$t := .Data}}
+<h1>Task {{$t.ID}} {{template "state" $t.State}}</h1>
+{{if not .ReadOnly}}
+<div class="actions">
+  {{if or (eq (print $t.State) "dead") (eq (print $t.State) "canceled")}}
+  <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/retry"><button>Retry</button></form>
+  {{end}}
+  {{if not $t.State.Finished}}
+  <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/cancel" data-confirm="Cancel task {{$t.ID}}?"><button>Cancel</button></form>
+  {{end}}
+  {{if ne (print $t.State) "running"}}
+  <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/delete" data-confirm="Delete task {{$t.ID}}? This cannot be undone."><button class="danger">Delete</button></form>
+  {{end}}
+</div>
+{{end}}
+<dl>
+  <dt>Kind</dt><dd>{{$t.Kind}}</dd>
+  <dt>Queue</dt><dd><a href="{{path "/tasks"}}?queue={{$t.Queue}}">{{$t.Queue}}</a></dd>
+  {{with $t.GroupKey}}<dt>FIFO group</dt><dd>{{.}}</dd>{{end}}
+  <dt>Priority</dt><dd>{{$t.Priority}}</dd>
+  <dt>Attempt</dt><dd>{{$t.Attempt}} of {{$t.MaxAttempts}}</dd>
+  <dt>Created</dt><dd title="{{timestamp $t.CreatedAt}}">{{timestamp $t.CreatedAt}} ({{ago $t.CreatedAt}})</dd>
+  <dt>Run at</dt><dd>{{timestamp $t.RunAt}} ({{ago $t.RunAt}})</dd>
+  {{if not $t.Deadline.IsZero}}<dt>Deadline</dt><dd>{{timestamp $t.Deadline}} ({{ago $t.Deadline}})</dd>{{end}}
+  {{if not $t.AttemptedAt.IsZero}}<dt>Last attempt</dt><dd>{{timestamp $t.AttemptedAt}} ({{ago $t.AttemptedAt}})</dd>{{end}}
+  {{if not $t.FinalizedAt.IsZero}}<dt>Finished</dt><dd>{{timestamp $t.FinalizedAt}} ({{ago $t.FinalizedAt}})</dd>{{end}}
+</dl>
+<h2>Payload</h2>
+<pre>{{json $t.Payload}}</pre>
+{{with $t.Metadata}}
+<h2>Metadata</h2>
+<dl>{{range $k, $v := .}}<dt>{{$k}}</dt><dd>{{$v}}</dd>{{end}}</dl>
+{{end}}
+<h2>Errors</h2>
+{{with $t.Errors}}
+<ol class="errors">{{range .}}
+  <li><span class="muted">attempt {{.Attempt}} · {{timestamp .At}}{{with .Code}} · {{.}}{{end}}</span><pre>{{.Message}}</pre></li>
+{{end}}</ol>
+{{else}}<p class="muted">No failed attempts.</p>{{end}}
+{{template "foot" .}}{{end}}
