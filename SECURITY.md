@@ -2,8 +2,8 @@
 
 ## Supported versions
 
-taskmill has not been released yet. Once it is, security fixes are made for
-the latest minor release. This policy will be extended at v1.0.0.
+Before v1.0.0, security fixes are made for the latest minor release only.
+This policy will be extended at v1.0.0.
 
 ## Reporting a vulnerability
 

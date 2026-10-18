@@ -11,13 +11,15 @@ saves time for everyone.
 
 ## Development setup
 
-You need Git, Make, and Go. The exact Go version comes from the `toolchain`
-line in [go.mod](go.mod); with the default `GOTOOLCHAIN=auto`, any recent Go
-downloads it for you.
+You need Git, Make, Go, and Docker. The exact Go version comes from the
+`toolchain` line in [go.mod](go.mod); with the default `GOTOOLCHAIN=auto`, any
+recent Go downloads it for you. The integration tests need PostgreSQL, which
+`make db` starts in Docker.
 
 ```sh
 git clone https://github.com/code19m/taskmill.git
 cd taskmill
+make db
 make check
 ```
 
@@ -26,6 +28,7 @@ development tools into `./bin`. `make help` lists every target:
 
 | Target | What it does |
 |---|---|
+| `make db` | Start PostgreSQL in Docker for the tests (`make db-stop` removes it) |
 | `make check` | All CI checks: tidy, lint, test, vulnerability scan |
 | `make fmt` | Format the code with gofumpt and goimports |
 | `make lint` | Run golangci-lint and actionlint |
@@ -58,10 +61,13 @@ Every change is held to the same bar:
 
 - Use the standard `testing` package. Prefer table-driven tests when they make
   the cases easier to read.
+- Test behavior against a real PostgreSQL: each test migrates its own schema
+  through `internal/testdb`, so tests run in parallel.
 - Tests must pass with `-race` and `-shuffle=on`. They must not rely on timing
   luck: never `time.Sleep` while waiting for a result.
 - A bug fix includes a test that fails without the fix.
-- `Example` functions include an `// Output:` comment, so they run as tests.
+- `Example` functions compile with the tests. Those that need no database
+  include an `// Output:` comment, so they run as tests too.
 
 ## Commit messages
 

@@ -72,7 +72,7 @@ CREATE TABLE taskmill.tasks (
     finalized_at        timestamptz,                  -- when it became dead or canceled
     lease_token         integer NOT NULL DEFAULT 0,   -- grows by one on every fetch
     state               taskmill.task_state NOT NULL,
-    priority            smallint NOT NULL DEFAULT 0,  -- higher runs first
+    priority            smallint NOT NULL DEFAULT 2,  -- 1 to 4, higher runs first
     attempt             smallint NOT NULL DEFAULT 0,  -- attempts used
     max_attempts        smallint NOT NULL,
     queue               text NOT NULL,
@@ -105,8 +105,9 @@ Design notes:
   can never match again. Unlike `attempt`, it never goes down, so snoozes and
   graceful releases, which give attempts back, are safe.
 - **`errors` is bounded.** Each failure appends an entry with the attempt
-  number, the time, and the error. Beyond 20 entries the oldest is dropped. The
-  Go side truncates each error to a fixed size before storing it.
+  number, the time, the message, and, for failures that taskmill detected
+  itself, a code such as `lease_expired`. Beyond 20 entries the oldest is
+  dropped. The Go side truncates each message to 4 KiB before storing it.
 - **`fillfactor = 80`** leaves room in each page for updated row versions, so
   heartbeats can be HOT updates (see [Evidence](#evidence)).
 - **`queue` and `kind` are stored as text,** not as IDs into lookup tables. The
@@ -155,14 +156,16 @@ head. See [FIFO groups](#fifo-groups).
 
 ```sql
 CREATE TABLE taskmill.groups (
-    queue      text NOT NULL,
-    group_key  text NOT NULL,
-    tasks      integer NOT NULL,  -- unfinished tasks; a halted group also counts its dead head
-    halted_at  timestamptz,       -- set when the head became dead and the queue halts groups
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    queue          text NOT NULL,
+    group_key      text NOT NULL,
+    tasks          integer NOT NULL,  -- unfinished tasks; a halted group also counts its dead head
+    halted_task_id bigint,            -- the dead head that halted the group
+    halted_at      timestamptz,
+    updated_at     timestamptz NOT NULL DEFAULT now(),
 
     PRIMARY KEY (queue, group_key),
-    CONSTRAINT groups_tasks_check CHECK (tasks >= 0)
+    CONSTRAINT groups_tasks_check  CHECK (tasks >= 0),
+    CONSTRAINT groups_halted_check CHECK ((halted_task_id IS NULL) = (halted_at IS NULL))
 ) WITH (fillfactor = 80);
 
 CREATE INDEX groups_halted_idx ON taskmill.groups (queue) WHERE halted_at IS NOT NULL;
@@ -320,8 +323,12 @@ FROM unnest($1::text[], $2::text[], $3::smallint[], $4::timestamptz[],
 RETURNING id;
 ```
 
-Grouped and deduplicated enqueues are variants of this statement; see
-[FIFO groups](#fifo-groups) and [Deduplication](#deduplication).
+The implementation sends every batch through one of two statements. Batches
+with dedupe keys or FIFO groups go through a statement that also claims the
+keys and counts the groups, as described in [FIFO groups](#fifo-groups) and
+[Deduplication](#deduplication); all other batches go through a lean one.
+Both reserve IDs from the `tasks_id_seq` identity sequence first, so results
+map back to their inputs.
 
 ### Fetch
 
@@ -521,7 +528,7 @@ expired key that the maintainer has not deleted yet is claimed again:
 
 ```sql
 WITH next AS (
-    SELECT nextval(pg_get_serial_sequence('taskmill.tasks', 'id')) AS id
+    SELECT nextval('taskmill.tasks_id_seq') AS id
 ), k AS (
     INSERT INTO taskmill.dedupe_keys AS d (key, task_id, expires_at)
     SELECT $1, next.id, now() + $2::interval FROM next
