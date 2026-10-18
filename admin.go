@@ -1,10 +1,11 @@
 package taskmill
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"fmt"
-	"log/slog"
+	"math"
 	"strconv"
 	"time"
 
@@ -15,33 +16,25 @@ import (
 const (
 	defaultListLimit = 100
 	maxListLimit     = 1000
-	listTimeout      = "5s" // bound on one page's query, so inspection never loads the database
-	statsCap         = 100_000
-	statsInterval    = 10 * time.Second
+	listTimeout      = "5s"    // bound on one page's query, so inspection never loads the database
+	statsQueueCap    = 10_000  // most tasks counted per queue and state
+	statsDueCap      = 100_000 // most scheduled and retryable tasks counted in all
 
 	defaultHistoryRetention = 7 * 24 * time.Hour
 	defaultDeadRetention    = 30 * 24 * time.Hour
+	minRetention            = time.Hour
 )
 
-// QueueSettings are a queue's cluster-wide settings, stored in the database.
-// The zero value means: no concurrency limit, keep completed tasks in history,
-// and let FIFO groups continue past dead tasks.
+// QueueSettings are a queue's installation-wide settings, stored in the
+// database. The zero value means no concurrency limit.
 type QueueSettings struct {
 	// MaxRunning caps the tasks of the queue running at once across all
-	// workers. Zero means no limit.
+	// workers of the installation. Zero means no limit.
 	MaxRunning int
-
-	// DiscardCompleted deletes completed tasks at once instead of keeping
-	// them in history for the retention period.
-	DiscardCompleted bool
-
-	// HaltGroupOnDead stops a FIFO group when one of its tasks becomes dead,
-	// until an operator retries or deletes that task.
-	HaltGroupOnDead bool
 }
 
 // QueueInfo describes a queue: its settings, its workers, and its latest
-// statistics, which the maintainer refreshes every few seconds.
+// statistics, which the maintainer refreshes every 10 seconds.
 type QueueInfo struct {
 	Name     string
 	Settings QueueSettings
@@ -49,8 +42,9 @@ type QueueInfo struct {
 	Workers  int // live workers that serve the queue
 
 	// Counts holds the number of tasks per state, except completed tasks.
-	// A count that reached the statistics cap of 100,000 per state is
-	// reported as counted so far, and Capped is set.
+	// Counting stops at 10,000 tasks per state, and at 100,000 scheduled
+	// and retryable tasks across all queues; Capped reports that a count
+	// stopped early and is a lower bound.
 	Counts      map[State]int64
 	Capped      bool
 	RefreshedAt time.Time // zero until the maintainer first counts the queue
@@ -60,11 +54,11 @@ type QueueInfo struct {
 // applied by the maintainer. Zero fields mean their defaults.
 type Settings struct {
 	// HistoryRetention is how long completed tasks stay in history.
-	// Default: 7 days.
+	// Minimum: 1 hour. Default: 7 days.
 	HistoryRetention time.Duration
 
 	// DeadRetention is how long dead and canceled tasks are kept for
-	// operators to inspect and retry. Default: 30 days.
+	// operators to inspect and retry. Minimum: 1 hour. Default: 30 days.
 	DeadRetention time.Duration
 }
 
@@ -72,10 +66,11 @@ type Settings struct {
 type WorkerInfo struct {
 	ID          string
 	Hostname    string
-	Version     string
+	Version     string // taskmill's version in the worker's binary
 	Queues      []string
 	StartedAt   time.Time
 	HeartbeatAt time.Time
+	Maintainer  bool // the worker is the elected maintainer
 }
 
 // ListParams filters and pages [Client.List].
@@ -89,7 +84,10 @@ type ListParams struct {
 	// Kind limits the result to one kind. Empty means all kinds.
 	Kind string
 
-	// Limit is the page size. Default: 100. Maximum: 1000.
+	// GroupKey limits the result to one FIFO group. Empty means all tasks.
+	GroupKey string
+
+	// Limit is the page size. Default: 100. Maximum: 1,000.
 	Limit int
 
 	// Cursor continues from a previous page's [ListResult.Next].
@@ -104,24 +102,22 @@ type ListResult struct {
 	Next string
 }
 
-// UpdateQueue changes a queue's settings for every worker in the cluster,
-// creating the queue if it does not exist. Workers apply the change within
-// seconds.
+// UpdateQueue sets a queue's installation-wide settings for every worker, and
+// creates the queue if needed. Passing nil, or a zero MaxRunning, removes the
+// limit. Workers apply the change within 10 seconds, and at once if they
+// receive notifications.
 func (c *Client) UpdateQueue(ctx context.Context, name string, settings *QueueSettings) error {
-	if err := checkName("queue", name, maxNameLength); err != nil {
-		return err
-	}
 	if settings == nil {
 		settings = &QueueSettings{}
 	}
 	if settings.MaxRunning < 0 {
-		return invalidArgument("max running must not be negative")
+		return invalidArgument("MaxRunning must not be negative")
 	}
 	var maxRunning *int
 	if settings.MaxRunning > 0 {
 		maxRunning = &settings.MaxRunning
 	}
-	return c.changeQueue(ctx, name, c.sql.updateQueue, maxRunning, !settings.DiscardCompleted, settings.HaltGroupOnDead)
+	return c.changeQueue(ctx, name, c.sql.updateQueue, maxRunning)
 }
 
 // PauseQueue stops workers from fetching the queue's tasks. Tasks already
@@ -145,7 +141,7 @@ func (c *Client) changeQueue(ctx context.Context, name, sql string, args ...any)
 		if _, err := tx.Exec(ctx, sql, append([]any{name}, args...)...); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, "SELECT pg_notify($1, $2)", c.schema, "q|"+name)
+		_, err := tx.Exec(ctx, notifySQL, c.schema, notifyQueue+"|"+name)
 		return err
 	})
 	if err != nil {
@@ -165,8 +161,7 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 	index := make(map[string]int)
 	for r.Next() {
 		var q QueueInfo
-		if err := r.Scan(&q.Name, &q.Settings.MaxRunning, &q.Settings.DiscardCompleted,
-			&q.Settings.HaltGroupOnDead, &q.Paused, &q.Workers); err != nil {
+		if err := r.Scan(&q.Name, &q.Settings.MaxRunning, &q.Paused, &q.Workers); err != nil {
 			r.Close()
 			return nil, fmt.Errorf("taskmill: list queues: %w", err)
 		}
@@ -223,10 +218,10 @@ func (c *Client) UpdateSettings(ctx context.Context, settings *Settings) error {
 	if settings == nil {
 		settings = &Settings{}
 	}
-	history := cmpDuration(settings.HistoryRetention, defaultHistoryRetention)
-	dead := cmpDuration(settings.DeadRetention, defaultDeadRetention)
-	if history < time.Hour || dead < time.Hour {
-		return invalidArgument("retention periods must be at least an hour")
+	history := cmp.Or(settings.HistoryRetention, defaultHistoryRetention)
+	dead := cmp.Or(settings.DeadRetention, defaultDeadRetention)
+	if history < minRetention || dead < minRetention {
+		return invalidArgument("retention periods must be at least %s", minRetention)
 	}
 	if _, err := c.pool.Exec(ctx, c.sql.updateSettings, history.Microseconds(), dead.Microseconds()); err != nil {
 		return fmt.Errorf("taskmill: update settings: %w", err)
@@ -234,15 +229,8 @@ func (c *Client) UpdateSettings(ctx context.Context, settings *Settings) error {
 	return nil
 }
 
-func cmpDuration(d, fallback time.Duration) time.Duration {
-	if d == 0 {
-		return fallback
-	}
-	return d
-}
-
 // Workers returns the registered worker processes. A worker that stopped
-// without unregistering disappears after a few minutes without heartbeats.
+// without unregistering disappears after 5 minutes without heartbeats.
 func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	r, err := c.pool.Query(ctx, c.sql.listWorkers)
 	if err != nil {
@@ -252,7 +240,7 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	var out []WorkerInfo
 	for r.Next() {
 		var w WorkerInfo
-		if err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.StartedAt, &w.HeartbeatAt); err != nil {
+		if err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.StartedAt, &w.HeartbeatAt, &w.Maintainer); err != nil {
 			return nil, fmt.Errorf("taskmill: list workers: %w", err)
 		}
 		out = append(out, w)
@@ -264,7 +252,9 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 }
 
 // List returns tasks that match params, newest first, one page at a time.
-// Each page's query is bounded in time, so listing never loads the database.
+// Each page's query is canceled after 5 seconds, so listing cannot overload
+// the database; on a very large table, a filter that matches few tasks can
+// reach that limit and return an error.
 func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, error) {
 	if params == nil {
 		params = &ListParams{}
@@ -273,24 +263,23 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	if err != nil {
 		return nil, err
 	}
-
-	states := make([]string, 0, len(params.States))
-	history := len(params.States) == 0
-	for _, s := range params.States {
-		if s == StateCompleted {
-			history = true
-			continue
-		}
-		states = append(states, string(s))
+	states, live, history, err := listStates(params.States)
+	if err != nil {
+		return nil, err
 	}
-	live := len(params.States) == 0 || len(states) > 0
 
 	var out ListResult
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
 			return err
 		}
-		r, err := tx.Query(ctx, c.sql.listTasks, params.Queue, states, params.Kind, before, limit+1, live, history)
+		// Custom plans see which filters are empty, and so use the indexes
+		// that serve the filters that are set.
+		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
+			return err
+		}
+		r, err := tx.Query(ctx, c.sql.listTasks,
+			params.Queue, states, params.Kind, before, limit+1, live, history, params.GroupKey)
 		if err != nil {
 			return err
 		}
@@ -315,6 +304,26 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	return &out, nil
 }
 
+// listStates splits a state filter into the states of unfinished tasks, and
+// reports whether the list reads the tasks table and the history.
+func listStates(filter []State) (states []string, live, history bool, err error) {
+	states = make([]string, 0, len(filter))
+	for _, s := range filter {
+		if !s.valid() {
+			return nil, false, false, invalidArgument("unknown state %q", s)
+		}
+		if s == StateCompleted {
+			history = true
+			continue
+		}
+		states = append(states, string(s))
+	}
+	if len(filter) == 0 {
+		return states, true, true, nil
+	}
+	return states, len(states) > 0, history, nil
+}
+
 // listBounds validates a page size and decodes a cursor into the ID that
 // the page starts below.
 func listBounds(p *ListParams) (limit int, before int64, err error) {
@@ -326,7 +335,7 @@ func listBounds(p *ListParams) (limit int, before int64, err error) {
 		return 0, 0, invalidArgument("limit must be between 1 and %d", maxListLimit)
 	}
 	if p.Cursor == "" {
-		return limit, 1<<63 - 1, nil
+		return limit, math.MaxInt64, nil
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(p.Cursor)
 	if err != nil {
@@ -336,61 +345,4 @@ func listBounds(p *ListParams) (limit int, before int64, err error) {
 		return 0, 0, invalidArgument("invalid cursor")
 	}
 	return limit, before, nil
-}
-
-// refreshStats counts each queue's tasks per state, up to a cap per state,
-// and stores the counts for [Client.Queues].
-func (m *maintainer) refreshStats(ctx context.Context) {
-	type row struct {
-		queue, state string
-		n            int64
-		capped       bool
-	}
-	var rows []row
-	for _, s := range []State{StateScheduled, StatePending, StateAvailable, StateRunning, StateRetryable, StateDead, StateCanceled} {
-		r, err := m.c.pool.Query(ctx, m.c.sql.countState, string(s), statsCap)
-		if err != nil {
-			m.log(ctx, slog.LevelError, "refresh statistics", err)
-			return
-		}
-		var total int64
-		var counted []row
-		for r.Next() {
-			x := row{state: string(s)}
-			if err := r.Scan(&x.queue, &x.n); err != nil {
-				r.Close()
-				m.log(ctx, slog.LevelError, "refresh statistics", err)
-				return
-			}
-			total += x.n
-			counted = append(counted, x)
-		}
-		r.Close()
-		if err := r.Err(); err != nil {
-			m.log(ctx, slog.LevelError, "refresh statistics", err)
-			return
-		}
-		for i := range counted {
-			counted[i].capped = total >= statsCap
-		}
-		rows = append(rows, counted...)
-	}
-
-	queues := make([]string, len(rows))
-	states := make([]string, len(rows))
-	counts := make([]int64, len(rows))
-	capped := make([]bool, len(rows))
-	for i, x := range rows {
-		queues[i], states[i], counts[i], capped[i] = x.queue, x.state, x.n, x.capped
-	}
-	err := pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, m.c.sql.clearStats); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped)
-		return err
-	})
-	if err != nil {
-		m.log(ctx, slog.LevelError, "store statistics", err)
-	}
 }

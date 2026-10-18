@@ -59,7 +59,12 @@ var macros = map[string]string{
 // Parse parses a cron expression.
 func Parse(expr string) (*Schedule, error) {
 	expr = strings.TrimSpace(expr)
-	if m, ok := macros[strings.ToLower(expr)]; ok {
+	if strings.HasPrefix(expr, "@") {
+		m, ok := macros[strings.ToLower(expr)]
+		if !ok {
+			return nil, fmt.Errorf("cron macro %q is not supported: use @yearly, @annually, @monthly, "+
+				"@weekly, @daily, @midnight, @hourly, or five fields", expr)
+		}
 		expr = m
 	}
 	fields := strings.Fields(expr)
@@ -188,8 +193,13 @@ func (s *Schedule) Next(t time.Time) (time.Time, error) {
 // that happens twice when clocks go back resolves to its first occurrence.
 func instant(c time.Time, loc *time.Location) time.Time {
 	at := time.Date(c.Year(), c.Month(), c.Day(), c.Hour(), c.Minute(), 0, 0, loc)
-	if got := civil(at); !got.Equal(c) {
-		return at.Add(c.Sub(got))
+	if !civil(at).Equal(c) {
+		// c falls in a gap. Read with the offset in effect before the jump,
+		// it lands as far after the jump as it is into the gap. Transitions
+		// are months apart, and offsets reach 14 hours, so two days earlier
+		// is safely before this one.
+		_, offset := c.Add(-48 * time.Hour).In(loc).Zone()
+		return c.Add(-time.Duration(offset) * time.Second).In(loc)
 	}
 	for _, back := range []time.Duration{time.Hour, 30 * time.Minute} {
 		if earlier := at.Add(-back); civil(earlier).Equal(c) {

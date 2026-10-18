@@ -12,6 +12,9 @@ func TestNext(t *testing.T) {
 	if err != nil {
 		t.Skip("time zone database unavailable")
 	}
+	berlin, _ := time.LoadLocation("Europe/Berlin")
+	sydney, _ := time.LoadLocation("Australia/Sydney")
+	auckland, _ := time.LoadLocation("Pacific/Auckland")
 	tests := []struct {
 		expr string
 		from time.Time
@@ -31,6 +34,11 @@ func TestNext(t *testing.T) {
 		// Spring forward: 02:30 does not exist on 2026-03-08 in New York.
 		{"30 2 * * *", time.Date(2026, 3, 7, 12, 0, 0, 0, ny), time.Date(2026, 3, 8, 3, 30, 0, 0, ny)},
 		{"0 9 * * *", time.Date(2026, 3, 7, 12, 0, 0, 0, ny), time.Date(2026, 3, 8, 9, 0, 0, 0, ny)},
+		// Zones east of UTC: the skipped time runs right after the jump too.
+		{"30 2 * * *", time.Date(2026, 3, 28, 12, 0, 0, 0, berlin), time.Date(2026, 3, 29, 3, 30, 0, 0, berlin)},
+		{"0 2 * * *", time.Date(2026, 3, 29, 1, 30, 0, 0, berlin), time.Date(2026, 3, 29, 3, 0, 0, 0, berlin)},
+		{"30 2 * * *", time.Date(2026, 10, 3, 12, 0, 0, 0, sydney), time.Date(2026, 10, 4, 3, 30, 0, 0, sydney)},
+		{"30 2 * * *", time.Date(2026, 9, 26, 12, 0, 0, 0, auckland), time.Date(2026, 9, 27, 3, 30, 0, 0, auckland)},
 		// Fall back: 01:30 happens twice on 2026-11-01 in New York; it runs once.
 		{"30 1 * * *", time.Date(2026, 11, 1, 0, 0, 0, 0, ny), time.Date(2026, 11, 1, 1, 30, 0, 0, ny)},
 		{"30 1 * * *", time.Date(2026, 11, 1, 1, 31, 0, 0, ny), time.Date(2026, 11, 2, 1, 30, 0, 0, ny)},

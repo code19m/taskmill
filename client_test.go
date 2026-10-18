@@ -1,12 +1,16 @@
 package taskmill_test
 
 import (
+	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
+	"github.com/code19m/taskmill/internal/testdb"
 )
 
 func TestGetUnknownTask(t *testing.T) {
@@ -63,8 +67,8 @@ func TestCancelTxNeedsATransaction(t *testing.T) {
 	if err := e.client.CancelTx(t.Context(), taskmill.Pgx(e.pool), id); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("pool instead of transaction: got %v, want ErrInvalidArgument", err)
 	}
-	if err := e.client.CancelTx(t.Context(), taskmill.PgxExecutor{}, id); !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("zero executor: got %v, want ErrInvalidArgument", err)
+	if err := e.client.CancelTx(t.Context(), taskmill.Pgx(nil), id); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("nil executor: got %v, want ErrInvalidArgument", err)
 	}
 
 	err := pgx.BeginFunc(t.Context(), e.pool, func(tx pgx.Tx) error {
@@ -151,7 +155,6 @@ func TestRetryGroupedTaskWaitsBehindTheGroup(t *testing.T) {
 func TestRetryResumesAHaltedGroup(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.exec(t, "INSERT INTO {s}.queues (name, halt_group_on_dead) VALUES ('default', true)")
 	group := &taskmill.EnqueueOptions{GroupKey: "ledger"}
 	head := e.enqueue(t, sendEmail{To: "1"}, group)
 	next := e.enqueue(t, sendEmail{To: "2"}, group)
@@ -195,13 +198,45 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+func TestCancelAndDeleteFreeTheDedupeKey(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
+	enqueue := func() taskmill.EnqueueResult {
+		t.Helper()
+		res, err := e.client.Enqueue(ctx, sendEmail{}, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	first := enqueue()
+	if dup := enqueue(); !dup.Duplicate || dup.ID != first.ID {
+		t.Fatalf("got %+v, want a duplicate of %d", dup, first.ID)
+	}
+	if err := e.client.Cancel(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second := enqueue()
+	if second.Duplicate {
+		t.Fatalf("the canceled task still holds its key: %+v", second)
+	}
+	if err := e.client.Delete(ctx, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if third := enqueue(); third.Duplicate {
+		t.Fatalf("the deleted task still holds its key: %+v", third)
+	}
+}
+
 func TestRetryAndDeleteSeeTheLatestGroupHalt(t *testing.T) {
 	t.Parallel()
 	for _, op := range []string{"retry", "delete"} {
 		t.Run(op, func(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t)
-			e.exec(t, "INSERT INTO {s}.queues (name, halt_group_on_dead) VALUES ('default', true)")
 			group := &taskmill.EnqueueOptions{GroupKey: "g"}
 			head := e.enqueue(t, sendEmail{To: "1"}, group)
 			next := e.enqueue(t, sendEmail{To: "2"}, group)
@@ -264,5 +299,114 @@ func TestOperationsOnCompletedTasks(t *testing.T) {
 	}
 	if _, err := e.client.Get(t.Context(), id); !errors.Is(err, taskmill.ErrNotFound) {
 		t.Fatalf("deleted task: got %v, want ErrNotFound", err)
+	}
+}
+
+func TestTxMethodsWithDatabaseSQL(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	db := openSQL(t)
+	ctx := t.Context()
+	group := &taskmill.EnqueueOptions{GroupKey: "g"}
+	head := e.enqueue(t, sendEmail{To: "1"}, group)
+	next := e.enqueue(t, sendEmail{To: "2"}, group)
+	inTx := func(fn func(tx *sql.Tx) error) {
+		t.Helper()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fn(tx); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Each of these runs several statements, which must commit together.
+	inTx(func(tx *sql.Tx) error { return e.client.CancelTx(ctx, taskmill.SQL(tx), head) })
+	e.wantState(t, head, taskmill.StateCanceled)
+	e.wantState(t, next, taskmill.StateAvailable)
+
+	if err := e.client.Retry(ctx, head); err != nil {
+		t.Fatal(err)
+	}
+	e.wantState(t, head, taskmill.StatePending)
+
+	inTx(func(tx *sql.Tx) error { return e.client.CancelTx(ctx, taskmill.SQL(tx), next) })
+	e.wantState(t, head, taskmill.StateAvailable)
+
+	if err := e.client.CancelTx(ctx, taskmill.SQL(db), head); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("a database instead of a transaction: got %v, want ErrInvalidArgument", err)
+	}
+}
+
+// wrappedTx is a transaction type that embeds *sql.Tx, as sqlx's does.
+type wrappedTx struct {
+	*sql.Tx
+}
+
+func TestTxMethodsAcceptWrappedSQLTransactions(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	db := openSQL(t)
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	tx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := e.client.CancelTx(t.Context(), taskmill.SQL(wrappedTx{tx}), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	e.wantState(t, id, taskmill.StateCanceled)
+}
+
+func TestCancelWhileTheWorkerRecordsAResult(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	id := e.enqueue(t, sendEmail{}, nil)
+	e.exec(t, `UPDATE {s}.tasks SET state = 'running', attempt = 1, lease_token = 1,
+	           lease_expires_at = now() + interval '30 seconds', attempted_at = now(), attempted_by = 'w'
+	           WHERE id = $1`, id)
+
+	// The worker records a failure while Cancel waits for the task's lock.
+	tx := e.begin(t)
+	e.txExec(t, tx, `UPDATE {s}.tasks SET state = 'retryable', lease_expires_at = NULL,
+	                 run_at = now() + interval '1 minute' WHERE id = $1`, id)
+	done := make(chan error, 1)
+	go func() { done <- e.client.Cancel(t.Context(), id) }()
+	e.waitBlocked(t, "{s}.tasks WHERE id = $1 FOR UPDATE")
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	e.wantState(t, id, taskmill.StateCanceled)
+}
+
+func TestNewClientRequiresReadCommitted(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 1
+	cfg.ConnConfig.RuntimeParams["default_transaction_isolation"] = "serializable"
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	_, err = taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema})
+	if err == nil || !strings.Contains(err.Error(), "read committed") {
+		t.Fatalf("got %v, want an error about the isolation level", err)
 	}
 }

@@ -1,27 +1,30 @@
 // Package outbox publishes messages to a message broker reliably, with the
 // transactional outbox pattern.
 //
-// [Store] saves messages in the same transaction as the business data that
-// produced them, so a message exists if and only if that data was committed.
-// A relay, registered on a worker with [AddRelay], then publishes the stored
-// messages through a [Publisher] that wraps any broker client: Kafka, NATS,
-// RabbitMQ, or another. Messages with the same topic and key are published
-// one at a time, in the order they were stored.
+// [Outbox.Store] saves messages in the same transaction as the business data
+// that produced them, so a message exists if and only if that data was
+// committed. A relay, registered on a worker with [Outbox.AddRelay], then
+// publishes the stored messages through a [Publisher] that wraps any broker
+// client: Kafka, NATS, RabbitMQ, or another. Messages with the same topic and
+// key are published one at a time, in the order they were stored. A message
+// that cannot be published is retried for about a month; then it is dead,
+// and its key halts until an operator retries or deletes it, so later
+// messages never overtake it.
 //
 // Publishing is at least once: a message can be published twice, for example
 // if the worker crashes after the broker accepted it. Every delivery carries
 // an ID that stays the same across retries, so consumers can deduplicate.
 // The receiving side needs no package: a consumer that enqueues a task for
 // each message, with the message ID as [taskmill.EnqueueOptions.DedupeKey],
-// handles every message once.
+// creates at most one task per message within the dedupe window.
 package outbox
 
 import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -29,17 +32,18 @@ import (
 	"github.com/code19m/taskmill/internal/uuid"
 )
 
-// DefaultQueue is the queue that holds outbox messages unless [Options] says
-// otherwise.
-const DefaultQueue = "outbox"
+// Queue is the taskmill queue that holds stored messages. A worker with a
+// relay serves it by default.
+const Queue = "outbox"
 
 const (
-	maxAttempts      = 100
+	// maxAttempts with relayRetry keeps retrying a message for about a month.
+	maxAttempts      = 10_000
 	maxGroupKeyRunes = 256
 )
 
 // relayRetry retries a failed publish quickly at first, then every five
-// minutes, so a broker outage of a few days loses nothing.
+// minutes, so a broker outage of up to a month loses nothing.
 var relayRetry = taskmill.ExponentialBackoff{Base: time.Second, Max: 5 * time.Minute}
 
 // Message is an event to publish.
@@ -50,13 +54,14 @@ type Message struct {
 	// Key orders messages: messages with the same topic and key are
 	// published one at a time, in the order they were stored. Messages
 	// without a key are published in any order.
-	Key string
+	Key []byte
 
-	// Value is the message body.
+	// Value is the message body. It is stored base64-encoded in a task
+	// payload, whose 1 MiB limit allows about 750 KiB of Value.
 	Value []byte
 
 	// Headers are passed to the broker with the message.
-	Headers map[string]string
+	Headers map[string][]byte
 }
 
 // Delivery is a stored message on its way to the broker.
@@ -69,9 +74,11 @@ type Delivery struct {
 }
 
 // Publisher sends deliveries to a broker. It returns one error per delivery,
-// in the same order: nil marks that delivery as published, and an error
-// retries it later. A batch never holds two deliveries with the same topic
-// and key.
+// in the same order: nil marks that delivery as published, an error retries
+// it later, and an error wrapped with [taskmill.Permanent] makes it dead at
+// once. A batch holds at most 100 deliveries, never two with the same topic
+// and key. Each call has 1 minute: then its context is canceled, and the
+// deliveries without a nil result are retried.
 type Publisher interface {
 	Publish(ctx context.Context, deliveries []Delivery) []error
 }
@@ -84,93 +91,67 @@ func (f PublisherFunc) Publish(ctx context.Context, deliveries []Delivery) []err
 	return f(ctx, deliveries)
 }
 
-// Options configure the outbox. The zero value is valid; the same options
-// must be used to store, relay, and set up.
-type Options struct {
-	// Queue is the taskmill queue that holds pending messages.
-	// Default: [DefaultQueue].
-	Queue string
-
-	// BatchSize is the most deliveries one Publish call receives.
-	// Default: 100.
-	BatchSize int
+// Outbox stores messages and relays them to a broker. Create one with [New]
+// and share it: it is safe for concurrent use.
+type Outbox struct {
+	client *taskmill.Client
 }
 
-func (o *Options) queue() string {
-	if o == nil || o.Queue == "" {
-		return DefaultQueue
-	}
-	return o.Queue
+// New returns an outbox that keeps its messages in client's database.
+func New(client *taskmill.Client) *Outbox {
+	return &Outbox{client: client}
 }
-
-// ErrNoTopic is returned by [Store] for a message without a topic.
-var ErrNoTopic = errors.New("outbox: message has no topic")
 
 // Store saves msgs in the outbox inside the caller's transaction, so they are
-// published only if the transaction commits. opts may be nil.
-func Store(ctx context.Context, client *taskmill.Client, tx taskmill.Executor, opts *Options, msgs ...Message) error {
+// published only if the transaction commits. A message without a topic fails
+// with an error that wraps [taskmill.ErrInvalidArgument].
+func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Message) error {
+	if o.client == nil {
+		return fmt.Errorf("%w: outbox client is nil", taskmill.ErrInvalidArgument)
+	}
 	if len(msgs) == 0 {
 		return nil
 	}
-	queue := opts.queue()
 	params := make([]taskmill.EnqueueParams, len(msgs))
 	for i, m := range msgs {
 		if m.Topic == "" {
-			return fmt.Errorf("%w (message %d of %d)", ErrNoTopic, i+1, len(msgs))
+			return fmt.Errorf("%w: outbox message %d of %d has no topic", taskmill.ErrInvalidArgument, i+1, len(msgs))
 		}
 		params[i] = taskmill.EnqueueParams{
-			Args: message{ID: uuid.NewV7(), Topic: m.Topic, Key: m.Key, Value: m.Value, Headers: m.Headers},
-			Options: &taskmill.EnqueueOptions{
-				Queue:       queue,
-				GroupKey:    groupKey(m.Topic, m.Key),
-				MaxAttempts: maxAttempts,
-			},
+			Args:    message{ID: uuid.NewV7(), Topic: m.Topic, Key: m.Key, Value: m.Value, Headers: m.Headers},
+			Options: &taskmill.EnqueueOptions{GroupKey: groupKey(m.Topic, m.Key)},
 		}
 	}
-	if _, err := client.EnqueueManyTx(ctx, tx, params); err != nil {
-		return fmt.Errorf("outbox: store: %w", err)
-	}
-	return nil
+	_, err := o.client.EnqueueManyTx(ctx, tx, params)
+	return err
 }
 
 // AddRelay registers the batch handler that publishes stored messages through
-// pub. Serve the outbox queue with a worker to run it. opts may be nil.
-func AddRelay(hs *taskmill.Handlers, pub Publisher, opts *Options) {
-	size := 0
-	if opts != nil {
-		size = opts.BatchSize
+// pub. A worker with no Queues set serves [Queue] for it. A nil pub is
+// reported by [taskmill.NewWorker].
+func (*Outbox) AddRelay(hs *taskmill.Handlers, pub Publisher) {
+	opts := &taskmill.HandlerOptions{Retry: relayRetry, DiscardCompleted: true}
+	if pub == nil {
+		taskmill.AddBatchHandler[message](hs, nil, opts)
+		return
 	}
-	taskmill.AddBatchHandler[message](hs, relay{pub: pub}, &taskmill.HandlerOptions{
-		BatchSize: size,
-		Retry:     relayRetry,
-	})
-}
-
-// Setup applies the settings the outbox queue needs, once per installation:
-// a key whose message cannot be published halts until an operator retries or
-// deletes that message, so later messages never overtake it, and published
-// messages are not kept in history. opts may be nil.
-func Setup(ctx context.Context, client *taskmill.Client, opts *Options) error {
-	err := client.UpdateQueue(ctx, opts.queue(), &taskmill.QueueSettings{
-		HaltGroupOnDead:  true,
-		DiscardCompleted: true,
-	})
-	if err != nil {
-		return fmt.Errorf("outbox: setup: %w", err)
-	}
-	return nil
+	taskmill.AddBatchHandler[message](hs, relay{pub: pub}, opts)
 }
 
 // message is the stored form of a Message.
 type message struct {
 	ID      string            `json:"id"`
 	Topic   string            `json:"topic"`
-	Key     string            `json:"key,omitempty"`
+	Key     []byte            `json:"key,omitempty"`
 	Value   []byte            `json:"value"`
-	Headers map[string]string `json:"headers,omitempty"`
+	Headers map[string][]byte `json:"headers,omitempty"`
 }
 
 func (message) Kind() string { return "taskmill.outbox.message" }
+
+func (message) EnqueueDefaults() taskmill.EnqueueOptions {
+	return taskmill.EnqueueOptions{Queue: Queue, MaxAttempts: maxAttempts}
+}
 
 type relay struct {
 	pub Publisher
@@ -180,20 +161,20 @@ func (r relay) HandleBatch(ctx context.Context, tasks []*taskmill.Task[message])
 	ds := make([]Delivery, len(tasks))
 	for i, t := range tasks {
 		m := t.Args
-		ds[i] = Delivery{ID: m.ID, Topic: m.Topic, Key: m.Key, Value: m.Value, Headers: m.Headers}
+		ds[i] = Delivery{ID: m.ID, Message: Message{Topic: m.Topic, Key: m.Key, Value: m.Value, Headers: m.Headers}}
 	}
 	return r.pub.Publish(ctx, ds)
 }
 
 // groupKey orders the messages of one topic and key. The two are joined by
-// the ASCII unit separator, which topics and keys do not contain, and long
-// keys are hashed to fit the group key limit.
-func groupKey(topic, key string) string {
-	if key == "" {
+// the ASCII unit separator. Keys that are long, binary, or contain a NUL
+// byte, which a group key cannot hold, are hashed.
+func groupKey(topic string, key []byte) string {
+	if len(key) == 0 {
 		return ""
 	}
-	g := topic + "\x1f" + key
-	if utf8.RuneCountInString(g) > maxGroupKeyRunes {
+	g := topic + "\x1f" + string(key)
+	if !utf8.ValidString(g) || strings.ContainsRune(g, 0) || utf8.RuneCountInString(g) > maxGroupKeyRunes {
 		sum := sha256.Sum256([]byte(g))
 		return "sha256:" + hex.EncodeToString(sum[:])
 	}

@@ -1,9 +1,11 @@
 package outbox_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,7 +21,12 @@ import (
 	"github.com/code19m/taskmill/outbox"
 )
 
-func setup(t *testing.T) (*taskmill.Client, *pgxpool.Pool) {
+func TestMain(m *testing.M) {
+	outbox.FastRetry()
+	os.Exit(m.Run())
+}
+
+func setup(t *testing.T) (*taskmill.Client, *outbox.Outbox, *pgxpool.Pool) {
 	t.Helper()
 	pool := testdb.Pool(t)
 	schema := testdb.Schema(t, pool)
@@ -30,10 +37,7 @@ func setup(t *testing.T) (*taskmill.Client, *pgxpool.Pool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := outbox.Setup(t.Context(), client, nil); err != nil {
-		t.Fatal(err)
-	}
-	return client, pool
+	return client, outbox.New(client), pool
 }
 
 // broker records what it publishes and fails each delivery's first attempt
@@ -56,8 +60,8 @@ func (b *broker) Publish(_ context.Context, ds []outbox.Delivery) []error {
 	errs := make([]error, len(ds))
 	seen := map[string]bool{}
 	for i, d := range ds {
-		stream := d.Topic + "/" + d.Key
-		if d.Key != "" && seen[stream] {
+		stream := d.Topic + "/" + string(d.Key)
+		if len(d.Key) > 0 && seen[stream] {
 			errs[i] = errors.New("two deliveries of one key in a batch")
 			continue
 		}
@@ -88,15 +92,11 @@ func (b *broker) count() int {
 	return n
 }
 
-func run(t *testing.T, client *taskmill.Client, pub outbox.Publisher) {
+func run(t *testing.T, client *taskmill.Client, ob *outbox.Outbox, pub outbox.Publisher) {
 	t.Helper()
 	var hs taskmill.Handlers
-	outbox.AddRelay(&hs, pub, &outbox.Options{BatchSize: 16})
-	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
-		Handlers:     &hs,
-		Queues:       map[string]taskmill.QueueOptions{outbox.DefaultQueue: {Concurrency: 4}},
-		PollInterval: 20 * time.Millisecond,
-	})
+	ob.AddRelay(&hs, pub)
+	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs, PollInterval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,13 +113,13 @@ func run(t *testing.T, client *taskmill.Client, pub outbox.Publisher) {
 
 func TestStoreCommitsWithTheTransaction(t *testing.T) {
 	t.Parallel()
-	client, pool := setup(t)
+	client, ob, pool := setup(t)
 	b := newBroker(false)
-	run(t, client, b)
+	run(t, client, ob, b)
 	ctx := t.Context()
 
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if err := outbox.Store(ctx, client, taskmill.Pgx(tx), nil, outbox.Message{Topic: "orders", Key: "1", Value: []byte("rolled back")}); err != nil {
+		if err := ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "orders", Key: []byte("1"), Value: []byte("rolled back")}); err != nil {
 			return err
 		}
 		return errors.New("roll back")
@@ -128,16 +128,16 @@ func TestStoreCommitsWithTheTransaction(t *testing.T) {
 		t.Fatal("expected the rollback error")
 	}
 	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return outbox.Store(ctx, client, taskmill.Pgx(tx), nil, outbox.Message{
-			Topic: "orders", Key: "1", Value: []byte("committed"), Headers: map[string]string{"type": "order.paid"},
+		return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{
+			Topic: "orders", Key: []byte("1"), Value: []byte("committed"), Headers: map[string][]byte{"type": []byte("order.paid")},
 		})
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	// Had the rolled-back message been stored, it would be published first.
 	waitFor(t, func() bool { return b.count() == 1 })
-	time.Sleep(200 * time.Millisecond)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if got := b.published["orders/1"]; !slices.Equal(got, []string{"committed"}) {
@@ -147,7 +147,7 @@ func TestStoreCommitsWithTheTransaction(t *testing.T) {
 
 func TestRelayKeepsOrderPerKey(t *testing.T) {
 	t.Parallel()
-	client, pool := setup(t)
+	client, ob, pool := setup(t)
 	b := newBroker(true)
 	ctx := t.Context()
 
@@ -156,35 +156,38 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 			msgs := make([]outbox.Message, keys)
 			for k := range keys {
-				msgs[k] = outbox.Message{Topic: "accounts", Key: strconv.Itoa(k), Value: fmt.Appendf(nil, "%d-%02d", k, i)}
+				msgs[k] = outbox.Message{Topic: "accounts", Key: []byte(strconv.Itoa(k)), Value: fmt.Appendf(nil, "%d-%02d", k, i)}
 			}
-			return outbox.Store(ctx, client, taskmill.Pgx(tx), nil, msgs...)
+			return ob.Store(ctx, taskmill.Pgx(tx), msgs...)
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	run(t, client, b)
+	run(t, client, ob, b)
 
 	waitFor(t, func() bool { return b.count() == keys*perKey })
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for k := range keys {
-		got := b.published[fmt.Sprintf("accounts/%d", k)]
-		if !slices.IsSorted(got) || len(got) != perKey {
-			t.Fatalf("key %d published out of order: %v", k, got)
+		want := make([]string, perKey)
+		for i := range want {
+			want[i] = fmt.Sprintf("%d-%02d", k, i)
+		}
+		if got := b.published[fmt.Sprintf("accounts/%d", k)]; !slices.Equal(got, want) {
+			t.Fatalf("key %d: published %v, want %v", k, got, want)
 		}
 	}
 }
 
 func TestStoreRejectsMessagesWithoutTopic(t *testing.T) {
 	t.Parallel()
-	client, pool := setup(t)
+	_, ob, pool := setup(t)
 	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
-		return outbox.Store(t.Context(), client, taskmill.Pgx(tx), nil, outbox.Message{Value: []byte("x")})
+		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Value: []byte("x")})
 	})
-	if !errors.Is(err, outbox.ErrNoTopic) {
-		t.Fatalf("got %v, want ErrNoTopic", err)
+	if !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -196,5 +199,116 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("condition not met in time")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
+	t.Parallel()
+	client, ob, pool := setup(t)
+	ctx := t.Context()
+	var mu sync.Mutex
+	var published []string
+	reject := true
+	run(t, client, ob, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
+		mu.Lock()
+		defer mu.Unlock()
+		errs := make([]error, len(ds))
+		for i, d := range ds {
+			if string(d.Value) == "first" && reject {
+				errs[i] = taskmill.Permanent(errors.New("the broker refuses it"))
+				continue
+			}
+			published = append(published, string(d.Value))
+		}
+		return errs
+	}))
+	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return ob.Store(ctx, taskmill.Pgx(tx),
+			outbox.Message{Topic: "orders", Key: []byte("7"), Value: []byte("first")},
+			outbox.Message{Topic: "orders", Key: []byte("7"), Value: []byte("second")})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var dead []taskmill.TaskInfo
+	waitFor(t, func() bool {
+		page, err := client.List(ctx, &taskmill.ListParams{Queue: outbox.Queue, States: []taskmill.State{taskmill.StateDead}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dead = page.Tasks
+		return len(dead) == 1
+	})
+	time.Sleep(200 * time.Millisecond) // the second message would be published by now if the key did not halt
+	mu.Lock()
+	if len(published) != 0 {
+		t.Fatalf("published %v behind a dead message", published)
+	}
+	reject = false
+	mu.Unlock()
+
+	if err := client.Retry(ctx, dead[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(published) == 2
+	})
+	mu.Lock()
+	if !slices.Equal(published, []string{"first", "second"}) {
+		t.Fatalf("published %v", published)
+	}
+	mu.Unlock()
+	// Published messages are not kept in history.
+	waitFor(t, func() bool {
+		page, err := client.List(ctx, &taskmill.ListParams{Queue: outbox.Queue})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(page.Tasks) == 0
+	})
+}
+
+func TestAddRelayWithoutPublisherIsReported(t *testing.T) {
+	t.Parallel()
+	client, ob, _ := setup(t)
+	var hs taskmill.Handlers
+	ob.AddRelay(&hs, nil)
+	_, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs})
+	if !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestBinaryKeysAndHeadersArriveIntact(t *testing.T) {
+	t.Parallel()
+	client, ob, pool := setup(t)
+	got := make(chan outbox.Delivery, 2)
+	run(t, client, ob, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
+		for _, d := range ds {
+			got <- d
+		}
+		return make([]error, len(ds))
+	}))
+
+	key := []byte{0xff, 0x00, 0x1f, 0x80} // not UTF-8, with a NUL byte
+	header := []byte{0x00, 0xfe}
+	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{
+			Topic: "events", Key: key, Value: []byte("v"), Headers: map[string][]byte{"trace": header},
+		})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case d := <-got:
+		if !bytes.Equal(d.Key, key) || !bytes.Equal(d.Headers["trace"], header) {
+			t.Fatalf("got key %x and header %x", d.Key, d.Headers["trace"])
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the message was not published")
 	}
 }

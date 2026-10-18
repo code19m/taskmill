@@ -2,13 +2,19 @@ package ui_test
 
 import (
 	"context"
+	"html"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -59,7 +65,8 @@ func TestPagesRender(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
 	ctx := t.Context()
-	res, err := client.Enqueue(ctx, greet{Name: "<script>alert(1)</script>"}, &taskmill.EnqueueOptions{Queue: "mail"})
+	res, err := client.Enqueue(ctx, greet{Name: "<script>alert(1)</script>"},
+		&taskmill.EnqueueOptions{Queue: "mail", GroupKey: "topic\x1fkey", Priority: taskmill.PriorityHigh})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +93,17 @@ func TestPagesRender(t *testing.T) {
 	if code != http.StatusOK || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;") {
 		t.Fatalf("task page did not escape the payload: %d\n%s", code, body)
 	}
+	if !strings.Contains(body, "<dd>high</dd>") || !strings.Contains(body, "topic␟key") ||
+		!strings.Contains(body, "group=topic%1fkey") {
+		t.Fatalf("task page: want the priority's name and a visible link to the group\n%s", body)
+	}
+	code, body, _ = get(t, h, "/admin/tasks/tasks?queue=mail&group=topic%1Fkey")
+	if code != http.StatusOK || !strings.Contains(body, `href="/admin/tasks/tasks/`+id+`"`) {
+		t.Fatalf("group's tasks: %d\n%s", code, body)
+	}
+	if code, _, _ = get(t, h, "/admin/tasks/tasks?state=bogus"); code != http.StatusBadRequest {
+		t.Fatalf("unknown state: %d", code)
+	}
 
 	if code, _, _ = get(t, h, "/admin/tasks/tasks/999999"); code != http.StatusNotFound {
 		t.Fatalf("unknown task: %d", code)
@@ -103,7 +121,8 @@ func TestActions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := ui.Handler(client, nil)
+	logs := &actionLog{}
+	h := ui.Handler(client, &ui.Config{Logger: slog.New(logs)})
 	id := strconv.FormatInt(res.ID, 10)
 
 	if rec := post(t, h, "/tasks/"+id+"/cancel", "cross-site"); rec.Code != http.StatusForbidden {
@@ -130,7 +149,42 @@ func TestActions(t *testing.T) {
 	if _, err := client.Get(context.WithoutCancel(ctx), res.ID); err == nil {
 		t.Fatal("deleted task still exists")
 	}
+	want := []string{"cancel task " + id, "retry task " + id, "pause queue default", "delete task " + id}
+	if !slices.Equal(logs.actions, want) {
+		t.Fatalf("logged actions %v, want %v", logs.actions, want)
+	}
 }
+
+// actionLog records the actions that the web interface logs.
+type actionLog struct {
+	mu      sync.Mutex
+	actions []string
+}
+
+func (*actionLog) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *actionLog) Handle(_ context.Context, r slog.Record) error {
+	var action, target string
+	r.Attrs(func(a slog.Attr) bool {
+		switch a.Key {
+		case "action":
+			action = a.Value.String()
+		case "target":
+			target = a.Value.String()
+		}
+		return true
+	})
+	if r.Message == "web interface action" {
+		l.mu.Lock()
+		l.actions = append(l.actions, action+" "+target)
+		l.mu.Unlock()
+	}
+	return nil
+}
+
+func (l *actionLog) WithAttrs([]slog.Attr) slog.Handler { return l }
+
+func (l *actionLog) WithGroup(string) slog.Handler { return l }
 
 func TestReadOnly(t *testing.T) {
 	t.Parallel()
@@ -148,5 +202,87 @@ func TestReadOnly(t *testing.T) {
 	}
 	if rec := post(t, h, "/tasks/"+id+"/cancel", "same-origin"); rec.Code != http.StatusForbidden {
 		t.Fatalf("read-only cancel: %d", rec.Code)
+	}
+}
+
+func TestQueueActionsWorkForAnyName(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	ctx := t.Context()
+	const name = "a/b?c#d%2Fe"
+	if err := client.UpdateQueue(ctx, name, nil); err != nil {
+		t.Fatal(err)
+	}
+	h := ui.Handler(client, &ui.Config{Prefix: "/admin"})
+
+	_, body, _ := get(t, h, "/admin/")
+	m := regexp.MustCompile(`action="([^"]*/pause)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no pause form in\n%s", body)
+	}
+	if rec := post(t, h, html.UnescapeString(m[1]), "same-origin"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("pause: got %d", rec.Code)
+	}
+	queues, err := client.Queues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range queues {
+		if q.Paused != (q.Name == name) {
+			t.Fatalf("queue %q paused: %v", q.Name, q.Paused)
+		}
+	}
+}
+
+func TestScheduleActionsWorkForAnyName(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	ctx := t.Context()
+	const name = "a/b?c#d%2Fe"
+
+	// A worker stores its schedules in its first maintenance cycle.
+	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
+		Schedules: []taskmill.Schedule{{Name: name, Cron: "@daily", Args: greet{}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wctx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- w.Run(wctx) }()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		ss, err := client.Schedules(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ss) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the schedule was not stored")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	h := ui.Handler(client, &ui.Config{Prefix: "/admin"})
+	_, body, _ := get(t, h, "/admin/")
+	m := regexp.MustCompile(`action="([^"]*/schedules/[^"]*/pause)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no schedule pause form in\n%s", body)
+	}
+	if rec := post(t, h, html.UnescapeString(m[1]), "same-origin"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("pause: got %d", rec.Code)
+	}
+	ss, err := client.Schedules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ss) != 1 || ss[0].Name != name || !ss[0].Paused {
+		t.Fatalf("got %+v", ss)
 	}
 }

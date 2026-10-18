@@ -4,6 +4,7 @@
 <form class="filters" method="get" action="{{path "/tasks"}}">
   <input name="queue" placeholder="queue" value="{{$d.Queue}}">
   <input name="kind" placeholder="kind" value="{{$d.Kind}}">
+  <input name="group" placeholder="FIFO group" value="{{$d.Group}}">
   <select name="state">
     <option value="">any state</option>
     {{range states}}<option value="{{.}}"{{if eq (print .) $d.State}} selected{{end}}>{{.}}</option>{{end}}
@@ -17,7 +18,7 @@
   <tbody>{{range $d.Tasks}}
     <tr>
       <td class="num"><a href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
-      <td>{{.Kind}}</td><td>{{.Queue}}{{if .GroupKey}} <span class="muted">· {{.GroupKey}}</span>{{end}}</td>
+      <td>{{.Kind}}</td><td>{{.Queue}}{{if .GroupKey}} <span class="muted">· {{visible .GroupKey}}</span>{{end}}</td>
       <td>{{template "state" .State}}</td>
       <td class="num">{{.Attempt}}/{{.MaxAttempts}}</td>
       <td title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>

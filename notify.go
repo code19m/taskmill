@@ -11,8 +11,18 @@ import (
 
 // notifyWindow is the shortest gap between two notifications for one queue
 // from one client. NOTIFY serializes committing transactions, so sending one
-// per enqueue caps throughput; see docs/design/performance.md.
+// per enqueue caps throughput.
 const notifyWindow = 50 * time.Millisecond
+
+// Notifications on an installation's channel, named after its schema, carry
+// "<kind>|<argument>".
+const (
+	notifyAvailable = "a" // tasks became available in queue <argument>
+	notifyCancel    = "c" // cancel the running task with ID <argument>
+	notifyQueue     = "q" // the settings of queue <argument> changed
+
+	notifySQL = "SELECT pg_notify($1, $2)"
+)
 
 // notifier throttles "tasks available" notifications per queue. The first
 // enqueue in a window notifies inside its own transaction; later ones in the
@@ -65,16 +75,10 @@ func (n *notifier) sendTrailing(ctx context.Context, queue string) {
 	n.last[queue] = time.Now()
 	n.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
-	if _, err := n.pool.Exec(ctx, "SELECT pg_notify($1, $2)", n.channel, availablePayload(queue)); err != nil {
+	if _, err := n.pool.Exec(ctx, notifySQL, n.channel, notifyAvailable+"|"+queue); err != nil {
 		n.logger.LogAttrs(ctx, slog.LevelWarn, "notification failed",
 			slog.String(logKeyQueue, queue), slog.Any(logKeyError, err))
 	}
-}
-
-// availablePayload is the notification payload announcing new available tasks
-// in queue.
-func availablePayload(queue string) string {
-	return "a|" + queue
 }

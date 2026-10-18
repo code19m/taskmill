@@ -28,10 +28,18 @@ their transactions through two adapters, `taskmill.Pgx` for pgx and
 `taskmill.SQL` for `database/sql`. The `database/sql` connection must use pgx's
 driver.
 
+**Why adapters.** `pgx.Tx` and `*sql.Tx` have no method in common, so no
+single interface can accept both. The alternative, a client that is generic
+over the transaction type (`Client[TTx]`), would spread a type parameter
+through every type that touches a transaction, including the tasks given to
+handlers. The adapters cost one function call where a transaction is passed,
+and keep every other type simple. Their result, `Executor`, is sealed: only
+taskmill implements it, so its methods can change without breaking anyone.
+
 The core module's allowlist in `.golangci.yml` gains `github.com/jackc/pgx/v5`.
-Measured with `go list -deps`, pgx brings four more modules into the build:
-`github.com/jackc/pgpassfile`, `github.com/jackc/pgservicefile`,
-`github.com/jackc/puddle/v2`, and `golang.org/x/text` with `golang.org/x/sync`
+Measured with `go list -deps`, pgx brings five more modules into the build:
+`github.com/jackc/pgpassfile`, `github.com/jackc/pgservicefile`, and
+`github.com/jackc/puddle/v2`, and `golang.org/x/text` and `golang.org/x/sync`
 from the Go project.
 
 ## Consequences
@@ -43,5 +51,7 @@ from the Go project.
 - Applications on `database/sql` must use pgx's driver; lib/pq is not
   supported. Libraries that rewrite query placeholders, such as bun, must pass
   their underlying `*sql.Tx`.
-- pgx types appear in taskmill's public API (`PgxQuerier`). A future pgx major
-  version would therefore require a taskmill major version.
+- pgx types appear in taskmill's public API: `PgxQuerier` uses pgx's result
+  types, and `NewClient`, `Migrate`, and `WorkerConfig.ListenConfig` take
+  `*pgxpool.Pool` and `*pgx.ConnConfig`. A future pgx major version would
+  therefore require a taskmill major version.

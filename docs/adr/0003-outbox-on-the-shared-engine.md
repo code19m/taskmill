@@ -11,7 +11,7 @@ published reliably and in order.
 
 An outbox needs almost everything the task engine already provides: rows
 written in the caller's transaction, safe concurrent fetching, leases and
-fencing, retries and a dead-letter queue, ordering per key, batching,
+lease tokens, retries and a dead-letter queue, ordering per key, batching,
 notifications, leader election, migrations, and monitoring. These are the
 hardest parts to get right. Outbox users, however, think in topics, keys, and
 messages, not in tasks and handlers.
@@ -37,13 +37,11 @@ changes.
 ## Consequences
 
 - There is one engine to make correct. Services that need both background tasks
-  and an outbox run one system, with one schema and one dashboard.
+  and an outbox run one system, with one schema and one web interface.
 - The outbox tests the engine's API. If the outbox cannot be built cleanly on
   the public API, the API is wrong.
 - The engine must provide what the outbox needs: FIFO groups, batch handlers,
-  unique enqueue, deletion on completion, and stable task identities
-  (requirements R6, R7, R9, R10, and R11 in the
-  [scope document](../design/scope.md)).
+  permanent failures, and deleting tasks on completion.
 - At very high volumes, around 100,000 messages per second, a different storage
   model is faster: rows that are only appended and read in order. The outbox
   API hides its storage, so such an engine can be added later without changing

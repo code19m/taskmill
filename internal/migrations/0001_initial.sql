@@ -10,7 +10,6 @@ CREATE TABLE __SCHEMA__.tasks (
     id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     run_at              timestamptz NOT NULL,
     created_at          timestamptz NOT NULL DEFAULT now(),
-    deadline            timestamptz,
     lease_expires_at    timestamptz,
     attempted_at        timestamptz,
     cancel_requested_at timestamptz,
@@ -44,12 +43,10 @@ CREATE TABLE __SCHEMA__.tasks (
 );
 
 CREATE INDEX tasks_fetch_idx    ON __SCHEMA__.tasks (queue, priority DESC, run_at, id) WHERE state = 'available';
-CREATE INDEX tasks_due_idx      ON __SCHEMA__.tasks (run_at) WHERE state IN ('scheduled', 'retryable');
+CREATE INDEX tasks_due_idx      ON __SCHEMA__.tasks (run_at) INCLUDE (queue, state) WHERE state IN ('scheduled', 'retryable');
 CREATE INDEX tasks_running_idx  ON __SCHEMA__.tasks (queue) WHERE state = 'running';
 CREATE INDEX tasks_pending_idx  ON __SCHEMA__.tasks (queue, group_key, id) WHERE state = 'pending';
-CREATE INDEX tasks_deadline_idx ON __SCHEMA__.tasks (deadline)
-    WHERE deadline IS NOT NULL AND state IN ('scheduled', 'pending', 'available', 'retryable');
-CREATE INDEX tasks_finished_idx ON __SCHEMA__.tasks (queue, finalized_at) WHERE state IN ('dead', 'canceled');
+CREATE INDEX tasks_finished_idx ON __SCHEMA__.tasks (queue, state, finalized_at) WHERE state IN ('dead', 'canceled');
 
 CREATE TABLE __SCHEMA__.task_history (
     id           bigint NOT NULL,
@@ -69,7 +66,7 @@ CREATE TABLE __SCHEMA__.task_history (
     errors       jsonb NOT NULL
 ) PARTITION BY RANGE (finalized_at);
 
-CREATE INDEX task_history_queue_idx ON __SCHEMA__.task_history (queue, finalized_at);
+CREATE INDEX task_history_queue_idx ON __SCHEMA__.task_history (queue, id);
 CREATE INDEX task_history_id_idx    ON __SCHEMA__.task_history (id);
 
 CREATE TABLE __SCHEMA__.groups (
@@ -85,7 +82,6 @@ CREATE TABLE __SCHEMA__.groups (
     CONSTRAINT groups_halted_check CHECK ((halted_task_id IS NULL) = (halted_at IS NULL))
 ) WITH (fillfactor = 80);
 
-CREATE INDEX groups_halted_idx      ON __SCHEMA__.groups (queue) WHERE halted_at IS NOT NULL;
 CREATE INDEX groups_halted_task_idx ON __SCHEMA__.groups (halted_task_id) WHERE halted_task_id IS NOT NULL;
 
 CREATE TABLE __SCHEMA__.dedupe_keys (
@@ -97,15 +93,14 @@ CREATE TABLE __SCHEMA__.dedupe_keys (
 );
 
 CREATE INDEX dedupe_keys_expires_idx ON __SCHEMA__.dedupe_keys (expires_at);
+CREATE INDEX dedupe_keys_task_idx    ON __SCHEMA__.dedupe_keys (task_id);
 
 CREATE TABLE __SCHEMA__.queues (
-    name               text PRIMARY KEY,
-    paused_at          timestamptz,
-    max_running        integer,
-    keep_history       boolean NOT NULL DEFAULT true,
-    halt_group_on_dead boolean NOT NULL DEFAULT false,
-    created_at         timestamptz NOT NULL DEFAULT now(),
-    updated_at         timestamptz NOT NULL DEFAULT now(),
+    name        text PRIMARY KEY,
+    paused_at   timestamptz,
+    max_running integer,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
 
     CONSTRAINT queues_name_check        CHECK (char_length(name) BETWEEN 1 AND 128),
     CONSTRAINT queues_max_running_check CHECK (max_running > 0)
@@ -144,8 +139,7 @@ CREATE TABLE __SCHEMA__.workers (
     hostname     text NOT NULL,
     version      text NOT NULL,
     started_at   timestamptz NOT NULL DEFAULT now(),
-    heartbeat_at timestamptz NOT NULL DEFAULT now(),
-    metadata     jsonb NOT NULL DEFAULT '{}'
+    heartbeat_at timestamptz NOT NULL DEFAULT now()
 ) WITH (fillfactor = 50);
 
 CREATE TABLE __SCHEMA__.leader (
@@ -160,7 +154,6 @@ CREATE TABLE __SCHEMA__.queue_stats (
     state        __SCHEMA__.task_state NOT NULL,
     tasks        bigint NOT NULL,
     capped       boolean NOT NULL,
-    oldest_at    timestamptz,
     refreshed_at timestamptz NOT NULL,
 
     PRIMARY KEY (queue, state)

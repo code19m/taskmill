@@ -8,8 +8,9 @@ import (
 
 // Errors returned by taskmill. Test for them with [errors.Is].
 var (
-	// ErrNotFound means the task does not exist, or no longer exists.
-	ErrNotFound = errors.New("taskmill: task not found")
+	// ErrNotFound means the task or schedule does not exist, or no longer
+	// exists.
+	ErrNotFound = errors.New("taskmill: not found")
 
 	// ErrLeaseLost means the attempt no longer owns its task: its lease
 	// expired and the task was rescued, canceled, or fetched again.
@@ -17,9 +18,10 @@ var (
 
 	// ErrInvalidState means the operation does not apply to the task's
 	// current state, such as retrying a running task.
-	ErrInvalidState = errors.New("taskmill: operation not allowed in the task's state")
+	ErrInvalidState = errors.New("taskmill: invalid state")
 
-	// ErrInvalidArgument means an argument or option is out of range.
+	// ErrInvalidArgument means an argument or option is invalid: out of
+	// range, too long, or holding a NUL character.
 	ErrInvalidArgument = errors.New("taskmill: invalid argument")
 
 	// ErrSchemaOutdated means the database schema is missing or older than
@@ -40,8 +42,11 @@ type PermanentError struct {
 }
 
 // Permanent wraps err so that the task becomes dead without retrying, for
-// example when its payload fails validation.
+// example when its payload fails validation. Permanent(nil) returns nil.
 func Permanent(err error) error {
+	if err == nil {
+		return nil
+	}
 	return &PermanentError{Err: err}
 }
 
@@ -66,7 +71,8 @@ type SnoozeError struct {
 
 // Snooze returns an error that reschedules the task to run after d, without
 // using an attempt. Use it when the task cannot proceed yet, for example while
-// waiting for a rate limit to reset.
+// waiting for a rate limit to reset. A delay of zero or less makes the task
+// available at once. A task that always snoozes never becomes dead.
 func Snooze(d time.Duration) error {
 	return &SnoozeError{Delay: d}
 }
