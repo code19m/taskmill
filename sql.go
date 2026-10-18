@@ -64,8 +64,24 @@ type statements struct {
 	rescue         string
 	expireDeadline string
 
-	retention        string
-	deleteFinished   string
+	retention       string
+	deleteFinished  string
+	loadSchedules   string
+	upsertSchedule  string
+	advanceSchedule string
+	listSchedules   string
+	pauseSchedule   string
+
+	updateQueue      string
+	pauseQueue       string
+	listQueues       string
+	queueStats       string
+	updateSettings   string
+	listWorkers      string
+	listTasks        string
+	countState       string
+	clearStats       string
+	storeStats       string
 	deleteDedupeKeys string
 	deleteWorkers    string
 }
@@ -445,5 +461,97 @@ DELETE FROM {s}.dedupe_keys WHERE key IN (
 )`),
 
 		deleteWorkers: q(`DELETE FROM {s}.workers WHERE heartbeat_at < now() - $1 * interval '1 second'`),
+
+		loadSchedules: q(`
+SELECT name, queue, kind, cron, timezone, payload, next_run_at, paused_at IS NOT NULL
+FROM {s}.schedules WHERE name = ANY($1)`),
+
+		// upsertSchedule stores a schedule's definition. Its next run time is
+		// replaced only when $8 says the timing changed.
+		upsertSchedule: q(`
+INSERT INTO {s}.schedules AS s (name, queue, kind, cron, timezone, payload, next_run_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+ON CONFLICT (name) DO UPDATE
+SET queue = EXCLUDED.queue, kind = EXCLUDED.kind, cron = EXCLUDED.cron, timezone = EXCLUDED.timezone,
+    payload = EXCLUDED.payload,
+    next_run_at = CASE WHEN $8 THEN EXCLUDED.next_run_at ELSE s.next_run_at END,
+    updated_at = now()`),
+
+		// advanceSchedule claims the run due at $3; it changes nothing if
+		// another maintainer claimed it first or the schedule was paused.
+		advanceSchedule: q(`
+UPDATE {s}.schedules SET next_run_at = $2, last_run_at = now(), updated_at = now()
+WHERE name = $1 AND next_run_at = $3 AND paused_at IS NULL`),
+
+		listSchedules: q(`
+SELECT name, queue, kind, cron, timezone, next_run_at, last_run_at, paused_at IS NOT NULL
+FROM {s}.schedules ORDER BY name`),
+
+		updateQueue: q(`
+INSERT INTO {s}.queues AS q (name, max_running, keep_history, halt_group_on_dead) VALUES ($1, $2, $3, $4)
+ON CONFLICT (name) DO UPDATE
+SET max_running = EXCLUDED.max_running, keep_history = EXCLUDED.keep_history,
+    halt_group_on_dead = EXCLUDED.halt_group_on_dead, updated_at = now()`),
+
+		pauseQueue: q(`
+INSERT INTO {s}.queues AS q (name, paused_at) VALUES ($1, CASE WHEN $2 THEN now() END)
+ON CONFLICT (name) DO UPDATE
+SET paused_at = CASE WHEN $2 THEN coalesce(q.paused_at, now()) END, updated_at = now()`),
+
+		listQueues: q(`
+WITH names AS (
+    SELECT name FROM {s}.queues
+    UNION SELECT queue FROM {s}.queue_stats
+    UNION SELECT unnest(queues) FROM {s}.workers
+)
+SELECT n.name, coalesce(q.max_running, 0), NOT coalesce(q.keep_history, true),
+       coalesce(q.halt_group_on_dead, false), q.paused_at IS NOT NULL,
+       (SELECT count(*) FROM {s}.workers w WHERE n.name = ANY(w.queues))::int
+FROM names n LEFT JOIN {s}.queues q ON q.name = n.name
+ORDER BY n.name`),
+
+		queueStats: q(`SELECT queue, state::text, tasks, capped, refreshed_at FROM {s}.queue_stats`),
+
+		updateSettings: q(`
+UPDATE {s}.settings
+SET history_retention = $1 * interval '1 microsecond', dead_retention = $2 * interval '1 microsecond',
+    updated_at = now()`),
+
+		listWorkers: q(`SELECT id, hostname, version, queues, started_at, heartbeat_at FROM {s}.workers ORDER BY id`),
+
+		// listTasks pages through live tasks and history, newest first. Each
+		// branch is limited on its own, so both can use their ID indexes.
+		listTasks: q(`
+SELECT ` + taskColumns + ` FROM (
+    (SELECT ` + taskColumns + ` FROM {s}.tasks
+     WHERE $6 AND ($1 = '' OR queue = $1) AND (cardinality($2::text[]) = 0 OR state::text = ANY($2))
+       AND ($3 = '' OR kind = $3) AND id < $4
+     ORDER BY id DESC LIMIT $5)
+    UNION ALL
+    (SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(group_key, ''),
+            metadata, payload, errors, created_at, run_at, NULL::timestamptz, attempted_at, finalized_at
+     FROM {s}.task_history
+     WHERE $7 AND ($1 = '' OR queue = $1) AND ($3 = '' OR kind = $3) AND id < $4
+     ORDER BY id DESC LIMIT $5)
+) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
+       created_at, run_at, deadline, attempted_at, finalized_at)
+ORDER BY id DESC LIMIT $5`),
+
+		// countState counts each queue's tasks in one state, reading at most
+		// $2 index entries in all.
+		countState: q(`
+SELECT queue, count(*) FROM (
+    SELECT queue FROM {s}.tasks WHERE state = $1::{s}.task_state LIMIT $2
+) capped GROUP BY queue`),
+
+		clearStats: q(`DELETE FROM {s}.queue_stats`),
+		storeStats: q(`
+INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at)
+SELECT q, s::{s}.task_state, n, c, now()
+FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[]) AS u(q, s, n, c)`),
+
+		pauseSchedule: q(`
+UPDATE {s}.schedules SET paused_at = CASE WHEN $2 THEN coalesce(paused_at, now()) END, updated_at = now()
+WHERE name = $1`),
 	}
 }

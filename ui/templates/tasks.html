@@ -1,0 +1,32 @@
+{{define "tasks.html"}}{{template "head" .}}
+{{$d := .Data}}
+<h1>Tasks</h1>
+<form class="filters" method="get" action="{{path "/tasks"}}">
+  <input name="queue" placeholder="queue" value="{{$d.Queue}}">
+  <input name="kind" placeholder="kind" value="{{$d.Kind}}">
+  <select name="state">
+    <option value="">any state</option>
+    {{range states}}<option value="{{.}}"{{if eq (print .) $d.State}} selected{{end}}>{{.}}</option>{{end}}
+  </select>
+  <button>Filter</button>
+</form>
+{{if $d.Tasks}}
+<div class="scroll">
+<table>
+  <thead><tr><th class="num">ID</th><th>Kind</th><th>Queue</th><th>State</th><th class="num">Attempt</th><th>Created</th><th>Run at</th><th>Last error</th></tr></thead>
+  <tbody>{{range $d.Tasks}}
+    <tr>
+      <td class="num"><a href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
+      <td>{{.Kind}}</td><td>{{.Queue}}{{if .GroupKey}} <span class="muted">· {{.GroupKey}}</span>{{end}}</td>
+      <td>{{template "state" .State}}</td>
+      <td class="num">{{.Attempt}}/{{.MaxAttempts}}</td>
+      <td title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>
+      <td title="{{timestamp .RunAt}}">{{ago .RunAt}}</td>
+      <td class="error">{{with lastError .Errors}}{{printf "%.120s" .Message}}{{end}}</td>
+    </tr>
+  {{end}}</tbody>
+</table>
+</div>
+{{if $d.Next}}<p><a class="button" href="{{$d.Next}}">Older tasks →</a></p>{{end}}
+{{else}}<p class="muted">No tasks match.</p>{{end}}
+{{template "foot" .}}{{end}}

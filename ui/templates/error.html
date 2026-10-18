@@ -1,0 +1,5 @@
+{{define "error.html"}}{{template "head" .}}
+<h1>{{.Title}}</h1>
+<p>{{.Data}}</p>
+<p><a href="{{path "/"}}">Back to the overview</a></p>
+{{template "foot" .}}{{end}}
