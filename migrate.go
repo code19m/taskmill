@@ -2,11 +2,13 @@ package taskmill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill/internal/migrations"
@@ -23,17 +25,20 @@ const partitionLockTimeout = "5s"
 
 // MigrateConfig configures [Migrate]. The zero value is valid.
 type MigrateConfig struct {
-	// Schema is the PostgreSQL schema to migrate. Default: "taskmill".
+	// Schema is the PostgreSQL schema to migrate. It must match
+	// ^[a-z_][a-z0-9_]{0,62}$. Default: "taskmill".
 	Schema string
 
-	// Logger receives one log line per applied migration.
-	// Default: logs are discarded.
+	// Logger receives one log line per applied migration, and a warning if
+	// partitions cannot be prepared. Default: logs are discarded.
 	Logger *slog.Logger
 }
 
 // Migrate creates or upgrades taskmill's schema, and prepares the next week's
 // history partitions. It is safe to run from several processes at once: one
-// applies the migrations while the others wait. cfg may be nil.
+// applies the migrations while the others wait. A schema that is up to date
+// is left as it is, so Migrate then needs no privilege to change it, and a
+// failure to prepare partitions is only logged. cfg may be nil.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error {
 	if pool == nil {
 		return invalidArgument("pool is nil")
@@ -55,16 +60,37 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 		return fmt.Errorf("taskmill: %w", err)
 	}
 
+	current, err := schemaVersion(ctx, pool, schema)
+	if err != nil {
+		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+	}
+	if current >= len(all) {
+		// The maintainer keeps the partitions ready too, so a role that may not
+		// create them still starts.
+		if err := ensureHistoryPartitions(ctx, pool, schema, time.Now(), historyDaysAhead); err != nil {
+			logger.LogAttrs(ctx, slog.LevelWarn, "prepare history partitions failed", slog.Any(logKeyError, err))
+		}
+		return nil
+	}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return applyMigrations(ctx, tx, schema, all, logger)
 	}); err != nil {
 		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
 	}
-
 	if err := ensureHistoryPartitions(ctx, pool, schema, time.Now(), historyDaysAhead); err != nil {
 		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
 	}
 	return nil
+}
+
+// schemaVersion returns the schema's migration version, or 0 if it has none.
+func schemaVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int, error) {
+	var version int
+	err := pool.QueryRow(ctx, fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)).Scan(&version)
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42P01" { // undefined_table
+		return 0, nil
+	}
+	return version, err
 }
 
 // applyMigrations applies the migrations that the schema lacks, in tx. One
@@ -125,8 +151,9 @@ type Migration struct {
 }
 
 // Migrations returns every migration for schema, in order. Teams that use
-// their own migration tools apply these instead of calling [Migrate]; history
-// partitions are then created by the maintainer when workers start.
+// their own migration tools apply these instead of calling [Migrate]. The
+// maintainer then creates the daily history partitions when workers start,
+// which needs the workers' role to own the taskmill tables.
 func Migrations(schema string) ([]Migration, error) {
 	schema, err := validateSchema(schema)
 	if err != nil {

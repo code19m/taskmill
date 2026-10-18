@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -14,7 +13,7 @@ import (
 
 // fetchLoop fetches tasks for one queue whenever it has free capacity, until
 // ctx is canceled.
-func (w *Worker) fetchLoop(ctx, runCtx context.Context, q *queueState, inflight *sync.WaitGroup) {
+func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 	poll := time.NewTicker(w.cfg.PollInterval)
 	defer poll.Stop()
 
@@ -42,7 +41,7 @@ func (w *Worker) fetchLoop(ctx, runCtx context.Context, q *queueState, inflight 
 			}
 			continue
 		}
-		w.dispatch(ctx, runCtx, q, tasks, inflight)
+		w.dispatch(ctx, r, q, tasks)
 		// A notification wakes every worker of the queue, and most find
 		// nothing: those pause before acting on the next one.
 		if !more && !wait(notified && len(tasks) == 0) {
@@ -77,9 +76,9 @@ func waitForWork(ctx context.Context, q *queueState, poll *time.Ticker, pause bo
 
 // fetch leases up to slots tasks of q, one per free slot, then fills the
 // batches of batch kinds among them with more tasks of those kinds, so that
-// every fetched task starts at once. A queue with a cluster-wide concurrency
-// limit fetches only up to its remaining capacity. more reports that the
-// first lease took all it asked for, so more tasks may be waiting.
+// every fetched task starts at once. A queue with an installation-wide
+// concurrency limit fetches only up to its remaining capacity. more reports
+// that the first lease took all it asked for, so more tasks may be waiting.
 func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*tracked, more bool, err error) {
 	// The statements run on a context that outlives ctx: once tasks are
 	// leased, they must reach the worker even if it is stopping.
@@ -250,7 +249,7 @@ func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limi
 
 // leaseArgs returns a fetch statement's arguments.
 func (w *Worker) leaseArgs(q *queueState, limit int, extra []any) []any {
-	return append([]any{q.name, limit, w.cfg.LeaseDuration.Microseconds(), w.cfg.ID}, extra...)
+	return append([]any{q.name, limit, w.cfg.LeaseDuration.Microseconds(), w.id}, extra...)
 }
 
 // scanAllLeased reads the tasks that a fetch statement leased.
@@ -289,10 +288,10 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 		priority, att, maxAtt   int16
 		token                   int32
 		metadata, payload, errs []byte
-		deadline, attemptedAt   *time.Time
+		attemptedAt             *time.Time
 	)
 	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &priority, &att, &maxAtt, &token, &info.GroupKey,
-		&metadata, &payload, &errs, &info.CreatedAt, &info.RunAt, &deadline, &attemptedAt)
+		&metadata, &payload, &errs, &info.CreatedAt, &info.RunAt, &attemptedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -301,18 +300,15 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 	info.Attempt = int(att)
 	info.MaxAttempts = int(maxAtt)
 	info.Payload = payload
-	info.Deadline = deref(deadline)
 	info.AttemptedAt = deref(attemptedAt)
-	if err := decodeMetadata(metadata, &info.Metadata); err != nil {
+	if err := decodeJSONColumns(&info, metadata, errs); err != nil {
 		return nil, err
 	}
-	if err := decodeErrors(errs, &info.Errors); err != nil {
-		return nil, err
-	}
+	reg := w.handlers[info.Kind]
 	return &tracked{
-		att:      &attempt{client: w.client, id: info.ID, token: token},
+		att:      &attempt{client: w.client, id: info.ID, token: token, discard: reg != nil && reg.opts.DiscardCompleted},
 		info:     &info,
-		reg:      w.handlers[info.Kind],
+		reg:      reg,
 		lastBeat: now,
 	}, nil
 }
@@ -320,15 +316,10 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 // dispatch starts the fetched tasks: each one alone, or in batches for batch
 // handlers. Each start takes a slot of the queue's concurrency. Tasks that
 // cannot start before the worker stops go back to the queue.
-func (w *Worker) dispatch(ctx, runCtx context.Context, q *queueState, tasks []*tracked, inflight *sync.WaitGroup) {
-	if len(tasks) == 0 {
-		return
-	}
-	w.mu.Lock()
+func (w *Worker) dispatch(ctx context.Context, r *run, q *queueState, tasks []*tracked) {
 	for _, t := range tasks {
-		w.attempts[t.att.id] = t
+		w.track(t)
 	}
-	w.mu.Unlock()
 
 	for _, unit := range w.units(tasks) {
 		if !q.takeSlot(ctx) {
@@ -340,16 +331,14 @@ func (w *Worker) dispatch(ctx, runCtx context.Context, q *queueState, tasks []*t
 			}
 			continue
 		}
-		inflight.Add(len(unit))
-		go func() {
+		r.inflight.Go(func() {
 			defer q.freeSlot()
 			if len(unit) == 1 && (unit[0].reg == nil || unit[0].reg.run != nil) {
-				w.runOne(runCtx, unit[0])
+				w.runOne(r.attemptCtx, unit[0])
 			} else {
-				w.runBatch(runCtx, unit)
+				w.runBatch(r.attemptCtx, unit)
 			}
-			inflight.Add(-len(unit))
-		}()
+		})
 	}
 }
 

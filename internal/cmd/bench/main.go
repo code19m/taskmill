@@ -1,5 +1,5 @@
-// Command bench measures taskmill against the targets in
-// docs/design/performance.md, and checks its reliability under faults.
+// Command bench measures taskmill against the targets in docs/benchmarks.md,
+// and checks its reliability under faults.
 //
 // It runs against the database in TASKMILL_TEST_DATABASE_URL, in a schema of
 // its own that it recreates, and prints a Markdown report:
@@ -257,10 +257,7 @@ func benchFIFO(ctx context.Context, pool *pgxpool.Pool, n int) {
 	fifo := runUntil(ctx, c, &hs, taskmill.DefaultQueue, 64, func() bool { return completed.Load() >= int64(n) })
 
 	c = fresh(ctx, pool)
-	ob := outbox.New(c, nil)
-	if err := ob.Setup(ctx); err != nil {
-		fail(err)
-	}
+	ob := outbox.New(c)
 	for done := 0; done < n; done += 1000 {
 		msgs := make([]outbox.Message, 1000)
 		for i := range msgs {
@@ -277,7 +274,7 @@ func benchFIFO(ctx context.Context, pool *pgxpool.Pool, n int) {
 		published.Add(int64(len(ds)))
 		return make([]error, len(ds))
 	}))
-	relay := runUntil(ctx, c, &hs, ob.Queue(), 8, func() bool { return published.Load() >= int64(n) })
+	relay := runUntil(ctx, c, &hs, outbox.Queue, 8, func() bool { return published.Load() >= int64(n) })
 
 	fmt.Println("## Ordering")
 	fmt.Println()

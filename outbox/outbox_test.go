@@ -37,11 +37,7 @@ func setup(t *testing.T) (*taskmill.Client, *outbox.Outbox, *pgxpool.Pool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ob := outbox.New(client, &outbox.Options{BatchSize: 16})
-	if err := ob.Setup(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	return client, ob, pool
+	return client, outbox.New(client), pool
 }
 
 // broker records what it publishes and fails each delivery's first attempt
@@ -100,11 +96,7 @@ func run(t *testing.T, client *taskmill.Client, ob *outbox.Outbox, pub outbox.Pu
 	t.Helper()
 	var hs taskmill.Handlers
 	ob.AddRelay(&hs, pub)
-	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
-		Handlers:     &hs,
-		Queues:       map[string]taskmill.QueueOptions{ob.Queue(): {Concurrency: 4}},
-		PollInterval: 20 * time.Millisecond,
-	})
+	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs, PollInterval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,8 +186,8 @@ func TestStoreRejectsMessagesWithoutTopic(t *testing.T) {
 	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
 		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Value: []byte("x")})
 	})
-	if !errors.Is(err, outbox.ErrNoTopic) {
-		t.Fatalf("got %v, want ErrNoTopic", err)
+	if !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -210,26 +202,73 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 }
 
-func TestSetupKeepsTheConcurrencyLimit(t *testing.T) {
+func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 	t.Parallel()
-	client, ob, _ := setup(t)
+	client, ob, pool := setup(t)
 	ctx := t.Context()
-	if err := client.UpdateQueue(ctx, ob.Queue(), &taskmill.QueueSettings{MaxRunning: 3}); err != nil {
-		t.Fatal(err)
-	}
-	if err := ob.Setup(ctx); err != nil {
-		t.Fatal(err)
-	}
-	queues, err := client.Queues(ctx)
+	var mu sync.Mutex
+	var published []string
+	reject := true
+	run(t, client, ob, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
+		mu.Lock()
+		defer mu.Unlock()
+		errs := make([]error, len(ds))
+		for i, d := range ds {
+			if string(d.Value) == "first" && reject {
+				errs[i] = taskmill.Permanent(errors.New("the broker refuses it"))
+				continue
+			}
+			published = append(published, string(d.Value))
+		}
+		return errs
+	}))
+	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return ob.Store(ctx, taskmill.Pgx(tx),
+			outbox.Message{Topic: "orders", Key: []byte("7"), Value: []byte("first")},
+			outbox.Message{Topic: "orders", Key: []byte("7"), Value: []byte("second")})
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := taskmill.QueueSettings{MaxRunning: 3, DiscardCompleted: true, HaltGroupOnDead: true}
-	for _, q := range queues {
-		if q.Name == ob.Queue() && q.Settings != want {
-			t.Fatalf("got %+v, want %+v", q.Settings, want)
+
+	var dead []taskmill.TaskInfo
+	waitFor(t, func() bool {
+		page, err := client.List(ctx, &taskmill.ListParams{Queue: outbox.Queue, States: []taskmill.State{taskmill.StateDead}})
+		if err != nil {
+			t.Fatal(err)
 		}
+		dead = page.Tasks
+		return len(dead) == 1
+	})
+	time.Sleep(200 * time.Millisecond) // the second message would be published by now if the key did not halt
+	mu.Lock()
+	if len(published) != 0 {
+		t.Fatalf("published %v behind a dead message", published)
 	}
+	reject = false
+	mu.Unlock()
+
+	if err := client.Retry(ctx, dead[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(published) == 2
+	})
+	mu.Lock()
+	if !slices.Equal(published, []string{"first", "second"}) {
+		t.Fatalf("published %v", published)
+	}
+	mu.Unlock()
+	// Published messages are not kept in history.
+	waitFor(t, func() bool {
+		page, err := client.List(ctx, &taskmill.ListParams{Queue: outbox.Queue})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(page.Tasks) == 0
+	})
 }
 
 func TestAddRelayWithoutPublisherIsReported(t *testing.T) {

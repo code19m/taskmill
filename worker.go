@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"runtime/debug"
 	"slices"
@@ -20,52 +21,54 @@ import (
 
 // Worker defaults.
 const (
-	defaultLeaseDuration      = 30 * time.Second
-	defaultPollInterval       = time.Second
-	defaultDrainTimeout       = 30 * time.Second
-	defaultUnknownKindTimeout = time.Hour
-	defaultConcurrency        = 10
+	defaultLeaseDuration = 30 * time.Second
+	defaultPollInterval  = time.Second
+	defaultDrainTimeout  = 20 * time.Second
+	defaultConcurrency   = 10
 
 	minLeaseDuration   = 100 * time.Millisecond
-	recordTimeout      = 30 * time.Second       // bound on recording one result
+	recordTimeout      = 30 * time.Second       // bound on one try to record a result
+	recordRetryFirst   = 100 * time.Millisecond // first wait before trying to record a result again
+	recordRetryMax     = 2 * time.Second        // longest wait between those tries
 	cleanupTimeout     = 5 * time.Second        // bound on best-effort cleanup, such as closing a connection
 	maxFetch           = 1000                   // most tasks one fetch leases
 	completionBatch    = 500                    // most completions recorded in one statement
-	completeAttempts   = 3                      // tries to record a batch of completions
-	completeRetryDelay = 100 * time.Millisecond // grows with each try
 	completionLinger   = 2 * time.Millisecond   // wait for more completions to batch with
 	heldRetryDelay     = 20 * time.Millisecond  // first wait before retrying completions whose rows were held
 	heldRetryMax       = time.Second            // longest wait before retrying them
 	emptyFetchCooldown = 20 * time.Millisecond  // pause after a notification that found nothing
 	errorMessageLimit  = 4096                   // bytes of an error message that are kept
+	poolReserve        = 5                      // pool connections the worker needs besides its handlers'
 )
 
 // timing holds a worker's fixed intervals. They are not configurable, but
 // tests shorten them.
 type timing struct {
-	maintainer    time.Duration // how often the maintainer works, at most
-	election      time.Duration // how often workers that do not lead try to take over
-	leaderLease   time.Duration // how long a maintainer leads without renewing
-	retention     time.Duration // how often retention runs
-	stats         time.Duration // how often queue statistics are refreshed
-	settings      time.Duration // how often queue settings are reloaded
-	shutdownGrace time.Duration // how long canceled attempts get to return before release
-	unknownKind   time.Duration // how long a task of an unknown kind is snoozed
-	reconnectMin  time.Duration // first wait before reconnecting the listener
-	reconnectMax  time.Duration // longest wait before reconnecting the listener
+	maintainer      time.Duration // how often the maintainer works, at most
+	election        time.Duration // how often workers that do not lead try to take over
+	leaderLease     time.Duration // how long a maintainer leads without renewing
+	retention       time.Duration // how often retention runs
+	stats           time.Duration // how often queue statistics are refreshed
+	settings        time.Duration // how often queue settings are reloaded
+	shutdownGrace   time.Duration // how long canceled attempts get to return before release
+	noHandlerSnooze time.Duration // how long a task of an unknown kind is snoozed at a time
+	noHandlerWait   time.Duration // how long it waits for a handler before it becomes dead
+	reconnectMin    time.Duration // first wait before reconnecting the listener
+	reconnectMax    time.Duration // longest wait before reconnecting the listener
 }
 
 var defaultTiming = timing{
-	maintainer:    time.Second,
-	election:      2 * time.Second,
-	leaderLease:   10 * time.Second,
-	retention:     time.Minute,
-	stats:         10 * time.Second,
-	settings:      10 * time.Second,
-	shutdownGrace: 5 * time.Second,
-	unknownKind:   time.Minute,
-	reconnectMin:  time.Second,
-	reconnectMax:  30 * time.Second,
+	maintainer:      time.Second,
+	election:        2 * time.Second,
+	leaderLease:     10 * time.Second,
+	retention:       time.Minute,
+	stats:           10 * time.Second,
+	settings:        10 * time.Second,
+	shutdownGrace:   5 * time.Second,
+	noHandlerSnooze: time.Minute,
+	noHandlerWait:   time.Hour,
+	reconnectMin:    time.Second,
+	reconnectMax:    30 * time.Second,
 }
 
 // Causes of a canceled attempt context, which decide how its result is
@@ -81,39 +84,45 @@ var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with
 
 // Worker fetches tasks from its queues and runs their handlers. One worker per
 // process is typical; it also takes part in electing the maintainer, which
-// promotes due tasks, rescues expired leases, and applies retention.
+// promotes due tasks, rescues expired leases, runs schedules, and applies
+// retention.
 type Worker struct {
 	client    *Client
 	cfg       WorkerConfig
+	id        string
+	host      string
 	handlers  map[string]*registration
+	queues    map[string]*queueState
 	timing    timing
 	logger    *slog.Logger
 	listen    *pgx.ConnConfig
 	version   string
 	schedules []compiledSchedule
 
-	running atomic.Bool
+	running   atomic.Bool
+	released  atomic.Int64   // tasks given back during the current Run's shutdown
+	recording sync.WaitGroup // Run's attempts whose results are being recorded
 
 	mu       sync.Mutex
-	attempts map[int64]*tracked
-	queues   map[string]*queueState
+	attempts map[int64]*tracked // attempts that Run and RunTask are running or recording
 
-	completions chan *tracked
-	completerUp chan struct{} // closed when the completer stops
+	completions   chan *tracked // successful attempts of Run, for the completer
+	completerDone chan struct{} // closed when the current Run's completer returns
 }
 
-// WorkerConfig configures a [Worker]. Every field except Handlers and Queues
-// has a default; a worker with no queues only takes part in maintenance.
+// WorkerConfig configures a [Worker]. The zero value is valid: a worker
+// without handlers only takes part in maintenance.
 type WorkerConfig struct {
 	// Handlers runs the tasks this worker fetches.
 	Handlers *Handlers
 
 	// Queues lists the queues to fetch from, with per-process options.
+	// Default: the default queue of every registered kind, from
+	// [ArgsWithDefaults] or else [DefaultQueue], with default options. If
+	// Queues leaves out a registered kind's default queue, Run logs a warning
+	// when it starts: tasks enqueued with the kind's defaults would wait for
+	// another worker.
 	Queues map[string]QueueOptions
-
-	// ID identifies this worker in the database and in logs.
-	// Default: hostname, process ID, and a random suffix.
-	ID string
 
 	// LeaseDuration is how long a fetched task stays owned without a
 	// heartbeat. Heartbeats are sent every third of it. Default: 30 seconds.
@@ -124,20 +133,10 @@ type WorkerConfig struct {
 	PollInterval time.Duration
 
 	// DrainTimeout is how long Run waits for running tasks after its context
-	// is canceled, before canceling their contexts and releasing them.
-	// Default: 30 seconds.
+	// is canceled, before canceling their contexts and, 5 seconds later,
+	// releasing them. Keep it at least 10 seconds below the time the platform
+	// gives a stopping process. Default: 20 seconds.
 	DrainTimeout time.Duration
-
-	// UnknownKindTimeout is how long a task whose kind has no handler keeps
-	// waiting for a worker that has one, before it becomes dead. This keeps
-	// tasks safe during rolling deploys. Default: 1 hour.
-	UnknownKindTimeout time.Duration
-
-	// DefaultRetry is the retry policy for kinds that set none.
-	// Default: ExponentialBackoff{} (1 second doubling up to 1 hour). A task
-	// whose worker lost its lease is retried with that default, whatever
-	// this says: the maintainer that rescues it knows no worker's settings.
-	DefaultRetry RetryPolicy
 
 	// Middleware wraps every attempt, in order: the first is the outermost.
 	Middleware []Middleware
@@ -154,23 +153,23 @@ type WorkerConfig struct {
 	// proxy, which cannot deliver them. Create it with [pgx.ParseConfig].
 	// Default: the pool's configuration.
 	ListenConfig *pgx.ConnConfig
-
-	// Logger receives the worker's logs. Default: the client's logger.
-	Logger *slog.Logger
 }
 
 // QueueOptions configure how one worker process serves one queue.
-// Cluster-wide settings, such as a concurrency limit, are [QueueSettings].
+// Installation-wide settings, such as a concurrency limit, are
+// [QueueSettings].
 type QueueOptions struct {
 	// Concurrency is how many of the queue's tasks this process runs at once.
 	// A batch counts as one. Default: 10.
 	Concurrency int
 }
 
-// Middleware wraps the execution of an attempt, for logging, metrics,
-// tracing, or recovering from panics. It must call next at most once, and must
-// not modify task. Returning without calling next fails the attempt with the
-// returned error.
+// Middleware wraps the execution of an attempt, for logging, metrics, or
+// tracing. It must call next at most once, and must not modify task.
+// Returning without calling next fails the attempt with the returned error.
+// A handler's panic reaches middleware as an error. For a batch handler,
+// middleware runs once per task, but the context it passes to next does not
+// reach the handler.
 type Middleware func(ctx context.Context, task *TaskInfo, next func(context.Context) error) error
 
 // NewWorker returns a worker that uses client to reach the database. It
@@ -183,19 +182,26 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		cfg = &WorkerConfig{}
 	}
 	c := *cfg
-	err := resolveWorkerConfig(&c)
-	if err != nil {
+	c.Middleware = slices.Clone(c.Middleware)
+	if err := resolveWorkerConfig(&c); err != nil {
 		return nil, err
 	}
 
+	host, _ := os.Hostname()
+	id := workerID(host)
 	w := &Worker{
-		client:   client,
-		cfg:      c,
-		handlers: map[string]*registration{},
-		timing:   defaultTiming,
-		logger:   cmp.Or(c.Logger, client.logger),
-		listen:   c.ListenConfig,
-		version:  moduleVersion(),
+		client:      client,
+		cfg:         c,
+		id:          id,
+		host:        host,
+		handlers:    map[string]*registration{},
+		queues:      make(map[string]*queueState, len(c.Queues)),
+		timing:      defaultTiming,
+		logger:      client.logger.With(slog.String(logKeyWorker, id)),
+		listen:      c.ListenConfig,
+		version:     moduleVersion(),
+		attempts:    make(map[int64]*tracked),
+		completions: make(chan *tracked, completionBatch),
 	}
 	if c.Handlers != nil {
 		for kind, reg := range c.Handlers.byKind {
@@ -203,15 +209,23 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 			r.opts.Timeout = cmp.Or(r.opts.Timeout, defaultHandlerTimeout)
 			r.opts.BatchSize = cmp.Or(r.opts.BatchSize, defaultBatchSize)
 			if r.opts.Retry == nil {
-				r.opts.Retry = c.DefaultRetry
+				r.opts.Retry = ExponentialBackoff{}
 			}
 			w.handlers[kind] = &r
+		}
+	}
+	for name, o := range c.Queues {
+		w.queues[name] = &queueState{
+			name:  name,
+			slots: make(chan struct{}, o.Concurrency),
+			wake:  make(chan struct{}, 1),
+			freed: make(chan struct{}, 1),
 		}
 	}
 	if w.listen == nil {
 		w.listen = client.pool.Config().ConnConfig.Copy()
 	}
-	w.logger = w.logger.With(slog.String(logKeyWorker, c.ID))
+	var err error
 	if w.schedules, err = compileSchedules(c.Schedules); err != nil {
 		return nil, err
 	}
@@ -219,13 +233,22 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 }
 
 func resolveWorkerConfig(c *WorkerConfig) error {
-	if c.Handlers != nil && c.Handlers.err != nil {
-		return fmt.Errorf("%w: %w", ErrInvalidArgument, c.Handlers.err)
+	var kinds map[string]*registration
+	if c.Handlers != nil {
+		if c.Handlers.err != nil {
+			return c.Handlers.err
+		}
+		kinds = c.Handlers.byKind
 	}
-	if len(c.Queues) > 0 && (c.Handlers == nil || len(c.Handlers.byKind) == 0) {
+	if len(c.Queues) > 0 && len(kinds) == 0 {
 		return invalidArgument("a worker with queues needs handlers")
 	}
-	queues := make(map[string]QueueOptions, len(c.Queues))
+	queues := make(map[string]QueueOptions)
+	if len(c.Queues) == 0 {
+		for _, reg := range kinds {
+			queues[reg.queue] = QueueOptions{Concurrency: defaultConcurrency}
+		}
+	}
 	for name, o := range c.Queues {
 		if err := checkName("queue", name, maxNameLength); err != nil {
 			return err
@@ -238,27 +261,35 @@ func resolveWorkerConfig(c *WorkerConfig) error {
 	}
 	c.Queues = queues
 
-	if c.LeaseDuration == 0 {
-		c.LeaseDuration = defaultLeaseDuration
+	switch {
+	case c.LeaseDuration != 0 && c.LeaseDuration < minLeaseDuration:
+		return invalidArgument("LeaseDuration must be at least %s", minLeaseDuration)
+	case c.PollInterval < 0:
+		return invalidArgument("PollInterval must not be negative")
+	case c.DrainTimeout < 0:
+		return invalidArgument("DrainTimeout must not be negative")
 	}
-	if c.LeaseDuration < minLeaseDuration {
-		return invalidArgument("lease duration must be at least %s", minLeaseDuration)
-	}
-	for _, d := range []time.Duration{c.PollInterval, c.DrainTimeout, c.UnknownKindTimeout} {
-		if d < 0 {
-			return invalidArgument("durations must not be negative")
-		}
-	}
+	c.LeaseDuration = cmp.Or(c.LeaseDuration, defaultLeaseDuration)
 	c.PollInterval = cmp.Or(c.PollInterval, defaultPollInterval)
 	c.DrainTimeout = cmp.Or(c.DrainTimeout, defaultDrainTimeout)
-	c.UnknownKindTimeout = cmp.Or(c.UnknownKindTimeout, defaultUnknownKindTimeout)
-	if c.DefaultRetry == nil {
-		c.DefaultRetry = ExponentialBackoff{}
+	return nil
+}
+
+// warnUnservedKinds logs the registered kinds whose default queue the worker
+// does not serve: tasks enqueued with their defaults wait for another worker.
+func (w *Worker) warnUnservedKinds(ctx context.Context) {
+	var kinds []string
+	for kind, reg := range w.handlers {
+		if w.queues[reg.queue] == nil {
+			kinds = append(kinds, kind+" (queue "+reg.queue+")")
+		}
 	}
-	if c.ID == "" {
-		c.ID = defaultWorkerID()
+	if len(kinds) == 0 {
+		return
 	}
-	return checkName("worker ID", c.ID, maxNameLength)
+	slices.Sort(kinds)
+	w.logger.LogAttrs(ctx, slog.LevelWarn,
+		"the worker does not serve the default queue of these registered kinds", slog.Any(logKeyKinds, kinds))
 }
 
 // queueState is one queue that the worker serves.
@@ -268,7 +299,7 @@ type queueState struct {
 	wake       chan struct{} // nudges the fetch loop: tasks may be available
 	freed      chan struct{} // nudges the fetch loop: a slot was freed
 	paused     atomic.Bool
-	maxRunning atomic.Int32 // cluster-wide limit; 0 means none
+	maxRunning atomic.Int32 // installation-wide limit; 0 means none
 }
 
 func (q *queueState) nudge() {
@@ -305,9 +336,16 @@ const (
 	stateAbandoned                     // released at shutdown; the result is ignored
 )
 
+// run is the state of one call to [Worker.Run].
+type run struct {
+	attemptCtx context.Context // parent of every attempt; canceled with errShutdown once DrainTimeout passes
+	inflight   sync.WaitGroup  // the running attempts and batches
+}
+
 // Run fetches and runs tasks until ctx is canceled. It then stops fetching,
-// waits up to DrainTimeout for running tasks, cancels and releases those still
-// running, and returns. It returns nil after a clean shutdown.
+// waits up to DrainTimeout for running tasks, cancels and releases those
+// still running, and returns nil. It returns an error only if the worker
+// cannot start: it is already running, or cannot register in the database.
 func (w *Worker) Run(ctx context.Context) error {
 	if !w.running.CompareAndSwap(false, true) {
 		return errors.New("taskmill: worker is already running")
@@ -318,29 +356,19 @@ func (w *Worker) Run(ctx context.Context) error {
 	// values but not its cancellation.
 	base := context.WithoutCancel(ctx)
 
-	w.attempts = make(map[int64]*tracked)
-	w.queues = make(map[string]*queueState, len(w.cfg.Queues))
-	names := make([]string, 0, len(w.cfg.Queues))
-	for name, o := range w.cfg.Queues {
-		w.queues[name] = &queueState{
-			name:  name,
-			slots: make(chan struct{}, o.Concurrency),
-			wake:  make(chan struct{}, 1),
-			freed: make(chan struct{}, 1),
-		}
-		names = append(names, name)
-	}
+	names := make([]string, 0, len(w.queues)) // not nil: the column holds an array
+	names = slices.AppendSeq(names, maps.Keys(w.queues))
 	slices.Sort(names)
-
-	hostname, _ := os.Hostname()
-	if _, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.cfg.ID, names, hostname, w.version); err != nil {
+	if _, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, names, w.host, w.version); err != nil {
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
 	w.refreshQueueSettings(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
+	w.warnUnservedKinds(ctx)
+	w.checkPoolSize(ctx)
 
-	w.completions = make(chan *tracked, completionBatch)
-	w.completerUp = make(chan struct{})
+	w.released.Store(0)
+	w.completerDone = make(chan struct{})
 	completerCtx, stopCompleter := context.WithCancel(base)
 	go w.completer(completerCtx)
 
@@ -353,39 +381,65 @@ func (w *Worker) Run(ctx context.Context) error {
 		loops.Go(func() { newMaintainer(w).run(loopsCtx) })
 	}
 
-	runCtx, stopRun := context.WithCancelCause(base)
-	var inflight sync.WaitGroup
+	attemptCtx, stopAttempts := context.WithCancelCause(base)
+	r := &run{attemptCtx: attemptCtx}
 	var fetchers sync.WaitGroup
 	for _, q := range w.queues {
-		fetchers.Go(func() { w.fetchLoop(ctx, runCtx, q, &inflight) })
+		fetchers.Go(func() { w.fetchLoop(ctx, r, q) })
 	}
 
 	<-ctx.Done()
 	fetchers.Wait()
-	w.drain(base, &inflight, stopRun)
+	w.drain(base, r, stopAttempts)
+	// Attempts that ended before drain gave up may still be recording their
+	// results, through the completer too.
+	w.recording.Wait()
 
 	stopCompleter()
-	<-w.completerUp
+	<-w.completerDone
 	stopLoops()
 	loops.Wait()
 
 	stopCtx, cancel := context.WithTimeout(base, recordTimeout)
 	defer cancel()
-	if _, err := w.client.pool.Exec(stopCtx, w.client.sql.deleteWorker, w.cfg.ID); err != nil {
+	if _, err := w.client.pool.Exec(stopCtx, w.client.sql.deleteWorker, w.id); err != nil {
 		w.logger.LogAttrs(stopCtx, slog.LevelWarn, "unregister worker failed", slog.Any(logKeyError, err))
 	}
-	w.logger.LogAttrs(stopCtx, slog.LevelInfo, "worker stopped")
+	w.logger.LogAttrs(stopCtx, slog.LevelInfo, "worker stopped", slog.Int64(logKeyReleased, w.released.Load()))
 	return nil
+}
+
+// checkPoolSize warns if handlers that use the client's pool could take all
+// its connections: the worker's heartbeats would then wait, and attempts
+// would lose their leases and run twice.
+func (w *Worker) checkPoolSize(ctx context.Context) {
+	concurrency := 0
+	for _, q := range w.queues {
+		concurrency += cap(q.slots)
+	}
+	if conns := int(w.client.pool.Config().MaxConns); concurrency > 0 && conns < concurrency+poolReserve {
+		w.logger.LogAttrs(ctx, slog.LevelWarn,
+			"the pool has fewer connections than the worker's concurrency plus 5; "+
+				"handlers that use the same pool can starve the worker's heartbeats",
+			slog.Int(logKeyMaxConns, conns), slog.Int(logKeyConcurrency, concurrency))
+	}
 }
 
 // drain waits for running attempts, then cancels them and releases the tasks
 // of those that do not return in time.
-func (w *Worker) drain(ctx context.Context, inflight *sync.WaitGroup, stopRun context.CancelCauseFunc) {
+func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelCauseFunc) {
 	done := make(chan struct{})
 	go func() {
-		inflight.Wait()
+		r.inflight.Wait()
 		close(done)
 	}()
+	select {
+	case <-done:
+		return
+	default:
+	}
+	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker stopping; waiting for running tasks",
+		slog.Int(logKeyTasks, w.tracking()), slog.Duration(logKeyTimeout, w.cfg.DrainTimeout))
 
 	select {
 	case <-done:
@@ -393,7 +447,7 @@ func (w *Worker) drain(ctx context.Context, inflight *sync.WaitGroup, stopRun co
 	case <-time.After(w.cfg.DrainTimeout):
 	}
 
-	stopRun(errShutdown)
+	stopAttempts(errShutdown)
 	select {
 	case <-done:
 		return
@@ -406,7 +460,7 @@ func (w *Worker) drain(ctx context.Context, inflight *sync.WaitGroup, stopRun co
 	var abandoned []*tracked
 	for _, t := range w.attempts {
 		t.mu.Lock()
-		if t.state == stateRunning {
+		if t.state == stateRunning && !t.direct {
 			t.state = stateAbandoned
 			abandoned = append(abandoned, t)
 		}
@@ -420,58 +474,56 @@ func (w *Worker) drain(ctx context.Context, inflight *sync.WaitGroup, stopRun co
 	}
 }
 
+// tracking returns how many attempts the worker tracks.
+func (w *Worker) tracking() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.attempts)
+}
+
 // RunTask runs one task now, in the calling goroutine, the way [Worker.Run]
 // runs tasks: it leases the task, runs the middleware and the handler of its
 // kind while renewing the lease, and records the outcome. It ignores the
-// task's run time, queue pauses, and concurrency limits, but not FIFO order
-// or deadlines. It does not need Run to be running, which makes it the tool
-// for tests and for operators who need one task run now. If ctx is canceled
-// before the handler returns, the handler's context is canceled too, and the
-// task goes back to its queue without using an attempt.
+// task's run time, queue pauses, and concurrency limits, but not FIFO order.
+// It does not need Run to be running, which makes it the tool for tests. If
+// ctx is canceled before the handler returns, the handler's context is
+// canceled too, and the task goes back to its queue without using an attempt.
 //
 // It returns the task afterwards. It returns [ErrNotFound] if no task has the
 // ID, and [ErrInvalidState] if the task is running, waits behind its FIFO
-// group, has finished, or its deadline passed.
+// group, or has finished.
 func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	t, err := w.leaseTask(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	t.direct = true
+	w.track(t)
 
-	// Heartbeats renew the lease while the handler runs.
+	// Heartbeats renew the lease while the handler runs, and while its
+	// result is recorded.
 	beatCtx, stopBeats := context.WithCancel(context.WithoutCancel(ctx))
 	var beats sync.WaitGroup
 	beats.Go(func() {
-		tick := time.NewTicker(w.cfg.LeaseDuration / 3)
-		defer tick.Stop()
-		for {
-			select {
-			case <-beatCtx.Done():
-				return
-			case <-tick.C:
-				renewCtx, cancel := context.WithTimeout(beatCtx, w.cfg.LeaseDuration/3)
-				w.renewLeases(renewCtx, []*tracked{t})
-				cancel()
-			}
-		}
+		w.everyBeat(beatCtx, func(ctx context.Context) { w.renewLeases(ctx, []*tracked{t}) })
 	})
 
-	runCtx, stopRun := context.WithCancelCause(context.WithoutCancel(ctx))
-	stopAfter := context.AfterFunc(ctx, func() { stopRun(errShutdown) })
+	attemptCtx, stopAttempt := context.WithCancelCause(context.WithoutCancel(ctx))
+	stopAfter := context.AfterFunc(ctx, func() { stopAttempt(errShutdown) })
 	if t.reg != nil && t.reg.runBatch != nil {
-		w.runBatch(runCtx, []*tracked{t})
+		w.runBatch(attemptCtx, []*tracked{t})
 	} else {
-		w.runOne(runCtx, t)
+		w.runOne(attemptCtx, t)
 	}
 	stopAfter()
-	stopRun(nil)
+	stopAttempt(nil)
 	stopBeats()
 	beats.Wait()
 
 	info, err := w.client.Get(context.WithoutCancel(ctx), id)
 	if errors.Is(err, ErrNotFound) && t.completedDirectly {
-		// The queue keeps no history: the task was deleted as it completed.
+		// The kind discards completed tasks: the task was deleted as it
+		// completed.
 		done := *t.info
 		done.State, done.FinalizedAt = StateCompleted, time.Now()
 		return &done, nil
@@ -481,7 +533,7 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 
 // leaseTask leases one task for RunTask, or explains why it cannot.
 func (w *Worker) leaseTask(ctx context.Context, id int64) (*tracked, error) {
-	r, err := w.client.pool.Query(ctx, w.client.sql.leaseTask, id, w.cfg.LeaseDuration.Microseconds(), w.cfg.ID)
+	r, err := w.client.pool.Query(ctx, w.client.sql.leaseTask, id, w.cfg.LeaseDuration.Microseconds(), w.id)
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: run task %d: %w", id, err)
 	}
@@ -496,19 +548,13 @@ func (w *Worker) leaseTask(ctx context.Context, id int64) (*tracked, error) {
 	if err := r.Err(); err != nil {
 		return nil, fmt.Errorf("taskmill: run task %d: %w", id, err)
 	}
-	info, err := w.client.Get(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if !info.State.Finished() && info.State != StatePending && info.State != StateRunning {
-		return nil, fmt.Errorf("%w: cannot run task %d: its deadline passed", ErrInvalidState, id)
-	}
-	return nil, fmt.Errorf("%w: cannot run task %d in state %s", ErrInvalidState, id, info.State)
+	return nil, w.client.stateError(ctx, pgxQuerier{q: w.client.pool}, id, "run")
 }
 
-func defaultWorkerID() string {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
+// workerID names a worker after its host and process, with a random suffix
+// that keeps restarted processes apart.
+func workerID(host string) string {
+	if host == "" {
 		host = "worker"
 	}
 	var b [3]byte

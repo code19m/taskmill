@@ -3,7 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -51,7 +51,12 @@ func newWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) *taskmill.Worke
 // for Run to return. The worker also stops when the test ends.
 func runWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) (stop func()) {
 	t.Helper()
-	w := newWorker(t, e, cfg)
+	return startWorker(t, newWorker(t, e, cfg))
+}
+
+// startWorker runs w as runWorker does.
+func startWorker(t *testing.T, w *taskmill.Worker) (stop func()) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -75,26 +80,6 @@ func handlers(fn func(ctx context.Context, task *taskmill.Task[sendEmail]) error
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](fn), opts)
 	return &hs
-}
-
-// waitState waits for a task to reach state.
-func (e *env) waitState(t *testing.T, id int64, state taskmill.State) *taskmill.TaskInfo {
-	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		info, err := e.client.Get(t.Context(), id)
-		if err == nil && info.State == state {
-			return info
-		}
-		if time.Now().After(deadline) {
-			got := "error: " + fmt.Sprint(err)
-			if info != nil {
-				got = string(info.State)
-			}
-			t.Fatalf("task %d did not become %s; it is %s", id, state, got)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 }
 
 func defaultQueue(concurrency int) map[string]taskmill.QueueOptions {
@@ -183,18 +168,21 @@ func TestWorkerFailureKinds(t *testing.T) {
 	tests := []struct {
 		to       string
 		attempts int
-		code     string
+		code     taskmill.ErrorCode
 	}{
 		{"permanent", 1, ""},
-		{"panic", 2, "panic"},
-		{"timeout", 2, "timeout"},
+		{"panic", 2, taskmill.CodePanic},
+		{"timeout", 2, taskmill.CodeTimeout},
 	}
 	for _, tt := range tests {
-		id := e.enqueue(t, sendEmail{To: tt.to}, &taskmill.EnqueueOptions{MaxAttempts: 2})
-		info := e.waitState(t, id, taskmill.StateDead)
-		if info.Attempt != tt.attempts || len(info.Errors) != tt.attempts || info.Errors[0].Code != tt.code {
-			t.Errorf("%s: got attempt %d, errors %+v", tt.to, info.Attempt, info.Errors)
-		}
+		t.Run(tt.to, func(t *testing.T) {
+			t.Parallel()
+			id := e.enqueue(t, sendEmail{To: tt.to}, &taskmill.EnqueueOptions{MaxAttempts: 2})
+			info := e.waitState(t, id, taskmill.StateDead)
+			if info.Attempt != tt.attempts || len(info.Errors) != tt.attempts || info.Errors[0].Code != tt.code {
+				t.Errorf("got attempt %d, errors %+v", info.Attempt, info.Errors)
+			}
+		})
 	}
 }
 
@@ -210,7 +198,7 @@ func TestWorkerRejectsUndecodablePayload(t *testing.T) {
 	           VALUES ('default', 'email.send', 'available', now(), '{"user_id": "not a number"}', 5)`)
 	id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
 	info := e.waitState(t, id, taskmill.StateDead)
-	if info.Attempt != 1 || info.Errors[0].Code != "invalid_payload" {
+	if info.Attempt != 1 || info.Errors[0].Code != taskmill.CodeInvalidPayload {
 		t.Fatalf("got attempt %d, errors %+v", info.Attempt, info.Errors)
 	}
 }
@@ -241,11 +229,9 @@ func TestWorkerSnoozesUnknownKinds(t *testing.T) {
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
 	const timeout = 500 * time.Millisecond
-	runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers:           &hs,
-		Queues:             defaultQueue(1),
-		UnknownKindTimeout: timeout,
-	})
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+	taskmill.SetTiming(w, taskmill.Timing{NoHandlerWait: timeout})
+	startWorker(t, w)
 
 	// A task created long ago, for example in a long FIFO group, still waits
 	// the whole timeout from the first time a worker meets it.
@@ -254,8 +240,11 @@ func TestWorkerSnoozesUnknownKinds(t *testing.T) {
 	id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
 
 	info := e.waitState(t, id, taskmill.StateDead)
-	if len(info.Errors) != 2 || info.Errors[0].Code != "no_handler" || info.Errors[1].Code != "unknown_kind" {
+	if len(info.Errors) != 2 || info.Errors[0].Code != taskmill.CodeNoHandler || info.Errors[1].Code != taskmill.CodeUnknownKind {
 		t.Fatalf("got errors %+v, want a note when snoozed and an error when dead", info.Errors)
+	}
+	if info.Errors[0].Attempt != 0 || info.Attempt != 1 {
+		t.Fatalf("the note counts attempt %d and the task %d; snoozes use no attempt", info.Errors[0].Attempt, info.Attempt)
 	}
 	if waited := info.Errors[1].At.Sub(info.Errors[0].At); waited < timeout {
 		t.Fatalf("gave up after %s, want at least %s", waited, timeout)
@@ -454,7 +443,6 @@ func TestFIFOGroupRunsOneAtATimeInOrder(t *testing.T) {
 func TestFIFOGroupHaltsOnDeadHead(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.setDefaultQueue(t, &taskmill.QueueSettings{HaltGroupOnDead: true})
 	var fixed atomic.Bool
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
@@ -522,8 +510,8 @@ func TestQueueConcurrencyLimitAcrossWorkers(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 		return nil
 	}, nil)
-	runWorker(t, e, &taskmill.WorkerConfig{Handlers: hs, Queues: defaultQueue(5), ID: "w1"})
-	runWorker(t, e, &taskmill.WorkerConfig{Handlers: hs, Queues: defaultQueue(5), ID: "w2"})
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: hs, Queues: defaultQueue(5)})
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: hs, Queues: defaultQueue(5)})
 
 	var last int64
 	for range 10 {
@@ -554,7 +542,7 @@ func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
 		if at.Before(runAt) {
 			t.Fatalf("task started %s before its run time", runAt.Sub(at))
 		}
-		// The target is 1.5 s (docs/design/performance.md); the bound here
+		// The target is 1.5 s (docs/benchmarks.md); the bound here
 		// leaves room for a loaded test machine.
 		if late := at.Sub(runAt); late > 5*time.Second {
 			t.Fatalf("task started %s late", late)
@@ -701,11 +689,16 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 	var dup taskmill.Handlers
 	taskmill.AddHandler(&dup, noop, nil)
 	taskmill.AddHandler(&dup, noop, nil)
+	var noKind taskmill.Handlers
+	taskmill.AddHandler(&noKind, taskmill.HandlerFunc[emptyKind](func(context.Context, *taskmill.Task[emptyKind]) error {
+		return nil
+	}), nil)
 
 	tests := []struct {
 		name string
 		cfg  *taskmill.WorkerConfig
 	}{
+		{"kind that is empty", &taskmill.WorkerConfig{Handlers: &noKind}},
 		{"duplicate kind", &taskmill.WorkerConfig{Handlers: &dup, Queues: defaultQueue(1)}},
 		{"queues without handlers", &taskmill.WorkerConfig{Queues: defaultQueue(1)}},
 		{"negative concurrency", &taskmill.WorkerConfig{Handlers: handlers(noop, nil), Queues: defaultQueue(-1)}},
@@ -715,17 +708,27 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 		{"schedule that never runs", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 			{Name: "x", Cron: "0 0 31 2 *", Args: sendEmail{}},
 		}}},
-		{"schedule with a deadline", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
-			{Name: "x", Cron: "@daily", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{Deadline: time.Now().Add(time.Hour)}},
+		{"schedule with an @every macro", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+			{Name: "x", Cron: "@every 30s", Args: sendEmail{}},
+		}}},
+		{"schedule with an oversized payload", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+			{Name: "x", Cron: "@daily", Args: sendEmail{To: strings.Repeat("x", 1<<20)}},
 		}}},
 		{"schedule with a bad queue", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 			{Name: "x", Cron: "@daily", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{Queue: "a\x00b"}},
 		}}},
 	}
 	for _, tt := range tests {
-		if _, err := taskmill.NewWorker(e.client, tt.cfg); !errors.Is(err, taskmill.ErrInvalidArgument) {
-			t.Errorf("%s: got %v, want ErrInvalidArgument", tt.name, err)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := taskmill.NewWorker(e.client, tt.cfg)
+			if !errors.Is(err, taskmill.ErrInvalidArgument) {
+				t.Fatalf("got %v, want ErrInvalidArgument", err)
+			}
+			if n := strings.Count(err.Error(), "taskmill:"); n != 1 {
+				t.Errorf("%q names the package %d times", err, n)
+			}
+		})
 	}
 }
 
@@ -1062,7 +1065,7 @@ func testLostLease(t *testing.T, lose func(e *env, id int64) (release func())) {
 	// The first attempt's success was discarded: the task is rescued once its
 	// lease expires, and completes on its second attempt.
 	info := e.waitState(t, id, taskmill.StateCompleted)
-	if info.Attempt != 2 || len(info.Errors) != 1 || info.Errors[0].Code != "lease_expired" {
+	if info.Attempt != 2 || len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseExpired {
 		t.Fatalf("got attempt %d with errors %+v, want attempt 2 after a lost lease", info.Attempt, info.Errors)
 	}
 }
@@ -1086,11 +1089,12 @@ func (f *failingBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[sen
 func TestBatchHandlerFailures(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name, code, message string
-		panics              bool
+		name, message string
+		code          taskmill.ErrorCode
+		panics        bool
 	}{
-		{"panic", "panic", "panic: broker client crashed", true},
-		{"missing results", "", "the batch handler returned no result for this task", false},
+		{"panic", "panic: broker client crashed", taskmill.CodePanic, true},
+		{"missing results", "the batch handler returned no result for this task", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1269,41 +1273,6 @@ func TestLockedGroupDoesNotHoldUpOtherCompletions(t *testing.T) {
 	}
 }
 
-func TestPendingTaskPastItsDeadlineHaltsItsGroup(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	e.setDefaultQueue(t, &taskmill.QueueSettings{HaltGroupOnDead: true})
-	started := make(chan struct{}, 1)
-	release := make(chan struct{})
-	runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
-			if task.Args.To == "head" {
-				started <- struct{}{}
-				<-release
-			}
-			return nil
-		}, nil),
-		Queues: defaultQueue(2),
-	})
-	deadline := time.Now().Add(300 * time.Millisecond)
-	head := e.enqueue(t, sendEmail{To: "head"}, &taskmill.EnqueueOptions{GroupKey: "g"})
-	late := e.enqueue(t, sendEmail{To: "late"}, &taskmill.EnqueueOptions{GroupKey: "g", Deadline: deadline})
-	last := e.enqueue(t, sendEmail{To: "last"}, &taskmill.EnqueueOptions{GroupKey: "g"})
-	recv(t, started, "a handler to start")
-	time.Sleep(time.Until(deadline)) // the deadline passes while the task waits behind the head
-	close(release)
-
-	e.waitState(t, head, taskmill.StateCompleted)
-	info := e.waitState(t, late, taskmill.StateDead)
-	if len(info.Errors) != 1 || info.Errors[0].Code != "deadline_exceeded" {
-		t.Fatalf("got errors %+v", info.Errors)
-	}
-	if n := e.count(t, "SELECT count(*) FROM {s}.groups WHERE halted_task_id = $1", late); n != 1 {
-		t.Fatal("the dead task did not halt its group")
-	}
-	e.wantState(t, last, taskmill.StatePending)
-}
-
 func TestBatchFillsWithoutLeasingOtherKinds(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -1477,18 +1446,27 @@ func TestRunTask(t *testing.T) {
 		e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 		           VALUES ('default', 'other.kind', 'available', now(), '{}', 5)`)
 		id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks WHERE kind = 'other.kind'"))
-		if info := run(t, t.Context(), id, taskmill.StateScheduled); info.Errors[0].Code != "no_handler" {
+		if info := run(t, t.Context(), id, taskmill.StateScheduled); info.Errors[0].Code != taskmill.CodeNoHandler {
 			t.Fatalf("got errors %+v", info.Errors)
 		}
 	})
-	t.Run("queue without history", func(t *testing.T) {
-		t.Parallel()
-		if err := e.client.UpdateQueue(t.Context(), "nohistory", &taskmill.QueueSettings{DiscardCompleted: true}); err != nil {
-			t.Fatal(err)
-		}
-		id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "nohistory"})
-		run(t, t.Context(), id, taskmill.StateCompleted)
+}
+
+func TestRunTaskOfAKindWithoutHistory(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil },
+			&taskmill.HandlerOptions{DiscardCompleted: true}),
 	})
+	id := e.enqueue(t, sendEmail{}, nil)
+	info, err := w.RunTask(t.Context(), id)
+	if err != nil || info.State != taskmill.StateCompleted {
+		t.Fatalf("got %v, %v", info, err)
+	}
+	if _, err := e.client.Get(t.Context(), id); !errors.Is(err, taskmill.ErrNotFound) {
+		t.Fatalf("the completed task was kept: %v", err)
+	}
 }
 
 func TestRunTaskRefuses(t *testing.T) {
@@ -1504,12 +1482,6 @@ func TestRunTaskRefuses(t *testing.T) {
 	running := e.enqueue(t, sendEmail{}, nil)
 	e.exec(t, `UPDATE {s}.tasks SET state = 'running', attempt = 1, lease_token = 1,
 	           lease_expires_at = now() + interval '30 seconds' WHERE id = $1`, running)
-	late := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{
-		RunAt: time.Now().Add(-time.Hour), Deadline: time.Now().Add(50 * time.Millisecond),
-	})
-	waitFor(t, "the deadline to pass", func() bool {
-		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND deadline < now()", late) == 1
-	})
 
 	for name, tc := range map[string]struct {
 		id   int64
@@ -1519,7 +1491,6 @@ func TestRunTaskRefuses(t *testing.T) {
 		"completed": {completed, taskmill.ErrInvalidState},
 		"pending":   {pending, taskmill.ErrInvalidState},
 		"running":   {running, taskmill.ErrInvalidState},
-		"too late":  {late, taskmill.ErrInvalidState},
 	} {
 		if _, err := w.RunTask(t.Context(), tc.id); !errors.Is(err, tc.want) {
 			t.Errorf("%s: got %v, want %v", name, err, tc.want)
@@ -1549,4 +1520,66 @@ func TestFetchStaysOnItsIndexWithStaleStatistics(t *testing.T) {
 	if strings.Contains(plan, "Sort") || strings.Contains(plan, "Bitmap") || !strings.Contains(plan, "tasks_fetch_idx") {
 		t.Fatalf("the fetch does not read its index in order:\n%s", plan)
 	}
+}
+
+func TestMiddlewareCannotRunAHandlerTwice(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var runs atomic.Int32
+	twice := taskmill.Middleware(func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+		_ = next(ctx)
+		return next(ctx)
+	})
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			runs.Add(1)
+			return nil
+		}, nil),
+		Middleware: []taskmill.Middleware{twice},
+	})
+	info, err := w.RunTask(t.Context(), e.enqueue(t, sendEmail{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs.Load() != 1 || info.State != taskmill.StateRetryable ||
+		!strings.Contains(info.Errors[0].Message, "next twice") {
+		t.Fatalf("the handler ran %d times; task %s with errors %+v", runs.Load(), info.State, info.Errors)
+	}
+}
+
+func TestCompletionWithoutHistoryPartition(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	logs := &logRecorder{}
+	w := newWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+	// The worker's role could not create today's partition.
+	today := "task_history_" + time.Now().UTC().Format("20060102")
+	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+today)
+	e.exec(t, "DROP TABLE {s}."+today)
+
+	for range 2 {
+		info, err := w.RunTask(t.Context(), e.enqueue(t, sendEmail{}, nil))
+		if err != nil || info.State != taskmill.StateCompleted || info.Attempt != 1 {
+			t.Fatalf("got %+v, %v; want completed on the first attempt", info, err)
+		}
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 0 {
+		t.Fatalf("%d tasks left", n)
+	}
+	if logs.count("task history has no partition for today, so completed tasks are not kept in history; "+
+		"the role that runs workers must own the taskmill tables to create the daily partitions") != 1 {
+		t.Fatal("the missing partition was not logged once")
+	}
+}
+
+func TestWorkerWarnsAboutUnservedKinds(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	logs := &logRecorder{}
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+	runWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+	waitFor(t, "a warning that the reports queue is not served", func() bool {
+		return logs.count("the worker does not serve the default queue of these registered kinds") == 1
+	})
 }

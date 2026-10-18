@@ -4,12 +4,15 @@ import (
 	"context"
 	"html"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,7 +65,8 @@ func TestPagesRender(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
 	ctx := t.Context()
-	res, err := client.Enqueue(ctx, greet{Name: "<script>alert(1)</script>"}, &taskmill.EnqueueOptions{Queue: "mail"})
+	res, err := client.Enqueue(ctx, greet{Name: "<script>alert(1)</script>"},
+		&taskmill.EnqueueOptions{Queue: "mail", GroupKey: "topic\x1fkey", Priority: taskmill.PriorityHigh})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,6 +93,17 @@ func TestPagesRender(t *testing.T) {
 	if code != http.StatusOK || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;") {
 		t.Fatalf("task page did not escape the payload: %d\n%s", code, body)
 	}
+	if !strings.Contains(body, "<dd>high</dd>") || !strings.Contains(body, "topic␟key") ||
+		!strings.Contains(body, "group=topic%1fkey") {
+		t.Fatalf("task page: want the priority's name and a visible link to the group\n%s", body)
+	}
+	code, body, _ = get(t, h, "/admin/tasks/tasks?queue=mail&group=topic%1Fkey")
+	if code != http.StatusOK || !strings.Contains(body, `href="/admin/tasks/tasks/`+id+`"`) {
+		t.Fatalf("group's tasks: %d\n%s", code, body)
+	}
+	if code, _, _ = get(t, h, "/admin/tasks/tasks?state=bogus"); code != http.StatusBadRequest {
+		t.Fatalf("unknown state: %d", code)
+	}
 
 	if code, _, _ = get(t, h, "/admin/tasks/tasks/999999"); code != http.StatusNotFound {
 		t.Fatalf("unknown task: %d", code)
@@ -106,7 +121,8 @@ func TestActions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := ui.Handler(client, nil)
+	logs := &actionLog{}
+	h := ui.Handler(client, &ui.Config{Logger: slog.New(logs)})
 	id := strconv.FormatInt(res.ID, 10)
 
 	if rec := post(t, h, "/tasks/"+id+"/cancel", "cross-site"); rec.Code != http.StatusForbidden {
@@ -133,7 +149,42 @@ func TestActions(t *testing.T) {
 	if _, err := client.Get(context.WithoutCancel(ctx), res.ID); err == nil {
 		t.Fatal("deleted task still exists")
 	}
+	want := []string{"cancel task " + id, "retry task " + id, "pause queue default", "delete task " + id}
+	if !slices.Equal(logs.actions, want) {
+		t.Fatalf("logged actions %v, want %v", logs.actions, want)
+	}
 }
+
+// actionLog records the actions that the web interface logs.
+type actionLog struct {
+	mu      sync.Mutex
+	actions []string
+}
+
+func (*actionLog) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *actionLog) Handle(_ context.Context, r slog.Record) error {
+	var action, target string
+	r.Attrs(func(a slog.Attr) bool {
+		switch a.Key {
+		case "action":
+			action = a.Value.String()
+		case "target":
+			target = a.Value.String()
+		}
+		return true
+	})
+	if r.Message == "web interface action" {
+		l.mu.Lock()
+		l.actions = append(l.actions, action+" "+target)
+		l.mu.Unlock()
+	}
+	return nil
+}
+
+func (l *actionLog) WithAttrs([]slog.Attr) slog.Handler { return l }
+
+func (l *actionLog) WithGroup(string) slog.Handler { return l }
 
 func TestReadOnly(t *testing.T) {
 	t.Parallel()

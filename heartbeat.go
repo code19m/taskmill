@@ -9,22 +9,28 @@ import (
 // heartbeatLoop renews the leases of every tracked attempt, and cancels the
 // attempts that lost theirs or whose tasks were canceled.
 func (w *Worker) heartbeatLoop(ctx context.Context) {
-	tick := time.NewTicker(w.cfg.LeaseDuration / 3)
+	w.everyBeat(ctx, w.heartbeat)
+}
+
+// everyBeat calls beat every third of the lease, each time with that third
+// as its timeout, until ctx ends.
+func (w *Worker) everyBeat(ctx context.Context, beat func(context.Context)) {
+	interval := w.cfg.LeaseDuration / 3
+	tick := time.NewTicker(interval)
 	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			w.heartbeat(ctx)
+			beatCtx, cancel := context.WithTimeout(ctx, interval)
+			beat(beatCtx)
+			cancel()
 		}
 	}
 }
 
 func (w *Worker) heartbeat(ctx context.Context) {
-	ctx, cancel := context.WithTimeout(ctx, w.cfg.LeaseDuration/3)
-	defer cancel()
-
 	w.mu.Lock()
 	ts := make([]*tracked, 0, len(w.attempts))
 	for _, t := range w.attempts {
@@ -32,7 +38,7 @@ func (w *Worker) heartbeat(ctx context.Context) {
 	}
 	w.mu.Unlock()
 
-	if _, err := w.client.pool.Exec(ctx, w.client.sql.beatWorker, w.cfg.ID); err != nil {
+	if _, err := w.client.pool.Exec(ctx, w.client.sql.beatWorker, w.id); err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "worker heartbeat failed", slog.Any(logKeyError, err))
 	}
 	w.renewLeases(ctx, ts)

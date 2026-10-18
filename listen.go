@@ -5,13 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// settingsLoop reloads the cluster-wide settings of the worker's queues.
+// settingsLoop reloads the installation-wide settings of the worker's queues.
 func (w *Worker) settingsLoop(ctx context.Context) {
 	tick := time.NewTicker(w.timing.settings)
 	defer tick.Stop()
@@ -73,13 +74,17 @@ func (w *Worker) loadQueueSettings(ctx context.Context, names []string) (map[str
 }
 
 // listenLoop receives notifications on a dedicated connection, reconnecting
-// with backoff when it breaks.
+// with backoff when it breaks. The backoff starts over after a connection
+// that worked.
 func (w *Worker) listenLoop(ctx context.Context) {
 	backoff := w.timing.reconnectMin
 	for ctx.Err() == nil {
-		err := w.listenOnce(ctx)
+		listened, err := w.listenOnce(ctx)
 		if ctx.Err() != nil {
 			return
+		}
+		if listened {
+			backoff = w.timing.reconnectMin
 		}
 		if errors.Is(err, errListenConfig) {
 			w.logger.LogAttrs(ctx, slog.LevelError, "notifications disabled; polling only", slog.Any(logKeyError, err))
@@ -96,10 +101,12 @@ func (w *Worker) listenLoop(ctx context.Context) {
 	}
 }
 
-func (w *Worker) listenOnce(ctx context.Context) error {
+// listenOnce listens on one connection until it breaks. It reports whether
+// it got as far as listening.
+func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 	conn, err := w.connectListener(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
@@ -107,7 +114,7 @@ func (w *Worker) listenOnce(ctx context.Context) error {
 		_ = conn.Close(closeCtx)
 	}()
 	if _, err := conn.Exec(ctx, "LISTEN "+w.client.schema); err != nil {
-		return err
+		return false, err
 	}
 	// Notifications may have been missed while disconnected.
 	for _, q := range w.queues {
@@ -116,7 +123,7 @@ func (w *Worker) listenOnce(ctx context.Context) error {
 	for {
 		n, err := conn.WaitForNotification(ctx)
 		if err != nil {
-			return err
+			return true, err
 		}
 		w.handleNotification(ctx, n.Payload)
 	}
@@ -140,13 +147,13 @@ func (w *Worker) handleNotification(ctx context.Context, payload string) {
 		return
 	}
 	switch kind {
-	case "a":
+	case notifyAvailable:
 		if q := w.queues[arg]; q != nil {
 			q.nudge()
 		}
-	case "c":
-		var id int64
-		if _, err := fmt.Sscan(arg, &id); err != nil {
+	case notifyCancel:
+		id, err := strconv.ParseInt(arg, 10, 64)
+		if err != nil {
 			return
 		}
 		w.mu.Lock()
@@ -155,7 +162,7 @@ func (w *Worker) handleNotification(ctx context.Context, payload string) {
 		if t != nil {
 			t.requestCancel()
 		}
-	case "q":
+	case notifyQueue:
 		if w.queues[arg] != nil {
 			w.refreshQueueSettings(ctx)
 		}

@@ -29,7 +29,7 @@ func TestEnqueueStoresTheTask(t *testing.T) {
 	if info.State != taskmill.StateAvailable || info.Queue != taskmill.DefaultQueue || info.Kind != "email.send" {
 		t.Fatalf("got state %s, queue %s, kind %s", info.State, info.Queue, info.Kind)
 	}
-	if info.Priority != taskmill.PriorityNormal || info.MaxAttempts != 10 || info.Attempt != 0 {
+	if info.Priority != taskmill.PriorityNormal || info.MaxAttempts != 25 || info.Attempt != 0 {
 		t.Fatalf("got priority %d, max attempts %d, attempt %d", info.Priority, info.MaxAttempts, info.Attempt)
 	}
 	if !strings.Contains(string(info.Payload), "1234567890123456789") {
@@ -81,24 +81,38 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 		{"priority out of range", sendEmail{}, &taskmill.EnqueueOptions{Priority: 9}},
 		{"negative max attempts", sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: -1}},
 		{"queue too long", sendEmail{}, &taskmill.EnqueueOptions{Queue: strings.Repeat("q", 129)}},
-		{"deadline before run time", sendEmail{}, &taskmill.EnqueueOptions{
-			RunAt: time.Now().Add(time.Hour), Deadline: time.Now(),
-		}},
+		{"payload over 1 MiB", sendEmail{To: strings.Repeat("x", 1<<20)}, nil},
 		{"negative dedupe window", sendEmail{}, &taskmill.EnqueueOptions{DedupeKey: "k", DedupeWindow: -time.Second}},
 		{"invalid UTF-8 group key", sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "\xff"}},
 		{"NUL in queue", sendEmail{}, &taskmill.EnqueueOptions{Queue: "a\x00b"}},
 		{"NUL in payload", sendEmail{To: "a\x00b"}, nil},
 		{"NUL in metadata", sendEmail{}, &taskmill.EnqueueOptions{Metadata: map[string]string{"k": "a\x00b"}}},
 	}
-	for _, tt := range tests {
-		if _, err := e.client.Enqueue(t.Context(), tt.args, tt.opts); !errors.Is(err, taskmill.ErrInvalidArgument) {
-			t.Errorf("%s: got %v, want ErrInvalidArgument", tt.name, err)
+	// Runs after the parallel subtests, once the test's context is canceled.
+	t.Cleanup(func() {
+		var n int
+		err := e.pool.QueryRow(context.Background(), replaceSchema("SELECT count(*) FROM {s}.tasks", e.schema)).Scan(&n)
+		if err != nil || n != 0 {
+			t.Errorf("invalid enqueues stored %d tasks (%v)", n, err)
 		}
+	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := e.client.Enqueue(t.Context(), tt.args, tt.opts)
+			if !errors.Is(err, taskmill.ErrInvalidArgument) {
+				t.Fatalf("got %v, want ErrInvalidArgument", err)
+			}
+			if n := strings.Count(err.Error(), "taskmill:"); n != 1 {
+				t.Errorf("%q names the package %d times", err, n)
+			}
+		})
 	}
-	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 0 {
-		t.Fatalf("invalid enqueues stored %d tasks", n)
-	}
+}
 
+func TestEnqueueKeepsEscapedBackslashes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
 	// A backslash followed by "u0000" is text, not a NUL character.
 	id := e.enqueue(t, sendEmail{To: `\u0000`}, nil)
 	var got sendEmail
@@ -110,16 +124,6 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 type emptyKind struct{}
 
 func (emptyKind) Kind() string { return "" }
-
-func TestEnqueueRejectsOversizedPayload(t *testing.T) {
-	t.Parallel()
-	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{MaxPayloadBytes: 64})
-
-	_, err := e.client.Enqueue(t.Context(), sendEmail{To: strings.Repeat("x", 100)}, nil)
-	if !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("got %v, want ErrInvalidArgument", err)
-	}
-}
 
 func TestEnqueueManyKeepsOrderInOneTransaction(t *testing.T) {
 	t.Parallel()

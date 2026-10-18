@@ -18,18 +18,20 @@ const DefaultQueue = "default"
 
 // Defaults and limits of enqueue options.
 const (
-	defaultMaxAttempts  = 10
+	defaultMaxAttempts  = 25 // with the default backoff, retries span about 13 hours
 	defaultDedupeWindow = 24 * time.Hour
 	maxNameLength       = 128
 	maxGroupKeyLength   = 256
 	maxAttemptsLimit    = 10_000
+	maxPayloadBytes     = 1 << 20 // protects the database from oversized rows
 )
 
 // EnqueueOptions control how a task is enqueued. Zero values mean "not set":
 // a field set in the call wins over the kind's defaults (see
 // [ArgsWithDefaults]), which win over taskmill's defaults.
 type EnqueueOptions struct {
-	// Queue is the queue to enqueue into. Default: [DefaultQueue].
+	// Queue is the queue to enqueue into, at most 128 characters.
+	// Default: [DefaultQueue].
 	Queue string
 
 	// Priority orders tasks within the queue. Default: [PriorityNormal].
@@ -38,20 +40,20 @@ type EnqueueOptions struct {
 	// RunAt is the earliest time the task may start. Default: now.
 	RunAt time.Time
 
-	// Deadline is the latest time the task may start. If it passes first,
-	// the task becomes dead without running. Default: none.
-	Deadline time.Time
-
-	// MaxAttempts is how many times the task may run. Default: 10.
+	// MaxAttempts is how many times the task may run, from 1 to 10,000.
+	// Default: 25, which with the default backoff spans about 13 hours.
 	MaxAttempts int
 
 	// GroupKey puts the task in a FIFO group: tasks with the same key in the
-	// same queue run one at a time, in enqueue order. Default: none.
+	// same queue run one at a time, in enqueue order. A group's dead task
+	// halts it until an operator retries or deletes that task. At most 256
+	// characters. Default: none.
 	GroupKey string
 
 	// DedupeKey makes the enqueue idempotent: while the key's window lasts,
 	// enqueueing the same kind with the same key in the same queue creates no
-	// new task, and reports the existing one. Default: none.
+	// new task, and reports the existing one. Canceling or deleting the task
+	// frees the key at once. Default: none.
 	DedupeKey string
 
 	// DedupeWindow is how long DedupeKey blocks duplicates. Default: 24 hours.
@@ -62,7 +64,7 @@ type EnqueueOptions struct {
 	Metadata map[string]string
 }
 
-// EnqueueParams is one task in a batch enqueue.
+// EnqueueParams is one task in a batch enqueue. Options may be nil.
 type EnqueueParams struct {
 	Args    Args
 	Options *EnqueueOptions
@@ -136,7 +138,7 @@ type enqueueBatch struct {
 	queues, kinds, groups []string
 	priorities            []int16
 	maxAttempts           []int16
-	runAts, deadlines     []*time.Time
+	runAts                []*time.Time
 	dedupeKeys            [][]byte
 	dedupeWindows         []int64
 	payloads, metadata    []string
@@ -150,26 +152,28 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 	}
 
 	b := enqueueBatch{due: make(map[string]bool), plain: true}
-	// sent[i] is the batch position of params[i], or -1 for a repeat of an
-	// earlier dedupe key in the same batch; firstOf maps it to that earlier one.
-	sent := make([]int, len(params))
-	firstOf := make(map[string]int)
+	pos := make([]int, len(params))     // the batch row of params[i]
+	repeat := make([]bool, len(params)) // params[i] repeats an earlier dedupe key of the batch
+	rowOf := make(map[string]int)       // the batch row of each dedupe key
 	now := time.Now()
 
 	for i, p := range params {
-		t, err := c.resolve(ctx, p, now)
+		t, err := c.resolve(ctx, p)
 		if err != nil {
-			return nil, fmt.Errorf("taskmill: enqueue task %d of %d: %w", i+1, len(params), err)
+			if len(params) > 1 {
+				err = fmt.Errorf("%w (task %d of %d)", err, i+1, len(params))
+			}
+			return nil, err
 		}
 		if t.dedupeKey != nil {
-			if first, ok := firstOf[string(t.dedupeKey)]; ok {
-				sent[i] = -1 - first
+			if row, ok := rowOf[string(t.dedupeKey)]; ok {
+				pos[i], repeat[i] = row, true
 				continue
 			}
-			firstOf[string(t.dedupeKey)] = i
+			rowOf[string(t.dedupeKey)] = len(b.queues)
 		}
-		sent[i] = len(b.queues)
-		b.add(t)
+		pos[i] = len(b.queues)
+		b.add(t, now)
 	}
 
 	results, err := c.runEnqueue(ctx, q, &b)
@@ -178,13 +182,9 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 	}
 
 	out := make([]EnqueueResult, len(params))
-	for i, pos := range sent {
-		if pos >= 0 {
-			out[i] = results[pos]
-			continue
-		}
-		first := out[-1-pos]
-		out[i] = EnqueueResult{ID: first.ID, Duplicate: true}
+	for i := range params {
+		out[i] = results[pos[i]]
+		out[i].Duplicate = out[i].Duplicate || repeat[i]
 	}
 	return out, nil
 }
@@ -202,7 +202,7 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		stmt = c.sql.enqueuePlain
 	}
 	r, err := q.query(ctx, stmt,
-		b.queues, b.kinds, b.priorities, b.runAts, b.deadlines, b.maxAttempts, nullable(b.groups),
+		b.queues, b.kinds, b.priorities, b.runAts, b.maxAttempts, nullable(b.groups),
 		b.dedupeKeys, b.dedupeWindows, b.payloads, b.metadata, c.schema, notify)
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: enqueue: %w", err)
@@ -268,7 +268,7 @@ type resolvedTask struct {
 	queue, kind, group string
 	priority           Priority
 	maxAttempts        int
-	runAt, deadline    time.Time
+	runAt              time.Time
 	dedupeKey          []byte
 	dedupeWindow       time.Duration
 	payload, metadata  []byte
@@ -276,7 +276,7 @@ type resolvedTask struct {
 
 // resolve merges a task's options over its kind's defaults and taskmill's,
 // and validates the result.
-func (c *Client) resolve(ctx context.Context, p EnqueueParams, now time.Time) (*resolvedTask, error) {
+func (c *Client) resolve(ctx context.Context, p EnqueueParams) (*resolvedTask, error) {
 	if p.Args == nil {
 		return nil, invalidArgument("args is nil")
 	}
@@ -300,7 +300,6 @@ func (c *Client) resolve(ctx context.Context, p EnqueueParams, now time.Time) (*
 		priority:     o.Priority,
 		maxAttempts:  o.MaxAttempts,
 		runAt:        o.RunAt,
-		deadline:     o.Deadline,
 		dedupeWindow: o.DedupeWindow,
 	}
 	if t.queue == "" {
@@ -316,7 +315,7 @@ func (c *Client) resolve(ctx context.Context, p EnqueueParams, now time.Time) (*
 		t.dedupeWindow = defaultDedupeWindow
 	}
 
-	if err := t.validate(now); err != nil {
+	if err := t.validate(); err != nil {
 		return nil, err
 	}
 
@@ -325,19 +324,9 @@ func (c *Client) resolve(ctx context.Context, p EnqueueParams, now time.Time) (*
 		t.dedupeKey = sum[:]
 	}
 
-	payload, err := json.Marshal(p.Args)
+	payload, err := encodePayload(kind, p.Args)
 	if err != nil {
-		return nil, invalidArgument("encode payload of kind %q: %v", kind, err)
-	}
-	if bytes.Equal(payload, []byte("null")) {
-		return nil, invalidArgument("payload of kind %q encodes to null", kind)
-	}
-	if len(payload) > c.maxPayloadBytes {
-		return nil, invalidArgument("payload of kind %q is %d bytes, more than the limit of %d",
-			kind, len(payload), c.maxPayloadBytes)
-	}
-	if hasNUL(payload) {
-		return nil, invalidArgument("payload of kind %q contains a NUL character", kind)
+		return nil, err
 	}
 	t.payload = payload
 
@@ -358,6 +347,24 @@ func (c *Client) resolve(ctx context.Context, p EnqueueParams, now time.Time) (*
 		return nil, invalidArgument("metadata contains a NUL character")
 	}
 	return t, nil
+}
+
+// encodePayload encodes args as JSON, and checks that jsonb can store it
+// within the payload limit.
+func encodePayload(kind string, args Args) ([]byte, error) {
+	payload, err := json.Marshal(args)
+	switch {
+	case err != nil:
+		return nil, invalidArgument("encode payload of kind %q: %v", kind, err)
+	case bytes.Equal(payload, []byte("null")):
+		return nil, invalidArgument("payload of kind %q encodes to null", kind)
+	case len(payload) > maxPayloadBytes:
+		return nil, invalidArgument("payload of kind %q is %d bytes, more than the limit of %d",
+			kind, len(payload), maxPayloadBytes)
+	case hasNUL(payload):
+		return nil, invalidArgument("payload of kind %q contains a NUL character", kind)
+	}
+	return payload, nil
 }
 
 // hasNUL reports whether JSON text encodes a NUL character, which jsonb
@@ -381,7 +388,7 @@ func hasNUL(text []byte) bool {
 	}
 }
 
-func (t *resolvedTask) validate(now time.Time) error {
+func (t *resolvedTask) validate() error {
 	if err := checkName("queue", t.queue, maxNameLength); err != nil {
 		return err
 	}
@@ -399,33 +406,24 @@ func (t *resolvedTask) validate(now time.Time) error {
 	if t.dedupeWindow < 0 {
 		return invalidArgument("dedupe window must not be negative")
 	}
-	if !t.deadline.IsZero() {
-		start := t.runAt
-		if start.IsZero() {
-			start = now
-		}
-		if !t.deadline.After(start) {
-			return invalidArgument("deadline %s is not after the run time %s",
-				t.deadline.Format(time.RFC3339), start.Format(time.RFC3339))
-		}
-	}
 	return nil
 }
 
-func (b *enqueueBatch) add(t *resolvedTask) {
+// add appends t to the batch. now is the batch's time, which decides whether
+// t is due at once.
+func (b *enqueueBatch) add(t *resolvedTask, now time.Time) {
 	b.queues = append(b.queues, t.queue)
 	b.kinds = append(b.kinds, t.kind)
 	b.groups = append(b.groups, t.group)
 	b.priorities = append(b.priorities, int16(t.priority))
 	b.maxAttempts = append(b.maxAttempts, int16(t.maxAttempts)) //nolint:gosec // validated to at most maxAttemptsLimit
 	b.runAts = append(b.runAts, timePtr(t.runAt))
-	b.deadlines = append(b.deadlines, timePtr(t.deadline))
 	b.dedupeKeys = append(b.dedupeKeys, t.dedupeKey)
 	b.dedupeWindows = append(b.dedupeWindows, t.dedupeWindow.Microseconds())
 	b.payloads = append(b.payloads, string(t.payload))
 	b.metadata = append(b.metadata, string(t.metadata))
 	b.plain = b.plain && t.dedupeKey == nil && t.group == ""
-	if t.runAt.IsZero() || !t.runAt.After(time.Now()) {
+	if !t.runAt.After(now) {
 		b.due[t.queue] = true
 	}
 }
@@ -440,9 +438,6 @@ func mergeOptions(base, override EnqueueOptions) EnqueueOptions {
 	}
 	if !override.RunAt.IsZero() {
 		base.RunAt = override.RunAt
-	}
-	if !override.Deadline.IsZero() {
-		base.Deadline = override.Deadline
 	}
 	if override.MaxAttempts != 0 {
 		base.MaxAttempts = override.MaxAttempts

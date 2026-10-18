@@ -1,9 +1,10 @@
 # Guide
 
-This guide covers everything taskmill does, with examples. For the reasoning
-behind the design, see [docs/design](design); for the API in full, see
-[pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill).
+This guide shows how to use every part of taskmill. For the full API, see
+[pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill). For the
+promises taskmill makes, see the [task lifecycle](design/task-lifecycle.md).
 
+- [Concepts](#concepts)
 - [Setting up](#setting-up)
 - [Defining tasks](#defining-tasks)
 - [Enqueueing](#enqueueing)
@@ -16,13 +17,43 @@ behind the design, see [docs/design](design); for the API in full, see
 - [Observability](#observability)
 - [Testing your code](#testing-your-code)
 - [Running in production](#running-in-production)
-- [Architectures](#architectures)
+- [Upgrading](#upgrading)
+- [Defaults and limits](#defaults-and-limits)
+
+## Concepts
+
+| Term | Meaning |
+|---|---|
+| Task | One unit of work: a kind, a payload, and options such as a queue. |
+| Kind | The name that selects a task's handler, such as `email.send_receipt`. |
+| Payload | A task's data, stored as JSON. In Go, it is the task's `Args` value. |
+| Queue | A named list of tasks. Each worker chooses the queues it serves. |
+| Attempt | One run of a task's handler. Each task has a maximum number of attempts. |
+| Lease | An attempt's time-limited ownership of its task. Only the attempt that holds the lease can record a result. |
+| Heartbeat | The worker's renewal of its leases, every third of `LeaseDuration`. |
+| Backoff | The wait before a failed task is retried. |
+| Snooze | Run a task again later, without using an attempt. |
+| Release | Give a running task back to its queue at shutdown, without using an attempt. |
+| Dead | Will not run again unless an operator retries it. Dead tasks are kept for inspection: they are the dead-letter queue. |
+| Finished | Completed, dead, or canceled. All other states are unfinished. |
+| FIFO group | The tasks of one queue that share a `GroupKey`. They run one at a time, in enqueue order. |
+| Head | A group's oldest unfinished task: the only one of the group that can run. |
+| Halt | A group stops behind its dead head until an operator retries or deletes it. |
+| Slot | One of a worker's `Concurrency` places for a queue. An attempt, or a whole batch, takes one slot. |
+| Dedupe key | A key that admits at most one task per queue and kind within a time window. |
+| Maintainer | The one elected worker that does the upkeep of its installation, such as rescuing expired leases and running schedules. |
+| Installation | One taskmill schema, with the clients and workers that use it. Installations never see each other's tasks. |
+
+A task is always in one of eight states: `scheduled`, `pending`, `available`,
+`running`, `retryable`, `completed`, `dead`, or `canceled`. The
+[task lifecycle](design/task-lifecycle.md#states) defines each state, every
+transition between them, and the guarantees taskmill makes.
 
 ## Setting up
 
 taskmill keeps its tables in one PostgreSQL schema, `taskmill` by default.
-Create or upgrade it with `Migrate`, which is safe to call from every process
-at startup: one applies the migrations while the others wait.
+`Migrate` creates or upgrades it. It is safe to call from every process at
+startup: one process applies the migrations while the others wait.
 
 ```go
 pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
@@ -33,24 +64,26 @@ if err := taskmill.Migrate(ctx, pool, nil); err != nil {
 client, err := taskmill.NewClient(ctx, pool, nil)
 ```
 
-`NewClient` refuses a schema that is missing or older than the code
-(`ErrSchemaOutdated`), so a deploy that forgot to migrate fails fast.
+`NewClient` fails fast if the schema is missing or older than the code
+(`ErrSchemaOutdated`). It also fails if the pool does not use the READ
+COMMITTED isolation level (see [Running in production](#running-in-production)).
 
-Teams that apply migrations with their own tool, such as goose, Atlas, or
-Flyway, take the SQL from `taskmill.Migrations(schema)` instead. Apply them in
-order. The first one, version 0, creates the schema and its `migrations`
-table; record the version and name of every later one in that table.
+**Your own migration tool.** Teams that use goose, Atlas, or Flyway take the
+SQL from `taskmill.Migrations(schema)` instead. Apply the migrations in order.
+The first one, version 0, creates the schema and its `migrations` table.
+Record the version and name of every later one in that table.
 
 **Several installations can share a database.** Set `Schema` in
-`ClientConfig` and `MigrateConfig`, for example one schema per service or per
-module. A worker uses its client's schema. Installations are fully
-independent.
+`ClientConfig` and `MigrateConfig`, for example one schema per service or
+per module. A worker uses its client's schema. A service that only enqueues
+tasks for another service creates a `Client` for that service's schema and
+registers no handlers.
 
 ## Defining tasks
 
 A task's payload is a struct that implements `Args`. Its kind names the
-handler, and it is the contract between the code that enqueues and the code
-that handles:
+handler. The kind is the contract between the code that enqueues and the
+code that handles:
 
 ```go
 type SendReceipt struct {
@@ -61,17 +94,19 @@ type SendReceipt struct {
 func (SendReceipt) Kind() string { return "email.send_receipt" }
 ```
 
-- Implement `Kind` on a value receiver and return a constant. Renaming a kind
-  orphans the tasks already enqueued under the old name.
+- Implement `Kind` on a value receiver and return a constant. If you rename
+  a kind, tasks already enqueued under the old name find no handler, and
+  become dead after 1 hour (see [Running in production](#running-in-production)).
 - Namespace kinds by module, such as `billing.invoice.send`.
 - Payloads are stored as JSON and decoded straight into the handler's type,
   so large integers stay exact. Keep payloads small: identifiers, not whole
-  records. The default limit is 1 MiB (`ClientConfig.MaxPayloadBytes`).
+  records. The limit is 1 MiB of JSON.
+- Change payloads only in compatible ways, such as adding fields. A payload
+  that does not decode makes the task dead at once, with the code
+  `invalid_payload`.
 - PostgreSQL cannot store the NUL character (`\u0000`) in text or JSON. A
   payload, metadata, queue name, kind, or group key that holds one fails
   with `ErrInvalidArgument`.
-- Add fields compatibly: tasks enqueued by an older version must still decode
-  in the new one.
 
 A kind can set its own defaults by implementing `ArgsWithDefaults`:
 
@@ -95,10 +130,9 @@ taskmill's. Every zero value means "not set":
 | `Queue` | The queue to enqueue into | `"default"` |
 | `Priority` | `PriorityLow`, `PriorityNormal`, `PriorityHigh`, or `PriorityCritical` | `PriorityNormal` |
 | `RunAt` | The earliest start | Now |
-| `Deadline` | The latest start; afterwards the task becomes dead without running | None |
-| `MaxAttempts` | How many times the task may run | 10 |
+| `MaxAttempts` | How many times the task may run, from 1 to 10,000 | 25 |
 | `GroupKey` | A FIFO group within the queue | None |
-| `DedupeKey` | Makes the enqueue idempotent within a window | None |
+| `DedupeKey` | Admits at most one task with this key within a window | None |
 | `DedupeWindow` | How long the dedupe key blocks duplicates | 24 hours |
 | `Metadata` | String tags passed to the handler | None |
 
@@ -124,19 +158,19 @@ _, err = client.EnqueueTx(ctx, taskmill.SQL(tx), SendReceipt{OrderID: order.ID},
 _, err = client.EnqueueTx(ctx, taskmill.SQL(bunTx.Tx), SendReceipt{OrderID: order.ID}, nil)
 ```
 
+`database/sql` code must use pgx's driver; lib/pq is not supported.
 `EnqueueTx` and `EnqueueManyTx` accept a transaction, a connection, or a
-pool. `CancelTx`, `RetryTx`, `DeleteTx`, and `Task.CompleteTx` run several
-statements that must commit together, so they need a transaction: a
-`pgx.Tx`, a `*sql.Tx`, or a type with `Commit() error` and `Rollback() error`,
-such as sqlx's `*sqlx.Tx`. They return `ErrInvalidArgument` for anything
-else. bun is the exception: pass its underlying `Tx`, as above.
+pool. `CancelTx` and `Task.CompleteTx` need a transaction, because they run
+several statements that must commit together. Pass a `pgx.Tx`, a `*sql.Tx`,
+or a type with `Commit` and `Rollback` methods, such as `*sqlx.Tx`; anything
+else returns `ErrInvalidArgument`.
 
 ### In batches
 
 `EnqueueMany` and `EnqueueManyTx` send any number of tasks in one round trip,
-and return results in the same order. In the benchmarks, batches of 100
-enqueue about 20 times more tasks per second than single enqueues, with half
-as many producers.
+and return results in the same order. In the
+[benchmarks](benchmarks.md), batches of 100 enqueue more than 20 times more
+tasks per second than single enqueues.
 
 ```go
 params := make([]taskmill.EnqueueParams, len(users))
@@ -176,16 +210,30 @@ task's ID, attempt number, metadata, and the errors of earlier attempts.
 | Too slow | Its context is canceled at the timeout, and the attempt fails | Yes |
 
 Return `Permanent` when retrying cannot help, such as for a payload that
-fails validation. Return `Snooze` when the task cannot proceed yet, such as
-while waiting for a rate limit.
+fails validation. `Permanent(nil)` returns nil, so
+`return taskmill.Permanent(validate(t.Args))` is safe. Return `Snooze` when
+the task cannot proceed yet, such as while waiting for a rate limit. A snooze
+of zero or less makes the task available at once. Snoozes use no attempts, so
+a task that always snoozes never becomes dead.
 
 **Retries** wait 1 second, then double up to 1 hour, with ±10% random jitter
-so that failed tasks do not retry in waves. Set `HandlerOptions.Retry` or
-`WorkerConfig.DefaultRetry` to change that; `ExponentialBackoff` is the
-built-in policy.
+so that failed tasks do not retry in waves. With the default 25 attempts, a
+failing task keeps retrying for about 13 hours before it becomes dead. A
+retry starts within about a second of its time, so shorter delays round up to
+about a second.
 
-**Handlers must be idempotent.** taskmill runs every task at least once, and
-a task can run twice: for example, when a worker crashes after the work was
+**Options per kind**, in `HandlerOptions`:
+
+| Option | Meaning | Default |
+|---|---|---|
+| `Timeout` | Bound on each attempt, or each batch | 1 minute |
+| `Retry` | A `RetryPolicy` that returns the delay before each retry | `ExponentialBackoff{}` |
+| `BatchSize` | Most tasks per call of a batch handler, up to 1,000 | 100 |
+| `DiscardCompleted` | Delete completed tasks at once, instead of keeping them in history | `false` |
+
+**Handlers must be idempotent:** running a task twice must have the same
+effect as running it once. taskmill runs every task at least once, and a
+task can run twice: for example, when a worker crashes after the work was
 done but before the result was recorded. Pass the task ID to external
 services as an idempotency key, or use transactional completion.
 
@@ -197,7 +245,7 @@ promptly.
 
 A handler whose effects live in the same database can complete its task in
 its own transaction. The effects and the completion then commit together, so
-they happen exactly once even if the task runs again:
+they happen exactly once, even if the task runs again:
 
 ```go
 func (a *PaymentApplier) Handle(ctx context.Context, t *taskmill.Task[ApplyPayment]) error {
@@ -206,16 +254,16 @@ func (a *PaymentApplier) Handle(ctx context.Context, t *taskmill.Task[ApplyPayme
             t.Args.Cents, t.Args.AccountID); err != nil {
             return err
         }
-        return t.CompleteTx(ctx, taskmill.Pgx(tx)) // ErrLeaseLost rolls the update back
+        return t.CompleteTx(ctx, taskmill.Pgx(tx)) // an error rolls the update back
     })
 }
 ```
 
-`CompleteTx` fails with `ErrLeaseLost` if another attempt took the task over,
-which rolls back the handler's writes. If the transaction rolls back for
-another reason, return the error: the attempt then fails as usual. Once
-`CompleteTx` succeeds, the worker never cancels the attempt as lost, even
-while your transaction is still open.
+`CompleteTx` returns `ErrLeaseLost` if another attempt took the task over.
+Return that error, so that your transaction rolls back. If the transaction
+fails for another reason, return the error: the attempt then fails as usual.
+Once `CompleteTx` succeeds, the worker never cancels the attempt as lost,
+even while your transaction is still open.
 
 ### Batch handlers
 
@@ -230,82 +278,66 @@ func (p *Publisher) HandleBatch(ctx context.Context, tasks []*taskmill.Task[Even
 taskmill.AddBatchHandler[Event](&handlers, p, &taskmill.HandlerOptions{BatchSize: 200})
 ```
 
-A worker fetches one task per free slot. Then it fills each batch kind's
-batch with more tasks of that kind, taken from the first 1,000 available
-tasks of the queue. A batch uses one slot, so every fetched task starts at
-once, and a batch kind can share a queue with other kinds. A queue of its own
-is still a good choice when the batch kind should not compete with other work
-for slots.
+A batch uses one slot. Batch kinds can share a queue; give one its own queue
+if it should not compete with other work for slots.
+
+Canceling a task of a batch, or losing its lease, does not cancel the
+batch's context. The batch runs to the end; then that task becomes canceled,
+or its result is discarded.
 
 ## Running workers
 
 ```go
 worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
     Handlers: &handlers,
-    Queues: map[string]taskmill.QueueOptions{
-        "default": {Concurrency: 20},
-        "emails":  {Concurrency: 5},
-    },
+    Queues:   map[string]taskmill.QueueOptions{"emails": {Concurrency: 5}}, // optional
 })
 // ...
 err = worker.Run(ctx)
 ```
 
-`Run` blocks until its context is canceled. A worker fetches from each queue
-up to its free capacity, in priority, run time, and enqueue order. It wakes
-on notifications as soon as tasks are enqueued, and polls every second as a
-fallback. A notification wakes every worker of the queue; a worker that then
-finds nothing waits 20 ms before it acts on the next one, so that many workers
-on one queue do not all fetch for every task. A worker records successful
-attempts in batches, gathered over 2 ms.
+Without `Queues`, a worker serves the default queue of each kind it handles:
+the queue from the kind's `EnqueueDefaults`, or else `"default"`, with 10
+slots each. If `Queues` leaves out a handled kind's default queue, `Run`
+logs a warning when it starts. A worker with no handlers and no queues only
+takes part in maintenance.
 
-**Shutting down.** When the context is canceled, `Run` stops fetching, waits
-up to `DrainTimeout` (30 seconds) for running tasks, cancels the contexts of
-those still running, and puts their tasks back in the queue without using an
-attempt. Tie the context to `SIGTERM`:
+`Run` blocks until its context is canceled. It returns an error only if the
+worker cannot start. A worker fetches from each queue up to its free slots,
+in priority, run time, and enqueue order. PostgreSQL notifications wake it as
+soon as tasks are enqueued, and it polls every second as a fallback.
 
-```go
-ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-defer stop()
-err := worker.Run(ctx)
-```
+**Shutting down.** When the context is canceled, `Run` stops fetching and
+waits up to `DrainTimeout` (20 seconds) for running tasks. Then it cancels
+the contexts of the tasks still running, gives their handlers 5 seconds to
+return, and releases them. Tie the context to `SIGTERM` with
+`signal.NotifyContext`, as the [README](../README.md#quick-start) does.
 
-Give the process's termination grace period, such as Kubernetes'
-`terminationGracePeriodSeconds`, at least `DrainTimeout` plus a few seconds.
-
-**Leases.** A fetched task belongs to its worker for `LeaseDuration`
-(30 seconds), renewed by heartbeats every third of that. If a worker crashes,
+**Leases.** A fetched task belongs to its attempt for `LeaseDuration`
+(30 seconds), and heartbeats renew it every 10 seconds. If a worker crashes,
 its tasks run again once their leases expire. A worker cut off from the
-database cancels its running attempts when it cannot renew their leases, and
-their late results are rejected.
+database cancels its attempts when it cannot renew their leases, and their
+late results are rejected. A worker retries recording a result until the
+lease would expire, so a short database outage or failover does not make
+finished tasks run again.
 
-**The maintainer.** One worker per installation is elected to maintain it:
-it makes due tasks available, rescues tasks whose leases expired, expires
-deadlines, runs schedules, refreshes statistics, and applies retention. Every
-worker takes part in the election unless `NoMaintainer` is set; if the
-maintainer dies, another takes over within seconds. A worker with no queues
-only maintains.
+**The maintainer.** One worker per installation is elected to do its upkeep:
+it makes due tasks available, rescues tasks whose leases expired, runs
+schedules, refreshes statistics, and deletes old tasks. Every worker takes
+part in the election unless `NoMaintainer` is set; at least one must take
+part. If the maintainer stops, another worker takes over within about
+12 seconds. `WorkerInfo.Maintainer` shows which worker leads.
 
-The maintainer rescues expired leases, expires deadlines, and runs schedules
-every second. It makes due tasks available as they come due, up to 20 times
-a second. Statistics (every 10 seconds) and retention (every minute) run on
-their own, so a slow retention step never delays the rest.
-
-**Rolling deploys.** A worker that fetches a task whose kind it has no
-handler for, such as a kind that only the new version knows, snoozes the
-task without using an attempt, for up to `UnknownKindTimeout` (1 hour). The
-time counts from the first time a worker met the task without a handler;
-that first snooze records a note with the code `no_handler`, and a task that
-waits too long becomes dead with the code `unknown_kind`. Deploy
-consumers before producers, and avoid renaming kinds.
-
-**Concurrency.** `QueueOptions.Concurrency` limits one process. To limit a
-queue across all workers, for example to protect a rate-limited API, set a
-cluster-wide limit:
+**Installation-wide concurrency limits.** `QueueOptions.Concurrency` limits
+one process. To limit a queue across all workers, for example to protect a
+rate-limited API, set `MaxRunning`:
 
 ```go
-client.UpdateQueue(ctx, "partner-api", &taskmill.QueueSettings{MaxRunning: 4})
+err := client.UpdateQueue(ctx, "partner-api", &taskmill.QueueSettings{MaxRunning: 4})
 ```
+
+`UpdateQueue` replaces the queue's settings: a zero `MaxRunning`, or nil
+settings, removes the limit. Workers apply the change within 10 seconds.
 
 ## Ordering and deduplication
 
@@ -314,25 +346,28 @@ priority, run time, and enqueue order, but run concurrently, so they may
 finish in any order.
 
 **FIFO groups.** Tasks with the same `GroupKey` in a queue run one at a time,
-in enqueue order. A failed head is retried before anything behind it runs.
-Groups are created on the fly; millions of keys cost nothing extra.
+in enqueue order. Only the group's head, its oldest unfinished task, can run.
+A failed head is retried before anything behind it runs.
 
 ```go
-client.Enqueue(ctx, PostLedgerEntry{...}, &taskmill.EnqueueOptions{GroupKey: "account-7"})
+_, err := client.Enqueue(ctx, PostLedgerEntry{...}, &taskmill.EnqueueOptions{GroupKey: "account-7"})
 ```
 
-When a group's head becomes dead, the group moves on to its next task by
-default. For streams where skipping a task would corrupt data, make the
-queue halt such groups until an operator retries or deletes the dead task:
+- Groups need no setup, and millions of keys work well. Each group with
+  unfinished tasks keeps one small row, and a grouped task costs one or two
+  extra row writes.
+- If the head becomes dead, the group halts: nothing behind it runs until an
+  operator retries or deletes the dead task. Skipping it would break the
+  order you asked for. A canceled head does not halt its group.
+- Producers that enqueue into the same group wait for each other's
+  transactions, so keep those transactions short.
+- `ListParams.GroupKey` lists the tasks of one group, and the web interface
+  links each task to its group.
 
-```go
-client.UpdateQueue(ctx, "ledger", &taskmill.QueueSettings{HaltGroupOnDead: true})
-```
-
-**Deduplication.** A `DedupeKey` makes an enqueue idempotent: while its
-window lasts, enqueueing the same kind with the same key in the same queue
-creates no new task. The result reports the existing task instead of an
-error, even when producers race:
+**Deduplication.** A `DedupeKey` admits at most one task: while its window
+lasts, enqueueing the same kind with the same key in the same queue creates
+no new task. The result reports the existing task instead of an error, even
+when producers race:
 
 ```go
 res, err := client.Enqueue(ctx, ChargeInvoice{ID: 7}, &taskmill.EnqueueOptions{
@@ -344,10 +379,14 @@ if res.Duplicate {
 }
 ```
 
+`Cancel` and `Delete` release the task's key, so the same key can be
+enqueued again at once. A dead task keeps its key until the window ends.
+
 ## Schedules
 
-Recurring tasks are defined on the workers, with standard five-field cron
-expressions or macros such as `@daily`:
+Recurring tasks are defined on the workers, with five-field cron expressions
+or the macros `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`,
+`@midnight`, and `@hourly`. `@every` is not supported.
 
 ```go
 worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
@@ -359,29 +398,32 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 })
 ```
 
-- Each scheduled time is enqueued at most once across all workers, even if
-  two maintainers briefly overlap.
-- Define the same schedules on every worker that can become the maintainer.
+- Each scheduled time is enqueued at most once across all workers. Define
+  the same schedules on every worker that can become the maintainer.
+- A scheduled task's `RunAt` is the time it was scheduled for, so its
+  handler knows which period it runs for.
 - Runs missed while no maintainer runs, or while a schedule is paused,
   collapse into one run.
-- A schedule sets its task's run time and dedupe key itself. `NewWorker`
-  rejects a schedule whose expression never matches, whose options set a
-  `Deadline`, or whose queue, group key, or priority is invalid.
-- Expressions are read on the wall clock of `Location` (UTC by default): a
-  time skipped when clocks go forward runs right after the jump, and a time
+- `NewWorker` rejects a schedule whose expression never matches, or whose
+  task options are invalid.
+- Expressions are read on the wall clock of `Location` (UTC by default). A
+  time skipped when clocks go forward runs right after the jump. A time
   repeated when clocks go back runs once.
+- A maintainer that defines schedules deletes a stored schedule that it does
+  not define and that did not run or change for 24 hours, such as one
+  removed from the code.
 
 `Client.Schedules`, `PauseSchedule`, and `ResumeSchedule` list and control
-them.
+schedules.
 
 ## The outbox and the inbox
 
 **The outbox** publishes messages to a broker with the same guarantee as the
-data that produced them. Create one `Outbox` and share it, then store
-messages in the business transaction:
+data that produced them. Create one `Outbox`, share it, and store messages in
+the business transaction:
 
 ```go
-ob := outbox.New(client, nil) // nil: the default options and the "outbox" queue
+ob := outbox.New(client)
 
 err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
     if err := markPaid(ctx, tx, orderID); err != nil {
@@ -398,10 +440,6 @@ err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 Relay them with a worker and a `Publisher` that wraps your broker client:
 
 ```go
-if err := ob.Setup(ctx); err != nil { // once per deploy: halt keys whose message fails for good
-    return err
-}
-
 var handlers taskmill.Handlers
 ob.AddRelay(&handlers, outbox.PublisherFunc(func(ctx context.Context, ds []outbox.Delivery) []error {
     errs := make([]error, len(ds))
@@ -410,32 +448,28 @@ ob.AddRelay(&handlers, outbox.PublisherFunc(func(ctx context.Context, ds []outbo
     }
     return errs
 }))
-worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
-    Handlers: &handlers,
-    Queues:   map[string]taskmill.QueueOptions{ob.Queue(): {Concurrency: 4}},
-})
+worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers}) // serves outbox.Queue
 ```
 
-Messages with the same topic and key are published one at a time, in the
-order they were stored, and a batch never holds two of them. Delivery is at
-least once: each `Delivery.ID` is a UUIDv7 that stays the same across
-retries, so consumers can deduplicate by it.
-
-- `Message.Key` is `[]byte` and `Message.Headers` is `map[string][]byte`, so
-  binary keys and header values are safe.
-- A message is tried up to 10,000 times: quickly at first, then every 5
-  minutes. That is about a month, so a broker outage of up to a month
-  loses nothing.
-- `Setup` keeps a `MaxRunning` limit that an operator set on the queue. Every
-  service that stores or relays the messages of one outbox must use the same
-  `outbox.Options`.
-- A nil `Publisher` is reported by `NewWorker`.
+- Messages with the same topic and key are published one at a time, in the
+  order they were stored; messages without a key, in any order. A batch
+  holds up to 100 deliveries, never two with the same topic and key.
+- Delivery is at least once. Each `Delivery.ID` is a UUIDv7 that stays the
+  same across retries, so consumers can deduplicate by it.
+- Keys and header values are `[]byte`, so binary data is safe. `Value` is
+  stored base64-encoded, so the 1 MiB payload limit allows about 750 KiB.
+- Each `Publish` call has 1 minute; then its context is canceled.
+  Deliveries without a nil result are retried quickly at first, then every
+  5 minutes, up to 10,000 times: about a month. Return
+  `taskmill.Permanent(err)` for a delivery that can never succeed. A message
+  that becomes dead halts its key until an operator retries or deletes it.
+- `Store` rejects a message without a topic with an error that wraps
+  `taskmill.ErrInvalidArgument`. Published messages are not kept in history.
 
 **The inbox** needs no package. A consumer enqueues one task per received
 message, with the message ID as the dedupe key, and commits its broker offset
-afterwards. This creates at most one task per message within the dedupe
-window: a redelivered message becomes a duplicate result instead of a second
-task:
+afterwards. A redelivered message then becomes a duplicate result instead of
+a second task:
 
 ```go
 _, err := client.Enqueue(ctx, HandleOrderEvent{...}, &taskmill.EnqueueOptions{
@@ -447,68 +481,71 @@ _, err := client.Enqueue(ctx, HandleOrderEvent{...}, &taskmill.EnqueueOptions{
 ## Operating taskmill
 
 **The web interface** shows queues with their statistics, workers,
-schedules, and tasks with their payloads and error histories, and can pause,
+schedules, and tasks with their payloads and error histories. It can pause,
 resume, retry, cancel, and delete. Mount it behind your own authentication:
 
 ```go
 mux.Handle("/taskmill/", requireAdmin(ui.Handler(client, &ui.Config{Prefix: "/taskmill"})))
 ```
 
+The handler strips `Prefix` itself; do not wrap it in `http.StripPrefix`.
 `ui.Config.ReadOnly` disables every action. Forms are protected against
-cross-site request forgery.
+cross-site request forgery, and every action is logged to `ui.Config.Logger`.
 
-**The client** offers the same operations to your own code and tools:
+**The operations API**, the `Client` methods below, offers the same to your
+own code and tools:
 
 | Method | Does |
 |---|---|
-| `Get` | Returns a task, live or from history |
-| `List` | Pages through tasks by queue, state, and kind, newest first; each page's query stops after 5 seconds |
+| `Get` | Returns a task, unfinished, finished, or from history |
+| `List` | Pages through tasks by queue, state, kind, and FIFO group, newest first |
 | `Cancel`, `CancelTx` | Cancels a waiting task, or asks a running task's worker to stop it |
-| `Retry`, `RetryTx` | Runs a dead or canceled task again with fresh attempts |
-| `Delete`, `DeleteTx` | Deletes a task that is not running |
+| `Retry` | Runs a dead or canceled task again, with fresh attempts |
+| `Delete` | Deletes a task that is not running |
 | `Queues` | Every queue with its settings, workers, and task counts per state |
-| `UpdateQueue`, `PauseQueue`, `ResumeQueue` | Changes a queue's cluster-wide settings |
-| `Schedules`, `PauseSchedule`, `ResumeSchedule` | Lists and controls schedules |
-| `Settings`, `UpdateSettings` | Retention of history and of dead and canceled tasks |
-| `Workers` | The registered worker processes |
+| `UpdateQueue`, `PauseQueue`, `ResumeQueue` | Change a queue's installation-wide settings |
+| `Schedules`, `PauseSchedule`, `ResumeSchedule` | List and control schedules |
+| `Settings`, `UpdateSettings` | Retention of history, and of dead and canceled tasks |
+| `Workers` | The running workers, and which one is the maintainer |
 
-The `...Tx` methods run in your own transaction, so the change commits or
-rolls back with your writes. A task or schedule that does not exist returns
-`ErrNotFound`. An action that does not fit the task's state returns
-`ErrInvalidState`: for example, canceling or retrying a completed task.
+A task or schedule that does not exist returns `ErrNotFound`. An action that
+does not fit the task's state returns `ErrInvalidState`: for example,
+canceling or retrying a completed task. Each `List` page's query stops after
+5 seconds. On a very large installation, a filter that matches few tasks can
+reach that bound and return an error.
 
 A running task's cancellation takes effect when its attempt ends, however it
 ends: a failure, a snooze, or a release at shutdown. If the handler completes
 the task before it notices the cancellation, the task stays completed.
 
-**Running one task now.** `Worker.RunTask` runs one task at once, in the
-calling goroutine: it leases the task, runs the middleware and the handler
-with heartbeats, and records the outcome. It ignores the task's run time,
-queue pauses, and concurrency limits, but not FIFO order or deadlines. It
-needs no running worker:
+**Error history.** `TaskInfo.Errors` keeps a task's 20 most recent errors.
+`AttemptError.Code` is empty for an error that a handler returned. For
+failures that taskmill detects itself, it is `CodeLeaseExpired`, `CodeTimeout`,
+`CodePanic`, `CodeInvalidPayload`, or `CodeUnknownKind`. `CodeNoHandler`
+marks a note, not a failure.
 
-```go
-info, err := worker.RunTask(ctx, id) // info is the task afterwards
-```
+**Running one task now.** `Worker.RunTask(ctx, id)` runs one task at once,
+in the calling goroutine, and returns the task afterwards. It ignores the
+task's run time, queue pauses, and concurrency limits, but not FIFO order. It
+needs no running worker.
 
 **Retention.** Completed tasks move to a history table and stay there for
-7 days; dead and canceled tasks stay for 30 days. Both are installation-wide
-settings. A dead task that halts its FIFO group is kept until an operator
-retries or deletes it. A queue whose completed tasks are not worth keeping
-can skip history entirely:
+7 days. Dead and canceled tasks stay for 30 days. Both are installation-wide
+settings, of at least 1 hour. A dead task that halts its group is kept until
+an operator retries or deletes it. History grows with your completion rate,
+so for busy kinds whose completed tasks are not worth keeping, skip it:
 
 ```go
-client.UpdateQueue(ctx, "notifications", &taskmill.QueueSettings{DiscardCompleted: true})
+taskmill.AddHandler(&handlers, &CacheWarmer{}, &taskmill.HandlerOptions{DiscardCompleted: true})
 ```
 
 ## Observability
 
-**Logs** go to the `*slog.Logger` in `ClientConfig.Logger` and
-`WorkerConfig.Logger`. By default they are discarded.
+**Logs** go to the `*slog.Logger` in `ClientConfig.Logger`, which workers use
+too. By default they are discarded.
 
-**Middleware** wraps every attempt, including each task of a batch, and sees
-its kind, queue, attempt, metadata, and timestamps. It is the place for
-metrics and tracing:
+**Middleware** wraps every attempt and sees its kind, queue, attempt,
+metadata, and timestamps. It is the place for metrics and tracing:
 
 ```go
 func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
@@ -519,6 +556,10 @@ func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Con
     return err
 }
 ```
+
+Middleware must call `next` at most once. A handler's panic reaches it as an
+error. For a batch handler, middleware runs once per task, but the context it
+passes to `next` does not reach the handler.
 
 **Tracing across the queue.** `ClientConfig.ContextMetadata` turns the
 producer's context into task metadata on every enqueue, and middleware turns
@@ -548,10 +589,9 @@ tracing := func(ctx context.Context, task *taskmill.TaskInfo, next func(context.
 
 **Queue depth** comes from `Client.Queues`, whose counts the maintainer
 refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
-backlog: available, running, pending, dead, and canceled tasks are counted up
-to 10,000 per queue and state, and scheduled and retryable tasks up to
-100,000 across all queues. `QueueInfo.Capped` means a count hit its cap and is
-a lower bound.
+backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
+and retryable tasks across all queues. `QueueInfo.Capped` means a count hit
+its cap and is a lower bound.
 
 ## Testing your code
 
@@ -574,7 +614,7 @@ func TestCheckout(t *testing.T) {
     }
 
     // Enqueue a task and run the handler on it once, the way a worker does.
-    info, err := taskmilltest.Run(t, client, &ReceiptSender{mailer: fakeMailer{}}, tasks[0].Args, nil)
+    info, err := taskmilltest.Run(t, client, &ReceiptSender{mailer: fakeMailer{}}, tasks[0].Args)
     if err != nil || info.State != taskmill.StateCompleted {
         t.Fatalf("got %s, %v", info.State, err)
     }
@@ -582,87 +622,196 @@ func TestCheckout(t *testing.T) {
 ```
 
 - `NewClient` migrates a new schema, so tests can run in parallel.
-- `Enqueued` returns the committed tasks of one kind, with their arguments
+- `Enqueued` returns the committed tasks of one kind, with their payloads
   decoded. Use it to check that the code under test enqueued a task when its
   transaction committed, and no task when it rolled back.
 - `Run` holds a real lease, so the handler may use `CompleteTx`. It does not
-  retry: a failed task stays retryable or dead. `RunOptions` sets the
-  enqueue options and the handler options.
-- `Work` runs a worker until no task of its queues is available or running,
-  for tests that process everything that was enqueued:
+  retry: a failed task stays retryable or dead.
+- `Work` runs a worker until no task in any queue is available or running:
+  `taskmilltest.Work(t, client, &taskmill.WorkerConfig{Handlers: &handlers})`.
 
-  ```go
-  taskmilltest.Work(t, client, &taskmill.WorkerConfig{
-      Handlers: &handlers,
-      Queues:   map[string]taskmill.QueueOptions{"emails": {}},
-  })
-  ```
+**Retries.** To test that a handler succeeds after failing, enqueue the task
+and call `Worker.RunTask` in a loop. `RunTask` runs a retryable task at once,
+without waiting for its backoff:
 
-To run one task that already exists, use `Worker.RunTask` (see
-[Operating taskmill](#operating-taskmill)).
+```go
+// handlers holds a handler whose mailer fails twice, then succeeds.
+worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers})
+// ...
+res, err := client.Enqueue(t.Context(), SendReceipt{OrderID: 42}, nil)
+// ...
+info := &taskmill.TaskInfo{State: taskmill.StateAvailable}
+for i := 0; i < 5 && !info.State.Finished(); i++ {
+    if info, err = worker.RunTask(t.Context(), res.ID); err != nil {
+        t.Fatal(err)
+    }
+}
+if info.State != taskmill.StateCompleted || info.Attempt != 3 {
+    t.Fatalf("got %s after %d attempts", info.State, info.Attempt)
+}
+```
+
+**database/sql.** The helpers take a `*pgxpool.Pool`. Code built on
+`database/sql` can use the same pool, through
+`stdlib.OpenDBFromPool(pool)` from `github.com/jackc/pgx/v5/stdlib`.
+
+**Leftover schemas.** A test binary that is killed cannot drop its schemas.
+When no tests are running, find the leftovers with this query, and drop each
+schema it lists with `DROP SCHEMA ... CASCADE`:
+
+```sql
+SELECT nspname FROM pg_namespace WHERE nspname LIKE 'taskmilltest\_%';
+```
 
 ## Running in production
 
-- **Connections.** Running attempts hold no connection while their handlers
-  run. A worker needs a few connections of its pool, for fetching each queue,
-  heartbeats, recording results, and maintenance, plus one dedicated
-  connection for notifications. Size the pool for that plus whatever your
-  handlers use.
-- **Connection poolers.** Everything works through PgBouncer in transaction
-  mode except notifications, which need a session. pgx caches prepared
-  statements, so use PgBouncer 1.21 or newer with `max_prepared_statements`
-  set, or set pgx's `DefaultQueryExecMode` to `QueryExecModeExec`. Point
-  `WorkerConfig.ListenConfig` at a direct connection, created with
-  `pgx.ParseConfig`; without it, workers fall back to polling. A
-  `ListenConfig` that pgx cannot use is logged, and the worker polls.
+**Database privileges.** The maintainer creates and drops a daily partition
+of the `task_history` table, and that needs table ownership. So the role that
+runs workers must own taskmill's tables, or be a member of the role that owns
+them. This holds also when your own tool applies the migrations. If a
+partition is missing, completions still succeed, but without history, and the
+worker logs an error. `Migrate` needs no CREATE privilege when the schema is
+already up to date.
 
-  ```go
-  cfg, err := pgxpool.ParseConfig(os.Getenv("PGBOUNCER_URL"))
-  // ...
-  cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec // not needed with max_prepared_statements
-  pool, err := pgxpool.NewWithConfig(ctx, cfg)
-  // ...
-  listen, err := pgx.ParseConfig(os.Getenv("DIRECT_DATABASE_URL"))
-  // ...
-  worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
-      // ...
-      ListenConfig: listen,
-  })
+**Isolation level.** taskmill's own transactions rely on READ COMMITTED,
+PostgreSQL's default. If your database or role sets another default,
+`NewClient` fails. Set the level back for taskmill's pool:
+
+```go
+cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
+// ...
+cfg.ConnConfig.RuntimeParams["default_transaction_isolation"] = "read committed"
+pool, err := pgxpool.NewWithConfig(ctx, cfg)
+```
+
+Your own transactions, passed to the `...Tx` methods, may use any level. At
+REPEATABLE READ or SERIALIZABLE, retrying serialization failures is up to
+you.
+
+**Connections.** Running attempts hold no connection of their own. A worker
+uses its pool for fetching, heartbeats, results, and maintenance, plus one
+dedicated connection for notifications. If handlers use the same pool, set
+the pool's `MaxConns` to at least the worker's total concurrency plus 5, or
+give handlers a pool of their own. Otherwise handlers can starve the
+worker's heartbeats, which then lose leases and run tasks twice. The worker
+logs a warning at start when `MaxConns` is lower. pgx's default is the larger
+of 4 and the number of CPUs.
+
+**Connection poolers.** Everything works through PgBouncer in transaction
+mode except notifications, which need a session. pgx caches prepared
+statements, so use PgBouncer 1.21 or newer with `max_prepared_statements`
+set, or set pgx's `DefaultQueryExecMode` to `QueryExecModeExec`. Point
+`WorkerConfig.ListenConfig` at a direct connection, created with
+`pgx.ParseConfig`. Without it, workers fall back to polling.
+
+```go
+cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec // not needed with max_prepared_statements
+listen, err := pgx.ParseConfig(os.Getenv("DIRECT_DATABASE_URL"))
+// ...
+worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers, ListenConfig: listen})
+```
+
+**Old snapshots.** A snapshot is a transaction's view of the data. While an
+old one stays open anywhere in the database, vacuum cannot remove dead rows
+from taskmill's busy `tasks` table. Every fetch then steps over more dead
+index entries, so throughput falls and tasks wait longer. Common sources are
+idle-in-transaction sessions, `pg_dump`, long analytics queries, replicas
+with `hot_standby_feedback`, and stale replication slots.
+
+- Set `idle_in_transaction_session_timeout`, and `statement_timeout` for
+  analytics roles. Run long reports on a replica without
+  `hot_standby_feedback`.
+- Set `autovacuum_naptime` to 10 seconds or less. taskmill's migrations tune
+  autovacuum for the `tasks` table; keep autovacuum on.
+- Alert when one of these ages keeps growing:
+
+  ```sql
+  SELECT max(age(backend_xmin)) FROM pg_stat_activity;    -- open transactions
+  SELECT max(age(xmin)) FROM pg_replication_slots;         -- replication slots
+  SELECT max(age(backend_xmin)) FROM pg_stat_replication;  -- standbys with hot_standby_feedback
   ```
 
-- **Long transactions** anywhere in the database stop vacuum from cleaning up
-  after taskmill's busy tables, and fetching slows down. Set
-  `idle_in_transaction_session_timeout`, and keep an eye on old transactions.
-- **Autovacuum** is tuned for taskmill's hot table by its migrations. Leave it
-  on.
-- **Replication.** With asynchronous replication, a failover can lose the
-  last committed transactions, including enqueued tasks, as it can lose any
-  other row.
-- **Clocks.** taskmill takes most times from the database, but not all. An
-  enqueue checks a deadline against the producer's clock, and workers create
-  the daily history partitions by their own clocks. Keep every server's clock
-  in sync with NTP.
+**Deploys.** Give the process's termination grace period, such as
+Kubernetes' `terminationGracePeriodSeconds`, at least `DrainTimeout` plus
+10 seconds. The defaults fit Kubernetes' 30 seconds. During a rolling deploy,
+a worker may fetch a task whose kind it has no handler for, such as a kind
+that only the new version knows. It snoozes the task for 1 minute at a time,
+without using an attempt, and records a note with the code `no_handler`. If
+no worker runs the task within 1 hour of that note, the task becomes dead
+with the code `unknown_kind`. Deploy consumers before producers, and do not
+rename kinds.
 
-## Architectures
+**What to alert on.**
 
-**Monolith.** One binary enqueues and works. Run workers in the same process,
-or as a separate deployment of the same binary that serves the busy queues.
+- Dead tasks: the `StateDead` counts in `Client.Queues`.
+- No maintainer: no worker in `Client.Workers` has `Maintainer` set.
+  Schedules and retries then stop.
+- Error logs from workers, such as a failed maintenance step or a missing
+  history partition, and warnings about rescued tasks.
+- The snapshot ages above.
 
-**Modular monolith.** Each module registers its handlers on the shared
-`Handlers` and owns its queues and its namespaced kinds, such as
-`billing.invoice.send`. For stronger isolation, give each module its own
-schema: installations do not interact. Each schema then needs its own
-`Client` and its own `Worker`, which means its own `LISTEN` connection and
-its own maintainer.
+**Retrying after an incident.** There is no bulk retry yet. Page through the
+dead tasks with `List`, filtered by queue or kind, and retry each one, as
+[the example of `Client.Retry`](https://pkg.go.dev/github.com/code19m/taskmill#example-Client.Retry)
+does.
 
-**Microservices with a database each.** Each service runs taskmill in its
-own database. Services never enqueue into each other's databases: one
-service publishes events with the outbox, and the other receives them with an
-inbox, so every step is transactional.
+**Replication.** With asynchronous replication, a failover can lose the last
+committed transactions, including enqueued tasks, as it can lose any other
+row.
 
-**A shared database cluster.** Each service gets its own schema in the shared
-cluster, with its own workers. A service that only produces tasks for another
-creates a `Client` for that service's schema and never registers handlers.
-Its taskmill version must be no newer than the one that migrated that schema:
-`NewClient` checks the schema version and fails with `ErrSchemaOutdated` on an
-older schema.
+**Clocks.** taskmill takes most times from the database, but not all. A
+producer sets `RunAt` with its own clock, and workers create the daily
+history partitions by their own clocks. Keep every server's clock in sync
+with NTP.
+
+## Upgrading
+
+taskmill follows [Semantic Versioning](https://semver.org/).
+
+- **Before v1.0.0,** a minor release (v0.x.0) may break the API; a patch
+  release never does. The [changelog](../CHANGELOG.md) marks each breaking
+  change with **Breaking:** and says how to migrate. Only the latest minor
+  release gets fixes, including security fixes.
+- **Interfaces you implement never grow.** `Args`, `Handler`,
+  `BatchHandler`, `RetryPolicy`, and `outbox.Publisher` keep their methods.
+  New capabilities arrive as new optional interfaces, the way
+  `ArgsWithDefaults` extends `Args`. Configuration structs grow only with
+  fields whose zero value keeps the old behavior.
+- **Deprecation comes first.** An identifier is marked `// Deprecated:` for at
+  least one minor release before it is removed.
+- **Migrations only move forward.** There are no down migrations. Run
+  `Migrate`, or apply `Migrations`, before you roll out a new version.
+- **Old code works on a newer schema.** Each release's schema works with the
+  previous release's workers and clients, so old and new versions can run
+  side by side during a rolling deploy. Code that is newer than its schema
+  fails in `NewClient` with `ErrSchemaOutdated`.
+- **The tables are internal.** Their layout can change in any release. Read
+  and change tasks through `Client`, not with SQL.
+
+## Defaults and limits
+
+| Setting | Default | Limit |
+|---|---|---|
+| Schema | `taskmill` | Matches `^[a-z_][a-z0-9_]{0,62}$` |
+| Queue, kind, and schedule names | — | 1 to 128 characters |
+| Group key | — | 1 to 256 characters |
+| Payload | — | 1 MiB of JSON |
+| `MaxAttempts` | 25 | 1 to 10,000 |
+| Retry backoff | 1 s, doubling to 1 h, ±10% jitter; about 13 h for 25 attempts | — |
+| Retry and run time accuracy | About 1 second | — |
+| `DedupeWindow` | 24 hours | — |
+| `HandlerOptions.Timeout` | 1 minute | — |
+| `HandlerOptions.BatchSize` | 100 | 1,000 |
+| `QueueOptions.Concurrency` | 10 slots per queue and worker | — |
+| `LeaseDuration` | 30 seconds; heartbeats every 10 seconds | At least 100 ms |
+| `PollInterval` | 1 second | — |
+| `DrainTimeout` | 20 seconds, then 5 seconds for handlers to return | — |
+| Unknown kind | Snoozed 1 minute at a time; dead after 1 hour | — |
+| Maintainer takeover | Within about 12 seconds | — |
+| History retention | 7 days | At least 1 hour |
+| Dead and canceled retention | 30 days | At least 1 hour |
+| Error history | 20 most recent errors per task | 4 KiB per message |
+| `List` page | 100 tasks | 1,000 tasks; 5 seconds per query |
+| Queue statistics | Refreshed every 10 seconds | 10,000 per queue and state; 100,000 scheduled and retryable in all |
+| Removed schedules | Deleted after 24 hours without a run or change | — |
+| Outbox | 100 deliveries per batch; 1 minute per `Publish` | 10,000 tries, about a month; about 750 KiB of `Value` |

@@ -16,6 +16,7 @@
 package ui
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -38,22 +39,26 @@ var assets embed.FS
 
 // Log attribute keys.
 const (
-	logKeyError = "error"
-	logKeyPage  = "page"
-	logKeyPath  = "path"
+	logKeyAction = "action"
+	logKeyError  = "error"
+	logKeyPage   = "page"
+	logKeyPath   = "path"
+	logKeyTarget = "target"
 )
 
 // Config configures the web interface. The zero value is valid.
 type Config struct {
 	// Prefix is the path the handler is mounted at, such as "/taskmill".
-	// Links and redirects include it. Default: none, the root.
+	// The handler strips it from requests and adds it to links and
+	// redirects, so do not wrap the handler in http.StripPrefix.
+	// Default: none, the root.
 	Prefix string
 
 	// ReadOnly hides and refuses every action that changes state.
 	ReadOnly bool
 
-	// Logger receives errors that the interface shows as a server error.
-	// Default: logs are discarded.
+	// Logger receives every action taken, and the errors that the interface
+	// shows as a server error. Default: logs are discarded.
 	Logger *slog.Logger
 }
 
@@ -78,6 +83,7 @@ func Handler(client *taskmill.Client, cfg *Config) http.Handler {
 		"json":      prettyJSON,
 		"states":    func() []taskmill.State { return listedStates },
 		"lastError": lastError,
+		"visible":   visible,
 		// segment escapes a name for one path segment: queue and schedule
 		// names may hold /, ?, #, or %.
 		"segment": url.PathEscape,
@@ -153,11 +159,18 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	params := &taskmill.ListParams{Queue: q.Get("queue"), Kind: q.Get("kind"), Cursor: q.Get("cursor"), Limit: 50}
+	params := &taskmill.ListParams{
+		Queue: q.Get("queue"), Kind: q.Get("kind"), GroupKey: q.Get("group"), Cursor: q.Get("cursor"), Limit: 50,
+	}
 	if state := q.Get("state"); state != "" {
 		params.States = []taskmill.State{taskmill.State(state)}
 	}
 	res, err := s.client.List(r.Context(), params)
+	if errors.Is(err, taskmill.ErrInvalidArgument) {
+		w.WriteHeader(http.StatusBadRequest)
+		s.render(w, r, "error.html", "Invalid filter", err.Error())
+		return
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -169,10 +182,10 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		next = s.path("/tasks?" + v.Encode())
 	}
 	s.render(w, r, "tasks.html", "Tasks", struct {
-		Tasks              []taskmill.TaskInfo
-		Queue, Kind, State string
-		Next               string
-	}{res.Tasks, params.Queue, params.Kind, q.Get("state"), next})
+		Tasks                     []taskmill.TaskInfo
+		Queue, Kind, Group, State string
+		Next                      string
+	}{res.Tasks, params.Queue, params.Kind, params.GroupKey, q.Get("state"), next})
 }
 
 func (s *server) task(w http.ResponseWriter, r *http.Request) {
@@ -203,8 +216,9 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
+	action := r.PathValue("action")
 	target := s.path("/tasks/" + strconv.FormatInt(id, 10))
-	switch r.PathValue("action") {
+	switch action {
 	case "retry":
 		err = s.client.Retry(ctx, id)
 	case "cancel":
@@ -216,7 +230,7 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r)
 		return
 	}
-	s.finishAction(w, r, err, target)
+	s.finishAction(w, r, err, target, action+" task", strconv.FormatInt(id, 10))
 }
 
 func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
@@ -224,8 +238,8 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	name := r.PathValue("name")
-	switch r.PathValue("action") {
+	name, action := r.PathValue("name"), r.PathValue("action")
+	switch action {
 	case "pause":
 		err = s.client.PauseQueue(r.Context(), name)
 	case "resume":
@@ -234,7 +248,7 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r)
 		return
 	}
-	s.finishAction(w, r, err, s.path("/"))
+	s.finishAction(w, r, err, s.path("/"), action+" queue", name)
 }
 
 func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
@@ -242,8 +256,8 @@ func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	name := r.PathValue("name")
-	switch r.PathValue("action") {
+	name, action := r.PathValue("name"), r.PathValue("action")
+	switch action {
 	case "pause":
 		err = s.client.PauseSchedule(r.Context(), name)
 	case "resume":
@@ -252,19 +266,22 @@ func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r)
 		return
 	}
-	s.finishAction(w, r, err, s.path("/"))
+	s.finishAction(w, r, err, s.path("/"), action+" schedule", name)
 }
 
-// finishAction redirects after an action, or explains why it did not apply.
-func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error, target string) {
+// finishAction logs an action that succeeded and redirects, or explains why
+// it did not apply.
+func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error, redirect, action, target string) {
 	switch {
 	case err == nil:
-		http.Redirect(w, r, target, http.StatusSeeOther)
+		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "web interface action",
+			slog.String(logKeyAction, action), slog.String(logKeyTarget, target))
+		http.Redirect(w, r, redirect, http.StatusSeeOther)
 	case errors.Is(err, taskmill.ErrNotFound):
 		s.notFound(w, r)
 	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrInvalidArgument):
 		w.WriteHeader(http.StatusConflict)
-		s.render(w, r, "error.html", "Not possible", strings.TrimPrefix(err.Error(), "taskmill: "))
+		s.render(w, r, "error.html", "Not possible", err.Error())
 	default:
 		s.fail(w, r, err)
 	}
@@ -341,6 +358,18 @@ func ago(t time.Time) string {
 	}
 }
 
+// visible shows the control characters of a name, such as the separator
+// that the outbox puts between a topic and a key, as Unicode control
+// pictures.
+func visible(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 {
+			return 0x2400 + r
+		}
+		return r
+	}, s)
+}
+
 // lastError returns the most recent attempt error, or nil.
 func lastError(errs []taskmill.AttemptError) *taskmill.AttemptError {
 	if len(errs) == 0 {
@@ -356,19 +385,13 @@ func timestamp(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05.000 UTC")
 }
 
-// prettyJSON indents a payload for reading. It keeps characters such as "<"
-// as they are: the template escapes them for HTML.
+// prettyJSON indents a payload for reading. It keeps the text as stored, so
+// large integers stay exact, and characters such as "<" stay as they are: the
+// template escapes them for HTML.
 func prettyJSON(raw json.RawMessage) string {
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
+	var b bytes.Buffer
+	if err := json.Indent(&b, raw, "", "  "); err != nil {
 		return string(raw)
 	}
-	var b strings.Builder
-	enc := json.NewEncoder(&b)
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(v); err != nil {
-		return string(raw)
-	}
-	return strings.TrimSuffix(b.String(), "\n")
+	return b.String()
 }

@@ -40,32 +40,53 @@ func TestMaintainerRescuesExpiredLeases(t *testing.T) {
 		t.Fatal("expired lease was not rescued")
 	}
 	info := e.waitState(t, id, taskmill.StateCompleted)
-	if len(info.Errors) != 1 || info.Errors[0].Code != "lease_expired" {
+	if len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseExpired {
 		t.Fatalf("got errors %+v", info.Errors)
 	}
 }
 
-func TestMaintainerExpiresDeadlines(t *testing.T) {
+func TestMaintenanceDoesNotWaitForHeldGroups(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
 
-	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "unserved", Deadline: time.Now().Add(100 * time.Millisecond)})
-	info := e.waitState(t, id, taskmill.StateDead)
-	if len(info.Errors) != 1 || info.Errors[0].Code != "deadline_exceeded" {
-		t.Fatalf("got errors %+v", info.Errors)
+	// Two tasks whose worker crashed, one of them in a group that an
+	// application transaction holds, as an enqueue into the group does.
+	expired := `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+	                                  lease_expires_at, attempted_at, attempted_by, group_key)
+	            VALUES ('unserved', 'email.send', 'running', now(), '{}', 5, 1, 1,
+	                    now() - interval '1 second', now(), 'crashed', $1)
+	            RETURNING id`
+	var grouped, plain int64
+	if err := e.pool.QueryRow(t.Context(), replaceSchema(expired, e.schema), "g").Scan(&grouped); err != nil {
+		t.Fatal(err)
 	}
+	e.exec(t, "INSERT INTO {s}.groups (queue, group_key, tasks) VALUES ('unserved', 'g', 1)")
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'g' FOR UPDATE")
+	if err := e.pool.QueryRow(t.Context(), replaceSchema(expired, e.schema), nil).Scan(&plain); err != nil {
+		t.Fatal(err)
+	}
+	due := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "unserved", RunAt: time.Now().Add(200 * time.Millisecond)})
+
+	e.waitState(t, plain, taskmill.StateRetryable)
+	e.waitState(t, due, taskmill.StateAvailable)
+	e.wantState(t, grouped, taskmill.StateRunning)
+
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	e.waitState(t, grouped, taskmill.StateRetryable)
 }
 
 func TestOneMaintainerLeadsAndAnotherTakesOver(t *testing.T) {
 	t.Parallel()
 	e := newEnvWith(t, testdb.PoolSize(t, 16), nil)
-	logs := make(map[string]*logRecorder)
-	stops := make(map[string]func())
-	for i := range 3 {
-		id := fmt.Sprintf("w%d", i)
-		logs[id] = &logRecorder{}
-		stops[id] = runWorker(t, e, &taskmill.WorkerConfig{ID: id, Logger: slog.New(logs[id])})
+	logs := make([]*logRecorder, 3)
+	stops := make([]func(), 3)
+	for i := range logs {
+		logs[i] = &logRecorder{}
+		stops[i] = runWorker(t, e.withLogger(t, slog.New(logs[i])), &taskmill.WorkerConfig{})
 	}
 	leader := func() (id string, expires time.Time) {
 		_ = e.pool.QueryRow(t.Context(), replaceSchema("SELECT worker_id, expires_at FROM {s}.leader", e.schema)).
@@ -81,15 +102,17 @@ func TestOneMaintainerLeadsAndAnotherTakesOver(t *testing.T) {
 		_, expires := leader()
 		return expires.Sub(elected) >= 2*testTiming.Maintainer
 	})
-	total := 0
-	for _, l := range logs {
-		total += l.count("elected maintainer")
+	total, leading := 0, 0
+	for i, l := range logs {
+		if n := l.count("elected maintainer"); n > 0 {
+			total, leading = total+n, i
+		}
 	}
 	if total != 1 {
 		t.Fatalf("%d workers were elected, want 1", total)
 	}
 
-	stops[first]()
+	stops[leading]()
 	waitFor(t, "another worker to take over", func() bool { id, _ := leader(); return id != "" && id != first })
 }
 

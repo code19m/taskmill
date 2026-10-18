@@ -59,7 +59,12 @@ var macros = map[string]string{
 // Parse parses a cron expression.
 func Parse(expr string) (*Schedule, error) {
 	expr = strings.TrimSpace(expr)
-	if m, ok := macros[strings.ToLower(expr)]; ok {
+	if strings.HasPrefix(expr, "@") {
+		m, ok := macros[strings.ToLower(expr)]
+		if !ok {
+			return nil, fmt.Errorf("cron macro %q is not supported: use @yearly, @annually, @monthly, "+
+				"@weekly, @daily, @midnight, @hourly, or five fields", expr)
+		}
 		expr = m
 	}
 	fields := strings.Fields(expr)

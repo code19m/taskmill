@@ -3,11 +3,14 @@ package taskmill_test
 import (
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
+	"github.com/code19m/taskmill/internal/testdb"
 )
 
 func TestGetUnknownTask(t *testing.T) {
@@ -152,7 +155,6 @@ func TestRetryGroupedTaskWaitsBehindTheGroup(t *testing.T) {
 func TestRetryResumesAHaltedGroup(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.setDefaultQueue(t, &taskmill.QueueSettings{HaltGroupOnDead: true})
 	group := &taskmill.EnqueueOptions{GroupKey: "ledger"}
 	head := e.enqueue(t, sendEmail{To: "1"}, group)
 	next := e.enqueue(t, sendEmail{To: "2"}, group)
@@ -196,13 +198,45 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+func TestCancelAndDeleteFreeTheDedupeKey(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
+	enqueue := func() taskmill.EnqueueResult {
+		t.Helper()
+		res, err := e.client.Enqueue(ctx, sendEmail{}, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+
+	first := enqueue()
+	if dup := enqueue(); !dup.Duplicate || dup.ID != first.ID {
+		t.Fatalf("got %+v, want a duplicate of %d", dup, first.ID)
+	}
+	if err := e.client.Cancel(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second := enqueue()
+	if second.Duplicate {
+		t.Fatalf("the canceled task still holds its key: %+v", second)
+	}
+	if err := e.client.Delete(ctx, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if third := enqueue(); third.Duplicate {
+		t.Fatalf("the deleted task still holds its key: %+v", third)
+	}
+}
+
 func TestRetryAndDeleteSeeTheLatestGroupHalt(t *testing.T) {
 	t.Parallel()
 	for _, op := range []string{"retry", "delete"} {
 		t.Run(op, func(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t)
-			e.setDefaultQueue(t, &taskmill.QueueSettings{HaltGroupOnDead: true})
 			group := &taskmill.EnqueueOptions{GroupKey: "g"}
 			head := e.enqueue(t, sendEmail{To: "1"}, group)
 			next := e.enqueue(t, sendEmail{To: "2"}, group)
@@ -296,10 +330,12 @@ func TestTxMethodsWithDatabaseSQL(t *testing.T) {
 	e.wantState(t, head, taskmill.StateCanceled)
 	e.wantState(t, next, taskmill.StateAvailable)
 
-	inTx(func(tx *sql.Tx) error { return e.client.RetryTx(ctx, taskmill.SQL(tx), head) })
+	if err := e.client.Retry(ctx, head); err != nil {
+		t.Fatal(err)
+	}
 	e.wantState(t, head, taskmill.StatePending)
 
-	inTx(func(tx *sql.Tx) error { return e.client.DeleteTx(ctx, taskmill.SQL(tx), next) })
+	inTx(func(tx *sql.Tx) error { return e.client.CancelTx(ctx, taskmill.SQL(tx), next) })
 	e.wantState(t, head, taskmill.StateAvailable)
 
 	if err := e.client.CancelTx(ctx, taskmill.SQL(db), head); !errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -353,4 +389,24 @@ func TestCancelWhileTheWorkerRecordsAResult(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 	e.wantState(t, id, taskmill.StateCanceled)
+}
+
+func TestNewClientRequiresReadCommitted(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 1
+	cfg.ConnConfig.RuntimeParams["default_transaction_isolation"] = "serializable"
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	_, err = taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema})
+	if err == nil || !strings.Contains(err.Error(), "read committed") {
+		t.Fatalf("got %v, want an error about the isolation level", err)
+	}
 }

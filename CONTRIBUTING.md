@@ -69,9 +69,9 @@ Every change is held to the same bar:
   maintainer's interval, may shorten them through `export_test.go`
   (`taskmill.SetTiming`) instead of waiting for the defaults.
 - Tests must pass with `-race` and `-shuffle=on`. They must not rely on timing
-  luck. To wait for a result, poll with a deadline (`waitFor`, `waitState`,
-  `recv`); never sleep a fixed time and assume the result is ready. Every
-  test also checks the FIFO group invariants when it ends.
+  luck. To wait for a result, poll with a deadline (`waitFor`, `waitState`, `recv`);
+  never sleep a fixed time and assume the result is ready. Every test also
+  checks the FIFO group invariants when it ends.
 - A bug fix includes a test that fails without the fix.
 - `Example` functions compile with the tests. Those that need no database
   include an `// Output:` comment, so they run as tests too.
@@ -92,7 +92,8 @@ message** on `main`. CI checks the title.
 - **summary** is in the imperative mood, starts with a lowercase letter, has
   no trailing period, and is at most 72 characters.
 - **Breaking changes** add `!` after the type or scope, such as
-  `feat(worker)!: rename Run to Start`, and the body explains how to migrate.
+  `feat(worker)!: rename Run to Start`. Explain how to migrate in the pull
+  request description and in CHANGELOG.md.
 
 ```text
 feat(worker): drain in-flight tasks on shutdown
@@ -106,6 +107,23 @@ docs: explain at-least-once delivery
   review as a series of small ones.
 - Fill in the template: what changed, why, and how you tested it.
 - `make check` must pass, and a maintainer reviews every change.
+- **Update CHANGELOG.md.** A user-visible change adds one line under
+  `[Unreleased]`, in the right category: Added, Changed, Deprecated, Removed,
+  Fixed, or Security. A breaking change starts with **Breaking:** and says
+  how to migrate.
+- **Follow the [compatibility policy](docs/guide.md#upgrading).** Interfaces
+  that users implement never grow, and a removal is deprecated for at least
+  one minor release first.
+
+## Schema migrations
+
+- A schema change is a new file in `internal/migrations`. Released
+  migrations never change; a test pins their checksums.
+- The previous release's code must keep working on the new schema, so that
+  rolling deploys work.
+- New migrations must be safe to run on a busy database: set `lock_timeout`,
+  and avoid statements that hold long locks on `tasks`, such as table
+  rewrites.
 
 ## Design decisions
 
@@ -113,8 +131,21 @@ Significant decisions are recorded as Architecture Decision Records in
 [docs/adr](docs/adr). If your change alters a decision, supersede its ADR in
 the same pull request.
 
-## Versioning
+## Releasing
 
-taskmill follows [Semantic Versioning](https://semver.org/). Before v1.0.0, a
-minor release may contain breaking changes; the release notes always call them
-out.
+Maintainers release from a green `main`:
+
+1. In CHANGELOG.md, move `[Unreleased]` to a section `## [X.Y.Z] - YYYY-MM-DD`.
+   Update the links at the bottom: `[Unreleased]` compares `vX.Y.Z...HEAD`,
+   and `[X.Y.Z]` points to the release.
+2. Check that `internal/migrations/released_test.go` pins the checksum of
+   every migration in the release.
+3. Tag the release commit with an annotated tag, and push it:
+   `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+4. Make the Go module proxy fetch the version, so pkg.go.dev shows it:
+   `GOPROXY=https://proxy.golang.org go list -m github.com/code19m/taskmill@vX.Y.Z`.
+5. Create the GitHub release from that CHANGELOG section.
+
+Never move or delete a published tag: the Go checksum database keeps every
+version forever. Fix a bad release forward with a new patch release, and
+mark the bad version with a `retract` directive in go.mod.

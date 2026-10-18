@@ -3,6 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -51,6 +52,19 @@ type env struct {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	return newEnvWith(t, testdb.Pool(t), nil)
+}
+
+// withLogger returns a copy of e whose client, and the workers created with
+// it, log to logger.
+func (e *env) withLogger(t *testing.T, logger *slog.Logger) *env {
+	t.Helper()
+	client, err := taskmill.NewClient(t.Context(), e.pool, &taskmill.ClientConfig{Schema: e.schema, Logger: logger})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	c := *e
+	c.client = client
+	return &c
 }
 
 // newEnvWith is newEnv with a given pool and client configuration.
@@ -185,6 +199,26 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitState waits for a task to reach state.
+func (e *env) waitState(t *testing.T, id int64, state taskmill.State) *taskmill.TaskInfo {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		info, err := e.client.Get(t.Context(), id)
+		if err == nil && info.State == state {
+			return info
+		}
+		if time.Now().After(deadline) {
+			got := "error: " + fmt.Sprint(err)
+			if info != nil {
+				got = string(info.State)
+			}
+			t.Fatalf("task %d did not become %s; it is %s", id, state, got)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

@@ -12,24 +12,47 @@ together with your data.
 
 - **Transactional.** Enqueue inside your own transaction, with pgx or
   `database/sql`. If it rolls back, the task never existed.
-- **Reliable.** At-least-once execution with leases, heartbeats, retries with
-  backoff, and a dead-letter queue: dead tasks are kept for inspection and
-  retry. A crashed worker never loses a task.
-- **Ordered when you need it.** Strict FIFO groups, for any number of keys,
-  that can halt on a dead task instead of skipping it.
-- **Complete.** Priorities, delays, deadlines, deduplication, cron schedules,
-  concurrency limits, batch handlers, cancellation, and pausing.
+- **Reliable.** Every task runs at least once, with leases, heartbeats, and
+  retries with backoff. Dead tasks are kept for inspection and retry. A crashed
+  worker never loses a task.
+- **Ordered when you need it.** FIFO groups run tasks one at a time per key,
+  for any number of keys, and halt on a dead task instead of skipping it.
+- **Complete.** Priorities, delays, deduplication, cron schedules,
+  concurrency limits across all workers, batch handlers, cancellation, and
+  pausing.
 - **An outbox, too.** Publish to Kafka, NATS, or RabbitMQ with the same
   transactional guarantee, in order per key.
-- **Operable.** A web interface, an inspection API, structured logs through
+- **Operable.** A web interface, an operations API, structured logs through
   `log/slog`, and middleware for metrics and tracing.
-- **Small and fast.** One dependency, pgx. On a laptop, one worker runs over
-  35,000 tasks per second, and one relay publishes over 35,000 outbox messages
-  per second; see the [benchmarks](docs/benchmarks.md).
+- **Small and fast.** One direct dependency, pgx. One worker drained a backlog
+  at over 35,000 tasks per second, and one relay published over 35,000 outbox
+  messages per second. This was on an Apple M5 laptop with PostgreSQL 18 in
+  Docker; see the [benchmarks](docs/benchmarks.md).
 
-> [!NOTE]
-> taskmill is pre-1.0: minor releases may change the API until v1.0.0, and
-> the release notes say how to migrate.
+> **Status:** taskmill is new, with no known production users yet. Before
+> v1.0.0, minor releases may change the API, and the
+> [changelog](CHANGELOG.md) says how to migrate. See
+> [Upgrading](docs/guide.md#upgrading).
+
+## Why taskmill?
+
+taskmill is closest to [River](https://riverqueue.com). Both keep tasks in
+PostgreSQL, use pgx, and enqueue in your own transaction. taskmill also
+includes FIFO ordering per key, concurrency limits across all workers, batch
+handlers, a transactional outbox, and a web interface, in one MIT-licensed
+module. River offers several of these only in its paid River Pro. Choose
+River if you need workflows, a command-line tool, or a long production
+record.
+
+## What taskmill is not
+
+- **A workflow engine.** Tasks do not depend on each other.
+- **A message broker.** The outbox hands messages to your broker.
+- **Exactly-once across systems.** Delivery is at least once, and consumers
+  deduplicate.
+- **For other databases.** It runs on PostgreSQL only.
+
+The [design overview](docs/design/README.md#out-of-scope) lists the rest.
 
 ## Install
 
@@ -37,7 +60,8 @@ together with your data.
 go get github.com/code19m/taskmill
 ```
 
-taskmill needs Go 1.27 or newer and PostgreSQL 15 or newer.
+taskmill needs Go 1.26 or newer and PostgreSQL 15 or newer
+([supported versions](docs/adr/0002-supported-versions.md)).
 
 ## Quick start
 
@@ -84,10 +108,7 @@ func main() {
             return sendEmail(ctx, t.Args.Email, t.Args.OrderID)
         }), nil)
 
-    worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
-        Handlers: &handlers,
-        Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {Concurrency: 20}},
-    })
+    worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers})
     if err != nil {
         log.Fatal(err)
     }
@@ -101,26 +122,27 @@ func main() {
 }
 ```
 
-A handler that returns an error is retried with backoff until the task runs
-out of attempts and becomes dead. `taskmill.Permanent(err)` makes it dead at
-once, and `taskmill.Snooze(d)` runs it again later without using an attempt.
+A runnable version is `Example` in [example_test.go](example_test.go). A
+handler that returns an error is retried with backoff, by default for about
+13 hours, and then the task becomes dead. `taskmill.Permanent(err)` makes it
+dead at once, and `taskmill.Snooze(d)` runs it again later without using an
+attempt.
 
 ## Documentation
 
-- **[Guide](docs/guide.md):** every feature with examples, testing,
-  production settings, observability, and how taskmill fits monoliths,
-  modular monoliths, microservices, and shared database clusters.
+- **[Guide](docs/guide.md):** how to use every feature, test your code, and
+  run in production.
 - **[API reference](https://pkg.go.dev/github.com/code19m/taskmill)** on
   pkg.go.dev.
-- **[Design](docs/design):** the task lifecycle and its guarantees, the storage
-  schema, the public API, and the performance targets.
+- **[Design](docs/design):** the task lifecycle and its guarantees, and the
+  storage schema.
+- **[Benchmarks](docs/benchmarks.md):** performance targets and measured
+  results.
 - **[Decisions](docs/adr):** why taskmill is built the way it is.
-- **[Benchmarks](docs/benchmarks.md):** measured throughput, latency, and
-  behavior under faults.
 
 | Package | What it is |
 |---|---|
-| [`taskmill`](https://pkg.go.dev/github.com/code19m/taskmill) | The client, workers, schedules, and the inspection API |
+| [`taskmill`](https://pkg.go.dev/github.com/code19m/taskmill) | The client, workers, schedules, and the operations API |
 | [`taskmill/outbox`](https://pkg.go.dev/github.com/code19m/taskmill/outbox) | The transactional outbox for message brokers |
 | [`taskmill/ui`](https://pkg.go.dev/github.com/code19m/taskmill/ui) | The web interface, as an `http.Handler` |
 | [`taskmill/taskmilltest`](https://pkg.go.dev/github.com/code19m/taskmill/taskmilltest) | Helpers to test your code against a real PostgreSQL |

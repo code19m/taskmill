@@ -1,58 +1,155 @@
 package taskmill
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
-	"slices"
+	"strconv"
 	"sync/atomic"
 	"time"
 )
 
+// Priority orders tasks within a queue: higher priorities start first.
+// The zero value means "not set" and resolves to [PriorityNormal].
+type Priority int16
+
+// Task priorities, from lowest to highest.
+const (
+	PriorityLow      Priority = 1
+	PriorityNormal   Priority = 2
+	PriorityHigh     Priority = 3
+	PriorityCritical Priority = 4
+)
+
+// String returns the priority's name, such as "normal".
+func (p Priority) String() string {
+	switch p {
+	case PriorityLow:
+		return "low"
+	case PriorityNormal:
+		return "normal"
+	case PriorityHigh:
+		return "high"
+	case PriorityCritical:
+		return "critical"
+	}
+	return "Priority(" + strconv.Itoa(int(p)) + ")"
+}
+
+// State is the lifecycle state of a task. The lifecycle and its guarantees
+// are described in
+// https://github.com/code19m/taskmill/blob/main/docs/design/task-lifecycle.md.
+type State string
+
+// Task states.
+const (
+	StateScheduled State = "scheduled" // waiting for its run time
+	StatePending   State = "pending"   // waiting behind the head of its FIFO group
+	StateAvailable State = "available" // ready, waiting for a worker
+	StateRunning   State = "running"   // leased by an attempt
+	StateRetryable State = "retryable" // failed, waiting for its backoff
+	StateCompleted State = "completed" // its handler succeeded
+	StateDead      State = "dead"      // will not run again unless an operator retries it
+	StateCanceled  State = "canceled"  // canceled on request
+)
+
+// Finished reports whether the state is final: completed, dead, or canceled.
+func (s State) Finished() bool {
+	return s == StateCompleted || s == StateDead || s == StateCanceled
+}
+
+// valid reports whether s is one of the task states.
+func (s State) valid() bool {
+	switch s {
+	case StateScheduled, StatePending, StateAvailable, StateRunning,
+		StateRetryable, StateCompleted, StateDead, StateCanceled:
+		return true
+	}
+	return false
+}
+
 // TaskInfo describes a task: where it is in its lifecycle and what happened
 // to its attempts.
 type TaskInfo struct {
-	ID          int64
-	Queue       string
-	Kind        string
-	State       State
-	Priority    Priority
+	ID       int64
+	Queue    string
+	Kind     string
+	State    State
+	Priority Priority
+
+	// Attempt is the number of attempts used. In a handler, it is the
+	// current attempt, counting from 1. A snooze gives its attempt back, and
+	// [Client.Retry] starts over from 0.
 	Attempt     int
 	MaxAttempts int
-	GroupKey    string
-	Metadata    map[string]string
+
+	GroupKey string
+
+	// Metadata holds the tags from [EnqueueOptions.Metadata] and
+	// [ClientConfig.ContextMetadata].
+	Metadata map[string]string
 
 	// Payload is the task's Args as stored, in JSON.
 	Payload json.RawMessage
 
-	// Errors holds the errors of failed attempts, oldest first: the 20 most
-	// recent ones.
+	// Errors is the task's error history, oldest first: at most the 20 most
+	// recent entries.
 	Errors []AttemptError
 
-	CreatedAt   time.Time
-	RunAt       time.Time
-	Deadline    time.Time // zero if none
+	CreatedAt time.Time
+
+	// RunAt is the earliest time the task may start: for a retryable or
+	// snoozed task, when it runs again, and for a task that a [Schedule]
+	// enqueued, the time it was scheduled for.
+	RunAt time.Time
+
 	AttemptedAt time.Time // zero if never attempted
 	FinalizedAt time.Time // zero until completed, dead, or canceled
 }
 
-// AttemptError records why an attempt failed.
+// AttemptError is one entry of a task's error history: why an attempt
+// failed, or a note that taskmill recorded.
 type AttemptError struct {
 	Attempt int       `json:"attempt"`
 	At      time.Time `json:"at"`
 
-	// Message is the error's text, truncated to a fixed length.
+	// Message is the error's text, truncated to 4 KiB.
 	Message string `json:"message"`
 
-	// Code classifies failures that taskmill itself detected:
-	// "lease_expired", "deadline_exceeded", "panic", "timeout",
-	// "invalid_payload", or "unknown_kind" when no worker with a handler for
-	// the kind appeared in time. "no_handler" marks a note, not a failure:
-	// the first time a worker met the task without a handler, and began to
-	// wait for one. Code is empty for errors returned by a handler.
-	Code string `json:"code,omitempty"`
+	// Code classifies the entries that taskmill itself recorded. It is empty
+	// for an error returned by a handler.
+	Code ErrorCode `json:"code,omitempty"`
 }
+
+// ErrorCode classifies an entry of a task's error history that taskmill
+// itself recorded.
+type ErrorCode string
+
+// Error codes.
+const (
+	// CodeLeaseExpired means the worker lost the attempt's lease: it crashed,
+	// stopped, or lost the database.
+	CodeLeaseExpired ErrorCode = "lease_expired"
+
+	// CodePanic means the handler panicked.
+	CodePanic ErrorCode = "panic"
+
+	// CodeTimeout means the attempt ran longer than [HandlerOptions.Timeout].
+	CodeTimeout ErrorCode = "timeout"
+
+	// CodeInvalidPayload means the payload did not decode into the kind's
+	// Args, so the task became dead at once.
+	CodeInvalidPayload ErrorCode = "invalid_payload"
+
+	// CodeUnknownKind means no worker with a handler for the kind appeared
+	// within an hour, so the task became dead.
+	CodeUnknownKind ErrorCode = "unknown_kind"
+
+	// CodeNoHandler marks a note, not a failure: a worker met the task
+	// without a handler for its kind, and the task began to wait for one,
+	// without using attempts.
+	CodeNoHandler ErrorCode = "no_handler"
+)
 
 // Task is a task being run by a handler, with its decoded Args.
 type Task[A Args] struct {
@@ -65,9 +162,10 @@ type Task[A Args] struct {
 
 // attempt is one run of a task: the lease it holds and how it ended.
 type attempt struct {
-	client *Client
-	id     int64
-	token  int32
+	client  *Client
+	id      int64
+	token   int32
+	discard bool // the kind keeps no history of completed tasks
 
 	// completedInTx is set once the handler completed the task in its own
 	// transaction, so the worker must not record a result.
@@ -76,8 +174,8 @@ type attempt struct {
 
 // CompleteTx completes the task inside the caller's transaction, so that the
 // handler's own writes and the completion commit together or not at all. It
-// returns [ErrLeaseLost] if the attempt no longer owns the task; the caller
-// must then roll back.
+// returns [ErrLeaseLost] if another attempt took the task over; return that
+// error, so that the transaction rolls back.
 //
 // After CompleteTx, the handler should commit and return nil. If the handler
 // returns an error after its transaction committed, the task stays completed
@@ -92,7 +190,7 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 		return err
 	}
 	a := t.attempt
-	done, err := a.client.complete(ctx, q, []completion{{id: a.id, token: a.token}})
+	done, err := a.client.complete(ctx, q, []completion{{id: a.id, token: a.token, discard: a.discard}})
 	if err != nil {
 		return err
 	}
@@ -103,87 +201,17 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	return nil
 }
 
-// completion identifies an attempt whose task succeeded.
-type completion struct {
-	id    int64
-	token int32
-}
-
-// completedTask is a task that a completion finished.
-type completedTask struct {
-	id    int64
-	queue string
-	group string
-}
-
-// complete records successful attempts: it moves their tasks to history, or
-// deletes them if their queue keeps no history, and advances their FIFO
-// groups. It returns the tasks it completed; an attempt that lost its lease is
-// left out. q must be a transaction if any task belongs to a FIFO group.
-func (c *Client) complete(ctx context.Context, q querier, cs []completion) ([]completedTask, error) {
-	ids := make([]int64, len(cs))
-	tokens := make([]int32, len(cs))
-	for i, x := range cs {
-		ids[i], tokens[i] = x.id, x.token
-	}
-
-	r, err := q.query(ctx, c.sql.complete, ids, tokens)
-	if err != nil {
-		return nil, fmt.Errorf("taskmill: complete: %w", err)
-	}
-	var done []completedTask
-	for r.Next() {
-		var t completedTask
-		if err := r.Scan(&t.id, &t.queue, &t.group); err != nil {
-			r.Close()
-			return nil, fmt.Errorf("taskmill: complete: %w", err)
-		}
-		done = append(done, t)
-	}
-	r.Close()
-	if err := r.Err(); err != nil {
-		return nil, fmt.Errorf("taskmill: complete: %w", err)
-	}
-
-	var heads []groupHead
-	for _, t := range sortedByGroup(done) {
-		heads = append(heads, groupHead{queue: t.queue, group: t.group, id: t.id})
-	}
-	if len(heads) > 0 {
-		if err := c.finishHeads(ctx, q, heads); err != nil {
-			return nil, fmt.Errorf("taskmill: complete: %w", err)
-		}
-	}
-	return done, nil
-}
-
-// sortedByGroup returns the grouped tasks in a fixed order of queue and group,
-// so that concurrent transactions lock group rows in the same order and cannot
-// deadlock.
-func sortedByGroup(ts []completedTask) []completedTask {
-	var grouped []completedTask
-	for _, t := range ts {
-		if t.group != "" {
-			grouped = append(grouped, t)
-		}
-	}
-	slices.SortFunc(grouped, func(a, b completedTask) int {
-		return cmp.Or(cmp.Compare(a.queue, b.queue), cmp.Compare(a.group, b.group))
-	})
-	return grouped
-}
-
 // scanTaskInfo reads one row of taskColumns.
 func scanTaskInfo(r rows) (*TaskInfo, error) {
 	var (
-		info                               TaskInfo
-		state                              string
-		priority, attempt, maxAttempts     int16
-		metadata, payload, errs            []byte
-		deadline, attemptedAt, finalizedAt *time.Time
+		info                           TaskInfo
+		state                          string
+		priority, attempt, maxAttempts int16
+		metadata, payload, errs        []byte
+		attemptedAt, finalizedAt       *time.Time
 	)
 	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
-		&metadata, &payload, &errs, &info.CreatedAt, &info.RunAt, &deadline, &attemptedAt, &finalizedAt)
+		&metadata, &payload, &errs, &info.CreatedAt, &info.RunAt, &attemptedAt, &finalizedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -192,34 +220,22 @@ func scanTaskInfo(r rows) (*TaskInfo, error) {
 	info.Attempt = int(attempt)
 	info.MaxAttempts = int(maxAttempts)
 	info.Payload = payload
-	if err := decodeMetadata(metadata, &info.Metadata); err != nil {
-		return nil, err
-	}
-	if err := decodeErrors(errs, &info.Errors); err != nil {
-		return nil, err
-	}
-	info.Deadline = deref(deadline)
 	info.AttemptedAt = deref(attemptedAt)
 	info.FinalizedAt = deref(finalizedAt)
-	return &info, nil
+	return &info, decodeJSONColumns(&info, metadata, errs)
 }
 
-func decodeMetadata(raw []byte, dst *map[string]string) error {
-	if len(raw) == 0 || string(raw) == "{}" {
-		return nil
+// decodeJSONColumns decodes a task's metadata and errors columns into info.
+func decodeJSONColumns(info *TaskInfo, metadata, errs []byte) error {
+	if len(metadata) > 0 && string(metadata) != "{}" {
+		if err := json.Unmarshal(metadata, &info.Metadata); err != nil {
+			return fmt.Errorf("decode metadata: %w", err)
+		}
 	}
-	if err := json.Unmarshal(raw, dst); err != nil {
-		return fmt.Errorf("decode metadata: %w", err)
-	}
-	return nil
-}
-
-func decodeErrors(raw []byte, dst *[]AttemptError) error {
-	if len(raw) == 0 || string(raw) == "[]" {
-		return nil
-	}
-	if err := json.Unmarshal(raw, dst); err != nil {
-		return fmt.Errorf("decode errors: %w", err)
+	if len(errs) > 0 && string(errs) != "[]" {
+		if err := json.Unmarshal(errs, &info.Errors); err != nil {
+			return fmt.Errorf("decode errors: %w", err)
+		}
 	}
 	return nil
 }

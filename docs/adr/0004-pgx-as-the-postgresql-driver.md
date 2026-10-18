@@ -28,6 +28,14 @@ their transactions through two adapters, `taskmill.Pgx` for pgx and
 `taskmill.SQL` for `database/sql`. The `database/sql` connection must use pgx's
 driver.
 
+**Why adapters.** `pgx.Tx` and `*sql.Tx` have no method in common, so no
+single interface can accept both. The alternative, a client that is generic
+over the transaction type (`Client[TTx]`), would spread a type parameter
+through every type that touches a transaction, including the tasks given to
+handlers. The adapters cost one function call where a transaction is passed,
+and keep every other type simple. Their result, `Executor`, is sealed: only
+taskmill implements it, so its methods can change without breaking anyone.
+
 The core module's allowlist in `.golangci.yml` gains `github.com/jackc/pgx/v5`.
 Measured with `go list -deps`, pgx brings five more modules into the build:
 `github.com/jackc/pgpassfile`, `github.com/jackc/pgservicefile`, and

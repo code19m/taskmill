@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,25 +17,29 @@ import (
 // Schedule enqueues a task on a cron schedule, once per scheduled time across
 // all workers. Define the same schedules on every worker that takes part in
 // the maintainer election: the elected maintainer runs its own definitions.
+// If it defines any, it also deletes the stored schedules that it does not
+// define once they have not run or changed for a day.
 //
 // Runs that are missed while no maintainer runs, or while the schedule is
 // paused, collapse into one run. The expression is read on the wall clock of
-// Location, so daylight saving time behaves as in classic cron.
+// Location, so daylight saving time behaves as in classic cron. The task's
+// RunAt is the time it was scheduled for.
 type Schedule struct {
 	// Name identifies the schedule. Schedules are kept in the database by
 	// name, so renaming one creates a new schedule.
 	Name string
 
-	// Cron is a five-field cron expression, such as "0 3 * * *", or a macro
-	// such as "@daily".
+	// Cron is a five-field cron expression, such as "0 3 * * *", or one of
+	// the macros @yearly, @annually, @monthly, @weekly, @daily, @midnight,
+	// and @hourly.
 	Cron string
 
 	// Location is the time zone the expression is read in. Default: UTC.
 	Location *time.Location
 
-	// Args and Options describe the task to enqueue. The schedule sets the
-	// run time and the dedupe key itself, to enqueue each run once when it
-	// is due; Options must not set a deadline.
+	// Args and Options describe the task to enqueue; Options may be nil.
+	// The schedule sets the run time and the dedupe key itself, to enqueue
+	// each run once.
 	Args    Args
 	Options *EnqueueOptions
 }
@@ -93,8 +96,7 @@ func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 		}
 		opts.Queue = cmp.Or(opts.Queue, DefaultQueue)
 		if err := checkScheduledTask(s.Args, opts); err != nil {
-			detail, _ := strings.CutPrefix(err.Error(), ErrInvalidArgument.Error()+": ")
-			return nil, invalidArgument("schedule %q: %s", s.Name, detail)
+			return nil, fmt.Errorf("%w (schedule %q)", err, s.Name)
 		}
 		out = append(out, compiledSchedule{Schedule: s, expr: expr, opts: opts})
 	}
@@ -104,9 +106,6 @@ func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 // checkScheduledTask validates the task that a schedule enqueues, so that a
 // mistake fails NewWorker instead of every run.
 func checkScheduledTask(args Args, opts EnqueueOptions) error {
-	if !opts.Deadline.IsZero() {
-		return invalidArgument("options must not set a deadline")
-	}
 	kind := args.Kind()
 	if err := checkName("kind", kind, maxNameLength); err != nil {
 		return err
@@ -118,17 +117,11 @@ func checkScheduledTask(args Args, opts EnqueueOptions) error {
 		priority:    cmp.Or(opts.Priority, PriorityNormal),
 		maxAttempts: cmp.Or(opts.MaxAttempts, defaultMaxAttempts),
 	}
-	if err := t.validate(time.Now()); err != nil {
+	if err := t.validate(); err != nil {
 		return err
 	}
-	payload, err := json.Marshal(args)
-	if err != nil {
-		return invalidArgument("encode payload of kind %q: %v", kind, err)
-	}
-	if hasNUL(payload) {
-		return invalidArgument("payload of kind %q contains a NUL character", kind)
-	}
-	return nil
+	_, err := encodePayload(kind, args)
+	return err
 }
 
 // scheduleState is a schedule's row in the database.
@@ -214,6 +207,12 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 		return err
 	}
 	return pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
+		// An enqueue into a FIFO group waits for the group's row. The election
+		// runs in the same loop, so give up after a moment, and try again in
+		// the next cycle.
+		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+maintenanceLockTimeout+"'"); err != nil {
+			return err
+		}
 		tag, err := tx.Exec(ctx, m.c.sql.advanceSchedule, s.Name, next, due)
 		if err != nil || tag.RowsAffected() == 0 {
 			return err // another maintainer ran it, or it was paused meanwhile
@@ -221,10 +220,27 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 		opts := s.opts
 		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(due.Unix(), 10)
 		opts.DedupeWindow = max(24*time.Hour, 2*next.Sub(due))
-		opts.RunAt = time.Time{}
+		opts.RunAt = due // in the past: the task is available at once
 		_, err = m.c.enqueue(ctx, pgxQuerier{q: tx}, []EnqueueParams{{Args: s.Args, Options: &opts}})
 		return err
 	})
+}
+
+// pruneSchedules deletes the stored schedules that this maintainer does not
+// define, once they have not run or changed for a day. A maintainer that
+// defines none, such as a worker that only does maintenance, leaves them
+// alone.
+func (m *maintainer) pruneSchedules(ctx context.Context) {
+	if len(m.w.schedules) == 0 {
+		return
+	}
+	names := make([]string, len(m.w.schedules))
+	for i, s := range m.w.schedules {
+		names[i] = s.Name
+	}
+	if _, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, names); err != nil {
+		m.log(ctx, slog.LevelError, "delete removed schedules", err)
+	}
 }
 
 func jsonEqual(a, b []byte) bool {

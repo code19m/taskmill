@@ -48,18 +48,20 @@ func TestRunRecordsTheOutcome(t *testing.T) {
 	client := taskmilltest.NewClient(t, pool, nil)
 
 	ok := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { return nil })
-	info, err := taskmilltest.Run(t, client, ok, greet{Name: "ada"}, nil)
+	info, err := taskmilltest.Run(t, client, ok, greet{Name: "ada"})
 	if err != nil || info.State != taskmill.StateCompleted {
 		t.Fatalf("got %s, %v", info.State, err)
 	}
 
 	boom := errors.New("boom")
 	failing := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { return boom })
-	info, err = taskmilltest.Run(t, client, failing, greet{}, &taskmilltest.RunOptions{
-		Enqueue: &taskmill.EnqueueOptions{MaxAttempts: 1},
-	})
-	if !errors.Is(err, boom) || info.State != taskmill.StateDead || info.Errors[0].Message != "boom" {
+	info, err = taskmilltest.Run(t, client, failing, greet{})
+	if !errors.Is(err, boom) || info.State != taskmill.StateRetryable || info.Errors[0].Message != "boom" {
 		t.Fatalf("got %s with %+v, %v", info.State, info.Errors, err)
+	}
+	bad := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { return taskmill.Permanent(boom) })
+	if info, _ = taskmilltest.Run(t, client, bad, greet{}); info.State != taskmill.StateDead {
+		t.Fatalf("got %s, want dead", info.State)
 	}
 }
 
@@ -76,7 +78,7 @@ func TestRunSupportsCompleteTx(t *testing.T) {
 			return task.CompleteTx(ctx, taskmill.Pgx(tx))
 		})
 	})
-	info, err := taskmilltest.Run(t, client, h, greet{Name: "ada"}, nil)
+	info, err := taskmilltest.Run(t, client, h, greet{Name: "ada"})
 	if err != nil || info.State != taskmill.StateCompleted || info.Attempt != 1 {
 		t.Fatalf("got %s on attempt %d, %v", info.State, info.Attempt, err)
 	}
@@ -120,8 +122,8 @@ func TestRunReportsPanics(t *testing.T) {
 	t.Parallel()
 	client := taskmilltest.NewClient(t, testdb.Pool(t), nil)
 	h := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { panic("boom") })
-	info, err := taskmilltest.Run(t, client, h, greet{}, nil)
-	if err == nil || info.State != taskmill.StateRetryable || info.Errors[0].Code != "panic" {
+	info, err := taskmilltest.Run(t, client, h, greet{})
+	if err == nil || info.State != taskmill.StateRetryable || info.Errors[0].Code != taskmill.CodePanic {
 		t.Fatalf("got %s with %+v, %v", info.State, info.Errors, err)
 	}
 }

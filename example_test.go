@@ -60,10 +60,9 @@ func Example() {
 		},
 	), nil)
 
-	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
-		Handlers: &handlers,
-		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {Concurrency: 20}},
-	})
+	// The worker serves the queues of its handlers' kinds: here the default
+	// queue.
+	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -181,13 +180,18 @@ func rateLimited() bool { return false }
 func ExampleSchedule() {
 	var client *taskmill.Client // from taskmill.NewClient
 	var handlers taskmill.Handlers
+	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[SendReceipt](
+		func(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
+			// t.RunAt is the night the run is for.
+			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
+		},
+	), nil)
 	berlin, err := time.LoadLocation("Europe/Berlin")
 	if err != nil {
 		log.Fatal(err)
 	}
 	_, err = taskmill.NewWorker(client, &taskmill.WorkerConfig{
 		Handlers: &handlers,
-		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}},
 		Schedules: []taskmill.Schedule{
 			{Name: "nightly-receipts", Cron: "0 3 * * *", Location: berlin, Args: SendReceipt{}},
 		},
@@ -228,14 +232,11 @@ func (receiptMailer) HandleBatch(ctx context.Context, tasks []*taskmill.Task[Sen
 	return errs
 }
 
-// This example runs receipts in batches of up to 50, in a queue of their own.
+// This example runs receipts in batches of up to 50.
 func ExampleAddBatchHandler() {
 	var handlers taskmill.Handlers
 	taskmill.AddBatchHandler[SendReceipt](&handlers, receiptMailer{}, &taskmill.HandlerOptions{BatchSize: 50})
-	_ = taskmill.WorkerConfig{
-		Handlers: &handlers,
-		Queues:   map[string]taskmill.QueueOptions{"receipts": {Concurrency: 2}},
-	}
+	_ = taskmill.WorkerConfig{Handlers: &handlers} // serves the kind's default queue
 }
 
 // This example prints the migrations, for teams that apply them with their
@@ -253,18 +254,23 @@ func ExampleMigrations() {
 	// 0001_initial
 }
 
-// This example pages through the dead tasks of one queue.
-func ExampleClient_List() {
+// This example retries every dead task of one queue, once the cause of their
+// failures is fixed.
+func ExampleClient_Retry() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
-	params := &taskmill.ListParams{Queue: "emails", States: []taskmill.State{taskmill.StateDead}}
+	params := &taskmill.ListParams{Queue: "emails", States: []taskmill.State{taskmill.StateDead}, Limit: 1000}
 	for {
 		page, err := client.List(ctx, params)
 		if err != nil {
 			log.Fatal(err)
 		}
 		for _, t := range page.Tasks {
-			log.Printf("task %d failed: %s", t.ID, t.Errors[len(t.Errors)-1].Message)
+			// An operator may have retried or deleted it meanwhile.
+			if err := client.Retry(ctx, t.ID); err != nil && !errors.Is(err, taskmill.ErrInvalidState) &&
+				!errors.Is(err, taskmill.ErrNotFound) {
+				log.Fatal(err)
+			}
 		}
 		if page.Next == "" {
 			break

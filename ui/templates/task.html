@@ -17,12 +17,11 @@
 <dl>
   <dt>Kind</dt><dd>{{$t.Kind}}</dd>
   <dt>Queue</dt><dd><a href="{{path "/tasks"}}?queue={{$t.Queue}}">{{$t.Queue}}</a></dd>
-  {{with $t.GroupKey}}<dt>FIFO group</dt><dd>{{.}}</dd>{{end}}
+  {{with $t.GroupKey}}<dt>FIFO group</dt><dd><a href="{{path "/tasks"}}?queue={{$t.Queue}}&amp;group={{.}}">{{visible .}}</a></dd>{{end}}
   <dt>Priority</dt><dd>{{$t.Priority}}</dd>
   <dt>Attempt</dt><dd>{{$t.Attempt}} of {{$t.MaxAttempts}}</dd>
   <dt>Created</dt><dd title="{{timestamp $t.CreatedAt}}">{{timestamp $t.CreatedAt}} ({{ago $t.CreatedAt}})</dd>
   <dt>Run at</dt><dd>{{timestamp $t.RunAt}} ({{ago $t.RunAt}})</dd>
-  {{if not $t.Deadline.IsZero}}<dt>Deadline</dt><dd>{{timestamp $t.Deadline}} ({{ago $t.Deadline}})</dd>{{end}}
   {{if not $t.AttemptedAt.IsZero}}<dt>Last attempt</dt><dd>{{timestamp $t.AttemptedAt}} ({{ago $t.AttemptedAt}})</dd>{{end}}
   {{if not $t.FinalizedAt.IsZero}}<dt>Finished</dt><dd>{{timestamp $t.FinalizedAt}} ({{ago $t.FinalizedAt}})</dd>{{end}}
 </dl>
@@ -37,5 +36,5 @@
 <ol class="errors">{{range .}}
   <li><span class="muted">attempt {{.Attempt}} · {{timestamp .At}}{{with .Code}} · {{.}}{{end}}</span><pre>{{.Message}}</pre></li>
 {{end}}</ol>
-{{else}}<p class="muted">No failed attempts.</p>{{end}}
+{{else}}<p class="muted">No errors.</p>{{end}}
 {{template "foot" .}}{{end}}

@@ -58,7 +58,11 @@ tidy-check: ## Fail if go.mod or go.sum is not tidy.
 	go mod tidy -diff
 
 .PHONY: db
-db: ## Start a PostgreSQL container for the tests.
+db: ## Start a PostgreSQL container for the tests (TEST_POSTGRES picks the image).
+	@image=$$(docker inspect -f '{{.Config.Image}}' taskmill-test-db 2>/dev/null); \
+	if [ -n "$$image" ] && [ "$$image" != "$(TEST_POSTGRES)" ]; then \
+		echo "taskmill-test-db runs $$image, not $(TEST_POSTGRES): run \`make db-stop\` first" >&2; exit 1; \
+	fi
 	@docker start taskmill-test-db >/dev/null 2>&1 || docker run -d --name taskmill-test-db -p 54329:5432 \
 		-e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill $(TEST_POSTGRES) -c max_connections=500 >/dev/null
 	@until docker exec taskmill-test-db pg_isready -h 127.0.0.1 -U postgres -q; do sleep 0.2; done

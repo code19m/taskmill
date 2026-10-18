@@ -10,7 +10,6 @@ CREATE TABLE __SCHEMA__.tasks (
     id                  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     run_at              timestamptz NOT NULL,
     created_at          timestamptz NOT NULL DEFAULT now(),
-    deadline            timestamptz,
     lease_expires_at    timestamptz,
     attempted_at        timestamptz,
     cancel_requested_at timestamptz,
@@ -47,8 +46,6 @@ CREATE INDEX tasks_fetch_idx    ON __SCHEMA__.tasks (queue, priority DESC, run_a
 CREATE INDEX tasks_due_idx      ON __SCHEMA__.tasks (run_at) INCLUDE (queue, state) WHERE state IN ('scheduled', 'retryable');
 CREATE INDEX tasks_running_idx  ON __SCHEMA__.tasks (queue) WHERE state = 'running';
 CREATE INDEX tasks_pending_idx  ON __SCHEMA__.tasks (queue, group_key, id) WHERE state = 'pending';
-CREATE INDEX tasks_deadline_idx ON __SCHEMA__.tasks (deadline)
-    WHERE deadline IS NOT NULL AND state IN ('scheduled', 'available', 'retryable');
 CREATE INDEX tasks_finished_idx ON __SCHEMA__.tasks (queue, state, finalized_at) WHERE state IN ('dead', 'canceled');
 
 CREATE TABLE __SCHEMA__.task_history (
@@ -96,15 +93,14 @@ CREATE TABLE __SCHEMA__.dedupe_keys (
 );
 
 CREATE INDEX dedupe_keys_expires_idx ON __SCHEMA__.dedupe_keys (expires_at);
+CREATE INDEX dedupe_keys_task_idx    ON __SCHEMA__.dedupe_keys (task_id);
 
 CREATE TABLE __SCHEMA__.queues (
-    name               text PRIMARY KEY,
-    paused_at          timestamptz,
-    max_running        integer,
-    keep_history       boolean NOT NULL DEFAULT true,
-    halt_group_on_dead boolean NOT NULL DEFAULT false,
-    created_at         timestamptz NOT NULL DEFAULT now(),
-    updated_at         timestamptz NOT NULL DEFAULT now(),
+    name        text PRIMARY KEY,
+    paused_at   timestamptz,
+    max_running integer,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    updated_at  timestamptz NOT NULL DEFAULT now(),
 
     CONSTRAINT queues_name_check        CHECK (char_length(name) BETWEEN 1 AND 128),
     CONSTRAINT queues_max_running_check CHECK (max_running > 0)

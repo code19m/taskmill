@@ -13,4 +13,5 @@
 - [ ] `make check` passes locally.
 - [ ] New behavior is covered by tests; a bug fix includes a test that failed before it.
 - [ ] Exported identifiers have doc comments, and user-facing docs are updated.
-- [ ] Breaking changes are marked with `!` in the title and explained above.
+- [ ] CHANGELOG.md has a line under `[Unreleased]` for each user-visible change.
+- [ ] Breaking changes are marked with `!` in the title, and explained above and in CHANGELOG.md.

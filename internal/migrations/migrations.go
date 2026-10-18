@@ -8,7 +8,6 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -47,7 +46,7 @@ func All(schema string) ([]Migration, error) {
 		})
 	}
 
-	sort.Slice(all, func(i, j int) bool { return all[i].Version < all[j].Version })
+	// ReadDir sorts by name, and names start with zero-padded versions.
 	for i, m := range all {
 		if m.Version != i+1 {
 			return nil, fmt.Errorf("migration versions must be consecutive from 1, found %d at position %d", m.Version, i+1)
@@ -58,11 +57,11 @@ func All(schema string) ([]Migration, error) {
 
 // Latest returns the highest migration version.
 func Latest() int {
-	entries, err := fs.ReadDir(files, ".")
+	all, err := All("")
 	if err != nil {
 		return 0
 	}
-	return len(entries)
+	return len(all)
 }
 
 // parseName splits "0001_initial.sql" into 1 and "initial".

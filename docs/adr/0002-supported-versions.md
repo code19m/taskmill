@@ -12,10 +12,11 @@ protect.
 
 ## Decision
 
-**Go.** taskmill targets the latest stable Go release. The `go` line in
-[go.mod](../../go.mod) names its minor version (now `go 1.27.0`), and the
-`toolchain` line pins the latest patch release for development (now
-`go1.27.2`). CI tests with that version and with the newest stable Go.
+**Go.** taskmill supports the two newest Go releases, matching Go's own
+support policy. The `go` line in [go.mod](../../go.mod) names the older one
+(now `go 1.26.0`), and the `toolchain` line pins the patch release used for
+development. CI tests with the oldest supported Go and with the newest stable
+Go.
 
 **PostgreSQL.** taskmill supports every PostgreSQL major version that still
 receives community support, starting with 15. PostgreSQL 14 reaches end of life
@@ -27,8 +28,7 @@ against every supported major version: today PostgreSQL 15, 16, 17, and 18.
 ## Consequences
 
 - We can use modern Go and PostgreSQL features freely.
-- Users on Go 1.26 or PostgreSQL 14 cannot adopt taskmill. We accept this for a
+- Users on Go 1.25 or PostgreSQL 14 cannot adopt taskmill. We accept this for a
   new project.
-- We will revisit the Go policy before v1.0.0. Supporting the two newest Go
-  releases, which matches Go's own security support window, is the likely
-  choice once there are users to protect.
+- When a new Go release comes out, the `go` line moves up in the next minor
+  release of taskmill.

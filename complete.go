@@ -1,10 +1,15 @@
 package taskmill
 
 import (
+	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // completer records successful attempts in batches: it gathers the results
@@ -14,7 +19,7 @@ import (
 // tries them again shortly, so that it never waits for another transaction's
 // lock while holding a connection.
 func (w *Worker) completer(ctx context.Context) {
-	defer close(w.completerUp)
+	defer close(w.completerDone)
 	record := context.WithoutCancel(ctx)
 	var held []*tracked // completions whose rows other transactions held
 	delay := heldRetryDelay
@@ -78,16 +83,16 @@ ready:
 }
 
 // completeWaiting completes tasks whose groups other transactions held,
-// waiting for those locks, within one record timeout.
+// waiting for those locks.
 func (w *Worker) completeWaiting(ctx context.Context, ts []*tracked) {
 	if len(ts) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, recordTimeout)
-	defer cancel()
-	err := w.client.inTx(ctx, func(q querier) error {
-		_, err := w.client.complete(ctx, q, completions(ts))
-		return err
+	err := w.whileLeased(ctx, ts, func(ctx context.Context) error {
+		return w.client.inTx(ctx, func(q querier) error {
+			_, err := w.client.complete(ctx, q, completionsOf(ts))
+			return err
+		})
 	})
 	w.completed(ctx, ts, err)
 }
@@ -109,8 +114,8 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 	}
 
 	if len(plain) > 0 {
-		err := retry(ctx, func(ctx context.Context) error {
-			_, err := w.client.complete(ctx, pgxQuerier{q: w.client.pool}, completions(plain))
+		err := w.whileLeased(ctx, plain, func(ctx context.Context) error {
+			_, err := w.client.complete(ctx, pgxQuerier{q: w.client.pool}, completionsOf(plain))
 			return err
 		})
 		w.completed(ctx, plain, err)
@@ -118,7 +123,7 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 	if len(grouped) == 0 {
 		return nil
 	}
-	err := retry(ctx, func(ctx context.Context) error {
+	err := w.whileLeased(ctx, grouped, func(ctx context.Context) error {
 		return w.client.inTx(ctx, func(q querier) error {
 			var err error
 			held, err = w.completeLocked(ctx, q, grouped)
@@ -191,7 +196,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 		}
 	}
 	if len(ready) > 0 {
-		if _, err := w.client.complete(ctx, q, completions(ready)); err != nil {
+		if _, err := w.client.complete(ctx, q, completionsOf(ready)); err != nil {
 			return nil, err
 		}
 	}
@@ -232,29 +237,63 @@ func (w *Worker) completed(ctx context.Context, ts []*tracked, err error) {
 	}
 }
 
-// retry runs fn up to completeAttempts times, giving each try its own
-// timeout, until it succeeds.
-func retry(ctx context.Context, fn func(context.Context) error) error {
-	var err error
-	for try := range completeAttempts {
+// whileLeased runs fn until it succeeds, waiting longer after each failed
+// try, for as long as the leases of ts may still be held when it starts: by
+// then the tasks are rescued, and a result recorded later would be refused.
+// A database outage or failover shorter than a lease thus loses no results,
+// while an error that persists ends the tries. Each try gets its own timeout.
+func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context.Context) error) error {
+	// The deadline is fixed now: heartbeats keep renewing the leases while
+	// the tries go on, which would otherwise never let them end.
+	deadline := w.leaseEnd(ts)
+	delay := recordRetryFirst
+	for {
 		tryCtx, cancel := context.WithTimeout(ctx, recordTimeout)
-		err = fn(tryCtx)
+		err := fn(tryCtx)
 		cancel()
-		if err == nil || try == completeAttempts-1 {
-			break
+		if err == nil || ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
+			return err
 		}
-		time.Sleep(time.Duration(try+1) * completeRetryDelay)
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "record results failed; trying again",
+			slog.Int(logKeyTasks, len(ts)), slog.Duration(logKeyRetryIn, delay), slog.Any(logKeyError, err))
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+		delay = min(2*delay, recordRetryMax)
 	}
-	return err
 }
 
-// completions returns the completions of ts.
-func completions(ts []*tracked) []completion {
+// leaseEnd returns when the first of the leases of ts may expire, as far as
+// the worker knows.
+func (w *Worker) leaseEnd(ts []*tracked) time.Time {
+	var end time.Time
+	for i, t := range ts {
+		t.mu.Lock()
+		e := t.lastBeat.Add(w.cfg.LeaseDuration)
+		t.mu.Unlock()
+		if i == 0 || e.Before(end) {
+			end = e
+		}
+	}
+	return end
+}
+
+// completionsOf returns the completions of ts.
+func completionsOf(ts []*tracked) []completion {
 	cs := make([]completion, len(ts))
 	for i, t := range ts {
-		cs[i] = completion{id: t.att.id, token: t.att.token}
+		cs[i] = completion{id: t.att.id, token: t.att.token, discard: t.att.discard}
 	}
 	return cs
+}
+
+// track starts tracking t, so that heartbeats renew its lease.
+func (w *Worker) track(t *tracked) {
+	w.mu.Lock()
+	w.attempts[t.att.id] = t
+	w.mu.Unlock()
 }
 
 func (w *Worker) untrack(t *tracked) {
@@ -263,4 +302,108 @@ func (w *Worker) untrack(t *tracked) {
 		delete(w.attempts, t.att.id)
 	}
 	w.mu.Unlock()
+}
+
+// completion identifies an attempt whose task succeeded.
+type completion struct {
+	id      int64
+	token   int32
+	discard bool // delete the task without keeping it in history
+}
+
+// completedTask is a task that a completion finished.
+type completedTask struct {
+	id    int64
+	queue string
+	group string
+}
+
+// historyGap is how long completions skip history after one found no history
+// partition for its day.
+const historyGap = time.Minute
+
+// complete records successful attempts: it moves their tasks to history, or
+// deletes those whose kind keeps none, and advances their FIFO groups. It
+// returns the tasks it completed; an attempt that lost its lease is left
+// out. q must be a transaction if any task belongs to a FIFO group.
+func (c *Client) complete(ctx context.Context, q querier, cs []completion) ([]completedTask, error) {
+	ids := make([]int64, len(cs))
+	tokens := make([]int32, len(cs))
+	discard := make([]int64, 0) // not nil: the statement compares with every element
+	keep := time.Now().UnixNano() >= c.historyGapUntil.Load()
+	for i, x := range cs {
+		ids[i], tokens[i] = x.id, x.token
+		if x.discard || !keep {
+			discard = append(discard, x.id)
+		}
+	}
+
+	done, err := c.completeTasks(ctx, q, ids, tokens, discard)
+	if err != nil {
+		c.noteMissingHistory(ctx, err)
+		return nil, fmt.Errorf("taskmill: complete: %w", err)
+	}
+
+	var heads []groupHead
+	for _, t := range sortedByGroup(done) {
+		heads = append(heads, groupHead{queue: t.queue, group: t.group, id: t.id})
+	}
+	if len(heads) > 0 {
+		if err := c.finishHeads(ctx, q, heads); err != nil {
+			return nil, fmt.Errorf("taskmill: complete: %w", err)
+		}
+	}
+	return done, nil
+}
+
+func (c *Client) completeTasks(ctx context.Context, q querier, ids []int64, tokens []int32, discard []int64) ([]completedTask, error) {
+	r, err := q.query(ctx, c.sql.complete, ids, tokens, discard)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	var done []completedTask
+	for r.Next() {
+		var t completedTask
+		if err := r.Scan(&t.id, &t.queue, &t.group); err != nil {
+			return nil, err
+		}
+		done = append(done, t)
+	}
+	return done, r.Err()
+}
+
+// noteMissingHistory makes completions skip history for a while if err says
+// that the history has no partition for today: the maintainer could not
+// create it, typically because the worker's role does not own the table.
+// Completions keep working, and a retry of the failed one succeeds. The
+// history table has no CHECK constraint, so a check violation on it can only
+// mean a missing partition; the message is not read, as it may be
+// translated.
+func (c *Client) noteMissingHistory(ctx context.Context, err error) {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	if !ok || pgErr.Code != "23514" || pgErr.TableName != "task_history" || pgErr.SchemaName != c.schema { // check_violation
+		return
+	}
+	c.historyGapUntil.Store(time.Now().Add(historyGap).UnixNano())
+	c.logger.LogAttrs(ctx, slog.LevelError,
+		"task history has no partition for today, so completed tasks are not kept in history; "+
+			"the role that runs workers must own the taskmill tables to create the daily partitions",
+		slog.Any(logKeyError, err))
+}
+
+// sortedByGroup returns the grouped tasks in a fixed order of queue and group,
+// so that concurrent transactions lock group rows in the same order and cannot
+// deadlock.
+func sortedByGroup(ts []completedTask) []completedTask {
+	var grouped []completedTask
+	for _, t := range ts {
+		if t.group != "" {
+			grouped = append(grouped, t)
+		}
+	}
+	slices.SortFunc(grouped, func(a, b completedTask) int {
+		return cmp.Or(cmp.Compare(a.queue, b.queue), cmp.Compare(a.group, b.group))
+	})
+	return grouped
 }

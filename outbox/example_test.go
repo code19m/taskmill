@@ -17,7 +17,7 @@ func Example() {
 	ctx := context.Background()
 	var pool *pgxpool.Pool      // the application's pool
 	var client *taskmill.Client // from taskmill.NewClient
-	ob := outbox.New(client, nil)
+	ob := outbox.New(client)
 
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "UPDATE orders SET status = 'paid' WHERE id = 42"); err != nil {
@@ -33,9 +33,6 @@ func Example() {
 		log.Fatal(err)
 	}
 
-	if err := ob.Setup(ctx); err != nil {
-		log.Fatal(err)
-	}
 	var handlers taskmill.Handlers
 	ob.AddRelay(&handlers, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
 		errs := make([]error, len(ds)) // nil: published
@@ -44,10 +41,7 @@ func Example() {
 		}
 		return errs
 	}))
-	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
-		Handlers: &handlers,
-		Queues:   map[string]taskmill.QueueOptions{ob.Queue(): {Concurrency: 4}},
-	})
+	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers}) // serves outbox.Queue
 	if err != nil {
 		log.Fatal(err)
 	}

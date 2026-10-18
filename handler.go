@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"reflect"
 	"time"
 
 	"github.com/code19m/taskmill/internal/argkind"
@@ -42,6 +43,10 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 // A batch takes one slot of its queue's concurrency. When a worker fetches a
 // task of a batch kind, it fills that task's batch with more available tasks
 // of the kind, so a batch kind can share a queue with other kinds.
+//
+// ctx is canceled when the batch times out or the worker shuts down, but not
+// when one of its tasks is canceled or loses its lease: the batch runs to the
+// end, and then that task becomes canceled, or its result is discarded.
 type BatchHandler[A Args] interface {
 	HandleBatch(ctx context.Context, tasks []*Task[A]) []error
 }
@@ -51,13 +56,19 @@ type HandlerOptions struct {
 	// Timeout bounds each attempt, or each batch. Default: 1 minute.
 	Timeout time.Duration
 
-	// Retry decides the delay before each retry. Default: the worker's
-	// [WorkerConfig.DefaultRetry].
+	// Retry decides the delay before each retry. A task whose worker lost its
+	// lease is retried with the default instead, because the maintainer that
+	// rescues it knows no handler's options. Default: [ExponentialBackoff]{}.
 	Retry RetryPolicy
 
 	// BatchSize is the most tasks a [BatchHandler] receives at once.
-	// Default: 100. Ignored for other handlers.
+	// Default: 100. Maximum: 1,000. Ignored for other handlers.
 	BatchSize int
+
+	// DiscardCompleted deletes completed tasks of the kind at once, instead
+	// of keeping them in history, for high-volume kinds whose history nobody
+	// reads.
+	DiscardCompleted bool
 }
 
 const (
@@ -78,8 +89,9 @@ type Handlers struct {
 
 // registration is a handler with its options, with its Args type erased.
 type registration struct {
-	kind string
-	opts HandlerOptions
+	kind  string
+	queue string // the kind's default queue
+	opts  HandlerOptions
 
 	// Exactly one of run and runBatch is set.
 	run      func(ctx context.Context, info *TaskInfo, a *attempt) error
@@ -89,25 +101,16 @@ type registration struct {
 // AddHandler registers h for the kind of A. opts may be nil. Mistakes, such
 // as registering a kind twice, are reported by [NewWorker].
 func AddHandler[A Args](hs *Handlers, h Handler[A], opts *HandlerOptions) {
-	kind, err := argkind.Of[A]()
-	if err != nil {
-		hs.fail(err)
-		return
-	}
-	reg := &registration{kind: kind}
-	if opts != nil {
-		reg.opts = *opts
-	}
-	if h == nil {
-		hs.fail(fmt.Errorf("handler for kind %q is nil", reg.kind))
+	reg := newRegistration[A](hs, h == nil, opts)
+	if reg == nil {
 		return
 	}
 	reg.run = func(ctx context.Context, info *TaskInfo, a *attempt) error {
-		var args A
-		if err := json.Unmarshal(info.Payload, &args); err != nil {
-			return &failure{code: codeInvalidPayload, permanent: true, err: fmt.Errorf("decode payload: %w", err)}
+		t, err := newTask[A](info, a)
+		if err != nil {
+			return err
 		}
-		return h.Handle(ctx, &Task[A]{TaskInfo: *info, Args: args, attempt: a})
+		return h.Handle(ctx, t)
 	}
 	hs.add(reg)
 }
@@ -115,17 +118,8 @@ func AddHandler[A Args](hs *Handlers, h Handler[A], opts *HandlerOptions) {
 // AddBatchHandler registers h for the kind of A. opts may be nil. Mistakes,
 // such as registering a kind twice, are reported by [NewWorker].
 func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptions) {
-	kind, err := argkind.Of[A]()
-	if err != nil {
-		hs.fail(err)
-		return
-	}
-	reg := &registration{kind: kind}
-	if opts != nil {
-		reg.opts = *opts
-	}
-	if h == nil {
-		hs.fail(fmt.Errorf("batch handler for kind %q is nil", reg.kind))
+	reg := newRegistration[A](hs, h == nil, opts)
+	if reg == nil {
 		return
 	}
 	reg.runBatch = func(ctx context.Context, infos []*TaskInfo, as []*attempt) []error {
@@ -133,12 +127,12 @@ func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptio
 		tasks := make([]*Task[A], 0, len(infos))
 		index := make([]int, 0, len(infos)) // position of each decoded task in infos
 		for i, info := range infos {
-			var args A
-			if err := json.Unmarshal(info.Payload, &args); err != nil {
-				errs[i] = &failure{code: codeInvalidPayload, permanent: true, err: fmt.Errorf("decode payload: %w", err)}
+			t, err := newTask[A](info, as[i])
+			if err != nil {
+				errs[i] = err
 				continue
 			}
-			tasks = append(tasks, &Task[A]{TaskInfo: *info, Args: args, attempt: as[i]})
+			tasks = append(tasks, t)
 			index = append(index, i)
 		}
 		if len(tasks) == 0 {
@@ -157,11 +151,53 @@ func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptio
 	hs.add(reg)
 }
 
-func (hs *Handlers) add(reg *registration) {
-	if err := checkName("kind", reg.kind, maxNameLength); err != nil {
-		hs.fail(err)
-		return
+// newRegistration starts the registration of A's handler, or records why it
+// cannot and returns nil.
+func newRegistration[A Args](hs *Handlers, nilHandler bool, opts *HandlerOptions) *registration {
+	kind, err := argkind.Of[A]()
+	if err == nil {
+		err = checkName("kind of "+reflect.TypeFor[A]().String(), kind, maxNameLength)
 	}
+	if err != nil {
+		hs.fail(err)
+		return nil
+	}
+	if nilHandler {
+		hs.fail(fmt.Errorf("handler for kind %q is nil", kind))
+		return nil
+	}
+	reg := &registration{kind: kind, queue: defaultQueueOf[A]()}
+	if opts != nil {
+		reg.opts = *opts
+	}
+	return reg
+}
+
+// defaultQueueOf returns the queue that A's tasks go to by default, read
+// from a zero value as the kind is.
+func defaultQueueOf[A Args]() (queue string) {
+	defer func() {
+		if recover() != nil {
+			queue = DefaultQueue
+		}
+	}()
+	if d, ok := any(argkind.Zero[A]()).(ArgsWithDefaults); ok && d.EnqueueDefaults().Queue != "" {
+		return d.EnqueueDefaults().Queue
+	}
+	return DefaultQueue
+}
+
+// newTask decodes a task's payload for its handler. A payload that does not
+// decode makes the task dead: retrying cannot fix it.
+func newTask[A Args](info *TaskInfo, a *attempt) (*Task[A], error) {
+	var args A
+	if err := json.Unmarshal(info.Payload, &args); err != nil {
+		return nil, &failure{code: CodeInvalidPayload, permanent: true, err: fmt.Errorf("decode payload: %w", err)}
+	}
+	return &Task[A]{TaskInfo: *info, Args: args, attempt: a}, nil
+}
+
+func (hs *Handlers) add(reg *registration) {
 	switch {
 	case reg.opts.Timeout < 0:
 		hs.fail(fmt.Errorf("handler for kind %q: timeout must not be negative", reg.kind))
@@ -180,7 +216,12 @@ func (hs *Handlers) add(reg *registration) {
 	hs.byKind[reg.kind] = reg
 }
 
+// fail records a registration error, which NewWorker reports as an
+// [ErrInvalidArgument].
 func (hs *Handlers) fail(err error) {
+	if !errors.Is(err, ErrInvalidArgument) {
+		err = fmt.Errorf("%w: %w", ErrInvalidArgument, err)
+	}
 	hs.err = errors.Join(hs.err, err)
 }
 
@@ -192,8 +233,9 @@ type RetryPolicy interface {
 }
 
 // ExponentialBackoff doubles the delay after each failed attempt, from Base up
-// to Max, and spreads retries out with ±10% random jitter. The zero value uses
-// a base of 1 second and a maximum of 1 hour.
+// to Max, and spreads retries out with ±10% random jitter, so a delay can
+// reach 10% above Max. The zero value uses a base of 1 second and a maximum
+// of 1 hour.
 type ExponentialBackoff struct {
 	Base time.Duration
 	Max  time.Duration
@@ -218,18 +260,9 @@ func (b ExponentialBackoff) Backoff(attempt int) time.Duration {
 	return time.Duration(float64(d) * jitter)
 }
 
-// Failure codes that taskmill records with an attempt's error.
-const (
-	codeInvalidPayload = "invalid_payload"
-	codePanic          = "panic"
-	codeTimeout        = "timeout"
-	codeUnknownKind    = "unknown_kind"
-	codeNoHandler      = "no_handler"
-)
-
 // failure is a failed attempt that taskmill itself classified.
 type failure struct {
-	code      string
+	code      ErrorCode
 	permanent bool
 	err       error
 }

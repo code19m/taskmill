@@ -36,16 +36,18 @@ jobs:
     name: Test (Go ${{ matrix.go }}, PostgreSQL ${{ matrix.postgres }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local # test the Go of the matrix, not the toolchain line of go.mod
     strategy:
       fail-fast: false
       matrix:
-        # The go.mod version against every supported PostgreSQL, and the
+        # The oldest supported Go against every supported PostgreSQL, and the
         # newest Go against the newest PostgreSQL to catch breakage early.
         include:
-          - { go: go.mod, postgres: 15 }
-          - { go: go.mod, postgres: 16 }
-          - { go: go.mod, postgres: 17 }
-          - { go: go.mod, postgres: 18 }
+          - { go: "1.26.x", postgres: 15 }
+          - { go: "1.26.x", postgres: 16 }
+          - { go: "1.26.x", postgres: 17 }
+          - { go: "1.26.x", postgres: 18 }
           - { go: stable, postgres: 18 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -53,8 +55,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ matrix.go != 'go.mod' && matrix.go || '' }}
-          go-version-file: ${{ matrix.go == 'go.mod' && 'go.mod' || '' }}
+          go-version: ${{ matrix.go }}
           check-latest: true
           cache-dependency-path: go.sum
       # The same database as `make db` locally, with the same settings.
@@ -77,3 +78,16 @@ jobs:
             go.sum
             Makefile
       - run: make vuln
+
+  # The one check that branch protection requires, so that changing the
+  # matrix needs no change to the repository's settings.
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [lint, test, vuln]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1
+      - run: echo "Every check passed."

@@ -101,27 +101,15 @@ func Enqueued[A taskmill.Args](tb testing.TB, client *taskmill.Client) []*taskmi
 	return out
 }
 
-// RunOptions configure [Run]. The zero value is valid.
-type RunOptions struct {
-	// Enqueue are the options the task is enqueued with.
-	Enqueue *taskmill.EnqueueOptions
-
-	// Handler are the options the handler runs with, such as its timeout.
-	Handler *taskmill.HandlerOptions
-}
-
 // Run enqueues a task with args, runs h on it once, the way a worker does,
 // and records the outcome. The attempt holds a real lease, so h may complete
 // the task with [taskmill.Task.CompleteTx]. Run does not retry: a failed task
 // stays retryable or dead. It returns the task afterwards, and the error h
-// returned, or an error describing its panic. opts may be nil.
-func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Handler[A], args A, opts *RunOptions) (*taskmill.TaskInfo, error) {
+// returned, or an error describing its panic. To run a task enqueued with
+// other options, or again after a failure, use [taskmill.Worker.RunTask].
+func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Handler[A], args A) (*taskmill.TaskInfo, error) {
 	tb.Helper()
-	var o RunOptions
-	if opts != nil {
-		o = *opts
-	}
-	res, err := client.Enqueue(tb.Context(), args, o.Enqueue)
+	res, err := client.Enqueue(tb.Context(), args, nil)
 	if err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
 	}
@@ -138,9 +126,9 @@ func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Han
 			}()
 			handlerErr = h.Handle(ctx, task)
 			return handlerErr
-		}), o.Handler)
+		}), nil)
 	} else {
-		taskmill.AddHandler[A](&hs, nil, o.Handler) // reported by NewWorker
+		taskmill.AddHandler[A](&hs, nil, nil) // reported by NewWorker
 	}
 	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs, NoMaintainer: true})
 	if err != nil {
@@ -153,15 +141,16 @@ func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Han
 	return info, handlerErr
 }
 
-// Work runs a worker with cfg until no task of its queues is available or
-// running, then stops it. Tasks that wait for a later run time, such as
-// retries, stay waiting. If cfg.PollInterval is zero, the worker polls every
-// 10 milliseconds. Work fails the test if the worker fails, or if the queues
-// are not empty within a minute.
+// Work runs a worker with cfg until no task is available or running, then
+// stops it. Tasks that wait for a later run time, such as retries, stay
+// waiting. If cfg.PollInterval is zero, the worker polls every 10
+// milliseconds. Work fails the test if the worker fails, or if tasks are
+// still available or running after a minute, for example in a queue that the
+// worker does not serve.
 func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig) {
 	tb.Helper()
 	if cfg == nil {
-		tb.Fatal("taskmilltest: Work needs a WorkerConfig with handlers and queues")
+		tb.Fatal("taskmilltest: Work needs a WorkerConfig with handlers")
 	}
 	c := *cfg
 	if c.PollInterval == 0 {
@@ -178,18 +167,18 @@ func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig) {
 	go func() { done <- w.Run(ctx) }()
 	limit := time.After(workLimit)
 	for {
-		busy, err := busy(ctx, client, c.Queues)
+		queue, err := busyQueue(ctx, client)
 		if err != nil {
 			tb.Fatalf("taskmilltest: %v", err)
 		}
-		if !busy {
+		if queue == "" {
 			break
 		}
 		select {
 		case err := <-done:
 			tb.Fatalf("taskmilltest: worker stopped: %v", err)
 		case <-limit:
-			tb.Fatalf("taskmilltest: tasks were still available or running after %s", workLimit)
+			tb.Fatalf("taskmilltest: tasks in queue %q were still available or running after %s", queue, workLimit)
 		case <-time.After(c.PollInterval):
 		}
 	}
@@ -199,25 +188,17 @@ func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig) {
 	}
 }
 
-// busy reports whether a task of one of queues is available or running. A
-// task stays running until its result is recorded, in the same transaction
-// that promotes the next task of its FIFO group, so no check falls between a
-// task's end and its successor's start.
-func busy(ctx context.Context, client *taskmill.Client, queues map[string]taskmill.QueueOptions) (bool, error) {
-	params := &taskmill.ListParams{States: []taskmill.State{taskmill.StateAvailable, taskmill.StateRunning}, Limit: 1000}
-	for {
-		page, err := client.List(ctx, params)
-		if err != nil {
-			return false, err
-		}
-		for _, t := range page.Tasks {
-			if _, ok := queues[t.Queue]; ok {
-				return true, nil
-			}
-		}
-		if page.Next == "" {
-			return false, nil
-		}
-		params.Cursor = page.Next
+// busyQueue returns the queue of a task that is available or running, or ""
+// if there is none. A task stays running until its result is recorded, in the
+// same transaction that promotes the next task of its FIFO group, so no check
+// falls between a task's end and its successor's start.
+func busyQueue(ctx context.Context, client *taskmill.Client) (string, error) {
+	page, err := client.List(ctx, &taskmill.ListParams{
+		States: []taskmill.State{taskmill.StateAvailable, taskmill.StateRunning},
+		Limit:  1,
+	})
+	if err != nil || len(page.Tasks) == 0 {
+		return "", err
 	}
+	return page.Tasks[0].Queue, nil
 }

@@ -41,31 +41,20 @@ func TestPauseAndResumeQueue(t *testing.T) {
 func TestDiscardCompletedSkipsHistory(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	if err := e.client.UpdateQueue(t.Context(), "fire-and-forget", &taskmill.QueueSettings{DiscardCompleted: true}); err != nil {
-		t.Fatal(err)
-	}
 	done := make(chan struct{}, 1)
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			done <- struct{}{}
 			return nil
-		}, nil),
-		Queues: map[string]taskmill.QueueOptions{"fire-and-forget": {}},
+		}, &taskmill.HandlerOptions{DiscardCompleted: true}),
 	})
 
-	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "fire-and-forget"})
-	recv(t, done, "the worker to stop")
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, done, "the handler to run")
+	waitFor(t, "the completed task to be deleted", func() bool {
 		_, err := e.client.Get(t.Context(), id)
-		if errors.Is(err, taskmill.ErrNotFound) {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("completed task still exists: %v", err)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return errors.Is(err, taskmill.ErrNotFound)
+	})
 	if n := e.count(t, "SELECT count(*) FROM {s}.task_history"); n != 0 {
 		t.Fatalf("history holds %d tasks", n)
 	}
@@ -103,40 +92,35 @@ func TestQueuesAndWorkers(t *testing.T) {
 		t.Fatal(err)
 	}
 	runWorker(t, e, &taskmill.WorkerConfig{
-		ID:       "reporter",
 		Handlers: noopHandlers(),
 		Queues:   map[string]taskmill.QueueOptions{"mail": {}},
 	})
 
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	byName := map[string]taskmill.QueueInfo{}
+	waitFor(t, "statistics to show the backlog", func() bool {
 		queues, err := e.client.Queues(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
-		byName := map[string]taskmill.QueueInfo{}
 		for _, q := range queues {
 			byName[q.Name] = q
 		}
-		if byName["backlog"].Counts[taskmill.StateAvailable] == 3 {
-			if byName["mail"].Workers != 1 || byName["limited"].Settings.MaxRunning != 2 {
-				t.Fatalf("got %+v", byName)
-			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("statistics never showed the backlog: %+v", byName)
-		}
-		time.Sleep(50 * time.Millisecond)
+		return byName["backlog"].Counts[taskmill.StateAvailable] == 3
+	})
+	if byName["mail"].Workers != 1 || byName["limited"].Settings.MaxRunning != 2 {
+		t.Fatalf("got %+v", byName)
 	}
 
-	workers, err := e.client.Workers(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(workers) != 1 || workers[0].ID != "reporter" || !slices.Equal(workers[0].Queues, []string{"mail"}) {
-		t.Fatalf("got workers %+v", workers)
-	}
+	waitFor(t, "the only worker to be elected maintainer", func() bool {
+		workers, err := e.client.Workers(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(workers) != 1 || workers[0].ID == "" || !slices.Equal(workers[0].Queues, []string{"mail"}) {
+			t.Fatalf("got workers %+v", workers)
+		}
+		return workers[0].Maintainer
+	})
 }
 
 func TestListPagesNewestFirst(t *testing.T) {
@@ -199,14 +183,33 @@ func TestListPagesNewestFirst(t *testing.T) {
 	if _, err := e.client.List(t.Context(), &taskmill.ListParams{Cursor: "%%%"}); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("bad cursor: got %v", err)
 	}
+	unknown := &taskmill.ListParams{States: []taskmill.State{"bogus"}}
+	if _, err := e.client.List(t.Context(), unknown); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("unknown state: got %v", err)
+	}
+}
+
+func TestListOneGroup(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	a1 := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"})
+	a2 := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
+	page, err := e.client.List(t.Context(), &taskmill.ListParams{GroupKey: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Tasks) != 2 || page.Tasks[0].ID != a2 || page.Tasks[1].ID != a1 {
+		t.Fatalf("got %+v", page.Tasks)
+	}
 }
 
 func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	schedules := []taskmill.Schedule{{Name: "digest", Cron: "@hourly", Args: sendEmail{To: "digest"}}}
-	a := newWorker(t, e, &taskmill.WorkerConfig{ID: "a", Schedules: schedules})
-	b := newWorker(t, e, &taskmill.WorkerConfig{ID: "b", Schedules: schedules})
+	a := newWorker(t, e, &taskmill.WorkerConfig{Schedules: schedules})
+	b := newWorker(t, e, &taskmill.WorkerConfig{Schedules: schedules})
 	ctx := t.Context()
 	tasks := func() int { return e.count(t, "SELECT count(*) FROM {s}.tasks") }
 	// Each run is due at a different time, as cron runs are: runs are
@@ -230,8 +233,12 @@ func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 	}
 
 	// Two maintainers whose terms overlap both find the run due: it is
-	// enqueued once.
+	// enqueued once, to run at the time it was scheduled for.
 	makeDue(time.Second)
+	var slot time.Time
+	if err := e.pool.QueryRow(ctx, replaceSchema("SELECT next_run_at FROM {s}.schedules", e.schema)).Scan(&slot); err != nil {
+		t.Fatal(err)
+	}
 	var wg sync.WaitGroup
 	for _, w := range []*taskmill.Worker{a, b} {
 		wg.Go(func() { taskmill.RunSchedules(ctx, w) })
@@ -239,6 +246,13 @@ func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 	wg.Wait()
 	if n := tasks(); n != 1 {
 		t.Fatalf("one due run enqueued %d tasks", n)
+	}
+	page, err := e.client.List(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := page.Tasks[0].RunAt; !got.Equal(slot) {
+		t.Fatalf("the task runs at %s, want its slot %s", got, slot)
 	}
 
 	// A paused schedule does not run; once resumed, its missed run does.
@@ -260,6 +274,70 @@ func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 
 	if err := e.client.PauseSchedule(ctx, "unknown"); !errors.Is(err, taskmill.ErrNotFound) {
 		t.Fatalf("unknown schedule: got %v", err)
+	}
+}
+
+func TestRemovedSchedulesArePruned(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Schedules: []taskmill.Schedule{{Name: "kept", Cron: "@yearly", Args: sendEmail{}}},
+	})
+	ctx := t.Context()
+	taskmill.RunSchedules(ctx, w)
+	for _, name := range []string{"removed-today", "removed-long-ago"} {
+		e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at) VALUES ($1, 'default', 'email.send', '@daily', now())`, name)
+	}
+	e.exec(t, "UPDATE {s}.schedules SET updated_at = now() - interval '2 days' WHERE name IN ('kept', 'removed-long-ago')")
+
+	// A worker that defines no schedules, such as one that only does
+	// maintenance, deletes none.
+	taskmill.PruneSchedules(ctx, newWorker(t, e, &taskmill.WorkerConfig{}))
+	if n := e.count(t, "SELECT count(*) FROM {s}.schedules"); n != 3 {
+		t.Fatalf("a maintainer without schedules left %d of 3", n)
+	}
+
+	taskmill.PruneSchedules(ctx, w)
+	ss, err := e.client.Schedules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, s := range ss {
+		names = append(names, s.Name)
+	}
+	if !slices.Equal(names, []string{"kept", "removed-today"}) {
+		t.Fatalf("got schedules %v", names)
+	}
+}
+
+func TestScheduleDoesNotWaitForAHeldGroup(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+		{Name: "ledger", Cron: "@hourly", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
+	}})
+	ctx := t.Context()
+	taskmill.RunSchedules(ctx, w)
+	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'g' FOR UPDATE")
+
+	start := time.Now()
+	taskmill.RunSchedules(ctx, w)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("the schedule waited %s for the group", d)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
+		t.Fatalf("got %d tasks while the group was held, want 1", n)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	taskmill.RunSchedules(ctx, w)
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 2 {
+		t.Fatalf("got %d tasks after the group was free, want 2", n)
 	}
 }
 

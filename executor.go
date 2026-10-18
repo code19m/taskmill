@@ -13,10 +13,10 @@ import (
 // Create one with [Pgx] or [SQL].
 //
 // The enqueue methods accept a transaction, a connection, or a pool.
-// CancelTx, RetryTx, DeleteTx, and [Task.CompleteTx] run several statements
-// that must commit together, so they need a transaction: a [pgx.Tx], a
-// [*sql.Tx], or a type with Commit and Rollback methods, such as *sqlx.Tx.
-// They return [ErrInvalidArgument] for anything else.
+// [Client.CancelTx] and [Task.CompleteTx] run several statements that must
+// commit together, so they need a transaction: a [pgx.Tx], a [*sql.Tx], or a
+// type with Commit and Rollback methods, such as *sqlx.Tx. They return
+// [ErrInvalidArgument] for anything else.
 //
 // Executor is sealed: only this package implements it, which lets its methods
 // change without breaking callers.
@@ -27,9 +27,9 @@ type Executor interface {
 // PgxQuerier is the part of pgx that taskmill uses. [pgx.Tx], [*pgx.Conn],
 // and [*pgxpool.Pool] implement it.
 type PgxQuerier interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, query string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
 }
 
 // SQLQuerier is the part of database/sql that taskmill uses. [*sql.Tx],
@@ -79,8 +79,8 @@ func (e sqlExecutor) querier() querier {
 // querier is what taskmill's statements run on: a pool, a connection, or a
 // transaction, from pgx or database/sql.
 type querier interface {
-	exec(ctx context.Context, sql string, args ...any) (int64, error)
-	query(ctx context.Context, sql string, args ...any) (rows, error)
+	exec(ctx context.Context, query string, args ...any) (int64, error)
+	query(ctx context.Context, query string, args ...any) (rows, error)
 
 	// inTx reports whether statements run inside one transaction, which
 	// operations made of several statements require.
@@ -100,16 +100,16 @@ type pgxQuerier struct {
 	q PgxQuerier
 }
 
-func (p pgxQuerier) exec(ctx context.Context, sql string, args ...any) (int64, error) {
-	tag, err := p.q.Exec(ctx, sql, args...)
+func (p pgxQuerier) exec(ctx context.Context, query string, args ...any) (int64, error) {
+	tag, err := p.q.Exec(ctx, query, args...)
 	if err != nil {
 		return 0, err
 	}
 	return tag.RowsAffected(), nil
 }
 
-func (p pgxQuerier) query(ctx context.Context, sql string, args ...any) (rows, error) {
-	return p.q.Query(ctx, sql, args...) //nolint:sqlclosecheck // the caller closes the rows
+func (p pgxQuerier) query(ctx context.Context, query string, args ...any) (rows, error) {
+	return p.q.Query(ctx, query, args...) //nolint:sqlclosecheck // the caller closes the rows
 }
 
 func (p pgxQuerier) inTx() bool {
@@ -158,8 +158,8 @@ func (r sqlRows) Close() {
 
 // queryRow runs a statement that returns at most one row and scans it into
 // dest. It returns false if there was no row.
-func queryRow(ctx context.Context, q querier, sql string, args []any, dest ...any) (bool, error) {
-	r, err := q.query(ctx, sql, args...)
+func queryRow(ctx context.Context, q querier, query string, args []any, dest ...any) (bool, error) {
+	r, err := q.query(ctx, query, args...)
 	if err != nil {
 		return false, err
 	}
