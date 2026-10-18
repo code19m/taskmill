@@ -52,13 +52,14 @@ var (
 // process is typical; it also takes part in electing the maintainer, which
 // promotes due tasks, rescues expired leases, and applies retention.
 type Worker struct {
-	client   *Client
-	cfg      WorkerConfig
-	handlers map[string]*registration
-	hasBatch bool
-	logger   *slog.Logger
-	listen   *pgx.ConnConfig
-	version  string
+	client    *Client
+	cfg       WorkerConfig
+	handlers  map[string]*registration
+	hasBatch  bool
+	logger    *slog.Logger
+	listen    *pgx.ConnConfig
+	version   string
+	schedules []compiledSchedule
 
 	running atomic.Bool
 
@@ -148,7 +149,8 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		cfg = &WorkerConfig{}
 	}
 	c := *cfg
-	if err := resolveWorkerConfig(&c); err != nil {
+	err := resolveWorkerConfig(&c)
+	if err != nil {
 		return nil, err
 	}
 
@@ -176,6 +178,9 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		w.listen = client.pool.Config().ConnConfig.Copy()
 	}
 	w.logger = w.logger.With(slog.String(logKeyWorker, c.ID))
+	if w.schedules, err = compileSchedules(c.Schedules); err != nil {
+		return nil, err
+	}
 	return w, nil
 }
 

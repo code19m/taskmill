@@ -29,6 +29,7 @@ type maintainer struct {
 	c             *Client
 	leader        bool
 	lastRetention time.Time
+	lastStats     time.Time
 }
 
 func newMaintainer(w *Worker) *maintainer {
@@ -59,6 +60,10 @@ func (m *maintainer) cycle(ctx context.Context) time.Duration {
 	m.rescue(ctx)
 	m.expireDeadlines(ctx)
 	m.runSchedules(ctx)
+	if time.Since(m.lastStats) >= statsInterval {
+		m.refreshStats(ctx)
+		m.lastStats = time.Now()
+	}
 	if time.Since(m.lastRetention) >= retentionInterval {
 		m.retain(ctx)
 		m.lastRetention = time.Now()
