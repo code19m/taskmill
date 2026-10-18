@@ -1,12 +1,17 @@
 package taskmill_test
 
 import (
+	"context"
+	"database/sql"
+	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -36,6 +41,10 @@ type env struct {
 	pool   *pgxpool.Pool
 	schema string
 	client *taskmill.Client
+
+	// rawGroups turns off the FIFO group check at the end of the test, for
+	// tests that write group rows by hand.
+	rawGroups bool
 }
 
 // newEnv migrates a fresh schema and returns a client for it.
@@ -59,7 +68,64 @@ func newEnvWith(t *testing.T, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *e
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	return &env{pool: pool, schema: schema, client: client}
+	e := &env{pool: pool, schema: schema, client: client}
+	// Cleanups run last first, so this check runs after the test's workers
+	// stopped.
+	t.Cleanup(func() {
+		if !e.rawGroups && !t.Failed() {
+			e.checkGroups(t)
+		}
+	})
+	return e
+}
+
+// checkGroups fails the test unless every FIFO group satisfies the
+// invariants in docs/design/task-lifecycle.md: its count matches its
+// unfinished tasks plus a halting dead head, it has exactly one head, and
+// every unfinished grouped task belongs to a group row.
+func (e *env) checkGroups(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var broken []string
+	r, err := e.pool.Query(ctx, replaceSchema(`
+WITH members AS (
+    SELECT g.queue, g.group_key, g.tasks, g.halted_task_id,
+           count(t.id) FILTER (WHERE t.state = 'pending') AS pending,
+           count(t.id) FILTER (WHERE t.state IN ('scheduled', 'available', 'running', 'retryable')) AS heads,
+           count(t.id) FILTER (WHERE t.id = g.halted_task_id AND t.state = 'dead') AS halting
+    FROM {s}.groups g
+    LEFT JOIN {s}.tasks t ON t.queue = g.queue AND t.group_key = g.group_key
+    GROUP BY g.queue, g.group_key, g.tasks, g.halted_task_id
+)
+SELECT format('group %s/%s counts %s tasks: %s pending, %s heads, %s halting dead head (halted by %s)',
+              queue, group_key, tasks, pending, heads, halting, coalesce(halted_task_id::text, 'none'))
+FROM members
+WHERE tasks <> pending + heads + halting
+   OR heads + halting <> 1
+   OR (halted_task_id IS NOT NULL AND halting = 0)
+UNION ALL
+SELECT format('task %s in group %s/%s is %s, but the group has no row', t.id, t.queue, t.group_key, t.state)
+FROM {s}.tasks t
+WHERE t.group_key IS NOT NULL AND t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
+  AND NOT EXISTS (SELECT 1 FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key)`, e.schema))
+	if err != nil {
+		t.Fatalf("check groups: %v", err)
+	}
+	defer r.Close()
+	for r.Next() {
+		var s string
+		if err := r.Scan(&s); err != nil {
+			t.Fatalf("check groups: %v", err)
+		}
+		broken = append(broken, s)
+	}
+	if err := r.Err(); err != nil {
+		t.Fatalf("check groups: %v", err)
+	}
+	for _, s := range broken {
+		t.Errorf("FIFO invariant broken: %s", s)
+	}
 }
 
 // enqueue enqueues args and fails the test on error.
@@ -132,7 +198,8 @@ func (e *env) begin(t *testing.T) pgx.Tx { //nolint:ireturn // pgx's transaction
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = tx.Rollback(t.Context()) })
+	// t.Context is canceled before cleanups run.
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
 	return tx
 }
 
@@ -157,4 +224,81 @@ LIMIT 1`, replaceSchema(fragment, e.schema)).Scan(&pid)
 		return err == nil
 	})
 	return pid
+}
+
+// openSQL opens the test database through database/sql.
+func openSQL(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("pgx", testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// logRecorder is a slog handler that keeps the messages it receives.
+type logRecorder struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (*logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *logRecorder) Handle(_ context.Context, r slog.Record) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.messages = append(l.messages, r.Message)
+	return nil
+}
+
+func (l *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return l }
+
+func (l *logRecorder) WithGroup(string) slog.Handler { return l }
+
+// count returns how many times message was logged.
+func (l *logRecorder) count(message string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, m := range l.messages {
+		if m == message {
+			n++
+		}
+	}
+	return n
+}
+
+// listenerPID returns the process ID of the backend that listens for the
+// env's notifications, or 0 if there is none.
+func (e *env) listenerPID(t *testing.T) int {
+	t.Helper()
+	return e.count(t, "SELECT coalesce(max(pid), 0) FROM pg_stat_activity WHERE query = 'LISTEN ' || $1", e.schema)
+}
+
+// waitListening waits until a worker listens for the env's notifications.
+func (e *env) waitListening(t *testing.T) {
+	t.Helper()
+	waitFor(t, "a worker to listen", func() bool { return e.listenerPID(t) != 0 })
+}
+
+// recv receives from ch, and fails the test if nothing arrives in time.
+func recv[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(15 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		panic("unreachable")
+	}
+}
+
+// setDefaultQueue changes the default queue's settings, and fails the test
+// on error.
+func (e *env) setDefaultQueue(t *testing.T, settings *taskmill.QueueSettings) {
+	t.Helper()
+	if err := e.client.UpdateQueue(t.Context(), taskmill.DefaultQueue, settings); err != nil {
+		t.Fatalf("update the default queue: %v", err)
+	}
 }

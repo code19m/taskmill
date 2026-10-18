@@ -7,13 +7,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
 
-// Defaults for enqueue options.
+// DefaultQueue is the queue that tasks go to when neither the enqueue call
+// nor the kind's defaults name one.
+const DefaultQueue = "default"
+
+// Defaults and limits of enqueue options.
 const (
-	DefaultQueue        = "default"
 	defaultMaxAttempts  = 10
 	defaultDedupeWindow = 24 * time.Hour
 	maxNameLength       = 128
@@ -332,6 +336,9 @@ func (c *Client) resolve(ctx context.Context, p EnqueueParams, now time.Time) (*
 		return nil, invalidArgument("payload of kind %q is %d bytes, more than the limit of %d",
 			kind, len(payload), c.maxPayloadBytes)
 	}
+	if hasNUL(payload) {
+		return nil, invalidArgument("payload of kind %q contains a NUL character", kind)
+	}
 	t.payload = payload
 
 	meta := o.Metadata
@@ -347,7 +354,31 @@ func (c *Client) resolve(ctx context.Context, p EnqueueParams, now time.Time) (*
 	} else if t.metadata, err = json.Marshal(meta); err != nil {
 		return nil, invalidArgument("encode metadata: %v", err)
 	}
+	if hasNUL(t.metadata) {
+		return nil, invalidArgument("metadata contains a NUL character")
+	}
 	return t, nil
+}
+
+// hasNUL reports whether JSON text encodes a NUL character, which jsonb
+// cannot store. An escape is one only if an odd number of backslashes leads
+// to it: in \\u0000 the backslash itself is escaped.
+func hasNUL(text []byte) bool {
+	for i := 0; ; {
+		j := bytes.Index(text[i:], []byte("u0000"))
+		if j < 0 {
+			return false
+		}
+		j += i
+		slashes := 0
+		for k := j - 1; k >= 0 && text[k] == '\\'; k-- {
+			slashes++
+		}
+		if slashes%2 == 1 {
+			return true
+		}
+		i = j + 1
+	}
 }
 
 func (t *resolvedTask) validate(now time.Time) error {
@@ -443,6 +474,8 @@ func checkName(what, s string, maxLen int) error {
 		return invalidArgument("%s is empty", what)
 	case !utf8.ValidString(s):
 		return invalidArgument("%s is not valid UTF-8", what)
+	case strings.ContainsRune(s, 0):
+		return invalidArgument("%s contains a NUL character", what)
 	case utf8.RuneCountInString(s) > maxLen:
 		return invalidArgument("%s %q is longer than %d characters", what, s, maxLen)
 	}

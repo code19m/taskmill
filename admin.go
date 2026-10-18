@@ -1,6 +1,7 @@
 package taskmill
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -15,12 +16,13 @@ import (
 const (
 	defaultListLimit = 100
 	maxListLimit     = 1000
-	listTimeout      = "5s" // bound on one page's query, so inspection never loads the database
-	statsCap         = 100_000
-	statsInterval    = 10 * time.Second
+	listTimeout      = "5s"    // bound on one page's query, so inspection never loads the database
+	statsQueueCap    = 10_000  // most tasks counted per queue and state
+	statsDueCap      = 100_000 // most scheduled and retryable tasks counted in all
 
 	defaultHistoryRetention = 7 * 24 * time.Hour
 	defaultDeadRetention    = 30 * 24 * time.Hour
+	minRetention            = time.Hour
 )
 
 // QueueSettings are a queue's cluster-wide settings, stored in the database.
@@ -49,8 +51,9 @@ type QueueInfo struct {
 	Workers  int // live workers that serve the queue
 
 	// Counts holds the number of tasks per state, except completed tasks.
-	// A count that reached the statistics cap of 100,000 per state is
-	// reported as counted so far, and Capped is set.
+	// Counting stops at 10,000 tasks per state, and at 100,000 scheduled
+	// and retryable tasks across all queues; Capped reports that a count
+	// stopped early and is a lower bound.
 	Counts      map[State]int64
 	Capped      bool
 	RefreshedAt time.Time // zero until the maintainer first counts the queue
@@ -104,9 +107,9 @@ type ListResult struct {
 	Next string
 }
 
-// UpdateQueue changes a queue's settings for every worker in the cluster,
-// creating the queue if it does not exist. Workers apply the change within
-// seconds.
+// UpdateQueue replaces a queue's settings for every worker in the cluster,
+// creating the queue if it does not exist: fields left zero, or a nil
+// settings, restore the defaults. Workers apply the change within seconds.
 func (c *Client) UpdateQueue(ctx context.Context, name string, settings *QueueSettings) error {
 	if err := checkName("queue", name, maxNameLength); err != nil {
 		return err
@@ -223,22 +226,15 @@ func (c *Client) UpdateSettings(ctx context.Context, settings *Settings) error {
 	if settings == nil {
 		settings = &Settings{}
 	}
-	history := cmpDuration(settings.HistoryRetention, defaultHistoryRetention)
-	dead := cmpDuration(settings.DeadRetention, defaultDeadRetention)
-	if history < time.Hour || dead < time.Hour {
-		return invalidArgument("retention periods must be at least an hour")
+	history := cmp.Or(settings.HistoryRetention, defaultHistoryRetention)
+	dead := cmp.Or(settings.DeadRetention, defaultDeadRetention)
+	if history < minRetention || dead < minRetention {
+		return invalidArgument("retention periods must be at least %s", minRetention)
 	}
 	if _, err := c.pool.Exec(ctx, c.sql.updateSettings, history.Microseconds(), dead.Microseconds()); err != nil {
 		return fmt.Errorf("taskmill: update settings: %w", err)
 	}
 	return nil
-}
-
-func cmpDuration(d, fallback time.Duration) time.Duration {
-	if d == 0 {
-		return fallback
-	}
-	return d
 }
 
 // Workers returns the registered worker processes. A worker that stopped
@@ -264,7 +260,9 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 }
 
 // List returns tasks that match params, newest first, one page at a time.
-// Each page's query is bounded in time, so listing never loads the database.
+// Each page's query is canceled after 5 seconds, so listing cannot overload
+// the database; on a very large table, a filter that matches few tasks can
+// reach that limit and return an error.
 func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, error) {
 	if params == nil {
 		params = &ListParams{}
@@ -288,6 +286,11 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	var out ListResult
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
+			return err
+		}
+		// Custom plans see which filters are empty, and so use the indexes
+		// that serve the filters that are set.
+		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
 			return err
 		}
 		r, err := tx.Query(ctx, c.sql.listTasks, params.Queue, states, params.Kind, before, limit+1, live, history)
@@ -338,52 +341,46 @@ func listBounds(p *ListParams) (limit int, before int64, err error) {
 	return limit, before, nil
 }
 
-// refreshStats counts each queue's tasks per state, up to a cap per state,
-// and stores the counts for [Client.Queues].
+// refreshStats counts each queue's tasks per state, up to the caps, and
+// stores the counts for [Client.Queues].
 func (m *maintainer) refreshStats(ctx context.Context) {
-	type row struct {
-		queue, state string
-		n            int64
-		capped       bool
+	var queues, states []string
+	var counts []int64
+	var capped []bool
+	var dueTotal int64 // scheduled and retryable tasks counted, in all queues
+	r, err := m.c.pool.Query(ctx, m.c.sql.countStats, statsQueueCap, statsDueCap)
+	if err != nil {
+		m.log(ctx, slog.LevelError, "refresh statistics", err)
+		return
 	}
-	var rows []row
-	for _, s := range []State{StateScheduled, StatePending, StateAvailable, StateRunning, StateRetryable, StateDead, StateCanceled} {
-		r, err := m.c.pool.Query(ctx, m.c.sql.countState, string(s), statsCap)
-		if err != nil {
+	for r.Next() {
+		var state, queue string
+		var n int64
+		if err := r.Scan(&state, &queue, &n); err != nil {
+			r.Close()
 			m.log(ctx, slog.LevelError, "refresh statistics", err)
 			return
 		}
-		var total int64
-		var counted []row
-		for r.Next() {
-			x := row{state: string(s)}
-			if err := r.Scan(&x.queue, &x.n); err != nil {
-				r.Close()
-				m.log(ctx, slog.LevelError, "refresh statistics", err)
-				return
-			}
-			total += x.n
-			counted = append(counted, x)
+		if s := State(state); s == StateScheduled || s == StateRetryable {
+			dueTotal += n
 		}
-		r.Close()
-		if err := r.Err(); err != nil {
-			m.log(ctx, slog.LevelError, "refresh statistics", err)
-			return
+		queues, states, counts = append(queues, queue), append(states, state), append(counts, n)
+		capped = append(capped, n >= statsQueueCap)
+	}
+	r.Close()
+	if err := r.Err(); err != nil {
+		m.log(ctx, slog.LevelError, "refresh statistics", err)
+		return
+	}
+	// The scheduled and retryable counts share one cap: once it is hit,
+	// any queue may have more of them than counted, even none counted.
+	if dueTotal >= statsDueCap {
+		for i := range capped {
+			capped[i] = true
 		}
-		for i := range counted {
-			counted[i].capped = total >= statsCap
-		}
-		rows = append(rows, counted...)
 	}
 
-	queues := make([]string, len(rows))
-	states := make([]string, len(rows))
-	counts := make([]int64, len(rows))
-	capped := make([]bool, len(rows))
-	for i, x := range rows {
-		queues[i], states[i], counts[i], capped[i] = x.queue, x.state, x.n, x.capped
-	}
-	err := pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
+	err = pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, m.c.sql.clearStats); err != nil {
 			return err
 		}

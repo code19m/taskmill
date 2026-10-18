@@ -30,9 +30,11 @@ that taskmill's migrations set on its own tables. `fsync` and
 
 ## Targets
 
-Each target has an ID that the benchmark reports use. Throughput is sustained
-for 10 minutes after a 1-minute warm-up; every number is the median of three
-runs. Handlers are no-ops unless stated otherwise.
+Each target has an ID that the benchmark reports use: T for throughput, L for
+latency, S for scalability, E for efficiency (resource use), and F for faults.
+On the reference hardware, throughput is to be sustained for 10 minutes after
+a 1-minute warm-up, and every number is the median of three runs. Handlers are
+no-ops unless stated otherwise.
 
 ### Throughput
 
@@ -67,12 +69,12 @@ runs. Handlers are no-ops unless stated otherwise.
 
 | ID | Measure | Target |
 |---|---|---|
-| R1 | SQL statements per task under load, ungrouped | ≤ 3, amortized over batches |
-| R2 | WAL written per task, history kept | ≤ 2 KiB |
-| R3 | `tasks` heap and index size during a 4-hour run at half of T3 | Within 2× of their size after the first hour |
-| R4 | Database connections | Client: its pool only. Worker: its pool plus one `LISTEN` connection |
-| R5 | Worker memory | Idle ≤ 30 MiB RSS; ≤ 8 KiB per running task, beyond the handler's own |
-| R6 | An idle worker's load on the database | One fetch per queue per poll interval, plus heartbeats |
+| E1 | SQL statements per task under load, ungrouped | ≤ 3, amortized over batches |
+| E2 | WAL written per task, history kept | ≤ 2 KiB |
+| E3 | `tasks` heap and index size during a 4-hour run at half of T3 | Within 2× of their size after the first hour |
+| E4 | Database connections | Client: its pool only. Worker: its pool plus one `LISTEN` connection |
+| E5 | Worker memory | Idle ≤ 30 MiB RSS; ≤ 8 KiB per running task, beyond the handler's own |
+| E6 | An idle worker's load on the database | One fetch per queue per poll interval, plus heartbeats |
 
 ### Reliability
 
@@ -92,16 +94,16 @@ These targets have zero tolerance: one violation blocks the release.
 
 ## How M7 measures
 
-- **A benchmark program** in `internal/cmd/bench` drives each workload against
-  a real database and reports every target by ID. It records latency
-  histograms, statement counts from `pg_stat_statements`, WAL from
-  `pg_current_wal_lsn()`, and table sizes, and writes the results to
-  `docs/benchmarks.md` with the hardware and versions used.
-- **Failure scenarios** run in the same program: it starts worker processes,
-  kills them, restarts PostgreSQL, and cuts connections with a proxy.
-- **Micro-benchmarks** (`go test -bench`) cover the worker's hot paths. They are
-  compared before and after a change with `benchstat`; they guard against
-  regressions rather than prove the targets.
+- **A benchmark program,** `internal/cmd/bench`, runs T1 to T5, E1, E2, L1,
+  and the fault checks F1 to F3 against a real database, and prints a Markdown
+  report; [benchmarks.md](../benchmarks.md) holds the latest one, with the
+  hardware and versions used. It counts statements with a pgx query tracer
+  and WAL with `pg_current_wal_lsn()`.
+- **Fault checks** run in the same program: it starts worker processes and
+  kills them with `SIGKILL` while they work.
+- **Planned before v1.0.0:** runs on the reference hardware for the full 10
+  minutes, latency histograms, table sizes (E3), PostgreSQL restarts and
+  network cuts (F6 to F9), and micro-benchmarks of the worker's hot paths.
 - **On a laptop** the program runs scaled down, with the same IDs, so
   contributors can check a change before the full run.
 
@@ -127,23 +129,24 @@ A soak ran 10,000 tasks/s through enqueue and processing for 5 minutes,
 3 million tasks in all, starting from an empty queue. The backlog stayed near
 zero, and the `tasks` heap stayed between 35 and 41 MB while autovacuum ran
 about every 7 seconds. Each fetch-and-complete cycle took 1 to 3 ms. Its
-indexes grew from 7.5 to 12 MB, which is why R3 measures over hours.
+indexes grew from 7.5 to 12 MB, which is why E3 measures over hours.
 
 ## What the baseline changed in the design
 
 1. **Workers batch automatically.** Processing tasks one at a time is 4.5
    times slower than in batches of 10. Workers fetch up to their free
-   capacity at once, and record completions for every result that is ready in
-   one statement. At low load a batch is a single task, so batching adds no
+   capacity at once, and record completions for every result that is ready
+   together: one statement for ungrouped tasks, one transaction for tasks in
+   FIFO groups. At low load a batch is a single task, so batching adds no
    latency.
 2. **Notifications are throttled.** `NOTIFY` in every enqueue cut throughput
    to about 10,000 tasks/s, and more producers made it worse, because
    PostgreSQL serializes notifying commits. A client sends at most one
    notification per queue per 50 ms, inside the enqueue's transaction, so an
-   idle worker wakes for the first task of a burst at once. If more enqueues
-   follow within the window, the client sends one more notification when the
-   window ends, so a wake-up is at most about 50 ms late, unless the enqueue's
-   transaction is still open then and polling picks the task up. A busy worker
+   idle worker wakes for the first task of a burst at once. Later enqueues in
+   the same window share one more notification, sent when the window ends, so
+   a worker wakes at most about 50 ms late, unless the enqueue's transaction
+   is still open then and polling picks the task up. A busy worker
    needs none of this: it fetches again as soon as it has free capacity.
 3. **The hot table stays small,** as the schema intended: in steady state it
    holds only the tasks in flight, and vacuum keeps up with the churn.

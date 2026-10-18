@@ -1,11 +1,13 @@
 package taskmill
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -33,7 +35,8 @@ type Schedule struct {
 	Location *time.Location
 
 	// Args and Options describe the task to enqueue. The schedule sets the
-	// dedupe key itself, to enqueue each run once.
+	// run time and the dedupe key itself, to enqueue each run once when it
+	// is due; Options must not set a deadline.
 	Args    Args
 	Options *EnqueueOptions
 }
@@ -57,11 +60,6 @@ type compiledSchedule struct {
 	opts EnqueueOptions
 }
 
-func validateSchedules(ss []Schedule) error {
-	_, err := compileSchedules(ss)
-	return err
-}
-
 func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 	out := make([]compiledSchedule, 0, len(ss))
 	seen := make(map[string]bool, len(ss))
@@ -76,12 +74,15 @@ func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 		if s.Args == nil {
 			return nil, invalidArgument("schedule %q has no args", s.Name)
 		}
-		expr, err := cron.Parse(s.Cron)
-		if err != nil {
-			return nil, invalidArgument("schedule %q: %v", s.Name, err)
-		}
 		if s.Location == nil {
 			s.Location = time.UTC
+		}
+		expr, err := cron.Parse(s.Cron)
+		if err == nil {
+			_, err = expr.Next(time.Now().In(s.Location)) // fails if it never matches
+		}
+		if err != nil {
+			return nil, invalidArgument("schedule %q: %v", s.Name, err)
 		}
 		var opts EnqueueOptions
 		if d, ok := s.Args.(ArgsWithDefaults); ok {
@@ -90,17 +91,44 @@ func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 		if s.Options != nil {
 			opts = mergeOptions(opts, *s.Options)
 		}
-		opts.Queue = cmpOr(opts.Queue, DefaultQueue)
+		opts.Queue = cmp.Or(opts.Queue, DefaultQueue)
+		if err := checkScheduledTask(s.Args, opts); err != nil {
+			detail, _ := strings.CutPrefix(err.Error(), ErrInvalidArgument.Error()+": ")
+			return nil, invalidArgument("schedule %q: %s", s.Name, detail)
+		}
 		out = append(out, compiledSchedule{Schedule: s, expr: expr, opts: opts})
 	}
 	return out, nil
 }
 
-func cmpOr(s, fallback string) string {
-	if s == "" {
-		return fallback
+// checkScheduledTask validates the task that a schedule enqueues, so that a
+// mistake fails NewWorker instead of every run.
+func checkScheduledTask(args Args, opts EnqueueOptions) error {
+	if !opts.Deadline.IsZero() {
+		return invalidArgument("options must not set a deadline")
 	}
-	return s
+	kind := args.Kind()
+	if err := checkName("kind", kind, maxNameLength); err != nil {
+		return err
+	}
+	t := resolvedTask{
+		queue:       opts.Queue,
+		kind:        kind,
+		group:       opts.GroupKey,
+		priority:    cmp.Or(opts.Priority, PriorityNormal),
+		maxAttempts: cmp.Or(opts.MaxAttempts, defaultMaxAttempts),
+	}
+	if err := t.validate(time.Now()); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(args)
+	if err != nil {
+		return invalidArgument("encode payload of kind %q: %v", kind, err)
+	}
+	if hasNUL(payload) {
+		return invalidArgument("payload of kind %q contains a NUL character", kind)
+	}
+	return nil
 }
 
 // scheduleState is a schedule's row in the database.
@@ -245,9 +273,13 @@ func (c *Client) ResumeSchedule(ctx context.Context, name string) error {
 }
 
 func (c *Client) setSchedulePaused(ctx context.Context, name string, paused bool) error {
+	verb := "resume"
+	if paused {
+		verb = "pause"
+	}
 	tag, err := c.pool.Exec(ctx, c.sql.pauseSchedule, name, paused)
 	if err != nil {
-		return fmt.Errorf("taskmill: pause schedule %q: %w", name, err)
+		return fmt.Errorf("taskmill: %s schedule %q: %w", verb, name, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: schedule %q", ErrNotFound, name)

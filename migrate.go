@@ -16,6 +16,11 @@ import (
 // that completions never wait for a partition.
 const historyDaysAhead = 7
 
+// partitionLockTimeout bounds the wait for the history table's lock while
+// attaching a partition, so that a long transaction cannot stall completions
+// behind it.
+const partitionLockTimeout = "5s"
+
 // MigrateConfig configures [Migrate]. The zero value is valid.
 type MigrateConfig struct {
 	// Schema is the PostgreSQL schema to migrate. Default: "taskmill".
@@ -106,13 +111,13 @@ CREATE TABLE IF NOT EXISTS %[1]s.migrations (
 }
 
 // Migration is one versioned schema change, for teams that apply migrations
-// with their own tools. Apply them in order, each in a transaction, and record
-// them so that [NewClient] finds the schema up to date:
+// with their own tools. [Migrations] returns them in order: first the
+// bootstrap, version 0, which creates the schema and the migrations table,
+// then every versioned migration. Apply them in order, each in a
+// transaction, and record every version above 0, so that [NewClient] finds
+// the schema up to date:
 //
 //	INSERT INTO <schema>.migrations (version, name) VALUES (<Version>, '<Name>')
-//
-// The migrations table itself is created by the first migration's caller:
-// see [Migrate] for the exact statements.
 type Migration struct {
 	Version int
 	Name    string
@@ -150,7 +155,7 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "taskmill.partitions."+schema); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '5s'"); err != nil {
+		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+partitionLockTimeout+"'"); err != nil {
 			return err
 		}
 

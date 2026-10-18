@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -78,6 +79,8 @@ func Example() {
 func ExampleSQL() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
+
+	// The "pgx" driver comes from: import _ "github.com/jackc/pgx/v5/stdlib"
 	db, err := sql.Open("pgx", os.Getenv("DATABASE_URL"))
 	if err != nil {
 		log.Fatal(err)
@@ -191,5 +194,81 @@ func ExampleSchedule() {
 	})
 	if err != nil {
 		log.Fatal(err)
+	}
+}
+
+// This example logs every attempt with its duration, as tracing and metrics
+// middleware would measure it.
+func ExampleMiddleware() {
+	logAttempts := taskmill.Middleware(func(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
+		start := time.Now()
+		err := next(ctx)
+		log.Printf("task %d (%s), attempt %d: %v after %s", task.ID, task.Kind, task.Attempt, err, time.Since(start))
+		return err
+	})
+	var client *taskmill.Client // from taskmill.NewClient
+	var handlers taskmill.Handlers
+	_, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
+		Handlers:   &handlers,
+		Middleware: []taskmill.Middleware{logAttempts},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+// receiptMailer sends receipts in bulk.
+type receiptMailer struct{}
+
+func (receiptMailer) HandleBatch(ctx context.Context, tasks []*taskmill.Task[SendReceipt]) []error {
+	errs := make([]error, len(tasks))
+	for i, t := range tasks {
+		errs[i] = deliverReceipt(ctx, t.Args.Email, t.Args.OrderID) // or one bulk call to the mail service
+	}
+	return errs
+}
+
+// This example runs receipts in batches of up to 50, in a queue of their own.
+func ExampleAddBatchHandler() {
+	var handlers taskmill.Handlers
+	taskmill.AddBatchHandler[SendReceipt](&handlers, receiptMailer{}, &taskmill.HandlerOptions{BatchSize: 50})
+	_ = taskmill.WorkerConfig{
+		Handlers: &handlers,
+		Queues:   map[string]taskmill.QueueOptions{"receipts": {Concurrency: 2}},
+	}
+}
+
+// This example prints the migrations, for teams that apply them with their
+// own migration tool.
+func ExampleMigrations() {
+	ms, err := taskmill.Migrations("taskmill")
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, m := range ms {
+		fmt.Printf("%04d_%s\n", m.Version, m.Name)
+	}
+	// Output:
+	// 0000_bootstrap
+	// 0001_initial
+}
+
+// This example pages through the dead tasks of one queue.
+func ExampleClient_List() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+	params := &taskmill.ListParams{Queue: "emails", States: []taskmill.State{taskmill.StateDead}}
+	for {
+		page, err := client.List(ctx, params)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, t := range page.Tasks {
+			log.Printf("task %d failed: %s", t.ID, t.Errors[len(t.Errors)-1].Message)
+		}
+		if page.Next == "" {
+			break
+		}
+		params.Cursor = page.Next
 	}
 }

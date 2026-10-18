@@ -121,7 +121,7 @@ linters:
         - error
         - generic
         - stdlib
-        - taskmill\.(querier|rows)$ # unexported adapters over pgx and database/sql
+        - taskmill\.(Executor|querier|rows)$ # the sealed Executor, and unexported adapters over pgx and database/sql
 
     misspell:
       locale: US

@@ -2,13 +2,16 @@ package ui_test
 
 import (
 	"context"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -148,5 +151,87 @@ func TestReadOnly(t *testing.T) {
 	}
 	if rec := post(t, h, "/tasks/"+id+"/cancel", "same-origin"); rec.Code != http.StatusForbidden {
 		t.Fatalf("read-only cancel: %d", rec.Code)
+	}
+}
+
+func TestQueueActionsWorkForAnyName(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	ctx := t.Context()
+	const name = "a/b?c#d%2Fe"
+	if err := client.UpdateQueue(ctx, name, nil); err != nil {
+		t.Fatal(err)
+	}
+	h := ui.Handler(client, &ui.Config{Prefix: "/admin"})
+
+	_, body, _ := get(t, h, "/admin/")
+	m := regexp.MustCompile(`action="([^"]*/pause)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no pause form in\n%s", body)
+	}
+	if rec := post(t, h, html.UnescapeString(m[1]), "same-origin"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("pause: got %d", rec.Code)
+	}
+	queues, err := client.Queues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range queues {
+		if q.Paused != (q.Name == name) {
+			t.Fatalf("queue %q paused: %v", q.Name, q.Paused)
+		}
+	}
+}
+
+func TestScheduleActionsWorkForAnyName(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	ctx := t.Context()
+	const name = "a/b?c#d%2Fe"
+
+	// A worker stores its schedules in its first maintenance cycle.
+	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
+		Schedules: []taskmill.Schedule{{Name: name, Cron: "@daily", Args: greet{}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wctx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- w.Run(wctx) }()
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		ss, err := client.Schedules(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ss) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the schedule was not stored")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	stop()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	h := ui.Handler(client, &ui.Config{Prefix: "/admin"})
+	_, body, _ := get(t, h, "/admin/")
+	m := regexp.MustCompile(`action="([^"]*/schedules/[^"]*/pause)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no schedule pause form in\n%s", body)
+	}
+	if rec := post(t, h, html.UnescapeString(m[1]), "same-origin"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("pause: got %d", rec.Code)
+	}
+	ss, err := client.Schedules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ss) != 1 || ss[0].Name != name || !ss[0].Paused {
+		t.Fatalf("got %+v", ss)
 	}
 }

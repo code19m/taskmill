@@ -26,8 +26,8 @@ type TaskInfo struct {
 	// Payload is the task's Args as stored, in JSON.
 	Payload json.RawMessage
 
-	// Errors holds the errors of failed attempts, oldest first. Only the
-	// most recent ones are kept.
+	// Errors holds the errors of failed attempts, oldest first: the 20 most
+	// recent ones.
 	Errors []AttemptError
 
 	CreatedAt   time.Time
@@ -47,8 +47,10 @@ type AttemptError struct {
 
 	// Code classifies failures that taskmill itself detected:
 	// "lease_expired", "deadline_exceeded", "panic", "timeout",
-	// "invalid_payload", or "unknown_kind". Empty for errors returned by a
-	// handler.
+	// "invalid_payload", or "unknown_kind" when no worker with a handler for
+	// the kind appeared in time. "no_handler" marks a note, not a failure:
+	// the first time a worker met the task without a handler, and began to
+	// wait for one. Code is empty for errors returned by a handler.
 	Code string `json:"code,omitempty"`
 }
 
@@ -143,9 +145,13 @@ func (c *Client) complete(ctx context.Context, q querier, cs []completion) ([]co
 		return nil, fmt.Errorf("taskmill: complete: %w", err)
 	}
 
+	var heads []groupHead
 	for _, t := range sortedByGroup(done) {
-		if err := c.leaveGroup(ctx, q, t.queue, t.group, t.id, true, false); err != nil {
-			return nil, fmt.Errorf("taskmill: complete task %d: %w", t.id, err)
+		heads = append(heads, groupHead{queue: t.queue, group: t.group, id: t.id})
+	}
+	if len(heads) > 0 {
+		if err := c.finishHeads(ctx, q, heads); err != nil {
+			return nil, fmt.Errorf("taskmill: complete: %w", err)
 		}
 	}
 	return done, nil

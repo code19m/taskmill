@@ -4,7 +4,7 @@
 // It runs against the database in TASKMILL_TEST_DATABASE_URL, in a schema of
 // its own that it recreates, and prints a Markdown report:
 //
-//	go run ./internal/cmd/bench -scenarios enqueue,throughput,latency,chaos
+//	go run ./internal/cmd/bench -scenarios enqueue,throughput,fifo,latency,chaos
 //
 // The chaos scenario starts worker processes and kills them with SIGKILL
 // while they work, then checks that every task completed exactly once.
@@ -31,13 +31,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
+	"github.com/code19m/taskmill/outbox"
 )
 
 const schema = "taskmill_bench"
 
 type noop struct {
 	N    int   `json:"n"`
-	Sent int64 `json:"sent,omitempty"` // UnixNano after the enqueue committed
+	Sent int64 `json:"sent,omitempty"` // UnixNano just before the enqueue's transaction
 }
 
 func (noop) Kind() string { return "bench.noop" }
@@ -53,7 +54,7 @@ func (tracked) Kind() string { return "bench.tracked" }
 func main() {
 	var (
 		url       = flag.String("db", os.Getenv("TASKMILL_TEST_DATABASE_URL"), "database URL")
-		scenarios = flag.String("scenarios", "enqueue,throughput,latency,chaos", "comma-separated scenarios")
+		scenarios = flag.String("scenarios", "enqueue,throughput,fifo,latency,chaos", "comma-separated scenarios")
 		duration  = flag.Duration("duration", 10*time.Second, "duration of timed scenarios")
 		tasks     = flag.Int("tasks", 200_000, "tasks for the throughput scenario")
 		role      = flag.String("role", "", "internal: run as a chaos worker process")
@@ -79,6 +80,8 @@ func main() {
 			benchEnqueue(ctx, pool, *duration)
 		case "throughput":
 			benchThroughput(ctx, pool, *tasks)
+		case "fifo":
+			benchFIFO(ctx, pool, *tasks)
 		case "latency":
 			benchLatency(ctx, pool, *duration)
 		case "chaos":
@@ -95,6 +98,7 @@ func connect(ctx context.Context, url string, conns int32) *pgxpool.Pool {
 		fail(err)
 	}
 	cfg.MaxConns = conns
+	cfg.ConnConfig.Tracer = &statements
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		fail(err)
@@ -170,7 +174,7 @@ func timed(ctx context.Context, n int, d time.Duration, fn func(context.Context)
 	return total.Load()
 }
 
-// T3, R1, and R2: end-to-end processing of a backlog, with history kept.
+// T3, E1, and E2: processing a backlog of queued tasks, with history kept.
 func benchThroughput(ctx context.Context, pool *pgxpool.Pool, n int) {
 	c := fresh(ctx, pool)
 	batch := make([]taskmill.EnqueueParams, 1000)
@@ -198,7 +202,7 @@ func benchThroughput(ctx context.Context, pool *pgxpool.Pool, n int) {
 	}
 
 	walStart := walLSN(ctx, pool)
-	statsStart := statements(ctx, pool)
+	statsStart := statements.n.Load()
 	wctx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	start := time.Now()
@@ -216,19 +220,99 @@ func benchThroughput(ctx context.Context, pool *pgxpool.Pool, n int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	wal := walDiff(ctx, pool, walStart)
-	stmts := statements(ctx, pool) - statsStart
+	stmts := statements.n.Load() - statsStart
 
 	fmt.Println("## Processing")
 	fmt.Println()
 	fmt.Println("| ID | Workload | Result |")
 	fmt.Println("|---|---|---|")
-	fmt.Printf("| T3 | %d tasks end to end, 1 worker with concurrency 64, history kept | %s tasks/s |\n",
-		n, rate(int64(n), elapsed))
-	fmt.Printf("| R2 | WAL written per task, fetch to history | %.2f KiB |\n", float64(wal)/float64(n)/1024)
-	if stmts > 0 {
-		fmt.Printf("| R1 | SQL statements per task while processing | %.2f |\n", float64(stmts)/float64(n))
-	}
+	fmt.Printf("| T3 | %s queued tasks fetched, run, and completed into history, 1 worker with concurrency 64 | %s tasks/s |\n",
+		commas(int64(n)), rate(int64(n), elapsed))
+	fmt.Printf("| E1 | SQL statements per task while processing | %.2f |\n", float64(stmts)/float64(n))
+	fmt.Printf("| E2 | WAL written per task, fetch to history | %.2f KiB |\n", float64(wal)/float64(n)/1024)
 	fmt.Println()
+}
+
+// T4 and T5: FIFO groups, and the outbox relay with a batch publisher.
+func benchFIFO(ctx context.Context, pool *pgxpool.Pool, n int) {
+	const groups, keys = 100_000, 10_000
+
+	c := fresh(ctx, pool)
+	batch := make([]taskmill.EnqueueParams, 1000)
+	for done := 0; done < n; done += len(batch) {
+		for i := range batch {
+			key := "account-" + strconv.Itoa((done+i)%groups)
+			batch[i] = taskmill.EnqueueParams{Args: noop{N: done + i}, Options: &taskmill.EnqueueOptions{GroupKey: key}}
+		}
+		if _, err := c.EnqueueMany(ctx, batch); err != nil {
+			fail(err)
+		}
+	}
+	var completed atomic.Int64
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[noop](func(context.Context, *taskmill.Task[noop]) error {
+		completed.Add(1)
+		return nil
+	}), nil)
+	fifo := runUntil(ctx, c, &hs, taskmill.DefaultQueue, 64, func() bool { return completed.Load() >= int64(n) })
+
+	c = fresh(ctx, pool)
+	ob := outbox.New(c, nil)
+	if err := ob.Setup(ctx); err != nil {
+		fail(err)
+	}
+	for done := 0; done < n; done += 1000 {
+		msgs := make([]outbox.Message, 1000)
+		for i := range msgs {
+			msgs[i] = outbox.Message{Topic: "orders", Key: strconv.AppendInt(nil, int64((done+i)%keys), 10), Value: []byte(`{}`)}
+		}
+		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return ob.Store(ctx, taskmill.Pgx(tx), msgs...) })
+		if err != nil {
+			fail(err)
+		}
+	}
+	var published atomic.Int64
+	hs = taskmill.Handlers{}
+	ob.AddRelay(&hs, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
+		published.Add(int64(len(ds)))
+		return make([]error, len(ds))
+	}))
+	relay := runUntil(ctx, c, &hs, ob.Queue(), 8, func() bool { return published.Load() >= int64(n) })
+
+	fmt.Println("## Ordering")
+	fmt.Println()
+	fmt.Println("| ID | Workload | Result |")
+	fmt.Println("|---|---|---|")
+	fmt.Printf("| T4 | %s tasks in %s FIFO groups, 1 worker with concurrency 64 | %s tasks/s |\n",
+		commas(int64(n)), commas(groups), rate(int64(n), fifo))
+	fmt.Printf("| T5 | %s outbox messages on %s keys, 1 relay worker with concurrency 8 | %s messages/s |\n",
+		commas(int64(n)), commas(keys), rate(int64(n), relay))
+	fmt.Println()
+}
+
+// runUntil runs a worker on queue until done reports true, and returns how
+// long that took.
+func runUntil(ctx context.Context, c *taskmill.Client, hs *taskmill.Handlers, queue string, concurrency int, done func() bool) time.Duration {
+	w, err := taskmill.NewWorker(c, &taskmill.WorkerConfig{
+		Handlers: hs,
+		Queues:   map[string]taskmill.QueueOptions{queue: {Concurrency: concurrency}},
+	})
+	if err != nil {
+		fail(err)
+	}
+	wctx, cancel := context.WithCancel(ctx)
+	stopped := make(chan error, 1)
+	start := time.Now()
+	go func() { stopped <- w.Run(wctx) }()
+	for !done() && ctx.Err() == nil {
+		time.Sleep(10 * time.Millisecond)
+	}
+	elapsed := time.Since(start)
+	cancel()
+	if err := <-stopped; err != nil {
+		fail(err)
+	}
+	return elapsed
 }
 
 // L1: pickup latency of an idle worker woken by notifications.
@@ -259,8 +343,8 @@ func benchLatency(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 	sent := 0
 	end := time.Now().Add(d)
 	for time.Now().Before(end) && ctx.Err() == nil {
-		// The enqueue's commit is the starting point, so the send time is
-		// stamped in a second statement in the same transaction.
+		// The send time is stamped just before the transaction, so L1
+		// includes the enqueue's and the commit's round trips.
 		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 			_, err := c.EnqueueTx(ctx, taskmill.Pgx(tx), noop{Sent: time.Now().UnixNano()}, nil)
 			return err
@@ -432,16 +516,32 @@ func walDiff(ctx context.Context, pool *pgxpool.Pool, from string) int64 {
 	return n
 }
 
-// statements returns the number of statements run, if pg_stat_statements is
-// installed, or 0.
-func statements(ctx context.Context, pool *pgxpool.Pool) int64 {
-	var n int64
-	err := pool.QueryRow(ctx, "SELECT coalesce(sum(calls), 0)::bigint FROM pg_stat_statements WHERE query ILIKE '%"+schema+"%'").Scan(&n)
-	if err != nil {
-		return 0
-	}
-	return n
+// statements counts the statements that the benchmark's pools run, for E1.
+var statements statementCounter
+
+// statementCounter is a pgx tracer that counts statements, including each
+// statement of a batch.
+type statementCounter struct {
+	n atomic.Int64
 }
+
+func (c *statementCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.n.Add(1)
+	return ctx
+}
+
+func (*statementCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (*statementCounter) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	return ctx
+}
+
+// TraceBatchQuery counts each statement of a batch.
+func (c *statementCounter) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {
+	c.n.Add(1)
+}
+
+func (*statementCounter) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
 
 func rate(n int64, d time.Duration) string {
 	return commas(int64(float64(n) / d.Seconds()))

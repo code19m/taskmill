@@ -63,9 +63,15 @@ Every change is held to the same bar:
 - Use the standard `testing` package. Prefer table-driven tests when they make
   the cases easier to read.
 - Test behavior against a real PostgreSQL: each test migrates its own schema
-  through `internal/testdb`, so tests run in parallel.
+  through `internal/testdb`, so tests run in parallel. CI starts PostgreSQL
+  with `make db`, the same as a local run, once for each supported version.
+- A test that waits for the worker's internal timers, such as the
+  maintainer's interval, may shorten them through `export_test.go`
+  (`taskmill.SetTiming`) instead of waiting for the defaults.
 - Tests must pass with `-race` and `-shuffle=on`. They must not rely on timing
-  luck: never `time.Sleep` while waiting for a result.
+  luck. To wait for a result, poll with a deadline (`waitFor`, `waitState`,
+  `recv`); never sleep a fixed time and assume the result is ready. Every
+  test also checks the FIFO group invariants when it ends.
 - A bug fix includes a test that fails without the fix.
 - `Example` functions compile with the tests. Those that need no database
   include an `// Output:` comment, so they run as tests too.

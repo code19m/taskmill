@@ -65,7 +65,7 @@ func (n *notifier) sendTrailing(ctx context.Context, queue string) {
 	n.last[queue] = time.Now()
 	n.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
 	if _, err := n.pool.Exec(ctx, "SELECT pg_notify($1, $2)", n.channel, availablePayload(queue)); err != nil {
 		n.logger.LogAttrs(ctx, slog.LevelWarn, "notification failed",

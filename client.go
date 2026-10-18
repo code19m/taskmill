@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -120,7 +121,7 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 		if err := r.Err(); err != nil {
 			return nil, fmt.Errorf("taskmill: get task %d: %w", id, err)
 		}
-		return nil, fmt.Errorf("%w: %d", ErrNotFound, id)
+		return nil, fmt.Errorf("%w: task %d", ErrNotFound, id)
 	}
 	info, err := scanTaskInfo(r)
 	if err != nil {
@@ -147,23 +148,34 @@ func (c *Client) CancelTx(ctx context.Context, tx Executor, id int64) error {
 }
 
 func (c *Client) cancel(ctx context.Context, q querier, id int64) error {
-	var prev, queue, group string
-	found, err := queryRow(ctx, q, c.sql.cancel, []any{id}, &prev, &queue, &group)
+	if _, err := q.exec(ctx, c.sql.lockPendingGroup, id); err != nil {
+		return fmt.Errorf("taskmill: cancel task %d: %w", id, err)
+	}
+	var state, queue, group string
+	found, err := queryRow(ctx, q, c.sql.lockTask, []any{id}, &state, &queue, &group)
 	if err != nil {
 		return fmt.Errorf("taskmill: cancel task %d: %w", id, err)
 	}
 	if !found {
 		return c.stateError(ctx, q, id, "cancel")
 	}
-	if State(prev) == StateRunning {
+	switch s := State(state); {
+	case s.Finished():
+		return fmt.Errorf("%w: cannot cancel task %d in state %s", ErrInvalidState, id, s)
+	case s == StateRunning:
+		if _, err := q.exec(ctx, c.sql.flagCancel, id); err != nil {
+			return fmt.Errorf("taskmill: cancel task %d: %w", id, err)
+		}
 		if _, err := q.exec(ctx, "SELECT pg_notify($1, $2)", c.schema, cancelPayload(id)); err != nil {
 			return fmt.Errorf("taskmill: cancel task %d: %w", id, err)
 		}
 		return nil
 	}
+	if _, err := q.exec(ctx, c.sql.cancelWaiting, id); err != nil {
+		return fmt.Errorf("taskmill: cancel task %d: %w", id, err)
+	}
 	if group != "" {
-		head := State(prev) != StatePending
-		if err := c.leaveGroup(ctx, q, queue, group, id, head, false); err != nil {
+		if err := c.leaveGroup(ctx, q, queue, group, id, State(state) != StatePending, false); err != nil {
 			return fmt.Errorf("taskmill: cancel task %d: %w", id, err)
 		}
 	}
@@ -177,9 +189,18 @@ func (c *Client) Retry(ctx context.Context, id int64) error {
 	return c.inTx(ctx, func(q querier) error { return c.retry(ctx, q, id) })
 }
 
+// RetryTx is [Client.Retry] in the caller's transaction.
+func (c *Client) RetryTx(ctx context.Context, tx Executor, id int64) error {
+	q, err := txQuerier(tx)
+	if err != nil {
+		return err
+	}
+	return c.retry(ctx, q, id)
+}
+
 func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	var state, queue, group string
-	found, err := queryRow(ctx, q, c.sql.lockForRetry, []any{id}, &state, &queue, &group)
+	found, err := queryRow(ctx, q, c.sql.lockTask, []any{id}, &state, &queue, &group)
 	if err != nil {
 		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
 	}
@@ -238,7 +259,19 @@ func (c *Client) Delete(ctx context.Context, id int64) error {
 	return c.inTx(ctx, func(q querier) error { return c.delete(ctx, q, id) })
 }
 
+// DeleteTx is [Client.Delete] in the caller's transaction.
+func (c *Client) DeleteTx(ctx context.Context, tx Executor, id int64) error {
+	q, err := txQuerier(tx)
+	if err != nil {
+		return err
+	}
+	return c.delete(ctx, q, id)
+}
+
 func (c *Client) delete(ctx context.Context, q querier, id int64) error {
+	if _, err := q.exec(ctx, c.sql.lockPendingGroup, id); err != nil {
+		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+	}
 	var state, queue, group string
 	found, err := queryRow(ctx, q, c.sql.deleteTask, []any{id}, &state, &queue, &group)
 	if err != nil {
@@ -283,7 +316,7 @@ func (c *Client) stateError(ctx context.Context, q querier, id int64, op string)
 		return fmt.Errorf("taskmill: %s task %d: %w", op, id, err)
 	}
 	if !found {
-		return fmt.Errorf("%w: %d", ErrNotFound, id)
+		return fmt.Errorf("%w: task %d", ErrNotFound, id)
 	}
 	return fmt.Errorf("%w: cannot %s task %d in state %s", ErrInvalidState, op, id, state)
 }
@@ -324,13 +357,116 @@ func (c *Client) leaveGroup(ctx context.Context, q querier, queue, group string,
 	}
 }
 
-// promoteGroup makes the oldest pending task of a group its head.
+// promoteGroup makes the oldest pending task of a group its head. If that
+// task's deadline passed while it waited, it is dead, and leaves the group
+// as a dead head does.
 func (c *Client) promoteGroup(ctx context.Context, q querier, queue, group string) error {
-	allow := c.notifier.allow(ctx, queue)
+	var id, notified int64
 	var state string
-	var notified bool
-	_, err := queryRow(ctx, q, c.sql.promoteGroup, []any{queue, group, c.schema, allow}, &state, &notified)
-	return err
+	found, err := queryRow(ctx, q, c.sql.promoteGroup, []any{queue, group, c.schema, c.notifier.allow(ctx, queue)},
+		&id, &state, &notified)
+	if err != nil || !found || State(state) != StateDead {
+		return err
+	}
+	return c.leaveGroup(ctx, q, queue, group, id, true, true)
+}
+
+// groupHead is a group whose head finished.
+type groupHead struct {
+	queue, group string
+	id           int64 // the finished head
+}
+
+// finishHeads is leaveGroup for heads that completed, one per group, with a
+// few statements for all of them. The caller holds the groups' locks.
+func (c *Client) finishHeads(ctx context.Context, q querier, heads []groupHead) error {
+	queues := make([]string, len(heads))
+	groups := make([]string, len(heads))
+	ids := make([]int64, len(heads))
+	for i, h := range heads {
+		queues[i], groups[i], ids[i] = h.queue, h.group, h.id
+	}
+	r, err := q.query(ctx, c.sql.decrementGroups, queues, groups, ids)
+	if err != nil {
+		return err
+	}
+	var empty, next groupSet
+	for r.Next() {
+		var queue, group string
+		var remaining int
+		var halted bool
+		if err := r.Scan(&queue, &group, &remaining, &halted); err != nil {
+			r.Close()
+			return err
+		}
+		switch {
+		case remaining == 0:
+			empty.add(queue, group)
+		case !halted:
+			next.add(queue, group)
+		}
+	}
+	r.Close()
+	if err := r.Err(); err != nil {
+		return err
+	}
+	if len(empty.queues) > 0 {
+		if _, err := q.exec(ctx, c.sql.deleteEmptyGroups, empty.queues, empty.groups); err != nil {
+			return err
+		}
+	}
+	if len(next.queues) == 0 {
+		return nil
+	}
+	return c.promoteGroups(ctx, q, next)
+}
+
+// groupSet holds groups as two parallel slices, as statements take them.
+type groupSet struct {
+	queues, groups []string
+}
+
+func (s *groupSet) add(queue, group string) {
+	s.queues = append(s.queues, queue)
+	s.groups = append(s.groups, group)
+}
+
+// promoteGroups is promoteGroup for every group in s.
+func (c *Client) promoteGroups(ctx context.Context, q querier, s groupSet) error {
+	var notify []string
+	for _, queue := range s.queues {
+		if !slices.Contains(notify, queue) && c.notifier.allow(ctx, queue) {
+			notify = append(notify, queue)
+		}
+	}
+	r, err := q.query(ctx, c.sql.promoteGroups, s.queues, s.groups, c.schema, notify)
+	if err != nil {
+		return err
+	}
+	var expired []groupHead
+	for r.Next() {
+		var h groupHead
+		var state string
+		var notified int64
+		if err := r.Scan(&h.id, &h.queue, &h.group, &state, &notified); err != nil {
+			r.Close()
+			return err
+		}
+		if State(state) == StateDead {
+			expired = append(expired, h)
+		}
+	}
+	r.Close()
+	if err := r.Err(); err != nil {
+		return err
+	}
+	// New heads whose deadlines passed while they waited are dead.
+	for _, h := range expired {
+		if err := c.leaveGroup(ctx, q, h.queue, h.group, h.id, true, true); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // notifyAvailable announces new available tasks in queue, inside q's

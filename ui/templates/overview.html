@@ -17,15 +17,15 @@
         {{if $q.Settings.HaltGroupOnDead}}halts groups{{end}}
       </td>
       <td class="actions">{{if not $ro}}
-        {{if $q.Paused}}<form method="post" action="{{path "/queues/"}}{{$q.Name}}/resume"><button>Resume</button></form>
-        {{else}}<form method="post" action="{{path "/queues/"}}{{$q.Name}}/pause" data-confirm="Pause queue {{$q.Name}}?"><button>Pause</button></form>{{end}}
+        {{if $q.Paused}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/resume"><button>Resume</button></form>
+        {{else}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/pause" data-confirm="Pause queue {{$q.Name}}?"><button>Pause</button></form>{{end}}
       {{end}}</td>
     </tr>
   {{end}}
   </tbody>
 </table>
 </div>
-<p class="muted">Counts refresh every few seconds{{range $d.Queues}}{{if .Capped}}; counts above 100,000 per state are partial{{break}}{{end}}{{end}}.</p>
+<p class="muted">Counts refresh every few seconds{{range $d.Queues}}{{if .Capped}}; some counts stopped at their cap, and show at least that many{{break}}{{end}}{{end}}.</p>
 {{else}}<p class="muted">No queues yet.</p>{{end}}
 
 <h2>Workers</h2>
@@ -48,8 +48,8 @@
     <td>{{$s.Kind}}</td><td>{{$s.Queue}}</td>
     <td title="{{timestamp $s.NextRunAt}}">{{ago $s.NextRunAt}}</td><td title="{{timestamp $s.LastRunAt}}">{{ago $s.LastRunAt}}</td>
     <td class="actions">{{if not $ro}}
-      {{if $s.Paused}}<form method="post" action="{{path "/schedules/"}}{{$s.Name}}/resume"><button>Resume</button></form>
-      {{else}}<form method="post" action="{{path "/schedules/"}}{{$s.Name}}/pause" data-confirm="Pause schedule {{$s.Name}}?"><button>Pause</button></form>{{end}}
+      {{if $s.Paused}}<form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/resume"><button>Resume</button></form>
+      {{else}}<form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/pause" data-confirm="Pause schedule {{$s.Name}}?"><button>Pause</button></form>{{end}}
     {{end}}</td></tr>
   {{end}}</tbody>
 </table>

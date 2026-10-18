@@ -19,9 +19,10 @@ protect.
 
 **PostgreSQL.** taskmill supports every PostgreSQL major version that still
 receives community support, starting with 15. PostgreSQL 14 reaches end of life
-in November 2026, before taskmill's first release. A version is dropped in the
-first minor release after its end of life. Once integration tests exist, CI
-runs them against every supported major version.
+in November 2026, weeks after taskmill's first release; rather than support it
+for those few weeks, taskmill starts with 15. A version is dropped in the
+first minor release after its end of life. CI runs the integration tests
+against every supported major version: today PostgreSQL 15, 16, 17, and 18.
 
 ## Consequences
 

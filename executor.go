@@ -12,6 +12,12 @@ import (
 // caller owns, so that they commit or roll back with the caller's own work.
 // Create one with [Pgx] or [SQL].
 //
+// The enqueue methods accept a transaction, a connection, or a pool.
+// CancelTx, RetryTx, DeleteTx, and [Task.CompleteTx] run several statements
+// that must commit together, so they need a transaction: a [pgx.Tx], a
+// [*sql.Tx], or a type with Commit and Rollback methods, such as *sqlx.Tx.
+// They return [ErrInvalidArgument] for anything else.
+//
 // Executor is sealed: only this package implements it, which lets its methods
 // change without breaking callers.
 type Executor interface {
@@ -35,37 +41,35 @@ type SQLQuerier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// PgxExecutor runs statements through pgx. Create one with [Pgx].
-type PgxExecutor struct {
-	q PgxQuerier
-}
-
-// SQLExecutor runs statements through database/sql. Create one with [SQL].
-type SQLExecutor struct {
-	q SQLQuerier
-}
-
 // Pgx returns an [Executor] that runs statements on q, typically a [pgx.Tx].
-func Pgx(q PgxQuerier) PgxExecutor {
-	return PgxExecutor{q: q}
+func Pgx(q PgxQuerier) Executor {
+	return pgxExecutor{q: q}
 }
 
 // SQL returns an [Executor] that runs statements on q, typically a [*sql.Tx].
 //
 // Libraries built on database/sql work through their underlying transaction:
 // with bun, pass tx.Tx, because bun rewrites query placeholders itself.
-func SQL(q SQLQuerier) SQLExecutor {
-	return SQLExecutor{q: q}
+func SQL(q SQLQuerier) Executor {
+	return sqlExecutor{q: q}
 }
 
-func (e PgxExecutor) querier() querier {
+type pgxExecutor struct {
+	q PgxQuerier
+}
+
+func (e pgxExecutor) querier() querier {
 	if e.q == nil {
 		return nil
 	}
 	return pgxQuerier(e)
 }
 
-func (e SQLExecutor) querier() querier {
+type sqlExecutor struct {
+	q SQLQuerier
+}
+
+func (e sqlExecutor) querier() querier {
 	if e.q == nil {
 		return nil
 	}
@@ -133,8 +137,13 @@ func (s sqlQuerier) query(ctx context.Context, query string, args ...any) (rows,
 	return sqlRows{Rows: r}, nil
 }
 
+// inTx reports whether q is a transaction: a *sql.Tx, or a type that wraps
+// one, such as *sqlx.Tx.
 func (s sqlQuerier) inTx() bool {
-	_, ok := s.q.(*sql.Tx)
+	_, ok := s.q.(interface {
+		Commit() error
+		Rollback() error
+	})
 	return ok
 }
 

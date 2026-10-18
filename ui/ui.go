@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -77,6 +78,9 @@ func Handler(client *taskmill.Client, cfg *Config) http.Handler {
 		"json":      prettyJSON,
 		"states":    func() []taskmill.State { return listedStates },
 		"lastError": lastError,
+		// segment escapes a name for one path segment: queue and schedule
+		// names may hold /, ?, #, or %.
+		"segment": url.PathEscape,
 	}).ParseFS(assets, "templates/*.html"))
 
 	static, _ := fs.Sub(assets, "static") // the directory is embedded above

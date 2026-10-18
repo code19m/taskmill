@@ -8,31 +8,32 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// Maintainer timing.
+// Maintenance limits.
 const (
-	maintainerInterval = time.Second      // how often the leader works
-	leaderLease        = 10 * time.Second // how long a leader stays leader without renewing
-	electionInterval   = 2 * time.Second  // how often other workers try to take over
-	retentionInterval  = time.Minute
-	staleWorkerAge     = 5 * time.Minute
-	detachTimeout      = 30 * time.Second
-	maintenanceBatch   = 1000
+	maintenanceBatch   = 1000                  // most tasks one maintenance statement changes
+	minMaintainerSleep = 50 * time.Millisecond // shortest wait for the next due task: at most 20 promotions a second
+	staleWorkerAge     = 5 * time.Minute       // a worker without heartbeats this long is removed
+	detachTimeout      = 30 * time.Second      // bound on detaching one history partition
 )
 
-// maintainer does the cluster-wide work of one elected worker: it promotes
-// due tasks, rescues expired leases, expires deadlines, enqueues schedules,
-// and applies retention.
+// maintainer does the cluster-wide work of one elected worker. Its main loop
+// elects the leader, then rescues expired leases, expires deadlines, and
+// enqueues schedules once per interval, and promotes due tasks as they come
+// due. Statistics and retention run in a loop of their own, because they can
+// take long on a large installation and must not delay the main loop.
 type maintainer struct {
-	w             *Worker
-	c             *Client
-	leader        bool
-	lastRetention time.Time
-	lastStats     time.Time
+	w      *Worker
+	c      *Client
+	leader atomic.Bool
+
+	lastElection time.Time // used by the main loop only
 }
 
 func newMaintainer(w *Worker) *maintainer {
@@ -40,99 +41,109 @@ func newMaintainer(w *Worker) *maintainer {
 }
 
 func (m *maintainer) run(ctx context.Context) {
-	timer := time.NewTimer(0)
-	defer timer.Stop()
+	var housekeeping sync.WaitGroup
+	housekeeping.Go(func() { m.housekeep(ctx) })
+	defer housekeeping.Wait()
+
+	tick := time.NewTicker(m.w.timing.maintainer)
+	defer tick.Stop()
+	promote := time.NewTimer(0)
+	defer promote.Stop()
+	m.cycle(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			m.resign(context.WithoutCancel(ctx))
 			return
-		case <-timer.C:
+		case <-tick.C:
+			m.cycle(ctx)
+		case <-promote.C:
+			next := m.w.timing.maintainer
+			if m.leader.Load() {
+				m.promote(ctx)
+				next = m.untilNextDue(ctx)
+			}
+			promote.Reset(next)
 		}
-		timer.Reset(m.cycle(ctx))
 	}
 }
 
-// cycle runs one round of maintenance if this worker is the leader, and
-// returns how long to wait before the next.
-func (m *maintainer) cycle(ctx context.Context) time.Duration {
-	if !m.elect(ctx) {
-		return electionInterval
+// cycle renews or tries to take the leadership, and if this worker leads,
+// rescues expired leases, expires deadlines, and enqueues due schedules.
+func (m *maintainer) cycle(ctx context.Context) {
+	if !m.leader.Load() && time.Since(m.lastElection) < m.w.timing.election {
+		return
 	}
-	m.promote(ctx)
+	m.lastElection = time.Now()
+	if !m.elect(ctx) {
+		return
+	}
 	m.rescue(ctx)
 	m.expireDeadlines(ctx)
 	m.runSchedules(ctx)
-	if time.Since(m.lastStats) >= statsInterval {
-		m.refreshStats(ctx)
-		m.lastStats = time.Now()
+}
+
+// housekeep refreshes statistics and applies retention while this worker
+// leads.
+func (m *maintainer) housekeep(ctx context.Context) {
+	tick := time.NewTicker(m.w.timing.maintainer)
+	defer tick.Stop()
+	var lastStats, lastRetention time.Time
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		if !m.leader.Load() {
+			continue
+		}
+		if time.Since(lastStats) >= m.w.timing.stats {
+			m.refreshStats(ctx)
+			lastStats = time.Now()
+		}
+		if time.Since(lastRetention) >= m.w.timing.retention {
+			m.retain(ctx)
+			lastRetention = time.Now()
+		}
 	}
-	if time.Since(m.lastRetention) >= retentionInterval {
-		m.retain(ctx)
-		m.lastRetention = time.Now()
-	}
-	return m.untilNextDue(ctx)
 }
 
 func (m *maintainer) elect(ctx context.Context) bool {
 	var id string
-	err := m.c.pool.QueryRow(ctx, m.c.sql.electLeader, m.w.cfg.ID, leaderLease.Microseconds()).Scan(&id)
+	err := m.c.pool.QueryRow(ctx, m.c.sql.electLeader, m.w.cfg.ID, m.w.timing.leaderLease.Microseconds()).Scan(&id)
 	leader := err == nil
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		m.log(ctx, slog.LevelWarn, "maintainer election", err)
 	}
-	if leader != m.leader {
-		m.leader = leader
-		if leader {
-			m.w.logger.LogAttrs(ctx, slog.LevelInfo, "elected maintainer")
-		}
+	if m.leader.Swap(leader) != leader && leader {
+		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "elected maintainer")
 	}
 	return leader
 }
 
 func (m *maintainer) resign(ctx context.Context) {
-	if !m.leader {
+	if !m.leader.Swap(false) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
 	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignLeader, m.w.cfg.ID); err != nil {
 		m.log(ctx, slog.LevelWarn, "resign maintainer", err)
 	}
-	m.leader = false
 }
 
-// promote makes due scheduled and retryable tasks available, and wakes the
-// workers of their queues.
+// promote makes due scheduled and retryable tasks available. The statement
+// also wakes the workers of their queues.
 func (m *maintainer) promote(ctx context.Context) {
 	for {
-		r, err := m.c.pool.Query(ctx, m.c.sql.promoteDue, maintenanceBatch)
+		var promoted, notified int
+		err := m.c.pool.QueryRow(ctx, m.c.sql.promoteDue, m.c.schema).Scan(&promoted, &notified)
 		if err != nil {
 			m.log(ctx, slog.LevelError, "promote due tasks", err)
 			return
 		}
-		total := 0
-		var queues []string
-		for r.Next() {
-			var queue string
-			var n int
-			if err := r.Scan(&queue, &n); err != nil {
-				r.Close()
-				m.log(ctx, slog.LevelError, "promote due tasks", err)
-				return
-			}
-			total += n
-			queues = append(queues, queue)
-		}
-		r.Close()
-		if err := r.Err(); err != nil {
-			m.log(ctx, slog.LevelError, "promote due tasks", err)
-			return
-		}
-		for _, q := range queues {
-			m.c.notifyAvailable(ctx, pgxQuerier{q: m.c.pool}, q)
-		}
-		if total < maintenanceBatch {
+		if promoted < maintenanceBatch {
 			return
 		}
 	}
@@ -142,7 +153,7 @@ func (m *maintainer) promote(ctx context.Context) {
 func (m *maintainer) rescue(ctx context.Context) {
 	m.sweep(ctx, "rescue expired leases", func(ctx context.Context, q querier) (int, error) {
 		r, err := q.query(ctx, m.c.sql.rescue,
-			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds(), maintenanceBatch)
+			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds())
 		if err != nil {
 			return 0, err
 		}
@@ -169,7 +180,7 @@ func (m *maintainer) rescue(ctx context.Context) {
 // expireDeadlines makes waiting tasks dead once their deadline passed.
 func (m *maintainer) expireDeadlines(ctx context.Context) {
 	m.sweep(ctx, "expire deadlines", func(ctx context.Context, q querier) (int, error) {
-		r, err := q.query(ctx, m.c.sql.expireDeadline, maintenanceBatch)
+		r, err := q.query(ctx, m.c.sql.expireDeadline)
 		if err != nil {
 			return 0, err
 		}
@@ -181,8 +192,9 @@ func (m *maintainer) expireDeadlines(ctx context.Context) {
 			if x.group == "" {
 				continue
 			}
-			head := State(x.state) != StatePending
-			if err := m.c.leaveGroup(ctx, q, x.queue, x.group, x.id, head, true); err != nil {
+			// The sweep expires heads only: pending tasks expire when their
+			// group promotes them.
+			if err := m.c.leaveGroup(ctx, q, x.queue, x.group, x.id, true, true); err != nil {
 				return 0, err
 			}
 		}
@@ -321,10 +333,9 @@ func (m *maintainer) dropPartition(ctx context.Context, name string, pending boo
 	return nil
 }
 
-// deleteInBatches runs a delete statement that takes extra arguments followed
-// by a batch size, until it deletes less than a full batch.
+// deleteInBatches runs a delete statement that deletes up to one batch,
+// until it deletes less than a full batch.
 func (m *maintainer) deleteInBatches(ctx context.Context, what, sql string, args ...any) {
-	args = append(args, maintenanceBatch)
 	for {
 		tag, err := m.c.pool.Exec(ctx, sql, args...)
 		if err != nil {
@@ -342,10 +353,10 @@ func (m *maintainer) deleteInBatches(ctx context.Context, what, sql string, args
 func (m *maintainer) untilNextDue(ctx context.Context) time.Duration {
 	var secs *float64
 	if err := m.c.pool.QueryRow(ctx, m.c.sql.nextDue).Scan(&secs); err != nil || secs == nil {
-		return maintainerInterval
+		return m.w.timing.maintainer
 	}
 	d := time.Duration(*secs * float64(time.Second))
-	return min(max(d, 10*time.Millisecond), maintainerInterval)
+	return min(max(d, minMaintainerSleep), m.w.timing.maintainer)
 }
 
 // log reports a failed maintenance step.

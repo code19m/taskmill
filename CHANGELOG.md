@@ -28,13 +28,19 @@ The first release, to be tagged v0.1.0.
 - An elected maintainer that promotes due tasks, rescues expired leases,
   expires deadlines, runs cron schedules, refreshes statistics, and applies
   retention.
-- Cron schedules, exactly once per scheduled time across workers.
+- Cron schedules, enqueued at most once per scheduled time across workers;
+  missed runs collapse into one.
 - An inspection and operations API: listing, retrying, canceling, and
-  deleting tasks; queue settings and pausing; retention settings; workers and
+  deleting tasks, also in the caller's transaction (`CancelTx`, `RetryTx`,
+  `DeleteTx`); queue settings and pausing; retention settings; workers and
   queue statistics.
+- `Worker.RunTask`, which runs one task now, for tests and operators.
 - The `outbox` package: a transactional outbox for message brokers, in order
-  per key.
+  per key, created with `outbox.New`. Keys and headers are binary-safe, and a
+  message is tried for about a month.
 - The `ui` package: a web interface as an `http.Handler`.
+- The `taskmilltest` package: helpers to test code that uses taskmill against
+  a real PostgreSQL.
 - Versioned migrations, with the SQL exported for external migration tools.
 
 [Unreleased]: https://github.com/code19m/taskmill/commits/main

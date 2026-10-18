@@ -13,17 +13,19 @@ together with your data.
 - **Transactional.** Enqueue inside your own transaction, with pgx or
   `database/sql`. If it rolls back, the task never existed.
 - **Reliable.** At-least-once execution with leases, heartbeats, retries with
-  backoff, and a dead-letter queue. A crashed worker never loses a task.
+  backoff, and a dead-letter queue: dead tasks are kept for inspection and
+  retry. A crashed worker never loses a task.
 - **Ordered when you need it.** Strict FIFO groups, for any number of keys,
-  that can halt on a failed task instead of skipping it.
+  that can halt on a dead task instead of skipping it.
 - **Complete.** Priorities, delays, deadlines, deduplication, cron schedules,
   concurrency limits, batch handlers, cancellation, and pausing.
 - **An outbox, too.** Publish to Kafka, NATS, or RabbitMQ with the same
   transactional guarantee, in order per key.
 - **Operable.** A web interface, an inspection API, structured logs through
   `log/slog`, and middleware for metrics and tracing.
-- **Small and fast.** One dependency, pgx. Over 35,000 tasks per second end to
-  end on a laptop; see the [benchmarks](docs/benchmarks.md).
+- **Small and fast.** One dependency, pgx. On a laptop, one worker runs over
+  35,000 tasks per second, and one relay publishes over 35,000 outbox messages
+  per second; see the [benchmarks](docs/benchmarks.md).
 
 > [!NOTE]
 > taskmill is pre-1.0: minor releases may change the API until v1.0.0, and
@@ -105,9 +107,9 @@ once, and `taskmill.Snooze(d)` runs it again later without using an attempt.
 
 ## Documentation
 
-- **[Guide](docs/guide.md):** every feature with examples, production
-  settings, observability, and how taskmill fits monoliths, modular monoliths,
-  microservices, and shared database clusters.
+- **[Guide](docs/guide.md):** every feature with examples, testing,
+  production settings, observability, and how taskmill fits monoliths,
+  modular monoliths, microservices, and shared database clusters.
 - **[API reference](https://pkg.go.dev/github.com/code19m/taskmill)** on
   pkg.go.dev.
 - **[Design](docs/design):** the task lifecycle and its guarantees, the storage
@@ -121,6 +123,7 @@ once, and `taskmill.Snooze(d)` runs it again later without using an attempt.
 | [`taskmill`](https://pkg.go.dev/github.com/code19m/taskmill) | The client, workers, schedules, and the inspection API |
 | [`taskmill/outbox`](https://pkg.go.dev/github.com/code19m/taskmill/outbox) | The transactional outbox for message brokers |
 | [`taskmill/ui`](https://pkg.go.dev/github.com/code19m/taskmill/ui) | The web interface, as an `http.Handler` |
+| [`taskmill/taskmilltest`](https://pkg.go.dev/github.com/code19m/taskmill/taskmilltest) | Helpers to test your code against a real PostgreSQL |
 
 ## Contributing
 

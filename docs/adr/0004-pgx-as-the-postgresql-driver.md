@@ -29,9 +29,9 @@ their transactions through two adapters, `taskmill.Pgx` for pgx and
 driver.
 
 The core module's allowlist in `.golangci.yml` gains `github.com/jackc/pgx/v5`.
-Measured with `go list -deps`, pgx brings four more modules into the build:
-`github.com/jackc/pgpassfile`, `github.com/jackc/pgservicefile`,
-`github.com/jackc/puddle/v2`, and `golang.org/x/text` with `golang.org/x/sync`
+Measured with `go list -deps`, pgx brings five more modules into the build:
+`github.com/jackc/pgpassfile`, `github.com/jackc/pgservicefile`, and
+`github.com/jackc/puddle/v2`, and `golang.org/x/text` and `golang.org/x/sync`
 from the Go project.
 
 ## Consequences
@@ -43,5 +43,7 @@ from the Go project.
 - Applications on `database/sql` must use pgx's driver; lib/pq is not
   supported. Libraries that rewrite query placeholders, such as bun, must pass
   their underlying `*sql.Tx`.
-- pgx types appear in taskmill's public API (`PgxQuerier`). A future pgx major
-  version would therefore require a taskmill major version.
+- pgx types appear in taskmill's public API: `PgxQuerier` uses pgx's result
+  types, and `NewClient`, `Migrate`, and `WorkerConfig.ListenConfig` take
+  `*pgxpool.Pool` and `*pgx.ConnConfig`. A future pgx major version would
+  therefore require a taskmill major version.

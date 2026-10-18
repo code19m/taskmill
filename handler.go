@@ -6,8 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
-	"reflect"
 	"time"
+
+	"github.com/code19m/taskmill/internal/argkind"
 )
 
 // Handler runs tasks of one kind.
@@ -38,9 +39,9 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 // a [Handler]'s error would. Returning a shorter slice fails the tasks
 // without an entry.
 //
-// Batches hold the tasks of one fetch, so a batch kind works best in a queue
-// of its own: a queue that carries a batch kind fetches up to BatchSize tasks
-// per free slot, and tasks of other kinds fetched with them wait for a slot.
+// A batch takes one slot of its queue's concurrency. When a worker fetches a
+// task of a batch kind, it fills that task's batch with more available tasks
+// of the kind, so a batch kind can share a queue with other kinds.
 type BatchHandler[A Args] interface {
 	HandleBatch(ctx context.Context, tasks []*Task[A]) []error
 }
@@ -88,7 +89,7 @@ type registration struct {
 // AddHandler registers h for the kind of A. opts may be nil. Mistakes, such
 // as registering a kind twice, are reported by [NewWorker].
 func AddHandler[A Args](hs *Handlers, h Handler[A], opts *HandlerOptions) {
-	kind, err := argsKind[A]()
+	kind, err := argkind.Of[A]()
 	if err != nil {
 		hs.fail(err)
 		return
@@ -114,7 +115,7 @@ func AddHandler[A Args](hs *Handlers, h Handler[A], opts *HandlerOptions) {
 // AddBatchHandler registers h for the kind of A. opts may be nil. Mistakes,
 // such as registering a kind twice, are reported by [NewWorker].
 func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptions) {
-	kind, err := argsKind[A]()
+	kind, err := argkind.Of[A]()
 	if err != nil {
 		hs.fail(err)
 		return
@@ -156,28 +157,17 @@ func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptio
 	hs.add(reg)
 }
 
-// argsKind returns the kind of A, read from its zero value. For a pointer type
-// it reads it from a pointer to a zero value instead of a nil pointer.
-func argsKind[A Args]() (kind string, err error) {
-	var zero A
-	if t := reflect.TypeFor[A](); t.Kind() == reflect.Pointer {
-		zero, _ = reflect.TypeAssert[A](reflect.New(t.Elem()))
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("%v.Kind panicked on a zero value: %v", reflect.TypeFor[A](), r)
-		}
-	}()
-	return zero.Kind(), nil
-}
-
 func (hs *Handlers) add(reg *registration) {
 	if err := checkName("kind", reg.kind, maxNameLength); err != nil {
 		hs.fail(err)
 		return
 	}
-	if reg.opts.Timeout < 0 || reg.opts.BatchSize < 0 || reg.opts.BatchSize > maxBatchSize {
-		hs.fail(fmt.Errorf("handler for kind %q: invalid options", reg.kind))
+	switch {
+	case reg.opts.Timeout < 0:
+		hs.fail(fmt.Errorf("handler for kind %q: timeout must not be negative", reg.kind))
+		return
+	case reg.opts.BatchSize < 0 || reg.opts.BatchSize > maxBatchSize:
+		hs.fail(fmt.Errorf("handler for kind %q: batch size %d is not between 0 and %d", reg.kind, reg.opts.BatchSize, maxBatchSize))
 		return
 	}
 	if hs.byKind == nil {
@@ -234,6 +224,7 @@ const (
 	codePanic          = "panic"
 	codeTimeout        = "timeout"
 	codeUnknownKind    = "unknown_kind"
+	codeNoHandler      = "no_handler"
 )
 
 // failure is a failed attempt that taskmill itself classified.

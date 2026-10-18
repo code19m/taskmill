@@ -19,7 +19,8 @@ The Go standard library covers most of what a task queue needs:
 1. **Standard library first.** A third-party module is added only when the
    standard library cannot do the job well, and an ADR records why.
 2. **The allowlist is enforced.** The `depguard` linter runs in strict mode and
-   allows only the standard library and this module. Adding a dependency
+   allows only the standard library and this module ([ADR 0004](0004-pgx-as-the-postgresql-driver.md)
+   later added pgx). Adding a dependency
    extends the allowlist in [.golangci.yml](../../.golangci.yml) in the same
    pull request as its ADR.
 3. **Heavy integrations live in separate modules.** Integrations such as

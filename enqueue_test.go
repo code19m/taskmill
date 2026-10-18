@@ -86,18 +86,24 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 		}},
 		{"negative dedupe window", sendEmail{}, &taskmill.EnqueueOptions{DedupeKey: "k", DedupeWindow: -time.Second}},
 		{"invalid UTF-8 group key", sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "\xff"}},
+		{"NUL in queue", sendEmail{}, &taskmill.EnqueueOptions{Queue: "a\x00b"}},
+		{"NUL in payload", sendEmail{To: "a\x00b"}, nil},
+		{"NUL in metadata", sendEmail{}, &taskmill.EnqueueOptions{Metadata: map[string]string{"k": "a\x00b"}}},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := e.client.Enqueue(t.Context(), tt.args, tt.opts)
-			if !errors.Is(err, taskmill.ErrInvalidArgument) {
-				t.Fatalf("got %v, want ErrInvalidArgument", err)
-			}
-		})
+		if _, err := e.client.Enqueue(t.Context(), tt.args, tt.opts); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("%s: got %v, want ErrInvalidArgument", tt.name, err)
+		}
 	}
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 0 {
 		t.Fatalf("invalid enqueues stored %d tasks", n)
+	}
+
+	// A backslash followed by "u0000" is text, not a NUL character.
+	id := e.enqueue(t, sendEmail{To: `\u0000`}, nil)
+	var got sendEmail
+	if err := json.Unmarshal(e.get(t, id).Payload, &got); err != nil || got.To != `\u0000` {
+		t.Fatalf("got %q, %v", got.To, err)
 	}
 }
 
@@ -368,5 +374,35 @@ func TestEnqueueNotifiesListeners(t *testing.T) {
 	}
 	if n, err = conn.Conn().WaitForNotification(ctx); err != nil || n.Payload != "a|mail" {
 		t.Fatalf("trailing notification: %v, %v", n, err)
+	}
+}
+
+func TestEnqueueFindsADuplicateCommittedWhileItWaited(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
+	tx := e.begin(t)
+	first, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{To: "first"}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A second enqueue of the key waits for the first one's transaction.
+	type result struct {
+		res taskmill.EnqueueResult
+		err error
+	}
+	second := make(chan result, 1)
+	go func() {
+		res, err := e.client.Enqueue(t.Context(), sendEmail{To: "second"}, opts)
+		second <- result{res, err}
+	}()
+	e.waitBlocked(t, "{s}.dedupe_keys")
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	got := recv(t, second, "the second enqueue")
+	if got.err != nil || !got.res.Duplicate || got.res.ID != first.ID {
+		t.Fatalf("got %+v, %v; want a duplicate of task %d", got.res, got.err, first.ID)
 	}
 }

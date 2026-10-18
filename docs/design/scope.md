@@ -18,8 +18,10 @@ repository.
 | `github.com/code19m/taskmill` | The engine: client, worker, maintainer, migrations, and the inspect API | Everyone |
 | `github.com/code19m/taskmill/outbox` | Transactional outbox and inbox, in terms of topics, keys, and messages | Services that publish to a message broker |
 | `github.com/code19m/taskmill/ui` | A web interface, served as an `http.Handler` | Operators |
+| `github.com/code19m/taskmill/taskmilltest` | Helpers to test code that uses taskmill, against a real PostgreSQL | Application tests |
 
-The packages use only the engine's public API. Integrations that need
+The packages build on the engine's public API, sharing only small internal
+helpers with it, such as UUID generation. Integrations that need
 third-party modules, such as OpenTelemetry or broker clients, are separate Go
 modules ([ADR 0001](../adr/0001-dependency-policy.md)).
 [ADR 0003](../adr/0003-outbox-on-the-shared-engine.md) explains why the outbox
@@ -53,7 +55,8 @@ broker instead:
 ```
 
 The outbox makes publishing as reliable as the business write. The inbox on
-the receiving side turns each broker message into exactly one task.
+the receiving side turns each broker message into a task, at most one per
+message within the dedupe window.
 
 ### U4. Shared database cluster and polyglot producers
 
@@ -63,8 +66,9 @@ enqueue into a shared queue database whose workers are the only consumers.
 
 ### U5. Scheduled and recurring work
 
-Tasks that run at a given time, or on a cron schedule, exactly once per
-scheduled time across all processes.
+Tasks that run at a given time, or on a cron schedule, enqueued at most once
+per scheduled time across all processes. Runs that were missed collapse into
+one.
 
 ### U6. Operations
 
@@ -91,9 +95,9 @@ delivered in later milestones.
 | R11 | Every task has a stable identity that handlers can pass on, for example as a broker message ID. | U3 | M2 |
 | R12 | Enqueue accepts the caller's transaction, from pgx or `database/sql`. Handlers can opt in to completing their task inside their own transaction. | All | M2, M3 |
 | R13 | Every attempt's error is kept with the task, up to a fixed number of attempts. | U6 | M2 |
-| R14 | Recurring schedules enqueue exactly one task per scheduled time across all processes. | U5 | M5 |
+| R14 | Recurring schedules enqueue at most one task per scheduled time across all processes, and missed runs collapse into one. | U5 | M5 |
 | R15 | Cheap monitoring: registries of queues and live workers, and statistics refreshed by the maintainer, so that no request counts the rows of a large table. | U6 | M5 |
-| R16 | An inspect API shared by the web interface and users: list and filter tasks, read one task, and retry, cancel, or delete tasks in bulk. Lists are paginated by key, never by offset, and bulk actions run in small batches. | U6 | M6 |
+| R16 | An inspect API shared by the web interface and users: list and filter tasks, read one task, and retry, cancel, or delete one task at a time. Lists are paginated by key, never by offset. | U6 | M6 |
 | R17 | Queues can be paused and resumed. Workers stop fetching from a paused queue promptly, and tasks already running finish normally. | U6 | M6 |
 
 ## The web interface
@@ -110,7 +114,9 @@ busy production database.
 - **A read-only mode,** and protection against cross-site request forgery from
   `net/http`.
 - **Never expensive.** It reads only through the inspect API (R16) and the
-  maintained statistics (R15), so every page is a bounded query.
+  maintained statistics (R15), and every page's query stops after 5 seconds.
+  Most pages read a few index entries; a page filtered by state, on an
+  installation with tens of millions of unfinished tasks, can take that long.
 
 ## Out of scope for v1
 
@@ -126,6 +132,9 @@ busy production database.
   dependencies; the documentation shows how.
 - **Exactly-once delivery across systems.** Through a broker, delivery is
   at-least-once, and consumers deduplicate by message ID (R9, R11).
+- **Bulk actions in v0.1.** Retrying, canceling, or deleting many tasks at once
+  waits for a later release; until then, page with `List` and act on each
+  task, which the transactional variants make atomic when needed.
 
 ## Decisions
 

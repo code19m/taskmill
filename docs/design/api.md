@@ -17,6 +17,9 @@ about drivers were tested against PostgreSQL (see [Verification](#verification))
 
 1. **Concrete types out, small interfaces in.** Constructors return `*Client`
    and `*Worker`; parameters accept small interfaces such as `Handler[A]`.
+   The exceptions are `Executor`, which `Pgx` and `SQL` return so that the
+   types behind this sealed interface stay unexported, and `ui.Handler`,
+   which returns an `http.Handler`, as the standard library's handlers do.
 2. **Context first.** Every call that can block takes a `context.Context`
    first.
 3. **No global state.** Everything hangs off a `Client`, so one process can
@@ -29,8 +32,8 @@ about drivers were tested against PostgreSQL (see [Verification](#verification))
    `NewWorker`.
 6. **Typed payloads.** A handler receives its payload already decoded into its
    own struct type, through generics.
-7. **Only what users need is exported.** The core package exports 99
-   top-level identifiers: 40 types, 31 methods, 13 constants, 10 functions, and
+7. **Only what users need is exported.** The core package exports 97
+   identifiers: 38 types, 31 methods, 13 constants, 10 functions, and
    5 variables. Everything else stays unexported, so it can change without
    breaking users.
 
@@ -107,8 +110,9 @@ func run(ctx context.Context, pool *pgxpool.Pool, mailer Mailer) error {
 | Package | Contents | Milestone |
 |---|---|---|
 | `taskmill` | Client, worker, handlers, migrations, inspect and admin API | M2, M3 |
-| `taskmill/outbox` | Transactional outbox: `Store`, `Publisher`, `AddRelay` | M4 |
+| `taskmill/outbox` | Transactional outbox: `New`, `Outbox` (`Store`, `AddRelay`, `Setup`), `Publisher` | M4 |
 | `taskmill/ui` | Web interface as an `http.Handler` | M6 |
+| `taskmill/taskmilltest` | Test helpers: `NewClient`, `Enqueued`, `Run`, `Work` | M7 |
 
 ## Connecting to the database
 
@@ -129,19 +133,25 @@ commit or roll back with it (R12). An `Executor` comes from one of two
 adapters:
 
 ```go
-func Pgx(q PgxQuerier) PgxExecutor // pgx.Tx, *pgx.Conn, *pgxpool.Pool
-func SQL(q SQLQuerier) SQLExecutor // *sql.Tx, *sql.Conn, *sql.DB
+func Pgx(q PgxQuerier) Executor // pgx.Tx, *pgx.Conn, *pgxpool.Pool
+func SQL(q SQLQuerier) Executor // *sql.Tx, *sql.Conn, *sql.DB
 ```
 
 | Application uses | Pass |
 |---|---|
 | pgx | `taskmill.Pgx(tx)` |
 | `database/sql` with pgx's driver | `taskmill.SQL(tx)` |
-| sqlx | `taskmill.SQL(tx)`: `*sqlx.Tx` embeds `*sql.Tx` |
+| sqlx | `taskmill.SQL(tx)`: `*sqlx.Tx` works directly |
 | bun | `taskmill.SQL(tx.Tx)`: bun rewrites placeholders, so it needs the underlying `*sql.Tx` |
 
 `database/sql` connections must use pgx's driver, `pgx/v5/stdlib`; lib/pq is
 not supported.
+
+Enqueues accept a pool or a connection too. Operations that run several
+statements, such as `CancelTx`, `RetryTx`, `DeleteTx`, and `Task.CompleteTx`,
+need a transaction: a `pgx.Tx`, or from `database/sql` any type that has
+`Commit() error` and `Rollback() error`, such as `*sql.Tx` or `*sqlx.Tx`.
+Other values fail with `ErrInvalidArgument`.
 
 **Why adapters.** `pgx.Tx` and `*sql.Tx` have no method in common, so no
 single interface can accept both. The alternative, a client that is generic
@@ -288,11 +298,17 @@ type BatchHandler[A Args] interface {
 func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptions)
 ```
 
+A batch takes one slot of its queue's concurrency. A worker fetches one task
+per free slot, then fills each batch kind's batch with more tasks of that kind
+from the first 1,000 available tasks of the queue. So every fetched task
+starts at once, and a batch kind can share a queue with other kinds.
+
 ## Running workers
 
 ```go
 func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error)
 func (w *Worker) Run(ctx context.Context) error
+func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error)
 ```
 
 `Run` blocks until its context is canceled, the same way `http.Server` serves
@@ -308,10 +324,24 @@ until it is shut down. A worker:
    for running attempts, then cancels their contexts and releases their tasks
    without using attempts (lifecycle transition 12), and returns `nil`.
 
+`RunTask` runs one task now, in the calling goroutine, the way `Run` runs
+tasks: it leases the task, runs the middleware and the handler with
+heartbeats, and records the outcome. It ignores the task's run time, queue
+pauses, and concurrency limits, but not FIFO order or deadlines. It needs no
+running worker, so it serves tests and operators who need one task run now.
+It returns the task afterwards, `ErrNotFound` for an unknown ID, and
+`ErrInvalidState` for a task that is running, pending, finished, or past its
+deadline.
+
+`NewWorker` validates everything it can: queue options, handler
+registrations, and schedules. A schedule whose cron expression never matches,
+whose options set a `Deadline`, or whose queue, group key, or priority is
+invalid is rejected.
+
 | Field | Meaning | Default |
 |---|---|---|
-| `Handlers` | The handler set | Required |
-| `Queues` | Queues to serve, with this process's `Concurrency` for each | Required |
+| `Handlers` | The handler set | Required when `Queues` is set |
+| `Queues` | Queues to serve, with this process's `Concurrency` for each | None: the worker only takes part in maintenance |
 | `ID` | Worker identity in the database and in logs | Hostname, process ID, random suffix |
 | `LeaseDuration` | How long a task stays owned without a heartbeat | 30 seconds |
 | `PollInterval` | Fallback polling when no notification arrives | 1 second |
@@ -321,7 +351,7 @@ until it is shut down. A worker:
 | `Middleware` | Wrappers around every attempt | None |
 | `Schedules` | Recurring tasks (R14, M5) | None |
 | `NoMaintainer` | Keeps this process out of the maintainer election | `false` |
-| `ListenConfig` | A direct connection for notifications, when the pool goes through a transaction-pooling proxy | The pool's configuration |
+| `ListenConfig` | A direct connection for notifications, when the pool goes through a transaction-pooling proxy; create it with `pgx.ParseConfig` | The pool's configuration |
 | `Logger` | Where logs go | The client's logger |
 
 **Per process or per cluster.** `QueueOptions` in `WorkerConfig` are local to
@@ -347,8 +377,8 @@ All on `Client`, so that the web interface and applications share one API
 | `Get(ctx, id)` | Returns a task from `tasks` or from history | M2 |
 | `List(ctx, *ListParams)` | Pages through tasks filtered by queue, states, and kind, with a cursor | M6 |
 | `Cancel(ctx, id)`, `CancelTx` | Cancels a waiting task at once, or a running task when its attempt ends | M2 |
-| `Retry(ctx, id)` | Makes a dead or canceled task available, with fresh attempts | M2 |
-| `Delete(ctx, id)` | Deletes a task that is not running | M2 |
+| `Retry(ctx, id)`, `RetryTx` | Makes a dead or canceled task available, with fresh attempts | M2 |
+| `Delete(ctx, id)`, `DeleteTx` | Deletes a task that is not running, including a completed task in history | M2 |
 | `Queues(ctx)` | Every queue with its settings and statistics | M6 |
 | `UpdateQueue(ctx, name, *QueueSettings)` | Changes a queue's cluster-wide settings | M4 |
 | `PauseQueue(ctx, name)`, `ResumeQueue` | Stops or resumes fetching from a queue (R17) | M6 |
@@ -373,16 +403,18 @@ fast.
 
 | Error | Meaning |
 |---|---|
-| `ErrNotFound` | The task does not exist, or no longer exists |
+| `ErrNotFound` | The task or schedule does not exist, or no longer exists |
 | `ErrLeaseLost` | The attempt no longer owns its task; roll back |
-| `ErrInvalidState` | The operation does not apply to the task's state |
-| `ErrInvalidArgument` | An argument or option is out of range |
+| `ErrInvalidState` | The operation does not apply to the task's state, such as canceling or retrying a completed task |
+| `ErrInvalidArgument` | An argument or option is out of range, or a string holds a NUL character |
 | `ErrSchemaOutdated` | The schema is missing or older than this version; run `Migrate` |
 | `*PermanentError` | Returned by `Permanent`; the task becomes dead without retrying |
 | `*SnoozeError` | Returned by `Snooze`; the task runs again later |
 
-Every error message starts with `taskmill:`, and wrapped errors keep their
-cause for `errors.Is` and `errors.As`.
+Error messages start with `taskmill:`, so they are easy to find in logs. The
+exceptions are `*PermanentError` and `*SnoozeError`, which handlers return to
+tell taskmill what to do. Wrapped errors keep their cause for `errors.Is` and
+`errors.As`.
 
 ## Logging and observability
 
@@ -401,30 +433,75 @@ cause for `errors.Is` and `errors.As`.
 ## Outbox (M4)
 
 ```go
-func Store(ctx context.Context, client *taskmill.Client, tx taskmill.Executor, opts *Options, msgs ...Message) error
-func AddRelay(hs *taskmill.Handlers, pub Publisher, opts *Options)
+func New(client *taskmill.Client, opts *Options) *Outbox
+
+func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Message) error
+func (o *Outbox) AddRelay(hs *taskmill.Handlers, pub Publisher)
+func (o *Outbox) Setup(ctx context.Context) error
+func (o *Outbox) Queue() string
 
 type Publisher interface {
     Publish(ctx context.Context, deliveries []Delivery) []error
 }
 ```
 
+- `New` returns an `Outbox` that holds the options (`Queue`, `BatchSize`).
+  Every service that stores or relays the messages of one outbox must use the
+  same options.
 - `Store` saves messages in the outbox inside the business transaction.
 - `AddRelay` registers a batch handler that publishes them through the
-  application's own `Publisher`: Kafka, NATS, RabbitMQ, or anything else.
+  application's own `Publisher`: Kafka, NATS, RabbitMQ, or anything else. A
+  worker serves `Queue()` to run it. A nil `Publisher` is reported by
+  `NewWorker`.
+- `Message.Key` is `[]byte` and `Message.Headers` is `map[string][]byte`, so
+  both are binary-safe.
 - Messages with the same topic and key are published in order, through a FIFO
   group. A batch never holds two of them, so per-delivery errors cannot break
   that order.
+- A message is tried up to 10,000 times: quickly at first, then every
+  5 minutes. That is about a month, so a broker outage of up to a month loses
+  nothing.
 - Each `Delivery` has an ID that is unique across services and stays the same
   on retries (a UUIDv7), so consumers can deduplicate by it.
 
-`outbox.Setup` applies the queue settings the outbox needs, once: a key whose
-message fails for good halts instead of being overtaken, and published
-messages skip history. `outbox.PublisherFunc` adapts a plain function.
+`Setup` applies the queue settings the outbox needs, once per deploy: a key
+whose message fails for good halts instead of being overtaken, and published
+messages skip history. It keeps a `MaxRunning` limit that an operator set.
+`outbox.PublisherFunc` adapts a plain function.
 
 **The inbox needs no package.** A consumer enqueues each received message with
-`DedupeKey` set to the message ID, and a redelivered message becomes a
-duplicate result instead of a second task.
+`DedupeKey` set to the message ID. That creates at most one task per message
+within the dedupe window: a redelivered message becomes a duplicate result
+instead of a second task.
+
+## Test helpers (M7)
+
+```go
+func NewClient(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *taskmill.Client
+func Enqueued[A taskmill.Args](tb testing.TB, client *taskmill.Client) []*taskmill.Task[A]
+func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Handler[A], args A, opts *RunOptions) (*taskmill.TaskInfo, error)
+func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig)
+
+type RunOptions struct {
+    Enqueue *taskmill.EnqueueOptions
+    Handler *taskmill.HandlerOptions
+}
+```
+
+Package `taskmilltest` helps applications test their own code:
+
+- `NewClient` migrates a schema with a random name and drops it when the test
+  ends, so tests can run in parallel.
+- `Enqueued` returns the committed tasks of `A`'s kind, oldest first, with
+  their arguments decoded.
+- `Run` enqueues a task and runs a handler on it once, the way a worker does.
+  The attempt holds a real lease, so the handler may use `CompleteTx`. It does
+  not retry.
+- `Work` runs a worker until no task of its queues is available or running.
+
+The helpers need a real PostgreSQL, by design: a fake would hide the
+transactional behavior that is the product. Every helper fails the test on
+errors in its own setup.
 
 ## Web interface (M6)
 
@@ -492,7 +569,8 @@ authentication middleware (see [scope](scope.md#the-web-interface)).
 ## Verification
 
 - **The sketch compiles and passes `go vet` and every project linter.** That
-  covers, among other rules, no interfaces returned from constructors, named
+  covers, among other rules, no interfaces returned from constructors (the
+  sealed `Executor` became the one allowed exception later), named
   parameters in interfaces, a doc comment on every exported identifier, and
   `slog` usage. Only stub artifacts remained, such as unused receivers.
 - **The code examples in this document compile, verbatim,** and pass the same

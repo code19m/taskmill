@@ -8,8 +8,9 @@ import (
 
 // Errors returned by taskmill. Test for them with [errors.Is].
 var (
-	// ErrNotFound means the task does not exist, or no longer exists.
-	ErrNotFound = errors.New("taskmill: task not found")
+	// ErrNotFound means the task or schedule does not exist, or no longer
+	// exists.
+	ErrNotFound = errors.New("taskmill: not found")
 
 	// ErrLeaseLost means the attempt no longer owns its task: its lease
 	// expired and the task was rescued, canceled, or fetched again.
