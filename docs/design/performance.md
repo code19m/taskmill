@@ -1,6 +1,6 @@
 # Performance targets
 
-- Status: Draft
+- Status: Accepted
 - Milestone: M1
 
 This document sets the numbers taskmill promises, the hardware they apply to,

@@ -51,7 +51,7 @@ See [ADR 0002](docs/adr/0002-supported-versions.md) for the support policy.
 | **v0.1.0** | First release |
 | M4 Ordering, batching, and outbox | FIFO groups, batch handlers, concurrency limits, unique enqueue, outbox and inbox |
 | M5 Scheduling and retention | Cron schedules, retention, statistics |
-| M6 Observability and operations | Metrics, tracing, inspect API, queue pausing, web interface, CLI |
+| M6 Observability and operations | Inspect API, queue pausing, web interface, tracing and metrics hooks |
 | M7 Hardening | Benchmarks, load and failure testing |
 | **v1.0.0** | Stable API and complete documentation |
 

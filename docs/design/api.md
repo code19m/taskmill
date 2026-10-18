@@ -1,6 +1,6 @@
 # Public API
 
-- Status: Draft
+- Status: Accepted
 - Milestone: M1
 
 This document defines the Go API that applications use: how they connect,
@@ -109,8 +109,6 @@ func run(ctx context.Context, pool *pgxpool.Pool, mailer Mailer) error {
 | `taskmill` | Client, worker, handlers, migrations, inspect and admin API | M2, M3 |
 | `taskmill/outbox` | Transactional outbox: `Store`, `Publisher`, `AddRelay` | M4 |
 | `taskmill/ui` | Web interface as an `http.Handler` | M6 |
-| `taskmill/cmd/taskmill` | Command-line tool and standalone web interface | M6 |
-| `github.com/code19m/taskmill/otel` | OpenTelemetry metrics and tracing; a separate module | M6 |
 
 ## Connecting to the database
 
@@ -340,8 +338,8 @@ type Middleware func(ctx context.Context, task *TaskInfo, next func(context.Cont
 
 ## Managing tasks, queues, and the installation
 
-All on `Client`, so that the web interface, the command-line tool, and
-applications share one API (R16):
+All on `Client`, so that the web interface and applications share one API
+(R16):
 
 | Method | Does | Milestone |
 |---|---|---|
@@ -389,10 +387,14 @@ cause for `errors.Is` and `errors.As`.
 - **Logging** uses `log/slog`. The default logger discards everything; a
   library must not write to stdout unless asked.
 - **Middleware** covers everything that happens around an attempt.
-- **Metrics and tracing** come from the separate
-  `github.com/code19m/taskmill/otel` module (M6), so applications that do not
-  use OpenTelemetry never download it. It builds on middleware and on
-  lifecycle hooks that M6 will design.
+- **Tracing** crosses from producer to worker through task metadata:
+  `ClientConfig.ContextMetadata`, a `func(context.Context) map[string]string`,
+  adds metadata to every enqueue, such as a trace context, and middleware reads
+  it back when the task runs.
+- **Metrics** come from middleware, which sees every attempt with its kind,
+  queue, outcome, and timestamps, and from `Client.Queues` for queue depths.
+- The documentation shows an OpenTelemetry setup built on these two hooks, so
+  applications that do not use OpenTelemetry never download it.
 
 ## Outbox (M4)
 

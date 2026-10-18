@@ -1,6 +1,6 @@
 # Scope and use cases
 
-- Status: Draft
+- Status: Accepted
 - Milestone: M1
 
 This document defines what taskmill is for, which architectures it must serve,
@@ -18,7 +18,6 @@ repository.
 | `github.com/code19m/taskmill` | The engine: client, worker, maintainer, migrations, and the inspect API | Everyone |
 | `github.com/code19m/taskmill/outbox` | Transactional outbox and inbox, in terms of topics, keys, and messages | Services that publish to a message broker |
 | `github.com/code19m/taskmill/ui` | A web interface, served as an `http.Handler` | Operators |
-| `github.com/code19m/taskmill/cmd/taskmill` | A command-line tool and a standalone web interface server | Operators and deployment pipelines |
 
 The packages use only the engine's public API. Integrations that need
 third-party modules, such as OpenTelemetry or broker clients, are separate Go
@@ -70,8 +69,7 @@ scheduled time across all processes.
 ### U6. Operations
 
 Operators inspect queues, find failing tasks, read their errors, and retry,
-cancel, or delete them, from the web interface, the command-line tool, or
-their own code.
+cancel, or delete them, from the web interface or their own code.
 
 ## Requirements
 
@@ -95,7 +93,7 @@ delivered in later milestones.
 | R13 | Every attempt's error is kept with the task, up to a fixed number of attempts. | U6 | M2 |
 | R14 | Recurring schedules enqueue exactly one task per scheduled time across all processes. | U5 | M5 |
 | R15 | Cheap monitoring: registries of queues and live workers, and statistics refreshed by the maintainer, so that no request counts the rows of a large table. | U6 | M5 |
-| R16 | An inspect API shared by the web interface, the command-line tool, and users: list and filter tasks, read one task, and retry, cancel, or delete tasks in bulk. Lists are paginated by key, never by offset, and bulk actions run in small batches. | U6 | M6 |
+| R16 | An inspect API shared by the web interface and users: list and filter tasks, read one task, and retry, cancel, or delete tasks in bulk. Lists are paginated by key, never by offset, and bulk actions run in small batches. | U6 | M6 |
 | R17 | Queues can be paused and resumed. Workers stop fetching from a paused queue promptly, and tasks already running finish normally. | U6 | M6 |
 
 ## The web interface
@@ -106,9 +104,9 @@ busy production database.
 - **Server-rendered with the standard library:** `html/template`, `embed`, and
   `net/http`. There is no JavaScript build step and no Node.js toolchain.
 - **An `http.Handler`,** so applications mount it on their own router and
-  protect it with their own authentication middleware. A standalone server in
-  `cmd/taskmill` serves the same handler for teams that prefer a separate
-  deployment.
+  protect it with their own authentication middleware. Teams that prefer a
+  separate deployment run a small program that mounts the same handler; the
+  documentation shows one.
 - **A read-only mode,** and protection against cross-site request forgery from
   `net/http`.
 - **Never expensive.** It reads only through the inspect API (R16) and the
@@ -121,6 +119,11 @@ busy production database.
   does not deliver messages between services itself.
 - **Authentication in the web interface.** Applications provide it, as above.
 - **Databases other than PostgreSQL.**
+- **A command-line tool.** Migrations run through `Migrate`, and teams that use
+  their own migration tools take the SQL from `Migrations`.
+- **A separate OpenTelemetry module.** Middleware and a client hook that turns
+  a context into task metadata cover tracing and metrics without adding
+  dependencies; the documentation shows how.
 - **Exactly-once delivery across systems.** Through a broker, delivery is
   at-least-once, and consumers deduplicate by message ID (R9, R11).
 

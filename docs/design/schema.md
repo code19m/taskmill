@@ -1,6 +1,6 @@
 # Storage schema
 
-- Status: Draft
+- Status: Accepted
 - Milestone: M1
 
 This document maps the [task lifecycle](task-lifecycle.md) and the

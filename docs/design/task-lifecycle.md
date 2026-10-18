@@ -1,6 +1,6 @@
 # Task lifecycle and guarantees
 
-- Status: Draft
+- Status: Accepted
 - Milestone: M1
 
 This document defines the states a task moves through, what moves it from one
