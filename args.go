@@ -6,7 +6,8 @@ package taskmill
 // Implement Kind on a value receiver and return a constant: producers and
 // consumers agree on the kind, so changing it orphans enqueued tasks.
 type Args interface {
-	// Kind returns the task kind, such as "email.send".
+	// Kind returns the task kind, such as "email.send". It must not depend
+	// on the value's fields: handler registration reads it from a zero value.
 	Kind() string
 }
 

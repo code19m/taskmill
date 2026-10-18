@@ -3,7 +3,9 @@ package taskmill_test
 import (
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -108,4 +110,51 @@ func (e *env) wantState(t *testing.T, id int64, state taskmill.State) {
 	if got := e.get(t, id).State; got != state {
 		t.Fatalf("task %d is %s, want %s", id, got, state)
 	}
+}
+
+// waitFor waits until cond holds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// begin starts a transaction that is rolled back when the test ends, unless
+// the test commits it.
+func (e *env) begin(t *testing.T) pgx.Tx { //nolint:ireturn // pgx's transaction type is an interface
+	t.Helper()
+	tx, err := e.pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(t.Context()) })
+	return tx
+}
+
+// txExec runs a statement in tx; {s} stands for the schema.
+func (e *env) txExec(t *testing.T, tx pgx.Tx, sql string, args ...any) {
+	t.Helper()
+	if _, err := tx.Exec(t.Context(), replaceSchema(sql, e.schema), args...); err != nil {
+		t.Fatalf("exec %q: %v", sql, err)
+	}
+}
+
+// waitBlocked waits until a statement that contains fragment, with {s} for
+// the schema, waits for a lock, and returns its backend's process ID.
+func (e *env) waitBlocked(t *testing.T, fragment string) int {
+	t.Helper()
+	var pid int
+	waitFor(t, "a statement to wait for a lock", func() bool {
+		err := e.pool.QueryRow(t.Context(), `
+SELECT pid FROM pg_stat_activity
+WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0
+LIMIT 1`, replaceSchema(fragment, e.schema)).Scan(&pid)
+		return err == nil
+	})
+	return pid
 }

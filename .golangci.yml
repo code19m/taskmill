@@ -58,7 +58,6 @@ linters:
     - misspell
 
     # Tests.
-    - testableexamples
     - thelper
     - tparallel
     - usetesting
@@ -181,6 +180,10 @@ linters:
   exclusions:
     generated: strict
     warn-unused: true
+    rules:
+      - path: ^internal/cmd/
+        linters:
+          - forbidigo # commands print their reports to stdout
 
 formatters:
   enable:

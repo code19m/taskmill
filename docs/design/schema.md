@@ -72,7 +72,7 @@ CREATE TABLE taskmill.tasks (
     finalized_at        timestamptz,                  -- when it became dead or canceled
     lease_token         integer NOT NULL DEFAULT 0,   -- grows by one on every fetch
     state               taskmill.task_state NOT NULL,
-    priority            smallint NOT NULL DEFAULT 0,  -- higher runs first
+    priority            smallint NOT NULL DEFAULT 2,  -- 1 to 4, higher runs first
     attempt             smallint NOT NULL DEFAULT 0,  -- attempts used
     max_attempts        smallint NOT NULL,
     queue               text NOT NULL,
@@ -105,8 +105,9 @@ Design notes:
   can never match again. Unlike `attempt`, it never goes down, so snoozes and
   graceful releases, which give attempts back, are safe.
 - **`errors` is bounded.** Each failure appends an entry with the attempt
-  number, the time, and the error. Beyond 20 entries the oldest is dropped. The
-  Go side truncates each error to a fixed size before storing it.
+  number, the time, the message, and, for failures that taskmill detected
+  itself, a code such as `lease_expired`. Beyond 20 entries the oldest is
+  dropped. The Go side truncates each message to 4 KiB before storing it.
 - **`fillfactor = 80`** leaves room in each page for updated row versions, so
   heartbeats can be HOT updates (see [Evidence](#evidence)).
 - **`queue` and `kind` are stored as text,** not as IDs into lookup tables. The
@@ -155,18 +156,24 @@ head. See [FIFO groups](#fifo-groups).
 
 ```sql
 CREATE TABLE taskmill.groups (
-    queue      text NOT NULL,
-    group_key  text NOT NULL,
-    tasks      integer NOT NULL,  -- unfinished tasks; a halted group also counts its dead head
-    halted_at  timestamptz,       -- set when the head became dead and the queue halts groups
-    updated_at timestamptz NOT NULL DEFAULT now(),
+    queue          text NOT NULL,
+    group_key      text NOT NULL,
+    tasks          integer NOT NULL,  -- unfinished tasks; a halted group also counts its dead head
+    halted_task_id bigint,            -- the dead head that halted the group
+    halted_at      timestamptz,
+    updated_at     timestamptz NOT NULL DEFAULT now(),
 
     PRIMARY KEY (queue, group_key),
-    CONSTRAINT groups_tasks_check CHECK (tasks >= 0)
+    CONSTRAINT groups_tasks_check  CHECK (tasks >= 0),
+    CONSTRAINT groups_halted_check CHECK ((halted_task_id IS NULL) = (halted_at IS NULL))
 ) WITH (fillfactor = 80);
 
-CREATE INDEX groups_halted_idx ON taskmill.groups (queue) WHERE halted_at IS NOT NULL;
+CREATE INDEX groups_halted_idx      ON taskmill.groups (queue) WHERE halted_at IS NOT NULL;
+CREATE INDEX groups_halted_task_idx ON taskmill.groups (halted_task_id) WHERE halted_task_id IS NOT NULL;
 ```
+
+`groups_halted_task_idx` lets retention skip the dead heads that keep their
+groups halted without scanning every group.
 
 ### `dedupe_keys`
 
@@ -320,8 +327,12 @@ FROM unnest($1::text[], $2::text[], $3::smallint[], $4::timestamptz[],
 RETURNING id;
 ```
 
-Grouped and deduplicated enqueues are variants of this statement; see
-[FIFO groups](#fifo-groups) and [Deduplication](#deduplication).
+The implementation sends every batch through one of two statements. Batches
+with dedupe keys or FIFO groups go through a statement that also claims the
+keys and counts the groups, as described in [FIFO groups](#fifo-groups) and
+[Deduplication](#deduplication); all other batches go through a lean one.
+Both reserve IDs from the `tasks_id_seq` identity sequence first, so results
+map back to their inputs.
 
 ### Fetch
 
@@ -360,17 +371,34 @@ serializes fetches for limited queues only.
 ### Heartbeat
 
 ```sql
-UPDATE taskmill.tasks
-SET lease_expires_at = now() + $3::interval
-WHERE (id, lease_token) IN (SELECT * FROM unnest($1::bigint[], $2::integer[]))
-  AND state = 'running'
-RETURNING id, cancel_requested_at IS NOT NULL AS cancel_requested;
+WITH attempts AS (
+    SELECT * FROM unnest($1::bigint[], $2::integer[]) AS u(id, token)
+), owned AS (
+    SELECT id, cancel_requested_at IS NOT NULL AS cancel_requested FROM taskmill.tasks
+    WHERE (id, lease_token) IN (SELECT * FROM attempts) AND state = 'running'
+), renewed AS (
+    UPDATE taskmill.tasks
+    SET lease_expires_at = now() + $3::interval
+    WHERE id IN (
+        SELECT id FROM taskmill.tasks
+        WHERE (id, lease_token) IN (SELECT * FROM attempts) AND state = 'running'
+        FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id
+)
+SELECT owned.id, renewed.id IS NOT NULL AS renewed, owned.cancel_requested
+FROM owned LEFT JOIN renewed USING (id);
 ```
 
 One statement renews every lease a worker holds. A task missing from the
 result has lost its lease, and the worker cancels that attempt's context. A
 task returned with `cancel_requested` is canceled the same way (transition 16
 of the lifecycle).
+
+`SKIP LOCKED` keeps one locked row, such as a task that an application
+transaction is canceling, from holding up the renewal of all the others. A
+skipped task is returned as not renewed: the worker keeps it until its lease
+could have expired, and renews it at the next heartbeat.
 
 ### Complete
 
@@ -399,9 +427,11 @@ run inside the handler's transaction, is transactional completion (R12).
 
 ```sql
 UPDATE taskmill.tasks
-SET state            = $3::taskmill.task_state,  -- 'retryable' or 'dead', from the kind's retry policy
-    run_at           = CASE WHEN $3::taskmill.task_state = 'retryable' THEN now() + $4::interval ELSE run_at END,
-    finalized_at     = CASE WHEN $3::taskmill.task_state = 'dead' THEN now() END,
+SET state            = CASE WHEN cancel_requested_at IS NOT NULL THEN 'canceled'
+                            ELSE $3::taskmill.task_state END,  -- 'retryable' or 'dead', from the kind's retry policy
+    run_at           = CASE WHEN cancel_requested_at IS NULL AND $3::taskmill.task_state = 'retryable'
+                            THEN now() + $4::interval ELSE run_at END,
+    finalized_at     = CASE WHEN cancel_requested_at IS NOT NULL OR $3::taskmill.task_state = 'dead' THEN now() END,
     lease_expires_at = NULL,
     errors           = (CASE WHEN jsonb_array_length(errors) >= 20 THEN errors - 0 ELSE errors END)
                        || jsonb_build_array(jsonb_build_object('attempt', attempt, 'at', now(), 'error', $5::jsonb))
@@ -409,7 +439,9 @@ WHERE id = $1 AND lease_token = $2 AND state = 'running';
 ```
 
 Snooze and graceful release are similar updates that also give the attempt
-back (`attempt = attempt - 1`).
+back (`attempt = attempt - 1`). All three cancel the task instead if its
+cancellation was requested, so a request whose notification was missed still
+takes effect when the attempt ends.
 
 ### Rescue expired leases
 
@@ -426,7 +458,7 @@ SET state = CASE
         END::taskmill.task_state,
     run_at = CASE
             WHEN t.cancel_requested_at IS NULL AND t.attempt < t.max_attempts
-            THEN now() + make_interval(secs => least($1 * power(2, t.attempt - 1), $2) * (0.9 + random() * 0.2))
+            THEN now() + make_interval(secs => least($1 * power(2, least(t.attempt - 1, 30)), $2) * (0.9 + random() * 0.2))
             ELSE t.run_at
         END,
     finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
@@ -445,7 +477,8 @@ RETURNING t.id, t.queue, t.group_key, t.state;
 ```
 
 The backoff is exponential with ±10% jitter: `$1` is the base delay in seconds
-and `$2` the maximum.
+and `$2` the maximum. The exponent is capped, so that a task with thousands of
+attempts cannot overflow it.
 
 ### Other statements
 
@@ -521,7 +554,7 @@ expired key that the maintainer has not deleted yet is claimed again:
 
 ```sql
 WITH next AS (
-    SELECT nextval(pg_get_serial_sequence('taskmill.tasks', 'id')) AS id
+    SELECT nextval('taskmill.tasks_id_seq') AS id
 ), k AS (
     INSERT INTO taskmill.dedupe_keys AS d (key, task_id, expires_at)
     SELECT $1, next.id, now() + $2::interval FROM next

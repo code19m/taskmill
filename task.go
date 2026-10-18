@@ -79,7 +79,8 @@ type attempt struct {
 //
 // After CompleteTx, the handler should commit and return nil. If the handler
 // returns an error after its transaction committed, the task stays completed
-// and the error is only logged.
+// and the error is only logged; if the transaction rolled back, the error fails
+// the attempt as usual.
 func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	if t.attempt == nil {
 		return invalidArgument("task was not created by a worker")

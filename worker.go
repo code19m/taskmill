@@ -48,6 +48,9 @@ var (
 	errAttemptTimeout  = errors.New("taskmill: attempt timed out")
 )
 
+// errListenConfig reports a ListenConfig that pgx cannot connect with.
+var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with pgx.ParseConfig")
+
 // Worker fetches tasks from its queues and runs their handlers. One worker per
 // process is typical; it also takes part in electing the maintainer, which
 // promotes due tasks, rescues expired leases, and applies retention.
@@ -55,7 +58,6 @@ type Worker struct {
 	client    *Client
 	cfg       WorkerConfig
 	handlers  map[string]*registration
-	hasBatch  bool
 	logger    *slog.Logger
 	listen    *pgx.ConnConfig
 	version   string
@@ -118,7 +120,8 @@ type WorkerConfig struct {
 
 	// ListenConfig is the connection that receives notifications. Set it to
 	// a direct connection when the pool goes through a transaction-pooling
-	// proxy, which cannot deliver them. Default: the pool's configuration.
+	// proxy, which cannot deliver them. Create it with [pgx.ParseConfig].
+	// Default: the pool's configuration.
 	ListenConfig *pgx.ConnConfig
 
 	// Logger receives the worker's logs. Default: the client's logger.
@@ -171,7 +174,6 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 				r.opts.Retry = c.DefaultRetry
 			}
 			w.handlers[kind] = &r
-			w.hasBatch = w.hasBatch || r.runBatch != nil
 		}
 	}
 	if w.listen == nil {
@@ -237,6 +239,11 @@ type queueState struct {
 	wake       chan struct{} // nudges the fetch loop
 	paused     atomic.Bool
 	maxRunning atomic.Int32 // cluster-wide limit; 0 means none
+
+	// batchSize is the largest batch size of the batch kinds seen in the
+	// queue, or 0 if none were seen: a queue with batch kinds fetches enough
+	// tasks per free slot to fill a batch. Only the fetch loop uses it.
+	batchSize int
 }
 
 func (q *queueState) nudge() {
@@ -409,8 +416,8 @@ func (w *Worker) fetchLoop(ctx, runCtx context.Context, q *queueState, inflight 
 			continue
 		}
 		limit := free
-		if w.hasBatch {
-			limit = min(free*maxBatchSize, maxFetch)
+		if q.batchSize > 0 {
+			limit = min(free*q.batchSize, maxFetch)
 		}
 
 		tasks, err := w.fetch(ctx, q, limit)
@@ -464,18 +471,8 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, limit int) ([]*tracke
 		}
 	}
 
-	now := time.Now()
-	var out []*tracked
-	for r.Next() {
-		t, err := w.scanFetched(r, q, now)
-		if err != nil {
-			r.Close()
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	r.Close()
-	if err := r.Err(); err != nil {
+	out, err := w.scanAllFetched(r, q)
+	if err != nil {
 		return nil, err
 	}
 	if tx != nil {
@@ -513,6 +510,25 @@ func (w *Worker) capacity(ctx context.Context, tx pgx.Tx, queue string) (int, er
 		return 0, err
 	}
 	return max(*maxRunning-running, 0), nil
+}
+
+// scanAllFetched reads the fetched tasks, and notes the batch kinds among
+// them in q.
+func (w *Worker) scanAllFetched(r pgx.Rows, q *queueState) ([]*tracked, error) {
+	defer r.Close()
+	now := time.Now()
+	var out []*tracked
+	for r.Next() {
+		t, err := w.scanFetched(r, q, now)
+		if err != nil {
+			return nil, err
+		}
+		if t.reg != nil && t.reg.runBatch != nil {
+			q.batchSize = max(q.batchSize, t.reg.opts.BatchSize)
+		}
+		out = append(out, t)
+	}
+	return out, r.Err()
 }
 
 func (w *Worker) scanFetched(r pgx.Rows, q *queueState, now time.Time) (*tracked, error) {
@@ -565,9 +581,15 @@ func (w *Worker) dispatch(ctx, runCtx context.Context, q *queueState, tasks []*t
 	w.mu.Unlock()
 
 	for _, unit := range w.units(tasks) {
-		select {
-		case q.slots <- struct{}{}:
-		case <-ctx.Done():
+		started := false
+		if ctx.Err() == nil {
+			select {
+			case q.slots <- struct{}{}:
+				started = true
+			case <-ctx.Done():
+			}
+		}
+		if !started {
 			for _, t := range unit {
 				t.mu.Lock()
 				t.state = stateRecording
@@ -635,7 +657,7 @@ func (w *Worker) runOne(runCtx context.Context, t *tracked) {
 	err := w.invoke(ctx, t, func(ctx context.Context) error { return t.reg.run(ctx, t.info, t.att) })
 	cause := context.Cause(ctx)
 	cancelTimeout()
-	w.finish(ctx, t, w.classify(ctx, t, err, cause), &start)
+	w.finish(ctx, t, classify(t, err, cause), &start)
 }
 
 // runBatch runs a batch handler for tasks. Middleware still wraps each task:
@@ -698,7 +720,7 @@ func (w *Worker) runBatch(runCtx context.Context, tasks []*tracked) {
 
 	cause := context.Cause(ctx)
 	for i, t := range tasks {
-		w.finish(ctx, t, w.classify(ctx, t, errs[i], cause), &start)
+		w.finish(ctx, t, classify(t, errs[i], cause), &start)
 	}
 }
 
@@ -765,15 +787,11 @@ const (
 )
 
 // classify turns a handler's result into the outcome to record.
-func (w *Worker) classify(ctx context.Context, t *tracked, err, cause error) outcome {
+func classify(t *tracked, err, cause error) outcome {
 	switch {
 	case t.lost.Load():
 		return outcome{kind: outcomeDiscard}
-	case t.att.completedInTx.Load():
-		if err != nil {
-			w.logger.LogAttrs(ctx, slog.LevelWarn, "handler failed after completing its task",
-				slog.Int64(logKeyTaskID, t.att.id), slog.Any(logKeyError, err))
-		}
+	case err == nil && t.att.completedInTx.Load():
 		return outcome{kind: outcomeDiscard}
 	case err == nil:
 		return outcome{kind: outcomeComplete}
@@ -887,40 +905,47 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 	var found bool
 	var err error
 
+	// fail, snooze, and release cancel the task instead if its cancellation
+	// was requested, so they return the state they left it in.
+	var state string
 	switch o.kind {
 	case outcomeRetry, outcomeDead:
-		state := StateRetryable
+		want := StateRetryable
 		if o.kind == outcomeDead {
-			state = StateDead
+			want = StateDead
 		}
-		found, err = queryRow(ctx, q, sql.fail, []any{id, token, string(state), o.delay.Microseconds(), errorJSON(o)},
-			&queue, &group)
-		if err == nil && found && state == StateDead && group != "" {
-			err = w.client.leaveGroup(ctx, q, queue, group, id, true, true)
-		}
+		found, err = queryRow(ctx, q, sql.fail, []any{id, token, string(want), o.delay.Microseconds(), errorJSON(o)},
+			&queue, &group, &state)
 	case outcomeCancel:
+		state = string(StateCanceled)
 		found, err = queryRow(ctx, q, sql.cancelRunning, []any{id, token}, &queue, &group)
-		if err == nil && found && group != "" {
-			err = w.client.leaveGroup(ctx, q, queue, group, id, true, false)
-		}
 	case outcomeSnooze:
-		found, err = queryRow(ctx, q, sql.snooze, []any{id, token, o.delay.Microseconds()}, &queue)
-		if err == nil && found && o.delay == 0 {
-			w.client.notifyAvailable(ctx, q, queue)
-		}
+		found, err = queryRow(ctx, q, sql.snooze, []any{id, token, o.delay.Microseconds()}, &queue, &group, &state)
 	case outcomeRelease:
-		found, err = queryRow(ctx, q, sql.release, []any{id, token}, &queue)
-		if err == nil && found {
-			w.client.notifyAvailable(ctx, q, queue)
-		}
+		found, err = queryRow(ctx, q, sql.release, []any{id, token}, &queue, &group, &state)
 	case outcomeComplete, outcomeDiscard:
 		return nil
 	}
-	if err == nil && !found {
+	switch {
+	case err != nil:
+		return err
+	case !found && t.att.completedInTx.Load():
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler failed after completing its task; it stays completed",
+			slog.Int64(logKeyTaskID, id), slog.Any(logKeyError, o.err))
+		return nil
+	case !found:
 		w.logger.LogAttrs(ctx, slog.LevelDebug, "result discarded: the attempt lost its lease",
 			slog.Int64(logKeyTaskID, id))
+		return nil
 	}
-	return err
+
+	switch s := State(state); {
+	case s.Finished() && group != "":
+		return w.client.leaveGroup(ctx, q, queue, group, id, true, s == StateDead)
+	case s == StateAvailable:
+		w.client.notifyAvailable(ctx, q, queue)
+	}
+	return nil
 }
 
 // completer records successful attempts in batches: it takes every result
@@ -1042,55 +1067,63 @@ func (w *Worker) heartbeat(ctx context.Context) {
 		ids[i], tokens[i] = t.att.id, t.att.token
 	}
 	sent := time.Now()
-	owned, err := w.renew(ctx, ids, tokens)
+	beats, err := w.renew(ctx, ids, tokens)
 	if err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "lease heartbeat failed", slog.Any(logKeyError, err))
-		// Without a heartbeat, an attempt cannot know that it still owns its
-		// task once its lease could have expired.
-		for _, t := range ts {
+	}
+
+	for _, t := range ts {
+		b, owned := beats[t.att.id]
+		switch {
+		case err == nil && !owned:
+			w.loseLease(ctx, t)
+			continue
+		case b.renewed:
+			t.mu.Lock()
+			t.lastBeat = sent
+			t.mu.Unlock()
+		default:
+			// The heartbeat failed, or the task's row was locked: without a
+			// renewal, the attempt cannot know that it still owns its task
+			// once its lease could have expired.
 			t.mu.Lock()
 			expired := time.Since(t.lastBeat) >= w.cfg.LeaseDuration
 			t.mu.Unlock()
 			if expired {
 				w.loseLease(ctx, t)
+				continue
 			}
 		}
-		return
-	}
-
-	for _, t := range ts {
-		cancelRequested, ok := owned[t.att.id]
-		if !ok {
-			w.loseLease(ctx, t)
-			continue
-		}
-		t.mu.Lock()
-		t.lastBeat = sent
-		t.mu.Unlock()
-		if cancelRequested {
+		if b.cancelRequested {
 			t.requestCancel()
 		}
 	}
 }
 
-// renew extends the leases of the given attempts and returns those it found,
-// with whether their tasks' cancellation was requested.
-func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[int64]bool, error) {
+// beat is what a heartbeat learned about an attempt that owns its task.
+type beat struct {
+	renewed         bool // false if another transaction locked the task's row
+	cancelRequested bool
+}
+
+// renew extends the leases of the given attempts and returns those that still
+// own their tasks.
+func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[int64]beat, error) {
 	r, err := w.client.pool.Query(ctx, w.client.sql.heartbeat, ids, tokens, w.cfg.LeaseDuration.Microseconds())
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	owned := make(map[int64]bool, len(ids))
+	beats := make(map[int64]beat, len(ids))
 	for r.Next() {
 		var id int64
-		var cancelRequested bool
-		if err := r.Scan(&id, &cancelRequested); err != nil {
+		var b beat
+		if err := r.Scan(&id, &b.renewed, &b.cancelRequested); err != nil {
 			return nil, err
 		}
-		owned[id] = cancelRequested
+		beats[id] = b
 	}
-	return owned, r.Err()
+	return beats, r.Err()
 }
 
 func (w *Worker) loseLease(ctx context.Context, t *tracked) {
@@ -1146,37 +1179,43 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) {
 	for name := range w.queues {
 		names = append(names, name)
 	}
-	r, err := w.client.pool.Query(ctx, w.client.sql.queueSettings, names)
+	settings, err := w.loadQueueSettings(ctx, names)
 	if err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "load queue settings failed", slog.Any(logKeyError, err))
 		return
 	}
-	defer r.Close()
-	seen := make(map[string]bool, len(names))
-	for r.Next() {
-		var name string
-		var paused bool
-		var maxRunning int32
-		if err := r.Scan(&name, &paused, &maxRunning); err != nil {
-			return
-		}
-		if q := w.queues[name]; q != nil {
-			seen[name] = true
-			wasPaused := q.paused.Swap(paused)
-			q.maxRunning.Store(maxRunning)
-			if wasPaused && !paused {
-				q.nudge()
-			}
-		}
-	}
+	// A queue without a row has the default settings: running, no limit.
 	for name, q := range w.queues {
-		if !seen[name] && q.paused.Swap(false) {
+		s := settings[name]
+		q.maxRunning.Store(s.maxRunning)
+		if q.paused.Swap(s.paused) && !s.paused {
 			q.nudge()
 		}
-		if !seen[name] {
-			q.maxRunning.Store(0)
-		}
 	}
+}
+
+// queueSetting is the part of a queue's settings that its worker applies.
+type queueSetting struct {
+	paused     bool
+	maxRunning int32
+}
+
+func (w *Worker) loadQueueSettings(ctx context.Context, names []string) (map[string]queueSetting, error) {
+	r, err := w.client.pool.Query(ctx, w.client.sql.queueSettings, names)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	settings := make(map[string]queueSetting, len(names))
+	for r.Next() {
+		var name string
+		var s queueSetting
+		if err := r.Scan(&name, &s.paused, &s.maxRunning); err != nil {
+			return nil, err
+		}
+		settings[name] = s
+	}
+	return settings, r.Err()
 }
 
 // listenLoop receives notifications on a dedicated connection, reconnecting
@@ -1186,6 +1225,10 @@ func (w *Worker) listenLoop(ctx context.Context) {
 	for ctx.Err() == nil {
 		err := w.listenOnce(ctx)
 		if ctx.Err() != nil {
+			return
+		}
+		if errors.Is(err, errListenConfig) {
+			w.logger.LogAttrs(ctx, slog.LevelError, "notifications disabled; polling only", slog.Any(logKeyError, err))
 			return
 		}
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "notification connection lost; polling until it is back",
@@ -1200,7 +1243,7 @@ func (w *Worker) listenLoop(ctx context.Context) {
 }
 
 func (w *Worker) listenOnce(ctx context.Context) error {
-	conn, err := pgx.ConnectConfig(ctx, w.listen)
+	conn, err := w.connectListener(ctx)
 	if err != nil {
 		return err
 	}
@@ -1223,6 +1266,18 @@ func (w *Worker) listenOnce(ctx context.Context) error {
 		}
 		w.handleNotification(ctx, n.Payload)
 	}
+}
+
+// connectListener opens the notification connection. pgx panics on a
+// configuration that was not created by pgx.ParseConfig; that is reported as
+// errListenConfig instead.
+func (w *Worker) connectListener(ctx context.Context) (conn *pgx.Conn, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			conn, err = nil, fmt.Errorf("%w: %v", errListenConfig, r)
+		}
+	}()
+	return pgx.ConnectConfig(ctx, w.listen)
 }
 
 func (w *Worker) handleNotification(ctx context.Context, payload string) {
@@ -1257,7 +1312,7 @@ func (w *Worker) handleNotification(ctx context.Context, payload string) {
 func errorJSON(o outcome) string {
 	msg := "unknown error"
 	if o.err != nil {
-		msg = o.err.Error()
+		msg = strings.ReplaceAll(o.err.Error(), "\x00", "") // jsonb cannot store NUL
 	}
 	if len(msg) > errorMessageLimit {
 		msg = strings.ToValidUTF8(msg[:errorMessageLimit], "") + "…"

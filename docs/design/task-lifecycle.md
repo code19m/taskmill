@@ -107,7 +107,7 @@ transaction (see [FIFO groups](schema.md#fifo-groups) in the schema document).
 | 13 | `running` | `retryable`, `dead`, or `canceled` | The lease expired: the worker crashed or lost the database. Counts as a failed attempt. | Maintainer |
 | 14 | `scheduled`, `pending`, `available`, `retryable` | `dead` | The deadline passed before the task started. | Maintainer |
 | 15 | `scheduled`, `pending`, `available`, `retryable` | `canceled` | Cancellation was requested. | Client |
-| 16 | `running` | `canceled` | Cancellation was requested. The attempt's context is canceled, and the task becomes `canceled` when the attempt ends. | Worker |
+| 16 | `running` | `canceled` | Cancellation was requested. The attempt's context is canceled, and the task becomes `canceled` when the attempt ends, however it ends, unless the handler completed it. | Worker |
 | 17 | `dead`, `canceled` | `available` or `pending` | An operator retried the task. It gets a fresh set of attempts, and waits in `pending` if other tasks of its group are unfinished. | Client |
 | 18 | Any terminal state | Deleted | The retention period ended. | Maintainer |
 

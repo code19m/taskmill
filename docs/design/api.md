@@ -29,8 +29,8 @@ about drivers were tested against PostgreSQL (see [Verification](#verification))
    `NewWorker`.
 6. **Typed payloads.** A handler receives its payload already decoded into its
    own struct type, through generics.
-7. **Only what users need is exported.** The core package exports 90
-   top-level identifiers: 39 types, 24 methods, 12 constants, 10 functions, and
+7. **Only what users need is exported.** The core package exports 99
+   top-level identifiers: 40 types, 31 methods, 13 constants, 10 functions, and
    5 variables. Everything else stays unexported, so it can change without
    breaking users.
 
@@ -321,6 +321,7 @@ until it is shut down. A worker:
 | `Middleware` | Wrappers around every attempt | None |
 | `Schedules` | Recurring tasks (R14, M5) | None |
 | `NoMaintainer` | Keeps this process out of the maintainer election | `false` |
+| `ListenConfig` | A direct connection for notifications, when the pool goes through a transaction-pooling proxy | The pool's configuration |
 | `Logger` | Where logs go | The client's logger |
 
 **Per process or per cluster.** `QueueOptions` in `WorkerConfig` are local to
@@ -352,6 +353,7 @@ All on `Client`, so that the web interface and applications share one API
 | `UpdateQueue(ctx, name, *QueueSettings)` | Changes a queue's cluster-wide settings | M4 |
 | `PauseQueue(ctx, name)`, `ResumeQueue` | Stops or resumes fetching from a queue (R17) | M6 |
 | `Settings(ctx)`, `UpdateSettings` | History and dead-task retention for the installation | M5 |
+| `Schedules(ctx)`, `PauseSchedule`, `ResumeSchedule` | Lists and controls recurring schedules | M5 |
 | `Workers(ctx)` | Live worker processes (R15) | M6 |
 
 ## Schema migrations
@@ -415,6 +417,10 @@ type Publisher interface {
   that order.
 - Each `Delivery` has an ID that is unique across services and stays the same
   on retries (a UUIDv7), so consumers can deduplicate by it.
+
+`outbox.Setup` applies the queue settings the outbox needs, once: a key whose
+message fails for good halts instead of being overtaken, and published
+messages skip history. `outbox.PublisherFunc` adapts a plain function.
 
 **The inbox needs no package.** A consumer enqueues each received message with
 `DedupeKey` set to the message ID, and a redelivered message becomes a

@@ -194,3 +194,75 @@ func TestDelete(t *testing.T) {
 		t.Fatalf("unknown task: got %v, want ErrNotFound", err)
 	}
 }
+
+func TestRetryAndDeleteSeeTheLatestGroupHalt(t *testing.T) {
+	t.Parallel()
+	for _, op := range []string{"retry", "delete"} {
+		t.Run(op, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			e.exec(t, "INSERT INTO {s}.queues (name, halt_group_on_dead) VALUES ('default', true)")
+			group := &taskmill.EnqueueOptions{GroupKey: "g"}
+			head := e.enqueue(t, sendEmail{To: "1"}, group)
+			next := e.enqueue(t, sendEmail{To: "2"}, group)
+			e.exec(t, `UPDATE {s}.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, head)
+			e.exec(t, `UPDATE {s}.groups SET halted_task_id = $1, halted_at = now() WHERE group_key = 'g'`, head)
+
+			// While the operation waits for the head's lock, another transaction
+			// ends the halt: the head leaves its group and the next task takes
+			// over.
+			tx := e.begin(t)
+			e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", head)
+			e.txExec(t, tx, `UPDATE {s}.groups SET halted_task_id = NULL, halted_at = NULL, tasks = tasks - 1
+			                 WHERE group_key = 'g'`)
+			e.txExec(t, tx, "UPDATE {s}.tasks SET state = 'available' WHERE id = $1", next)
+
+			done := make(chan error, 1)
+			go func() {
+				if op == "retry" {
+					done <- e.client.Retry(t.Context(), head)
+				} else {
+					done <- e.client.Delete(t.Context(), head)
+				}
+			}()
+			e.waitBlocked(t, "{s}.tasks")
+			if err := tx.Commit(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+
+			want := 1 // the next task
+			if op == "retry" {
+				want = 2 // the head rejoins, behind the next task
+				e.wantState(t, head, taskmill.StatePending)
+			}
+			if n := e.count(t, "SELECT coalesce(sum(tasks), 0) FROM {s}.groups"); n != want {
+				t.Fatalf("group counts %d tasks, want %d", n, want)
+			}
+		})
+	}
+}
+
+func TestOperationsOnCompletedTasks(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	stop := runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+	id := e.enqueue(t, sendEmail{}, nil)
+	e.waitState(t, id, taskmill.StateCompleted)
+	stop()
+
+	if err := e.client.Cancel(t.Context(), id); !errors.Is(err, taskmill.ErrInvalidState) {
+		t.Fatalf("cancel: got %v, want ErrInvalidState", err)
+	}
+	if err := e.client.Retry(t.Context(), id); !errors.Is(err, taskmill.ErrInvalidState) {
+		t.Fatalf("retry: got %v, want ErrInvalidState", err)
+	}
+	if err := e.client.Delete(t.Context(), id); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := e.client.Get(t.Context(), id); !errors.Is(err, taskmill.ErrNotFound) {
+		t.Fatalf("deleted task: got %v, want ErrNotFound", err)
+	}
+}
