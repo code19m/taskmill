@@ -51,7 +51,12 @@ func TestMaintenanceDoesNotWaitForHeldGroups(t *testing.T) {
 	runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
 
 	// Two tasks whose worker crashed, one of them in a group that an
-	// application transaction holds, as an enqueue into the group does.
+	// application transaction holds, as an enqueue into the group does. The
+	// group is held before its task expires, so the maintainer never sees the
+	// task with the group free.
+	e.exec(t, "INSERT INTO {s}.groups (queue, group_key, tasks) VALUES ('unserved', 'g', 1)")
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'g' FOR UPDATE")
 	expired := `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
 	                                  lease_expires_at, attempted_at, attempted_by, group_key)
 	            VALUES ('unserved', 'email.send', 'running', now(), '{}', 5, 1, 1,
@@ -61,9 +66,6 @@ func TestMaintenanceDoesNotWaitForHeldGroups(t *testing.T) {
 	if err := e.pool.QueryRow(t.Context(), replaceSchema(expired, e.schema), "g").Scan(&grouped); err != nil {
 		t.Fatal(err)
 	}
-	e.exec(t, "INSERT INTO {s}.groups (queue, group_key, tasks) VALUES ('unserved', 'g', 1)")
-	tx := e.begin(t)
-	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'g' FOR UPDATE")
 	if err := e.pool.QueryRow(t.Context(), replaceSchema(expired, e.schema), nil).Scan(&plain); err != nil {
 		t.Fatal(err)
 	}
