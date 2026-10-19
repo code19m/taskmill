@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#181818">
 <title>{{.Title}} · taskmill</title>
 <link rel="icon" href="{{asset "favicon.svg"}}" type="image/svg+xml">
 <link rel="stylesheet" href="{{asset "style.css"}}">
@@ -11,41 +12,45 @@
 <script src="{{asset "app.js"}}" defer></script>
 </head>
 <body>
-<header class="topbar">
-  <div class="topbar-inner">
-    <a class="brand" href="{{path "/"}}" aria-label="taskmill overview">{{template "logo"}}<span>taskmill</span></a>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="appbar">
+  <div class="appbar-inner">
+    <a class="logo" href="{{path "/"}}" aria-label="taskmill overview">{{template "logo"}}<span>taskmill</span></a>
     <nav class="nav" aria-label="Sections">
-      <a href="{{path "/"}}"{{if eq .Nav "overview"}} aria-current="page"{{end}}>Overview</a>
-      <a href="{{path "/tasks"}}"{{if eq .Nav "tasks"}} aria-current="page"{{end}}>Tasks</a>
-      <a href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>Dead
-        <span class="nav-count{{if not .Dead}} is-empty{{end}}" data-live-part="dead-count">{{num .Dead}}</span></a>
-      <a href="{{path "/schedules"}}"{{if eq .Nav "schedules"}} aria-current="page"{{end}}>Schedules</a>
-      <a href="{{path "/workers"}}"{{if eq .Nav "workers"}} aria-current="page"{{end}}>Workers</a>
+      <a class="nav-item" href="{{path "/"}}"{{if eq .Nav "overview"}} aria-current="page"{{end}}>{{template "icon-overview"}}<span>Overview</span></a>
+      <a class="nav-item" href="{{path "/tasks"}}"{{if eq .Nav "tasks"}} aria-current="page"{{end}}>{{template "icon-tasks"}}<span>Tasks</span></a>
+      <a class="nav-item" href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>{{template "icon-dead"}}<span>Dead</span><span class="count mono" data-live-part="dead-count">{{if .Dead}}{{num .Dead}}{{end}}</span></a>
+      <a class="nav-item" href="{{path "/schedules"}}"{{if eq .Nav "schedules"}} aria-current="page"{{end}}>{{template "icon-schedules"}}<span>Schedules</span></a>
+      <a class="nav-item" href="{{path "/workers"}}"{{if eq .Nav "workers"}} aria-current="page"{{end}}>{{template "icon-workers"}}<span>Workers</span></a>
     </nav>
-    <div class="topbar-tools">
-      {{if .ReadOnly}}<span class="chip" title="Actions are disabled">Read-only</span>{{end}}
-      <button type="button" class="live" data-live-toggle aria-pressed="true" title="Pause live updates">
+    <div class="appbar-tools">
+      {{if .ReadOnly}}<span class="read-only-pill" title="Actions are disabled">read-only</span>{{end}}
+      <button type="button" class="btn quiet live" data-live-toggle aria-pressed="true" title="Pause live updates" hidden>
         <span class="live-dot" aria-hidden="true"></span><span class="live-label">Live</span>
       </button>
-      <button type="button" class="icon-button" data-theme-toggle title="Switch between light and dark" aria-label="Switch between light and dark">
-        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>
-      </button>
+      <div class="seg theme-seg" role="group" aria-label="Theme" hidden>
+        <button type="button" data-theme-option="system" title="System" aria-label="System theme">{{template "icon-device"}}</button>
+        <button type="button" data-theme-option="light" title="Light" aria-label="Light theme">{{template "icon-sun"}}</button>
+        <button type="button" data-theme-option="dark" title="Dark" aria-label="Dark theme">{{template "icon-moon"}}</button>
+      </div>
     </div>
   </div>
 </header>
-<main class="page" id="main"{{if .Nav}} data-live{{end}}>
-{{with .Notice}}<div class="toast" role="status" data-toast>{{.}}</div>{{end}}
+<div class="main">
+<main id="main" class="content" tabindex="-1"{{if .Nav}} data-live{{end}}>
+{{with .Notice}}<div class="toast" role="status" data-toast>{{template "icon-check"}}<span class="toast-message">{{.}}</span></div>{{end}}
 {{end}}
 
 {{define "foot"}}
 </main>
-<dialog class="dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+</div>
+<dialog class="modal" id="confirm-dialog" aria-labelledby="confirm-title">
   <form method="dialog">
-    <h2 id="confirm-title" class="dialog-title">Are you sure?</h2>
-    <p class="dialog-text" data-confirm-text></p>
-    <div class="dialog-actions">
+    <h2 id="confirm-title">Are you sure?</h2>
+    <p class="modal-text" data-confirm-text></p>
+    <div class="modal-actions">
       <button class="btn" value="cancel">Cancel</button>
-      <button class="btn btn-primary" value="confirm" data-confirm-button>Confirm</button>
+      <button class="btn primary" value="confirm" data-confirm-button>Confirm</button>
     </div>
   </form>
 </dialog>
@@ -53,8 +58,29 @@
 </html>
 {{end}}
 
-{{define "logo"}}<svg class="brand-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect width="24" height="24" rx="6.5" fill="currentColor"/><rect x="6" y="6.25" width="12" height="2.5" rx="1.25" fill="#fff"/><rect x="6" y="10.75" width="9" height="2.5" rx="1.25" fill="#fff" opacity=".78"/><rect x="6" y="15.25" width="5.5" height="2.5" rx="1.25" fill="#fff" opacity=".56"/></svg>{{end}}
+{{/* Two gears in mesh. */}}
+{{define "logo"}}<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><path fill="currentColor" fill-rule="evenodd" stroke="currentColor" stroke-width=".6" stroke-linejoin="round" d="M8.58 9.13L8.9 7.01A7.8 7.8 0 0 1 10.85 7.18L10.79 9.33A5.7 5.7 0 0 1 12.37 10.06L12.37 10.06L13.98 8.64A7.8 7.8 0 0 1 15.36 10.02L13.94 11.63A5.7 5.7 0 0 1 14.67 13.21L14.67 13.21L16.82 13.15A7.8 7.8 0 0 1 16.99 15.1L14.87 15.42A5.7 5.7 0 0 1 14.42 17.1L14.42 17.1L16.1 18.44A7.8 7.8 0 0 1 14.98 20.04L13.15 18.91A5.7 5.7 0 0 1 11.72 19.91L11.72 19.91L12.15 22.02A7.8 7.8 0 0 1 10.26 22.53L9.58 20.49A5.7 5.7 0 0 1 7.84 20.34L7.84 20.34L6.82 22.23A7.8 7.8 0 0 1 5.04 21.4L5.83 19.4A5.7 5.7 0 0 1 4.6 18.17L4.6 18.17L2.6 18.96A7.8 7.8 0 0 1 1.77 17.18L3.66 16.16A5.7 5.7 0 0 1 3.51 14.42L3.51 14.42L1.47 13.74A7.8 7.8 0 0 1 1.98 11.85L4.09 12.28A5.7 5.7 0 0 1 5.09 10.85L5.09 10.85L3.96 9.02A7.8 7.8 0 0 1 5.56 7.9L6.9 9.58A5.7 5.7 0 0 1 8.58 9.13ZM6.9 14.8a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0 -4.6 0ZM17.89 2.6L18.37 1.01A5 5 0 0 1 20.18 1.5L19.79 3.11A3.4 3.4 0 0 1 20.89 4.21L20.89 4.21L22.5 3.82A5 5 0 0 1 22.99 5.63L21.4 6.11A3.4 3.4 0 0 1 21 7.61L21 7.61L22.14 8.81A5 5 0 0 1 20.81 10.14L19.61 9A3.4 3.4 0 0 1 18.11 9.4L18.11 9.4L17.63 10.99A5 5 0 0 1 15.82 10.5L16.21 8.89A3.4 3.4 0 0 1 15.11 7.79L15.11 7.79L13.5 8.18A5 5 0 0 1 13.01 6.37L14.6 5.89A3.4 3.4 0 0 1 15 4.39L15 4.39L13.86 3.19A5 5 0 0 1 15.19 1.86L16.39 3A3.4 3.4 0 0 1 17.89 2.6ZM16.6 6a1.4 1.4 0 1 0 2.8 0a1.4 1.4 0 1 0 -2.8 0Z"/></svg>{{end}}
 
-{{define "state"}}<span class="badge state-{{.}}">{{.}}</span>{{end}}
+{{define "icon-overview"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.75" y="1.75" width="5" height="5" rx="1.2"/><rect x="9.25" y="1.75" width="5" height="5" rx="1.2"/><rect x="1.75" y="9.25" width="5" height="5" rx="1.2"/><rect x="9.25" y="9.25" width="5" height="5" rx="1.2"/></svg>{{end}}
+{{define "icon-tasks"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 3.5h8M6 8h8M6 12.5h8"/><circle cx="2.5" cy="3.5" r=".6" fill="currentColor"/><circle cx="2.5" cy="8" r=".6" fill="currentColor"/><circle cx="2.5" cy="12.5" r=".6" fill="currentColor"/></svg>{{end}}
+{{define "icon-dead"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="m4 4 8 8"/></svg>{{end}}
+{{define "icon-schedules"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.4 1.6"/></svg>{{end}}
+{{define "icon-workers"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="2.5" width="12.5" height="4.5" rx="1.3"/><rect x="1.75" y="9" width="12.5" height="4.5" rx="1.3"/><path d="M4.5 4.75h.01M4.5 11.25h.01"/></svg>{{end}}
+{{define "icon-device"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="2.5" width="12.5" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg>{{end}}
+{{define "icon-sun"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1v1M8 14v1M1 8h1M14 8h1M3 3l.7.7M12.3 12.3l.7.7M3 13l.7-.7M12.3 3.7l.7-.7"/></svg>{{end}}
+{{define "icon-moon"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.8 9.5A6 6 0 0 1 6.5 2.2 6 6 0 1 0 13.8 9.5Z"/></svg>{{end}}
+{{define "icon-check"}}<svg class="toast-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>{{end}}
 
-{{define "empty"}}<div class="empty"><svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 13h4.5l1.5 2h5l1.5-2h4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><p>{{.}}</p></div>{{end}}
+{{/* A task state: a ring icon, so that color is never the only cue, and its name. */}}
+{{define "state"}}<span class="status status-{{.}}">{{template "state-icon" .}}<span>{{.}}</span></span>{{end}}
+{{define "state-icon"}}{{$s := print .}}<svg class="ring ring-{{$s}}" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{{- if or (eq $s "scheduled") (eq $s "pending")}}<circle cx="8" cy="8" r="5.5" stroke-dasharray="2.2 2.2"/>
+{{- else if eq $s "available"}}<circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="2" fill="currentColor" stroke="none"/>
+{{- else if eq $s "running"}}<circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" stroke="none"/>
+{{- else if eq $s "retryable"}}<path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M12.2 1.8v2.6H9.6"/>
+{{- else if eq $s "completed"}}<circle cx="8" cy="8" r="5.5"/><path d="M5.3 8.2l1.9 1.8 3.5-3.6"/>
+{{- else if eq $s "dead"}}<circle cx="8" cy="8" r="5.5"/><path d="M6 6l4 4M10 6l-4 4"/>
+{{- else}}<circle cx="8" cy="8" r="5.5"/><path d="m4.2 4.2 7.6 7.6"/>{{end -}}
+</svg>{{end}}
+
+{{define "empty"}}<p class="empty-note">{{.}}</p>{{end}}

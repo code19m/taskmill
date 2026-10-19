@@ -1,44 +1,42 @@
 {{define "tasks.html"}}{{template "head" .}}
 {{$d := .Data}}
-<div class="page-header">
-  <div>
-    <h1>{{if eq $d.State "dead"}}Dead tasks{{else}}Tasks{{end}}</h1>
-    <p class="subtle">{{if eq $d.State "dead"}}Tasks that will not run again unless you retry them.{{else}}Newest first, unfinished and finished.{{end}}</p>
-  </div>
-</div>
-
-<nav class="segmented" aria-label="Filter by state">
+<header class="topbar">
+  <h1>{{if eq $d.State "dead"}}Dead tasks{{else}}Tasks{{end}}</h1>
+  {{if $d.Paged}}<span class="meta">older</span>{{end}}
+</header>
+<div class="page">
+<nav class="seg seg-wrap" aria-label="Filter by state">
   <a href="{{path "/tasks"}}{{query "queue" $d.Queue "kind" $d.Kind "group" $d.Group}}"{{if not $d.State}} aria-current="true"{{end}}>All</a>
-  {{range states}}<a href="{{path "/tasks"}}{{query "queue" $d.Queue "kind" $d.Kind "group" $d.Group "state" (print .)}}"{{if eq (print .) $d.State}} aria-current="true"{{end}}><i class="dot state-{{.}}"></i>{{.}}</a>{{end}}
+  {{range states}}<a href="{{path "/tasks"}}{{query "queue" $d.Queue "kind" $d.Kind "group" $d.Group "state" (print .)}}"{{if eq (print .) $d.State}} aria-current="true"{{end}}>{{template "state-icon" .}}{{.}}</a>{{end}}
 </nav>
 
 <form class="filters" method="get" action="{{path "/tasks"}}" data-autosubmit>
   {{with $d.State}}<input type="hidden" name="state" value="{{.}}">{{end}}
   <label class="field">
     <span>Queue</span>
-    <select name="queue">
+    <select class="ctl" name="queue">
       <option value="">All queues</option>
       {{range $d.Queues}}<option value="{{.Name}}"{{if eq .Name $d.Queue}} selected{{end}}>{{.Name}}</option>{{end}}
     </select>
   </label>
   <label class="field">
     <span>Kind</span>
-    <input name="kind" placeholder="email.send_receipt" value="{{$d.Kind}}" autocomplete="off" spellcheck="false">
+    <input class="ctl" name="kind" placeholder="email.send_receipt" value="{{$d.Kind}}" autocomplete="off" spellcheck="false">
   </label>
   <label class="field">
     <span>FIFO group</span>
-    <input name="group" placeholder="account-7" value="{{$d.Group}}" autocomplete="off" spellcheck="false">
+    <input class="ctl" name="group" placeholder="account-7" value="{{$d.Group}}" autocomplete="off" spellcheck="false">
   </label>
   <div class="filters-actions">
     <button class="btn">Apply</button>
-    {{if $d.Filtered}}<a class="btn btn-ghost" href="{{path "/tasks"}}">Clear</a>{{end}}
+    {{if $d.Filtered}}<a class="btn quiet" href="{{path "/tasks"}}">Clear</a>{{end}}
   </div>
 </form>
 
-<section class="card">
+<section class="card flush">
   {{if $d.Tasks}}
   <div class="table-scroll">
-  <table class="table table-tasks">
+  <table class="table">
     <thead><tr>
       <th class="num">ID</th><th>Kind</th><th>Queue</th><th>State</th><th class="num">Attempt</th>
       <th>Created</th><th>Run at</th><th>Last error</th>
@@ -48,10 +46,10 @@
         <td class="num"><a class="mono strong" href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
         <td class="mono">{{.Kind}}</td>
         <td class="nowrap">{{.Queue}}{{if .GroupKey}}<span class="group" title="FIFO group">{{visible .GroupKey}}</span>{{end}}</td>
-        <td>{{template "state" .State}}{{if ne .Priority 2}} <span class="chip chip-priority-{{.Priority}}">{{.Priority}}</span>{{end}}</td>
-        <td class="num">{{.Attempt}}<span class="faint">/{{.MaxAttempts}}</span></td>
-        <td class="nowrap" title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>
-        <td class="nowrap" title="{{timestamp .RunAt}}">{{ago .RunAt}}</td>
+        <td class="nowrap">{{template "state" .State}}{{if ne .Priority 2}} <span class="chip priority-{{.Priority}}">{{.Priority}}</span>{{end}}</td>
+        <td class="num mono">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
+        <td class="nowrap tone-faint" title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>
+        <td class="nowrap tone-faint" title="{{timestamp .RunAt}}">{{ago .RunAt}}</td>
         <td class="error-cell">{{with lastError .Errors}}<span title="{{.Message}}">{{printf "%.140s" .Message}}</span>{{end}}</td>
       </tr>
     {{end}}</tbody>
@@ -59,10 +57,11 @@
   </div>
   {{if or $d.Next $d.Paged}}
   <div class="pager">
-    {{if $d.Paged}}<a class="btn btn-sm btn-ghost" href="{{path "/tasks"}}{{query "queue" $d.Queue "kind" $d.Kind "group" $d.Group "state" $d.State}}">← Newest</a>{{else}}<span></span>{{end}}
-    {{if $d.Next}}<a class="btn btn-sm" href="{{$d.Next}}">Older →</a>{{end}}
+    {{if $d.Paged}}<a class="btn sm quiet" href="{{path "/tasks"}}{{query "queue" $d.Queue "kind" $d.Kind "group" $d.Group "state" $d.State}}">Newest</a>{{else}}<span></span>{{end}}
+    {{if $d.Next}}<a class="btn sm" href="{{$d.Next}}">Older</a>{{end}}
   </div>
   {{end}}
-  {{else}}{{template "empty" (print (or (and $d.Filtered "No tasks match these filters.") "No tasks yet."))}}{{end}}
+  {{else}}<div class="card-body">{{template "empty" (print (or (and $d.Filtered "No tasks match these filters") "No tasks yet"))}}</div>{{end}}
 </section>
+</div>
 {{template "foot" .}}{{end}}

@@ -1,15 +1,47 @@
-// Applies the chosen theme before the page paints, so it never flashes. A
-// page that embeds the interface can pick one with ?theme=light, dark, or
-// auto; the choice is remembered.
+// Applies the chosen theme before the page paints, so it never flashes.
+// Until someone picks Light or Dark, follow the device, also when it changes.
+// A page that embeds the interface can pick one with ?theme=light, dark, or
+// system; the choice is remembered.
 (() => {
   const key = "taskmill-theme";
+  const valid = (value) => value === "light" || value === "dark";
+  let choice = "system";
   try {
     const asked = new URLSearchParams(location.search).get("theme");
-    if (asked === "light" || asked === "dark") localStorage.setItem(key, asked);
-    if (asked === "auto") localStorage.removeItem(key);
-    const theme = localStorage.getItem(key);
-    if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+    if (valid(asked)) localStorage.setItem(key, asked);
+    if (asked === "system" || asked === "auto") localStorage.removeItem(key);
+    const saved = localStorage.getItem(key);
+    if (valid(saved)) choice = saved;
   } catch {
-    // Storage is blocked: follow the system's theme.
+    // Storage is blocked: follow the device.
   }
+  let device = null;
+  try { device = matchMedia("(prefers-color-scheme: dark)"); } catch { device = null; }
+  const resolved = () => (choice !== "system" ? choice : device?.matches === false ? "light" : "dark");
+
+  const apply = () => {
+    const theme = resolved();
+    document.documentElement.dataset.theme = theme;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = theme === "light" ? "#ffffff" : "#181818";
+    for (const button of document.querySelectorAll("[data-theme-option]")) {
+      button.setAttribute("aria-pressed", String(button.dataset.themeOption === choice));
+    }
+  };
+
+  window.TaskmillTheme = {
+    get choice() { return choice; },
+    set(value) {
+      if (!valid(value) && value !== "system") return;
+      choice = value;
+      try {
+        if (value === "system") localStorage.removeItem(key);
+        else localStorage.setItem(key, value);
+      } catch { /* not remembered */ }
+      apply();
+    },
+    apply,
+  };
+  try { device?.addEventListener("change", () => { if (choice === "system") apply(); }); } catch { /* old browser */ }
+  apply();
 })();
