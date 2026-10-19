@@ -45,7 +45,8 @@
     <td title="{{timestamp $s.NextRunAt}}">{{ago $s.NextRunAt}}</td><td title="{{timestamp $s.LastRunAt}}">{{ago $s.LastRunAt}}</td>
     <td class="actions">{{if not $ro}}
       {{if $s.Paused}}<form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/resume"><button>Resume</button></form>
-      {{else}}<form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/pause" data-confirm="Pause schedule {{$s.Name}}?"><button>Pause</button></form>{{end}}
+      {{else}}<form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/run" data-confirm="Run schedule {{$s.Name}} now?"><button>Run now</button></form>
+      <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/pause" data-confirm="Pause schedule {{$s.Name}}?"><button>Pause</button></form>{{end}}
     {{end}}</td></tr>
   {{end}}</tbody>
 </table>

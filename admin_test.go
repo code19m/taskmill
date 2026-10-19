@@ -277,6 +277,60 @@ func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 	}
 }
 
+func TestRunScheduleNow(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Schedules: []taskmill.Schedule{{
+			Name:    "yearly-report",
+			Cron:    "@yearly",
+			Args:    sendEmail{To: "report"},
+			Options: &taskmill.EnqueueOptions{Priority: taskmill.PriorityHigh},
+		}},
+	})
+	ctx := t.Context()
+	taskmill.RunSchedules(ctx, w)
+	before, err := e.client.Schedules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	asked := time.Now()
+	if err := e.client.RunSchedule(ctx, "yearly-report"); err != nil {
+		t.Fatal(err)
+	}
+	taskmill.RunSchedules(ctx, w)
+	page, err := e.client.List(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Tasks) != 1 {
+		t.Fatalf("got %d tasks, want 1", len(page.Tasks))
+	}
+	// The run has the schedule's options, and runs at the time of the request.
+	if task := page.Tasks[0]; task.Priority != taskmill.PriorityHigh || task.RunAt.Sub(asked).Abs() > 5*time.Second {
+		t.Fatalf("got priority %s and run time %s, want high and about %s", task.Priority, task.RunAt, asked)
+	}
+	// The timetable stays as it was.
+	after, err := e.client.Schedules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after[0].NextRunAt.Equal(before[0].NextRunAt) || after[0].LastRunAt.IsZero() {
+		t.Fatalf("next run %s, want %s; last run %s", after[0].NextRunAt, before[0].NextRunAt, after[0].LastRunAt)
+	}
+
+	if err := e.client.PauseSchedule(ctx, "yearly-report"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.client.RunSchedule(ctx, "yearly-report"); !errors.Is(err, taskmill.ErrInvalidState) {
+		t.Fatalf("paused schedule: got %v, want ErrInvalidState", err)
+	}
+	if err := e.client.RunSchedule(ctx, "unknown"); !errors.Is(err, taskmill.ErrNotFound) {
+		t.Fatalf("unknown schedule: got %v, want ErrNotFound", err)
+	}
+}
+
 func TestRemovedSchedulesArePruned(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

@@ -90,6 +90,7 @@ type statements struct {
 	advanceSchedule string
 	listSchedules   string
 	pauseSchedule   string
+	runSchedule     string
 
 	updateQueue      string
 	pauseQueue       string
@@ -826,6 +827,19 @@ SELECT state::text, queue, count(*) FROM (
 INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at)
 SELECT q, s::{s}.task_state, n, c, now()
 FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[]) AS u(q, s, n, c)`),
+
+		// runSchedule makes schedule $1 due now, unless it is paused, and
+		// reports whether it exists and is paused. The maintainer then runs
+		// it as it runs any due schedule, and computes the next regular run
+		// from the expression as usual.
+		runSchedule: q(`
+WITH s AS (
+    SELECT name, paused_at IS NOT NULL AS paused FROM {s}.schedules WHERE name = $1 FOR UPDATE
+), due AS (
+    UPDATE {s}.schedules t SET next_run_at = now(), updated_at = now()
+    FROM s WHERE t.name = s.name AND NOT s.paused
+)
+SELECT paused FROM s`),
 
 		pauseSchedule: q(`
 UPDATE {s}.schedules SET paused_at = CASE WHEN $2 THEN coalesce(paused_at, now()) END, updated_at = now()
