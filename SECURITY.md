@@ -12,11 +12,12 @@ In scope are flaws in taskmill's own code, for example:
 - SQL injection through any argument of taskmill's API;
 - cross-site request forgery (CSRF) or cross-site scripting (XSS) in the web
   interface of the `ui` package;
-- a way around `ui.Config.ReadOnly`.
+- a way around `ui.Config.ReadOnly` or `ui.Config.BasicAuth`.
 
-The `ui` handler has no authentication, by design: applications mount it
-behind their own. Exposing it without authentication is a deployment issue,
-not a vulnerability in taskmill.
+The `ui` handler authenticates only when `ui.Config.BasicAuth` is set;
+otherwise applications mount it behind their own authentication. Exposing it
+without authentication, or with basic authentication over plain HTTP, is a
+deployment issue, not a vulnerability in taskmill.
 
 ## Reporting a vulnerability
 

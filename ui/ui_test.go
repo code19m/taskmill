@@ -77,11 +77,17 @@ func TestPagesRender(t *testing.T) {
 	id := strconv.FormatInt(res.ID, 10)
 
 	code, body, header := get(t, h, "/admin/tasks/")
-	if code != http.StatusOK || !strings.Contains(body, "mail") || !strings.Contains(body, "max 3 running") {
+	if code != http.StatusOK || !strings.Contains(body, "mail") || !strings.Contains(body, "max 3") {
 		t.Fatalf("overview: %d\n%s", code, body)
 	}
-	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
+	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") ||
+		!strings.Contains(csp, "frame-ancestors 'none'") {
 		t.Fatalf("missing security headers: %v", header)
+	}
+	for _, path := range []string{"/admin/tasks/schedules", "/admin/tasks/workers"} {
+		if code, _, _ := get(t, h, path); code != http.StatusOK {
+			t.Fatalf("%s: %d", path, code)
+		}
 	}
 
 	code, body, _ = get(t, h, "/admin/tasks/tasks?queue=mail&state=available")
@@ -94,7 +100,7 @@ func TestPagesRender(t *testing.T) {
 		t.Fatalf("task page did not escape the payload: %d\n%s", code, body)
 	}
 	if !strings.Contains(body, "<dd>high</dd>") || !strings.Contains(body, "topic␟key") ||
-		!strings.Contains(body, "group=topic%1fkey") {
+		!strings.Contains(body, "group=topic%1Fkey") {
 		t.Fatalf("task page: want the priority's name and a visible link to the group\n%s", body)
 	}
 	code, body, _ = get(t, h, "/admin/tasks/tasks?queue=mail&group=topic%1Fkey")
@@ -197,7 +203,7 @@ func TestReadOnly(t *testing.T) {
 	id := strconv.FormatInt(res.ID, 10)
 
 	_, body, _ := get(t, h, "/tasks/"+id)
-	if strings.Contains(body, "/cancel") || !strings.Contains(body, "read-only") {
+	if strings.Contains(body, "/cancel") || !strings.Contains(body, "Read-only") {
 		t.Fatalf("read-only page offers actions:\n%s", body)
 	}
 	if rec := post(t, h, "/tasks/"+id+"/cancel", "same-origin"); rec.Code != http.StatusForbidden {
@@ -270,7 +276,7 @@ func TestScheduleActionsWorkForAnyName(t *testing.T) {
 	}
 
 	h := ui.Handler(client, &ui.Config{Prefix: "/admin"})
-	_, body, _ := get(t, h, "/admin/")
+	_, body, _ := get(t, h, "/admin/schedules")
 	form := func(action string) string {
 		m := regexp.MustCompile(`action="([^"]*/schedules/[^"]*/` + action + `)"`).FindStringSubmatch(body)
 		if m == nil {
@@ -302,5 +308,86 @@ func TestScheduleActionsWorkForAnyName(t *testing.T) {
 	}
 	if rec := post(t, h, run, "same-origin"); rec.Code != http.StatusConflict {
 		t.Fatalf("run now while paused: got %d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+func TestBasicAuth(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	h := ui.Handler(client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops", Password: "s3cret"}})
+
+	for _, creds := range [][2]string{{}, {"ops", "wrong"}, {"other", "s3cret"}} {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/static/style.css", nil)
+		if creds[0] != "" {
+			req.SetBasicAuth(creds[0], creds[1])
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Header().Get("WWW-Authenticate"), `Basic realm="taskmill"`) {
+			t.Fatalf("credentials %q: got %d, %v", creds, rec.Code, rec.Header())
+		}
+	}
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.SetBasicAuth("ops", "s3cret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("logged in: got %d", rec.Code)
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("an empty password was accepted")
+		}
+	}()
+	ui.Handler(client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops"}})
+}
+
+func TestFrameAncestors(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	h := ui.Handler(client, &ui.Config{FrameAncestors: []string{"'self'", "https://admin.example.com"}})
+	_, _, header := get(t, h, "/workers")
+	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'self' https://admin.example.com") {
+		t.Fatalf("got %q", csp)
+	}
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("an entry that injects a directive was accepted")
+		}
+	}()
+	ui.Handler(client, &ui.Config{FrameAncestors: []string{"https://a.example; script-src *"}})
+}
+
+func TestStaticFilesAreVersionedAndCached(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	h := ui.Handler(client, nil)
+	_, body, _ := get(t, h, "/workers")
+	m := regexp.MustCompile(`href="(/static/style\.css\?v=[0-9a-f]+)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("no versioned stylesheet link in\n%s", body)
+	}
+	code, _, header := get(t, h, m[1])
+	if code != http.StatusOK || !strings.Contains(header.Get("Cache-Control"), "immutable") {
+		t.Fatalf("stylesheet: %d, %v", code, header)
+	}
+}
+
+func TestActionNotices(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	h := ui.Handler(client, nil)
+	rec := post(t, h, "/queues/default/pause", "same-origin")
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/?done=queue-pause" {
+		t.Fatalf("pause: %d to %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if _, body, _ := get(t, h, "/?done=queue-pause"); !strings.Contains(body, "Queue paused.") {
+		t.Fatal("no notice after pausing")
+	}
+	// Only fixed notices are shown, never text from the address.
+	if _, body, _ := get(t, h, "/?done=%3Cb%3Ehi"); strings.Contains(body, "data-toast") {
+		t.Fatal("an unknown notice was shown")
 	}
 }

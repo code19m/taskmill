@@ -483,16 +483,36 @@ _, err := client.Enqueue(ctx, HandleOrderEvent{...}, &taskmill.EnqueueOptions{
 
 ## Operating taskmill
 
-**The web interface** shows queues with their statistics, workers,
-schedules, and tasks with their payloads and error histories. It can pause
-and resume queues and schedules, run a schedule now, and retry, cancel, and
-delete tasks. Mount it behind your own authentication:
+**The web interface** is a dashboard of queues, tasks, schedules, and
+workers. It shows task counts live, a chart of them while it is open, and
+each task's payload and error history. It can pause and resume queues and
+schedules, run a schedule now, and retry, cancel, and delete tasks. It has
+light and dark themes, works on phones, and works without JavaScript too.
+Use it in one of three ways:
 
-```go
-mux.Handle("/taskmill/", requireAdmin(ui.Handler(client, &ui.Config{Prefix: "/taskmill"})))
-```
+- **In your application,** behind your own authentication:
 
-The handler strips `Prefix` itself; do not wrap it in `http.StripPrefix`.
+  ```go
+  mux.Handle("/taskmill/", requireAdmin(ui.Handler(client, &ui.Config{Prefix: "/taskmill"})))
+  ```
+
+  The handler strips `Prefix` itself; do not wrap it in `http.StripPrefix`.
+- **On its own,** with the `taskmill-ui` command. It reads its settings from
+  the environment, and asks for a password when `TASKMILL_UI_PASSWORD` is
+  set:
+
+  ```sh
+  go install github.com/code19m/taskmill/cmd/taskmill-ui@latest
+  TASKMILL_DATABASE_URL=postgres://... TASKMILL_UI_PASSWORD=... taskmill-ui
+  ```
+
+  In your own server, `ui.Config.BasicAuth` does the same. Serve it over
+  HTTPS: basic authentication sends the password with every request.
+- **Inside another web application,** in an `<iframe>`. List that
+  application's origin in `ui.Config.FrameAncestors`; otherwise browsers
+  refuse to show the interface in a frame. Add `?theme=light` or
+  `?theme=dark` to the frame's address to match your application's theme.
+
 `ui.Config.ReadOnly` disables every action. Forms are protected against
 cross-site request forgery, and every action is logged to `ui.Config.Logger`.
 

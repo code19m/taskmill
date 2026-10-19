@@ -23,8 +23,10 @@ Initial release.
 - Cron schedules, enqueued at most once per scheduled time across workers,
   which operators can also run on demand.
 - Transactional completion, for exactly-once effects in the same database.
-- An operations API and the `ui` package, a web interface as an
-  `http.Handler`.
+- An operations API, and a live web dashboard: the `ui` package, an
+  `http.Handler` with optional basic authentication that can also be shown in
+  another application's frame, and the `taskmill-ui` command that serves it on
+  its own.
 - The `outbox` package, a transactional outbox that publishes in order per
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.

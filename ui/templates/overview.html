@@ -1,54 +1,105 @@
 {{define "overview.html"}}{{template "head" .}}
-{{$ro := .ReadOnly}}{{$d := .Data}}
-<h1>Queues</h1>
-{{if $d.Queues}}
-<div class="scroll">
-<table>
-  <thead><tr><th>Queue</th>{{range $d.States}}<th class="num">{{.}}</th>{{end}}<th class="num">Workers</th><th>Settings</th><th></th></tr></thead>
-  <tbody>
-  {{range $q := $d.Queues}}
-    <tr>
-      <td><a href="{{path "/tasks"}}?queue={{$q.Name}}">{{$q.Name}}</a>{{if $q.Paused}} <span class="badge warn">paused</span>{{end}}</td>
-      {{range $s := $d.States}}<td class="num"><a href="{{path "/tasks"}}?queue={{$q.Name}}&amp;state={{$s}}">{{index $q.Counts $s}}</a></td>{{end}}
-      <td class="num">{{$q.Workers}}</td>
-      <td class="muted">{{if $q.Settings.MaxRunning}}max {{$q.Settings.MaxRunning}} running{{end}}</td>
-      <td class="actions">{{if not $ro}}
-        {{if $q.Paused}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/resume"><button>Resume</button></form>
-        {{else}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/pause" data-confirm="Pause queue {{$q.Name}}?"><button>Pause</button></form>{{end}}
-      {{end}}</td>
-    </tr>
-  {{end}}
-  </tbody>
-</table>
+{{$d := .Data}}{{$ro := .ReadOnly}}
+<div class="page-header">
+  <div>
+    <h1>Overview</h1>
+    <p class="subtle">Counts refresh every 10 seconds{{if not $d.RefreshedAt.IsZero}}; last counted {{ago $d.RefreshedAt}}{{end}}.</p>
+  </div>
 </div>
-<p class="muted">Counts refresh every 10 seconds{{range $d.Queues}}{{if .Capped}}; some counts stopped at their cap, and show at least that many{{break}}{{end}}{{end}}.</p>
-{{else}}<p class="muted">No queues yet.</p>{{end}}
 
-<h2>Workers</h2>
-{{if $d.Workers}}
-<table>
-  <thead><tr><th>Worker</th><th>Host</th><th>Version</th><th>Queues</th><th>Started</th><th>Last heartbeat</th></tr></thead>
-  <tbody>{{range $d.Workers}}
-    <tr><td>{{.ID}}{{if .Maintainer}} <span class="badge">maintainer</span>{{end}}</td><td>{{.Hostname}}</td><td>{{.Version}}</td><td>{{range $i, $q := .Queues}}{{if $i}}, {{end}}{{$q}}{{end}}</td>
-    <td title="{{timestamp .StartedAt}}">{{ago .StartedAt}}</td><td title="{{timestamp .HeartbeatAt}}">{{ago .HeartbeatAt}}</td></tr>
-  {{end}}</tbody>
-</table>
-{{else}}<p class="muted">No workers are running.</p>{{end}}
+<section class="stats" aria-label="Totals">
+  <a class="stat" href="{{path "/tasks?state=available"}}">
+    <span class="stat-label"><i class="dot state-available"></i>Available</span>
+    <span class="stat-value">{{count $d.Totals.Available $d.Totals.Capped}}</span>
+    <span class="stat-note">ready for a worker</span>
+  </a>
+  <a class="stat" href="{{path "/tasks?state=running"}}">
+    <span class="stat-label"><i class="dot state-running"></i>Running</span>
+    <span class="stat-value">{{count $d.Totals.Running $d.Totals.Capped}}</span>
+    <span class="stat-note">in a handler now</span>
+  </a>
+  <a class="stat" href="{{path "/tasks?state=scheduled"}}">
+    <span class="stat-label"><i class="dot state-scheduled"></i>Waiting</span>
+    <span class="stat-value">{{count $d.Totals.Waiting $d.Totals.Capped}}</span>
+    <span class="stat-note">scheduled, retrying, or pending</span>
+  </a>
+  <a class="stat{{if $d.Totals.Dead}} stat-alert{{end}}" href="{{path "/tasks?state=dead"}}">
+    <span class="stat-label"><i class="dot state-dead"></i>Dead</span>
+    <span class="stat-value">{{count $d.Totals.Dead $d.Totals.Capped}}</span>
+    <span class="stat-note">{{if $d.Totals.Dead}}need an operator{{else}}nothing failed for good{{end}}</span>
+  </a>
+  <a class="stat" href="{{path "/workers"}}">
+    <span class="stat-label"><i class="dot{{if $d.Workers}} dot-ok{{end}}"></i>Workers</span>
+    <span class="stat-value">{{$d.Workers}}</span>
+    <span class="stat-note">{{if $d.Maintainer}}maintainer …{{short $d.Maintainer}}{{else if $d.Workers}}electing a maintainer{{else}}none running{{end}}</span>
+  </a>
+</section>
 
-<h2>Schedules</h2>
-{{if $d.Schedules}}
-<table>
-  <thead><tr><th>Schedule</th><th>Cron</th><th>Kind</th><th>Queue</th><th>Next run</th><th>Last run</th><th></th></tr></thead>
-  <tbody>{{range $s := $d.Schedules}}
-    <tr><td>{{$s.Name}}{{if $s.Paused}} <span class="badge warn">paused</span>{{end}}</td><td><code>{{$s.Cron}}</code> <span class="muted">{{$s.Location}}</span></td>
-    <td>{{$s.Kind}}</td><td>{{$s.Queue}}</td>
-    <td title="{{timestamp $s.NextRunAt}}">{{ago $s.NextRunAt}}</td><td title="{{timestamp $s.LastRunAt}}">{{ago $s.LastRunAt}}</td>
-    <td class="actions">{{if not $ro}}
-      {{if $s.Paused}}<form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/resume"><button>Resume</button></form>
-      {{else}}<form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/run" data-confirm="Run schedule {{$s.Name}} now?"><button>Run now</button></form>
-      <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/pause" data-confirm="Pause schedule {{$s.Name}}?"><button>Pause</button></form>{{end}}
-    {{end}}</td></tr>
-  {{end}}</tbody>
-</table>
-{{else}}<p class="muted">No schedules.</p>{{end}}
+<section class="card chart-card" aria-label="Activity">
+  <div class="card-header">
+    <h2 class="card-title">Activity</h2>
+    <div class="legend">
+      <span><i class="dot state-available"></i>Available</span>
+      <span><i class="dot state-running"></i>Running</span>
+      <span><i class="dot state-scheduled"></i>Waiting</span>
+      <span><i class="dot state-dead"></i>Dead</span>
+    </div>
+  </div>
+  <div class="chart" data-chart data-available="{{$d.Totals.Available}}" data-running="{{$d.Totals.Running}}"
+       data-waiting="{{$d.Totals.Waiting}}" data-dead="{{$d.Totals.Dead}}">
+    <p class="chart-note">The chart draws the counts while this page stays open.</p>
+  </div>
+</section>
+
+<section class="card" aria-labelledby="queues-title">
+  <div class="card-header">
+    <h2 class="card-title" id="queues-title">Queues</h2>
+    <span class="subtle">{{len $d.Queues}} {{if eq (len $d.Queues) 1}}queue{{else}}queues{{end}}</span>
+  </div>
+  {{if $d.Queues}}
+  <div class="table-scroll">
+  <table class="table">
+    <thead><tr>
+      <th>Queue</th>
+      {{range $d.States}}<th class="num">{{.}}</th>{{end}}
+      <th class="num">Workers</th>
+      {{if not $ro}}<th class="actions-col"><span class="visually-hidden">Actions</span></th>{{end}}
+    </tr></thead>
+    <tbody>
+    {{range $q := $d.Queues}}
+      <tr>
+        <td class="nowrap">
+          <a class="strong" href="{{path "/tasks"}}{{query "queue" $q.Name}}">{{$q.Name}}</a>
+          {{if $q.Paused}}<span class="badge badge-warn">paused</span>{{end}}
+          {{with $q.Settings.MaxRunning}}<span class="chip" title="At most {{.}} running across all workers">max {{.}}</span>{{end}}
+        </td>
+        {{range $s := $d.States}}{{$n := index $q.Counts $s}}
+        <td class="num"><a class="{{if not $n}}zero{{else}}count-{{$s}}{{end}}" href="{{path "/tasks"}}{{query "queue" $q.Name "state" (print $s)}}">{{count $n $q.Capped}}</a></td>
+        {{end}}
+        <td class="num{{if not $q.Workers}} zero{{end}}">{{$q.Workers}}</td>
+        {{if not $ro}}<td class="actions-col">
+          {{if $q.Paused}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/resume"><button class="btn btn-sm">Resume</button></form>
+          {{else}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/pause" data-confirm="Pause queue {{$q.Name}}? Running tasks finish, and no new ones start until you resume it." data-confirm-label="Pause queue"><button class="btn btn-sm btn-quiet">Pause</button></form>{{end}}
+        </td>{{end}}
+      </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{if $d.Totals.Capped}}<p class="card-foot">Some counts stopped at their cap and show at least that many.</p>{{end}}
+  {{else}}{{template "empty" "No queues yet. They appear once tasks are enqueued or workers start."}}{{end}}
+</section>
+
+<div class="grid-2">
+  <a class="card link-card" href="{{path "/schedules"}}">
+    <span class="link-card-label">Schedules</span>
+    <span class="link-card-value">{{$d.Schedules}}</span>
+    <span class="subtle">{{if not $d.NextRun.IsZero}}next run {{ago $d.NextRun}}{{else if $d.Schedules}}all paused{{else}}none defined{{end}}</span>
+  </a>
+  <div class="card link-card">
+    <span class="link-card-label">Retention</span>
+    <span class="link-card-value">{{period $d.Settings.HistoryRetention}}</span>
+    <span class="subtle">of completed tasks; dead and canceled ones stay {{period $d.Settings.DeadRetention}}</span>
+  </div>
+</div>
 {{template "foot" .}}{{end}}

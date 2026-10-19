@@ -1,5 +1,7 @@
 {{define "error.html"}}{{template "head" .}}
-<h1>{{.Title}}</h1>
-<p>{{.Data}}</p>
-<p><a href="{{path "/"}}">Back to the overview</a></p>
+<section class="card error-page">
+  <h1>{{.Title}}</h1>
+  <p>{{.Data}}</p>
+  <a class="btn" href="{{path "/"}}">Back to the overview</a>
+</section>
 {{template "foot" .}}{{end}}
