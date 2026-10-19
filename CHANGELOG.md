@@ -20,7 +20,8 @@ Initial release.
 - FIFO groups that run tasks one at a time per key, and halt on a dead task.
 - Concurrency limits per worker and across all workers, and pausing of
   queues.
-- Cron schedules, enqueued at most once per scheduled time across workers.
+- Cron schedules, enqueued at most once per scheduled time across workers,
+  which operators can also run on demand.
 - Transactional completion, for exactly-once effects in the same database.
 - An operations API and the `ui` package, a web interface as an
   `http.Handler`.

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -286,6 +287,25 @@ func (c *Client) PauseSchedule(ctx context.Context, name string) error {
 // collapse into one run.
 func (c *Client) ResumeSchedule(ctx context.Context, name string) error {
 	return c.setSchedulePaused(ctx, name, false)
+}
+
+// RunSchedule runs a schedule once now, in addition to its timetable. The
+// maintainer enqueues the run within about a second, with the schedule's
+// options, and the task's RunAt is the time of the request. The next regular
+// run stays as it was. It returns [ErrNotFound] for an unknown schedule, and
+// [ErrInvalidState] for a paused one.
+func (c *Client) RunSchedule(ctx context.Context, name string) error {
+	var paused bool
+	if err := c.pool.QueryRow(ctx, c.sql.runSchedule, name).Scan(&paused); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: schedule %q", ErrNotFound, name)
+		}
+		return fmt.Errorf("taskmill: run schedule %q: %w", name, err)
+	}
+	if paused {
+		return fmt.Errorf("%w: cannot run schedule %q while it is paused; resume it first", ErrInvalidState, name)
+	}
+	return nil
 }
 
 func (c *Client) setSchedulePaused(ctx context.Context, name string, paused bool) error {

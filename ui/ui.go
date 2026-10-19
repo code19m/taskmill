@@ -1,6 +1,7 @@
 // Package ui serves a web interface for operating taskmill: queues and their
 // statistics, workers, schedules, and tasks, with actions to pause and resume
-// queues and schedules and to retry, cancel, and delete tasks.
+// queues and schedules, run a schedule now, and retry, cancel, and delete
+// tasks.
 //
 // The interface is server-rendered with the standard library and needs no
 // JavaScript build step. It reads only through the bounded queries of
@@ -262,6 +263,8 @@ func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 		err = s.client.PauseSchedule(r.Context(), name)
 	case "resume":
 		err = s.client.ResumeSchedule(r.Context(), name)
+	case "run":
+		err = s.client.RunSchedule(r.Context(), name)
 	default:
 		s.notFound(w, r)
 		return

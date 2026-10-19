@@ -271,18 +271,36 @@ func TestScheduleActionsWorkForAnyName(t *testing.T) {
 
 	h := ui.Handler(client, &ui.Config{Prefix: "/admin"})
 	_, body, _ := get(t, h, "/admin/")
-	m := regexp.MustCompile(`action="([^"]*/schedules/[^"]*/pause)"`).FindStringSubmatch(body)
-	if m == nil {
-		t.Fatalf("no schedule pause form in\n%s", body)
+	form := func(action string) string {
+		m := regexp.MustCompile(`action="([^"]*/schedules/[^"]*/` + action + `)"`).FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("no schedule %s form in\n%s", action, body)
+		}
+		return html.UnescapeString(m[1])
 	}
-	if rec := post(t, h, html.UnescapeString(m[1]), "same-origin"); rec.Code != http.StatusSeeOther {
-		t.Fatalf("pause: got %d", rec.Code)
+	run, pause := form("run"), form("pause")
+
+	if rec := post(t, h, run, "same-origin"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("run now: got %d", rec.Code)
 	}
 	ss, err := client.Schedules(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(ss) != 1 || ss[0].NextRunAt.After(time.Now()) {
+		t.Fatalf("run now left the schedule not due: %+v", ss)
+	}
+
+	if rec := post(t, h, pause, "same-origin"); rec.Code != http.StatusSeeOther {
+		t.Fatalf("pause: got %d", rec.Code)
+	}
+	if ss, err = client.Schedules(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if len(ss) != 1 || ss[0].Name != name || !ss[0].Paused {
 		t.Fatalf("got %+v", ss)
+	}
+	if rec := post(t, h, run, "same-origin"); rec.Code != http.StatusConflict {
+		t.Fatalf("run now while paused: got %d, want %d", rec.Code, http.StatusConflict)
 	}
 }

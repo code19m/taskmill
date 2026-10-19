@@ -414,7 +414,10 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
   removed from the code.
 
 `Client.Schedules`, `PauseSchedule`, and `ResumeSchedule` list and control
-schedules.
+schedules. `RunSchedule` runs a schedule once now, for example after a fix,
+in addition to its timetable: the maintainer enqueues the run within about a
+second, with the schedule's options, and the next regular run stays as it
+was. A paused schedule must be resumed first.
 
 ## The outbox and the inbox
 
@@ -481,8 +484,9 @@ _, err := client.Enqueue(ctx, HandleOrderEvent{...}, &taskmill.EnqueueOptions{
 ## Operating taskmill
 
 **The web interface** shows queues with their statistics, workers,
-schedules, and tasks with their payloads and error histories. It can pause,
-resume, retry, cancel, and delete. Mount it behind your own authentication:
+schedules, and tasks with their payloads and error histories. It can pause
+and resume queues and schedules, run a schedule now, and retry, cancel, and
+delete tasks. Mount it behind your own authentication:
 
 ```go
 mux.Handle("/taskmill/", requireAdmin(ui.Handler(client, &ui.Config{Prefix: "/taskmill"})))
@@ -504,7 +508,7 @@ own code and tools:
 | `Delete` | Deletes a task that is not running |
 | `Queues` | Every queue with its settings, workers, and task counts per state |
 | `UpdateQueue`, `PauseQueue`, `ResumeQueue` | Change a queue's installation-wide settings |
-| `Schedules`, `PauseSchedule`, `ResumeSchedule` | List and control schedules |
+| `Schedules`, `PauseSchedule`, `ResumeSchedule`, `RunSchedule` | List schedules, pause and resume them, and run one now |
 | `Settings`, `UpdateSettings` | Retention of history, and of dead and canceled tasks |
 | `Workers` | The running workers, and which one is the maintainer |
 
