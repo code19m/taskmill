@@ -1,12 +1,11 @@
 {{define "schedules.html"}}{{template "head" .}}
 {{$ro := .ReadOnly}}
-<div class="page-header">
-  <div>
-    <h1>Schedules</h1>
-    <p class="subtle">Recurring tasks. The elected maintainer enqueues each run once, across all workers.</p>
-  </div>
-</div>
-<section class="card">
+<header class="topbar">
+  <h1>Schedules</h1>
+  <span class="meta mono">{{len .Data}}</span>
+</header>
+<div class="page">
+<section class="card flush">
   {{if .Data}}
   <div class="table-scroll">
   <table class="table">
@@ -16,24 +15,25 @@
     </tr></thead>
     <tbody>{{range $s := .Data}}
       <tr>
-        <td class="nowrap"><span class="strong">{{$s.Name}}</span>{{if $s.Paused}} <span class="badge badge-warn">paused</span>{{end}}</td>
-        <td class="nowrap"><code class="cron">{{$s.Cron}}</code> <span class="faint">{{$s.Location}}</span></td>
+        <td class="nowrap"><span class="strong">{{$s.Name}}</span>{{if $s.Paused}} <span class="chip warn">paused</span>{{end}}</td>
+        <td class="nowrap"><code class="chip mono">{{$s.Cron}}</code> <span class="tone-ghost">{{$s.Location}}</span></td>
         <td class="mono">{{$s.Kind}}</td>
         <td><a href="{{path "/tasks"}}{{query "queue" $s.Queue "kind" $s.Kind}}">{{$s.Queue}}</a></td>
-        <td class="nowrap{{if $s.Paused}} faint{{end}}" title="{{timestamp $s.NextRunAt}}">{{if $s.Paused}}paused{{else}}{{ago $s.NextRunAt}}{{end}}</td>
-        <td class="nowrap" title="{{timestamp $s.LastRunAt}}">{{ago $s.LastRunAt}}</td>
+        <td class="nowrap{{if $s.Paused}} tone-ghost{{end}}" title="{{timestamp $s.NextRunAt}}">{{if $s.Paused}}paused{{else}}{{ago $s.NextRunAt}}{{end}}</td>
+        <td class="nowrap tone-faint" title="{{timestamp $s.LastRunAt}}">{{ago $s.LastRunAt}}</td>
         {{if not $ro}}<td class="actions-col"><div class="row-actions">
           {{if $s.Paused}}
-          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/resume"><button class="btn btn-sm">Resume</button></form>
+          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/resume"><button class="btn sm">Resume</button></form>
           {{else}}
-          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/run" data-confirm="Run schedule {{$s.Name}} now? Its regular timetable stays as it is." data-confirm-label="Run now"><button class="btn btn-sm">Run now</button></form>
-          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/pause" data-confirm="Pause schedule {{$s.Name}}? Runs missed while paused collapse into one when you resume it." data-confirm-label="Pause schedule"><button class="btn btn-sm btn-ghost">Pause</button></form>
+          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/run" data-confirm="Its regular timetable stays as it is." data-confirm-title="Run {{$s.Name}} now?" data-confirm-label="Run now"><button class="btn sm">Run now</button></form>
+          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/pause" data-confirm="Runs missed while paused collapse into one when you resume it." data-confirm-title="Pause {{$s.Name}}?" data-confirm-label="Pause schedule"><button class="btn sm quiet">Pause</button></form>
           {{end}}
         </div></td>{{end}}
       </tr>
     {{end}}</tbody>
   </table>
   </div>
-  {{else}}{{template "empty" "No schedules. Workers store theirs when they start."}}{{end}}
+  {{else}}<div class="card-body">{{template "empty" "No schedules"}}</div>{{end}}
 </section>
+</div>
 {{template "foot" .}}{{end}}

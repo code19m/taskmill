@@ -1,27 +1,27 @@
 {{define "workers.html"}}{{template "head" .}}
-<div class="page-header">
-  <div>
-    <h1>Workers</h1>
-    <p class="subtle">Processes that run tasks. One of them is elected maintainer, and does the upkeep.</p>
-  </div>
-</div>
-<section class="card">
+<header class="topbar">
+  <h1>Workers</h1>
+  <span class="meta mono">{{len .Data}}</span>
+</header>
+<div class="page">
+<section class="card flush">
   {{if .Data}}
   <div class="table-scroll">
   <table class="table">
     <thead><tr><th>Worker</th><th>Host</th><th>Version</th><th>Queues</th><th>Started</th><th>Heartbeat</th></tr></thead>
     <tbody>{{range .Data}}
       <tr>
-        <td class="nowrap"><span class="health{{if stale .HeartbeatAt}} health-stale{{end}}" title="{{if stale .HeartbeatAt}}No heartbeat for a while{{else}}Healthy{{end}}"></span><span class="mono">{{.ID}}</span>{{if .Maintainer}} <span class="badge badge-accent">maintainer</span>{{end}}</td>
+        <td class="nowrap"><span class="health{{if stale .HeartbeatAt}} stale{{end}}" title="{{if stale .HeartbeatAt}}No heartbeat for a while{{else}}Healthy{{end}}"></span><span class="mono">{{.ID}}</span>{{if .Maintainer}} <span class="chip">maintainer</span>{{end}}</td>
         <td>{{.Hostname}}</td>
-        <td class="mono">{{.Version}}</td>
-        <td><div class="chips">{{range .Queues}}<a class="chip" href="{{path "/tasks"}}{{query "queue" .}}">{{.}}</a>{{else}}<span class="faint">maintenance only</span>{{end}}</div></td>
-        <td class="nowrap" title="{{timestamp .StartedAt}}">{{ago .StartedAt}}</td>
-        <td class="nowrap{{if stale .HeartbeatAt}} text-warn{{end}}" title="{{timestamp .HeartbeatAt}}">{{ago .HeartbeatAt}}</td>
+        <td class="mono tone-faint">{{.Version}}</td>
+        <td><div class="chips">{{range .Queues}}<a class="chip" href="{{path "/tasks"}}{{query "queue" .}}">{{.}}</a>{{else}}<span class="tone-ghost">maintenance only</span>{{end}}</div></td>
+        <td class="nowrap tone-faint" title="{{timestamp .StartedAt}}">{{ago .StartedAt}}</td>
+        <td class="nowrap{{if stale .HeartbeatAt}} tone-warn{{else}} tone-faint{{end}}" title="{{timestamp .HeartbeatAt}}">{{ago .HeartbeatAt}}</td>
       </tr>
     {{end}}</tbody>
   </table>
   </div>
-  {{else}}{{template "empty" "No workers are running. Without one, no task runs and no schedule fires."}}{{end}}
+  {{else}}<div class="card-body">{{template "empty" "No workers are running"}}</div>{{end}}
 </section>
+</div>
 {{template "foot" .}}{{end}}

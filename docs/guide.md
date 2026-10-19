@@ -510,8 +510,9 @@ Use it in one of three ways:
   HTTPS: basic authentication sends the password with every request.
 - **Inside another web application,** in an `<iframe>`. List that
   application's origin in `ui.Config.FrameAncestors`; otherwise browsers
-  refuse to show the interface in a frame. Add `?theme=light` or
-  `?theme=dark` to the frame's address to match your application's theme.
+  refuse to show the interface in a frame. Add `?theme=light`,
+  `?theme=dark`, or `?theme=system` to the frame's address to match your
+  application's theme.
 
 `ui.Config.ReadOnly` disables every action. Forms are protected against
 cross-site request forgery, and every action is logged to `ui.Config.Logger`.

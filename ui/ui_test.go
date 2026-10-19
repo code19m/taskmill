@@ -203,7 +203,7 @@ func TestReadOnly(t *testing.T) {
 	id := strconv.FormatInt(res.ID, 10)
 
 	_, body, _ := get(t, h, "/tasks/"+id)
-	if strings.Contains(body, "/cancel") || !strings.Contains(body, "Read-only") {
+	if strings.Contains(body, "/cancel") || !strings.Contains(body, "read-only") {
 		t.Fatalf("read-only page offers actions:\n%s", body)
 	}
 	if rec := post(t, h, "/tasks/"+id+"/cancel", "same-origin"); rec.Code != http.StatusForbidden {

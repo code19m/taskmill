@@ -6,7 +6,7 @@
 
   const REFRESH_MS = 5000;
   const CHART_WINDOW_MS = 10 * 60 * 1000;
-  const KEYS = { theme: "taskmill-theme", live: "taskmill-live", samples: "taskmill-samples" };
+  const KEYS = { live: "taskmill-live", samples: "taskmill-samples" };
 
   const store = (area) => ({
     get(key) {
@@ -22,17 +22,19 @@
   const local = store(() => localStorage);
   const session = store(() => sessionStorage);
 
-  // Theme
+  // Controls that need this script stay hidden without it.
+
+  for (const control of document.querySelectorAll("[data-live-toggle], .theme-seg, [data-copy]")) {
+    control.hidden = false;
+  }
+
+  // Theme: System, Light, or Dark
 
   document.addEventListener("click", (event) => {
-    if (!event.target.closest("[data-theme-toggle]")) return;
-    const root = document.documentElement;
-    const dark = root.dataset.theme
-      ? root.dataset.theme === "dark"
-      : matchMedia("(prefers-color-scheme: dark)").matches;
-    root.dataset.theme = dark ? "light" : "dark";
-    local.set(KEYS.theme, root.dataset.theme);
+    const option = event.target.closest("[data-theme-option]");
+    if (option) window.TaskmillTheme?.set(option.dataset.themeOption);
   });
+  window.TaskmillTheme?.apply();
 
   // Confirmation dialog
 
@@ -44,16 +46,17 @@
     if (!(form instanceof HTMLFormElement) || !form.dataset.confirm) return;
     event.preventDefault();
     if (!dialog || typeof dialog.showModal !== "function") {
-      if (window.confirm(form.dataset.confirm)) form.submit();
+      if (window.confirm(`${form.dataset.confirmTitle || ""} ${form.dataset.confirm}`.trim())) form.submit();
       return;
     }
     confirming = form;
     const danger = "confirmDanger" in form.dataset;
     const button = dialog.querySelector("[data-confirm-button]");
+    dialog.querySelector("h2").textContent = form.dataset.confirmTitle || "Are you sure?";
     dialog.querySelector("[data-confirm-text]").textContent = form.dataset.confirm;
     button.textContent = form.dataset.confirmLabel || "Confirm";
-    button.classList.toggle("btn-primary", !danger);
-    button.classList.toggle("btn-danger-solid", danger);
+    button.classList.toggle("primary", !danger);
+    button.classList.toggle("danger-solid", danger);
     dialog.showModal();
   });
 
@@ -135,7 +138,7 @@
 
   function showNotices(root) {
     for (const toast of root.querySelectorAll("[data-toast]")) {
-      setTimeout(() => toast.classList.add("is-leaving"), 4000);
+      setTimeout(() => toast.classList.add("leaving"), 4000);
       setTimeout(() => toast.remove(), 4400);
     }
     const url = new URL(location.href);

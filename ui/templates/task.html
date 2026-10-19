@@ -1,55 +1,51 @@
 {{define "task.html"}}{{template "head" .}}
 {{$t := .Data.Task}}{{$g := .Data.Group}}
-<a class="back" href="{{path "/tasks"}}{{query "queue" $t.Queue}}">← {{$t.Queue}}</a>
-<div class="page-header">
-  <div>
-    <h1 class="task-title"><span class="faint">Task</span> <span class="mono">#{{$t.ID}}</span> {{template "state" $t.State}}</h1>
-    <p class="subtle mono">{{$t.Kind}}</p>
-  </div>
+<header class="topbar">
+  <a class="crumb" href="{{path "/tasks"}}{{query "queue" $t.Queue}}">{{$t.Queue}}</a>
+  <span class="crumb-sep" aria-hidden="true">/</span>
+  <h1 class="task-heading"><span class="mono">#{{$t.ID}}</span>{{template "state" $t.State}}</h1>
   {{if not .ReadOnly}}
-  <div class="page-actions">
+  <div class="right">
     {{if or (eq (print $t.State) "dead") (eq (print $t.State) "canceled")}}
-    <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/retry" data-confirm="Retry task #{{$t.ID}}? It runs again with a fresh set of attempts." data-confirm-label="Retry"><button class="btn btn-primary">Retry</button></form>
+    <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/retry" data-confirm="It runs again with a fresh set of attempts." data-confirm-title="Retry task #{{$t.ID}}?" data-confirm-label="Retry"><button class="btn primary">Retry</button></form>
     {{end}}
     {{if not $t.State.Finished}}
-    <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/cancel" data-confirm="Cancel task #{{$t.ID}}?{{if eq (print $t.State) "running"}} Its handler's context is canceled, and the task becomes canceled when the handler returns.{{end}}" data-confirm-label="Cancel task"><button class="btn">Cancel</button></form>
+    <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/cancel" data-confirm="{{if eq (print $t.State) "running"}}Its handler's context is canceled, and the task becomes canceled when the handler returns.{{else}}It will not run.{{end}}" data-confirm-title="Cancel task #{{$t.ID}}?" data-confirm-label="Cancel task"><button class="btn">Cancel</button></form>
     {{end}}
     {{if ne (print $t.State) "running"}}
-    <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/delete" data-confirm="Delete task #{{$t.ID}}? This cannot be undone." data-confirm-label="Delete" data-confirm-danger><button class="btn btn-danger">Delete</button></form>
+    <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/delete" data-confirm="This cannot be undone." data-confirm-title="Delete task #{{$t.ID}}?" data-confirm-label="Delete" data-confirm-danger><button class="btn danger">Delete</button></form>
     {{end}}
   </div>
   {{end}}
-</div>
-
+</header>
+<div class="page">
 {{if and (eq (print $t.State) "dead") $g.Waiting}}
-<div class="callout callout-danger" role="note">
+<div class="callout failed" role="note">
   <div><strong>This task halts its FIFO group.</strong>
-    {{$g.Waiting}}{{if $g.More}}+{{end}} {{if eq $g.Waiting 1}}task waits{{else}}tasks wait{{end}} behind it.
-    Retry it to run it again, or delete it to let the next task start.</div>
-  <a class="btn btn-sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group</a>
+    {{$g.Waiting}}{{if $g.More}}+{{end}} {{if eq $g.Waiting 1}}task waits{{else}}tasks wait{{end}} behind it until you retry or delete it.</div>
+  <a class="btn sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group</a>
 </div>
 {{else if and (eq (print $t.State) "pending") $g.Head}}
 <div class="callout" role="note">
-  <div>Waits for its turn in its FIFO group, behind task
-    <a class="mono" href="{{path "/tasks/"}}{{$g.Head.ID}}">#{{$g.Head.ID}}</a> {{template "state" $g.Head.State}}</div>
-  <a class="btn btn-sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group</a>
+  <div>Waits behind <a class="mono" href="{{path "/tasks/"}}{{$g.Head.ID}}">#{{$g.Head.ID}}</a> {{template "state" $g.Head.State}} in its FIFO group.</div>
+  <a class="btn sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group</a>
 </div>
 {{end}}
 
 <div class="task-layout">
   <div class="stack">
-    <section class="card">
-      <div class="card-header"><h2 class="card-title">Payload</h2><button type="button" class="btn btn-sm btn-ghost" data-copy="#payload">Copy</button></div>
+    <section class="card flush">
+      <div class="card-head"><h2>Payload</h2><button type="button" class="btn sm quiet" data-copy="#payload" hidden>Copy</button></div>
       <pre class="code" id="payload" data-json>{{json $t.Payload}}</pre>
     </section>
     {{with $t.Metadata}}
-    <section class="card">
-      <div class="card-header"><h2 class="card-title">Metadata</h2></div>
+    <section class="card flush">
+      <div class="card-head"><h2>Metadata</h2></div>
       <dl class="props props-wide">{{range $k, $v := .}}<dt class="mono">{{$k}}</dt><dd class="mono">{{$v}}</dd>{{end}}</dl>
     </section>
     {{end}}
-    <section class="card">
-      <div class="card-header"><h2 class="card-title">Errors</h2><span class="subtle">{{len $t.Errors}} recorded, newest first</span></div>
+    <section class="card flush">
+      <div class="card-head"><h2>Errors</h2><span class="subtle mono">{{len $t.Errors}}</span></div>
       {{with $t.Errors}}
       <ol class="timeline">{{range newest .}}
         <li class="{{if .Code}}code-{{.Code}}{{end}}">
@@ -61,20 +57,21 @@
           <pre class="code code-error">{{.Message}}</pre>
         </li>
       {{end}}</ol>
-      {{else}}{{template "empty" "No errors. Every attempt so far succeeded or is still running."}}{{end}}
+      {{else}}<div class="card-body">{{template "empty" "No errors"}}</div>{{end}}
     </section>
   </div>
 
-  <aside class="card details">
-    <div class="card-header"><h2 class="card-title">Details</h2></div>
+  <aside class="card flush details">
+    <div class="card-head"><h2>Details</h2></div>
     <dl class="props">
+      <dt>Kind</dt><dd class="mono">{{$t.Kind}}</dd>
       <dt>Queue</dt><dd><a href="{{path "/tasks"}}{{query "queue" $t.Queue}}">{{$t.Queue}}</a></dd>
-      {{with $t.GroupKey}}<dt>FIFO group</dt><dd><a class="group-link" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" .}}">{{visible .}}</a></dd>{{end}}
+      {{with $t.GroupKey}}<dt>FIFO group</dt><dd><a class="mono" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" .}}">{{visible .}}</a></dd>{{end}}
       <dt>Priority</dt><dd>{{$t.Priority}}</dd>
       <dt>Attempts</dt>
       <dd>
-        <div class="attempts"><span>{{$t.Attempt}} of {{$t.MaxAttempts}}</span>
-          <svg class="bar" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true"><rect class="bar-track" width="100" height="4" rx="2"/><rect class="bar-fill" width="{{percent $t.Attempt $t.MaxAttempts}}" height="4" rx="2"/></svg>
+        <div class="attempts"><span class="mono">{{$t.Attempt}} of {{$t.MaxAttempts}}</span>
+          <svg class="progress" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="progress-track" width="100" height="6" rx="3"/><rect class="progress-fill" width="{{percent $t.Attempt $t.MaxAttempts}}" height="6" rx="3"/></svg>
         </div>
       </dd>
       <dt>Created</dt><dd title="{{timestamp $t.CreatedAt}}">{{ago $t.CreatedAt}}</dd>
@@ -83,5 +80,6 @@
       {{if not $t.FinalizedAt.IsZero}}<dt>Finished</dt><dd title="{{timestamp $t.FinalizedAt}}">{{ago $t.FinalizedAt}}</dd>{{end}}
     </dl>
   </aside>
+</div>
 </div>
 {{template "foot" .}}{{end}}
