@@ -1,0 +1,131 @@
+// Command taskmill-ui serves taskmill's web interface on its own: a dashboard
+// for an installation, run apart from the applications that use it.
+//
+//	go install github.com/code19m/taskmill/cmd/taskmill-ui@latest
+//	TASKMILL_DATABASE_URL=postgres://... TASKMILL_UI_PASSWORD=... taskmill-ui
+//
+// It reads its settings from the environment:
+//
+//	TASKMILL_DATABASE_URL  the PostgreSQL connection string (required)
+//	TASKMILL_SCHEMA        the installation's schema (default: taskmill)
+//	TASKMILL_UI_ADDR       the address to listen on (default: localhost:8080;
+//	                       use :8080 in a container)
+//	TASKMILL_UI_USERNAME   the user of HTTP basic authentication (default: admin)
+//	TASKMILL_UI_PASSWORD   its password; without one, anyone who reaches the
+//	                       address can use the dashboard
+//	TASKMILL_UI_READ_ONLY  "true" to disable every action
+//
+// It does not migrate the schema: the applications that own it do.
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/code19m/taskmill"
+	"github.com/code19m/taskmill/ui"
+)
+
+// Log attribute keys.
+const (
+	logKeyAddr     = "addr"
+	logKeyError    = "error"
+	logKeyReadOnly = "read_only"
+)
+
+func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	if err := run(os.Getenv, logger); err != nil {
+		logger.LogAttrs(context.Background(), slog.LevelError, "taskmill-ui stopped", slog.Any(logKeyError, err))
+		os.Exit(1)
+	}
+}
+
+// config is the command's settings.
+type config struct {
+	databaseURL, schema, addr string
+	readOnly                  bool
+	auth                      *ui.BasicAuth
+}
+
+func loadConfig(getenv func(string) string) (config, error) {
+	c := config{
+		databaseURL: getenv("TASKMILL_DATABASE_URL"),
+		schema:      getenv("TASKMILL_SCHEMA"),
+		addr:        getenv("TASKMILL_UI_ADDR"),
+	}
+	if c.databaseURL == "" {
+		return c, errors.New("set TASKMILL_DATABASE_URL to the PostgreSQL connection string")
+	}
+	if c.addr == "" {
+		c.addr = "localhost:8080"
+	}
+	if v := getenv("TASKMILL_UI_READ_ONLY"); v != "" {
+		readOnly, err := strconv.ParseBool(v)
+		if err != nil {
+			return c, fmt.Errorf("TASKMILL_UI_READ_ONLY: %w", err)
+		}
+		c.readOnly = readOnly
+	}
+	if password := getenv("TASKMILL_UI_PASSWORD"); password != "" {
+		user := getenv("TASKMILL_UI_USERNAME")
+		if user == "" {
+			user = "admin"
+		}
+		c.auth = &ui.BasicAuth{Username: user, Password: password}
+	}
+	return c, nil
+}
+
+func run(getenv func(string) string, logger *slog.Logger) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	cfg, err := loadConfig(getenv)
+	if err != nil {
+		return err
+	}
+	pool, err := pgxpool.New(ctx, cfg.databaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: cfg.schema, Logger: logger})
+	if err != nil {
+		return err
+	}
+
+	server := &http.Server{
+		Addr: cfg.addr,
+		Handler: ui.Handler(client, &ui.Config{
+			ReadOnly: cfg.readOnly, BasicAuth: cfg.auth, Logger: logger,
+		}),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	if cfg.auth == nil {
+		logger.LogAttrs(ctx, slog.LevelWarn,
+			"the dashboard has no password: set TASKMILL_UI_PASSWORD, unless something in front of it authenticates")
+	}
+	logger.LogAttrs(ctx, slog.LevelInfo, "taskmill-ui listening",
+		slog.String(logKeyAddr, cfg.addr), slog.Bool(logKeyReadOnly, cfg.readOnly))
+
+	errs := make(chan error, 1)
+	go func() { errs <- server.ListenAndServe() }()
+	select {
+	case err := <-errs:
+		return err
+	case <-ctx.Done():
+	}
+	shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	return server.Shutdown(shutdown)
+}

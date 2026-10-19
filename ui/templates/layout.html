@@ -3,27 +3,58 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>{{.Title}} · taskmill</title>
-<link rel="stylesheet" href="{{path "/static/style.css"}}">
-<script src="{{path "/static/app.js"}}" defer></script>
+<link rel="icon" href="{{asset "favicon.svg"}}" type="image/svg+xml">
+<link rel="stylesheet" href="{{asset "style.css"}}">
+<script src="{{asset "theme.js"}}"></script>
+<script src="{{asset "app.js"}}" defer></script>
 </head>
 <body>
-<header>
-  <a class="brand" href="{{path "/"}}">taskmill</a>
-  <nav>
-    <a href="{{path "/"}}">Overview</a>
-    <a href="{{path "/tasks"}}">Tasks</a>
-    <a href="{{path "/tasks?state=dead"}}">Dead letters</a>
-  </nav>
-  {{if .ReadOnly}}<span class="badge">read-only</span>{{end}}
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="{{path "/"}}" aria-label="taskmill overview">{{template "logo"}}<span>taskmill</span></a>
+    <nav class="nav" aria-label="Sections">
+      <a href="{{path "/"}}"{{if eq .Nav "overview"}} aria-current="page"{{end}}>Overview</a>
+      <a href="{{path "/tasks"}}"{{if eq .Nav "tasks"}} aria-current="page"{{end}}>Tasks</a>
+      <a href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>Dead
+        <span class="nav-count{{if not .Dead}} is-empty{{end}}" data-live-part="dead-count">{{num .Dead}}</span></a>
+      <a href="{{path "/schedules"}}"{{if eq .Nav "schedules"}} aria-current="page"{{end}}>Schedules</a>
+      <a href="{{path "/workers"}}"{{if eq .Nav "workers"}} aria-current="page"{{end}}>Workers</a>
+    </nav>
+    <div class="topbar-tools">
+      {{if .ReadOnly}}<span class="chip" title="Actions are disabled">Read-only</span>{{end}}
+      <button type="button" class="live" data-live-toggle aria-pressed="true" title="Pause live updates">
+        <span class="live-dot" aria-hidden="true"></span><span class="live-label">Live</span>
+      </button>
+      <button type="button" class="icon-button" data-theme-toggle title="Switch between light and dark" aria-label="Switch between light and dark">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>
+      </button>
+    </div>
+  </div>
 </header>
-<main>
+<main class="page" id="main"{{if .Nav}} data-live{{end}}>
+{{with .Notice}}<div class="toast" role="status" data-toast>{{.}}</div>{{end}}
 {{end}}
 
 {{define "foot"}}
 </main>
+<dialog class="dialog" id="confirm-dialog" aria-labelledby="confirm-title">
+  <form method="dialog">
+    <h2 id="confirm-title" class="dialog-title">Are you sure?</h2>
+    <p class="dialog-text" data-confirm-text></p>
+    <div class="dialog-actions">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn btn-primary" value="confirm" data-confirm-button>Confirm</button>
+    </div>
+  </form>
+</dialog>
 </body>
 </html>
 {{end}}
 
-{{define "state"}}<span class="state state-{{.}}">{{.}}</span>{{end}}
+{{define "logo"}}<svg class="brand-mark" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><rect width="24" height="24" rx="6.5" fill="currentColor"/><rect x="6" y="6.25" width="12" height="2.5" rx="1.25" fill="#fff"/><rect x="6" y="10.75" width="9" height="2.5" rx="1.25" fill="#fff" opacity=".78"/><rect x="6" y="15.25" width="5.5" height="2.5" rx="1.25" fill="#fff" opacity=".56"/></svg>{{end}}
+
+{{define "state"}}<span class="badge state-{{.}}">{{.}}</span>{{end}}
+
+{{define "empty"}}<div class="empty"><svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.5 13h4.5l1.5 2h5l1.5-2h4.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><p>{{.}}</p></div>{{end}}

@@ -22,8 +22,10 @@ together with your data.
   pausing.
 - **An outbox, too.** Publish to Kafka, NATS, or RabbitMQ with the same
   transactional guarantee, in order per key.
-- **Operable.** A web interface, an operations API, structured logs through
-  `log/slog`, and middleware for metrics and tracing.
+- **Operable.** A live web dashboard that you mount in your application,
+  embed in your admin panel, or run on its own; an operations API;
+  structured logs through `log/slog`; and middleware for metrics and
+  tracing.
 - **Small and fast.** One direct dependency, pgx. One worker drained a backlog
   at over 35,000 tasks per second, and one relay published over 35,000 outbox
   messages per second. This was on an Apple M5 laptop with PostgreSQL 18 in
@@ -145,6 +147,7 @@ attempt.
 | [`taskmill`](https://pkg.go.dev/github.com/code19m/taskmill) | The client, workers, schedules, and the operations API |
 | [`taskmill/outbox`](https://pkg.go.dev/github.com/code19m/taskmill/outbox) | The transactional outbox for message brokers |
 | [`taskmill/ui`](https://pkg.go.dev/github.com/code19m/taskmill/ui) | The web interface, as an `http.Handler` |
+| [`taskmill/cmd/taskmill-ui`](https://pkg.go.dev/github.com/code19m/taskmill/cmd/taskmill-ui) | The web interface as a dashboard of its own |
 | [`taskmill/taskmilltest`](https://pkg.go.dev/github.com/code19m/taskmill/taskmilltest) | Helpers to test your code against a real PostgreSQL |
 
 ## Contributing

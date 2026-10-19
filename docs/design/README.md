@@ -20,11 +20,15 @@ generation. [ADR 0003](../adr/0003-outbox-on-the-shared-engine.md) explains
 why the outbox is a package and not a separate project.
 
 The web interface is server-rendered with `html/template`, `embed`, and
-`net/http`, so it needs no JavaScript build step. Applications mount it on
-their own router behind their own authentication. It reads only through the
-operations API and the statistics the maintainer keeps. The task list's
-query stops after 5 seconds, and the other pages read small tables or single
-rows, so it is safe to point at a busy database.
+`net/http`. One small script of our own, under a strict content security
+policy, keeps pages live, draws a chart, and adds dialogs; every page also
+works without it, and nothing needs a JavaScript build step or third-party
+code. Applications mount it on their own router behind their own
+authentication, or run it on its own with basic authentication through the
+`taskmill-ui` command. It reads only through the operations API and the
+statistics the maintainer keeps. The task list's query stops after 5
+seconds, and the other pages read small tables or single rows, so it is safe
+to point at a busy database, even with pages refreshing every 5 seconds.
 
 ## Out of scope
 
@@ -33,10 +37,14 @@ rows, so it is safe to point at a busy database.
   does not deliver messages between services itself.
 - **Exactly-once delivery across systems.** Through a broker, delivery is at
   least once, and consumers deduplicate by message ID.
-- **Authentication in the web interface.** Applications provide it.
+- **Users and roles in the web interface.** It offers one optional user,
+  through basic authentication; applications that need more put their own
+  authentication in front of it.
 - **Databases other than PostgreSQL.**
-- **A command-line tool.** Migrations run through `Migrate`, or through your
-  own tool with the SQL from `Migrations`.
+- **A command-line tool for operations.** Migrations run through `Migrate`,
+  or through your own tool with the SQL from `Migrations`, and operators use
+  the web interface or the operations API. The `taskmill-ui` command only
+  serves the web interface.
 - **Integrations that need third-party modules,** such as OpenTelemetry or
   broker clients, inside the core module. Middleware and
   `ClientConfig.ContextMetadata` cover tracing and metrics, and the guide
