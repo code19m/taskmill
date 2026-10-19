@@ -13,27 +13,29 @@
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
-<nav class="sidebar" aria-label="Sections">
-  <a class="logo" href="{{path "/"}}" aria-label="taskmill overview">{{template "logo"}}<span>taskmill</span></a>
-  <div class="nav">
-    <a class="nav-item" href="{{path "/"}}"{{if eq .Nav "overview"}} aria-current="page"{{end}}>{{template "icon-overview"}}<span>Overview</span></a>
-    <a class="nav-item" href="{{path "/tasks"}}"{{if eq .Nav "tasks"}} aria-current="page"{{end}}>{{template "icon-tasks"}}<span>Tasks</span></a>
-    <a class="nav-item" href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>{{template "icon-dead"}}<span>Dead</span><span class="end mono" data-live-part="dead-count">{{if .Dead}}{{num .Dead}}{{end}}</span></a>
-    <a class="nav-item" href="{{path "/schedules"}}"{{if eq .Nav "schedules"}} aria-current="page"{{end}}>{{template "icon-schedules"}}<span>Schedules</span></a>
-    <a class="nav-item" href="{{path "/workers"}}"{{if eq .Nav "workers"}} aria-current="page"{{end}}>{{template "icon-workers"}}<span>Workers</span></a>
-  </div>
-  <div class="sidebar-bottom">
-    {{if .ReadOnly}}<span class="read-only-pill" title="Actions are disabled">read-only</span>{{end}}
-    <button type="button" class="nav-item live" data-live-toggle aria-pressed="true" title="Pause live updates" hidden>
-      <span class="live-dot" aria-hidden="true"></span><span class="live-label">Live</span>
-    </button>
-    <div class="seg theme-seg" role="group" aria-label="Theme" hidden>
-      <button type="button" data-theme-option="system" title="System" aria-label="System theme">{{template "icon-device"}}</button>
-      <button type="button" data-theme-option="light" title="Light" aria-label="Light theme">{{template "icon-sun"}}</button>
-      <button type="button" data-theme-option="dark" title="Dark" aria-label="Dark theme">{{template "icon-moon"}}</button>
+<header class="appbar">
+  <div class="appbar-inner">
+    <a class="logo" href="{{path "/"}}" aria-label="taskmill overview">{{template "logo"}}<span>taskmill</span></a>
+    <nav class="nav" aria-label="Sections">
+      <a class="nav-item" href="{{path "/"}}"{{if eq .Nav "overview"}} aria-current="page"{{end}}>{{template "icon-overview"}}<span>Overview</span></a>
+      <a class="nav-item" href="{{path "/tasks"}}"{{if eq .Nav "tasks"}} aria-current="page"{{end}}>{{template "icon-tasks"}}<span>Tasks</span></a>
+      <a class="nav-item" href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>{{template "icon-dead"}}<span>Dead</span><span class="count mono" data-live-part="dead-count">{{if .Dead}}{{num .Dead}}{{end}}</span></a>
+      <a class="nav-item" href="{{path "/schedules"}}"{{if eq .Nav "schedules"}} aria-current="page"{{end}}>{{template "icon-schedules"}}<span>Schedules</span></a>
+      <a class="nav-item" href="{{path "/workers"}}"{{if eq .Nav "workers"}} aria-current="page"{{end}}>{{template "icon-workers"}}<span>Workers</span></a>
+    </nav>
+    <div class="appbar-tools">
+      {{if .ReadOnly}}<span class="read-only-pill" title="Actions are disabled">read-only</span>{{end}}
+      <button type="button" class="btn quiet live" data-live-toggle aria-pressed="true" title="Pause live updates" hidden>
+        <span class="live-dot" aria-hidden="true"></span><span class="live-label">Live</span>
+      </button>
+      <div class="seg theme-seg" role="group" aria-label="Theme" hidden>
+        <button type="button" data-theme-option="system" title="System" aria-label="System theme">{{template "icon-device"}}</button>
+        <button type="button" data-theme-option="light" title="Light" aria-label="Light theme">{{template "icon-sun"}}</button>
+        <button type="button" data-theme-option="dark" title="Dark" aria-label="Dark theme">{{template "icon-moon"}}</button>
+      </div>
     </div>
   </div>
-</nav>
+</header>
 <div class="main">
 <main id="main" class="content" tabindex="-1"{{if .Nav}} data-live{{end}}>
 {{with .Notice}}<div class="toast" role="status" data-toast>{{template "icon-check"}}<span class="toast-message">{{.}}</span></div>{{end}}
@@ -56,7 +58,8 @@
 </html>
 {{end}}
 
-{{define "logo"}}<svg viewBox="0 0 100 100" width="24" height="24" aria-hidden="true"><rect x="18" y="18" width="64" height="64" rx="19" fill="none" stroke="currentColor" stroke-width="12"/><path d="M38 38h25M38 50h16M38 62h7" fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round"/></svg>{{end}}
+{{/* A pinwheel: a small mill. */}}
+{{define "logo"}}<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor" aria-hidden="true"><path d="M12 12V3a5 5 0 0 1 5 5 4 4 0 0 1-5 4Zm0 0h9a5 5 0 0 1-5 5 4 4 0 0 1-4-5Zm0 0v9a5 5 0 0 1-5-5 4 4 0 0 1 5-4Zm0 0H3a5 5 0 0 1 5-5 4 4 0 0 1 4 5Z"/></svg>{{end}}
 
 {{define "icon-overview"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.75" y="1.75" width="5" height="5" rx="1.2"/><rect x="9.25" y="1.75" width="5" height="5" rx="1.2"/><rect x="1.75" y="9.25" width="5" height="5" rx="1.2"/><rect x="9.25" y="9.25" width="5" height="5" rx="1.2"/></svg>{{end}}
 {{define "icon-tasks"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 3.5h8M6 8h8M6 12.5h8"/><circle cx="2.5" cy="3.5" r=".6" fill="currentColor"/><circle cx="2.5" cy="8" r=".6" fill="currentColor"/><circle cx="2.5" cy="12.5" r=".6" fill="currentColor"/></svg>{{end}}
