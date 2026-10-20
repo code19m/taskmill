@@ -161,6 +161,7 @@ type server struct {
 	logger   *slog.Logger
 	versions map[string]string // static file name to a hash of its content
 	files    map[string]staticFile
+	choices  choiceCache
 }
 
 // page is what every template receives.
@@ -305,7 +306,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	for _, kq := range known {
 		names = append(names, kq.Name)
 	}
-	knownKinds, knownGroups, moreGroups := s.choices(r)
+	offered := s.filterChoices(r)
 	newest := maps.Clone(q)
 	newest.Del("cursor")
 	next := ""
@@ -322,8 +323,8 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	for i, st := range listedStates {
 		stateNames[i] = string(st)
 	}
-	groupFilter := newFilter("group", "FIFO group", "groups", knownGroups, groups).searchable()
-	if moreGroups {
+	groupFilter := newFilter("group", "FIFO group", "groups", offered.groups, groups).searchable()
+	if offered.moreGroups {
 		groupFilter.Source = s.path("/choices/groups")
 	}
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
@@ -335,7 +336,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		res.Tasks,
 		newFilter("state", "State", "states", stateNames, states),
 		newFilter("queue", "Queue", "queues", names, queues).searchable(),
-		newFilter("kind", "Kind", "kinds", knownKinds, kinds).searchable(),
+		newFilter("kind", "Kind", "kinds", offered.kinds, kinds).searchable(),
 		groupFilter,
 		len(states)+len(queues)+len(kinds)+len(groups) > 0, params.Cursor != "",
 		s.path("/tasks?" + newest.Encode()), next,
@@ -345,13 +346,51 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 // groupChoices is how many FIFO groups a filter lists; it searches the rest.
 const groupChoices = 100
 
-// choices returns the kinds and FIFO groups that the filters offer: the kinds
-// that workers handle or schedules enqueue, and the first groups with
-// unfinished tasks, and whether there are more groups. The filters are not
-// worth failing the page for: without them, they offer what is chosen.
-func (s *server) choices(r *http.Request) (kinds, groups []string, more bool) {
+// choices are the kinds and FIFO groups that the task filters offer: the
+// kinds that workers handle or schedules enqueue, and the first groups with
+// unfinished tasks.
+type choices struct {
+	kinds, groups []string
+	moreGroups    bool // there are more groups than listed
+}
+
+// choiceCache keeps the filter choices for choicesTTL. They change rarely,
+// and every open task list would read them again with each live update.
+type choiceCache struct {
+	mu   sync.Mutex
+	read time.Time
+	last choices
+}
+
+const choicesTTL = 30 * time.Second
+
+// filterChoices returns the filter choices, read at most choicesTTL ago.
+// Choices read with an error are not kept, so the next request tries again.
+func (s *server) filterChoices(r *http.Request) choices {
+	s.choices.mu.Lock()
+	if !s.choices.read.IsZero() && time.Since(s.choices.read) < choicesTTL {
+		c := s.choices.last
+		s.choices.mu.Unlock()
+		return c
+	}
+	s.choices.mu.Unlock()
+	c, complete := s.readChoices(r)
+	if complete {
+		s.choices.mu.Lock()
+		s.choices.read, s.choices.last = time.Now(), c
+		s.choices.mu.Unlock()
+	}
+	return c
+}
+
+// readChoices reads the filter choices, and reports whether every read
+// succeeded. The filters are not worth failing the page for: without their
+// choices, they offer what is chosen.
+func (s *server) readChoices(r *http.Request) (c choices, complete bool) {
 	ctx := r.Context()
+	complete = true
 	warn := func(what string, err error) {
+		complete = false
 		if ctx.Err() == nil {
 			s.logger.LogAttrs(ctx, slog.LevelWarn, "read filter choices failed",
 				slog.String(logKeyTarget, what), slog.Any(logKeyError, err))
@@ -361,27 +400,28 @@ func (s *server) choices(r *http.Request) (kinds, groups []string, more bool) {
 		warn("workers", err)
 	} else {
 		for _, w := range workers {
-			kinds = append(kinds, w.Kinds...)
+			c.kinds = append(c.kinds, w.Kinds...)
 		}
 	}
 	if schedules, err := s.client.Schedules(ctx); err != nil {
 		warn("schedules", err)
 	} else {
 		for _, sc := range schedules {
-			kinds = append(kinds, sc.Kind)
+			c.kinds = append(c.kinds, sc.Kind)
 		}
 	}
-	slices.Sort(kinds)
-	kinds = slices.Compact(kinds)
+	slices.Sort(c.kinds)
+	c.kinds = slices.Compact(c.kinds)
 	found, err := s.client.Groups(ctx, &taskmill.GroupParams{Limit: groupChoices})
 	if err != nil {
 		warn("groups", err)
 	}
 	for _, g := range found {
-		groups = append(groups, g.Key)
+		c.groups = append(c.groups, g.Key)
 	}
-	slices.Sort(groups)
-	return kinds, slices.Compact(groups), len(found) == groupChoices
+	slices.Sort(c.groups)
+	c.groups, c.moreGroups = slices.Compact(c.groups), len(found) == groupChoices
+	return c, complete
 }
 
 // groupChoicesJSON lists the keys of the FIFO groups that match a search, for
