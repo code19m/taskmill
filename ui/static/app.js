@@ -133,11 +133,94 @@
     summary.setAttribute("aria-label", `${sel.querySelector(".pop").getAttribute("aria-label")}: ${text.textContent}`);
   }
 
+  // visible shows control characters, such as the separator in the outbox's
+  // group keys, as the server does.
+  const visible = (text) => text.replace(/[\u0000-\u001f]/g, (c) => String.fromCharCode(0x2400 + c.charCodeAt(0)));
+
+  // search shows the options that contain the query, and offers to filter
+  // by the query itself when no option is exactly it.
   function search(sel, query) {
     const q = query.trim().toLowerCase();
-    for (const option of sel.querySelectorAll(".pop-opt")) {
-      option.hidden = q !== "" && !option.textContent.toLowerCase().includes(q);
+    for (const row of sel.querySelectorAll(".pop-list .pop-opt")) {
+      row.hidden = q !== "" && !row.textContent.toLowerCase().includes(q);
     }
+    const add = sel.querySelector("[data-sel-add]");
+    if (!add) return;
+    const value = query.trim();
+    add.hidden = value === "" || boxes(sel).some((box) => box.value === value);
+    add.dataset.value = value;
+    add.textContent = `Filter by “${visible(value)}”`;
+  }
+
+  // option builds a menu option like the server's, for a value that the menu
+  // does not list yet.
+  function option(sel, value, checked) {
+    const tick = document.querySelector(".chk svg");
+    const row = document.createElement("label");
+    row.className = "pop-opt";
+    row.dataset.key = value;
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "chk-input";
+    box.name = sel.dataset.name;
+    box.value = value;
+    box.checked = checked;
+    const mark = document.createElement("span");
+    mark.className = "chk";
+    if (tick) mark.append(tick.cloneNode(true));
+    const text = document.createElement("span");
+    text.className = "mono" in sel.dataset ? "pop-text mono" : "pop-text";
+    text.textContent = visible(value);
+    row.append(box, mark, text);
+    sel.querySelector(".pop-empty")?.remove();
+    return row;
+  }
+
+  // addValue chooses a value that the menu does not list, typed in its search.
+  function addValue(sel, value) {
+    sel.querySelector(".pop-list").prepend(option(sel, value, true));
+    const field = sel.querySelector("[data-sel-search]");
+    field.value = "";
+    search(sel, "");
+    field.focus();
+    label(sel);
+    const form = sel.closest("form");
+    if (form && "filters" in form.dataset) applyFilters(form, 0);
+  }
+
+  // A menu with more choices than it lists asks the server for those that
+  // match its search, and adds them.
+  let lookup = null;
+  let lookupTimer = 0;
+
+  function findMore(sel, query) {
+    clearTimeout(lookupTimer);
+    lookup?.abort();
+    if (!sel.dataset.source || query.trim() === "") return;
+    lookupTimer = setTimeout(async () => {
+      const control = new AbortController();
+      lookup = control;
+      const timer = setTimeout(() => control.abort(), TIMEOUT_MS);
+      try {
+        const url = `${sel.dataset.source}?search=${encodeURIComponent(query.trim())}`;
+        const response = await fetch(url, {
+          credentials: "same-origin", signal: control.signal, headers: { "X-Taskmill-Live": "1" },
+        });
+        if (!response.ok) return;
+        const found = await response.json();
+        if (!Array.isArray(found) || !sel.open) return;
+        const listed = new Set(boxes(sel).map((box) => box.value));
+        const list = sel.querySelector(".pop-list");
+        for (const value of found) {
+          if (typeof value === "string" && !listed.has(value)) list.append(option(sel, value, false));
+        }
+        search(sel, sel.querySelector("[data-sel-search]")?.value ?? "");
+      } catch {
+        // Out of reach for a moment: the menu keeps what it lists.
+      } finally {
+        clearTimeout(timer);
+      }
+    }, FILTER_WAIT_MS);
   }
 
   // place opens a menu toward the side with room.
@@ -192,6 +275,13 @@
     } else if (event.key === "Enter" && event.target.matches(".chk-input")) {
       event.preventDefault();
       event.target.click();
+    } else if (event.key === "Enter" && event.target.matches("[data-sel-search]")) {
+      // Enter adds the typed value, or chooses the one option that matches.
+      event.preventDefault();
+      const add = sel.querySelector("[data-sel-add]");
+      const shown = boxes(sel).filter((box) => !box.closest(".pop-opt").hidden);
+      if (add && !add.hidden) addValue(sel, add.dataset.value);
+      else if (shown.length === 1) shown[0].click();
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const items = [sel.querySelector("[data-sel-search]"), ...boxes(sel).filter((box) => !box.closest(".pop-opt").hidden)]
@@ -202,16 +292,17 @@
     }
   });
 
+  document.addEventListener("click", (event) => {
+    const add = event.target.closest?.("[data-sel-add]");
+    if (add?.dataset.value) addValue(add.closest(".sel"), add.dataset.value);
+  });
+
   document.addEventListener("input", (event) => {
-    const target = event.target;
-    if (target.matches?.("[data-sel-search]")) {
-      search(target.closest(".sel"), target.value);
-    } else if (target.matches?.(".filter-text") && target.form) {
-      // Typed text applies with Enter; until then, Apply shows.
-      const dirty = [...target.form.querySelectorAll(".filter-text")].some((input) => input.value !== input.defaultValue);
-      if (dirty) target.form.dataset.jsDirty = "";
-      else delete target.form.dataset.jsDirty;
-    }
+    const field = event.target;
+    if (!field.matches?.("[data-sel-search]")) return;
+    const sel = field.closest(".sel");
+    search(sel, field.value);
+    findMore(sel, field.value);
   });
 
   document.addEventListener("change", (event) => {
@@ -251,7 +342,6 @@
     }
     history.replaceState(history.state, "", url.href);
     apply(result);
-    for (const form of document.querySelectorAll("form[data-filters]")) delete form.dataset.jsDirty;
     succeeded();
   }
 
@@ -268,11 +358,12 @@
   document.addEventListener("keydown", (event) => {
     if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.target.closest?.("input, select, textarea, dialog, [contenteditable]")) return;
-    const field = document.querySelector(".filters .filter-text");
-    if (field) {
+    // "/" opens the kind filter, ready to search.
+    const sel = document.querySelector('.filters details.sel[data-name="kind"]');
+    if (sel) {
       event.preventDefault();
-      field.focus();
-      field.select();
+      sel.open = true;
+      sel.querySelector("[data-sel-search]")?.focus();
     }
   });
 
@@ -352,7 +443,15 @@
   }
 
   function morph(node, next) {
+    // A checkbox that now stands for another value must not keep the
+    // reader's choice of the old one.
+    const reused = node.localName === "input" &&
+      (node.getAttribute("value") !== next.getAttribute("value") || node.getAttribute("name") !== next.getAttribute("name"));
     syncAttributes(node, next);
+    if (reused) {
+      node.checked = node.defaultChecked;
+      node.value = node.defaultValue;
+    }
     let current = node.firstChild;
     for (const wanted of [...next.childNodes]) {
       const key = keyOf(wanted);

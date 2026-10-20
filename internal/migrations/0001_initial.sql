@@ -136,6 +136,7 @@ CREATE INDEX schedules_due_idx ON __SCHEMA__.schedules (next_run_at) WHERE pause
 CREATE TABLE __SCHEMA__.workers (
     id           text PRIMARY KEY,
     queues       text[] NOT NULL,
+    kinds        text[] NOT NULL DEFAULT '{}',
     hostname     text NOT NULL,
     version      text NOT NULL,
     started_at   timestamptz NOT NULL DEFAULT now(),

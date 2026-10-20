@@ -92,16 +92,18 @@
 
 {{/* A multiple choice filter: a menu of checkboxes. Without the script it
    is a plain details element and the form's Apply button sends it; the
-   script applies each change at once and closes it on an outside click or
-   Escape. */}}
-{{define "multi"}}{{$f := .F}}<details class="sel" data-plural="{{$f.Plural}}">
+   script applies each change at once, closes it on an outside click or
+   Escape, and runs its search box, which can also add a value that the menu
+   does not list. */}}
+{{define "multi"}}{{$f := .F}}<details class="sel" data-name="{{$f.Name}}" data-plural="{{$f.Plural}}"{{with $f.Source}} data-source="{{.}}"{{end}}{{if $.Mono}} data-mono{{end}}>
   <summary class="ctl sel-btn{{if $f.Empty}} empty{{end}}" aria-label="{{$f.Title}}: {{$f.Label}}"><span class="sel-label">{{$f.Label}}</span>{{template "icon-chevron"}}</summary>
   <div class="pop" role="group" aria-label="{{$f.Title}}">
-    {{if gt (len $f.Options) 8}}<input class="pop-search js-only" type="search" placeholder="Search" aria-label="Search {{$f.Title}}" autocomplete="off" data-sel-search>{{end}}
+    {{if $f.Search}}<input class="pop-search js-only" type="search" placeholder="Search" aria-label="Search {{lower $f.Plural}}" autocomplete="off" spellcheck="false" data-sel-search>{{end}}
     <div class="pop-list">
-    {{range $f.Options}}<label class="pop-opt"><input type="checkbox" class="chk-input" name="{{$f.Name}}" value="{{.Value}}"{{if .Selected}} checked{{end}}><span class="chk">{{template "icon-tick"}}</span>{{if $.Rings}}{{template "state-icon" .Value}}{{end}}<span class="pop-text">{{.Value}}</span></label>
-    {{else}}<p class="pop-empty">Nothing to choose</p>{{end}}
+    {{range $f.Options}}<label class="pop-opt" data-key="{{.Value}}"><input type="checkbox" class="chk-input" name="{{$f.Name}}" value="{{.Value}}"{{if .Selected}} checked{{end}}><span class="chk">{{template "icon-tick"}}</span>{{if $.Rings}}{{template "state-icon" .Value}}{{end}}<span class="pop-text{{if $.Mono}} mono{{end}}">{{visible .Value}}</span></label>
+    {{else}}<p class="pop-empty">None yet</p>{{end}}
     </div>
+    {{if $f.Search}}<button type="button" class="pop-opt pop-add" data-sel-add hidden></button>{{end}}
   </div>
 </details>{{end}}
 

@@ -338,10 +338,10 @@ form { display: inline; margin: 0; }
 select.ctl option { background: var(--surface-raised); color: var(--ink); }
 
 .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.filters > .sel, .filter-text { flex: 0 1 180px; min-width: 0; }
-/* With the script, filters apply as they change; Apply shows only for typed
-   text that is not applied yet. */
-.js .filters:not(.dirty) [data-apply] { display: none; }
+.filters > .sel { flex: 0 1 200px; min-width: 0; }
+/* With the script, filters apply as they change, so Apply is only for pages
+   without it. */
+.js .filters [data-apply] { display: none; }
 
 /* A multiple choice filter: a details element with a menu of checkboxes. */
 .sel { position: relative; }
@@ -392,6 +392,12 @@ select.ctl option { background: var(--surface-raised); color: var(--ink); }
   color: var(--ink); font-family: var(--font-sans); font-size: var(--text-label);
 }
 .pop-empty { padding: 12px 10px; font-size: var(--text-xs); color: var(--ink-ghost); text-align: center; }
+.pop-text.mono { font-size: var(--text-sm); }
+/* The search box's offer to filter by what was typed. */
+.pop-add {
+  flex-shrink: 0; width: 100%; margin-top: 4px; border: 0; border-top: 1px solid var(--line); border-radius: 0 0 6px 6px;
+  background: none; color: var(--ink-muted); font-family: var(--font-sans); text-align: left;
+}
 
 .chip {
   display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 5px;
@@ -656,7 +662,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   .stat-value { font-size: 24px; }
   .table th, .table td { padding-left: 12px; padding-right: 12px; }
   .toast { right: 16px; width: calc(100vw - 32px); }
-  .filters > .sel, .filter-text { flex: 1 1 calc(50% - 4px); }
+  .filters > .sel { flex: 1 1 calc(50% - 4px); }
   /* The task list keeps its ID, kind, and state; a row leads to the rest. */
   .table-tasks { min-width: 0; }
   .table-tasks col.c-id { width: 64px; }

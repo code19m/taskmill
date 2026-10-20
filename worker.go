@@ -360,7 +360,11 @@ func (w *Worker) Run(ctx context.Context) error {
 	names := make([]string, 0, len(w.queues)) // not nil: the column holds an array
 	names = slices.AppendSeq(names, maps.Keys(w.queues))
 	slices.Sort(names)
-	if _, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, names, w.host, w.version); err != nil {
+	kinds := slices.Sorted(maps.Keys(w.handlers))
+	if kinds == nil {
+		kinds = []string{} // the column holds an array
+	}
+	if _, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, names, w.host, w.version, kinds); err != nil {
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
 	w.refreshQueueSettings(ctx)

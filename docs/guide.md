@@ -361,8 +361,9 @@ _, err := client.Enqueue(ctx, PostLedgerEntry{...}, &taskmill.EnqueueOptions{Gro
   order you asked for. A canceled head does not halt its group.
 - Producers that enqueue into the same group wait for each other's
   transactions, so keep those transactions short.
-- `ListParams.GroupKey` lists the tasks of one group, and the web interface
-  links each task to its group.
+- `ListParams.GroupKeys` lists the tasks of chosen groups, and
+  `Client.Groups` finds the groups that have unfinished tasks and those that
+  are halted. The web interface links each task to its group.
 
 **Deduplication.** A `DedupeKey` admits at most one task: while its window
 lasts, enqueueing the same kind with the same key in the same queue creates
@@ -529,7 +530,8 @@ own code and tools:
 | Method | Does |
 |---|---|
 | `Get` | Returns a task, unfinished, finished, or from history |
-| `List` | Pages through tasks by queues, states, kind, and FIFO group, newest first |
+| `List` | Pages through tasks by queues, states, kinds, and FIFO groups, newest first |
+| `Groups` | The FIFO groups that have unfinished tasks, which of them are halted, and by which task |
 | `Cancel`, `CancelTx` | Cancels a waiting task, or asks a running task's worker to stop it |
 | `Retry` | Runs a dead or canceled task again, with fresh attempts |
 | `Delete` | Deletes a task that is not running |
@@ -537,7 +539,7 @@ own code and tools:
 | `UpdateQueue`, `PauseQueue`, `ResumeQueue` | Change a queue's installation-wide settings |
 | `Schedules`, `PauseSchedule`, `ResumeSchedule`, `RunSchedule` | List schedules, pause and resume them, and run one now |
 | `Settings`, `UpdateSettings` | Retention of history, and of dead and canceled tasks |
-| `Workers` | The running workers, and which one is the maintainer |
+| `Workers` | The running workers, the queues and kinds they serve, and which one is the maintainer |
 | `Activity` | Task counts and ended attempts per minute, for the last day |
 
 A task or schedule that does not exist returns `ErrNotFound`. An action that
