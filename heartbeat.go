@@ -42,6 +42,7 @@ func (w *Worker) heartbeat(ctx context.Context) {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "worker heartbeat failed", slog.Any(logKeyError, err))
 	}
 	w.renewLeases(ctx, ts)
+	w.flushActivity(ctx)
 }
 
 // renewLeases renews the leases of ts, and cancels the attempts that lost

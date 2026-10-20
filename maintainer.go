@@ -167,9 +167,15 @@ func (m *maintainer) promote(ctx context.Context) {
 
 // rescue fails the attempts whose leases expired and updates their groups. It
 // skips tasks whose groups other transactions hold; a later cycle rescues
-// them.
+// them. Each failed attempt counts in the activity once its batch commits.
 func (m *maintainer) rescue(ctx context.Context) {
-	m.sweep(ctx, "rescue expired leases", func(ctx context.Context, q querier) (int, error) {
+	var batch []swept
+	committed := func() {
+		for _, x := range batch {
+			m.w.tally.add(x.queue, 0, 1)
+		}
+	}
+	m.sweep(ctx, "rescue expired leases", committed, func(ctx context.Context, q querier) (int, error) {
 		r, err := q.query(ctx, m.c.sql.rescue,
 			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds())
 		if err != nil {
@@ -179,6 +185,7 @@ func (m *maintainer) rescue(ctx context.Context) {
 		if err != nil {
 			return 0, err
 		}
+		batch = rows
 		for _, x := range rows {
 			s := State(x.state)
 			if x.group == "" || !s.Finished() {
@@ -200,8 +207,9 @@ func (m *maintainer) rescue(ctx context.Context) {
 	})
 }
 
-// sweep runs fn in transactions until a run handles less than a full batch.
-func (m *maintainer) sweep(ctx context.Context, what string, fn func(context.Context, querier) (int, error)) {
+// sweep runs fn in transactions until a run handles less than a full batch,
+// and calls committed after each transaction commits.
+func (m *maintainer) sweep(ctx context.Context, what string, committed func(), fn func(context.Context, querier) (int, error)) {
 	for {
 		var n int
 		err := m.c.inTx(ctx, func(q querier) error {
@@ -213,6 +221,7 @@ func (m *maintainer) sweep(ctx context.Context, what string, fn func(context.Con
 			m.log(ctx, slog.LevelError, what, err)
 			return
 		}
+		committed()
 		if n < maintenanceBatch {
 			return
 		}
@@ -265,6 +274,7 @@ func (m *maintainer) retain(ctx context.Context) {
 	}
 	m.deleteInBatches(ctx, "delete old dead and canceled tasks", m.c.sql.deleteFinished, deadSecs)
 	m.deleteInBatches(ctx, "delete expired dedupe keys", m.c.sql.deleteDedupeKeys)
+	m.deleteInBatches(ctx, "delete old activity", m.c.sql.deleteActivity, activityRetention.Seconds())
 	if _, err := m.c.pool.Exec(ctx, m.c.sql.deleteWorkers, staleWorkerAge.Seconds()); err != nil {
 		m.log(ctx, slog.LevelWarn, "delete stale workers", err)
 	}
@@ -372,7 +382,7 @@ func (m *maintainer) log(ctx context.Context, level slog.Level, step string, err
 }
 
 // refreshStats counts each queue's tasks per state, up to the caps, and
-// stores the counts for [Client.Queues].
+// stores the counts for [Client.Queues] and the current minute's activity.
 func (m *maintainer) refreshStats(ctx context.Context) {
 	var queues, states []string
 	var counts []int64
@@ -414,7 +424,10 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 		if _, err := tx.Exec(ctx, m.c.sql.clearStats); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped)
+		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, m.c.sql.storeActivity)
 		return err
 	})
 	if err != nil {

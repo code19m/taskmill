@@ -1,6 +1,5 @@
 // The interface works without this script. It keeps pages live, applies
-// filters as they change, confirms actions, draws a chart of the counts, and
-// adds a few conveniences.
+// filters as they change, confirms actions, and adds a few conveniences.
 //
 // It is careful with the network and the machine: one request at a time,
 // each abandoned after a while, with a growing wait while the server is out
@@ -14,9 +13,7 @@
   const MAX_WAIT_MS = 60000; // the longest wait between failed updates
   const SLOW_MS = 300; // a navigation that takes longer shows progress
   const FILTER_WAIT_MS = 250; // filter changes this close apply together
-  const CHART_WINDOW_MS = 10 * 60 * 1000;
-  const CHART_GAP_MS = 15000; // a longer gap between samples breaks the chart's lines
-  const KEYS = { live: "taskmill-live", samples: "taskmill-samples" };
+  const LIVE_KEY = "taskmill-live";
 
   const root = document.documentElement;
   const coarse = matchMedia("(pointer: coarse)");
@@ -34,7 +31,6 @@
     },
   });
   const local = store(() => localStorage);
-  const session = store(() => sessionStorage);
 
   // The static files of this page. A page from a newer server has others,
   // and then the whole page reloads, so that new markup never meets old code.
@@ -337,113 +333,6 @@
     }
   }
 
-  // Chart of the counts, sampled while the overview is open
-
-  const SERIES = [
-    { key: "available", state: "available", area: true },
-    { key: "running", state: "running", area: true },
-    { key: "waiting", state: "scheduled" },
-    { key: "dead", state: "dead" },
-  ];
-  let samples = [];
-  try {
-    const saved = JSON.parse(session.get(KEYS.samples));
-    if (Array.isArray(saved)) samples = saved.filter((p) => p && Number.isFinite(p.t));
-  } catch { samples = []; }
-  const saveSamples = () => session.set(KEYS.samples, JSON.stringify(samples));
-  window.addEventListener("pagehide", saveSamples);
-
-  function sample() {
-    const chart = document.querySelector("[data-chart]");
-    if (!chart) return;
-    const now = Date.now();
-    const point = { t: now };
-    for (const s of SERIES) point[s.key] = Number(chart.dataset[s.key]) || 0;
-    const last = samples[samples.length - 1];
-    if (!last || now - last.t >= 1000) samples.push(point);
-    samples = samples.filter((p) => now - p.t <= CHART_WINDOW_MS);
-    draw(chart);
-  }
-
-  const SVG = "http://www.w3.org/2000/svg";
-  const el = (name, attrs) => {
-    const node = document.createElementNS(SVG, name);
-    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
-    return node;
-  };
-
-  function niceMax(value) {
-    if (value <= 4) return 4;
-    const step = 10 ** Math.floor(Math.log10(value));
-    return Math.ceil(value / step) * step;
-  }
-
-  function draw(chart) {
-    if (samples.length < 2) return;
-    const style = getComputedStyle(chart);
-    const width = chart.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-    const height = chart.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
-    if (width <= 0 || height <= 0) return;
-
-    const left = 44, bottom = 18, top = 6;
-    const plotW = width - left, plotH = height - bottom - top;
-    const t0 = samples[0].t, t1 = samples[samples.length - 1].t;
-    const max = niceMax(Math.max(...samples.flatMap((p) => SERIES.map((s) => p[s.key]))));
-    const x = (t) => (left + ((t - t0) / Math.max(t1 - t0, 1)) * plotW).toFixed(1);
-    const y = (v) => (top + plotH - (v / max) * plotH).toFixed(1);
-
-    // Samples are missing while the tab was hidden or the server out of
-    // reach: the lines break there instead of bridging the gap.
-    const runs = [[samples[0]]];
-    for (let i = 1; i < samples.length; i++) {
-      if (samples[i].t - samples[i - 1].t > CHART_GAP_MS) runs.push([]);
-      runs[runs.length - 1].push(samples[i]);
-    }
-
-    const svg = el("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": "Task counts over time" });
-    for (const fraction of [0, 0.5, 1]) {
-      const v = max * fraction;
-      svg.append(el("line", { class: "grid-line", x1: left, x2: width, y1: y(v), y2: y(v) }));
-      const tick = el("text", { class: "axis-label", x: left - 8, y: Number(y(v)) + 4, "text-anchor": "end" });
-      tick.textContent = Math.round(v).toLocaleString();
-      svg.append(tick);
-    }
-    const since = el("text", { class: "axis-label", x: left, y: height - 2 });
-    since.textContent = new Date(t0).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    const until = el("text", { class: "axis-label", x: width, y: height - 2, "text-anchor": "end" });
-    until.textContent = "now";
-    svg.append(since, until);
-
-    for (const s of SERIES) {
-      const group = el("g", { class: `state-${s.state}` });
-      const line = runs.map((run) => `M${run.map((p) => `${x(p.t)},${y(p[s.key])}`).join("L")}`).join("");
-      if (s.area) {
-        const area = runs.map((run) => `M${x(run[0].t)},${y(0)}L${run.map((p) => `${x(p.t)},${y(p[s.key])}`).join("L")}L${x(run[run.length - 1].t)},${y(0)}Z`).join("");
-        group.append(el("path", { class: "area", d: area }));
-      }
-      group.append(el("path", { class: "series", d: line }));
-      svg.append(group);
-    }
-    const old = chart.querySelector("svg");
-    if (old) old.replaceWith(svg);
-    else chart.append(svg);
-    chart.classList.add("has-data");
-  }
-
-  {
-    const chart = document.querySelector("[data-chart]");
-    if (chart && "ResizeObserver" in window) {
-      let width = chart.clientWidth;
-      let frame = 0;
-      new ResizeObserver(() => {
-        if (chart.clientWidth === width) return;
-        width = chart.clientWidth;
-        cancelAnimationFrame(frame);
-        frame = requestAnimationFrame(() => draw(chart));
-      }).observe(chart);
-    }
-  }
-
   // Updating a page in place. morph changes the page to match a newer copy
   // of it, touching only what differs. Rows with a data-key are matched by
   // it, so a new row slides in without rebuilding the others. State that
@@ -463,13 +352,6 @@
   }
 
   function morph(node, next) {
-    if (node.hasAttribute("data-chart")) {
-      // The chart's drawing is the script's; only its counts come from the server.
-      for (const { name, value } of next.attributes) {
-        if (name.startsWith("data-") && node.getAttribute(name) !== value) node.setAttribute(name, value);
-      }
-      return;
-    }
     syncAttributes(node, next);
     let current = node.firstChild;
     for (const wanted of [...next.childNodes]) {
@@ -561,7 +443,7 @@
 
   const toggle = document.querySelector("[data-live-toggle]");
   const LABELS = { live: "Live", paused: "Paused", stale: "Reconnecting", offline: "Offline", "signed-out": "Signed out" };
-  let live = local.get(KEYS.live) !== "off";
+  let live = local.get(LIVE_KEY) !== "off";
   let status = "live";
   let failures = 0;
   let lastUpdate = Date.now();
@@ -602,7 +484,6 @@
     lastUpdate = Date.now();
     status = "live";
     show();
-    sample();
     if (toggle && !reducedMotion.matches && toggle.animate) {
       toggle.querySelector(".live-dot")?.animate([{ opacity: 0.3 }, { opacity: 1 }], { duration: 700, easing: "ease-out" });
     }
@@ -648,7 +529,7 @@
       return;
     }
     live = !live;
-    local.set(KEYS.live, live ? null : "off");
+    local.set(LIVE_KEY, live ? null : "off");
     show();
     if (live) {
       failures = 0;
@@ -659,11 +540,7 @@
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      saveSamples();
-      return;
-    }
-    schedule(Math.max(0, REFRESH_MS - (Date.now() - lastUpdate)));
+    if (!document.hidden) schedule(Math.max(0, REFRESH_MS - (Date.now() - lastUpdate)));
   });
   window.addEventListener("online", () => {
     failures = 0;
@@ -672,7 +549,6 @@
   window.addEventListener("offline", show);
 
   highlight(document);
-  sample();
   show();
   if (live) schedule(REFRESH_MS);
 })();

@@ -556,21 +556,46 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .timeline-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: var(--text-label); }
 .timeline-head time { margin-left: auto; }
 
-/* ---------- chart ---------- */
+/* ---------- charts ---------- */
 
-.chart-card { padding: 0; gap: 0; }
-.chart-card .card-head { border-bottom: 0; }
-.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: var(--text-xs); color: var(--ink-faint); }
+/* The server draws the charts. Their view box is stretched to the plot, so
+   strokes keep their width with non-scaling-stroke, and labels live in HTML. */
+.activity { overflow: hidden; }
+/* A one-pixel gap shows the line between the charts, side by side or stacked. */
+.charts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 1px;
+  background: var(--line-soft);
+}
+.chart { margin: 0; padding: 12px 16px; min-width: 0; background: var(--surface-raised); }
+.chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.chart-title { font-size: var(--text-sm); font-weight: 500; color: var(--ink-muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: var(--text-xs); color: var(--ink-faint); }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 10px; height: 2px; border-radius: 1px; background: var(--c); }
-.chart { position: relative; height: 170px; padding: 0 16px 14px; }
-.chart svg { display: block; width: 100%; height: 100%; overflow: visible; }
-.chart-note { position: absolute; inset: 0; display: grid; place-items: center; font-size: var(--text-xs); color: var(--ink-ghost); pointer-events: none; }
-.chart.has-data .chart-note { display: none; }
-.chart .grid-line { stroke: var(--line); stroke-width: 1; }
-.chart .axis-label { fill: var(--ink-ghost); font: 11px var(--font-sans); }
-.chart .series { fill: none; stroke: var(--c); stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
-.chart .area { fill: var(--c); opacity: .07; stroke: none; }
+.chart-body { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; }
+.chart-y {
+  display: flex; flex-direction: column; justify-content: space-between; min-width: 28px; padding: 1px 0;
+  text-align: right; font-size: 11px; color: var(--ink-ghost); font-variant-numeric: tabular-nums; line-height: 1;
+}
+.chart-plot { position: relative; height: 140px; }
+.chart-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.chart .grid-line { fill: none; stroke: var(--line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.chart .series {
+  fill: none; stroke: var(--c); stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+.chart .area { fill: var(--c); opacity: .08; }
+.chart .col { fill: transparent; }
+.chart .col:hover { fill: var(--fill-hover); }
+.chart-note {
+  position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
+  font-size: var(--text-xs); color: var(--ink-ghost);
+}
+.chart-x {
+  display: flex; justify-content: space-between; margin: 6px 0 0 36px;
+  font-size: 11px; color: var(--ink-ghost); font-variant-numeric: tabular-nums;
+}
+.seg-sm a { padding: 3px 10px; font-size: var(--text-sm); }
 
 /* ---------- workers ---------- */
 

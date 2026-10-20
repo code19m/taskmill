@@ -484,10 +484,10 @@ _, err := client.Enqueue(ctx, HandleOrderEvent{...}, &taskmill.EnqueueOptions{
 ## Operating taskmill
 
 **The web interface** is a dashboard of queues, tasks, schedules, and
-workers. It shows task counts live, a chart of them while it is open, and
-each task's payload and error history, and filters tasks by several states
-and queues at once. It can pause and resume queues and schedules, run a
-schedule now, and retry, cancel, and delete tasks. It has light and dark
+workers. It shows task counts live, charts of the last hour, 6 hours, or
+day, and each task's payload and error history. It filters tasks by several
+states and queues at once. It can pause and resume queues and schedules, run
+a schedule now, and retry, cancel, and delete tasks. It has light and dark
 themes, works on phones, and works without JavaScript too.
 
 It is light on the database and the network. Each request takes at most 10
@@ -538,6 +538,7 @@ own code and tools:
 | `Schedules`, `PauseSchedule`, `ResumeSchedule`, `RunSchedule` | List schedules, pause and resume them, and run one now |
 | `Settings`, `UpdateSettings` | Retention of history, and of dead and canceled tasks |
 | `Workers` | The running workers, and which one is the maintainer |
+| `Activity` | Task counts and ended attempts per minute, for the last day |
 
 A task or schedule that does not exist returns `ErrNotFound`. An action that
 does not fit the task's state returns `ErrInvalidState`: for example,
@@ -623,6 +624,19 @@ refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
 backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
 and retryable tasks across all queues. `QueueInfo.Capped` means a count hit
 its cap and is a lower bound.
+
+**History** comes from `Client.Activity`: for each minute of the last 24
+hours, the most tasks counted in each state, and the attempts that completed
+and failed. The web interface charts it over the last hour, 6 hours, or day.
+It is recorded on the server, so a chart shows the same history to everyone
+from the moment it opens. A gap means that no worker ran.
+
+```go
+points, err := client.Activity(ctx, &taskmill.ActivityParams{
+    Since: time.Now().Add(-6 * time.Hour),
+    Step:  5 * time.Minute, // one point per 5 minutes
+})
+```
 
 ## Testing your code
 

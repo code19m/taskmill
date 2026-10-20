@@ -101,6 +101,7 @@ type Worker struct {
 
 	running   atomic.Bool
 	released  atomic.Int64   // tasks given back during the current Run's shutdown
+	tally     tally          // ended attempts not yet added to the activity
 	recording sync.WaitGroup // Run's attempts whose results are being recorded
 
 	mu       sync.Mutex
@@ -402,6 +403,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	stopCtx, cancel := context.WithTimeout(base, recordTimeout)
 	defer cancel()
+	w.flushActivity(stopCtx)
 	if _, err := w.client.pool.Exec(stopCtx, w.client.sql.deleteWorker, w.id); err != nil {
 		w.logger.LogAttrs(stopCtx, slog.LevelWarn, "unregister worker failed", slog.Any(logKeyError, err))
 	}

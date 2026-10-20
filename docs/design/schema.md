@@ -49,6 +49,7 @@ configurable, so several installations can share a database. It must match
 | `workers` | Running worker processes | Cold: a heartbeat per process every 10 s |
 | `leader` | The elected maintainer | Cold |
 | `queue_stats` | Task counts per queue and state, refreshed by the maintainer | Cold |
+| `activity` | Task counts and ended attempts per minute and queue, for a day | Cold: a few rows every 10 s |
 | `migrations` | Applied schema migrations | Cold |
 
 ### `tasks`
@@ -121,6 +122,28 @@ or deleted. The index on `expires_at` serves retention, and the index on
 - `leader` elects the maintainer with a lease row rather than an advisory
   lock. Session advisory locks need a dedicated connection and do not work
   behind transaction-pooling proxies; a lease row works everywhere.
+
+### `activity`
+
+One row per minute and queue, kept for 24 hours, behind `Client.Activity`
+and the dashboard's charts. Two writers share a row, each with its own
+columns:
+
+- **The maintainer** copies the counts it stores in `queue_stats` into the
+  current minute, every 10 seconds, with zeros for known queues that have no
+  tasks. A minute with `NULL` counts had no maintainer, which a chart shows
+  as a gap rather than as an empty queue.
+- **Each worker** counts the attempts it ends, completed and failed, in
+  memory, and adds them to their minutes with each heartbeat. Counting in the
+  statements that record attempts would make every worker update the same
+  row with every result; adding per heartbeat costs one small upsert per
+  worker every few seconds. A worker that crashes loses the counts of its
+  last few seconds.
+
+Both writers lock rows in the order of minute, then queue name in byte
+order, so they cannot deadlock. `fillfactor = 70` keeps the repeated updates
+HOT, and the primary key leads with the minute, which serves both reading a
+period and deleting old rows.
 
 ## Indexes on `tasks`
 
@@ -256,9 +279,9 @@ transaction that also updates the group if the task finished.
 |---|---|
 | Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
 | Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
-| Retention | Every minute, deletes old dead and canceled tasks and expired dedupe keys in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers without a heartbeat for 5 minutes, and schedules that the maintainer does not define and that did not run or change for a day. |
+| Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers without a heartbeat for 5 minutes, and schedules that the maintainer does not define and that did not run or change for a day. |
 | History | Keeps partitions for today and the next 6 days, and drops a partition once its whole day is older than the retention period (see [Operational notes](#operational-notes)). |
-| Statistics | Every 10 seconds, counts each queue's tasks per state and stores the counts in `queue_stats`. |
+| Statistics | Every 10 seconds, counts each queue's tasks per state and stores the counts in `queue_stats` and the current minute of `activity`. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
 
 **Statistics read indexes only, and every count is capped,** so the cost
