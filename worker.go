@@ -49,6 +49,7 @@ type timing struct {
 	leaderLease     time.Duration // how long a maintainer leads without renewing
 	retention       time.Duration // how often retention runs
 	stats           time.Duration // how often queue statistics are refreshed
+	activity        time.Duration // how often a worker writes the attempts it counted
 	settings        time.Duration // how often queue settings are reloaded
 	shutdownGrace   time.Duration // how long canceled attempts get to return before release
 	noHandlerSnooze time.Duration // how long a task of an unknown kind is snoozed at a time
@@ -63,6 +64,7 @@ var defaultTiming = timing{
 	leaderLease:     10 * time.Second,
 	retention:       time.Minute,
 	stats:           10 * time.Second,
+	activity:        10 * time.Second,
 	settings:        10 * time.Second,
 	shutdownGrace:   5 * time.Second,
 	noHandlerSnooze: time.Minute,
@@ -381,6 +383,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	var loops sync.WaitGroup
 	loops.Go(func() { w.listenLoop(loopsCtx) })
 	loops.Go(func() { w.heartbeatLoop(loopsCtx) })
+	loops.Go(func() { w.activityLoop(loopsCtx) })
 	loops.Go(func() { w.settingsLoop(loopsCtx) })
 	if !w.cfg.NoMaintainer {
 		loops.Go(func() { newMaintainer(w).run(loopsCtx) })

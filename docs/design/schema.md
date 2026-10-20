@@ -134,11 +134,12 @@ columns:
   tasks. A minute with `NULL` counts had no maintainer, which a chart shows
   as a gap rather than as an empty queue.
 - **Each worker** counts the attempts it ends, completed and failed, in
-  memory, and adds them to their minutes with each heartbeat. Counting in the
+  memory, and adds them to their minutes every 10 seconds, in a loop of its
+  own so that a slow write never delays a lease's heartbeat. Counting in the
   statements that record attempts would make every worker update the same
-  row with every result; adding per heartbeat costs one small upsert per
-  worker every few seconds. A worker that crashes loses the counts of its
-  last few seconds.
+  row with every result; adding them every 10 seconds costs one small upsert
+  per worker. A worker that crashes loses the counts of its last few
+  seconds, and one that stops writes them before it returns.
 
 Both writers lock rows in the order of minute, then queue name in byte
 order, so they cannot deadlock. `fillfactor = 70` keeps the repeated updates
