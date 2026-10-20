@@ -76,18 +76,18 @@
 
 {{/* A task state: a ring icon, so that color is never the only cue, and its name. */}}
 {{define "state"}}<span class="status status-{{.}}">{{template "state-icon" .}}<span>{{.}}</span></span>{{end}}
-{{define "state-icon"}}<svg class="ring ring-{{.}}" width="13" height="13" aria-hidden="true"><use href="#ring-{{.}}"/></svg>{{end}}
+{{define "state-icon"}}<svg class="ring ring-{{.}}" width="15" height="15" aria-hidden="true"><use href="#ring-{{.}}"/></svg>{{end}}
 
 {{/* The state icons, defined once per page and used by reference. */}}
 {{define "sprite"}}<svg class="sprite" aria-hidden="true">
-  <symbol id="ring-scheduled" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.2 2.2"/></symbol>
-  <symbol id="ring-pending" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.2 2.2"/></symbol>
-  <symbol id="ring-available" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="8" r="2" fill="currentColor"/></symbol>
-  <symbol id="ring-running" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></symbol>
-  <symbol id="ring-retryable" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M12.2 1.8v2.6H9.6"/></g></symbol>
-  <symbol id="ring-completed" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.5"/><path d="M5.3 8.2l1.9 1.8 3.5-3.6"/></g></symbol>
-  <symbol id="ring-dead" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="5.5"/><path d="M6 6l4 4M10 6l-4 4"/></g></symbol>
-  <symbol id="ring-canceled" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="5.5"/><path d="m4.2 4.2 7.6 7.6"/></g></symbol>
+  <symbol id="ring-scheduled" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.2 2.2"/></symbol>
+  <symbol id="ring-pending" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="2.2 2.2"/></symbol>
+  <symbol id="ring-available" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="8" cy="8" r="2" fill="currentColor"/></symbol>
+  <symbol id="ring-running" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></symbol>
+  <symbol id="ring-retryable" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M12.2 1.8v2.6H9.6"/></g></symbol>
+  <symbol id="ring-completed" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.5"/><path d="M5.3 8.2l1.9 1.8 3.5-3.6"/></g></symbol>
+  <symbol id="ring-dead" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="8" cy="8" r="5.5"/><path d="M6 6l4 4M10 6l-4 4"/></g></symbol>
+  <symbol id="ring-canceled" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="8" cy="8" r="5.5"/><path d="m4.2 4.2 7.6 7.6"/></g></symbol>
 </svg>{{end}}
 
 {{/* A multiple choice filter: a menu of checkboxes. Without the script it
