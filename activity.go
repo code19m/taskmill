@@ -47,7 +47,7 @@ type Activity struct {
 	// Completed and Failed are the attempts that succeeded and failed during
 	// the step. Failed counts every failed attempt, whether its task is
 	// retried or dead, including attempts whose workers lost their leases.
-	// Workers write their counts every few seconds; a worker that crashes
+	// Workers write their counts every 10 seconds; a worker that crashes
 	// loses its last few seconds of them.
 	Completed, Failed int64
 }
@@ -136,7 +136,7 @@ var activityStates = [...]State{
 }
 
 // tally counts the attempts that a worker ended, per minute and queue, until
-// its next heartbeat adds them to the activity table. Counting in memory
+// it adds them to the activity table, every 10 seconds. Counting in memory
 // keeps the statements that record attempts free of a counter row that every
 // worker would update.
 type tally struct {
@@ -208,6 +208,23 @@ func (t *tally) restore(counts map[tallyKey]tallyCount) {
 func (w *Worker) countCompleted(done []completedTask) {
 	for _, d := range done {
 		w.tally.add(d.queue, 1, 0)
+	}
+}
+
+// activityLoop writes the attempts the worker counted, on a schedule of its
+// own: a slow write never delays the heartbeats that keep leases.
+func (w *Worker) activityLoop(ctx context.Context) {
+	tick := time.NewTicker(w.timing.activity)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			flushCtx, cancel := context.WithTimeout(ctx, w.timing.activity)
+			w.flushActivity(flushCtx)
+			cancel()
+		}
 	}
 }
 
