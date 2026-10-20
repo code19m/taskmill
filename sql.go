@@ -102,6 +102,10 @@ type statements struct {
 	countStats       string
 	clearStats       string
 	storeStats       string
+	storeActivity    string
+	addActivity      string
+	deleteActivity   string
+	activity         string
 	deleteDedupeKeys string
 	deleteWorkers    string
 }
@@ -827,6 +831,68 @@ SELECT state::text, queue, count(*) FROM (
 INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at)
 SELECT q, s::{s}.task_state, n, c, now()
 FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[]) AS u(q, s, n, c)`),
+
+		// storeActivity copies the counts just stored in queue_stats into the
+		// current minute's activity, with zeros for every other known queue,
+		// so that an empty queue reads as empty rather than as not counted.
+		// A later refresh in the same minute overwrites them. Rows are locked
+		// in the byte order of their queue names, the order workers use too.
+		storeActivity: q(`
+INSERT INTO {s}.activity AS a (minute, queue, scheduled, pending, available, running, retryable, dead, canceled)
+SELECT date_trunc('minute', now()), n.queue,
+       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'scheduled'), 0),
+       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'pending'), 0),
+       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'available'), 0),
+       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'running'), 0),
+       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'retryable'), 0),
+       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'dead'), 0),
+       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'canceled'), 0)
+FROM (SELECT name FROM {s}.queues
+      UNION SELECT queue FROM {s}.queue_stats
+      UNION SELECT unnest(queues) FROM {s}.workers) AS n(queue)
+LEFT JOIN {s}.queue_stats s ON s.queue = n.queue
+GROUP BY n.queue
+ORDER BY n.queue COLLATE "C"
+ON CONFLICT (minute, queue) DO UPDATE
+SET scheduled = excluded.scheduled, pending = excluded.pending, available = excluded.available,
+    running = excluded.running, retryable = excluded.retryable, dead = excluded.dead,
+    canceled = excluded.canceled`),
+
+		// addActivity adds a worker's counts of ended attempts to their
+		// minutes. The caller sorts the rows by minute, then by the bytes of
+		// the queue name, so that concurrent flushes lock rows in one order.
+		addActivity: q(`
+INSERT INTO {s}.activity AS a (minute, queue, completed, failed)
+SELECT m, q, c, f FROM unnest($1::timestamptz[], $2::text[], $3::integer[], $4::integer[]) AS u(m, q, c, f)
+ON CONFLICT (minute, queue) DO UPDATE
+SET completed = a.completed + excluded.completed, failed = a.failed + excluded.failed`),
+
+		deleteActivity: q(`
+WITH old AS (
+    SELECT minute, queue FROM {s}.activity WHERE minute < now() - $1 * interval '1 second'
+    LIMIT {batch} FOR UPDATE SKIP LOCKED
+)
+DELETE FROM {s}.activity a USING old WHERE a.minute = old.minute AND a.queue = old.queue`),
+
+		// activity sums the selected queues' activity per minute, then
+		// combines the minutes of each step of $3 seconds: the most tasks
+		// counted in each state, and the sum of ended attempts. A minute in
+		// which no maintainer counted has NULL counts.
+		activity: q(`
+WITH minutes AS (
+    SELECT minute, sum(scheduled) AS scheduled, sum(pending) AS pending, sum(available) AS available,
+           sum(running) AS running, sum(retryable) AS retryable, sum(dead) AS dead, sum(canceled) AS canceled,
+           sum(completed) AS completed, sum(failed) AS failed
+    FROM {s}.activity
+    WHERE minute >= $1 AND minute < $2 AND (cardinality($4::text[]) = 0 OR queue = ANY($4::text[]))
+    GROUP BY minute
+)
+SELECT date_bin($3 * interval '1 second', minute, '2000-01-01 00:00:00+00') AS at,
+       max(scheduled), max(pending), max(available), max(running), max(retryable), max(dead), max(canceled),
+       sum(completed), sum(failed)
+FROM minutes
+GROUP BY at
+ORDER BY at`),
 
 		// runSchedule makes schedule $1 due now, unless it is paused, and
 		// reports whether it exists and is paused. The maintainer then runs

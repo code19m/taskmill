@@ -88,13 +88,15 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*tracked) {
 	if len(ts) == 0 {
 		return
 	}
+	var done []completedTask
 	err := w.whileLeased(ctx, ts, func(ctx context.Context) error {
 		return w.client.inTx(ctx, func(q querier) error {
-			_, err := w.client.complete(ctx, q, completionsOf(ts))
+			var err error
+			done, err = w.client.complete(ctx, q, completionsOf(ts))
 			return err
 		})
 	})
-	w.completed(ctx, ts, err)
+	w.completed(ctx, ts, done, err)
 }
 
 // flush completes a batch of successful attempts. Ungrouped tasks complete
@@ -114,35 +116,38 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 	}
 
 	if len(plain) > 0 {
+		var done []completedTask
 		err := w.whileLeased(ctx, plain, func(ctx context.Context) error {
-			_, err := w.client.complete(ctx, pgxQuerier{q: w.client.pool}, completionsOf(plain))
+			var err error
+			done, err = w.client.complete(ctx, pgxQuerier{q: w.client.pool}, completionsOf(plain))
 			return err
 		})
-		w.completed(ctx, plain, err)
+		w.completed(ctx, plain, done, err)
 	}
 	if len(grouped) == 0 {
 		return nil
 	}
+	var done []completedTask
 	err := w.whileLeased(ctx, grouped, func(ctx context.Context) error {
 		return w.client.inTx(ctx, func(q querier) error {
 			var err error
-			held, err = w.completeLocked(ctx, q, grouped)
+			held, done, err = w.completeLocked(ctx, q, grouped)
 			return err
 		})
 	})
 	if err != nil {
-		w.completed(ctx, grouped, err)
+		w.completed(ctx, grouped, nil, err)
 		return nil
 	}
-	w.completed(ctx, slices.DeleteFunc(grouped, func(t *tracked) bool { return slices.Contains(held, t) }), nil)
+	w.completed(ctx, slices.DeleteFunc(grouped, func(t *tracked) bool { return slices.Contains(held, t) }), done, nil)
 	return held
 }
 
 // completeLocked completes, in q's transaction, the grouped tasks whose
-// group rows and task rows it can lock without waiting, and returns the
-// others, which other transactions hold. A task whose group has no row, which
-// should not happen, completes all the same.
-func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (held []*tracked, err error) {
+// group rows and task rows it can lock without waiting. It returns the
+// others, which other transactions hold, and the tasks it completed. A task
+// whose group has no row, which should not happen, completes all the same.
+func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (held []*tracked, done []completedTask, err error) {
 	queues := make([]string, len(ts))
 	groups := make([]string, len(ts))
 	for i, t := range ts {
@@ -155,7 +160,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 		return key, locked, err
 	}, queues, groups)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var mine []*tracked
 	for _, t := range ts {
@@ -167,7 +172,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 		}
 	}
 	if len(mine) == 0 {
-		return held, nil
+		return held, nil, nil
 	}
 
 	ids := make([]int64, len(mine))
@@ -182,7 +187,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 		return id, locked, err
 	}, ids, tokens)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Tasks no longer owned lost their leases, and are left out; the
 	// complete statement would skip them anyway.
@@ -196,11 +201,11 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 		}
 	}
 	if len(ready) > 0 {
-		if _, err := w.client.complete(ctx, q, completionsOf(ready)); err != nil {
-			return nil, err
+		if done, err = w.client.complete(ctx, q, completionsOf(ready)); err != nil {
+			return nil, nil, err
 		}
 	}
-	return held, nil
+	return held, done, nil
 }
 
 // lockedRows runs a statement that returns rows of a key and whether that
@@ -225,11 +230,14 @@ func lockedRows[K comparable](ctx context.Context, q querier, sql string, scan f
 	return locked, seen, r.Err()
 }
 
-// completed stops tracking completed attempts, and logs a failure to record
-// them.
-func (w *Worker) completed(ctx context.Context, ts []*tracked, err error) {
+// completed stops tracking completed attempts, counts the tasks that their
+// committed completion finished, and logs a failure to record them.
+func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedTask, err error) {
 	for _, t := range ts {
 		w.untrack(t)
+	}
+	if err == nil {
+		w.countCompleted(done)
 	}
 	if err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelError, "complete tasks failed; they are rescued when their leases expire",

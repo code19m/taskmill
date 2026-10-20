@@ -72,3 +72,8 @@ func ExplainFetch(ctx context.Context, c *Client, queue string, limit int) (stri
 	}
 	return strings.Join(plan, "\n"), r.Err()
 }
+
+// RunRetention applies retention once, as w's maintainer does every minute.
+func RunRetention(ctx context.Context, w *Worker) {
+	newMaintainer(w).retain(ctx)
+}

@@ -123,6 +123,19 @@ func TestPagesRender(t *testing.T) {
 	}
 }
 
+func TestOverviewPeriods(t *testing.T) {
+	t.Parallel()
+	h := ui.Handler(setup(t), nil)
+	// The charts' period is chosen in the address; an unknown one shows the
+	// last hour.
+	for query, want := range map[string]string{"?range=24h": "24h", "?range=7y": "1h"} {
+		_, body, _ := get(t, h, "/"+query)
+		if !strings.Contains(body, `aria-current="true">`+want+`<`) || !strings.Contains(body, `class="series"`) {
+			t.Fatalf("overview %s: want the %s period selected\n%s", query, want, body)
+		}
+	}
+}
+
 func TestTaskFilters(t *testing.T) {
 	t.Parallel()
 	client := setup(t)

@@ -29,19 +29,14 @@
   </a>
 </section>
 
-<section class="card chart-card" aria-label="Activity">
+<section class="card flush activity" aria-labelledby="activity-title">
   <div class="card-head">
-    <h2>Activity</h2>
-    <div class="legend">
-      <span class="state-available"><i></i>Available</span>
-      <span class="state-running"><i></i>Running</span>
-      <span class="state-scheduled"><i></i>Waiting</span>
-      <span class="state-dead"><i></i>Dead</span>
-    </div>
+    <h2 id="activity-title">Activity</h2>
+    <nav class="seg seg-sm" aria-label="Period">{{range $d.Ranges}}<a href="{{path "/"}}?range={{.Name}}"{{if eq .Name $d.Range}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
   </div>
-  <div class="chart" data-chart data-available="{{$d.Totals.Available}}" data-running="{{$d.Totals.Running}}"
-       data-waiting="{{$d.Totals.Waiting}}" data-dead="{{$d.Totals.Dead}}">
-    <p class="chart-note">Collecting counts</p>
+  <div class="charts">
+    {{template "chart" $d.Tasks}}
+    {{template "chart" $d.Attempts}}
   </div>
 </section>
 
@@ -99,3 +94,24 @@
 </div>
 </div>
 {{template "foot" .}}{{end}}
+
+{{/* A chart drawn on the server; see chart.go. Each step is a column whose
+   tooltip lists its values. */}}
+{{define "chart"}}<figure class="chart">
+  <figcaption class="chart-head">
+    <span class="chart-title">{{.Title}}</span>
+    <span class="legend">{{range .Series}}<span class="{{.Class}}"><i></i>{{.Name}}</span>{{end}}</span>
+  </figcaption>
+  <div class="chart-body">
+    <div class="chart-y" aria-hidden="true"><span>{{.Top}}</span><span>{{.Half}}</span><span>0</span></div>
+    <div class="chart-plot">
+      <svg viewBox="0 0 {{.Steps}} 100" preserveAspectRatio="none" role="img" aria-label="{{.Label}}">
+        <path class="grid-line" d="M0 4H{{.Steps}}M0 50H{{.Steps}}M0 96H{{.Steps}}"/>
+        {{range .Series}}<g class="{{.Class}}">{{with .Area}}<path class="area" d="{{.}}"/>{{end}}<path class="series" d="{{.Line}}"/></g>{{end}}
+        {{range .Columns}}<rect class="col" x="{{.X}}" width="1" height="100"><title>{{.Title}}</title></rect>{{end}}
+      </svg>
+      {{with .Note}}<p class="chart-note">{{.}}</p>{{end}}
+    </div>
+  </div>
+  <div class="chart-x" aria-hidden="true"><span>{{.From}}</span><span>{{.Mid}}</span><span>now</span></div>
+</figure>{{end}}

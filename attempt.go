@@ -290,14 +290,16 @@ func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.T
 	switch {
 	case o.kind == outcomeComplete && t.direct:
 		ts := []*tracked{t}
+		var done []completedTask
 		err := w.whileLeased(context.WithoutCancel(ctx), ts, func(ctx context.Context) error {
 			return w.client.inTx(ctx, func(q querier) error {
-				done, err := w.client.complete(ctx, q, completionsOf(ts))
+				var err error
+				done, err = w.client.complete(ctx, q, completionsOf(ts))
 				t.completedDirectly = err == nil && len(done) == 1
 				return err
 			})
 		})
-		w.completed(ctx, ts, err)
+		w.completed(ctx, ts, done, err)
 	case o.kind == outcomeComplete:
 		w.completions <- t // Run stops the completer only after every result is in
 	default:
@@ -305,9 +307,13 @@ func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.T
 	}
 }
 
-// record writes an outcome other than completion to the database.
+// record writes an outcome other than completion to the database, and
+// counts the attempt once that commits.
 func (w *Worker) record(ctx context.Context, t *tracked, o outcome) {
 	defer w.untrack(t)
+	if o.kind == outcomeDiscard && t.att.completedInTx.Load() {
+		w.tally.add(t.info.Queue, 1, 0) // the handler's transaction completed it
+	}
 	if o.kind == outcomeDiscard || o.kind == outcomeComplete {
 		return
 	}
@@ -317,19 +323,40 @@ func (w *Worker) record(ctx context.Context, t *tracked, o outcome) {
 
 	// Only a grouped task's outcome takes several statements that must
 	// commit together.
+	var ended attemptEnd
 	err := w.whileLeased(ctx, []*tracked{t}, func(ctx context.Context) error {
+		var err error
 		if t.info.GroupKey == "" {
-			return w.recordTx(ctx, pgxQuerier{q: w.client.pool}, t, o)
+			ended, err = w.recordTx(ctx, pgxQuerier{q: w.client.pool}, t, o)
+			return err
 		}
-		return w.client.inTx(ctx, func(q querier) error { return w.recordTx(ctx, q, t, o) })
+		return w.client.inTx(ctx, func(q querier) error {
+			ended, err = w.recordTx(ctx, q, t, o)
+			return err
+		})
 	})
+	switch {
+	case err == nil && ended == endedFailed:
+		w.tally.add(t.info.Queue, 0, 1)
+	case err == nil && ended == endedCompleted:
+		w.tally.add(t.info.Queue, 1, 0)
+	}
 	if err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelError, "record attempt failed; the task is rescued when its lease expires",
 			slog.Int64(logKeyTaskID, t.att.id), slog.Any(logKeyError, err))
 	}
 }
 
-func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome) error {
+// attemptEnd is how recording an outcome ended an attempt, for the activity.
+type attemptEnd int
+
+const (
+	endedOther     attemptEnd = iota
+	endedFailed               // its failure was recorded
+	endedCompleted            // the handler's transaction had completed its task
+)
+
+func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome) (attemptEnd, error) {
 	sql := w.client.sql
 	id, token := t.att.id, t.att.token
 	var queue, group string
@@ -360,30 +387,34 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 	case outcomeRelease:
 		found, err = queryRow(ctx, q, sql.release, []any{id, token}, &queue, &group, &state)
 	case outcomeComplete, outcomeDiscard:
-		return nil
+		return endedOther, nil
 	}
 	switch {
 	case err != nil:
-		return err
+		return endedOther, err
 	case !found && t.att.completedInTx.Load():
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler failed after completing its task; it stays completed",
 			slog.Int64(logKeyTaskID, id), slog.Any(logKeyError, o.err))
-		return nil
+		return endedCompleted, nil
 	case !found:
 		w.logger.LogAttrs(ctx, slog.LevelDebug, "result discarded: the attempt lost its lease",
 			slog.Int64(logKeyTaskID, id))
-		return nil
+		return endedOther, nil
 	}
 
+	ended := endedOther
+	if o.kind == outcomeRetry || o.kind == outcomeDead {
+		ended = endedFailed
+	}
 	switch s := State(state); {
 	case s == StateDead && group != "":
-		return w.client.leaveGroup(ctx, q, queue, group, id, leftDeadHead)
+		return ended, w.client.leaveGroup(ctx, q, queue, group, id, leftDeadHead)
 	case s.Finished() && group != "":
-		return w.client.leaveGroup(ctx, q, queue, group, id, leftHead)
+		return ended, w.client.leaveGroup(ctx, q, queue, group, id, leftHead)
 	case s == StateAvailable:
-		return w.client.notifyAvailable(ctx, q, queue)
+		return ended, w.client.notifyAvailable(ctx, q, queue)
 	}
-	return nil
+	return ended, nil
 }
 
 // errorJSON encodes an attempt's error for the errors column.

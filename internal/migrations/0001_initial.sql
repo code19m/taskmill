@@ -158,3 +158,19 @@ CREATE TABLE __SCHEMA__.queue_stats (
 
     PRIMARY KEY (queue, state)
 );
+
+CREATE TABLE __SCHEMA__.activity (
+    minute     timestamptz NOT NULL,
+    queue      text NOT NULL,
+    completed  integer NOT NULL DEFAULT 0,
+    failed     integer NOT NULL DEFAULT 0,
+    scheduled  integer,
+    pending    integer,
+    available  integer,
+    running    integer,
+    retryable  integer,
+    dead       integer,
+    canceled   integer,
+
+    PRIMARY KEY (minute, queue)
+) WITH (fillfactor = 70);

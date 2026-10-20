@@ -27,6 +27,8 @@ Initial release.
   `http.Handler` with optional basic authentication that can also be shown in
   another application's frame, and the `taskmill-ui` command that serves it on
   its own.
+- A day of activity history per minute: task counts and completed and failed
+  attempts, from `Client.Activity` and in the dashboard's charts.
 - The `outbox` package, a transactional outbox that publishes in order per
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.

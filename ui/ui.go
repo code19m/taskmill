@@ -3,7 +3,7 @@
 // schedules, run a schedule now, and retry, cancel, and delete tasks.
 //
 // The interface is rendered on the server with the standard library. A small
-// script, served with it, keeps pages live and adds dialogs and charts; every
+// script, served with it, keeps pages live and adds dialogs; every
 // page also works without it, and nothing needs a JavaScript build step. It
 // reads only through the bounded queries of [taskmill.Client], so it is safe
 // to point at a busy production database.
@@ -225,6 +225,19 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	now := time.Now()
+	span := rangeOf(r.URL.Query().Get("range"))
+	win := windowOf(span, now)
+	// The charts are not worth failing the page for: without their history,
+	// they say so.
+	activity, err := s.client.Activity(ctx, &taskmill.ActivityParams{Since: win.start, Step: win.step})
+	if err != nil && ctx.Err() == nil {
+		s.logger.LogAttrs(ctx, slog.LevelWarn, "read activity failed", slog.Any(logKeyError, err))
+	}
+	tasksChart, attemptsChart := taskChart(activity, win, now), attemptChart(activity, win, now)
+	if err != nil {
+		tasksChart.Note, attemptsChart.Note = "History is unavailable", "History is unavailable"
+	}
 	var nextRun time.Time
 	for _, sc := range schedules {
 		if !sc.Paused && (nextRun.IsZero() || sc.NextRunAt.Before(nextRun)) {
@@ -245,16 +258,22 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	}
 	t := sumQueues(queues)
 	s.render(w, r, http.StatusOK, "overview.html", page{Title: "Overview", Nav: "overview", Dead: t.Dead, Data: struct {
-		Queues      []taskmill.QueueInfo
-		States      []taskmill.State
-		Totals      totals
-		Workers     int
-		Maintainer  string
-		Schedules   int
-		NextRun     time.Time
-		Settings    *taskmill.Settings
-		RefreshedAt time.Time
-	}{queues, queueStates, t, len(workers), maintainer, len(schedules), nextRun, settings, refreshed}})
+		Queues          []taskmill.QueueInfo
+		States          []taskmill.State
+		Totals          totals
+		Workers         int
+		Maintainer      string
+		Schedules       int
+		NextRun         time.Time
+		Settings        *taskmill.Settings
+		RefreshedAt     time.Time
+		Ranges          []chartRange
+		Range           string
+		Tasks, Attempts chart
+	}{
+		queues, queueStates, t, len(workers), maintainer, len(schedules), nextRun, settings, refreshed,
+		chartRanges, span.Name, tasksChart, attemptsChart,
+	}})
 }
 
 func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
