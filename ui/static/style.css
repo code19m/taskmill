@@ -422,7 +422,7 @@ a.chip:hover { text-decoration: none; color: var(--ink); border-color: var(--lin
 .state-dead, .ring-dead { --c: var(--err); }
 .state-canceled, .ring-canceled { --c: var(--ink-ghost); }
 .ring { color: var(--c); flex-shrink: 0; }
-.status { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-soft); font-size: var(--text-label); white-space: nowrap; }
+.status { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-soft); font-size: var(--text-label); white-space: nowrap; }
 
 /* ---------- cards ---------- */
 
