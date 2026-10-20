@@ -75,8 +75,9 @@ type WorkerInfo struct {
 
 // ListParams filters and pages [Client.List].
 type ListParams struct {
-	// Queue limits the result to one queue. Empty means all queues.
-	Queue string
+	// Queues limits the result to tasks of these queues. Empty means all
+	// queues.
+	Queues []string
 
 	// States limits the result to tasks in these states. Empty means all.
 	States []State
@@ -267,6 +268,13 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	if err != nil {
 		return nil, err
 	}
+	queues := make([]string, 0, len(params.Queues)) // nil would be NULL, which matches nothing
+	for _, q := range params.Queues {
+		if q == "" {
+			return nil, invalidArgument("queue name must not be empty")
+		}
+		queues = append(queues, q)
+	}
 
 	var out ListResult
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
@@ -279,7 +287,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 			return err
 		}
 		r, err := tx.Query(ctx, c.sql.listTasks,
-			params.Queue, states, params.Kind, before, limit+1, live, history, params.GroupKey)
+			queues, states, params.Kind, before, limit+1, live, history, params.GroupKey)
 		if err != nil {
 			return err
 		}

@@ -259,7 +259,7 @@ func ExampleMigrations() {
 func ExampleClient_Retry() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
-	params := &taskmill.ListParams{Queue: "emails", States: []taskmill.State{taskmill.StateDead}, Limit: 1000}
+	params := &taskmill.ListParams{Queues: []string{"emails"}, States: []taskmill.State{taskmill.StateDead}, Limit: 1000}
 	for {
 		page, err := client.List(ctx, params)
 		if err != nil {

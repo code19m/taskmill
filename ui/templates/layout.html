@@ -12,23 +12,24 @@
 <script src="{{asset "app.js"}}" defer></script>
 </head>
 <body>
+{{template "sprite"}}
 <a class="skip-link" href="#main">Skip to content</a>
 <header class="appbar">
   <div class="appbar-inner">
     <a class="logo" href="{{path "/"}}" aria-label="taskmill overview">{{template "logo"}}<span>taskmill</span></a>
-    <nav class="nav" aria-label="Sections">
+    <nav class="nav" aria-label="Sections" data-live-part="nav">
       <a class="nav-item" href="{{path "/"}}"{{if eq .Nav "overview"}} aria-current="page"{{end}}>{{template "icon-overview"}}<span>Overview</span></a>
       <a class="nav-item" href="{{path "/tasks"}}"{{if eq .Nav "tasks"}} aria-current="page"{{end}}>{{template "icon-tasks"}}<span>Tasks</span></a>
-      <a class="nav-item" href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>{{template "icon-dead"}}<span>Dead</span><span class="count mono" data-live-part="dead-count">{{if .Dead}}{{num .Dead}}{{end}}</span></a>
+      <a class="nav-item" href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>{{template "icon-dead"}}<span>Dead</span><span class="count mono">{{if .Dead}}{{num .Dead}}{{end}}</span></a>
       <a class="nav-item" href="{{path "/schedules"}}"{{if eq .Nav "schedules"}} aria-current="page"{{end}}>{{template "icon-schedules"}}<span>Schedules</span></a>
       <a class="nav-item" href="{{path "/workers"}}"{{if eq .Nav "workers"}} aria-current="page"{{end}}>{{template "icon-workers"}}<span>Workers</span></a>
     </nav>
     <div class="appbar-tools">
       {{if .ReadOnly}}<span class="read-only-pill" title="Actions are disabled">read-only</span>{{end}}
-      <button type="button" class="btn quiet live" data-live-toggle aria-pressed="true" title="Pause live updates" hidden>
+      <button type="button" class="btn quiet live js-only" data-live-toggle aria-pressed="true" title="Pause live updates">
         <span class="live-dot" aria-hidden="true"></span><span class="live-label">Live</span>
       </button>
-      <div class="seg theme-seg" role="group" aria-label="Theme" hidden>
+      <div class="seg theme-seg js-only" role="group" aria-label="Theme">
         <button type="button" data-theme-option="system" title="System" aria-label="System theme">{{template "icon-device"}}</button>
         <button type="button" data-theme-option="light" title="Light" aria-label="Light theme">{{template "icon-sun"}}</button>
         <button type="button" data-theme-option="dark" title="Dark" aria-label="Dark theme">{{template "icon-moon"}}</button>
@@ -36,9 +37,9 @@
     </div>
   </div>
 </header>
+{{with .Notice}}<div class="toast" role="status" data-toast>{{template "icon-check"}}<span class="toast-message">{{.}}</span></div>{{end}}
 <div class="main">
 <main id="main" class="content" tabindex="-1"{{if .Nav}} data-live{{end}}>
-{{with .Notice}}<div class="toast" role="status" data-toast>{{template "icon-check"}}<span class="toast-message">{{.}}</span></div>{{end}}
 {{end}}
 
 {{define "foot"}}
@@ -69,18 +70,39 @@
 {{define "icon-device"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="2.5" width="12.5" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg>{{end}}
 {{define "icon-sun"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1v1M8 14v1M1 8h1M14 8h1M3 3l.7.7M12.3 12.3l.7.7M3 13l.7-.7M12.3 3.7l.7-.7"/></svg>{{end}}
 {{define "icon-moon"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.8 9.5A6 6 0 0 1 6.5 2.2 6 6 0 1 0 13.8 9.5Z"/></svg>{{end}}
+{{define "icon-chevron"}}<svg class="chev" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>{{end}}
+{{define "icon-tick"}}<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>{{end}}
 {{define "icon-check"}}<svg class="toast-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>{{end}}
 
 {{/* A task state: a ring icon, so that color is never the only cue, and its name. */}}
 {{define "state"}}<span class="status status-{{.}}">{{template "state-icon" .}}<span>{{.}}</span></span>{{end}}
-{{define "state-icon"}}{{$s := print .}}<svg class="ring ring-{{$s}}" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-{{- if or (eq $s "scheduled") (eq $s "pending")}}<circle cx="8" cy="8" r="5.5" stroke-dasharray="2.2 2.2"/>
-{{- else if eq $s "available"}}<circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="2" fill="currentColor" stroke="none"/>
-{{- else if eq $s "running"}}<circle cx="8" cy="8" r="5.5"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor" stroke="none"/>
-{{- else if eq $s "retryable"}}<path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M12.2 1.8v2.6H9.6"/>
-{{- else if eq $s "completed"}}<circle cx="8" cy="8" r="5.5"/><path d="M5.3 8.2l1.9 1.8 3.5-3.6"/>
-{{- else if eq $s "dead"}}<circle cx="8" cy="8" r="5.5"/><path d="M6 6l4 4M10 6l-4 4"/>
-{{- else}}<circle cx="8" cy="8" r="5.5"/><path d="m4.2 4.2 7.6 7.6"/>{{end -}}
+{{define "state-icon"}}<svg class="ring ring-{{.}}" width="13" height="13" aria-hidden="true"><use href="#ring-{{.}}"/></svg>{{end}}
+
+{{/* The state icons, defined once per page and used by reference. */}}
+{{define "sprite"}}<svg class="sprite" aria-hidden="true">
+  <symbol id="ring-scheduled" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.2 2.2"/></symbol>
+  <symbol id="ring-pending" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.2 2.2"/></symbol>
+  <symbol id="ring-available" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="8" r="2" fill="currentColor"/></symbol>
+  <symbol id="ring-running" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 2.5a5.5 5.5 0 0 1 0 11z" fill="currentColor"/></symbol>
+  <symbol id="ring-retryable" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M12.2 1.8v2.6H9.6"/></g></symbol>
+  <symbol id="ring-completed" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.5"/><path d="M5.3 8.2l1.9 1.8 3.5-3.6"/></g></symbol>
+  <symbol id="ring-dead" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="5.5"/><path d="M6 6l4 4M10 6l-4 4"/></g></symbol>
+  <symbol id="ring-canceled" viewBox="0 0 16 16"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8" cy="8" r="5.5"/><path d="m4.2 4.2 7.6 7.6"/></g></symbol>
 </svg>{{end}}
+
+{{/* A multiple choice filter: a menu of checkboxes. Without the script it
+   is a plain details element and the form's Apply button sends it; the
+   script applies each change at once and closes it on an outside click or
+   Escape. */}}
+{{define "multi"}}{{$f := .F}}<details class="sel" data-plural="{{$f.Plural}}">
+  <summary class="ctl sel-btn{{if $f.Empty}} empty{{end}}" aria-label="{{$f.Title}}: {{$f.Label}}"><span class="sel-label">{{$f.Label}}</span>{{template "icon-chevron"}}</summary>
+  <div class="pop" role="group" aria-label="{{$f.Title}}">
+    {{if gt (len $f.Options) 8}}<input class="pop-search js-only" type="search" placeholder="Search" aria-label="Search {{$f.Title}}" autocomplete="off" data-sel-search>{{end}}
+    <div class="pop-list">
+    {{range $f.Options}}<label class="pop-opt"><input type="checkbox" class="chk-input" name="{{$f.Name}}" value="{{.Value}}"{{if .Selected}} checked{{end}}><span class="chk">{{template "icon-tick"}}</span>{{if $.Rings}}{{template "state-icon" .Value}}{{end}}<span class="pop-text">{{.Value}}</span></label>
+    {{else}}<p class="pop-empty">Nothing to choose</p>{{end}}
+    </div>
+  </div>
+</details>{{end}}
 
 {{define "empty"}}<p class="empty-note">{{.}}</p>{{end}}

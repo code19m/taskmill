@@ -171,7 +171,7 @@ func TestListPagesNewestFirst(t *testing.T) {
 		t.Fatalf("completed tasks: %+v", completed.Tasks)
 	}
 	available, err := e.client.List(t.Context(), &taskmill.ListParams{
-		Queue: taskmill.DefaultQueue, States: []taskmill.State{taskmill.StateAvailable}, Kind: "email.send",
+		Queues: []string{taskmill.DefaultQueue}, States: []taskmill.State{taskmill.StateAvailable}, Kind: "email.send",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -179,13 +179,35 @@ func TestListPagesNewestFirst(t *testing.T) {
 	if len(available.Tasks) != 5 {
 		t.Fatalf("got %d available tasks, want 5", len(available.Tasks))
 	}
-
 	if _, err := e.client.List(t.Context(), &taskmill.ListParams{Cursor: "%%%"}); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("bad cursor: got %v", err)
 	}
 	unknown := &taskmill.ListParams{States: []taskmill.State{"bogus"}}
 	if _, err := e.client.List(t.Context(), unknown); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("unknown state: got %v", err)
+	}
+}
+
+func TestListSomeQueues(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for _, q := range []string{"a", "b", "c"} {
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: q})
+	}
+	for _, c := range []struct {
+		queues []string
+		want   int
+	}{{nil, 3}, {[]string{"a", "b"}, 2}, {[]string{"c"}, 1}, {[]string{"none"}, 0}} {
+		res, err := e.client.List(t.Context(), &taskmill.ListParams{Queues: c.queues})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Tasks) != c.want {
+			t.Fatalf("queues %v: got %d tasks, want %d", c.queues, len(res.Tasks), c.want)
+		}
+	}
+	if _, err := e.client.List(t.Context(), &taskmill.ListParams{Queues: []string{""}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("empty queue name: got %v", err)
 	}
 }
 

@@ -110,6 +110,8 @@ func run(getenv func(string) string, logger *slog.Logger) error {
 			ReadOnly: cfg.readOnly, BasicAuth: cfg.auth, Logger: logger,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      30 * time.Second, // pages take at most 10 seconds to read
+		IdleTimeout:       2 * time.Minute,
 	}
 	if cfg.auth == nil {
 		logger.LogAttrs(ctx, slog.LevelWarn,

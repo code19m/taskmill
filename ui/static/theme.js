@@ -3,6 +3,9 @@
 // A page that embeds the interface can pick one with ?theme=light, dark, or
 // system; the choice is remembered.
 (() => {
+  // Controls that need the scripts show from the first paint.
+  document.documentElement.classList.add("js");
+
   const key = "taskmill-theme";
   const valid = (value) => value === "light" || value === "dark";
   let choice = "system";
@@ -38,7 +41,11 @@
         if (value === "system") localStorage.removeItem(key);
         else localStorage.setItem(key, value);
       } catch { /* not remembered */ }
+      // Switch every color at once, not some over a transition.
+      const root = document.documentElement;
+      root.classList.add("switching");
       apply();
+      requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove("switching")));
     },
     apply,
   };

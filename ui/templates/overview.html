@@ -52,7 +52,8 @@
   </div>
   {{if $d.Queues}}
   <div class="table-scroll">
-  <table class="table">
+  <table class="table table-queues">
+    <colgroup><col>{{range $d.States}}<col class="c-count">{{end}}<col class="c-count">{{if not $ro}}<col class="c-act-1">{{end}}</colgroup>
     <thead><tr>
       <th>Queue</th>
       {{range $d.States}}<th class="num cap">{{.}}</th>{{end}}
@@ -61,8 +62,8 @@
     </tr></thead>
     <tbody>
     {{range $q := $d.Queues}}
-      <tr>
-        <td class="nowrap">
+      <tr data-key="{{$q.Name}}">
+        <td title="{{$q.Name}}">
           <a class="strong" href="{{path "/tasks"}}{{query "queue" $q.Name}}">{{$q.Name}}</a>
           {{if $q.Paused}}<span class="chip warn">paused</span>{{end}}
           {{with $q.Settings.MaxRunning}}<span class="chip" title="At most {{.}} running across all workers">max {{.}}</span>{{end}}

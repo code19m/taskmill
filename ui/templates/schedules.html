@@ -8,19 +8,20 @@
 <section class="card flush">
   {{if .Data}}
   <div class="table-scroll">
-  <table class="table">
+  <table class="table table-schedules">
+    <colgroup><col><col class="c-cron"><col class="c-kind"><col class="c-queue"><col class="c-time"><col class="c-time">{{if not $ro}}<col class="c-act-2">{{end}}</colgroup>
     <thead><tr>
       <th>Schedule</th><th>Cron</th><th>Kind</th><th>Queue</th><th>Next run</th><th>Last run</th>
       {{if not $ro}}<th class="actions-col"><span class="visually-hidden">Actions</span></th>{{end}}
     </tr></thead>
     <tbody>{{range $s := .Data}}
-      <tr>
-        <td class="nowrap"><span class="strong">{{$s.Name}}</span>{{if $s.Paused}} <span class="chip warn">paused</span>{{end}}</td>
-        <td class="nowrap"><code class="chip mono">{{$s.Cron}}</code> <span class="tone-ghost">{{$s.Location}}</span></td>
-        <td class="mono">{{$s.Kind}}</td>
-        <td><a href="{{path "/tasks"}}{{query "queue" $s.Queue "kind" $s.Kind}}">{{$s.Queue}}</a></td>
-        <td class="nowrap{{if $s.Paused}} tone-ghost{{end}}" title="{{timestamp $s.NextRunAt}}">{{if $s.Paused}}paused{{else}}{{ago $s.NextRunAt}}{{end}}</td>
-        <td class="nowrap tone-faint" title="{{timestamp $s.LastRunAt}}">{{ago $s.LastRunAt}}</td>
+      <tr data-key="{{$s.Name}}">
+        <td title="{{$s.Name}}"><span class="strong">{{$s.Name}}</span>{{if $s.Paused}} <span class="chip warn">paused</span>{{end}}</td>
+        <td><code class="chip mono">{{$s.Cron}}</code> <span class="tone-ghost">{{$s.Location}}</span></td>
+        <td class="mono" title="{{$s.Kind}}">{{$s.Kind}}</td>
+        <td title="{{$s.Queue}}"><a href="{{path "/tasks"}}{{query "queue" $s.Queue "kind" $s.Kind}}">{{$s.Queue}}</a></td>
+        <td class="{{if $s.Paused}}tone-ghost{{end}}" title="{{timestamp $s.NextRunAt}}">{{if $s.Paused}}paused{{else}}{{ago $s.NextRunAt}}{{end}}</td>
+        <td class="tone-faint" title="{{timestamp $s.LastRunAt}}">{{ago $s.LastRunAt}}</td>
         {{if not $ro}}<td class="actions-col"><div class="row-actions">
           {{if $s.Paused}}
           <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/resume"><button class="btn sm">Resume</button></form>
