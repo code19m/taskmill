@@ -136,6 +136,7 @@ func Handler(client *taskmill.Client, cfg *Config) http.Handler {
 	mux.HandleFunc("GET /{$}", s.overview)
 	mux.HandleFunc("GET /tasks", s.tasks)
 	mux.HandleFunc("GET /tasks/{id}", s.task)
+	mux.HandleFunc("GET /choices/groups", s.groupChoicesJSON)
 	mux.HandleFunc("GET /schedules", s.schedules)
 	mux.HandleFunc("GET /workers", s.workers)
 	mux.HandleFunc("POST /tasks/{id}/{action}", s.taskAction)
@@ -278,9 +279,9 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	states, queues := selected(q["state"]), selected(q["queue"])
+	states, queues, kinds, groups := selected(q["state"]), selected(q["queue"]), selected(q["kind"]), selected(q["group"])
 	params := &taskmill.ListParams{
-		Queues: queues, Kind: q.Get("kind"), GroupKey: q.Get("group"), Cursor: q.Get("cursor"), Limit: pageSize,
+		Queues: queues, Kinds: kinds, GroupKeys: groups, Cursor: q.Get("cursor"), Limit: pageSize,
 	}
 	for _, st := range states {
 		params.States = append(params.States, taskmill.State(st))
@@ -304,6 +305,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	for _, kq := range known {
 		names = append(names, kq.Name)
 	}
+	knownKinds, knownGroups, moreGroups := s.choices(r)
 	newest := maps.Clone(q)
 	newest.Del("cursor")
 	next := ""
@@ -320,18 +322,86 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	for i, st := range listedStates {
 		stateNames[i] = string(st)
 	}
+	groupFilter := newFilter("group", "FIFO group", "groups", knownGroups, groups).searchable()
+	if moreGroups {
+		groupFilter.Source = s.path("/choices/groups")
+	}
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
-		Tasks           []taskmill.TaskInfo
-		States, Queues  filter
-		Kind, Group     string
-		Filtered, Paged bool
-		Newest, Next    string
+		Tasks                         []taskmill.TaskInfo
+		States, Queues, Kinds, Groups filter
+		Filtered, Paged               bool
+		Newest, Next                  string
 	}{
-		res.Tasks, newFilter("state", "State", "states", stateNames, states), newFilter("queue", "Queue", "queues", names, queues),
-		params.Kind, params.GroupKey,
-		len(states)+len(queues) > 0 || params.Kind != "" || params.GroupKey != "", params.Cursor != "",
+		res.Tasks,
+		newFilter("state", "State", "states", stateNames, states),
+		newFilter("queue", "Queue", "queues", names, queues).searchable(),
+		newFilter("kind", "Kind", "kinds", knownKinds, kinds).searchable(),
+		groupFilter,
+		len(states)+len(queues)+len(kinds)+len(groups) > 0, params.Cursor != "",
 		s.path("/tasks?" + newest.Encode()), next,
 	}})
+}
+
+// groupChoices is how many FIFO groups a filter lists; it searches the rest.
+const groupChoices = 100
+
+// choices returns the kinds and FIFO groups that the filters offer: the kinds
+// that workers handle or schedules enqueue, and the first groups with
+// unfinished tasks, and whether there are more groups. The filters are not
+// worth failing the page for: without them, they offer what is chosen.
+func (s *server) choices(r *http.Request) (kinds, groups []string, more bool) {
+	ctx := r.Context()
+	warn := func(what string, err error) {
+		if ctx.Err() == nil {
+			s.logger.LogAttrs(ctx, slog.LevelWarn, "read filter choices failed",
+				slog.String(logKeyTarget, what), slog.Any(logKeyError, err))
+		}
+	}
+	if workers, err := s.client.Workers(ctx); err != nil {
+		warn("workers", err)
+	} else {
+		for _, w := range workers {
+			kinds = append(kinds, w.Kinds...)
+		}
+	}
+	if schedules, err := s.client.Schedules(ctx); err != nil {
+		warn("schedules", err)
+	} else {
+		for _, sc := range schedules {
+			kinds = append(kinds, sc.Kind)
+		}
+	}
+	slices.Sort(kinds)
+	kinds = slices.Compact(kinds)
+	found, err := s.client.Groups(ctx, &taskmill.GroupParams{Limit: groupChoices})
+	if err != nil {
+		warn("groups", err)
+	}
+	for _, g := range found {
+		groups = append(groups, g.Key)
+	}
+	slices.Sort(groups)
+	return kinds, slices.Compact(groups), len(found) == groupChoices
+}
+
+// groupChoicesJSON lists the keys of the FIFO groups that match a search, for
+// the group filter when it has more groups than it lists.
+func (s *server) groupChoicesJSON(w http.ResponseWriter, r *http.Request) {
+	found, err := s.client.Groups(r.Context(), &taskmill.GroupParams{Search: r.URL.Query().Get("search"), Limit: groupChoices})
+	if err != nil {
+		if r.Context().Err() == nil {
+			s.logger.LogAttrs(r.Context(), slog.LevelWarn, "search groups failed", slog.Any(logKeyError, err))
+		}
+		http.Error(w, "taskmill: search failed", http.StatusServiceUnavailable)
+		return
+	}
+	keys := make([]string, 0, len(found))
+	for _, g := range found {
+		keys = append(keys, g.Key)
+	}
+	slices.Sort(keys)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(slices.Compact(keys)) // the client may be gone; there is no one to tell
 }
 
 // filter is a multiple choice filter of the task list.
@@ -341,7 +411,14 @@ type filter struct {
 	Plural  string // what it chooses from
 	Label   string // what the trigger shows: all, the one choice, or how many
 	Empty   bool   // nothing is chosen
+	Search  bool   // its menu has a search box, which can also add any value
+	Source  string // where the search finds choices the menu does not list
 	Options []option
+}
+
+func (f filter) searchable() filter {
+	f.Search = true
+	return f
 }
 
 type option struct {
@@ -349,17 +426,18 @@ type option struct {
 	Selected bool
 }
 
-// newFilter lists all options, followed by chosen values that are not among
-// them, such as a queue that no longer has tasks.
+// newFilter lists the chosen values that are not among all options first,
+// such as a queue that no longer has tasks or a value typed in the search,
+// then all options.
 func newFilter(name, title, plural string, all, chosen []string) filter {
 	f := filter{Name: name, Title: title, Plural: plural, Empty: len(chosen) == 0}
-	for _, v := range all {
-		f.Options = append(f.Options, option{v, slices.Contains(chosen, v)})
-	}
 	for _, v := range chosen {
 		if !slices.Contains(all, v) {
 			f.Options = append(f.Options, option{v, true})
 		}
+	}
+	for _, v := range all {
+		f.Options = append(f.Options, option{v, slices.Contains(chosen, v)})
 	}
 	switch len(chosen) {
 	case 0:
@@ -428,7 +506,7 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 	switch t.State {
 	case taskmill.StateDead:
 		page, err := s.client.List(r.Context(), &taskmill.ListParams{
-			Queues: []string{t.Queue}, GroupKey: t.GroupKey, States: []taskmill.State{taskmill.StatePending}, Limit: groupPeek,
+			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, States: []taskmill.State{taskmill.StatePending}, Limit: groupPeek,
 		})
 		if err != nil {
 			return g, err
@@ -436,7 +514,7 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 		g.Waiting, g.More = len(page.Tasks), page.Next != ""
 	case taskmill.StatePending:
 		page, err := s.client.List(r.Context(), &taskmill.ListParams{
-			Queues: []string{t.Queue}, GroupKey: t.GroupKey, Limit: 1, States: []taskmill.State{
+			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, Limit: 1, States: []taskmill.State{
 				taskmill.StateScheduled, taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateRetryable, taskmill.StateDead,
 			},
 		})
@@ -735,6 +813,7 @@ func (s *server) funcs() template.FuncMap {
 		"percent":   percent,
 		"period":    period,
 		"dict":      dict,
+		"lower":     strings.ToLower,
 		// segment escapes a name for one path segment: queue and schedule
 		// names may hold /, ?, #, or %.
 		"segment": url.PathEscape,

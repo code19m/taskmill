@@ -68,6 +68,7 @@ type WorkerInfo struct {
 	Hostname    string
 	Version     string // taskmill's version in the worker's binary
 	Queues      []string
+	Kinds       []string // the kinds it has handlers for
 	StartedAt   time.Time
 	HeartbeatAt time.Time
 	Maintainer  bool // the worker is the elected maintainer
@@ -82,11 +83,13 @@ type ListParams struct {
 	// States limits the result to tasks in these states. Empty means all.
 	States []State
 
-	// Kind limits the result to one kind. Empty means all kinds.
-	Kind string
+	// Kinds limits the result to tasks of these kinds. Empty means all
+	// kinds.
+	Kinds []string
 
-	// GroupKey limits the result to one FIFO group. Empty means all tasks.
-	GroupKey string
+	// GroupKeys limits the result to the tasks of these FIFO groups. Empty
+	// means all tasks.
+	GroupKeys []string
 
 	// Limit is the page size. Default: 100. Maximum: 1,000.
 	Limit int
@@ -241,7 +244,7 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	var out []WorkerInfo
 	for r.Next() {
 		var w WorkerInfo
-		if err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.StartedAt, &w.HeartbeatAt, &w.Maintainer); err != nil {
+		if err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.StartedAt, &w.HeartbeatAt, &w.Maintainer); err != nil {
 			return nil, fmt.Errorf("taskmill: list workers: %w", err)
 		}
 		out = append(out, w)
@@ -268,12 +271,17 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	if err != nil {
 		return nil, err
 	}
-	queues := make([]string, 0, len(params.Queues)) // nil would be NULL, which matches nothing
-	for _, q := range params.Queues {
-		if q == "" {
-			return nil, invalidArgument("queue name must not be empty")
-		}
-		queues = append(queues, q)
+	queues, err := nonEmpty("queue name", params.Queues)
+	if err != nil {
+		return nil, err
+	}
+	kinds, err := nonEmpty("kind", params.Kinds)
+	if err != nil {
+		return nil, err
+	}
+	groups, err := nonEmpty("group key", params.GroupKeys)
+	if err != nil {
+		return nil, err
 	}
 
 	var out ListResult
@@ -287,7 +295,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 			return err
 		}
 		r, err := tx.Query(ctx, c.sql.listTasks,
-			queues, states, params.Kind, before, limit+1, live, history, params.GroupKey)
+			queues, states, kinds, before, limit+1, live, history, groups)
 		if err != nil {
 			return err
 		}
@@ -310,6 +318,82 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 		out.Next = base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(last, 10)))
 	}
 	return &out, nil
+}
+
+// nonEmpty checks that a filter's values are not empty, and returns them as a
+// slice that is never nil: NULL would match nothing.
+func nonEmpty(what string, values []string) ([]string, error) {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v == "" {
+			return nil, invalidArgument("%s must not be empty", what)
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// GroupParams selects the FIFO groups that [Client.Groups] returns.
+type GroupParams struct {
+	// Queues limits the result to groups of these queues. Empty means all
+	// queues.
+	Queues []string
+
+	// Search limits the result to groups whose keys contain it, ignoring
+	// case. Empty means all groups.
+	Search string
+
+	// Limit is the most groups returned. Default: 100. Maximum: 1,000.
+	Limit int
+}
+
+// GroupInfo is a FIFO group that has unfinished tasks.
+type GroupInfo struct {
+	Queue string
+	Key   string
+	Tasks int // unfinished tasks in the group
+
+	// HaltedBy is the dead task that halts the group, or 0 if it runs.
+	HaltedBy int64
+}
+
+// Groups returns the FIFO groups that have unfinished tasks, ordered by
+// queue and key. Like [Client.List], the query is canceled after 5 seconds.
+func (c *Client) Groups(ctx context.Context, params *GroupParams) ([]GroupInfo, error) {
+	p := GroupParams{}
+	if params != nil {
+		p = *params
+	}
+	switch {
+	case p.Limit == 0:
+		p.Limit = defaultListLimit
+	case p.Limit < 0 || p.Limit > maxListLimit:
+		return nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
+	}
+	queues, err := nonEmpty("queue name", p.Queues)
+	if err != nil {
+		return nil, err
+	}
+	var out []GroupInfo
+	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
+			return err
+		}
+		r, err := tx.Query(ctx, c.sql.listGroups, queues, p.Search, p.Limit)
+		if err != nil {
+			return err
+		}
+		out, err = pgx.CollectRows(r, func(r pgx.CollectableRow) (GroupInfo, error) {
+			var g GroupInfo
+			err := r.Scan(&g.Queue, &g.Key, &g.Tasks, &g.HaltedBy)
+			return g, err
+		})
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("taskmill: list groups: %w", err)
+	}
+	return out, nil
 }
 
 // listStates splits a state filter into the states of unfinished tasks, and

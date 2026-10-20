@@ -116,7 +116,8 @@ func TestQueuesAndWorkers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(workers) != 1 || workers[0].ID == "" || !slices.Equal(workers[0].Queues, []string{"mail"}) {
+		if len(workers) != 1 || workers[0].ID == "" || !slices.Equal(workers[0].Queues, []string{"mail"}) ||
+			!slices.Equal(workers[0].Kinds, []string{"email.send"}) {
 			t.Fatalf("got workers %+v", workers)
 		}
 		return workers[0].Maintainer
@@ -171,7 +172,7 @@ func TestListPagesNewestFirst(t *testing.T) {
 		t.Fatalf("completed tasks: %+v", completed.Tasks)
 	}
 	available, err := e.client.List(t.Context(), &taskmill.ListParams{
-		Queues: []string{taskmill.DefaultQueue}, States: []taskmill.State{taskmill.StateAvailable}, Kind: "email.send",
+		Queues: []string{taskmill.DefaultQueue}, States: []taskmill.State{taskmill.StateAvailable}, Kinds: []string{"email.send"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -211,18 +212,70 @@ func TestListSomeQueues(t *testing.T) {
 	}
 }
 
-func TestListOneGroup(t *testing.T) {
+func TestListSomeGroups(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	a1 := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
-	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"})
+	b := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"})
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "c"})
 	a2 := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
-	page, err := e.client.List(t.Context(), &taskmill.ListParams{GroupKey: "a"})
+	page, err := e.client.List(t.Context(), &taskmill.ListParams{GroupKeys: []string{"a", "b"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page.Tasks) != 2 || page.Tasks[0].ID != a2 || page.Tasks[1].ID != a1 {
-		t.Fatalf("got %+v", page.Tasks)
+	if got := ids(page.Tasks); !slices.Equal(got, []int64{a2, b, a1}) {
+		t.Fatalf("got %v, want %v", got, []int64{a2, b, a1})
+	}
+}
+
+func ids(tasks []taskmill.TaskInfo) []int64 {
+	out := make([]int64, len(tasks))
+	for i, t := range tasks {
+		out[i] = t.ID
+	}
+	return out
+}
+
+func TestGroups(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for _, key := range []string{"Account-1", "account-2", "account-2", "order-9"} {
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: key})
+	}
+	// A dead head halts its group, and the task behind it waits.
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			return taskmill.Permanent(errors.New("rejected"))
+		}, nil),
+		Queues: map[string]taskmill.QueueOptions{"other": {}},
+	})
+	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "other", GroupKey: "order-9"})
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "other", GroupKey: "order-9"})
+	e.waitState(t, head, taskmill.StateDead)
+
+	for _, c := range []struct {
+		params taskmill.GroupParams
+		want   []taskmill.GroupInfo
+	}{
+		{taskmill.GroupParams{Search: "ACCOUNT"}, []taskmill.GroupInfo{
+			{Queue: taskmill.DefaultQueue, Key: "Account-1", Tasks: 1},
+			{Queue: taskmill.DefaultQueue, Key: "account-2", Tasks: 2},
+		}},
+		{taskmill.GroupParams{Queues: []string{"other"}}, []taskmill.GroupInfo{
+			{Queue: "other", Key: "order-9", Tasks: 2, HaltedBy: head},
+		}},
+		{taskmill.GroupParams{Limit: 1}, []taskmill.GroupInfo{{Queue: taskmill.DefaultQueue, Key: "Account-1", Tasks: 1}}},
+	} {
+		got, err := e.client.Groups(t.Context(), &c.params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, c.want) {
+			t.Fatalf("%+v: got %+v, want %+v", c.params, got, c.want)
+		}
+	}
+	if _, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Limit: -1}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("negative limit: got %v", err)
 	}
 }
 

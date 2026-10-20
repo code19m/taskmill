@@ -140,11 +140,11 @@ func TestTaskFilters(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
 	ctx := t.Context()
-	mail, err := client.Enqueue(ctx, greet{Name: "a"}, &taskmill.EnqueueOptions{Queue: "mail"})
+	mail, err := client.Enqueue(ctx, greet{Name: "a"}, &taskmill.EnqueueOptions{Queue: "mail", GroupKey: "acct-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	news, err := client.Enqueue(ctx, greet{Name: "b"}, &taskmill.EnqueueOptions{Queue: "news"})
+	news, err := client.Enqueue(ctx, greet{Name: "b"}, &taskmill.EnqueueOptions{Queue: "news", GroupKey: "acct-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,11 +158,23 @@ func TestTaskFilters(t *testing.T) {
 		{"queue=news", false, true},
 		{"state=dead&state=available&queue=mail", true, false},
 		{"state=dead&state=canceled", false, false},
+		{"group=acct-1&group=acct-2", true, true},
+		{"kind=greet&group=acct-2", false, true},
+		{"kind=other", false, false},
 	} {
 		_, body, _ := get(t, h, "/admin/tasks/tasks?"+c.query)
 		if strings.Contains(body, link(mail.ID)) != c.mail || strings.Contains(body, link(news.ID)) != c.news {
 			t.Fatalf("%s: want mail %v, news %v\n%s", c.query, c.mail, c.news, body)
 		}
+	}
+
+	// The group filter offers the groups that have tasks, and searches them.
+	if _, body, _ := get(t, h, "/admin/tasks/tasks"); !strings.Contains(body, `name="group" value="acct-1"`) {
+		t.Fatalf("the group filter does not offer acct-1\n%s", body)
+	}
+	code, body, header := get(t, h, "/admin/tasks/choices/groups?search=T-2")
+	if code != http.StatusOK || header.Get("Content-Type") != "application/json" || strings.TrimSpace(body) != `["acct-2"]` {
+		t.Fatalf("group search: %d %q", code, body)
 	}
 }
 

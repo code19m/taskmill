@@ -8,8 +8,8 @@
 <form class="filters" method="get" action="{{path "/tasks"}}" data-filters>
   {{template "multi" (dict "F" $d.States "Rings" true)}}
   {{template "multi" (dict "F" $d.Queues)}}
-  <input class="ctl filter-text" name="kind" placeholder="Kind" aria-label="Kind" value="{{$d.Kind}}" autocomplete="off" spellcheck="false">
-  <input class="ctl filter-text" name="group" placeholder="FIFO group" aria-label="FIFO group" value="{{$d.Group}}" autocomplete="off" spellcheck="false">
+  {{template "multi" (dict "F" $d.Kinds "Mono" true)}}
+  {{template "multi" (dict "F" $d.Groups "Mono" true)}}
   <button class="btn" data-apply>Apply</button>
   {{if $d.Filtered}}<a class="btn quiet" href="{{path "/tasks"}}">Clear</a>{{end}}
 </form>

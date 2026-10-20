@@ -99,6 +99,7 @@ type statements struct {
 	updateSettings   string
 	listWorkers      string
 	listTasks        string
+	listGroups       string
 	countStats       string
 	clearStats       string
 	storeStats       string
@@ -575,9 +576,9 @@ RETURNING queue, coalesce(group_key, '')`),
 		queueSettings: q(`SELECT name, paused_at IS NOT NULL, coalesce(max_running, 0) FROM {s}.queues WHERE name = ANY($1)`),
 
 		upsertWorker: q(`
-INSERT INTO {s}.workers (id, queues, hostname, version) VALUES ($1, $2, $3, $4)
+INSERT INTO {s}.workers (id, queues, kinds, hostname, version) VALUES ($1, $2, $5, $3, $4)
 ON CONFLICT (id) DO UPDATE
-SET queues = EXCLUDED.queues, hostname = EXCLUDED.hostname, version = EXCLUDED.version,
+SET queues = EXCLUDED.queues, kinds = EXCLUDED.kinds, hostname = EXCLUDED.hostname, version = EXCLUDED.version,
     started_at = now(), heartbeat_at = now()`),
 		beatWorker:   q(`UPDATE {s}.workers SET heartbeat_at = now() WHERE id = $1`),
 		deleteWorker: q(`DELETE FROM {s}.workers WHERE id = $1`),
@@ -750,7 +751,7 @@ SET history_retention = $1 * interval '1 microsecond', dead_retention = $2 * int
     updated_at = now()`),
 
 		listWorkers: q(`
-SELECT w.id, w.hostname, w.version, w.queues, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL
+SELECT w.id, w.hostname, w.version, w.queues, w.kinds, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL
 FROM {s}.workers w
 LEFT JOIN {s}.leader l ON l.name = 'maintainer' AND l.worker_id = w.id AND l.expires_at > now()
 ORDER BY w.id`),
@@ -763,17 +764,29 @@ SELECT ` + taskColumns + ` FROM (
     (SELECT ` + taskColumns + ` FROM {s}.tasks
      WHERE $6 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
        AND (cardinality($2::text[]) = 0 OR state = ANY($2::text[]::{s}.task_state[]))
-       AND ($3 = '' OR kind = $3) AND ($8 = '' OR group_key = $8) AND id < $4
+       AND (cardinality($3::text[]) = 0 OR kind = ANY($3::text[]))
+       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4
      ORDER BY id DESC LIMIT $5)
     UNION ALL
     (SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(group_key, ''),
             metadata, payload, errors, created_at, run_at, attempted_at, finalized_at
      FROM {s}.task_history
-     WHERE $7 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[])) AND ($3 = '' OR kind = $3) AND ($8 = '' OR group_key = $8) AND id < $4
+     WHERE $7 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
+       AND (cardinality($3::text[]) = 0 OR kind = ANY($3::text[]))
+       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4
      ORDER BY id DESC LIMIT $5)
 ) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
        created_at, run_at, attempted_at, finalized_at)
 ORDER BY id DESC LIMIT $5`),
+
+		// listGroups reads FIFO groups in the order of the primary key, so a
+		// page with no search reads only that many rows of it.
+		listGroups: q(`
+SELECT queue, group_key, tasks, coalesce(halted_task_id, 0) FROM {s}.groups
+WHERE tasks > 0 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
+  AND ($2 = '' OR strpos(lower(group_key), lower($2)) > 0)
+ORDER BY queue, group_key
+LIMIT $3`),
 
 		// countStats counts each queue's tasks per state, except completed
 		// ones. The states whose indexes lead with the queue are counted per

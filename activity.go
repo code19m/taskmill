@@ -102,14 +102,8 @@ func activityParams(params *ActivityParams) (ActivityParams, []string, error) {
 	if p.Since.IsZero() {
 		p.Since = time.Now().Add(-time.Hour)
 	}
-	queues := make([]string, 0, len(p.Queues))
-	for _, q := range p.Queues {
-		if q == "" {
-			return p, nil, invalidArgument("queue name must not be empty")
-		}
-		queues = append(queues, q)
-	}
-	return p, queues, nil
+	queues, err := nonEmpty("queue name", p.Queues)
+	return p, queues, err
 }
 
 // scanActivity reads one row of the activity statement.

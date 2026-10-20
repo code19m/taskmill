@@ -79,7 +79,7 @@ func Enqueued[A taskmill.Args](tb testing.TB, client *taskmill.Client) []*taskmi
 		tb.Fatalf("taskmilltest: %v", err)
 	}
 	var out []*taskmill.Task[A]
-	params := &taskmill.ListParams{Kind: kind, Limit: 1000}
+	params := &taskmill.ListParams{Kinds: []string{kind}, Limit: 1000}
 	for {
 		page, err := client.List(tb.Context(), params)
 		if err != nil {
