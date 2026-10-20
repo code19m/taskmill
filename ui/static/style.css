@@ -8,7 +8,7 @@
   color-scheme: dark;
   --tone-rgb: 255 255 255;
 
-  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --text-xs: 12px;
   --text-sm: 13px;
@@ -33,6 +33,7 @@
 
   --fill-hover: rgb(var(--tone-rgb) / 0.055);
   --fill-selected: rgb(var(--tone-rgb) / 0.09);
+  --glass-1: rgb(var(--tone-rgb) / 0.025);
   --glass-2: var(--fill-hover);
   --line-soft: rgb(var(--tone-rgb) / 0.045);
   --line: rgb(var(--tone-rgb) / 0.055);
@@ -226,7 +227,7 @@ code, pre { font-family: var(--font-mono); }
 .nav-item {
   display: inline-flex; align-items: center; gap: 8px; min-height: 34px; padding: 6px 12px;
   border-radius: var(--radius-sm); white-space: nowrap;
-  color: var(--ink-soft); font-size: var(--text-label);
+  color: var(--ink-soft); font-size: 15px;
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .nav-item:hover { background: var(--fill-hover); color: var(--ink); text-decoration: none; }
@@ -329,7 +330,7 @@ form { display: inline; margin: 0; }
 .ctl {
   width: 100%; min-height: 34px; padding: 6px 10px;
   background: var(--glass-2); border: 1px solid rgb(var(--tone-rgb) / 0.08); border-radius: var(--radius-sm);
-  color: var(--ink); font-family: var(--font-sans); font-size: var(--text-label); line-height: 1.4;
+  color: var(--ink); font-family: var(--font-sans); font-size: 15px; line-height: 1.4;
   transition: border-color var(--motion-fast), background var(--motion-fast);
 }
 .ctl::placeholder { color: var(--ink-ghost); }
@@ -365,7 +366,7 @@ select.ctl option { background: var(--surface-raised); color: var(--ink); }
 .pop-list { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
 .pop-opt {
   position: relative; display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 6px 10px;
-  border-radius: 6px; color: var(--ink-soft); font-size: var(--text-label);
+  border-radius: 6px; color: var(--ink-soft); font-size: 15px;
   cursor: pointer; user-select: none; -webkit-user-select: none;
 }
 .pop-opt:hover { background: var(--fill-selected); color: var(--ink); }
@@ -432,7 +433,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   padding: 12px 16px; border-bottom: 1px solid var(--line);
 }
-.card-head h2 { font-size: var(--text-label); font-weight: 600; }
+.card-head h2 { font-size: var(--text-body); font-weight: 600; color: var(--ink); }
 .card-body { padding: 14px; }
 .card-foot { padding: 10px 16px; border-top: 1px solid var(--line); font-size: var(--text-xs); color: var(--ink-ghost); }
 .stack { display: grid; gap: 16px; align-content: start; min-width: 0; }
@@ -440,9 +441,9 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); gap: 12px; }
 .stat { gap: 6px; }
-.stat-label { display: inline-flex; align-items: center; gap: 7px; font-size: var(--text-label); color: var(--ink-muted); }
+.stat-label { display: inline-flex; align-items: center; gap: 7px; font-size: var(--text-label); font-weight: 500; color: var(--ink-soft); }
 .stat-label > svg:not(.ring) { color: var(--ink-faint); }
-.stat-value { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.stat-value { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .stat.failed .stat-value { color: var(--err); }
 .stat-note { font-size: var(--text-xs); color: var(--ink-ghost); font-variant-numeric: tabular-nums; }
 
@@ -493,9 +494,9 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table-workers { min-width: 940px; }
 .table th {
   padding: 10px 16px; text-align: left; white-space: nowrap;
-  font-size: var(--text-xs); font-weight: 500; color: var(--ink-ghost); border-bottom: 1px solid var(--line);
+  font-size: var(--text-sm); font-weight: 400; color: var(--ink-muted); background: var(--glass-1); border-bottom: 1px solid var(--line);
 }
-.table td { padding: 10px 16px; border-bottom: 1px solid var(--line-soft); color: var(--ink-soft); vertical-align: middle; }
+.table td { padding: 13px 16px; border-bottom: 1px solid var(--line-soft); color: var(--ink-soft); vertical-align: middle; }
 .table tbody tr:last-child td { border-bottom: 0; }
 .table tbody tr { transition: background 0.12s; }
 .table tbody tr:hover { background: var(--fill-hover); }
@@ -568,14 +569,14 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 }
 .chart { margin: 0; padding: 12px 16px; min-width: 0; background: var(--surface-raised); }
 .chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
-.chart-title { font-size: var(--text-sm); font-weight: 500; color: var(--ink-muted); }
+.chart-title { font-size: var(--text-label); font-weight: 500; color: var(--ink-soft); }
 .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: var(--text-xs); color: var(--ink-faint); }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i { width: 10px; height: 2px; border-radius: 1px; background: var(--c); }
-.chart-body { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; }
+.chart-body { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 8px; }
 .chart-y {
   display: flex; flex-direction: column; justify-content: space-between; min-width: 28px; padding: 1px 0;
-  text-align: right; font-size: 11px; color: var(--ink-ghost); font-variant-numeric: tabular-nums; line-height: 1;
+  text-align: right; font-size: var(--text-xs); color: var(--ink-faint); font-variant-numeric: tabular-nums; line-height: 1;
 }
 .chart-plot { position: relative; height: 140px; }
 .chart-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
@@ -592,8 +593,8 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   font-size: var(--text-xs); color: var(--ink-ghost);
 }
 .chart-x {
-  display: flex; justify-content: space-between; margin: 6px 0 0 36px;
-  font-size: 11px; color: var(--ink-ghost); font-variant-numeric: tabular-nums;
+  grid-column: 2; display: flex; justify-content: space-between;
+  font-size: var(--text-xs); color: var(--ink-faint); font-variant-numeric: tabular-nums;
 }
 .seg-sm a { padding: 3px 10px; font-size: var(--text-sm); }
 
