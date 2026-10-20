@@ -1,63 +1,45 @@
 {{define "tasks.html"}}{{template "head" .}}
 {{$d := .Data}}
 <header class="topbar">
-  <h1>{{if eq $d.State "dead"}}Dead tasks{{else}}Tasks{{end}}</h1>
+  <h1>{{.Title}}</h1>
   {{if $d.Paged}}<span class="meta">older</span>{{end}}
 </header>
 <div class="page">
-<nav class="seg seg-wrap" aria-label="Filter by state">
-  <a href="{{path "/tasks"}}{{query "queue" $d.Queue "kind" $d.Kind "group" $d.Group}}"{{if not $d.State}} aria-current="true"{{end}}>All</a>
-  {{range states}}<a href="{{path "/tasks"}}{{query "queue" $d.Queue "kind" $d.Kind "group" $d.Group "state" (print .)}}"{{if eq (print .) $d.State}} aria-current="true"{{end}}>{{template "state-icon" .}}{{.}}</a>{{end}}
-</nav>
-
-<form class="filters" method="get" action="{{path "/tasks"}}" data-autosubmit>
-  {{with $d.State}}<input type="hidden" name="state" value="{{.}}">{{end}}
-  <label class="field">
-    <span>Queue</span>
-    <select class="ctl" name="queue">
-      <option value="">All queues</option>
-      {{range $d.Queues}}<option value="{{.Name}}"{{if eq .Name $d.Queue}} selected{{end}}>{{.Name}}</option>{{end}}
-    </select>
-  </label>
-  <label class="field">
-    <span>Kind</span>
-    <input class="ctl" name="kind" placeholder="email.send_receipt" value="{{$d.Kind}}" autocomplete="off" spellcheck="false">
-  </label>
-  <label class="field">
-    <span>FIFO group</span>
-    <input class="ctl" name="group" placeholder="account-7" value="{{$d.Group}}" autocomplete="off" spellcheck="false">
-  </label>
-  <div class="filters-actions">
-    <button class="btn">Apply</button>
-    {{if $d.Filtered}}<a class="btn quiet" href="{{path "/tasks"}}">Clear</a>{{end}}
-  </div>
+<form class="filters" method="get" action="{{path "/tasks"}}" data-filters>
+  {{template "multi" (dict "F" $d.States "Rings" true)}}
+  {{template "multi" (dict "F" $d.Queues)}}
+  <input class="ctl filter-text" name="kind" placeholder="Kind" aria-label="Kind" value="{{$d.Kind}}" autocomplete="off" spellcheck="false">
+  <input class="ctl filter-text" name="group" placeholder="FIFO group" aria-label="FIFO group" value="{{$d.Group}}" autocomplete="off" spellcheck="false">
+  <button class="btn" data-apply>Apply</button>
+  {{if $d.Filtered}}<a class="btn quiet" href="{{path "/tasks"}}">Clear</a>{{end}}
 </form>
 
 <section class="card flush">
   {{if $d.Tasks}}
   <div class="table-scroll">
-  <table class="table">
+  <table class="table table-tasks">
+    <colgroup><col class="c-id"><col class="c-kind"><col class="c-queue"><col class="c-state"><col class="c-attempt"><col class="c-time"><col class="c-time"><col></colgroup>
     <thead><tr>
       <th class="num">ID</th><th>Kind</th><th>Queue</th><th>State</th><th class="num">Attempt</th>
       <th>Created</th><th>Run at</th><th>Last error</th>
     </tr></thead>
     <tbody>{{range $d.Tasks}}
-      <tr data-href="{{path "/tasks/"}}{{.ID}}">
+      <tr data-href="{{path "/tasks/"}}{{.ID}}" data-key="{{.ID}}">
         <td class="num"><a class="mono strong" href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
-        <td class="mono">{{.Kind}}</td>
-        <td class="nowrap">{{.Queue}}{{if .GroupKey}}<span class="group" title="FIFO group">{{visible .GroupKey}}</span>{{end}}</td>
-        <td class="nowrap">{{template "state" .State}}{{if ne .Priority 2}} <span class="chip priority-{{.Priority}}">{{.Priority}}</span>{{end}}</td>
+        <td class="mono" title="{{.Kind}}">{{.Kind}}</td>
+        <td title="{{.Queue}}{{with .GroupKey}}, FIFO group {{visible .}}{{end}}">{{.Queue}}{{if .GroupKey}}<span class="group">{{visible .GroupKey}}</span>{{end}}</td>
+        <td>{{template "state" .State}}{{if ne .Priority 2}} <span class="chip priority-{{.Priority}}">{{.Priority}}</span>{{end}}</td>
         <td class="num mono">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
-        <td class="nowrap tone-faint" title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>
-        <td class="nowrap tone-faint" title="{{timestamp .RunAt}}">{{ago .RunAt}}</td>
-        <td class="error-cell">{{with lastError .Errors}}<span title="{{.Message}}">{{printf "%.140s" .Message}}</span>{{end}}</td>
+        <td class="tone-faint" title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>
+        <td class="tone-faint" title="{{timestamp .RunAt}}">{{ago .RunAt}}</td>
+        <td class="error-cell">{{with lastError .Errors}}<span title="{{printf "%.300s" .Message}}">{{printf "%.140s" .Message}}</span>{{end}}</td>
       </tr>
     {{end}}</tbody>
   </table>
   </div>
   {{if or $d.Next $d.Paged}}
   <div class="pager">
-    {{if $d.Paged}}<a class="btn sm quiet" href="{{path "/tasks"}}{{query "queue" $d.Queue "kind" $d.Kind "group" $d.Group "state" $d.State}}">Newest</a>{{else}}<span></span>{{end}}
+    {{if $d.Paged}}<a class="btn sm quiet" href="{{$d.Newest}}">Newest</a>{{else}}<span></span>{{end}}
     {{if $d.Next}}<a class="btn sm" href="{{$d.Next}}">Older</a>{{end}}
   </div>
   {{end}}

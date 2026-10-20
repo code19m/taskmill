@@ -757,7 +757,7 @@ ORDER BY w.id`),
 		listTasks: q(`
 SELECT ` + taskColumns + ` FROM (
     (SELECT ` + taskColumns + ` FROM {s}.tasks
-     WHERE $6 AND ($1 = '' OR queue = $1)
+     WHERE $6 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
        AND (cardinality($2::text[]) = 0 OR state = ANY($2::text[]::{s}.task_state[]))
        AND ($3 = '' OR kind = $3) AND ($8 = '' OR group_key = $8) AND id < $4
      ORDER BY id DESC LIMIT $5)
@@ -765,7 +765,7 @@ SELECT ` + taskColumns + ` FROM (
     (SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(group_key, ''),
             metadata, payload, errors, created_at, run_at, attempted_at, finalized_at
      FROM {s}.task_history
-     WHERE $7 AND ($1 = '' OR queue = $1) AND ($3 = '' OR kind = $3) AND ($8 = '' OR group_key = $8) AND id < $4
+     WHERE $7 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[])) AND ($3 = '' OR kind = $3) AND ($8 = '' OR group_key = $8) AND id < $4
      ORDER BY id DESC LIMIT $5)
 ) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
        created_at, run_at, attempted_at, finalized_at)

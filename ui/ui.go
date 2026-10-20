@@ -23,6 +23,8 @@ package ui
 
 import (
 	"bytes"
+	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
@@ -31,14 +33,17 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io/fs"
+	"io"
 	"log/slog"
 	"maps"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/code19m/taskmill"
@@ -61,7 +66,17 @@ const (
 	groupPeek      = 100              // most waiting tasks of a group that a task page counts
 	staleHeartbeat = 30 * time.Second // a worker silent this long is shown as stale
 	statsCap       = 10_000           // the per-queue count cap of the statistics
+	requestTimeout = 10 * time.Second // bound on one request, so a slow database cannot hold it
+	maxChoices     = 100              // most values of one filter that a request may choose
+	gzipMin        = 1024             // smallest response worth compressing
 )
+
+// liveHeader marks the requests of the page's live updates. They are never
+// answered with a login prompt: the page shows that the session ended instead.
+const liveHeader = "X-Taskmill-Live"
+
+// errSlow is why a request that ran out of time was canceled.
+var errSlow = errors.New("the database did not answer in time")
 
 // Config configures the web interface. The zero value is valid.
 type Config struct {
@@ -109,16 +124,15 @@ func Handler(client *taskmill.Client, cfg *Config) http.Handler {
 		prefix:   strings.TrimRight(cfg.Prefix, "/"),
 		readOnly: cfg.ReadOnly,
 		logger:   cfg.Logger,
-		versions: assetVersions(),
 	}
+	s.files, s.versions = loadStatic()
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
 	}
 	s.pages = template.Must(template.New("").Funcs(s.funcs()).ParseFS(assets, "templates/*.html"))
 
-	static, _ := fs.Sub(assets, "static") // the directory is embedded above
 	mux := http.NewServeMux()
-	mux.Handle("GET /static/", http.StripPrefix("/static/", immutable(http.FileServerFS(static))))
+	mux.Handle("GET /static/{name}", s.static())
 	mux.HandleFunc("GET /{$}", s.overview)
 	mux.HandleFunc("GET /tasks", s.tasks)
 	mux.HandleFunc("GET /tasks/{id}", s.task)
@@ -128,7 +142,7 @@ func Handler(client *taskmill.Client, cfg *Config) http.Handler {
 	mux.HandleFunc("POST /queues/{name}/{action}", s.queueAction)
 	mux.HandleFunc("POST /schedules/{name}/{action}", s.scheduleAction)
 
-	h := http.NewCrossOriginProtection().Handler(mux)
+	h := deadline(http.NewCrossOriginProtection().Handler(mux))
 	if s.prefix != "" {
 		h = http.StripPrefix(s.prefix, h)
 	}
@@ -145,6 +159,7 @@ type server struct {
 	readOnly bool
 	logger   *slog.Logger
 	versions map[string]string // static file name to a hash of its content
+	files    map[string]staticFile
 }
 
 // page is what every template receives.
@@ -229,7 +244,7 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	t := sumQueues(queues)
-	s.render(w, r, "overview.html", page{Title: "Overview", Nav: "overview", Dead: t.Dead, Data: struct {
+	s.render(w, r, http.StatusOK, "overview.html", page{Title: "Overview", Nav: "overview", Dead: t.Dead, Data: struct {
 		Queues      []taskmill.QueueInfo
 		States      []taskmill.State
 		Totals      totals
@@ -244,46 +259,110 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	states, queues := selected(q["state"]), selected(q["queue"])
 	params := &taskmill.ListParams{
-		Queue: q.Get("queue"), Kind: q.Get("kind"), GroupKey: q.Get("group"), Cursor: q.Get("cursor"), Limit: pageSize,
+		Queues: queues, Kind: q.Get("kind"), GroupKey: q.Get("group"), Cursor: q.Get("cursor"), Limit: pageSize,
 	}
-	state := q.Get("state")
-	if state != "" {
-		params.States = []taskmill.State{taskmill.State(state)}
+	for _, st := range states {
+		params.States = append(params.States, taskmill.State(st))
 	}
 	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
-		w.WriteHeader(http.StatusBadRequest)
-		s.render(w, r, "error.html", page{Title: "Invalid filter", Data: err.Error()})
+		s.render(w, r, http.StatusBadRequest, "error.html",
+			page{Title: "Invalid filter", Data: problem{err.Error(), "/tasks", "Clear the filters"}})
 		return
 	}
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	queues, err := s.client.Queues(r.Context())
+	known, err := s.client.Queues(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	names := make([]string, 0, len(known))
+	for _, kq := range known {
+		names = append(names, kq.Name)
+	}
+	newest := maps.Clone(q)
+	newest.Del("cursor")
 	next := ""
 	if res.Next != "" {
-		v := maps.Clone(q)
+		v := maps.Clone(newest)
 		v.Set("cursor", res.Next)
 		next = s.path("/tasks?" + v.Encode())
 	}
-	nav := "tasks"
-	if state == string(taskmill.StateDead) {
-		nav = "dead"
+	nav, title := "tasks", "Tasks"
+	if slices.Equal(states, []string{string(taskmill.StateDead)}) {
+		nav, title = "dead", "Dead tasks"
 	}
-	filtered := params.Queue != "" || params.Kind != "" || params.GroupKey != "" || state != ""
-	s.render(w, r, "tasks.html", page{Title: "Tasks", Nav: nav, Dead: sumQueues(queues).Dead, Data: struct {
-		Tasks                     []taskmill.TaskInfo
-		Queues                    []taskmill.QueueInfo
-		Queue, Kind, Group, State string
-		Filtered, Paged           bool
-		Next                      string
-	}{res.Tasks, queues, params.Queue, params.Kind, params.GroupKey, state, filtered, params.Cursor != "", next}})
+	stateNames := make([]string, len(listedStates))
+	for i, st := range listedStates {
+		stateNames[i] = string(st)
+	}
+	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
+		Tasks           []taskmill.TaskInfo
+		States, Queues  filter
+		Kind, Group     string
+		Filtered, Paged bool
+		Newest, Next    string
+	}{
+		res.Tasks, newFilter("state", "State", "states", stateNames, states), newFilter("queue", "Queue", "queues", names, queues),
+		params.Kind, params.GroupKey,
+		len(states)+len(queues) > 0 || params.Kind != "" || params.GroupKey != "", params.Cursor != "",
+		s.path("/tasks?" + newest.Encode()), next,
+	}})
+}
+
+// filter is a multiple choice filter of the task list.
+type filter struct {
+	Name    string // the query parameter
+	Title   string // what it filters by
+	Plural  string // what it chooses from
+	Label   string // what the trigger shows: all, the one choice, or how many
+	Empty   bool   // nothing is chosen
+	Options []option
+}
+
+type option struct {
+	Value    string
+	Selected bool
+}
+
+// newFilter lists all options, followed by chosen values that are not among
+// them, such as a queue that no longer has tasks.
+func newFilter(name, title, plural string, all, chosen []string) filter {
+	f := filter{Name: name, Title: title, Plural: plural, Empty: len(chosen) == 0}
+	for _, v := range all {
+		f.Options = append(f.Options, option{v, slices.Contains(chosen, v)})
+	}
+	for _, v := range chosen {
+		if !slices.Contains(all, v) {
+			f.Options = append(f.Options, option{v, true})
+		}
+	}
+	switch len(chosen) {
+	case 0:
+		f.Label = "All " + plural
+	case 1:
+		f.Label = chosen[0]
+	default:
+		f.Label = strconv.Itoa(len(chosen)) + " " + plural
+	}
+	return f
+}
+
+// selected returns the non-empty values of a repeated query parameter,
+// without duplicates, up to maxChoices of them.
+func selected(values []string) []string {
+	var out []string
+	for _, v := range values[:min(len(values), maxChoices)] {
+		if v != "" && !slices.Contains(out, v) {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // group describes a task's place in its FIFO group.
@@ -314,7 +393,7 @@ func (s *server) task(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.render(w, r, "task.html", page{Title: fmt.Sprintf("Task %d", id), Nav: "tasks", Dead: s.deadCount(r), Data: struct {
+	s.render(w, r, http.StatusOK, "task.html", page{Title: fmt.Sprintf("Task %d", id), Nav: "tasks", Dead: s.deadCount(r), Data: struct {
 		Task  *taskmill.TaskInfo
 		Group group
 	}{info, g}})
@@ -330,7 +409,7 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 	switch t.State {
 	case taskmill.StateDead:
 		page, err := s.client.List(r.Context(), &taskmill.ListParams{
-			Queue: t.Queue, GroupKey: t.GroupKey, States: []taskmill.State{taskmill.StatePending}, Limit: groupPeek,
+			Queues: []string{t.Queue}, GroupKey: t.GroupKey, States: []taskmill.State{taskmill.StatePending}, Limit: groupPeek,
 		})
 		if err != nil {
 			return g, err
@@ -338,7 +417,7 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 		g.Waiting, g.More = len(page.Tasks), page.Next != ""
 	case taskmill.StatePending:
 		page, err := s.client.List(r.Context(), &taskmill.ListParams{
-			Queue: t.Queue, GroupKey: t.GroupKey, Limit: 1, States: []taskmill.State{
+			Queues: []string{t.Queue}, GroupKey: t.GroupKey, Limit: 1, States: []taskmill.State{
 				taskmill.StateScheduled, taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateRetryable, taskmill.StateDead,
 			},
 		})
@@ -359,7 +438,7 @@ func (s *server) schedules(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.render(w, r, "schedules.html", page{Title: "Schedules", Nav: "schedules", Dead: s.deadCount(r), Data: schedules})
+	s.render(w, r, http.StatusOK, "schedules.html", page{Title: "Schedules", Nav: "schedules", Dead: s.deadCount(r), Data: schedules})
 }
 
 func (s *server) workers(w http.ResponseWriter, r *http.Request) {
@@ -368,7 +447,7 @@ func (s *server) workers(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.render(w, r, "workers.html", page{Title: "Workers", Nav: "workers", Dead: s.deadCount(r), Data: workers})
+	s.render(w, r, http.StatusOK, "workers.html", page{Title: "Workers", Nav: "workers", Dead: s.deadCount(r), Data: workers})
 }
 
 // deadCount returns the dead tasks of every queue, or 0 if they cannot be
@@ -472,8 +551,7 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 	case errors.Is(err, taskmill.ErrNotFound):
 		s.notFound(w, r)
 	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrInvalidArgument):
-		w.WriteHeader(http.StatusConflict)
-		s.render(w, r, "error.html", page{Title: "Not possible", Data: err.Error()})
+		s.render(w, r, http.StatusConflict, "error.html", page{Title: "Not possible", Data: problem{err.Error(), target, "Go back"}})
 	default:
 		s.fail(w, r, err)
 	}
@@ -487,26 +565,126 @@ func (s *server) refuseIfReadOnly(w http.ResponseWriter) bool {
 	return true
 }
 
+// problem is what the error page shows: what went wrong, and where to go.
+type problem struct {
+	Message, Back, BackLabel string
+}
+
 func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotFound)
-	s.render(w, r, "error.html", page{Title: "Not found", Data: "Nothing exists at this address. The task may have been deleted."})
+	s.render(w, r, http.StatusNotFound, "error.html", page{Title: "Not found", Data: problem{
+		"Nothing exists at this address. The task may have been deleted.", "/tasks", "Back to the tasks",
+	}})
 }
 
+// fail answers a request whose reads or action failed. A request whose
+// client went away gets no answer, and is not an error of the interface.
 func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
-	s.logger.LogAttrs(r.Context(), slog.LevelError, "web interface request failed",
+	ctx := r.Context()
+	if errors.Is(context.Cause(ctx), errSlow) {
+		s.logger.LogAttrs(ctx, slog.LevelWarn, "web interface request timed out",
+			slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
+		again, label := r.URL.RequestURI(), "Try again"
+		if r.Method != http.MethodGet {
+			again, label = "/", "Back to the overview"
+		}
+		w.Header().Set("Retry-After", "5")
+		s.render(w, r, http.StatusServiceUnavailable, "error.html", page{Title: "Taking too long", Data: problem{
+			"The database did not answer in time. Try again in a moment.", again, label,
+		}})
+		return
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	s.logger.LogAttrs(ctx, slog.LevelError, "web interface request failed",
 		slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
-	w.WriteHeader(http.StatusInternalServerError)
-	s.render(w, r, "error.html", page{Title: "Something went wrong", Data: "The request failed; the server log has the details."})
+	s.render(w, r, http.StatusInternalServerError, "error.html", page{Title: "Something went wrong", Data: problem{
+		"The request failed; the server log has the details.", "/", "Back to the overview",
+	}})
 }
 
-func (s *server) render(w http.ResponseWriter, r *http.Request, name string, p page) {
+// buffers and gzipWriters are reused across requests: live updates render
+// pages every few seconds.
+var buffers, gzipWriters sync.Pool
+
+func getBuffer() *bytes.Buffer {
+	if b, ok := buffers.Get().(*bytes.Buffer); ok {
+		b.Reset()
+		return b
+	}
+	return new(bytes.Buffer)
+}
+
+func getGzip(w io.Writer) *gzip.Writer {
+	if zw, ok := gzipWriters.Get().(*gzip.Writer); ok {
+		zw.Reset(w)
+		return zw
+	}
+	zw, _ := gzip.NewWriterLevel(w, gzip.BestSpeed) // the level is valid
+	return zw
+}
+
+// render executes a page into a buffer before it answers, so that a failed
+// template never sends half a page. A page that the client already has, by
+// its ETag, is answered with 304 Not Modified, and others are compressed when
+// the client accepts it: live updates fetch the page every few seconds.
+func (s *server) render(w http.ResponseWriter, r *http.Request, status int, name string, p page) {
 	p.ReadOnly = s.readOnly
 	p.Notice = notices[r.URL.Query().Get("done")]
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := s.pages.ExecuteTemplate(w, name, p); err != nil {
+	buf := getBuffer()
+	defer buffers.Put(buf)
+	if err := s.pages.ExecuteTemplate(buf, name, p); err != nil {
 		s.logger.LogAttrs(r.Context(), slog.LevelError, "render page failed",
 			slog.String(logKeyPage, name), slog.Any(logKeyError, err))
+		http.Error(w, "taskmill: the page failed to render; the server log has the details", http.StatusInternalServerError)
+		return
 	}
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Vary", "Accept-Encoding")
+	if status == http.StatusOK {
+		sum := sha256.Sum256(buf.Bytes())
+		etag := `W/"` + hex.EncodeToString(sum[:8]) + `"`
+		h.Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
+	body := buf.Bytes()
+	if len(body) >= gzipMin && acceptsGzip(r) {
+		zbuf := getBuffer()
+		defer buffers.Put(zbuf)
+		zw := getGzip(zbuf)
+		_, _ = zw.Write(body) // writes to a buffer cannot fail
+		_ = zw.Close()
+		gzipWriters.Put(zw)
+		body = zbuf.Bytes()
+		h.Set("Content-Encoding", "gzip")
+	}
+	h.Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(status)
+	_, _ = w.Write(body) // the client may be gone; there is no one to tell
+}
+
+func acceptsGzip(r *http.Request) bool {
+	for part := range strings.SplitSeq(r.Header.Get("Accept-Encoding"), ",") {
+		coding, params, _ := strings.Cut(strings.TrimSpace(part), ";")
+		if strings.EqualFold(strings.TrimSpace(coding), "gzip") {
+			return strings.ReplaceAll(params, " ", "") != "q=0"
+		}
+	}
+	return false
+}
+
+// deadline bounds every request, so that a slow database cannot hold the
+// interface's requests, and the connections they use, for long.
+func deadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeoutCause(r.Context(), requestTimeout, errSlow)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // path returns an absolute path inside the interface.
@@ -556,24 +734,60 @@ func (s *server) funcs() template.FuncMap {
 	}
 }
 
-// assetVersions hashes the content of every static file.
-func assetVersions() map[string]string {
-	versions := map[string]string{}
-	entries, _ := assets.ReadDir("static") // the directory is embedded above
-	for _, e := range entries {
-		data, _ := assets.ReadFile("static/" + e.Name())
-		sum := sha256.Sum256(data)
-		versions[e.Name()] = hex.EncodeToString(sum[:4])
-	}
-	return versions
+// staticFile is a static file, kept with its compressed form.
+type staticFile struct {
+	body, gzipped []byte
+	contentType   string
 }
 
-// immutable lets browsers cache static files for a year: their URLs carry a
-// hash of their content.
-func immutable(next http.Handler) http.Handler {
+// loadStatic reads every static file, compresses it once, and hashes its
+// content for its versioned URL.
+func loadStatic() (map[string]staticFile, map[string]string) {
+	files, versions := map[string]staticFile{}, map[string]string{}
+	entries, _ := assets.ReadDir("static") // the directory is embedded above
+	for _, e := range entries {
+		body, _ := assets.ReadFile("static/" + e.Name())
+		sum := sha256.Sum256(body)
+		versions[e.Name()] = hex.EncodeToString(sum[:4])
+		var z bytes.Buffer
+		zw, _ := gzip.NewWriterLevel(&z, gzip.BestCompression) // the level is valid
+		_, _ = zw.Write(body)
+		_ = zw.Close()
+		f := staticFile{body: body, contentType: mime.TypeByExtension(path.Ext(e.Name()))}
+		if z.Len() < len(body) {
+			f.gzipped = z.Bytes()
+		}
+		files[e.Name()] = f
+	}
+	return files, versions
+}
+
+// static serves the static files. A URL with the current version of a file
+// may be cached for a year; any other, such as one from a page that an older
+// server rendered, must be checked again.
+func (s *server) static() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		next.ServeHTTP(w, r)
+		name := r.PathValue("name")
+		f, ok := s.files[name]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		h := w.Header()
+		h.Set("Content-Type", f.contentType)
+		h.Set("Vary", "Accept-Encoding")
+		if r.URL.Query().Get("v") == s.versions[name] {
+			h.Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			h.Set("Cache-Control", "no-cache")
+		}
+		body := f.body
+		if f.gzipped != nil && acceptsGzip(r) {
+			body = f.gzipped
+			h.Set("Content-Encoding", "gzip")
+		}
+		h.Set("Content-Length", strconv.Itoa(len(body)))
+		_, _ = w.Write(body) // the client may be gone; there is no one to tell
 	})
 }
 
@@ -590,7 +804,9 @@ func basicAuth(next http.Handler, auth BasicAuth) http.Handler {
 		gotUser, gotPass := sha256.Sum256([]byte(user)), sha256.Sum256([]byte(pass))
 		match := subtle.ConstantTimeCompare(gotUser[:], wantUser[:]) & subtle.ConstantTimeCompare(gotPass[:], wantPass[:])
 		if !ok || match != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="taskmill", charset="UTF-8"`)
+			if r.Header.Get(liveHeader) == "" {
+				w.Header().Set("WWW-Authenticate", `Basic realm="taskmill", charset="UTF-8"`)
+			}
 			http.Error(w, "taskmill: log in to continue", http.StatusUnauthorized)
 			return
 		}
@@ -623,6 +839,9 @@ func securityHeaders(next http.Handler, ancestors string) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "same-origin")
 		h.Set("Cache-Control", "no-store")
+		if ancestors == "'none'" {
+			h.Set("X-Frame-Options", "DENY") // for browsers without frame-ancestors
+		}
 		next.ServeHTTP(w, r)
 	})
 }

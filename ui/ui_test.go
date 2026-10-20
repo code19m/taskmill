@@ -1,6 +1,7 @@
 package ui_test
 
 import (
+	"compress/gzip"
 	"context"
 	"html"
 	"io"
@@ -41,10 +42,14 @@ func setup(t *testing.T) *taskmill.Client {
 	return client
 }
 
-func get(t *testing.T, h http.Handler, target string) (int, string, http.Header) {
+func get(t *testing.T, h http.Handler, target string, headers ...string) (int, string, http.Header) {
 	t.Helper()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
+	for i := 0; i+1 < len(headers); i += 2 {
+		req.Header.Set(headers[i], headers[i+1])
+	}
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil))
+	h.ServeHTTP(rec, req)
 	body, _ := io.ReadAll(rec.Body)
 	return rec.Code, string(body), rec.Header()
 }
@@ -81,7 +86,7 @@ func TestPagesRender(t *testing.T) {
 		t.Fatalf("overview: %d\n%s", code, body)
 	}
 	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") ||
-		!strings.Contains(csp, "frame-ancestors 'none'") {
+		!strings.Contains(csp, "frame-ancestors 'none'") || header.Get("X-Frame-Options") != "DENY" {
 		t.Fatalf("missing security headers: %v", header)
 	}
 	for _, path := range []string{"/admin/tasks/schedules", "/admin/tasks/workers"} {
@@ -94,7 +99,6 @@ func TestPagesRender(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, `href="/admin/tasks/tasks/`+id+`"`) {
 		t.Fatalf("task list: %d\n%s", code, body)
 	}
-
 	code, body, _ = get(t, h, "/admin/tasks/tasks/"+id)
 	if code != http.StatusOK || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;") {
 		t.Fatalf("task page did not escape the payload: %d\n%s", code, body)
@@ -116,6 +120,59 @@ func TestPagesRender(t *testing.T) {
 	}
 	if code, _, _ = get(t, h, "/admin/tasks/static/style.css"); code != http.StatusOK {
 		t.Fatalf("stylesheet: %d", code)
+	}
+}
+
+func TestTaskFilters(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	ctx := t.Context()
+	mail, err := client.Enqueue(ctx, greet{Name: "a"}, &taskmill.EnqueueOptions{Queue: "mail"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	news, err := client.Enqueue(ctx, greet{Name: "b"}, &taskmill.EnqueueOptions{Queue: "news"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := ui.Handler(client, &ui.Config{Prefix: "/admin/tasks"})
+	link := func(id int64) string { return `href="/admin/tasks/tasks/` + strconv.FormatInt(id, 10) + `"` }
+	for _, c := range []struct {
+		query      string
+		mail, news bool
+	}{
+		{"queue=mail&queue=news", true, true},
+		{"queue=news", false, true},
+		{"state=dead&state=available&queue=mail", true, false},
+		{"state=dead&state=canceled", false, false},
+	} {
+		_, body, _ := get(t, h, "/admin/tasks/tasks?"+c.query)
+		if strings.Contains(body, link(mail.ID)) != c.mail || strings.Contains(body, link(news.ID)) != c.news {
+			t.Fatalf("%s: want mail %v, news %v\n%s", c.query, c.mail, c.news, body)
+		}
+	}
+}
+
+func TestLiveUpdateResponses(t *testing.T) {
+	t.Parallel()
+	h := ui.Handler(setup(t), nil)
+	// Live updates ask for a page they already show, and are told it did not
+	// change; a client that accepts it gets the page compressed.
+	_, plain, header := get(t, h, "/workers")
+	etag := header.Get("ETag")
+	if code, body, _ := get(t, h, "/workers", "If-None-Match", etag); etag == "" || code != http.StatusNotModified || body != "" {
+		t.Fatalf("unchanged page: ETag %q, got %d", etag, code)
+	}
+	code, zipped, header := get(t, h, "/workers", "Accept-Encoding", "gzip")
+	if code != http.StatusOK || header.Get("Content-Encoding") != "gzip" {
+		t.Fatalf("compressed page: %d, %v", code, header)
+	}
+	zr, err := gzip.NewReader(strings.NewReader(zipped))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unzipped, err := io.ReadAll(zr); err != nil || string(unzipped) != plain {
+		t.Fatalf("compressed page differs: %v", err)
 	}
 }
 
@@ -327,6 +384,12 @@ func TestBasicAuth(t *testing.T) {
 			t.Fatalf("credentials %q: got %d, %v", creds, rec.Code, rec.Header())
 		}
 	}
+	// A live update after the password changed must not open a login prompt
+	// every few seconds: the page shows that the session ended instead.
+	code, _, header := get(t, h, "/", "X-Taskmill-Live", "1")
+	if code != http.StatusUnauthorized || header.Get("WWW-Authenticate") != "" {
+		t.Fatalf("live update without credentials: %d, %v", code, header)
+	}
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	req.SetBasicAuth("ops", "s3cret")
 	rec := httptest.NewRecorder()
@@ -348,8 +411,9 @@ func TestFrameAncestors(t *testing.T) {
 	client := setup(t)
 	h := ui.Handler(client, &ui.Config{FrameAncestors: []string{"'self'", "https://admin.example.com"}})
 	_, _, header := get(t, h, "/workers")
-	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'self' https://admin.example.com") {
-		t.Fatalf("got %q", csp)
+	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'self' https://admin.example.com") ||
+		header.Get("X-Frame-Options") != "" {
+		t.Fatalf("got %v", header)
 	}
 
 	defer func() {
@@ -372,6 +436,12 @@ func TestStaticFilesAreVersionedAndCached(t *testing.T) {
 	code, _, header := get(t, h, m[1])
 	if code != http.StatusOK || !strings.Contains(header.Get("Cache-Control"), "immutable") {
 		t.Fatalf("stylesheet: %d, %v", code, header)
+	}
+	// A page from another version of the server links other versions, which
+	// must not be cached as this one.
+	code, _, header = get(t, h, "/static/style.css?v=00000000")
+	if code != http.StatusOK || header.Get("Cache-Control") != "no-cache" {
+		t.Fatalf("stylesheet of another version: %d, %v", code, header)
 	}
 }
 

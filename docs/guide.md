@@ -485,10 +485,16 @@ _, err := client.Enqueue(ctx, HandleOrderEvent{...}, &taskmill.EnqueueOptions{
 
 **The web interface** is a dashboard of queues, tasks, schedules, and
 workers. It shows task counts live, a chart of them while it is open, and
-each task's payload and error history. It can pause and resume queues and
-schedules, run a schedule now, and retry, cancel, and delete tasks. It has
-light and dark themes, works on phones, and works without JavaScript too.
-Use it in one of three ways:
+each task's payload and error history, and filters tasks by several states
+and queues at once. It can pause and resume queues and schedules, run a
+schedule now, and retry, cancel, and delete tasks. It has light and dark
+themes, works on phones, and works without JavaScript too.
+
+It is light on the database and the network. Each request takes at most 10
+seconds. A live update downloads a page only when it changed, compressed,
+and changes only the parts of the screen that differ. While the server is
+out of reach, the page keeps what it shows, says so, and tries again less
+often. Use it in one of three ways:
 
 - **In your application,** behind your own authentication:
 
@@ -523,7 +529,7 @@ own code and tools:
 | Method | Does |
 |---|---|
 | `Get` | Returns a task, unfinished, finished, or from history |
-| `List` | Pages through tasks by queue, state, kind, and FIFO group, newest first |
+| `List` | Pages through tasks by queues, states, kind, and FIFO group, newest first |
 | `Cancel`, `CancelTx` | Cancels a waiting task, or asks a running task's worker to stop it |
 | `Retry` | Runs a dead or canceled task again, with fresh attempts |
 | `Delete` | Deletes a task that is not running |

@@ -2,8 +2,8 @@
 <header class="topbar"><h1>{{.Title}}</h1></header>
 <div class="page">
 <section class="card error-card">
-  <p>{{.Data}}</p>
-  <a class="btn" href="{{path "/"}}">Back to the overview</a>
+  <p>{{.Data.Message}}</p>
+  <a class="btn" href="{{path .Data.Back}}">{{.Data.BackLabel}}</a>
 </section>
 </div>
 {{template "foot" .}}{{end}}

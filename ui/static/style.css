@@ -8,8 +8,8 @@
   color-scheme: dark;
   --tone-rgb: 255 255 255;
 
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   --text-xs: 12px;
   --text-sm: 13px;
   --text-label: 14px;
@@ -23,9 +23,7 @@
   --surface-control: #2d2d2d;
   --surface-backdrop: #282828;
   --surface-glass: rgba(45, 45, 45, 0.92);
-  --surface-glass-sidebar: url("grain.svg"), linear-gradient(180deg, rgba(57, 57, 57, 0.88) 0%, rgba(41, 41, 41, 0.96) 100%);
   --surface-code: rgb(var(--tone-rgb) / 0.05);
-  --glass-blur: 40px;
 
   --ink: #f0f0f0;
   --ink-soft: #d4d4d4;
@@ -83,7 +81,6 @@
   --surface-control: #f1f1f1;
   --surface-backdrop: #f2f2f2;
   --surface-glass: rgba(255, 255, 255, 0.9);
-  --surface-glass-sidebar: url("grain.svg"), linear-gradient(180deg, rgba(246, 246, 246, 0.91) 0%, rgba(241, 241, 241, 0.95) 100%);
   --surface-code: #f5f5f5;
   --ink: #202020;
   --ink-soft: #383838;
@@ -125,7 +122,6 @@
     --surface-control: #f1f1f1;
     --surface-backdrop: #f2f2f2;
     --surface-glass: rgba(255, 255, 255, 0.9);
-    --surface-glass-sidebar: url("grain.svg"), linear-gradient(180deg, rgba(246, 246, 246, 0.91) 0%, rgba(241, 241, 241, 0.95) 100%);
     --surface-code: #f5f5f5;
     --ink: #202020;
     --ink-soft: #383838;
@@ -192,9 +188,13 @@ code, pre { font-family: var(--font-mono); }
 .tone-faint { color: var(--ink-faint); }
 .tone-ghost { color: var(--ink-ghost); }
 .tone-warn { color: var(--warn); }
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 .visually-hidden {
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
+/* Controls that need the script. theme.js marks the page before it paints. */
+:root:not(.js) .js-only { display: none !important; }
+
 .skip-link {
   position: fixed; left: 12px; top: -48px; z-index: 100; padding: 8px 12px;
   border-radius: var(--radius-sm); background: var(--accent); color: var(--on-accent);
@@ -203,12 +203,12 @@ code, pre { font-family: var(--font-mono); }
 
 /* ---------- shell ---------- */
 
+/* The header is solid: a blur behind a sticky bar is recomputed on every
+   scroll frame, which old machines feel. */
 .appbar {
   position: sticky; top: 0; z-index: 40;
-  background: var(--surface-glass-sidebar);
-  backdrop-filter: blur(var(--glass-blur)) saturate(110%);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(110%);
-  border-bottom: 1px solid rgb(var(--tone-rgb) / 0.045);
+  background: var(--surface-sidebar);
+  border-bottom: 1px solid var(--line);
 }
 .appbar-inner {
   max-width: 1320px; margin: 0 auto; height: 56px; padding: 0 28px;
@@ -237,11 +237,24 @@ code, pre { font-family: var(--font-mono); }
 .appbar-tools { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 .live { gap: 8px; color: var(--ink-faint); }
 .live-dot { width: 8px; display: inline-grid; place-items: center; }
-.live-dot::before {
-  content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
-  animation: pulse 2s ease-in-out infinite;
+.live-dot::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.live[aria-pressed="false"] .live-dot::before { background: var(--ink-ghost); }
+.live[data-state="stale"] .live-dot::before, .live[data-state="offline"] .live-dot::before { background: var(--warn); }
+.live[data-state="stale"] .live-label, .live[data-state="offline"] .live-label { color: var(--warn); }
+.live[data-state="signed-out"] .live-dot::before { background: var(--err); }
+.live[data-state="signed-out"] .live-label { color: var(--err); }
+
+/* A thin bar under the header while a navigation or an action is slow. */
+.appbar::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px;
+  background: var(--ink-faint); opacity: 0; transform: scaleX(0); transform-origin: left; pointer-events: none;
 }
-.live[aria-pressed="false"] .live-dot::before { background: var(--ink-ghost); animation: none; }
+.loading .appbar::after { opacity: 1; animation: loading 1.4s var(--ease-out) infinite; }
+.loading body { cursor: progress; }
+@keyframes loading { from { transform: scaleX(0); } to { transform: scaleX(1); opacity: 0; } }
+
+/* Switching themes changes every color at once. */
+.switching *, .switching *::before, .switching *::after { transition: none !important; }
 .theme-seg button { display: inline-grid; place-items: center; padding: 5px 9px; }
 .read-only-pill {
   padding: 3px 7px; border: 1px solid var(--line-strong); border-radius: 5px;
@@ -255,7 +268,7 @@ code, pre { font-family: var(--font-mono); }
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 56px;
 }
 .topbar h1 { white-space: nowrap; font-size: var(--text-heading); font-weight: 600; letter-spacing: -0.01em; }
-.topbar .meta { white-space: nowrap; font-size: var(--text-label); color: var(--ink-ghost); }
+.topbar .meta { white-space: nowrap; font-size: var(--text-label); color: var(--ink-ghost); font-variant-numeric: tabular-nums; }
 .topbar .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .task-heading { display: flex; align-items: center; gap: 10px; }
 .crumb { color: var(--ink-faint); font-size: var(--text-label); }
@@ -265,7 +278,6 @@ code, pre { font-family: var(--font-mono); }
   display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px;
 }
 
-@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 @keyframes modal-in { from { opacity: 0; transform: translateY(5px) scale(0.99); } to { opacity: 1; transform: none; } }
 
 /* ---------- controls ---------- */
@@ -296,6 +308,8 @@ code, pre { font-family: var(--font-mono); }
 }
 .btn.danger-solid { --btn-bg: var(--err); --btn-hover: color-mix(in srgb, var(--err) 88%, var(--ink)); --btn-ink: var(--surface-canvas); }
 .btn.sm { min-height: 28px; padding: 3px 12px; font-size: var(--text-sm); }
+.btn:disabled { opacity: 0.55; cursor: default; }
+[data-js-pending] .btn:disabled { cursor: progress; }
 form { display: inline; margin: 0; }
 
 .seg {
@@ -310,7 +324,6 @@ form { display: inline; margin: 0; }
 }
 .seg button:hover, .seg a:hover { color: var(--ink-soft); text-decoration: none; }
 .seg [aria-current="true"], .seg [aria-pressed="true"] { background: var(--segment-selected); color: var(--ink); font-weight: 500; }
-.seg-wrap { flex-wrap: wrap; max-width: 100%; }
 
 .ctl {
   width: 100%; min-height: 34px; padding: 6px 10px;
@@ -322,10 +335,61 @@ form { display: inline; margin: 0; }
 .ctl:hover { border-color: var(--line-strong); }
 select.ctl option { background: var(--surface-raised); color: var(--ink); }
 
-.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
-.field { display: flex; flex-direction: column; gap: 7px; min-width: 0; flex: 1 1 200px; }
-.field > span { font-size: var(--text-sm); font-weight: 500; color: var(--ink-muted); }
-.filters-actions { display: flex; gap: 6px; }
+.filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.filters > .sel, .filter-text { flex: 0 1 180px; min-width: 0; }
+/* With the script, filters apply as they change; Apply shows only for typed
+   text that is not applied yet. */
+.js .filters:not(.dirty) [data-apply] { display: none; }
+
+/* A multiple choice filter: a details element with a menu of checkboxes. */
+.sel { position: relative; }
+.sel > summary { list-style: none; }
+.sel > summary::-webkit-details-marker { display: none; }
+.sel-btn { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.sel-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sel-btn.empty .sel-label { color: var(--ink-muted); }
+.sel-btn .chev { flex-shrink: 0; color: var(--ink-faint); transition: transform var(--motion-fast) var(--ease-out); }
+.sel[open] > .sel-btn { border-color: var(--line-strong); }
+.sel[open] > .sel-btn .chev { transform: rotate(180deg); }
+.pop {
+  position: absolute; z-index: 50; top: calc(100% + 6px); left: 0;
+  width: max(100%, 230px); max-width: calc(100vw - 32px); max-height: min(400px, 70vh);
+  display: flex; flex-direction: column; padding: 6px;
+  background: var(--surface-glass); border: 1px solid rgb(var(--tone-rgb) / 0.12); border-radius: 14px;
+  backdrop-filter: blur(32px) saturate(140%); -webkit-backdrop-filter: blur(32px) saturate(140%);
+  box-shadow: var(--shadow-modal); animation: modal-in var(--motion-fast) var(--ease-out);
+}
+.pop.pop-end { left: auto; right: 0; }
+.pop.pop-up { top: auto; bottom: calc(100% + 6px); }
+.pop-list { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }
+.pop-opt {
+  position: relative; display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 6px 10px;
+  border-radius: 6px; color: var(--ink-soft); font-size: var(--text-label);
+  cursor: pointer; user-select: none; -webkit-user-select: none;
+}
+.pop-opt:hover { background: var(--fill-selected); color: var(--ink); }
+.pop-opt:has(.chk-input:checked) { color: var(--ink); font-weight: 500; }
+.pop-opt[hidden] { display: none; }
+.pop-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chk-input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.chk {
+  flex-shrink: 0; display: inline-grid; place-items: center; width: 15px; height: 15px;
+  border: 1px solid rgb(var(--tone-rgb) / 0.2); border-radius: 4px; background: rgb(var(--tone-rgb) / 0.03); color: var(--accent);
+}
+.chk svg { opacity: 0; }
+.pop-opt:hover .chk { border-color: var(--ink-muted); }
+.chk-input:checked + .chk {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.chk-input:checked + .chk svg { opacity: 1; }
+.chk-input:focus-visible + .chk { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.pop-search {
+  flex-shrink: 0; width: 100%; margin: 0 0 6px; padding: 6px 9px;
+  background: rgb(var(--tone-rgb) / 0.05); border: 1px solid rgb(var(--tone-rgb) / 0.08); border-radius: 6px;
+  color: var(--ink); font-family: var(--font-sans); font-size: var(--text-label);
+}
+.pop-empty { padding: 12px 10px; font-size: var(--text-xs); color: var(--ink-ghost); text-align: center; }
 
 .chip {
   display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 5px;
@@ -338,7 +402,6 @@ a.chip:hover { text-decoration: none; color: var(--ink); border-color: var(--lin
 .chip.priority-high { color: var(--warn); }
 .chip.priority-critical { color: var(--err); }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
-.table .chips { min-width: 240px; }
 
 /* ---------- status ---------- */
 
@@ -380,7 +443,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .stat-label > svg:not(.ring) { color: var(--ink-faint); }
 .stat-value { font-size: 28px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .stat.failed .stat-value { color: var(--err); }
-.stat-note { font-size: var(--text-xs); color: var(--ink-ghost); }
+.stat-note { font-size: var(--text-xs); color: var(--ink-ghost); font-variant-numeric: tabular-nums; }
 
 .empty-note {
   padding: 12px 8px; border: 1px dashed rgb(var(--tone-rgb) / 0.06); border-radius: var(--radius-md);
@@ -401,8 +464,32 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 
 /* ---------- tables ---------- */
 
+/* Tables have fixed column widths, so a live update that changes a count or
+   a time never moves a column. Text that does not fit ends in an ellipsis
+   and is complete in its tooltip. */
 .table-scroll { overflow-x: auto; }
-.table { width: 100%; border-collapse: collapse; font-size: var(--text-label); }
+.table {
+  width: 100%; border-collapse: collapse; table-layout: fixed;
+  font-size: var(--text-label); font-variant-numeric: tabular-nums;
+}
+.table th, .table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.table td.wrap { white-space: normal; }
+.table col.c-id { width: 92px; }
+.table col.c-state { width: 150px; }
+.table col.c-attempt { width: 96px; }
+.table col.c-time { width: 124px; }
+.table col.c-count { width: 92px; }
+.table col.c-kind { width: 18%; }
+.table col.c-queue { width: 12%; }
+.table col.c-cron { width: 200px; }
+.table col.c-host { width: 22%; }
+.table col.c-version { width: 110px; }
+.table col.c-act-1 { width: 108px; }
+.table col.c-act-2 { width: 206px; }
+.table-tasks { min-width: 1100px; }
+.table-queues { min-width: 980px; }
+.table-schedules { min-width: 1080px; }
+.table-workers { min-width: 940px; }
 .table th {
   padding: 10px 16px; text-align: left; white-space: nowrap;
   font-size: var(--text-xs); font-weight: 500; color: var(--ink-ghost); border-bottom: 1px solid var(--line);
@@ -412,23 +499,20 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table tbody tr { transition: background 0.12s; }
 .table tbody tr:hover { background: var(--fill-hover); }
 .table tr[data-href] { cursor: pointer; }
-.table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.table .num { padding-left: 8px; text-align: right; font-variant-numeric: tabular-nums; }
 .table th.cap { text-transform: capitalize; }
 .table td.num a { color: var(--ink); font-weight: 500; }
 .table td.num a.zero, .table td.zero { color: var(--ink-ghost); font-weight: 400; opacity: .7; }
 .table td.num a.count-dead { color: var(--err); }
 .table td.num a.count-retryable { color: var(--warn); }
 .table td.mono { font-size: var(--text-sm); }
-.table .actions-col { width: 1%; white-space: nowrap; text-align: right; }
+.table .actions-col { text-align: right; }
 .row-actions { display: inline-flex; gap: 6px; }
 .group {
   margin-left: 8px; padding: 1px 6px; border-radius: 5px; background: var(--glass-2);
   color: var(--ink-faint); font-family: var(--font-mono); font-size: var(--text-xs);
 }
-.error-cell {
-  max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--err); font-family: var(--font-mono); font-size: var(--text-xs);
-}
+.error-cell { color: var(--err); font-family: var(--font-mono); font-size: var(--text-xs); }
 .pager { display: flex; justify-content: space-between; padding: 10px 16px; border-top: 1px solid var(--line); }
 
 /* ---------- task ---------- */
@@ -497,12 +581,13 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .modal {
   width: min(460px, calc(100vw - 24px)); padding: 24px;
   background: var(--surface-glass); color: var(--ink);
-  backdrop-filter: blur(var(--glass-blur)) saturate(110%);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(110%);
+  backdrop-filter: blur(32px) saturate(140%);
+  -webkit-backdrop-filter: blur(32px) saturate(140%);
   border: 1px solid var(--line-strong); border-radius: 20px; box-shadow: var(--shadow-modal);
 }
 .modal[open] { animation: modal-in var(--motion-normal) var(--ease-out); }
-.modal::backdrop { background: var(--scrim); backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px); }
+.modal:not([open]) { display: none; } /* browsers without dialog support */
+.modal::backdrop { background: var(--scrim); }
 .modal form { display: block; }
 .modal h2 { margin: 0 0 10px; font-size: var(--text-ui); font-weight: 600; }
 .modal-text { font-size: var(--text-label); color: var(--ink-muted); line-height: 1.5; }
@@ -544,12 +629,22 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   .stat-value { font-size: 24px; }
   .table th, .table td { padding-left: 12px; padding-right: 12px; }
   .toast { right: 16px; width: calc(100vw - 32px); }
+  .filters > .sel, .filter-text { flex: 1 1 calc(50% - 4px); }
+  /* The task list keeps its ID, kind, and state; a row leads to the rest. */
+  .table-tasks { min-width: 0; }
+  .table-tasks col.c-id { width: 64px; }
+  .table-tasks col.c-kind { width: auto; }
+  .table-tasks col.c-state { width: 122px; }
+  .table-tasks col:is(:nth-child(3), :nth-child(n+5)) { width: 0; }
+  .table-tasks :is(th, td):is(:nth-child(3), :nth-child(n+5)) { padding: 0; font-size: 0; }
+}
+@media (pointer: coarse) {
+  .pop-opt, .sel-btn { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 @media (prefers-reduced-transparency: reduce) {
-  .appbar { background: var(--surface-sidebar); backdrop-filter: none; -webkit-backdrop-filter: none; }
-  .modal, .toast { background: var(--surface-raised); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .modal, .toast, .pop { background: var(--surface-raised); backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
