@@ -68,8 +68,8 @@
         {{end}}
         <td class="num{{if not $q.Workers}} zero{{end}}">{{$q.Workers}}</td>
         {{if not $ro}}<td class="actions-col">
-          {{if $q.Paused}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/resume"><button class="btn sm">Resume</button></form>
-          {{else}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/pause" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{$q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">Pause</button></form>{{end}}
+          {{if $q.Paused}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/resume"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
+          {{else}}<form method="post" action="{{path "/queues/"}}{{segment $q.Name}}/pause" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{$q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
         </td>{{end}}
       </tr>
     {{end}}

@@ -3,7 +3,7 @@
 <div class="page">
 <section class="card error-card">
   <p>{{.Data.Message}}</p>
-  <a class="btn" href="{{path .Data.Back}}">{{.Data.BackLabel}}</a>
+  <a class="btn" href="{{path .Data.Back}}">{{template "icon" "back"}}{{.Data.BackLabel}}</a>
 </section>
 </div>
 {{template "foot" .}}{{end}}

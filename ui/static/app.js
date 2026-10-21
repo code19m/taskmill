@@ -82,7 +82,9 @@
       const button = dialog.querySelector("[data-confirm-button]");
       dialog.querySelector("h2").textContent = form.dataset.confirmTitle || "Are you sure?";
       dialog.querySelector("[data-confirm-text]").textContent = form.dataset.confirm;
-      button.textContent = form.dataset.confirmLabel || "Confirm";
+      button.replaceChildren(form.dataset.confirmLabel || "Confirm");
+      const icon = form.querySelector(".icon");
+      if (icon) button.prepend(icon.cloneNode(true));
       button.classList.toggle("primary", !danger);
       button.classList.toggle("danger-solid", danger);
       // Escape closes the dialog without a value: an earlier one must not count.
@@ -371,13 +373,19 @@
     const button = event.target.closest?.("[data-copy]");
     const source = button && document.querySelector(button.dataset.copy);
     if (!source) return;
+    const label = button.lastElementChild;
+    const icon = button.querySelector("use");
     try {
       await navigator.clipboard.writeText(source.textContent);
-      button.textContent = "Copied";
+      label.textContent = "Copied";
+      icon.setAttribute("href", "#i-check");
     } catch {
-      button.textContent = "Select and copy";
+      label.textContent = "Select and copy";
     }
-    setTimeout(() => { button.textContent = "Copy"; }, 1600);
+    setTimeout(() => {
+      label.textContent = "Copy";
+      icon.setAttribute("href", "#i-copy");
+    }, 1600);
   });
 
   // Payload highlighting

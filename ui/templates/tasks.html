@@ -11,7 +11,7 @@
   {{template "multi" (dict "F" $d.Kinds "Mono" true)}}
   {{template "multi" (dict "F" $d.Groups "Mono" true)}}
   <button class="btn" data-apply>Apply</button>
-  {{if $d.Filtered}}<a class="btn quiet" href="{{path "/tasks"}}">Clear</a>{{end}}
+  {{if $d.Filtered}}<a class="btn quiet" href="{{path "/tasks"}}">{{template "icon" "clear"}}Clear</a>{{end}}
 </form>
 
 <section class="card flush">
@@ -39,8 +39,8 @@
   </div>
   {{if or $d.Next $d.Paged}}
   <div class="pager">
-    {{if $d.Paged}}<a class="btn sm quiet" href="{{$d.Newest}}">Newest</a>{{else}}<span></span>{{end}}
-    {{if $d.Next}}<a class="btn sm" href="{{$d.Next}}">Older</a>{{end}}
+    {{if $d.Paged}}<a class="btn sm quiet" href="{{$d.Newest}}">{{template "icon" "first"}}Newest</a>{{else}}<span></span>{{end}}
+    {{if $d.Next}}<a class="btn sm" href="{{$d.Next}}">Older{{template "icon" "next"}}</a>{{end}}
   </div>
   {{end}}
   {{else}}<div class="card-body">{{template "empty" (print (or (and $d.Filtered "No tasks match these filters") "No tasks yet"))}}</div>{{end}}
