@@ -2,7 +2,7 @@
 {{$d := .Data}}{{$ro := .ReadOnly}}
 <header class="topbar">
   <h1>Overview</h1>
-  {{if not $d.RefreshedAt.IsZero}}<span class="meta" title="{{timestamp $d.RefreshedAt}}">counted {{ago $d.RefreshedAt}}</span>{{end}}
+  {{if not $d.RefreshedAt.IsZero}}<span class="meta right" title="{{timestamp $d.RefreshedAt}}">counted {{ago $d.RefreshedAt}}</span>{{end}}
 </header>
 <div class="page">
 <section class="stats" aria-label="Totals">
