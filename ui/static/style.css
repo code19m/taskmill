@@ -157,7 +157,9 @@
 /* ---------- base ---------- */
 
 *, *::before, *::after { box-sizing: border-box; }
-html { background: var(--surface-canvas); -webkit-text-size-adjust: 100%; }
+/* No bounce past the top or bottom: a touchpad's bounce moves the whole page,
+   the sticky header with it. Sideways swipes still go back and forward. */
+html { background: var(--surface-canvas); -webkit-text-size-adjust: 100%; overscroll-behavior-y: none; }
 body {
   margin: 0;
   background: var(--surface-canvas);
