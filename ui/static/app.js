@@ -38,7 +38,11 @@
     .map((node) => node.getAttribute("src") || node.getAttribute("href")).join(" ");
   const assets = assetsOf(document);
 
+  // While the next page loads, a bar slides under the header and the page it
+  // replaces fades back. Leaving shows it for a full load, which the browser
+  // marks only in its own toolbar, if at all.
   const progress = (on) => root.classList.toggle("loading", on);
+  const leaving = () => setTimeout(() => progress(true), SLOW_MS);
 
   // Theme: System, Light, or Dark
 
@@ -336,12 +340,13 @@
     const slow = setTimeout(() => progress(true), SLOW_MS);
     const result = await load(url.href, null);
     clearTimeout(slow);
-    progress(false);
     if (result.kind === "aborted" || filterWaiting) return; // a newer change takes over
     if (result.kind !== "page" || assetsOf(result.doc) !== assets) {
       location.assign(url.href);
+      progress(true);
       return;
     }
+    progress(false);
     history.replaceState(history.state, "", url.href);
     apply(result);
     succeeded();
@@ -353,8 +358,25 @@
     const row = event.target.closest?.("tr[data-href]");
     if (!row || event.target.closest("a, button, form, input, label, summary")) return;
     if (window.getSelection()?.isCollapsed === false) return;
-    if (event.metaKey || event.ctrlKey) window.open(row.dataset.href, "_blank", "noopener");
-    else location.assign(row.dataset.href);
+    if (event.metaKey || event.ctrlKey) {
+      window.open(row.dataset.href, "_blank", "noopener");
+    } else {
+      location.assign(row.dataset.href);
+      leaving();
+    }
+  });
+
+  // A link to another page of this tab. Last, so that a handler above can
+  // take the click instead.
+  document.addEventListener("click", (event) => {
+    const link = event.target.closest?.("a[href]");
+    if (!link || event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if ((link.target && link.target !== "_self") || link.hasAttribute("download")) return;
+    const url = new URL(link.href);
+    if (url.origin !== location.origin) return;
+    if (url.hash && url.pathname === location.pathname && url.search === location.search) return;
+    leaving();
   });
 
   document.addEventListener("keydown", (event) => {
@@ -600,7 +622,9 @@
 
   async function update() {
     if (!live || status === "signed-out" || document.hidden || !livePage()) return;
-    if (busy() || filterWaiting) {
+    // A request in flight is a navigation: it must not be abandoned for an
+    // update of the page it replaces.
+    if (busy() || filterWaiting || inflight) {
       schedule(1000);
       return;
     }
