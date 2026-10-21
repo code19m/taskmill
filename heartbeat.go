@@ -38,10 +38,12 @@ func (w *Worker) heartbeat(ctx context.Context) {
 	}
 	w.mu.Unlock()
 
+	// Leases first: on a slow database they need the beat's time more than
+	// the worker's own row, which only shows that it is alive.
+	w.renewLeases(ctx, ts)
 	if _, err := w.client.pool.Exec(ctx, w.client.sql.beatWorker, w.id); err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "worker heartbeat failed", slog.Any(logKeyError, err))
 	}
-	w.renewLeases(ctx, ts)
 }
 
 // renewLeases renews the leases of ts, and cancels the attempts that lost
