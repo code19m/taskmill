@@ -12,7 +12,7 @@
   const TIMEOUT_MS = 10000; // a request that takes longer is abandoned
   const MAX_WAIT_MS = 60000; // the longest wait between failed updates
   const SLOW_MS = 300; // a navigation that takes longer shows progress
-  const FILTER_WAIT_MS = 250; // filter changes this close apply together
+  const SEARCH_WAIT_MS = 250; // typing this close asks the server once
   const LIVE_KEY = "taskmill-live";
 
   const root = document.documentElement;
@@ -73,7 +73,7 @@
     if (!(form instanceof HTMLFormElement)) return;
     if ("filters" in form.dataset) {
       event.preventDefault();
-      applyFilters(form, 0);
+      applyFilters(form);
       return;
     }
     if ("jsPending" in form.dataset) {
@@ -191,7 +191,7 @@
     field.focus();
     label(sel);
     const form = sel.closest("form");
-    if (form && "filters" in form.dataset) applyFilters(form, 0);
+    if (form && "filters" in form.dataset) applyFilters(form);
   }
 
   // A menu with more choices than it lists asks the server for those that
@@ -226,7 +226,7 @@
       } finally {
         clearTimeout(timer);
       }
-    }, FILTER_WAIT_MS);
+    }, SEARCH_WAIT_MS);
   }
 
   // place opens a menu toward the side with room.
@@ -262,6 +262,11 @@
   for (const type of ["pointerup", "pointercancel"]) {
     document.addEventListener(type, () => { pointerDown = false; }, true);
   }
+
+  // A live update waits while the reader scrolls: rows changing under a
+  // scroll make it stutter on a slow machine.
+  let scrolledAt = 0;
+  document.addEventListener("scroll", () => { scrolledAt = Date.now(); }, { capture: true, passive: true });
 
   // Tab out of a menu closes it. A click inside it can move focus to the page
   // around it, which is not leaving.
@@ -315,23 +320,17 @@
     const box = event.target;
     if (!box.matches?.(".sel .chk-input")) return;
     label(box.closest(".sel"));
-    if (box.form && "filters" in box.form.dataset) applyFilters(box.form, FILTER_WAIT_MS);
+    if (box.form && "filters" in box.form.dataset) applyFilters(box.form);
   });
 
-  let filterTimer = 0;
-  let filterWaiting = false;
-
-  function applyFilters(form, wait) {
-    clearTimeout(filterTimer);
-    filterWaiting = true;
-    filterTimer = setTimeout(() => {
-      filterWaiting = false;
-      const url = new URL(form.action, location.href);
-      for (const [name, value] of new FormData(form)) {
-        if (typeof value === "string" && value !== "") url.searchParams.append(name, value);
-      }
-      navigate(url);
-    }, wait);
+  // applyFilters shows the page for the filters at once. A change made while
+  // the last one loads abandons it, so quick clicks cost no more than one.
+  function applyFilters(form) {
+    const url = new URL(form.action, location.href);
+    for (const [name, value] of new FormData(form)) {
+      if (typeof value === "string" && value !== "") url.searchParams.append(name, value);
+    }
+    navigate(url);
   }
 
   // navigate shows another state of the page in place, such as other filters.
@@ -340,7 +339,7 @@
     const slow = setTimeout(() => progress(true), SLOW_MS);
     const result = await load(url.href, null);
     clearTimeout(slow);
-    if (result.kind === "aborted" || filterWaiting) return; // a newer change takes over
+    if (result.kind === "aborted") return; // a newer change takes over
     if (result.kind !== "page" || assetsOf(result.doc) !== assets) {
       location.assign(url.href);
       progress(true);
@@ -599,6 +598,7 @@
 
   function busy() {
     if (submitting || pointerDown || dialog?.open || document.querySelector("details.sel[open]")) return true;
+    if (Date.now() - scrolledAt < 1000) return true;
     if (document.activeElement?.matches("input:not([type=checkbox]), select, textarea")) return true;
     return window.getSelection()?.isCollapsed === false;
   }
@@ -624,7 +624,7 @@
     if (!live || status === "signed-out" || document.hidden || !livePage()) return;
     // A request in flight is a navigation: it must not be abandoned for an
     // update of the page it replaces.
-    if (busy() || filterWaiting || inflight) {
+    if (busy() || inflight) {
       schedule(1000);
       return;
     }
@@ -636,7 +636,7 @@
         location.reload();
         return;
       }
-      if (busy() || filterWaiting) {
+      if (busy()) {
         schedule(1000);
         return;
       }
