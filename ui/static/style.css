@@ -312,6 +312,11 @@ code, pre { font-family: var(--font-mono); }
 }
 .btn.danger-solid { --btn-bg: var(--err); --btn-hover: color-mix(in srgb, var(--err) 88%, var(--ink)); --btn-ink: var(--surface-canvas); }
 .btn.sm { min-height: 28px; padding: 3px 12px; font-size: var(--text-sm); }
+.icon { flex-shrink: 0; }
+.btn.sm .icon { width: 13px; height: 13px; }
+/* An icon looks farther from the edge than text does: pull it in a little. */
+.btn > .icon:first-child { margin-left: -2px; }
+.btn > .icon:last-child { margin-right: -2px; }
 .btn:disabled { opacity: 0.55; cursor: default; }
 [data-js-pending] .btn:disabled { cursor: progress; }
 form { display: inline; margin: 0; }
@@ -494,8 +499,8 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table col.c-cron { width: 200px; }
 .table col.c-host { width: 22%; }
 .table col.c-version { width: 110px; }
-.table col.c-act-1 { width: 108px; }
-.table col.c-act-2 { width: 206px; }
+.table col.c-act-1 { width: 128px; }
+.table col.c-act-2 { width: 220px; }
 .table-tasks { min-width: 1100px; }
 .table-queues { min-width: 980px; }
 .table-schedules { min-width: 1080px; }

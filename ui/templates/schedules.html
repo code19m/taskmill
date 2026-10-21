@@ -24,10 +24,10 @@
         <td class="tone-faint" title="{{timestamp $s.LastRunAt}}">{{ago $s.LastRunAt}}</td>
         {{if not $ro}}<td class="actions-col"><div class="row-actions">
           {{if $s.Paused}}
-          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/resume"><button class="btn sm">Resume</button></form>
+          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/resume"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
           {{else}}
-          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/run" data-confirm="Its regular timetable stays as it is." data-confirm-title="Run {{$s.Name}} now?" data-confirm-label="Run now"><button class="btn sm">Run now</button></form>
-          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/pause" data-confirm="Runs missed while paused collapse into one when you resume it." data-confirm-title="Pause {{$s.Name}}?" data-confirm-label="Pause schedule"><button class="btn sm quiet">Pause</button></form>
+          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/run" data-confirm="Its regular timetable stays as it is." data-confirm-title="Run {{$s.Name}} now?" data-confirm-label="Run now"><button class="btn sm">{{template "icon" "bolt"}}Run now</button></form>
+          <form method="post" action="{{path "/schedules/"}}{{segment $s.Name}}/pause" data-confirm="Runs missed while paused collapse into one when you resume it." data-confirm-title="Pause {{$s.Name}}?" data-confirm-label="Pause schedule"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>
           {{end}}
         </div></td>{{end}}
       </tr>
