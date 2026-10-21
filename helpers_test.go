@@ -77,6 +77,10 @@ func newEnvWith(t *testing.T, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *e
 	if cfg == nil {
 		cfg = &taskmill.ClientConfig{}
 	}
+	if cfg.Logger == nil {
+		// Warnings show in a failing test's log: a lost lease then says why.
+		cfg.Logger = slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelWarn}))
+	}
 	cfg.Schema = schema
 	client, err := taskmill.NewClient(t.Context(), pool, cfg)
 	if err != nil {

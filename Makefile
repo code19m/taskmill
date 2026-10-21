@@ -57,6 +57,9 @@ tidy: ## Tidy go.mod and go.sum.
 tidy-check: ## Fail if go.mod or go.sum is not tidy.
 	go mod tidy -diff
 
+# The test database is thrown away, so a commit does not wait for the disk:
+# a slow disk on a CI machine would stall heartbeats past the tests' short
+# leases.
 .PHONY: db
 db: ## Start a PostgreSQL container for the tests (TEST_POSTGRES picks the image).
 	@image=$$(docker inspect -f '{{.Config.Image}}' taskmill-test-db 2>/dev/null); \
@@ -64,7 +67,8 @@ db: ## Start a PostgreSQL container for the tests (TEST_POSTGRES picks the image
 		echo "taskmill-test-db runs $$image, not $(TEST_POSTGRES): run \`make db-stop\` first" >&2; exit 1; \
 	fi
 	@docker start taskmill-test-db >/dev/null 2>&1 || docker run -d --name taskmill-test-db -p 54329:5432 \
-		-e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill $(TEST_POSTGRES) -c max_connections=500 >/dev/null
+		-e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill $(TEST_POSTGRES) -c max_connections=500 \
+		-c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
 	@until docker exec taskmill-test-db pg_isready -h 127.0.0.1 -U postgres -q; do sleep 0.2; done
 	@echo "PostgreSQL is ready at $(TEST_DATABASE_URL)"
 
