@@ -7,6 +7,13 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Releases publish `taskmill-ui` binaries for Linux, macOS, and Windows, and
+  a container image, `ghcr.io/code19m/taskmill-ui`, for amd64 and arm64, with
+  checksums, SBOMs, and build provenance attestations.
+- `taskmill-ui` logs its version when it starts.
+
 ## [0.1.0] - 2026-10-25
 
 Initial release.

@@ -33,11 +33,12 @@ development tools into `./bin`. `make help` lists every target:
 | `make db` | Start PostgreSQL in Docker for the tests (`make db-stop` removes it) |
 | `make check` | All CI checks: tidy, lint, test, vulnerability scan |
 | `make fmt` | Format the code with gofumpt and goimports |
-| `make lint` | Run golangci-lint and actionlint |
+| `make lint` | Run golangci-lint, actionlint, and `goreleaser check` |
 | `make test` | Run the tests with the race detector, in random order |
 | `make cover` | Run the tests and open an HTML coverage report |
 | `make vuln` | Scan for known vulnerabilities with govulncheck |
 | `make bench` | Run the benchmarks and the chaos test, printing a Markdown report |
+| `make snapshot` | Build a release into `./dist` and its image into Docker, publishing nothing |
 
 ## Code standards
 
@@ -135,18 +136,53 @@ the same pull request.
 
 ## Releasing
 
-Maintainers release from a green `main`:
+Maintainers release from a green `main`. Pushing a tag publishes the release;
+the steps before and after it are manual:
 
 1. In CHANGELOG.md, move `[Unreleased]` to a section `## [X.Y.Z] - YYYY-MM-DD`.
    Update the links at the bottom: `[Unreleased]` compares `vX.Y.Z...HEAD`,
-   and `[X.Y.Z]` points to the release.
+   and `[X.Y.Z]` points to the release. `make release-notes TAG=vX.Y.Z`
+   prints the section as the release will show it.
 2. Check that `internal/migrations/released_test.go` pins the checksum of
    every migration in the release.
-3. Tag the release commit with an annotated tag, and push it:
-   `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+3. Once that is merged, tag the release commit on `main` with an annotated
+   tag, and push it: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
 4. Make the Go module proxy fetch the version, so pkg.go.dev shows it:
    `GOPROXY=https://proxy.golang.org go list -m github.com/code19m/taskmill@vX.Y.Z`.
-5. Create the GitHub release from that CHANGELOG section.
+
+The tag starts the [release workflow](.github/workflows/release.yml), which
+runs [GoReleaser](https://goreleaser.com) as configured in
+[.goreleaser.yaml](.goreleaser.yaml). It refuses a tag that is not on `main`,
+and publishes:
+
+- the GitHub release, with that CHANGELOG section as its notes. A tag such as
+  `v1.0.0-rc.1` makes a pre-release.
+- `taskmill-ui` archives for Linux, macOS, and Windows, on amd64 and arm64,
+  with `checksums.txt` and an SPDX SBOM for each archive.
+- the container image `ghcr.io/code19m/taskmill-ui`, for linux/amd64 and
+  linux/arm64, tagged `X.Y.Z` and, unless it is a pre-release, `latest`. ko
+  builds it on distroless `static`, running as user 65532, and attaches its
+  SBOM in the registry.
+- a build provenance attestation for every archive, SBOM, and the image,
+  which `gh attestation verify` checks.
+
+The release stays a draft until its attestations exist. If the run fails,
+run it again: it replaces the draft, and pushes the same image again. The
+first release creates the image's package on GitHub; if it is private, make
+it public in the package's settings.
+
+The binaries are built with the latest Go, so they carry its security fixes,
+and they are reproducible: in a checkout of the tag, with the Go version,
+`GOOS`, and `GOARCH` that `go version -m` shows for a binary,
+`CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' ./cmd/taskmill-ui`
+builds the same bytes. `make snapshot` runs the release's build without
+publishing anything, and loads the linux/amd64 image into Docker as
+`goreleaser.ko.local`. Run it after changing `.goreleaser.yaml`.
+
+A nested module, such as `otel`, is released by a tag of its own, such as
+`otel/vX.Y.Z`, and step 4 with its module path. The workflow ignores those
+tags: such a module ships no binaries, and pkg.go.dev shows its versions. So
+it gets no GitHub release, and the releases page stays about taskmill.
 
 Never move or delete a published tag: the Go checksum database keeps every
 version forever. Fix a bad release forward with a new patch release, and
