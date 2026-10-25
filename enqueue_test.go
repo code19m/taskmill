@@ -328,6 +328,36 @@ func TestEnqueueFIFOGroupHasOneHead(t *testing.T) {
 	}
 }
 
+func TestEnqueueAddsContextMetadata(t *testing.T) {
+	t.Parallel()
+	type traceKey struct{}
+	var seen string // what the enqueue middleware saw: ContextMetadata runs outside it
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
+		ContextMetadata: func(ctx context.Context) map[string]string {
+			if v, ok := ctx.Value(traceKey{}).(string); ok {
+				return map[string]string{"traceparent": v, "source": "context"}
+			}
+			return nil
+		},
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{
+			func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+				seen = tasks[0].Metadata["traceparent"]
+				return next(ctx)
+			},
+		},
+	})
+
+	ctx := context.WithValue(t.Context(), traceKey{}, "00-abc-01")
+	res, err := e.client.Enqueue(ctx, sendEmail{}, &taskmill.EnqueueOptions{Metadata: map[string]string{"source": "options"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := e.get(t, res.ID).Metadata
+	if meta["traceparent"] != "00-abc-01" || meta["source"] != "options" || seen != "00-abc-01" {
+		t.Fatalf("got metadata %v; the middleware saw %q", meta, seen)
+	}
+}
+
 func TestEnqueueMiddlewareWrapsEnqueues(t *testing.T) {
 	t.Parallel()
 	var calls []string

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -361,22 +362,20 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
-	t.Cleanup(func() {
+	stop := sync.OnceFunc(func() {
 		cancel()
 		if err := <-done; err != nil {
 			t.Error(err)
 		}
 	})
+	t.Cleanup(stop)
 
 	const available = "messaging.destination.name=backlog taskmill.task.state=available: 3"
-	deadline := time.Now().Add(30 * time.Second)
 	var counts []string
-	for counts = e.points(t, "taskmill.queue.tasks"); !slices.Contains(counts, available); counts = e.points(t, "taskmill.queue.tasks") {
-		if time.Now().After(deadline) {
-			t.Fatalf("the backlog was not counted: %q", counts)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	eventually(t, "the backlog to be counted", func() bool {
+		counts = e.points(t, "taskmill.queue.tasks")
+		return slices.Contains(counts, available)
+	})
 	for _, s := range []string{"scheduled", "pending", "running", "retryable", "dead", "canceled"} {
 		if want := "messaging.destination.name=backlog taskmill.task.state=" + s + ": 0"; !slices.Contains(counts, want) {
 			t.Errorf("no zero for state %s in %q", s, counts)
@@ -386,14 +385,46 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 	if capped := e.points(t, "taskmill.queue.capped"); !slices.Contains(capped, "messaging.destination.name=backlog: 0") {
 		t.Errorf("got capped %q, want 0 for the backlog", capped)
 	}
-	var lag float64
-	for _, p := range e.points(t, "taskmill.queue.lag") {
-		if rest, ok := strings.CutPrefix(p, "messaging.destination.name=backlog: "); ok {
-			lag, _ = strconv.ParseFloat(rest, 64)
+	if lag := e.value(t, "taskmill.queue.lag", "messaging.destination.name=backlog"); lag < 3600 || lag > 3660 {
+		t.Errorf("got lag %v seconds, want about an hour", lag)
+	}
+	age := e.value(t, "taskmill.stats.age", "")
+	if age < 0 || age > 15 {
+		t.Errorf("got statistics %v seconds old, want a fresh count", age)
+	}
+
+	// Without a maintainer, the statistics age.
+	stop()
+	eventually(t, "the statistics to age", func() bool {
+		return e.value(t, "taskmill.stats.age", "") > age+0.5
+	})
+}
+
+// value returns the value of the point of a gauge whose attributes render as
+// attrs, or fails the test if there is none.
+func (e *env) value(t *testing.T, name, attrs string) float64 {
+	t.Helper()
+	for _, p := range e.points(t, name) {
+		if rest, ok := strings.CutPrefix(p, attrs+": "); ok {
+			v, err := strconv.ParseFloat(rest, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return v
 		}
 	}
-	if lag < 3600 || lag > 3660 {
-		t.Errorf("got lag %v seconds, want about an hour", lag)
+	t.Fatalf("%s has no point with attributes %q", name, attrs)
+	return 0
+}
+
+// eventually polls cond until it holds, for up to 30 seconds.
+func eventually(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(30 * time.Second); !cond(); {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

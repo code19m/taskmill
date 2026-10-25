@@ -110,6 +110,10 @@ func TestQueuesAndWorkers(t *testing.T) {
 	if byName["mail"].Workers != 1 || byName["limited"].Settings.MaxRunning != 2 {
 		t.Fatalf("got %+v", byName)
 	}
+	// Queues without tasks are counted too, so they show when.
+	if byName["limited"].RefreshedAt.IsZero() || byName["mail"].RefreshedAt.IsZero() {
+		t.Fatalf("empty queues were not counted: %+v", byName)
+	}
 
 	waitFor(t, "the only worker to be elected maintainer", func() bool {
 		workers, err := e.client.Workers(t.Context())
@@ -140,7 +144,7 @@ func TestQueuesMeasureLag(t *testing.T) {
 	retry := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "retrying"})
 	e.exec(t, "UPDATE {s}.tasks SET state = 'retryable', run_at = now() - interval '30 minutes' WHERE id = $1", retry)
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "idle", RunAt: time.Now().Add(time.Hour)})
-	runWorker(t, e, &taskmill.WorkerConfig{
+	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: noopHandlers(),
 		Queues:   map[string]taskmill.QueueOptions{"mail": {}},
 	})
@@ -164,6 +168,21 @@ func TestQueuesMeasureLag(t *testing.T) {
 	if lag["idle"] != 0 {
 		t.Errorf("got lag %s for a queue without due tasks", lag["idle"])
 	}
+
+	// Without a maintainer, the lag keeps growing, by the database's clock.
+	stop()
+	waitFor(t, "the lag to grow without a maintainer", func() bool {
+		queues, err := e.client.Queues(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range queues {
+			if q.Name == "behind" {
+				return q.Lag > lag["behind"]+500*time.Millisecond
+			}
+		}
+		return false
+	})
 }
 
 func TestListPagesNewestFirst(t *testing.T) {

@@ -743,7 +743,13 @@ LEFT JOIN {s}.queues q ON q.name = n.name
 LEFT JOIN served s ON s.name = n.name
 ORDER BY n.name`),
 
-		queueStats: q(`SELECT queue, state::text, tasks, capped, refreshed_at, oldest_due_at FROM {s}.queue_stats`),
+		// queueStats reads the statistics, with the lag of each count in
+		// microseconds by the database's clock now: 0 for a count without a
+		// due task.
+		queueStats: q(`
+SELECT queue, state::text, tasks, capped, refreshed_at,
+       greatest(0, (extract(epoch FROM now() - oldest_due_at) * 1000000)::bigint)
+FROM {s}.queue_stats`),
 
 		updateSettings: q(`
 UPDATE {s}.settings
@@ -846,10 +852,18 @@ SELECT state::text, queue, count(*), min(run_at) FILTER (WHERE run_at <= now()) 
 ) due GROUP BY state, queue`),
 
 		clearStats: q(`DELETE FROM {s}.queue_stats`),
+		// storeStats stores the counts, and a zero count for every other known
+		// queue, so that each one shows when it was counted, even an empty
+		// installation. $6 marks those zeros as capped once the shared cap
+		// was hit.
 		storeStats: q(`
 INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at, oldest_due_at)
 SELECT q, s::{s}.task_state, n, c, now(), o
-FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[]) AS u(q, s, n, c, o)`),
+FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[]) AS u(q, s, n, c, o)
+UNION ALL
+SELECT k.name, 'available', 0, $6, now(), NULL
+FROM (SELECT name FROM {s}.queues UNION SELECT unnest(queues) FROM {s}.workers) AS k(name)
+WHERE NOT k.name = ANY($1::text[])`),
 
 		// storeActivity copies the counts just stored in queue_stats into the
 		// current minute's activity, with zeros for every other known queue,

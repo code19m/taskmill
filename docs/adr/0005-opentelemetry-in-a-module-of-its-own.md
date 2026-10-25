@@ -70,8 +70,10 @@ Only what the module cannot build on its own, with no dependency:
 1. **Enqueue middleware.** `ClientConfig.EnqueueMiddleware` wraps every
    enqueue: alone, in batches, inside the caller's transaction, and by
    schedules. It sees each task's resolved queue and kind, may change its
-   metadata before the tasks are stored, and sees their results. It replaces
-   `ClientConfig.ContextMetadata`, which it covers in a few lines. A
+   metadata before the tasks are stored, and sees their results. It covers
+   `ClientConfig.ContextMetadata` in a few lines, so that field is
+   deprecated: it runs as the outermost enqueue middleware until v0.3.0
+   removes it, as the compatibility policy asks. A
    middleware that fails after the tasks were stored outside the caller's
    transaction does not fail the enqueue, whose tasks have committed: a retry
    would duplicate them. The worker's `Middleware` already covers attempts.
@@ -79,10 +81,14 @@ Only what the module cannot build on its own, with no dependency:
    waited since its run time: an available task, or a scheduled or retryable
    one whose run time has passed, so overdue retries and a maintainer that
    stopped promoting show too. FIFO tasks that wait behind their group are
-   excluded: they wait by design. The maintainer measures it while it counts,
-   every 10 seconds, and stores it with the counts (migration 2), so
-   `Client.Queues`, which the dashboard reads every few seconds, reads it for
-   free. It is as fresh as the counts, but not capped like them.
+   excluded: they wait by design. The maintainer finds each queue's oldest
+   due task while it counts, every 10 seconds, and stores its run time with
+   the counts (migration 2). `Client.Queues`, which the dashboard reads every
+   few seconds, then measures its age by the database's clock without reading
+   a task. So lag is not capped like the counts, and keeps growing when no
+   maintainer runs, at the cost of reading high for up to one refresh. The
+   maintainer also counts every known queue, also an empty one, so the time of
+   the last count is always known.
 3. **Metadata in deliveries.** `outbox.Delivery.Metadata` carries the stored
    task's metadata, and with it the trace context, to the publisher.
 4. **Error classes.** taskmill's errors name their class, such as
@@ -118,9 +124,12 @@ own attributes use the `taskmill.` namespace: `taskmill.task.kind`,
 - **Metrics.** `messaging.client.sent.messages` for enqueues and publishes,
   `messaging.client.operation.duration` for enqueues, and
   `messaging.process.duration` for attempts, with `error.type` on failures.
-  Three gauges describe the queues: `taskmill.queue.tasks`, per state;
+  Gauges describe the queues: `taskmill.queue.tasks`, per state;
   `taskmill.queue.capped`, which says that a count stopped at its cap; and
-  `taskmill.queue.lag`, which backlog alerts use because it has no cap.
+  `taskmill.queue.lag`, which backlog alerts use because it has no cap. A
+  fourth, `taskmill.stats.age`, says how long ago the maintainer counted: a
+  queue that was empty then shows no lag, so this gauge is the alert for "no
+  maintainer runs".
   Metric attributes are bounded: queue, kind, state, and error type, never a
   task ID or an attempt number.
 
@@ -143,8 +152,8 @@ unless it is given others.
   the consumers behind the broker, and standard metrics, with a few lines of
   setup.
 - The core gains small extension points that other integrations can use
-  too, such as metrics for another system. Applications that used
-  `ContextMetadata` move to enqueue middleware.
+  too, such as metrics for another system. Applications that use
+  `ContextMetadata` move to enqueue middleware before v0.3.0.
 - Releasing takes one more step when the module needs new core features, and
   the repository has two modules to keep tidy, linted, and scanned.
 - Traces of tasks that retry for hours stay open for hours. Backends that

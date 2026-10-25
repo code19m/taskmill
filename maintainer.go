@@ -417,7 +417,8 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 	}
 	// The scheduled and retryable counts share one cap: once it is hit,
 	// any queue may have more of them than counted, even none counted.
-	if dueTotal >= statsDueCap {
+	dueCapped := dueTotal >= statsDueCap
+	if dueCapped {
 		for i := range capped {
 			capped[i] = true
 		}
@@ -427,7 +428,7 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 		if _, err := tx.Exec(ctx, m.c.sql.clearStats); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped, oldest); err != nil {
+		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped, oldest, dueCapped); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, m.c.sql.storeActivity)

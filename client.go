@@ -47,6 +47,14 @@ type ClientConfig struct {
 	// outermost. It can add metadata to tasks, for example to carry a trace
 	// context from the producer to the handler.
 	EnqueueMiddleware []EnqueueMiddleware
+
+	// ContextMetadata, if set, is called on every enqueue and its result is
+	// added to the tasks' metadata. Metadata set in [EnqueueOptions] wins. It
+	// runs as the outermost enqueue middleware.
+	//
+	// Deprecated: use EnqueueMiddleware, which can do the same. ContextMetadata
+	// will be removed in v0.3.0.
+	ContextMetadata func(ctx context.Context) map[string]string
 }
 
 // NewClient returns a client that uses pool for its own statements. cfg may
@@ -79,6 +87,9 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 		logger:            logger,
 		notifier:          newNotifier(pool, schema, logger),
 		enqueueMiddleware: slices.Clone(cfg.EnqueueMiddleware),
+	}
+	if cfg.ContextMetadata != nil {
+		c.enqueueMiddleware = slices.Insert(c.enqueueMiddleware, 0, contextMetadata(cfg.ContextMetadata))
 	}
 	if err := c.checkSchema(ctx); err != nil {
 		return nil, err

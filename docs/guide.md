@@ -703,6 +703,7 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
 | Gauge | `taskmill.queue.tasks` | Tasks per queue and state, up to the caps below. |
 | Gauge | `taskmill.queue.capped` | 1 when a count of the queue stopped at its cap. |
 | Gauge | `taskmill.queue.lag` | How long each queue's oldest due task has waited. Alert on it for backlogs. |
+| Gauge | `taskmill.stats.age` | How long ago the maintainer last counted. Alert when it passes a minute: no maintainer runs. |
 
 - Metrics carry the queue as `messaging.destination.name`, the kind as
   `taskmill.task.kind`, and on failure `error.type`, such as `panic`,
@@ -714,7 +715,9 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
   rollback leaves a span for a task that never existed.
 - The queue gauges describe the whole installation, as the maintainer last
   counted it, every 10 seconds. Every process that reports them reads the
-  same stored values: aggregate them with max, not sum.
+  same stored values: aggregate them with max, not sum. Lag keeps growing
+  when no maintainer runs, but a queue that was empty at the last count
+  shows none: `taskmill.stats.age` catches that.
 - For the outbox, wrap the publisher. Each delivery's span is a child of the
   span that stored the message, and goes to the broker in the message's
   headers, so consumers continue the trace:
@@ -726,9 +729,10 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
 **By hand**, the same extension points serve other tools. Worker
 `Middleware` wraps every attempt and sees its kind, queue, attempt, metadata,
 and timestamps; `ClientConfig.EnqueueMiddleware` wraps every enqueue, and may
-add metadata, such as a trace context, to the tasks it enqueues. Middleware
-that copies values from the context into the metadata, keeping what the
-enqueue set:
+add metadata, such as a trace context, to the tasks it enqueues. This one
+copies values from the context into the metadata, keeping what the enqueue
+set, as the deprecated `ClientConfig.ContextMetadata` does until v0.3.0
+removes it:
 
 ```go
 func FromContext(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
@@ -762,11 +766,13 @@ it succeeds, and the error is logged.
 refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
 backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
 and retryable tasks across all queues. `QueueInfo.Capped` means a count hit
-its cap and is a lower bound. `QueueInfo.Lag`, measured with the counts, is
-how long the queue's oldest due task had waited since its run time: an
-available task, or a scheduled or retryable one whose time had come. It has
-no such cap, so it suits backlog alerts. FIFO tasks waiting behind their
-group do not count.
+its cap and is a lower bound. `QueueInfo.Lag` is how long the queue's oldest
+due task has waited since its run time: an available task, or a scheduled or
+retryable one whose time has come. The maintainer finds that task when it
+counts, and `Client.Queues` measures its age by the database's clock, so lag
+has no cap, suits backlog alerts, and keeps growing when no maintainer runs.
+It may read high for up to one refresh, about 10 seconds. FIFO tasks waiting
+behind their group do not count.
 
 **History** comes from `Client.Activity`: for each minute of the last 24
 hours, the most tasks counted in each state, and the attempts that completed

@@ -45,16 +45,22 @@ type QueueInfo struct {
 	// Counting stops at 10,000 tasks per state, and at 100,000 scheduled
 	// and retryable tasks across all queues; Capped reports that a count
 	// stopped early and is a lower bound.
-	Counts      map[State]int64
-	Capped      bool
-	RefreshedAt time.Time // zero until the maintainer first counts the queue
+	Counts map[State]int64
+	Capped bool
 
-	// Lag is how long the queue's oldest due task had waited since its run
-	// time when the queue was counted: an available task, or a scheduled or
-	// retryable one whose run time had passed. It grows when workers fall
-	// behind or stop, the queue is paused, or due tasks are not promoted.
-	// Tasks pending behind their FIFO group wait by design and do not count.
-	// Zero when no task is due. It is as fresh as the counts.
+	// RefreshedAt is when the maintainer last counted the queue: zero until
+	// it first does. It stops moving when no maintainer runs.
+	RefreshedAt time.Time
+
+	// Lag is how long the queue's oldest due task has waited since its run
+	// time, by the database's clock at the call: an available task, or a
+	// scheduled or retryable one whose run time has passed. It grows when
+	// workers fall behind or stop, the queue is paused, or due tasks are not
+	// promoted, and keeps growing when no maintainer runs. Tasks pending
+	// behind their FIFO group wait by design and do not count. Zero when no
+	// task was due at the last count. The maintainer finds the oldest task
+	// when it counts, so for up to one refresh, about 10 seconds, Lag may
+	// read high: a task that finished since still counts.
 	Lag time.Duration
 }
 
@@ -196,8 +202,8 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 		var n int64
 		var capped bool
 		var at time.Time
-		var oldest *time.Time
-		if err := r.Scan(&name, &state, &n, &capped, &at, &oldest); err != nil {
+		var lag int64
+		if err := r.Scan(&name, &state, &n, &capped, &at, &lag); err != nil {
 			return nil, fmt.Errorf("taskmill: list queues: %w", err)
 		}
 		if i, ok := index[name]; ok {
@@ -205,9 +211,7 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 			q.Counts[State(state)] = n
 			q.Capped = q.Capped || capped
 			q.RefreshedAt = at
-			if oldest != nil {
-				q.Lag = max(q.Lag, at.Sub(*oldest))
-			}
+			q.Lag = max(q.Lag, time.Duration(lag)*time.Microsecond)
 		}
 	}
 	if err := r.Err(); err != nil {

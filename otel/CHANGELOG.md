@@ -20,7 +20,8 @@ Initial release, for taskmill v0.2.0 or newer.
 - Metrics: `messaging.client.sent.messages`,
   `messaging.client.operation.duration`, and `messaging.process.duration`.
 - Gauges of the queues: `taskmill.queue.tasks` per state,
-  `taskmill.queue.capped`, and `taskmill.queue.lag`.
+  `taskmill.queue.capped`, `taskmill.queue.lag`, and `taskmill.stats.age`,
+  which shows that no maintainer runs.
 - A wrapper for the outbox's publisher, which traces each delivery and carries
   the trace to the broker in the message's headers.
 

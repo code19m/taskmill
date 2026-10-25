@@ -301,8 +301,11 @@ bound.
 probe per queue and priority; for `scheduled` and `retryable`, the oldest
 task whose run time has passed, which the count meets first because it reads
 `tasks_due_idx` in run time order. A queue's lag is then the age of its
-oldest `oldest_due_at` when it was counted, which `Client.Queues` reads
-without touching `tasks`. Only if more than 100,000 scheduled and retryable
+oldest `oldest_due_at` by the database's clock, which `Client.Queues`
+computes without touching `tasks`; it keeps growing when no maintainer runs,
+and may read high for up to one refresh. The maintainer also stores a zero
+count for each known queue without tasks, so every queue shows when it was
+last counted. Only if more than 100,000 scheduled and retryable
 tasks are overdue can a queue's overdue tasks fall past the cap; the oldest
 ones, which set the largest lag, are always read.
 

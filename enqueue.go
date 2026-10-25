@@ -101,6 +101,22 @@ type EnqueueResult struct {
 // tasks.
 type EnqueueMiddleware func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error
 
+// contextMetadata is the enqueue middleware of the deprecated
+// [ClientConfig.ContextMetadata]: it adds the metadata that fromCtx returns
+// to the tasks, unless the enqueue set the same key.
+func contextMetadata(fromCtx func(context.Context) map[string]string) EnqueueMiddleware {
+	return func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error {
+		for k, v := range fromCtx(ctx) {
+			for _, task := range tasks {
+				if _, set := task.Metadata[k]; !set {
+					task.Metadata[k] = v
+				}
+			}
+		}
+		return next(ctx)
+	}
+}
+
 // EnqueueTask is a task being enqueued, as [EnqueueMiddleware] sees it.
 // Changes to fields other than Metadata are ignored.
 type EnqueueTask struct {
