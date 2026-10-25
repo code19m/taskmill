@@ -81,8 +81,10 @@ db: ## Start a PostgreSQL container for the tests (TEST_POSTGRES picks the image
 db-stop: ## Remove the test PostgreSQL container.
 	docker rm -f taskmill-test-db
 
-# The release targets read TAG from the environment, in the shell, and never
-# expand it in make: a tag name is not trusted.
+# The release targets read TAG only in the shell, quoted, since a tag name is
+# not trusted. Make passes a TAG from the environment to the shell unchanged,
+# but expands one given on its command line (`make TAG=...`) when it exports
+# it, so the release workflow sets TAG in the environment.
 
 .PHONY: release-check
 release-check: $(GORELEASER) ## Check .goreleaser.yaml (the first run builds GoReleaser, which takes minutes).

@@ -28,9 +28,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache-dependency-path: |
+          cache-dependency-path: | # one cache per job, so that each job can save its own
             go.sum
             Makefile
+            .golangci.yml
       - run: make tidy-check lint
 
   test:
@@ -94,8 +95,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: |
-            go.sum
             Makefile
+            .goreleaser.yaml
+      # The notes recipe runs under CI's make on every pull request, not first
+      # at a release.
+      - name: Check the release notes recipe
+        env:
+          TAG: v0.1.0
+        run: test "$(make -s release-notes | head -n 1)" = "Initial release."
       - run: make release-check
 
   # The one check that branch protection requires, so that changing the
