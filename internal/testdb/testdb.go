@@ -4,6 +4,11 @@
 // TASKMILL_TEST_DATABASE_URL environment variable is unset; `make test` sets
 // it to the database that `make db` starts. Each test gets its own schema, so
 // tests can run in parallel and leave nothing behind.
+//
+// To run the tests through a transaction-pooling proxy such as PgBouncer,
+// point TASKMILL_TEST_DATABASE_URL at the proxy and TASKMILL_TEST_LISTEN_URL
+// at the database itself: workers then listen for notifications on a direct
+// connection, which the proxy cannot provide.
 package testdb
 
 import (
@@ -14,11 +19,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// EnvURL names the environment variable that holds the test database URL.
-const EnvURL = "TASKMILL_TEST_DATABASE_URL"
+// Environment variables that configure the test database.
+const (
+	EnvURL       = "TASKMILL_TEST_DATABASE_URL" // the test database URL
+	EnvListenURL = "TASKMILL_TEST_LISTEN_URL"   // a direct URL, if EnvURL goes through a proxy
+)
 
 // URL returns the test database URL, or skips the test if none is set.
 func URL(tb testing.TB) string {
@@ -28,6 +37,32 @@ func URL(tb testing.TB) string {
 		tb.Skipf("%s is not set; run `make db` and `make test`", EnvURL)
 	}
 	return url
+}
+
+// DirectURL returns a URL that reaches the test database without a proxy:
+// EnvListenURL if it is set, or else EnvURL. Tests that set connection
+// parameters, which proxies refuse, connect with it.
+func DirectURL(tb testing.TB) string {
+	tb.Helper()
+	if url := os.Getenv(EnvListenURL); url != "" {
+		return url
+	}
+	return URL(tb)
+}
+
+// ListenConfig returns the connection that workers listen on: EnvListenURL's,
+// or nil if it is unset, which makes workers listen on their pools'.
+func ListenConfig(tb testing.TB) *pgx.ConnConfig {
+	tb.Helper()
+	url := os.Getenv(EnvListenURL)
+	if url == "" {
+		return nil
+	}
+	cfg, err := pgx.ParseConfig(url)
+	if err != nil {
+		tb.Fatalf("testdb: parse %s: %v", EnvListenURL, err)
+	}
+	return cfg
 }
 
 // Pool returns a pool of up to 8 connections to the test database, closed

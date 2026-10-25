@@ -1,0 +1,37 @@
+name: Faults
+
+# The fault scenarios of docs/benchmarks.md, F1 to F9, at a tenth of their
+# size, against databases of their own. They take about 15 minutes: too long
+# for every pull request, so they run nightly, and on pull requests that
+# change them.
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  pull_request:
+    paths:
+      - internal/cmd/bench/**
+      - .github/workflows/faults.yml
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  faults:
+    name: Fault scenarios
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - run: make faults

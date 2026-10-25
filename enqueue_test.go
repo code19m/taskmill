@@ -354,17 +354,17 @@ func TestEnqueueNotifiesListeners(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	conn, err := e.pool.Acquire(ctx)
+	conn, err := pgx.Connect(ctx, testdb.DirectURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Release()
+	defer func() { _ = conn.Close(t.Context()) }()
 	if _, err := conn.Exec(ctx, "LISTEN "+e.schema); err != nil {
 		t.Fatal(err)
 	}
 
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "mail"})
-	n, err := conn.Conn().WaitForNotification(ctx)
+	n, err := conn.WaitForNotification(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestEnqueueNotifiesListeners(t *testing.T) {
 	for range 5 {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "mail"})
 	}
-	if n, err = conn.Conn().WaitForNotification(ctx); err != nil || n.Payload != "a|mail" {
+	if n, err = conn.WaitForNotification(ctx); err != nil || n.Payload != "a|mail" {
 		t.Fatalf("trailing notification: %v, %v", n, err)
 	}
 }

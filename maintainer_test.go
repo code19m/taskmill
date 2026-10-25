@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -137,6 +140,28 @@ func TestRescueCapsTheBackoffOfManyAttempts(t *testing.T) {
 	}
 }
 
+func TestPromotionStaysOnItsIndexBesideABacklog(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// Run times in the past belong to available tasks, and those of
+	// scheduled tasks are a year ahead. The statistics see the two columns
+	// apart, so they suggest that a quarter of the tasks are due.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'default', 'email.send',
+	                  CASE WHEN i % 2 = 0 THEN 'available' ELSE 'scheduled' END::{s}.task_state,
+	                  now() + CASE WHEN i % 2 = 0 THEN interval '-1 hour' ELSE interval '1 year' END, '{}', 1
+	           FROM generate_series(1, 100000) i`)
+	e.exec(t, "ANALYZE {s}.tasks")
+
+	plan, err := taskmill.ExplainPromote(t.Context(), e.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plan, "Seq Scan") || !strings.Contains(plan, "Index Scan using tasks_due_idx") {
+		t.Fatalf("promotion does not read its indexes:\n%s", plan)
+	}
+}
+
 func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -148,12 +173,14 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 
 	// A transaction that reads history makes the detach wait, and a timeout
 	// interrupts it: the partition is left pending detach.
+	// The timeout is a session setting, which needs a connection of its own.
 	reader := e.begin(t)
 	e.txExec(t, reader, "SELECT count(*) FROM {s}.task_history")
-	conn, err := e.pool.Acquire(t.Context())
+	conn, err := pgx.Connect(t.Context(), testdb.DirectURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = conn.Close(t.Context()) }()
 	detach := replaceSchema(fmt.Sprintf("ALTER TABLE {s}.task_history DETACH PARTITION {s}.%s CONCURRENTLY", part), e.schema)
 	if _, err := conn.Exec(t.Context(), "SET statement_timeout = '200ms'"); err != nil {
 		t.Fatal(err)
@@ -161,10 +188,6 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	if _, err := conn.Exec(t.Context(), detach); err == nil {
 		t.Fatal("detach was not interrupted")
 	}
-	if _, err := conn.Exec(t.Context(), "RESET statement_timeout"); err != nil {
-		t.Fatal(err)
-	}
-	conn.Release()
 	if err := reader.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}

@@ -42,8 +42,12 @@ cover: ## Run all tests and open the coverage report in a browser (needs `make d
 	go tool cover -html=coverage.out
 
 .PHONY: bench
-bench: ## Run the benchmarks and the chaos test against the test database (needs `make db`).
+bench: ## Run the benchmarks and the fault scenarios against the test database (needs `make db`).
 	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go run ./internal/cmd/bench
+
+.PHONY: faults
+faults: ## Run the fault scenarios as CI does, against databases of their own (needs Docker).
+	./internal/cmd/bench/faults.sh
 
 .PHONY: vuln
 vuln: $(GOVULNCHECK) ## Scan for known vulnerabilities.

@@ -835,7 +835,9 @@ mode except notifications, which need a session. pgx caches prepared
 statements, so use PgBouncer 1.21 or newer with `max_prepared_statements`
 set, or set pgx's `DefaultQueryExecMode` to `QueryExecModeExec`. Point
 `WorkerConfig.ListenConfig` at a direct connection, created with
-`pgx.ParseConfig`. Without it, workers fall back to polling.
+`pgx.ParseConfig`. Without it, workers fall back to polling. A nightly CI run
+passes every test through PgBouncer this way (target F8 in
+[Benchmarks](benchmarks.md#reliability-under-faults)).
 
 ```go
 cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec // not needed with max_prepared_statements

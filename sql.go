@@ -598,18 +598,25 @@ RETURNING worker_id`),
 
 		// promoteDue makes a batch of due scheduled and retryable tasks
 		// available, notifies their queues on channel $1, and returns how
-		// many it promoted. It reads the notified CTE, so that it runs. Batch limits are part of the text, so that a
-		// generic plan stays bounded too. Maintenance statements have no
-		// ORDER BY: they repeat until they handle less than a batch, so order
-		// does not matter, and without one the planner never sorts.
+		// many it promoted. It reads the notified CTE, so that it runs. Batch
+		// limits are part of the text, so that a generic plan stays bounded
+		// too. Other maintenance statements have no ORDER BY: they repeat
+		// until they handle less than a batch, so order does not matter, and
+		// without one the planner never sorts. This one orders by run time,
+		// the order of its index, to keep the planner on that index: past run
+		// times belong to available tasks too, so the statistics, which see
+		// state and run time apart, can suggest that many tasks are due, and a
+		// scan of the whole table looks cheaper. Like the fetch, it updates
+		// the tasks through an array of their IDs.
 		promoteDue: q(`
 WITH due AS (
     SELECT id FROM {s}.tasks
     WHERE state IN ('scheduled', 'retryable') AND run_at <= now()
+    ORDER BY run_at
     LIMIT {batch}
     FOR UPDATE SKIP LOCKED
 ), promoted AS (
-    UPDATE {s}.tasks t SET state = 'available' FROM due WHERE t.id = due.id RETURNING t.queue
+    UPDATE {s}.tasks t SET state = 'available' WHERE t.id = ANY(ARRAY(SELECT id FROM due)) RETURNING t.queue
 ), notified AS (
     SELECT count(pg_notify($1, '{available}' || queue)) AS n FROM (SELECT DISTINCT queue FROM promoted) q
 )

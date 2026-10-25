@@ -86,12 +86,20 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 // schemaVersion returns the schema's migration version, or 0 if it has none.
 func schemaVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int, error) {
 	var version int
-	err := pool.QueryRow(ctx, fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)).Scan(&version)
+	sql := fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)
+	err := pool.QueryRow(ctx, sql, unprepared).Scan(&version)
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42P01" { // undefined_table
 		return 0, nil
 	}
 	return version, err
 }
+
+// unprepared runs a statement without preparing it by name. Statements that
+// can fail to parse, such as reads of a table that may not exist yet, use it:
+// PgBouncer keeps the name of a statement whose parse failed, and disconnects
+// the client when it prepares that name again
+// (https://github.com/pgbouncer/pgbouncer/issues/1630).
+const unprepared = pgx.QueryExecModeSimpleProtocol
 
 // applyMigrations applies the migrations that the schema lacks, in tx. One
 // process migrates at a time; the others wait for its lock, then find nothing

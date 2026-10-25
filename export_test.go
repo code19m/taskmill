@@ -49,15 +49,28 @@ func PruneSchedules(ctx context.Context, w *Worker) {
 
 // ExplainFetch returns the plan of a fetch from queue, as a worker runs it.
 func ExplainFetch(ctx context.Context, c *Client, queue string, limit int) (string, error) {
+	return explain(ctx, c, planSettings, c.sql.fetch, queue, limit, int64(1), "w")
+}
+
+// ExplainPromote returns the plan of the statement that promotes due tasks.
+func ExplainPromote(ctx context.Context, c *Client) (string, error) {
+	return explain(ctx, c, "", c.sql.promoteDue, c.schema)
+}
+
+// explain returns the plan of sql, after settings if any, in a transaction
+// that it rolls back.
+func explain(ctx context.Context, c *Client, settings, sql string, args ...any) (string, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, planSettings); err != nil {
-		return "", err
+	if settings != "" {
+		if _, err := tx.Exec(ctx, settings); err != nil {
+			return "", err
+		}
 	}
-	r, err := tx.Query(ctx, "EXPLAIN "+c.sql.fetch, queue, limit, int64(1), "w")
+	r, err := tx.Query(ctx, "EXPLAIN "+sql, args...)
 	if err != nil {
 		return "", err
 	}

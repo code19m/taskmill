@@ -33,11 +33,14 @@ var testTiming = taskmill.Timing{
 }
 
 // newWorker returns a worker with test timing that polls every 50 ms unless
-// cfg says otherwise.
+// cfg says otherwise, and listens as testdb.ListenConfig says.
 func newWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) *taskmill.Worker {
 	t.Helper()
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 50 * time.Millisecond
+	}
+	if cfg.ListenConfig == nil {
+		cfg.ListenConfig = testdb.ListenConfig(t)
 	}
 	w, err := taskmill.NewWorker(e.client, cfg)
 	if err != nil {

@@ -37,7 +37,8 @@ development tools into `./bin`. `make help` lists every target:
 | `make test` | Run the tests with the race detector, in random order |
 | `make cover` | Run the tests and open an HTML coverage report |
 | `make vuln` | Scan for known vulnerabilities with govulncheck |
-| `make bench` | Run the benchmarks and the chaos test, printing a Markdown report |
+| `make bench` | Run the benchmarks and the fault scenarios, printing a Markdown report |
+| `make faults` | Run the fault scenarios as the nightly CI run does, against databases of their own |
 
 ## Code standards
 
