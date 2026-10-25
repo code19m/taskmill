@@ -190,7 +190,7 @@ table, so the counts include calls whose worker died before reporting.
 | F5 | 1 million enqueues of 100,000 dedupe keys from 20 processes at once: exactly 100,000 tasks | 100,000 tasks; 100,000 enqueues reported a new task, 0 results named another task; FIFO groups exact: pass |
 | F6 | PostgreSQL restarted during a run: workers resume within 10 s; no task lost | Shut down cleanly: back after 1.1 s, workers resumed 0.55 s later. Crashed and down for 15 s: workers resumed 0.21 s after it was back. 60,000 completed once, 0 left: pass |
 | F7 | A worker cut off from the database for longer than its lease: its late result is rejected; the task completes once | 0 of 16 tasks completed by the cut worker's stale attempts; 116 completed once, 0 left; the cut worker ran new tasks on its own: pass |
-| F8 | The integration suite behind PgBouncer in transaction mode: passes, with `LISTEN` on a direct connection | Every test passes through PgBouncer 1.25.2, after a fix: pass |
+| F8 | The integration suite behind PgBouncer in transaction mode: passes, with `LISTEN` on a direct connection | Every test passes through PgBouncer 1.25.2, after two fixes: pass |
 | F9 | Application servers' clocks 5 minutes off: no early or late starts beyond L4 | Database clock 5 minutes ahead: 0 early starts, p99 432 ms late, 0 leases lost. 5 minutes behind: 0 early, p99 677 ms, 0 leases lost: pass |
 
 **F1 to F3** ran 60,000 tasks through 4 worker processes with 16 slots each, and
@@ -222,11 +222,16 @@ worker took the tasks over and held them until after the late results had
 arrived, so a late result accepted by mistake would have completed a task
 whose current attempt was still running.
 
-**F8 found a bug.** Through PgBouncer with `max_prepared_statements`,
-`Migrate` failed on every new schema: PgBouncer keeps the name of a statement
-whose parse failed, and disconnects the client that prepares it again
-([pgbouncer#1630](https://github.com/pgbouncer/pgbouncer/issues/1630)). It is
-fixed; see the [changelog](../CHANGELOG.md). Three tests that need a
+**F8 found two bugs,** both fixed; see the [changelog](../CHANGELOG.md).
+Through PgBouncer with `max_prepared_statements`, `Migrate` failed on every
+new schema: PgBouncer keeps the name of a statement whose parse failed, and
+disconnects the client that prepares it again
+([pgbouncer#1630](https://github.com/pgbouncer/pgbouncer/issues/1630)). And
+`Migrate` from several processes at once could fail on a new schema, which
+PgBouncer's shared, open connections made happen every time: a migration
+that waited for another's lock trusted its connection's stale view that the
+schema did not exist yet. It fails directly against PostgreSQL too, once the
+connections are open. Three tests that need a
 session of their own, for a session setting, a startup parameter, or
 `LISTEN`, now connect directly: through a transaction pooler, a session
 setting leaks into other clients.

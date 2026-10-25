@@ -15,6 +15,11 @@ All notable changes to taskmill are recorded here. The format follows
   statement whose parse failed, and disconnects the client that prepares it
   again ([pgbouncer#1630](https://github.com/pgbouncer/pgbouncer/issues/1630)).
   taskmill now reads the schema version without a prepared statement.
+- `Migrate` called by several processes at once on a new schema could fail
+  with a duplicate key on the schema's name, when their connections were
+  already open, as a running application's are. A migration that waited for
+  another's lock trusted its connection's stale view that the schema did not
+  exist yet.
 - Promoting due tasks could scan the whole `tasks` table every second, when
   many tasks were scheduled far ahead while others waited available: with 10
   million scheduled tasks, each promotion took 1.2 seconds instead of under a

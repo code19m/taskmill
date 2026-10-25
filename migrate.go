@@ -109,6 +109,14 @@ func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrat
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "taskmill.migrate."+schema); err != nil {
 		return err
 	}
+	// Waiting for the lock does not make the connection read the catalog
+	// changes that the lock's holder committed meanwhile. Its cache can still
+	// hold that the schema does not exist, as schemaVersion found, and IF NOT
+	// EXISTS would then create the schema again and fail. Reading a catalog
+	// table makes the connection apply those changes first.
+	if _, err := tx.Exec(ctx, "SELECT FROM pg_catalog.pg_namespace LIMIT 0"); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, bootstrapSQL(schema)); err != nil {
 		return err
 	}
