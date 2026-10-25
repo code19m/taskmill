@@ -1,6 +1,7 @@
 // Package ui serves taskmill's web interface: a dashboard of queues, tasks,
 // schedules, and workers, with actions to pause and resume queues and
-// schedules, run a schedule now, and retry, cancel, and delete tasks.
+// schedules, run a schedule now, and retry, cancel, and delete tasks, one at
+// a time or all that match the task list's filters.
 //
 // The interface is rendered on the server with the standard library. A small
 // script, served with it, keeps pages live and adds dialogs; every
@@ -59,6 +60,7 @@ const (
 	logKeyPage   = "page"
 	logKeyPath   = "path"
 	logKeyTarget = "target"
+	logKeyTasks  = "tasks"
 )
 
 const (
@@ -66,7 +68,9 @@ const (
 	groupPeek      = 100              // most waiting tasks of a group that a task page counts
 	staleHeartbeat = 30 * time.Second // a worker silent this long is shown as stale
 	statsCap       = 10_000           // the per-queue count cap of the statistics
+	countCap       = 10_000           // where Client.Count stops counting a state
 	requestTimeout = 10 * time.Second // bound on one request, so a slow database cannot hold it
+	bulkBudget     = 5 * time.Second  // the time a bulk action works within a request; the rest waits for another
 	maxChoices     = 100              // most values of one filter that a request may choose
 	gzipMin        = 1024             // smallest response worth compressing
 )
@@ -77,6 +81,9 @@ const liveHeader = "X-Taskmill-Live"
 
 // errSlow is why a request that ran out of time was canceled.
 var errSlow = errors.New("the database did not answer in time")
+
+// errBudget is why a bulk action stopped before it was done.
+var errBudget = errors.New("the bulk action used its time")
 
 // Config configures the web interface. The zero value is valid.
 type Config struct {
@@ -140,6 +147,7 @@ func Handler(client *taskmill.Client, cfg *Config) http.Handler {
 	mux.HandleFunc("GET /schedules", s.schedules)
 	mux.HandleFunc("GET /workers", s.workers)
 	mux.HandleFunc("POST /tasks/{id}/{action}", s.taskAction)
+	mux.HandleFunc("POST /tasks/bulk/{action}", s.bulkAction)
 	mux.HandleFunc("POST /queues/{name}/{action}", s.queueAction)
 	mux.HandleFunc("POST /schedules/{name}/{action}", s.scheduleAction)
 
@@ -280,12 +288,9 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	states, queues, kinds, groups := selected(q["state"]), selected(q["queue"]), selected(q["kind"]), selected(q["group"])
+	f := taskFilter(q)
 	params := &taskmill.ListParams{
-		Queues: queues, Kinds: kinds, GroupKeys: groups, Cursor: q.Get("cursor"), Limit: pageSize,
-	}
-	for _, st := range states {
-		params.States = append(params.States, taskmill.State(st))
+		Queues: f.Queues, States: f.States, Kinds: f.Kinds, GroupKeys: f.GroupKeys, Cursor: q.Get("cursor"), Limit: pageSize,
 	}
 	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -308,13 +313,16 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	offered := s.filterChoices(r)
 	newest := maps.Clone(q)
-	newest.Del("cursor")
+	for _, key := range []string{"cursor", "done", "count"} {
+		newest.Del(key)
+	}
 	next := ""
 	if res.Next != "" {
 		v := maps.Clone(newest)
 		v.Set("cursor", res.Next)
 		next = s.path("/tasks?" + v.Encode())
 	}
+	states := filterQuery(f)["state"]
 	nav, title := "tasks", "Tasks"
 	if slices.Equal(states, []string{string(taskmill.StateDead)}) {
 		nav, title = "dead", "Dead tasks"
@@ -323,24 +331,111 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	for i, st := range listedStates {
 		stateNames[i] = string(st)
 	}
-	groupFilter := newFilter("group", "FIFO group", "groups", offered.groups, groups).searchable()
+	groupFilter := newFilter("group", "FIFO group", "groups", offered.groups, f.GroupKeys).searchable()
 	if offered.moreGroups {
 		groupFilter.Source = s.path("/choices/groups")
+	}
+	filtered := len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
+	var bulk *bulkOffers
+	if filtered && !s.readOnly {
+		bulk = s.bulkOffers(r, f)
 	}
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
 		Tasks                         []taskmill.TaskInfo
 		States, Queues, Kinds, Groups filter
 		Filtered, Paged               bool
 		Newest, Next                  string
+		Bulk                          *bulkOffers
 	}{
 		res.Tasks,
 		newFilter("state", "State", "states", stateNames, states),
-		newFilter("queue", "Queue", "queues", names, queues).searchable(),
-		newFilter("kind", "Kind", "kinds", offered.kinds, kinds).searchable(),
+		newFilter("queue", "Queue", "queues", names, f.Queues).searchable(),
+		newFilter("kind", "Kind", "kinds", offered.kinds, f.Kinds).searchable(),
 		groupFilter,
-		len(states)+len(queues)+len(kinds)+len(groups) > 0, params.Cursor != "",
+		filtered, params.Cursor != "",
 		s.path("/tasks?" + newest.Encode()), next,
+		bulk,
 	}})
+}
+
+// taskFilter reads the task list's filters from a query.
+func taskFilter(q url.Values) taskmill.TaskFilter {
+	f := taskmill.TaskFilter{Queues: selected(q["queue"]), Kinds: selected(q["kind"]), GroupKeys: selected(q["group"])}
+	for _, st := range selected(q["state"]) {
+		f.States = append(f.States, taskmill.State(st))
+	}
+	return f
+}
+
+// filterQuery is the query of a task filter, for links and redirects.
+func filterQuery(f taskmill.TaskFilter) url.Values {
+	v := url.Values{"queue": f.Queues, "kind": f.Kinds, "group": f.GroupKeys}
+	for _, st := range f.States {
+		v.Add("state", string(st))
+	}
+	return v
+}
+
+// bulkOffers are the actions on every task that the filters select, each
+// with how many tasks it changes; nil for an action that changes none.
+type bulkOffers struct {
+	Retry, Cancel, Delete *bulkOffer
+}
+
+type bulkOffer struct {
+	Path  string // where its form posts
+	Count string // how many tasks it changes, such as "1,234" or "10,000+"
+	Tasks string // the same with its noun, such as "1 task"
+}
+
+// The states that each bulk action changes: those its action on one task
+// allows.
+var (
+	retryStates  = []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}
+	cancelStates = []taskmill.State{
+		taskmill.StateScheduled, taskmill.StatePending, taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateRetryable,
+	}
+	deleteStates = slices.DeleteFunc(slices.Clone(listedStates), func(st taskmill.State) bool { return st == taskmill.StateRunning })
+)
+
+// bulkOffers counts the tasks that each bulk action would change. The
+// actions are not worth failing the page for: without their counts, they
+// are not offered.
+func (s *server) bulkOffers(r *http.Request, f taskmill.TaskFilter) *bulkOffers {
+	ctx := r.Context()
+	counts, err := s.client.Count(ctx, &f)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.logger.LogAttrs(ctx, slog.LevelWarn, "count tasks failed", slog.Any(logKeyError, err))
+		}
+		return nil
+	}
+	query := filterQuery(f).Encode()
+	offer := func(action string, states []taskmill.State) *bulkOffer {
+		var n int64
+		capped := false
+		for _, st := range states {
+			n += counts[st]
+			capped = capped || counts[st] >= countCap
+		}
+		if n == 0 {
+			return nil
+		}
+		a := &bulkOffer{Path: s.path("/tasks/bulk/" + action + "?" + query), Count: number(n)}
+		if capped {
+			a.Count += "+"
+		}
+		a.Tasks = a.Count + " tasks"
+		if a.Count == "1" {
+			a.Tasks = "1 task"
+		}
+		return a
+	}
+	b := &bulkOffers{offer("retry", retryStates), offer("cancel", cancelStates), offer("delete", deleteStates)}
+	if *b == (bulkOffers{}) {
+		return nil
+	}
+	return b
 }
 
 // groupChoices is how many FIFO groups a filter lists; it searches the rest.
@@ -609,6 +704,30 @@ var notices = map[string]string{
 	"schedule-pause":  "Schedule paused.",
 	"schedule-resume": "Schedule resumed.",
 	"schedule-run":    "The schedule runs within a second.",
+	"retry-all":       "{tasks} retried. They run again with fresh attempts.",
+	"retry-more":      "{tasks} retried so far. Retry again to go on with the rest.",
+	"cancel-all":      "{tasks} canceled. Running tasks stop when their handlers return.",
+	"cancel-more":     "{tasks} canceled so far. Cancel again to go on with the rest.",
+	"delete-all":      "{tasks} deleted.",
+	"delete-more":     "{tasks} deleted so far. Delete again to go on with the rest.",
+}
+
+// notice returns the notice that a query asks for, with the number of tasks
+// in its "count" parameter for a bulk action.
+func notice(q url.Values) string {
+	text := notices[q.Get("done")]
+	if !strings.Contains(text, "{tasks}") {
+		return text
+	}
+	n, err := strconv.ParseInt(q.Get("count"), 10, 64)
+	if err != nil || n < 0 {
+		return ""
+	}
+	tasks := number(n) + " tasks"
+	if n == 1 {
+		tasks = "1 task"
+	}
+	return strings.Replace(text, "{tasks}", tasks, 1)
 }
 
 func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
@@ -680,18 +799,69 @@ func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 // finishAction logs an action that succeeded and redirects to target with
 // its notice, or explains why the action did not apply.
 func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error, target, notice, action, name string) {
+	if err != nil {
+		s.actionFailed(w, r, err, target)
+		return
+	}
+	s.logger.LogAttrs(r.Context(), slog.LevelInfo, "web interface action",
+		slog.String(logKeyAction, action), slog.String(logKeyTarget, name))
+	http.Redirect(w, r, s.path(target+"?done="+notice), http.StatusSeeOther)
+}
+
+// actionFailed explains why an action did not apply.
+func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error, back string) {
 	switch {
-	case err == nil:
-		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "web interface action",
-			slog.String(logKeyAction, action), slog.String(logKeyTarget, name))
-		http.Redirect(w, r, s.path(target+"?done="+notice), http.StatusSeeOther)
 	case errors.Is(err, taskmill.ErrNotFound):
 		s.notFound(w, r)
 	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrInvalidArgument):
-		s.render(w, r, http.StatusConflict, "error.html", page{Title: "Not possible", Data: problem{err.Error(), target, "Go back"}})
+		s.render(w, r, http.StatusConflict, "error.html", page{Title: "Not possible", Data: problem{err.Error(), back, "Go back"}})
 	default:
 		s.fail(w, r, err)
 	}
+}
+
+// bulkAction retries, cancels, or deletes every task that the filters in
+// the query select. It works for bulkBudget at most, so that it answers
+// well within the request's deadline; the notice then says that more
+// remain, and the page still offers the action for them.
+func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
+	if s.refuseIfReadOnly(w) {
+		return
+	}
+	var do func(context.Context, *taskmill.TaskFilter) (int64, error)
+	action := r.PathValue("action")
+	switch action {
+	case "retry":
+		do = s.client.RetryMatching
+	case "cancel":
+		do = s.client.CancelMatching
+	case "delete":
+		do = s.client.DeleteMatching
+	default:
+		s.notFound(w, r)
+		return
+	}
+	f := taskFilter(r.URL.Query())
+	query := filterQuery(f)
+	ctx, cancel := context.WithTimeoutCause(r.Context(), bulkBudget, errBudget)
+	defer cancel()
+	n, err := do(ctx, &f)
+	more := err != nil && errors.Is(context.Cause(ctx), errBudget)
+	if err == nil || more || n > 0 {
+		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "web interface action",
+			slog.String(logKeyAction, action+" tasks"), slog.String(logKeyTarget, query.Encode()), slog.Int64(logKeyTasks, n))
+	}
+	if err != nil && !more {
+		s.actionFailed(w, r, err, "/tasks?"+query.Encode())
+		return
+	}
+	done := action + "-all"
+	if more {
+		done = action + "-more"
+	}
+	query.Set("done", done)
+	query.Set("count", strconv.FormatInt(n, 10))
+	http.Redirect(w, r, s.path("/tasks?"+query.Encode()), http.StatusSeeOther)
 }
 
 func (s *server) refuseIfReadOnly(w http.ResponseWriter) bool {
@@ -767,7 +937,7 @@ func getGzip(w io.Writer) *gzip.Writer {
 // the client accepts it: live updates fetch the page every few seconds.
 func (s *server) render(w http.ResponseWriter, r *http.Request, status int, name string, p page) {
 	p.ReadOnly = s.readOnly
-	p.Notice = notices[r.URL.Query().Get("done")]
+	p.Notice = notice(r.URL.Query())
 	buf := getBuffer()
 	defer buffers.Put(buf)
 	if err := s.pages.ExecuteTemplate(buf, name, p); err != nil {

@@ -368,22 +368,28 @@ func (c *Client) leaveGroup(ctx context.Context, q querier, queue, group string,
 	}
 }
 
-// groupHead is a group whose head finished.
-type groupHead struct {
+// groupLeave is a FIFO group that some of its counted tasks left.
+type groupLeave struct {
 	queue, group string
-	id           int64 // the finished head
+	tasks        int  // how many left
+	head         bool // its head was among them: the next task becomes the head
 }
 
-// finishHeads is leaveGroup for heads that completed, one per group, with a
-// few statements for all of them. The caller holds the groups' locks.
-func (c *Client) finishHeads(ctx context.Context, q querier, heads []groupHead) error {
-	queues := make([]string, len(heads))
-	groups := make([]string, len(heads))
-	ids := make([]int64, len(heads))
-	for i, h := range heads {
-		queues[i], groups[i], ids[i] = h.queue, h.group, h.id
+// leaveGroups is leaveGroup for many groups, with a few statements for all
+// of them. The caller holds the groups' locks, and has ended the halts of
+// the halting heads that left.
+func (c *Client) leaveGroups(ctx context.Context, q querier, left []groupLeave) error {
+	queues := make([]string, len(left))
+	groups := make([]string, len(left))
+	counts := make([]int, len(left))
+	heads := make(map[[2]string]bool)
+	for i, l := range left {
+		queues[i], groups[i], counts[i] = l.queue, l.group, l.tasks
+		if l.head {
+			heads[[2]string{l.queue, l.group}] = true
+		}
 	}
-	r, err := q.query(ctx, c.sql.decrementGroups, queues, groups, ids)
+	r, err := q.query(ctx, c.sql.decrementGroups, queues, groups, counts)
 	if err != nil {
 		return err
 	}
@@ -399,7 +405,7 @@ func (c *Client) finishHeads(ctx context.Context, q querier, heads []groupHead) 
 		switch {
 		case remaining == 0:
 			empty.add(queue, group)
-		case !halted:
+		case !halted && heads[[2]string{queue, group}]:
 			next.add(queue, group)
 		}
 	}
@@ -430,14 +436,20 @@ func (s *groupSet) add(queue, group string) {
 
 // promoteGroups makes the oldest pending task of every group in s its head.
 func (c *Client) promoteGroups(ctx context.Context, q querier, s groupSet) error {
+	_, err := q.exec(ctx, c.sql.promoteGroups, s.queues, s.groups, c.schema, c.notifiable(ctx, s.queues))
+	return err
+}
+
+// notifiable returns, once each, the queues that the throttle allows to
+// notify now of available tasks.
+func (c *Client) notifiable(ctx context.Context, queues []string) []string {
 	var notify []string
-	for _, queue := range s.queues {
+	for _, queue := range queues {
 		if !slices.Contains(notify, queue) && c.notifier.allow(ctx, queue) {
 			notify = append(notify, queue)
 		}
 	}
-	_, err := q.exec(ctx, c.sql.promoteGroups, s.queues, s.groups, c.schema, notify)
-	return err
+	return notify
 }
 
 // notifyAvailable announces new available tasks in queue, inside q's

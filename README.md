@@ -23,7 +23,8 @@ together with your data.
 - **An outbox, too.** Publish to Kafka, NATS, or RabbitMQ with the same
   transactional guarantee, in order per key.
 - **Operable.** A live web dashboard that you mount in your application,
-  embed in your admin panel, or run on its own; an operations API;
+  embed in your admin panel, or run on its own; an operations API, with bulk
+  actions on every task that matches a filter;
   structured logs through `log/slog`; and middleware for metrics and
   tracing.
 - **Small and fast.** One direct dependency, pgx. One worker drained a backlog

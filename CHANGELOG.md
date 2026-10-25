@@ -7,6 +7,15 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Bulk actions by filter: `Client.RetryMatching`, `CancelMatching`, and
+  `DeleteMatching` act on every task that matches the queues, kinds, states,
+  and FIFO groups of a `TaskFilter`, in short batches that skip rows other
+  transactions hold, and return how many tasks they changed. `Client.Count`
+  counts the matching tasks per state. The dashboard's task list offers them
+  when filters are set, with the number of tasks each one changes.
+
 ## [0.1.0] - 2026-10-25
 
 Initial release.

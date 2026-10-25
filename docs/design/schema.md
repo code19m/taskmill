@@ -314,6 +314,20 @@ statement timeout.
   other unfinished tasks.
 - **Cancel and Delete** release the task's dedupe key in the same
   transaction.
+- **Bulk actions** (`RetryMatching`, `CancelMatching`, `DeleteMatching`) do
+  the same to every task that matches a filter, in batches of 1,000, each in
+  a transaction of its own. A batch locks its tasks with `SKIP LOCKED`, and
+  locks the group rows of grouped tasks in the same statement, skipping held
+  ones as rescue does, so it never waits for another transaction. It then
+  updates the batch's groups in a few statements for all of them, and
+  promotes the next task of each group whose head left in a statement of its
+  own, as completions do. The batches repeat until one is short, through the
+  states' partial indexes with no `ORDER BY`, like maintenance. They act on
+  tasks enqueued before the action started, and a retry on tasks that
+  finished before it, so the action ends however fast tasks arrive or fail,
+  and retries a task at most once. One wait remains: a retry that creates
+  the row of a group with no unfinished tasks waits for a concurrent enqueue
+  that creates the same row, as enqueues into one group wait for each other.
 
 ## FIFO groups
 

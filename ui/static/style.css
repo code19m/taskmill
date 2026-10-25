@@ -278,7 +278,7 @@ code, pre { font-family: var(--font-mono); }
 }
 .topbar h1 { white-space: nowrap; font-size: var(--text-heading); font-weight: 600; letter-spacing: -0.01em; }
 .topbar .meta { white-space: nowrap; font-size: var(--text-label); color: var(--ink-ghost); font-variant-numeric: tabular-nums; }
-.topbar .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.topbar .right { margin-left: auto; min-width: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
 .task-heading { display: flex; align-items: center; gap: 10px; }
 .crumb { color: var(--ink-faint); font-size: var(--text-label); }
 .crumb-sep { color: var(--ink-ghost); opacity: .6; }

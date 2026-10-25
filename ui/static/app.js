@@ -449,6 +449,7 @@
     const url = new URL(location.href);
     if (url.searchParams.has("done")) {
       url.searchParams.delete("done");
+      url.searchParams.delete("count");
       history.replaceState(history.state, "", url);
     }
   }

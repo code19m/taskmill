@@ -256,25 +256,15 @@ func ExampleMigrations() {
 
 // This example retries every dead task of one queue, once the cause of their
 // failures is fixed.
-func ExampleClient_Retry() {
+func ExampleClient_RetryMatching() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
-	params := &taskmill.ListParams{Queues: []string{"emails"}, States: []taskmill.State{taskmill.StateDead}, Limit: 1000}
-	for {
-		page, err := client.List(ctx, params)
-		if err != nil {
-			log.Fatal(err)
-		}
-		for _, t := range page.Tasks {
-			// An operator may have retried or deleted it meanwhile.
-			if err := client.Retry(ctx, t.ID); err != nil && !errors.Is(err, taskmill.ErrInvalidState) &&
-				!errors.Is(err, taskmill.ErrNotFound) {
-				log.Fatal(err)
-			}
-		}
-		if page.Next == "" {
-			break
-		}
-		params.Cursor = page.Next
+	n, err := client.RetryMatching(ctx, &taskmill.TaskFilter{
+		Queues: []string{"emails"},
+		States: []taskmill.State{taskmill.StateDead},
+	})
+	if err != nil {
+		log.Fatal(err)
 	}
+	log.Printf("retried %d tasks", n)
 }
