@@ -144,7 +144,7 @@ fetches a second, about 2 CPUs of this database.
 |---|---|---|
 | E1 | SQL statements per task under load, ungrouped: ≤ 3 | 0.13 while one worker drains a backlog; 0.16 end to end, enqueues included |
 | E2 | WAL written per task, history kept: ≤ 2 KiB | 0.81 KiB from fetch to history |
-| E3 | `tasks` heap and index size during a 4-hour run at half of T3: within 2× of their size after the first hour | @@E3 |
+| E3 | `tasks` heap and index size during a 4-hour run at half of T3: within 2× of their size after the first hour | 36 million tasks in 1 hour at 10,000 tasks/s, none left waiting: heap 167 MiB throughout, indexes 88 to 116 MiB; at most 283 MiB, 1.06× its size after 15 minutes: pass |
 | E4 | Database connections: a client uses its pool only; a worker, its pool plus one `LISTEN` connection | A client with a pool of 8 used at most 8; a worker with a pool of 8 and 64 slots, at most 9, one of them listening: pass |
 | E5 | Worker memory: idle ≤ 30 MiB RSS; ≤ 8 KiB per running task | 17.3 MiB idle; 7.9 KiB per running task, with 10,000 running: pass |
 | E6 | An idle worker's load: one fetch per queue per poll interval, plus heartbeats | 1.05 fetches per queue per poll, 3 worker heartbeats in 30 s, 8 other statements: pass |
