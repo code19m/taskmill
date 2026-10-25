@@ -316,18 +316,35 @@ statement timeout.
   transaction.
 - **Bulk actions** (`RetryMatching`, `CancelMatching`, `DeleteMatching`) do
   the same to every task that matches a filter, in batches of 1,000, each in
-  a transaction of its own. A batch locks its tasks with `SKIP LOCKED`, and
-  locks the group rows of grouped tasks in the same statement, skipping held
-  ones as rescue does, so it never waits for another transaction. It then
-  updates the batch's groups in a few statements for all of them, and
-  promotes the next task of each group whose head left in a statement of its
-  own, as completions do. The batches repeat until one is short, through the
-  states' partial indexes with no `ORDER BY`, like maintenance. They act on
-  tasks enqueued before the action started, and a retry on tasks that
-  finished before it, so the action ends however fast tasks arrive or fail,
-  and retries a task at most once. One wait remains: a retry that creates
-  the row of a group with no unfinished tasks waits for a concurrent enqueue
-  that creates the same row, as enqueues into one group wait for each other.
+  a transaction of its own.
+  - **Keyset by ID.** A batch takes the next 1,000 matching tasks in ID
+    order after the last one of the previous batch, up to the newest task
+    when the action started. So each batch starts where the last one ended,
+    through the primary key or a state's partial index, and the work grows
+    with the tasks the action reads, not with their square: on 2 million
+    tasks, canceling 500,000 of one queue kept a steady pace of about 40,000 per second.
+    It also reads each task once, so a retry never retries a task twice, and
+    it ends however fast tasks arrive. And a retry larger than a batch keeps
+    a group in order: the group's oldest task becomes its head.
+  - **No waiting while holding rows.** The batch's one statement that picks
+    tasks locks them, the rows of their groups, and the rows of their dedupe
+    keys, all with `SKIP LOCKED`, as rescue does, and leaves out the tasks
+    whose rows another transaction holds. Then the batch changes only rows
+    it holds: the tasks, their groups in a few statements for all of them,
+    and the next task of each group whose head left, promoted in a statement
+    of its own, as completions do.
+  - **One bounded wait.** A retry into a group that has no row creates the
+    row. A concurrent enqueue may be creating the same row, uncommitted, and
+    an insert must wait for it to decide. The batch inserts under a
+    savepoint with a lock timeout of 100 ms, far below the deadlock timeout
+    of 1 s, and on timeout leaves those groups' tasks for a later run. So it
+    never stalls an application transaction for long, and never makes one
+    fail with a deadlock. A transaction per new group would avoid the wait
+    too, but cost a transaction per group when every group is new, as after
+    canceling a whole queue.
+  - **Exact counts.** A batch whose statements ran commits even if the
+    caller's context ends meanwhile, so the number of changed tasks is
+    exact.
 
 ## FIFO groups
 

@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
 	"github.com/code19m/taskmill/ui"
@@ -30,6 +32,14 @@ func (greet) Kind() string { return "greet" }
 
 func setup(t *testing.T) *taskmill.Client {
 	t.Helper()
+	client, _, _ := setupDB(t)
+	return client
+}
+
+// setupDB migrates a fresh schema, and returns a client for it, with its
+// pool and name. When the test ends, it checks the schema's FIFO groups.
+func setupDB(t *testing.T) (*taskmill.Client, *pgxpool.Pool, string) {
+	t.Helper()
 	pool := testdb.Pool(t)
 	schema := testdb.Schema(t, pool)
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
@@ -39,7 +49,12 @@ func setup(t *testing.T) *taskmill.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return client
+	t.Cleanup(func() {
+		if !t.Failed() {
+			testdb.CheckGroups(t, pool, schema)
+		}
+	})
+	return client, pool, schema
 }
 
 func get(t *testing.T, h http.Handler, target string, headers ...string) (int, string, http.Header) {
@@ -245,10 +260,10 @@ func TestActions(t *testing.T) {
 
 func TestBulkActions(t *testing.T) {
 	t.Parallel()
-	client := setup(t)
+	client, pool, schema := setupDB(t)
 	ctx := t.Context()
 	var ids []int64
-	for range 3 {
+	for range 4 {
 		res, err := client.Enqueue(ctx, greet{Name: "x"}, &taskmill.EnqueueOptions{Queue: "mail"})
 		if err != nil {
 			t.Fatal(err)
@@ -258,42 +273,46 @@ func TestBulkActions(t *testing.T) {
 	if err := client.Cancel(ctx, ids[0]); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'running', attempt = 1, lease_token = 1,
+	    lease_expires_at = now() + interval '1 hour', attempted_at = now(), attempted_by = 'w' WHERE id = $1`, ids[3]); err != nil {
+		t.Fatal(err)
+	}
 	logs := &actionLog{}
 	h := ui.Handler(client, &ui.Config{Logger: slog.New(logs)})
 
-	if _, body, _ := get(t, h, "/tasks"); strings.Contains(body, "/tasks/bulk/") {
-		t.Fatal("bulk actions offered without filters")
+	// An action's page counts the tasks once, and confirms with or without
+	// the script.
+	code, body, _ := get(t, h, "/tasks/bulk/cancel?queue=mail")
+	if code != http.StatusOK || !strings.Contains(body, "Cancel 3 tasks</button>") || strings.Contains(body, `tabindex="-1" data-live`) ||
+		!strings.Contains(body, `<form class="bulk-actions" method="post" action="/tasks/bulk/cancel?queue=mail">`) {
+		t.Fatalf("cancel page: %d\n%s", code, body)
 	}
-	_, body, _ := get(t, h, "/tasks?queue=mail")
-	for _, want := range []string{
-		`action="/tasks/bulk/retry?queue=mail"`, `data-confirm-title="Retry 1 task?"`,
-		`action="/tasks/bulk/cancel?queue=mail"`, `data-confirm-title="Cancel 2 tasks?"`,
-		`action="/tasks/bulk/delete?queue=mail"`, `data-confirm-title="Delete 3 tasks?"`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("task list lacks %s\n%s", want, body)
-		}
-	}
-
 	if rec := post(t, h, "/tasks/bulk/cancel?queue=mail", "cross-site"); rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-site bulk cancel: %d", rec.Code)
 	}
 	rec := post(t, h, "/tasks/bulk/cancel?queue=mail", "same-origin")
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/tasks?count=2&done=cancel-all&queue=mail" {
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/tasks?count=3&done=cancel-all&queue=mail" {
 		t.Fatalf("bulk cancel: %d to %q", rec.Code, rec.Header().Get("Location"))
 	}
-	if _, body, _ := get(t, h, rec.Header().Get("Location")); !strings.Contains(body, "2 tasks canceled.") {
+	if _, body, _ := get(t, h, rec.Header().Get("Location")); !strings.Contains(body, "3 tasks canceled.") {
 		t.Fatal("no notice after the bulk cancel")
 	}
-	counts, err := client.Count(ctx, &taskmill.TaskFilter{Queues: []string{"mail"}})
-	if err != nil || counts[taskmill.StateCanceled] != 3 {
-		t.Fatalf("after the bulk cancel: %v, %v", counts, err)
+	// The running task was asked to stop: canceling it again is not offered.
+	if _, body, _ := get(t, h, "/tasks/bulk/cancel?queue=mail"); !strings.Contains(body, "No task matches.") || strings.Contains(body, `method="post"`) {
+		t.Fatalf("cancel page offers the running task again:\n%s", body)
 	}
+
 	if rec := post(t, h, "/tasks/bulk/delete?state=canceled", "same-origin"); rec.Code != http.StatusSeeOther {
 		t.Fatalf("bulk delete: %d", rec.Code)
 	}
+	if code, _, _ := get(t, h, "/tasks/bulk/delete"); code != http.StatusBadRequest {
+		t.Fatalf("bulk delete page without filters: %d", code)
+	}
 	if rec := post(t, h, "/tasks/bulk/delete", "same-origin"); rec.Code != http.StatusConflict {
 		t.Fatalf("bulk delete without filters: %d", rec.Code)
+	}
+	if code, _, _ := get(t, h, "/tasks/bulk/archive?queue=mail"); code != http.StatusNotFound {
+		t.Fatalf("unknown bulk action: %d", code)
 	}
 	want := []string{"cancel tasks queue=mail", "delete tasks state=canceled"}
 	if !slices.Equal(logs.actions, want) {
@@ -301,29 +320,70 @@ func TestBulkActions(t *testing.T) {
 	}
 }
 
-// A bulk action that runs out of time says what it did, and that more remain.
+// The task list offers the bulk actions that the selected states allow,
+// without counting the tasks.
+func TestTaskListOffersBulkActions(t *testing.T) {
+	t.Parallel()
+	h := ui.Handler(setup(t), nil)
+	for path, want := range map[string][]string{
+		"/tasks":                            nil,
+		"/tasks?queue=mail":                 {"/tasks/bulk/retry?queue=mail", "/tasks/bulk/cancel?queue=mail", "/tasks/bulk/delete?queue=mail"},
+		"/tasks?queue=mail&state=available": {"/tasks/bulk/cancel?", "/tasks/bulk/delete?"},
+		"/tasks?state=dead":                 {"/tasks/bulk/retry?state=dead", "/tasks/bulk/delete?state=dead"},
+		"/tasks?state=running&kind=greet":   {"/tasks/bulk/cancel?kind=greet&amp;state=running"},
+	} {
+		_, body, _ := get(t, h, path)
+		if got := strings.Count(body, `href="/tasks/bulk/`); got != len(want) {
+			t.Errorf("%s offers %d bulk actions, want %d", path, got, len(want))
+		}
+		for _, link := range want {
+			if !strings.Contains(body, `href="`+link) {
+				t.Errorf("%s does not offer %s", path, link)
+			}
+		}
+	}
+}
+
+// A bulk action that runs out of time says how far it got, and leads back to
+// its page to go on.
 func TestBulkActionStopsInTime(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
-	ctx := t.Context()
-	opts := &taskmill.EnqueueOptions{DedupeKey: "k"}
-	if _, err := client.Enqueue(ctx, greet{Name: "x"}, opts); err != nil {
-		t.Fatal(err)
+	params := make([]taskmill.EnqueueParams, 5000)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{GroupKey: strconv.Itoa(i % 10)}}
 	}
-	// A duplicate enqueue in an open transaction holds the dedupe key, which
-	// canceling the task deletes.
-	tx, err := testdb.Pool(t).Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
+	for range 6 {
+		if _, err := client.EnqueueMany(t.Context(), params); err != nil {
+			t.Fatal(err)
+		}
 	}
-	defer func() { _ = tx.Rollback(context.Background()) }()
-	if _, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), greet{Name: "x"}, opts); err != nil {
-		t.Fatal(err)
+	h := ui.Handler(client, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/tasks/bulk/cancel?queue=default", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	loc, _ := url.Parse(rec.Header().Get("Location"))
+	q := loc.Query()
+	n, _ := strconv.Atoi(q.Get("count"))
+	if rec.Code != http.StatusSeeOther || loc.Path != "/tasks/bulk/cancel" || q.Get("done") != "cancel-more" || n >= 30000 {
+		t.Fatalf("slow bulk cancel: %d to %q", rec.Code, loc)
 	}
-	rec := post(t, ui.Handler(client, nil), "/tasks/bulk/cancel?queue=default", "same-origin")
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/tasks?count=0&done=cancel-more&queue=default" {
-		t.Fatalf("slow bulk cancel: %d to %q", rec.Code, rec.Header().Get("Location"))
+	_, body, _ := get(t, h, loc.String())
+	if !strings.Contains(body, html.EscapeString(number(n)+" tasks canceled so far; more remain.")) || !strings.Contains(body, "Cancel ") {
+		t.Fatalf("the page after a partial cancel:\n%s", body)
 	}
+}
+
+// number formats n as the interface does.
+func number(n int) string {
+	s := strconv.Itoa(n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // actionLog records the actions that the web interface logs.
@@ -376,6 +436,9 @@ func TestReadOnly(t *testing.T) {
 	}
 	if _, body, _ := get(t, h, "/tasks?queue=default"); strings.Contains(body, "/tasks/bulk/") {
 		t.Fatalf("read-only task list offers bulk actions:\n%s", body)
+	}
+	if code, _, _ := get(t, h, "/tasks/bulk/cancel?queue=default"); code != http.StatusForbidden {
+		t.Fatalf("read-only bulk cancel page: %d", code)
 	}
 	if rec := post(t, h, "/tasks/bulk/cancel?queue=default", "same-origin"); rec.Code != http.StatusForbidden {
 		t.Fatalf("read-only bulk cancel: %d", rec.Code)

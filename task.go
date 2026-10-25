@@ -58,6 +58,25 @@ func (s State) Finished() bool {
 	return s == StateCompleted || s == StateDead || s == StateCanceled
 }
 
+// CanRetry reports whether tasks in state s can be retried, one with
+// [Client.Retry] or many with [Client.RetryMatching]: dead and canceled
+// tasks.
+func (s State) CanRetry() bool {
+	return s == StateDead || s == StateCanceled
+}
+
+// CanCancel reports whether tasks in state s can be canceled: unfinished
+// tasks.
+func (s State) CanCancel() bool {
+	return s.valid() && !s.Finished()
+}
+
+// CanDelete reports whether tasks in state s can be deleted: all but running
+// tasks.
+func (s State) CanDelete() bool {
+	return s.valid() && s != StateRunning
+}
+
 // valid reports whether s is one of the task states.
 func (s State) valid() bool {
 	switch s {

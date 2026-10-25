@@ -233,7 +233,7 @@ func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 
 	var dead []taskmill.TaskInfo
 	waitFor(t, func() bool {
-		page, err := client.List(ctx, &taskmill.ListParams{Queues: []string{outbox.Queue}, States: []taskmill.State{taskmill.StateDead}})
+		page, err := client.List(ctx, &taskmill.ListParams{Filter: taskmill.TaskFilter{Queues: []string{outbox.Queue}, States: []taskmill.State{taskmill.StateDead}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -263,7 +263,7 @@ func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 	mu.Unlock()
 	// Published messages are not kept in history.
 	waitFor(t, func() bool {
-		page, err := client.List(ctx, &taskmill.ListParams{Queues: []string{outbox.Queue}})
+		page, err := client.List(ctx, &taskmill.ListParams{Filter: taskmill.TaskFilter{Queues: []string{outbox.Queue}}})
 		if err != nil {
 			t.Fatal(err)
 		}

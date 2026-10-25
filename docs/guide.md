@@ -363,7 +363,7 @@ _, err := client.Enqueue(ctx, PostLedgerEntry{...}, &taskmill.EnqueueOptions{Gro
   order you asked for. A canceled head does not halt its group.
 - Producers that enqueue into the same group wait for each other's
   transactions, so keep those transactions short.
-- `ListParams.GroupKeys` lists the tasks of chosen groups, and
+- `TaskFilter.GroupKeys`, in `ListParams.Filter`, lists the tasks of chosen groups, and
   `Client.Groups` finds the groups that have unfinished tasks and those that
   are halted. The web interface links each task to its group.
 
@@ -528,9 +528,12 @@ often. Use it in one of three ways:
 
 `ui.Config.ReadOnly` disables every action. Forms are protected against
 cross-site request forgery, and every action is logged to `ui.Config.Logger`,
-a bulk action with its filters and how many tasks it changed. A bulk action
-works for up to 5 seconds per click; if more tasks remain, the page says so,
-and offers the action again for the rest.
+a bulk action with its filters and how many tasks it changed. The task list
+offers the bulk actions once filters are set. Each leads to a page that
+shows the filters and how many tasks the action changes, counted once, with
+a button that does it; the page is the same with or without JavaScript. A
+bulk action works for half the time the request has left, 5 seconds; if
+more tasks remain, its page says so and offers to go on.
 
 **The operations API**, the `Client` methods below, offers the same to your
 own code and tools:
@@ -539,7 +542,7 @@ own code and tools:
 |---|---|
 | `Get` | Returns a task, unfinished, finished, or from history |
 | `List` | Pages through tasks by queues, states, kinds, and FIFO groups, newest first |
-| `Count` | How many tasks match a `TaskFilter`, the filters of `List`, in each state, up to 10,000 per state |
+| `Count` | How many tasks match a `TaskFilter`, the filter of `List`: in each state, up to 10,000 per state, and how many each bulk action would change |
 | `Groups` | The FIFO groups that have unfinished tasks, which of them are halted, and by which task |
 | `Cancel`, `CancelTx` | Cancels a waiting task, or asks a running task's worker to stop it |
 | `Retry` | Runs a dead or canceled task again, with fresh attempts |
@@ -555,22 +558,25 @@ own code and tools:
 A task or schedule that does not exist returns `ErrNotFound`. An action that
 does not fit the task's state returns `ErrInvalidState`: for example,
 canceling or retrying a completed task. Each `List` page's query, and each
-`Count`, stops after 5 seconds. On a very large installation, a filter that matches few tasks can
-reach that bound and return an error.
+`Count`, stops after 5 seconds. On a very large installation, a filter that
+matches few tasks can reach that bound and return an error.
+`State.CanRetry`, `CanCancel`, and `CanDelete` say which actions a state
+allows.
 
 **Bulk actions** apply the rules of the single actions to every task that
 matches a filter, and skip the tasks in other states: `RetryMatching`
-retries dead and canceled tasks, `CancelMatching` unfinished ones, and
-`DeleteMatching` all but running ones, completed tasks in history included.
-The filter must not be empty. They work in batches of 1,000 tasks, each in a
-short transaction of its own, so they never hold locks for long, and FIFO
-groups stay in order. They skip tasks and FIFO groups that another
-transaction holds at that moment, rather than wait; run them again to catch
-those. They act only on tasks enqueued before they started, and
-`RetryMatching` only on tasks that finished before it started, so they end
-even while producers enqueue and tasks fail. If the context ends first, they
-return how many tasks they changed before, with an error; each batch commits
-whole or not at all.
+retries dead and canceled tasks, `CancelMatching` unfinished ones, except
+running tasks already asked to stop, and `DeleteMatching` all but running
+ones, completed tasks in history included. The filter must not be empty.
+
+They go through the tasks enqueued before they started, oldest first, in
+batches of 1,000, each in a short transaction of its own, so they never hold
+locks for long, and a large retry keeps each FIFO group in order. They read
+each task once, so a retry never retries a task twice, and they end however
+fast new tasks arrive. They skip the tasks, FIFO groups, and dedupe keys that
+another transaction holds at that moment, rather than wait; run them again
+to act on those. If the context ends first, they return how many tasks they
+changed before, with an error; each batch commits whole or not at all.
 
 A running task's cancellation takes effect when its attempt ends, however it
 ends: a failure, a snooze, or a release at shutdown. If the handler completes
@@ -906,7 +912,7 @@ rename kinds.
 **Retrying after an incident.** Once the cause is fixed, retry the dead
 tasks it left, filtered by queue, kind, or FIFO group, with `RetryMatching`,
 as [its example](https://pkg.go.dev/github.com/code19m/taskmill#example-Client.RetryMatching)
-does, or with the dashboard: filter the dead tasks and click Retry. A dead
+does, or with the dashboard: filter the dead tasks and click Retry all. A dead
 task that halts its FIFO group resumes the group. Retried tasks start at
 once, so a large retry competes with new work; pause the queue first to
 release them when you choose.

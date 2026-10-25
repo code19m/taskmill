@@ -54,18 +54,19 @@ type statements struct {
 	promoteGroup      string
 	lockGroups        string
 	lockLeased        string
-	decrementGroups   string
+	recountGroups     string
 	deleteEmptyGroups string
 	promoteGroups     string
 	lockPendingGroup  string
 	enterGroup        string
 	resumeHaltedHead  string
 
+	lastTask        string
 	pickRetry       string
 	pickCancel      string
 	pickDelete      string
 	releaseHalts    string
-	enterGroups     string
+	createGroups    string
 	retryTasks      string
 	cancelTasks     string
 	deleteTasks     string
@@ -140,6 +141,12 @@ const groupFree = `(t.group_key IS NULL
                   FOR UPDATE SKIP LOCKED)
        OR NOT EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key))`
 
+// keyFree matches the tasks t that hold no dedupe key, or whose key's row it
+// locks. It skips key rows that other transactions hold, such as a duplicate
+// enqueue in an open transaction, so a statement never waits for them.
+const keyFree = `(NOT EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id)
+       OR EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id FOR UPDATE SKIP LOCKED))`
+
 // taskColumns are the columns that scanTaskInfo reads, in its order.
 const taskColumns = `id, queue, kind, state::text, priority, attempt, max_attempts, coalesce(group_key, ''),
        metadata, payload, errors, created_at, run_at, attempted_at, finalized_at`
@@ -157,12 +164,15 @@ func newStatements(schema string) *statements {
 		"{trimmed}", "(CASE WHEN jsonb_array_length(errors) >= "+strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
 	)
 	q := func(sql string) string { return r.Replace(sql) }
-	pick := func(states string) string {
+	pick := func(cond string) string {
 		return q(`
-SELECT t.id, t.state::text, t.queue, coalesce(t.group_key, '') FROM {s}.tasks t
-WHERE ` + states + `
+SELECT t.id, t.state::text, t.queue, coalesce(t.group_key, ''),
+       EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key)
+FROM {s}.tasks t
+WHERE ` + cond + ` AND t.id > $5 AND t.id <= $6
   AND t.state = ANY($4::text[]::{s}.task_state[]) AND ` + taskFilter + `
   AND ` + groupFree + `
+ORDER BY t.id
 LIMIT {batch}
 FOR UPDATE OF t SKIP LOCKED`)
 	}
@@ -409,12 +419,12 @@ UNION ALL
 SELECT id, false FROM {s}.tasks
 WHERE (id, lease_token) IN (SELECT i, t FROM attempts) AND state = 'running'`),
 
-		// decrementGroups removes $3 counted tasks from each of groups ($1,
-		// $2). The caller holds the groups' locks, and has ended the halts of
-		// halting heads that left.
-		decrementGroups: q(`
+		// recountGroups adds $3, which is negative for tasks that left, to the
+		// counts of groups ($1, $2). The caller holds the groups' locks, and
+		// has ended the halts of halting heads that left.
+		recountGroups: q(`
 UPDATE {s}.groups g
-SET tasks = g.tasks - u.n, updated_at = now()
+SET tasks = g.tasks + u.n, updated_at = now()
 FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
 WHERE g.queue = u.queue AND g.group_key = u.group_key
 RETURNING g.queue, g.group_key, g.tasks, g.halted_task_id IS NOT NULL`),
@@ -462,16 +472,22 @@ RETURNING tasks`),
 UPDATE {s}.groups SET halted_task_id = NULL, halted_at = NULL, updated_at = now()
 WHERE queue = $1 AND group_key = $2 AND halted_task_id = $3`),
 
-		// The pick statements lock a batch of the tasks that a bulk action
-		// changes: those of states $4 that match the filters, and that were
-		// there when the action started at $5. They skip tasks and FIFO
-		// groups that other transactions hold. A retry picks only tasks that
-		// finished before it started, so that it never retries one twice; a
-		// cancel skips running tasks it already flagged.
-		pickRetry: pick(`t.state IN ('dead', 'canceled') AND t.finalized_at <= $5`),
+		// lastTask returns the ID of the newest task, unfinished or in history.
+		lastTask: q(`
+SELECT greatest((SELECT coalesce(max(id), 0) FROM {s}.tasks), (SELECT coalesce(max(id), 0) FROM {s}.task_history))`),
+
+		// The pick statements lock the next batch of the tasks that a bulk
+		// action changes, in ID order after $5 up to $6: those of states $4
+		// that match the filters. Each batch starts where the last one ended,
+		// so a bulk action reads each task once, and the oldest tasks of a
+		// FIFO group come first. They skip the tasks, the FIFO groups, and the
+		// dedupe keys that other transactions hold, and report whether each
+		// task's group had a row, which they then hold. A cancel skips running
+		// tasks already asked to stop.
+		pickRetry: pick(`t.state IN ('dead', 'canceled')`),
 		pickCancel: pick(`t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
-  AND t.cancel_requested_at IS NULL AND t.created_at <= $5`),
-		pickDelete: pick(`t.state <> 'running' AND t.created_at <= $5`),
+  AND t.cancel_requested_at IS NULL AND ` + keyFree),
+		pickDelete: pick(`t.state <> 'running' AND ` + keyFree),
 
 		// releaseHalts ends the halts of the groups that tasks $1 halt, and
 		// returns those tasks. The caller holds the tasks' and the groups'
@@ -485,14 +501,15 @@ FROM halting h
 WHERE g.queue = h.queue AND g.group_key = h.group_key
 RETURNING h.id`),
 
-		// enterGroups counts $3 tasks into each of groups ($1, $2), creating
-		// the groups that have no row, and returns their new counts.
-		enterGroups: q(`
-INSERT INTO {s}.groups AS g (queue, group_key, tasks)
+		// createGroups creates the rows of groups ($1, $2) with $3 tasks each,
+		// and returns those it created: a group whose row another transaction
+		// created meanwhile is left out.
+		createGroups: q(`
+INSERT INTO {s}.groups (queue, group_key, tasks)
 SELECT queue, group_key, n FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
 ORDER BY queue COLLATE "C", group_key COLLATE "C"
-ON CONFLICT (queue, group_key) DO UPDATE SET tasks = g.tasks + EXCLUDED.tasks, updated_at = now()
-RETURNING queue, group_key, tasks`),
+ON CONFLICT DO NOTHING
+RETURNING queue, group_key`),
 
 		// retryTasks retries the picked tasks $1, those of $2 into pending,
 		// and notifies channel $3 of queues $4.
@@ -531,19 +548,23 @@ WITH released AS (
 )
 DELETE FROM {s}.tasks WHERE id = ANY($1::bigint[])`),
 
-		// deleteCompleted deletes a batch of the completed tasks that match
-		// the filters and were enqueued by $4, and releases their dedupe
-		// keys.
+		// deleteCompleted deletes the next batch of the completed tasks that
+		// match the filters, in ID order after $4 up to $5, and releases their
+		// dedupe keys, skipping tasks whose keys other transactions hold. It
+		// returns how many it deleted, and the last ID.
 		deleteCompleted: q(`
 WITH picked AS (
     SELECT t.id FROM {s}.task_history t
-    WHERE ` + taskFilter + ` AND t.created_at <= $4
+    WHERE t.id > $4 AND t.id <= $5 AND ` + taskFilter + ` AND ` + keyFree + `
+    ORDER BY t.id
     LIMIT {batch}
     FOR UPDATE SKIP LOCKED
 ), released AS (
     DELETE FROM {s}.dedupe_keys WHERE task_id = ANY(ARRAY(SELECT id FROM picked))
+), deleted AS (
+    DELETE FROM {s}.task_history WHERE id = ANY(ARRAY(SELECT id FROM picked))
 )
-DELETE FROM {s}.task_history WHERE id = ANY(ARRAY(SELECT id FROM picked))`),
+SELECT count(*), coalesce(max(id), 0) FROM picked`),
 
 		// countTasks counts the tasks in each state of $4 that match the
 		// filters, up to {cap} per state. Each state has a branch of its own,
@@ -1044,23 +1065,25 @@ WHERE name = $1`),
 	}
 }
 
-// countTasks returns the statement that counts tasks per state: a branch for
-// each state, run only if $4 lists the state, so that each reads the index
-// of its state, or the history.
+// countTasks returns the statement that counts tasks per state, up to one
+// more than {cap} each, with how many of them were not asked to stop: a
+// branch for each state, run only if $4 lists it, so that each reads the
+// index of its state, or the history.
 func countTasks() string {
 	var b strings.Builder
 	for _, s := range allStates {
+		from := `SELECT t.cancel_requested_at FROM {s}.tasks t WHERE t.state = '` + string(s) + `' AND `
 		if s == StateCompleted {
-			continue
+			from = `SELECT NULL AS cancel_requested_at FROM {s}.task_history t WHERE `
+		}
+		if b.Len() > 0 {
+			b.WriteString("\nUNION ALL")
 		}
 		b.WriteString(`
-SELECT '` + string(s) + `', (SELECT count(*) FROM (
-    SELECT FROM {s}.tasks t WHERE t.state = '` + string(s) + `' AND ` + taskFilter + ` LIMIT {cap}) c)
-WHERE '` + string(s) + `' = ANY($4::text[])
-UNION ALL`)
+SELECT '` + string(s) + `', n, unflagged FROM (
+    SELECT count(*) AS n, count(*) FILTER (WHERE c.cancel_requested_at IS NULL) AS unflagged
+    FROM (` + from + taskFilter + ` LIMIT {cap} + 1) c) x
+WHERE '` + string(s) + `' = ANY($4::text[])`)
 	}
-	b.WriteString(`
-SELECT 'completed', (SELECT count(*) FROM (SELECT FROM {s}.task_history t WHERE ` + taskFilter + ` LIMIT {cap}) c)
-WHERE 'completed' = ANY($4::text[])`)
 	return b.String()
 }

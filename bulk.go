@@ -2,19 +2,33 @@ package taskmill
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// countCap is the most tasks that [Client.Count] counts in one state.
-const countCap = 10_000
+const (
+	countCap = 10_000 // most tasks that Client.Count counts in one state
 
-// TaskFilter selects tasks for [Client.Count] and the bulk actions, by the
-// same filters as [ListParams]: a task matches if it matches every filter
-// that is set.
+	// commitTimeout bounds the commit of a bulk action's batch, which goes on
+	// when ctx ends meanwhile, so that the count of changed tasks is exact.
+	commitTimeout = 5 * time.Second
+)
+
+// bulkSettings start each batch of a bulk action. Custom plans see which
+// filters are set, and so use the indexes of the states they select. The
+// lock timeout bounds the one wait that a batch can meet, far below the
+// deadlock timeout, so that a batch never holds other transactions up for
+// long, and never takes part in a deadlock.
+const bulkSettings = `SELECT set_config('plan_cache_mode', 'force_custom_plan', true), set_config('lock_timeout', '100ms', true)`
+
+// TaskFilter selects tasks by queue, state, kind, and FIFO group, for
+// [Client.List], [Client.Count], and the bulk actions: a task matches if it
+// matches every filter that is set.
 type TaskFilter struct {
 	// Queues limits the tasks to these queues. Empty means all queues.
 	Queues []string
@@ -30,24 +44,43 @@ type TaskFilter struct {
 	GroupKeys []string
 }
 
-// Every state, and the states that each bulk action applies to: those that
-// the action on a single task allows.
+func (f *TaskFilter) empty() bool {
+	return f == nil || len(f.Queues)+len(f.States)+len(f.Kinds)+len(f.GroupKeys) == 0
+}
+
+// TaskCounts counts the tasks that match a filter.
+type TaskCounts struct {
+	// States holds how many of them are in each state that the filter
+	// selects.
+	States map[State]int64
+
+	// Retry, Cancel, and Delete are how many of them [Client.RetryMatching],
+	// [Client.CancelMatching], and [Client.DeleteMatching] would change.
+	Retry, Cancel, Delete int64
+
+	// Capped reports that counting stopped at 10,000 tasks in a state, so
+	// that the counts are lower bounds.
+	Capped bool
+}
+
+// The states, and those that each bulk action applies to.
 var (
 	allStates = []State{
 		StateScheduled, StatePending, StateAvailable, StateRunning,
 		StateRetryable, StateCompleted, StateDead, StateCanceled,
 	}
-	retryStates  = []State{StateDead, StateCanceled}
-	cancelStates = []State{StateScheduled, StatePending, StateAvailable, StateRunning, StateRetryable}
-	deleteStates = slices.DeleteFunc(slices.Clone(allStates), func(s State) bool { return s == StateRunning })
+	retryStates  = slices.DeleteFunc(slices.Clone(allStates), func(s State) bool { return !s.CanRetry() })
+	cancelStates = slices.DeleteFunc(slices.Clone(allStates), func(s State) bool { return !s.CanCancel() })
+	deleteStates = slices.DeleteFunc(slices.Clone(allStates), func(s State) bool { return !s.CanDelete() })
 )
 
-// matching is a checked filter, as the arguments of the statements.
+// matching is a checked filter, as the arguments of the statements, and
+// how far a bulk action got.
 type matching struct {
 	queues, kinds, groups []string
-	states                []string  // the selected states, except completed
-	history               bool      // completed tasks are selected
-	start                 time.Time // when the bulk action started
+	states                []string // the selected states, except completed
+	history               bool     // completed tasks are selected
+	after, last           int64    // the action goes on after task after, up to task last
 }
 
 // match checks filter, and selects those of states that it allows. A nil
@@ -85,11 +118,10 @@ func match(filter *TaskFilter, states []State) (*matching, error) {
 	return &m, nil
 }
 
-// Count returns how many tasks match filter in each of its states, or in
-// every state if it selects none. filter may be nil. Counting stops at
-// 10,000 tasks per state, so 10,000 means 10,000 or more. Like
-// [Client.List], the query is canceled after 5 seconds.
-func (c *Client) Count(ctx context.Context, filter *TaskFilter) (map[State]int64, error) {
+// Count counts the tasks that match filter, which may be nil. It counts at
+// most 10,000 tasks per state. Like [Client.List], the query is canceled
+// after 5 seconds.
+func (c *Client) Count(ctx context.Context, filter *TaskFilter) (*TaskCounts, error) {
 	m, err := match(filter, allStates)
 	if err != nil {
 		return nil, err
@@ -98,12 +130,12 @@ func (c *Client) Count(ctx context.Context, filter *TaskFilter) (map[State]int64
 	if m.history {
 		states = append(states, string(StateCompleted))
 	}
-	out := make(map[State]int64, len(states))
+	out := &TaskCounts{States: make(map[State]int64, len(states))}
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
 			return err
 		}
-		// Custom plans leave out the branches of states not counted.
+		// Custom plans leave out the branches of the states not counted.
 		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
 			return err
 		}
@@ -114,11 +146,11 @@ func (c *Client) Count(ctx context.Context, filter *TaskFilter) (map[State]int64
 		defer r.Close()
 		for r.Next() {
 			var state string
-			var n int64
-			if err := r.Scan(&state, &n); err != nil {
+			var n, unflagged int64
+			if err := r.Scan(&state, &n, &unflagged); err != nil {
 				return err
 			}
-			out[State(state)] = n
+			out.add(State(state), n, unflagged)
 		}
 		return r.Err()
 	})
@@ -128,22 +160,41 @@ func (c *Client) Count(ctx context.Context, filter *TaskFilter) (map[State]int64
 	return out, nil
 }
 
+// add counts n tasks in state s, of which unflagged were not asked to stop.
+func (c *TaskCounts) add(s State, n, unflagged int64) {
+	c.Capped = c.Capped || n > countCap
+	n, unflagged = min(n, countCap), min(unflagged, countCap)
+	c.States[s] = n
+	if s.CanRetry() {
+		c.Retry += n
+	}
+	// Cancel skips running tasks already asked to stop.
+	if s.CanCancel() {
+		c.Cancel += unflagged
+	}
+	if s.CanDelete() {
+		c.Delete += n
+	}
+}
+
 // RetryMatching retries the dead and canceled tasks that match filter, as
 // [Client.Retry] retries each one, and returns how many it retried. The
 // filter must not be empty: to retry every dead task, set its States.
 //
-// It works in batches of 1,000 tasks, each in a short transaction of its
-// own, and skips the tasks and the FIFO groups that other transactions hold
-// at that moment; run it again to retry those. It retries only tasks that
-// finished before it started, so it retries a task at most once, even if
-// the task fails again meanwhile. If ctx ends first, it returns how many it
-// retried before, with an error; each batch commits whole or not at all.
+// It goes through the tasks enqueued before it started, oldest first, in
+// batches of 1,000, each in a short transaction of its own. It reads each
+// task once, so it retries a task at most once, even if the task fails again
+// meanwhile, and it ends however fast new tasks arrive. It skips the tasks,
+// the FIFO groups, and the dedupe keys that other transactions hold at that
+// moment; run it again to act on those. If ctx ends first, it returns how
+// many it retried before, with an error; each batch commits whole or not at
+// all.
 func (c *Client) RetryMatching(ctx context.Context, filter *TaskFilter) (int64, error) {
 	m, err := c.bulk(ctx, filter, retryStates)
 	if err != nil {
 		return 0, err
 	}
-	n, err := c.inBatches(ctx, func(q querier) (int, error) { return c.retryBatch(ctx, q, m) })
+	n, err := c.inBatches(ctx, func(q querier) (int, int, error) { return c.retryBatch(ctx, q, m) })
 	if err != nil {
 		return n, fmt.Errorf("taskmill: retry tasks: %w", err)
 	}
@@ -153,14 +204,14 @@ func (c *Client) RetryMatching(ctx context.Context, filter *TaskFilter) (int64, 
 // CancelMatching cancels the unfinished tasks that match filter, as
 // [Client.Cancel] cancels each one, and returns how many it canceled,
 // counting running tasks, which become canceled when their attempts end. It
-// works like [Client.RetryMatching], and leaves alone the tasks enqueued
-// after it started.
+// skips running tasks already asked to stop, and otherwise works like
+// [Client.RetryMatching].
 func (c *Client) CancelMatching(ctx context.Context, filter *TaskFilter) (int64, error) {
 	m, err := c.bulk(ctx, filter, cancelStates)
 	if err != nil {
 		return 0, err
 	}
-	n, err := c.inBatches(ctx, func(q querier) (int, error) { return c.cancelBatch(ctx, q, m) })
+	n, err := c.inBatches(ctx, func(q querier) (int, int, error) { return c.cancelBatch(ctx, q, m) })
 	if err != nil {
 		return n, fmt.Errorf("taskmill: cancel tasks: %w", err)
 	}
@@ -169,19 +220,21 @@ func (c *Client) CancelMatching(ctx context.Context, filter *TaskFilter) (int64,
 
 // DeleteMatching deletes the tasks that match filter, except running ones,
 // as [Client.Delete] deletes each one, completed tasks in history included,
-// and returns how many it deleted. It works like [Client.RetryMatching], and
-// leaves alone the tasks enqueued after it started.
+// and returns how many it deleted. It works like [Client.RetryMatching].
 func (c *Client) DeleteMatching(ctx context.Context, filter *TaskFilter) (int64, error) {
 	m, err := c.bulk(ctx, filter, deleteStates)
 	if err != nil {
 		return 0, err
 	}
-	n, err := c.inBatches(ctx, func(q querier) (int, error) { return c.deleteBatch(ctx, q, m) })
+	n, err := c.inBatches(ctx, func(q querier) (int, int, error) { return c.deleteBatch(ctx, q, m) })
 	if err == nil && m.history {
+		m.after = 0
 		var completed int64
-		completed, err = c.inBatches(ctx, func(q querier) (int, error) {
-			n, err := q.exec(ctx, c.sql.deleteCompleted, m.queues, m.kinds, m.groups, m.start)
-			return int(n), err
+		completed, err = c.inBatches(ctx, func(q querier) (int, int, error) {
+			var n int
+			_, err := queryRow(ctx, q, c.sql.deleteCompleted,
+				[]any{m.queues, m.kinds, m.groups, m.after, m.last}, &n, &m.after)
+			return n, n, err
 		})
 		n += completed
 	}
@@ -191,43 +244,51 @@ func (c *Client) DeleteMatching(ctx context.Context, filter *TaskFilter) (int64,
 	return n, nil
 }
 
-// bulk checks the filter of a bulk action that applies to states, and
-// notes when the action starts.
+// bulk checks the filter of a bulk action that applies to states, and notes
+// the last task enqueued before the action starts.
 func (c *Client) bulk(ctx context.Context, filter *TaskFilter, states []State) (*matching, error) {
-	if filter == nil || len(filter.Queues)+len(filter.States)+len(filter.Kinds)+len(filter.GroupKeys) == 0 {
+	if filter.empty() {
 		return nil, invalidArgument("the filter must not be empty")
 	}
 	m, err := match(filter, states)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.pool.QueryRow(ctx, "SELECT now()").Scan(&m.start); err != nil {
-		return nil, fmt.Errorf("taskmill: read the time: %w", err)
+	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
+		return nil, fmt.Errorf("taskmill: read the last task: %w", err)
 	}
 	return m, nil
 }
 
 // inBatches runs batch, each time in a transaction of its own, until it
-// changes less than a full batch, and returns how many tasks it changed.
-func (c *Client) inBatches(ctx context.Context, batch func(q querier) (int, error)) (int64, error) {
+// picks less than a full batch, and returns how many tasks it changed. A
+// batch whose statements ran commits even if ctx ends meanwhile.
+func (c *Client) inBatches(ctx context.Context, batch func(q querier) (picked, changed int, err error)) (int64, error) {
 	var total int64
 	for {
-		var n int
-		err := c.inTx(ctx, func(q querier) error {
-			// Custom plans see which filters are set, and so use the indexes
-			// of the states that they select.
-			if _, err := q.exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
-				return err
-			}
-			var err error
-			n, err = batch(q)
-			return err
-		})
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		tx, err := c.pool.Begin(ctx)
 		if err != nil {
 			return total, err
 		}
-		total += int64(n)
-		if n < maintenanceBatch {
+		var picked, changed int
+		if _, err = tx.Exec(ctx, bulkSettings); err == nil {
+			picked, changed, err = batch(pgxQuerier{q: tx})
+		}
+		end, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitTimeout)
+		if err == nil {
+			err = tx.Commit(end)
+		} else {
+			_ = tx.Rollback(end) // err says what went wrong
+		}
+		cancel()
+		if err != nil {
+			return total, err
+		}
+		total += int64(changed)
+		if picked < maintenanceBatch {
 			return total, nil
 		}
 	}
@@ -238,12 +299,13 @@ type bulkTask struct {
 	id           int64
 	state        State
 	queue, group string
+	inGroup      bool // its group has a row, which the action holds
 }
 
-// pick locks a batch of the tasks that match m, with one of the pick
-// statements.
+// pick locks the next batch of the tasks that match m, with one of the pick
+// statements, and moves m past them.
 func pick(ctx context.Context, q querier, sql string, m *matching) ([]bulkTask, error) {
-	r, err := q.query(ctx, sql, m.queues, m.kinds, m.groups, m.states, m.start)
+	r, err := q.query(ctx, sql, m.queues, m.kinds, m.groups, m.states, m.after, m.last)
 	if err != nil {
 		return nil, err
 	}
@@ -252,11 +314,12 @@ func pick(ctx context.Context, q querier, sql string, m *matching) ([]bulkTask, 
 	for r.Next() {
 		var t bulkTask
 		var state string
-		if err := r.Scan(&t.id, &state, &t.queue, &t.group); err != nil {
+		if err := r.Scan(&t.id, &state, &t.queue, &t.group, &t.inGroup); err != nil {
 			return nil, err
 		}
 		t.state = State(state)
 		out = append(out, t)
+		m.after = t.id
 	}
 	return out, r.Err()
 }
@@ -270,120 +333,183 @@ func idsOf(ts []bulkTask) []int64 {
 }
 
 // retryBatch retries a batch of the tasks that match m.
-func (c *Client) retryBatch(ctx context.Context, q querier, m *matching) (int, error) {
+func (c *Client) retryBatch(ctx context.Context, q querier, m *matching) (picked, changed int, err error) {
 	if len(m.states) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
-	picked, err := pick(ctx, q, c.sql.pickRetry, m)
-	if err != nil || len(picked) == 0 {
-		return 0, err
+	ts, err := pick(ctx, q, c.sql.pickRetry, m)
+	if err != nil || len(ts) == 0 {
+		return 0, 0, err
 	}
-	pending, err := c.rejoinGroups(ctx, q, picked)
+	retried, pending, err := c.rejoinGroups(ctx, q, ts)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	var available []string
-	for _, t := range picked {
+	for _, t := range retried {
 		if !slices.Contains(pending, t.id) {
 			available = append(available, t.queue)
 		}
 	}
-	_, err = q.exec(ctx, c.sql.retryTasks, idsOf(picked), pending, c.schema, c.notifiable(ctx, available))
-	return len(picked), err
+	_, err = q.exec(ctx, c.sql.retryTasks, idsOf(retried), pending, c.schema, c.notifiable(ctx, available))
+	return len(ts), len(retried), err
 }
 
-// rejoinGroups is rejoinGroup for the grouped tasks among ts, with a few
-// statements for all of them, and returns those that must wait in pending.
-// A dead head that halts its group resumes it; the oldest task of a group
-// that has no unfinished tasks becomes its head; the others wait behind
-// their groups' heads.
-func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) ([]int64, error) {
+// rejoinGroups is rejoinGroup for a batch of tasks to retry, with a few
+// statements for all of them. It returns the tasks to retry, and those of
+// them that wait in pending. A dead head that halts its group resumes it.
+// The other tasks of a group that has a row wait behind its head. A group
+// that has no row gets one, and its oldest task becomes its head.
+func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (retried []bulkTask, pending []int64, err error) {
 	resumed, err := c.releaseHalts(ctx, q, ts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	joining := make(map[[2]string][]int64) // by group, the tasks that enter it
-	var set groupSet
+	pending = []int64{} // not nil: the statement compares with every element
 	for _, t := range ts {
-		key := [2]string{t.queue, t.group}
 		if t.group == "" || resumed[t.id] {
-			continue
+			retried = append(retried, t)
 		}
-		if joining[key] == nil {
-			set.add(t.queue, t.group)
+	}
+	counted, missing, byGroup := groupTasks(ts, resumed)
+	if len(counted.queues) > 0 {
+		if _, err := q.exec(ctx, c.sql.recountGroups, counted.queues, counted.groups, counted.sizes(byGroup)); err != nil {
+			return nil, nil, err
 		}
-		joining[key] = append(joining[key], t.id)
+		for _, t := range counted.tasks(byGroup) {
+			retried = append(retried, t)
+			pending = append(pending, t.id)
+		}
 	}
-	pending := []int64{} // not nil: the statement compares with every element
-	if len(set.queues) == 0 {
-		return pending, nil
+	if len(missing.queues) == 0 {
+		return retried, pending, nil
 	}
-	counts := make([]int, len(set.queues))
-	for i := range set.queues {
-		counts[i] = len(joining[[2]string{set.queues[i], set.groups[i]}])
-	}
-	r, err := q.query(ctx, c.sql.enterGroups, set.queues, set.groups, counts)
+	created, err := c.createGroups(ctx, q, missing, byGroup)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	defer r.Close()
-	for r.Next() {
-		var key [2]string
-		var tasks int
-		if err := r.Scan(&key[0], &key[1], &tasks); err != nil {
-			return nil, err
-		}
-		ids := joining[key]
-		head := int64(0)
-		if tasks == len(ids) { // the group had no unfinished tasks
-			head = slices.Min(ids)
-		}
-		for _, id := range ids {
-			if id != head {
-				pending = append(pending, id)
+	for _, key := range created {
+		for i, t := range byGroup[key] {
+			retried = append(retried, t)
+			if i > 0 {
+				pending = append(pending, t.id)
 			}
 		}
 	}
-	return pending, r.Err()
+	return retried, pending, nil
+}
+
+// groupTasks sorts the grouped tasks of ts, except those of skip, by group:
+// the groups that have a row, and those that have none. A group's tasks
+// stay in ID order, as picked.
+func groupTasks(ts []bulkTask, skip map[int64]bool) (counted, missing groupSet, byGroup map[[2]string][]bulkTask) {
+	byGroup = make(map[[2]string][]bulkTask)
+	for _, t := range ts {
+		if t.group == "" || skip[t.id] {
+			continue
+		}
+		key := [2]string{t.queue, t.group}
+		switch {
+		case byGroup[key] != nil:
+		case t.inGroup:
+			counted.add(t.queue, t.group)
+		default:
+			missing.add(t.queue, t.group)
+		}
+		byGroup[key] = append(byGroup[key], t)
+	}
+	return counted, missing, byGroup
+}
+
+// createGroups creates the rows of groups s, which had none, and returns
+// those it created. A concurrent enqueue may be creating the same row: the
+// batch then waits for it for at most its lock timeout, and leaves the
+// tasks of all of s for a later run.
+func (c *Client) createGroups(ctx context.Context, q querier, s groupSet, byGroup map[[2]string][]bulkTask) ([][2]string, error) {
+	if _, err := q.exec(ctx, "SAVEPOINT create_groups"); err != nil {
+		return nil, err
+	}
+	var created [][2]string
+	r, err := q.query(ctx, c.sql.createGroups, s.queues, s.groups, s.sizes(byGroup))
+	if err == nil {
+		for r.Next() {
+			var key [2]string
+			if err = r.Scan(&key[0], &key[1]); err != nil {
+				break
+			}
+			created = append(created, key)
+		}
+		r.Close()
+		if err == nil {
+			err = r.Err()
+		}
+	}
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "55P03" { // lock_not_available
+		_, err = q.exec(ctx, "ROLLBACK TO SAVEPOINT create_groups")
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	_, err = q.exec(ctx, "RELEASE SAVEPOINT create_groups")
+	return created, err
+}
+
+// tasks returns the tasks of byGroup in the groups of s.
+func (s *groupSet) tasks(byGroup map[[2]string][]bulkTask) []bulkTask {
+	var out []bulkTask
+	for i := range s.queues {
+		out = append(out, byGroup[[2]string{s.queues[i], s.groups[i]}]...)
+	}
+	return out
+}
+
+// sizes returns how many of the tasks of byGroup are in each group of s.
+func (s *groupSet) sizes(byGroup map[[2]string][]bulkTask) []int {
+	out := make([]int, len(s.queues))
+	for i := range s.queues {
+		out[i] = len(byGroup[[2]string{s.queues[i], s.groups[i]}])
+	}
+	return out
 }
 
 // cancelBatch cancels a batch of the tasks that match m. Waiting tasks leave
 // their FIFO groups now, and running ones when their attempts end.
-func (c *Client) cancelBatch(ctx context.Context, q querier, m *matching) (int, error) {
+func (c *Client) cancelBatch(ctx context.Context, q querier, m *matching) (picked, changed int, err error) {
 	if len(m.states) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
-	picked, err := pick(ctx, q, c.sql.pickCancel, m)
-	if err != nil || len(picked) == 0 {
-		return 0, err
+	ts, err := pick(ctx, q, c.sql.pickCancel, m)
+	if err != nil || len(ts) == 0 {
+		return 0, 0, err
 	}
-	if _, err := q.exec(ctx, c.sql.cancelTasks, idsOf(picked), c.schema); err != nil {
-		return 0, err
+	if _, err := q.exec(ctx, c.sql.cancelTasks, idsOf(ts), c.schema); err != nil {
+		return 0, 0, err
 	}
-	err = c.leaveAll(ctx, q, picked, func(t bulkTask) bool { return t.state != StateRunning })
-	return len(picked), err
+	err = c.leaveAll(ctx, q, ts, func(t bulkTask) bool { return t.state != StateRunning })
+	return len(ts), len(ts), err
 }
 
 // deleteBatch deletes a batch of the unfinished, dead, and canceled tasks
 // that match m. Unfinished tasks leave their FIFO groups, and so does a dead
 // head that halts its group, which resumes it.
-func (c *Client) deleteBatch(ctx context.Context, q querier, m *matching) (int, error) {
+func (c *Client) deleteBatch(ctx context.Context, q querier, m *matching) (picked, changed int, err error) {
 	if len(m.states) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
-	picked, err := pick(ctx, q, c.sql.pickDelete, m)
-	if err != nil || len(picked) == 0 {
-		return 0, err
+	ts, err := pick(ctx, q, c.sql.pickDelete, m)
+	if err != nil || len(ts) == 0 {
+		return 0, 0, err
 	}
-	halting, err := c.releaseHalts(ctx, q, picked)
+	halting, err := c.releaseHalts(ctx, q, ts)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	if _, err := q.exec(ctx, c.sql.deleteTasks, idsOf(picked)); err != nil {
-		return 0, err
+	if _, err := q.exec(ctx, c.sql.deleteTasks, idsOf(ts)); err != nil {
+		return 0, 0, err
 	}
-	err = c.leaveAll(ctx, q, picked, func(t bulkTask) bool { return !t.state.Finished() || halting[t.id] })
-	return len(picked), err
+	err = c.leaveAll(ctx, q, ts, func(t bulkTask) bool { return !t.state.Finished() || halting[t.id] })
+	return len(ts), len(ts), err
 }
 
 // releaseHalts ends the halts of the FIFO groups that dead tasks among ts

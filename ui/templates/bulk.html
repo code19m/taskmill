@@ -1,0 +1,28 @@
+{{define "bulk.html"}}{{template "head" .}}
+{{$d := .Data}}
+<header class="topbar">
+  <a class="crumb" href="{{$d.Back}}">Tasks</a>
+  <span class="crumb-sep" aria-hidden="true">/</span>
+  <h1>{{.Title}}</h1>
+</header>
+<div class="page">
+<section class="card flush bulk-card">
+  <div class="card-head"><h2>Tasks that match</h2><span class="mono">{{$d.Tasks}}</span></div>
+  <dl class="props">
+    {{range $d.Filters}}<dt>{{.Title}}</dt><dd{{if .Mono}} class="mono"{{end}}>{{range $i, $v := .Values}}{{if $i}}, {{end}}{{visible $v}}{{end}}</dd>{{end}}
+  </dl>
+  <div class="card-body">
+    {{if $d.N}}
+    <p>{{$d.Explain}}</p>
+    <form class="bulk-actions" method="post" action="{{$d.Path}}">
+      <button class="btn {{if $d.Danger}}danger-solid{{else}}primary{{end}}">{{template "icon" $d.Icon}}{{$d.Verb}} {{$d.Tasks}}</button>
+      <a class="btn quiet" href="{{$d.Back}}">Back to the tasks</a>
+    </form>
+    {{else}}
+    <p>No task matches. {{$d.None}}</p>
+    <div class="bulk-actions"><a class="btn" href="{{$d.Back}}">{{template "icon" "back"}}Back to the tasks</a></div>
+    {{end}}
+  </div>
+</section>
+</div>
+{{template "foot" .}}{{end}}

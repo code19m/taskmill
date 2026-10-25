@@ -211,7 +211,7 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	if !found {
 		return c.stateError(ctx, q, id, "retry")
 	}
-	if s := State(state); s != StateDead && s != StateCanceled {
+	if s := State(state); !s.CanRetry() {
 		return fmt.Errorf("%w: cannot retry task %d in state %s", ErrInvalidState, id, s)
 	}
 
@@ -384,12 +384,12 @@ func (c *Client) leaveGroups(ctx context.Context, q querier, left []groupLeave) 
 	counts := make([]int, len(left))
 	heads := make(map[[2]string]bool)
 	for i, l := range left {
-		queues[i], groups[i], counts[i] = l.queue, l.group, l.tasks
+		queues[i], groups[i], counts[i] = l.queue, l.group, -l.tasks
 		if l.head {
 			heads[[2]string{l.queue, l.group}] = true
 		}
 	}
-	r, err := q.query(ctx, c.sql.decrementGroups, queues, groups, counts)
+	r, err := q.query(ctx, c.sql.recountGroups, queues, groups, counts)
 	if err != nil {
 		return err
 	}

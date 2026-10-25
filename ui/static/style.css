@@ -480,6 +480,10 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .callout > div { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 .error-card { gap: 14px; align-items: flex-start; max-width: 560px; padding: 20px; }
+.bulk-card { max-width: 640px; }
+.bulk-card .props { border-bottom: 1px solid var(--line); }
+.bulk-card .card-body { display: grid; gap: 14px; padding: 16px; color: var(--ink-muted); font-size: var(--text-label); }
+.bulk-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .error-card p { color: var(--ink-muted); font-size: var(--text-label); }
 
 /* ---------- tables ---------- */

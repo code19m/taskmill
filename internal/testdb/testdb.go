@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,4 +77,53 @@ func Schema(tb testing.TB, pool *pgxpool.Pool) string {
 		}
 	})
 	return schema
+}
+
+// CheckGroups fails the test unless every FIFO group of schema satisfies
+// the invariants in docs/design/task-lifecycle.md: its count matches its
+// unfinished tasks plus a halting dead head, it has exactly one head, and
+// every unfinished grouped task belongs to a group row.
+func CheckGroups(tb testing.TB, pool *pgxpool.Pool, schema string) {
+	tb.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	r, err := pool.Query(ctx, strings.ReplaceAll(`
+WITH members AS (
+    SELECT g.queue, g.group_key, g.tasks, g.halted_task_id,
+           count(t.id) FILTER (WHERE t.state = 'pending') AS pending,
+           count(t.id) FILTER (WHERE t.state IN ('scheduled', 'available', 'running', 'retryable')) AS heads,
+           count(t.id) FILTER (WHERE t.id = g.halted_task_id AND t.state = 'dead') AS halting
+    FROM {s}.groups g
+    LEFT JOIN {s}.tasks t ON t.queue = g.queue AND t.group_key = g.group_key
+    GROUP BY g.queue, g.group_key, g.tasks, g.halted_task_id
+)
+SELECT format('group %s/%s counts %s tasks: %s pending, %s heads, %s halting dead head (halted by %s)',
+              queue, group_key, tasks, pending, heads, halting, coalesce(halted_task_id::text, 'none'))
+FROM members
+WHERE tasks <> pending + heads + halting
+   OR heads + halting <> 1
+   OR (halted_task_id IS NOT NULL AND halting = 0)
+UNION ALL
+SELECT format('task %s in group %s/%s is %s, but the group has no row', t.id, t.queue, t.group_key, t.state)
+FROM {s}.tasks t
+WHERE t.group_key IS NOT NULL AND t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
+  AND NOT EXISTS (SELECT 1 FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key)`, "{s}", schema))
+	if err != nil {
+		tb.Fatalf("testdb: check groups: %v", err)
+	}
+	defer r.Close()
+	var broken []string
+	for r.Next() {
+		var s string
+		if err := r.Scan(&s); err != nil {
+			tb.Fatalf("testdb: check groups: %v", err)
+		}
+		broken = append(broken, s)
+	}
+	if err := r.Err(); err != nil {
+		tb.Fatalf("testdb: check groups: %v", err)
+	}
+	for _, s := range broken {
+		tb.Errorf("FIFO invariant broken: %s", s)
+	}
 }

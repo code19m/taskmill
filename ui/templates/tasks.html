@@ -5,9 +5,9 @@
   {{if $d.Paged}}<span class="meta">older</span>{{end}}
   {{with $d.Bulk}}
   <div class="right">
-    {{with .Retry}}<form method="post" action="{{.Path}}" data-confirm="Every dead and canceled task that matches the filters runs again, with a fresh set of attempts." data-confirm-title="Retry {{.Tasks}}?" data-confirm-label="Retry"><button class="btn primary">{{template "icon" "retry"}}Retry {{.Count}}</button></form>{{end}}
-    {{with .Cancel}}<form method="post" action="{{.Path}}" data-confirm="Waiting tasks that match the filters will not run. Running ones stop when their handlers return." data-confirm-title="Cancel {{.Tasks}}?" data-confirm-label="Cancel tasks"><button class="btn">{{template "icon" "cancel"}}Cancel {{.Count}}</button></form>{{end}}
-    {{with .Delete}}<form method="post" action="{{.Path}}" data-confirm="Every task that matches the filters, except running ones, is deleted. This cannot be undone." data-confirm-title="Delete {{.Tasks}}?" data-confirm-label="Delete" data-confirm-danger><button class="btn danger">{{template "icon" "trash"}}Delete {{.Count}}</button></form>{{end}}
+    {{with .Retry}}<a class="btn primary" href="{{.}}">{{template "icon" "retry"}}Retry all</a>{{end}}
+    {{with .Cancel}}<a class="btn" href="{{.}}">{{template "icon" "cancel"}}Cancel all</a>{{end}}
+    {{with .Delete}}<a class="btn danger" href="{{.}}">{{template "icon" "trash"}}Delete all</a>{{end}}
   </div>
   {{end}}
 </header>

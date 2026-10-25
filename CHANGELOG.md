@@ -11,10 +11,22 @@ All notable changes to taskmill are recorded here. The format follows
 
 - Bulk actions by filter: `Client.RetryMatching`, `CancelMatching`, and
   `DeleteMatching` act on every task that matches the queues, kinds, states,
-  and FIFO groups of a `TaskFilter`, in short batches that skip rows other
-  transactions hold, and return how many tasks they changed. `Client.Count`
-  counts the matching tasks per state. The dashboard's task list offers them
-  when filters are set, with the number of tasks each one changes.
+  and FIFO groups of a `TaskFilter`, oldest first, in short batches that skip
+  rows other transactions hold, and return how many tasks they changed.
+  `Client.Count` counts the matching tasks per state, and those each bulk
+  action would change. `State.CanRetry`, `CanCancel`, and `CanDelete` say
+  which actions a state allows.
+- The dashboard's task list offers the bulk actions when filters are set.
+  Each leads to a page that shows the filters and the number of tasks it
+  changes, and does it.
+
+### Changed
+
+- **Breaking:** `ListParams` holds its filters in a `Filter TaskFilter`
+  field, which the bulk actions and `Count` take too, instead of its own
+  `Queues`, `States`, `Kinds`, and `GroupKeys` fields. To migrate, move them
+  into `Filter`: `&taskmill.ListParams{Filter: taskmill.TaskFilter{Queues:
+  q}, Limit: 100}`.
 
 ## [0.1.0] - 2026-10-25
 
