@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"slices"
 	"strings"
@@ -79,8 +80,7 @@ func newEnvWith(t *testing.T, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *e
 		cfg = &taskmill.ClientConfig{}
 	}
 	if cfg.Logger == nil {
-		// Warnings show in a failing test's log: a lost lease then says why.
-		cfg.Logger = slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelWarn}))
+		cfg.Logger = testLogger(t)
 	}
 	cfg.Schema = schema
 	client, err := taskmill.NewClient(t.Context(), pool, cfg)
@@ -274,6 +274,35 @@ func openSQL(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+// testLogger writes warnings to t's log, which shows when the test fails: a
+// lost lease then says why. It drops what arrives once t's cleanup starts,
+// such as a trailing notification that fails on the closed pool: writing to
+// a finished test's log is a data race.
+func testLogger(t *testing.T) *slog.Logger {
+	t.Helper()
+	w := &testWriter{out: t.Output()}
+	t.Cleanup(func() {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.out = nil
+	})
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: slog.LevelWarn}))
+}
+
+type testWriter struct {
+	mu  sync.Mutex
+	out io.Writer // nil once the test's cleanup started
+}
+
+func (w *testWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.out == nil {
+		return len(p), nil
+	}
+	return w.out.Write(p)
 }
 
 // logRecorder is a slog handler that keeps the records it receives.
