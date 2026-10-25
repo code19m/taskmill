@@ -381,13 +381,15 @@ func (m *maintainer) log(ctx context.Context, level slog.Level, step string, err
 	m.w.logger.LogAttrs(ctx, level, "maintenance step failed", slog.String(logKeyStep, step), slog.Any(logKeyError, err))
 }
 
-// refreshStats counts each queue's tasks per state, up to the caps, and
-// stores the counts for [Client.Queues] and the current minute's activity.
+// refreshStats counts each queue's tasks per state, up to the caps, finds
+// each count's oldest due task, and stores both for [Client.Queues] and the
+// counts for the current minute's activity.
 func (m *maintainer) refreshStats(ctx context.Context) {
 	var queues, states []string
 	var counts []int64
 	var capped []bool
-	var dueTotal int64 // scheduled and retryable tasks counted, in all queues
+	var oldest []*time.Time // the run time of the oldest due task of each count
+	var dueTotal int64      // scheduled and retryable tasks counted, in all queues
 	r, err := m.c.pool.Query(ctx, m.c.sql.countStats, statsQueueCap, statsDueCap)
 	if err != nil {
 		m.log(ctx, slog.LevelError, "refresh statistics", err)
@@ -396,7 +398,8 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 	for r.Next() {
 		var state, queue string
 		var n int64
-		if err := r.Scan(&state, &queue, &n); err != nil {
+		var due *time.Time
+		if err := r.Scan(&state, &queue, &n, &due); err != nil {
 			r.Close()
 			m.log(ctx, slog.LevelError, "refresh statistics", err)
 			return
@@ -405,7 +408,7 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 			dueTotal += n
 		}
 		queues, states, counts = append(queues, queue), append(states, state), append(counts, n)
-		capped = append(capped, n >= statsQueueCap)
+		capped, oldest = append(capped, n >= statsQueueCap), append(oldest, due)
 	}
 	r.Close()
 	if err := r.Err(); err != nil {
@@ -424,7 +427,7 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 		if _, err := tx.Exec(ctx, m.c.sql.clearStats); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped); err != nil {
+		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped, oldest); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, m.c.sql.storeActivity)

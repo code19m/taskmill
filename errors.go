@@ -1,33 +1,45 @@
 package taskmill
 
 import (
-	"errors"
 	"fmt"
 	"time"
 )
 
-// Errors returned by taskmill. Test for them with [errors.Is].
+// Errors returned by taskmill. Test for them with [errors.Is]. Each names
+// its class for OpenTelemetry's error.type, such as "invalid_argument".
 var (
 	// ErrNotFound means the task or schedule does not exist, or no longer
 	// exists.
-	ErrNotFound = errors.New("taskmill: not found")
+	ErrNotFound = classError("taskmill: not found", "not_found")
 
 	// ErrLeaseLost means the attempt no longer owns its task: its lease
 	// expired and the task was rescued, canceled, or fetched again.
-	ErrLeaseLost = errors.New("taskmill: lease lost")
+	ErrLeaseLost = classError("taskmill: lease lost", "lease_lost")
 
 	// ErrInvalidState means the operation does not apply to the task's
 	// current state, such as retrying a running task.
-	ErrInvalidState = errors.New("taskmill: invalid state")
+	ErrInvalidState = classError("taskmill: invalid state", "invalid_state")
 
 	// ErrInvalidArgument means an argument or option is invalid: out of
 	// range, too long, or holding a NUL character.
-	ErrInvalidArgument = errors.New("taskmill: invalid argument")
+	ErrInvalidArgument = classError("taskmill: invalid argument", "invalid_argument")
 
 	// ErrSchemaOutdated means the database schema is missing or older than
 	// this version of taskmill. Run [Migrate].
-	ErrSchemaOutdated = errors.New("taskmill: database schema is missing or outdated")
+	ErrSchemaOutdated = classError("taskmill: database schema is missing or outdated", "schema_outdated")
 )
+
+// classified is an error that names its class. OpenTelemetry's
+// semconv.ErrorType reports the class of the first such error in a chain as
+// error.type, without taskmill depending on OpenTelemetry.
+type classified struct {
+	msg, class string
+}
+
+func classError(msg, class string) error { return &classified{msg: msg, class: class} }
+
+func (e *classified) Error() string     { return e.msg }
+func (e *classified) ErrorType() string { return e.class }
 
 // invalidArgument returns an error that wraps [ErrInvalidArgument] with
 // details.

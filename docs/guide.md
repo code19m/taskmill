@@ -700,19 +700,21 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
 | Counter | `messaging.client.sent.messages` | Tasks enqueued, and outbox messages published. |
 | Histogram | `messaging.client.operation.duration` | How long enqueue calls take. |
 | Histogram | `messaging.process.duration` | How long attempts take. |
-| Gauge | `taskmill.queue.tasks` | Tasks per queue and state. |
-| Gauge | `taskmill.queue.lag` | How long each queue's oldest available task has waited. |
+| Gauge | `taskmill.queue.tasks` | Tasks per queue and state, up to the caps below. |
+| Gauge | `taskmill.queue.capped` | 1 when a count of the queue stopped at its cap. |
+| Gauge | `taskmill.queue.lag` | How long each queue's oldest due task has waited. Alert on it for backlogs. |
 
 - Metrics carry the queue as `messaging.destination.name`, the kind as
-  `messaging.taskmill.kind`, and on failure `error.type`, such as `panic`.
-  They never carry task IDs, so their cardinality stays bounded.
+  `taskmill.task.kind`, and on failure `error.type`, such as `panic`,
+  `timeout`, or `invalid_argument`. They never carry task IDs, so their
+  cardinality stays bounded.
 - A task's attempts show in the trace of the request that enqueued it, even
   a retry hours later.
 - Inside your transaction, the `send` span ends before the commit: a
   rollback leaves a span for a task that never existed.
-- The queue gauges describe the whole installation, and cost two queries per
-  collection. Every process that reports them reports the same values:
-  aggregate them with max, not sum, or report them from one deployment.
+- The queue gauges describe the whole installation, as the maintainer last
+  counted it, every 10 seconds. Every process that reports them reads the
+  same stored values: aggregate them with max, not sum.
 - For the outbox, wrap the publisher. Each delivery's span is a child of the
   span that stored the message, and goes to the broker in the message's
   headers, so consumers continue the trace:
@@ -724,9 +726,22 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
 **By hand**, the same extension points serve other tools. Worker
 `Middleware` wraps every attempt and sees its kind, queue, attempt, metadata,
 and timestamps; `ClientConfig.EnqueueMiddleware` wraps every enqueue, and may
-add metadata, such as a trace context, to the tasks it enqueues:
+add metadata, such as a trace context, to the tasks it enqueues. Middleware
+that copies values from the context into the metadata, keeping what the
+enqueue set:
 
 ```go
+func FromContext(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+    for _, task := range tasks {
+        for k, v := range valuesOf(ctx) {
+            if _, set := task.Metadata[k]; !set {
+                task.Metadata[k] = v
+            }
+        }
+    }
+    return next(ctx)
+}
+
 func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
     start := time.Now()
     err := next(ctx)
@@ -736,18 +751,22 @@ func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Con
 }
 ```
 
-Middleware must call `next` at most once. A handler's panic reaches it as an
-error. For a batch handler, middleware runs once per task, but the context it
-passes to `next` does not reach the handler. `ClientConfig.ContextMetadata`
-is the simpler tool when you only need to copy values from the context into
-the metadata.
+Middleware must call `next` at most once. A handler's panic reaches attempt
+middleware as an error. For a batch handler, middleware runs once per task,
+but the context it passes to `next` does not reach the handler. Enqueue
+middleware that fails after `next` stored the tasks fails an enqueue in your
+transaction, so that you can roll back; any other enqueue has committed, so
+it succeeds, and the error is logged.
 
 **Queue depth** comes from `Client.Queues`, whose counts the maintainer
 refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
 backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
 and retryable tasks across all queues. `QueueInfo.Capped` means a count hit
-its cap and is a lower bound. `QueueInfo.Lag`, measured at the call, is how
-long the queue's oldest available task has waited since its run time.
+its cap and is a lower bound. `QueueInfo.Lag`, measured with the counts, is
+how long the queue's oldest due task had waited since its run time: an
+available task, or a scheduled or retryable one whose time had come. It has
+no such cap, so it suits backlog alerts. FIFO tasks waiting behind their
+group do not count.
 
 **History** comes from `Client.Activity`: for each minute of the last 24
 hours, the most tasks counted in each state, and the attempts that completed

@@ -16,11 +16,11 @@ Initial release, for taskmill v0.2.0 or newer.
 
 - Producer spans for enqueues and consumer spans for attempts, following
   OpenTelemetry's messaging conventions: an attempt is a child of the span
-  that enqueued its task.
+  that enqueued its task, and links to it.
 - Metrics: `messaging.client.sent.messages`,
   `messaging.client.operation.duration`, and `messaging.process.duration`.
-- Gauges of the queues: `taskmill.queue.tasks` per state, and
-  `taskmill.queue.lag`.
+- Gauges of the queues: `taskmill.queue.tasks` per state,
+  `taskmill.queue.capped`, and `taskmill.queue.lag`.
 - A wrapper for the outbox's publisher, which traces each delivery and carries
   the trace to the broker in the message's headers.
 

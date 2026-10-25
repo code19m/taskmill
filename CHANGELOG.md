@@ -12,12 +12,35 @@ All notable changes to taskmill are recorded here. The format follows
 - `ClientConfig.EnqueueMiddleware`, which wraps every enqueue, for tracing
   and metrics: it sees the tasks' queues and kinds, may add to their
   metadata, and sees their results.
-- `QueueInfo.Lag`: how long a queue's oldest available task has waited
-  since its run time.
+- `QueueInfo.Lag`: how long a queue's oldest due task has waited since its
+  run time. The maintainer measures it with the counts, in migration 2's new
+  column, which `Migrate` adds.
 - `outbox.Delivery.Metadata`: the metadata stored with a message, such as
   its trace context, for the publisher.
+- taskmill's errors name their class, such as `invalid_argument` or
+  `timeout`, which OpenTelemetry reports as `error.type`.
 - The `github.com/code19m/taskmill/otel` module, released on its own: traces
   and metrics through OpenTelemetry. See its [changelog](otel/CHANGELOG.md).
+
+### Removed
+
+- **Breaking:** `ClientConfig.ContextMetadata`. Enqueue middleware does the
+  same; this one keeps the metadata that the enqueue sets, as before:
+
+  ```go
+  EnqueueMiddleware: []taskmill.EnqueueMiddleware{
+      func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+          for _, task := range tasks {
+              for k, v := range contextMetadata(ctx) { // your former ContextMetadata function
+                  if _, set := task.Metadata[k]; !set {
+                      task.Metadata[k] = v
+                  }
+              }
+          }
+          return next(ctx)
+      },
+  },
+  ```
 
 ## [0.1.0] - 2026-10-25
 

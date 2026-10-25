@@ -18,12 +18,13 @@
 // traces what the outbox publishes to a broker.
 //
 // Attributes are those of the conventions, with messaging.system "taskmill"
-// and the queue as messaging.destination.name, plus messaging.taskmill.kind
-// and, on spans, messaging.taskmill.attempt. Metrics carry no task IDs, so
-// their cardinality is bounded by the queues and kinds. error.type is the
-// error's type as semconv.ErrorType reports it: an error with an
-// ErrorType() string method names its own, and taskmill reports a panic as
-// "panic" and a payload that does not decode as "invalid_payload".
+// and the queue as messaging.destination.name, plus taskmill.task.kind and,
+// on spans, taskmill.task.attempt. Metrics carry no task IDs, so their
+// cardinality is bounded by the queues and kinds. error.type is the error's
+// type as semconv.ErrorType reports it: an error with an ErrorType() string
+// method names its own. taskmill's errors name theirs, such as
+// "invalid_argument", "panic", or "timeout" for an attempt that ran out of
+// time.
 package otel
 
 import (
@@ -50,9 +51,9 @@ const (
 	scope  = "github.com/code19m/taskmill/otel"
 	system = messagingconv.SystemAttr("taskmill")
 
-	kindKey    = attribute.Key("messaging.taskmill.kind")
-	attemptKey = attribute.Key("messaging.taskmill.attempt")
-	stateKey   = attribute.Key("messaging.taskmill.state")
+	kindKey    = attribute.Key("taskmill.task.kind")
+	attemptKey = attribute.Key("taskmill.task.attempt")
+	stateKey   = attribute.Key("taskmill.task.state")
 )
 
 // durationBuckets are the bucket boundaries, in seconds, that the
@@ -203,10 +204,12 @@ func (in *Instrumentation) addSent(ctx context.Context, tasks []*taskmill.Enqueu
 // Middleware is a [taskmill.Middleware] that traces each attempt with a
 // consumer span, "process {queue}", and measures it. The span's parent is the
 // producer span whose context the task's metadata holds, so the attempt shows
-// in the trace that enqueued the task; a span already in ctx becomes a link.
-// The handler's context carries the span. A handler error sets the span's
-// status and error.type; a snooze is not an error. Add it first, so that it
-// measures the other middleware too.
+// in the trace that enqueued the task, and the span links to it too, as the
+// conventions ask; a span already in ctx becomes another link. The handler's
+// context carries the span. A handler error sets the span's status and
+// error.type, which names why the attempt's context ended if it did, such as
+// "timeout"; a snooze is not an error. Add it first, so that it measures the
+// other middleware too.
 func (in *Instrumentation) Middleware(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
 	shared := []attribute.KeyValue{semconv.MessagingDestinationName(task.Queue), kindKey.String(task.Kind)}
 	opts := []trace.SpanStartOption{
@@ -222,8 +225,11 @@ func (in *Instrumentation) Middleware(ctx context.Context, task *taskmill.TaskIn
 	}
 	ambient := trace.SpanContextFromContext(ctx)
 	ctx = in.propagator.Extract(ctx, propagation.MapCarrier(task.Metadata))
-	if ambient.IsValid() && !trace.SpanContextFromContext(ctx).Equal(ambient) {
-		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: ambient}))
+	if created := trace.SpanContextFromContext(ctx); created.IsValid() && !created.Equal(ambient) {
+		opts = append(opts, trace.WithLinks(trace.Link{SpanContext: created}))
+		if ambient.IsValid() {
+			opts = append(opts, trace.WithLinks(trace.Link{SpanContext: ambient}))
+		}
 	}
 
 	start := time.Now()
@@ -232,7 +238,11 @@ func (in *Instrumentation) Middleware(ctx context.Context, task *taskmill.TaskIn
 	err := next(ctx)
 	elapsed := time.Since(start).Seconds()
 	if _, snoozed := errors.AsType[*taskmill.SnoozeError](err); err != nil && !snoozed {
-		errType := semconv.ErrorType(err)
+		cause := err
+		if ctx.Err() != nil {
+			cause = context.Cause(ctx) // such as the attempt's timeout
+		}
+		errType := semconv.ErrorType(cause)
 		span.SetAttributes(errType)
 		span.SetStatus(codes.Error, err.Error())
 		shared = append(shared, errType)

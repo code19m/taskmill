@@ -10,6 +10,11 @@ ACTIONLINT_VERSION    := v1.7.12
 # Targets that check code run in each.
 MODULES := . otel
 
+# The core version that otel/go.mod requires. Its replace line builds the
+# module against the core next to it; `make otel-release-check` builds it
+# against this version instead, as its users do.
+OTEL_CORE := $(shell awk '$$1 == "github.com/code19m/taskmill" && $$2 ~ /^v/ { print $$2; exit }' otel/go.mod)
+
 # The database that `make db` starts and `make test` uses.
 TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:54329/taskmill?sslmode=disable
 TEST_POSTGRES     ?= postgres:18-alpine
@@ -26,7 +31,7 @@ help: ## Show this help.
 	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  %-12s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: check
-check: tidy-check lint test vuln ## Run every check that CI runs.
+check: tidy-check lint test vuln otel-release-check ## Run every check that CI runs.
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format all Go files.
@@ -51,6 +56,24 @@ cover: ## Run all tests and open the coverage report in a browser (needs `make d
 .PHONY: bench
 bench: ## Run the benchmarks and the chaos test against the test database (needs `make db`).
 	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go run ./internal/cmd/bench
+
+# The check works on a copy of the module without its replace line. Until the
+# required core version is released, it only says so, unless RELEASING is set:
+# then, as before tagging the module, an unreleased core fails it.
+.PHONY: otel-release-check
+otel-release-check: ## Build and test otel against the core version it requires (needs `make db`).
+	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
+	if ! go mod download -json github.com/code19m/taskmill@$(OTEL_CORE) > "$$tmp/core.json"; then \
+		if [ -z "$(RELEASING)" ] && grep -q 'unknown revision' "$$tmp/core.json"; then \
+			echo "taskmill $(OTEL_CORE) is not released yet: release it before the otel module."; exit 0; \
+		fi; \
+		cat "$$tmp/core.json"; exit 1; \
+	fi && \
+	cp -R otel "$$tmp/otel" && cd "$$tmp/otel" && \
+	go mod edit -dropreplace=github.com/code19m/taskmill && \
+	export GOWORK=off GOFLAGS=-mod=mod && go vet ./... && \
+	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -count=1 ./... && \
+	echo "otel builds and passes its tests with taskmill $(OTEL_CORE)."
 
 .PHONY: vuln
 vuln: $(GOVULNCHECK) ## Scan for known vulnerabilities.

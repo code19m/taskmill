@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,7 +23,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/code19m/taskmill"
-	"github.com/code19m/taskmill/internal/testdb"
 	tmotel "github.com/code19m/taskmill/otel"
 	"github.com/code19m/taskmill/outbox"
 	"github.com/code19m/taskmill/taskmilltest"
@@ -54,11 +54,27 @@ func setup(t *testing.T) *env {
 		MeterProvider:  sdkmetric.NewMeterProvider(sdkmetric.WithReader(metrics)),
 		Propagator:     propagation.TraceContext{},
 	})
-	pool := testdb.Pool(t)
+	pool := testPool(t)
 	client := taskmilltest.NewClient(t, pool, &taskmill.ClientConfig{
 		EnqueueMiddleware: []taskmill.EnqueueMiddleware{in.EnqueueMiddleware},
 	})
 	return &env{in: in, spans: spans, metrics: metrics, tracer: tp.Tracer("test"), pool: pool, client: client}
+}
+
+// testPool connects to the database named by TASKMILL_TEST_DATABASE_URL, as
+// the core's tests do, or skips the test if it is unset.
+func testPool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	url := os.Getenv("TASKMILL_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("TASKMILL_TEST_DATABASE_URL is not set; run `make db` and `make test`")
+	}
+	pool, err := pgxpool.New(t.Context(), url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 // worker returns a worker with the instrumentation's middleware that runs
@@ -218,22 +234,18 @@ func TestTraceFollowsTheTaskFromEnqueueToAttempts(t *testing.T) {
 	}
 	taskID := strconv.FormatInt(id, 10)
 	wantAttrs(t, send, "messaging.system=taskmill", "messaging.operation.name=send", "messaging.operation.type=send",
-		"messaging.destination.name=emails", "messaging.taskmill.kind=email.send", "messaging.message.id="+taskID)
+		"messaging.destination.name=emails", "taskmill.task.kind=email.send", "messaging.message.id="+taskID)
 
 	attempts := e.ended("process emails")
 	if len(attempts) != 2 || len(handlerSpans) != 2 {
 		t.Fatalf("got %d process spans and %d handler calls, want 2 of each", len(attempts), len(handlerSpans))
 	}
 	for i, span := range attempts {
-		if span.SpanKind() != trace.SpanKindConsumer || span.Parent().SpanID() != send.SpanContext().SpanID() {
-			t.Errorf("attempt %d: kind %s, parent %s; want a consumer child of the send span", i+1, span.SpanKind(), span.Parent().SpanID())
-		}
 		if !handlerSpans[i].Equal(span.SpanContext()) {
 			t.Errorf("attempt %d: the handler's context does not carry its span", i+1)
 		}
-		wantAttrs(t, span, "messaging.system=taskmill", "messaging.operation.name=process", "messaging.operation.type=process",
-			"messaging.destination.name=emails", "messaging.taskmill.kind=email.send", "messaging.message.id="+taskID,
-			"messaging.taskmill.attempt="+strconv.Itoa(i+1))
+		wantProcess(t, span, send)
+		wantAttrs(t, span, "messaging.message.id="+taskID, "taskmill.task.attempt="+strconv.Itoa(i+1))
 	}
 	if s := attempts[0].Status(); s.Code != codes.Error || s.Description != "smtp unavailable" {
 		t.Errorf("failed attempt: got status %+v", s)
@@ -267,7 +279,7 @@ func TestMetricsCountEnqueuesAndAttempts(t *testing.T) {
 
 	// A batch across queues has one span, whose context every task carries.
 	span := e.one(t, "send")
-	wantAttrs(t, span, "messaging.batch.message_count=2", "messaging.taskmill.kind=email.send")
+	wantAttrs(t, span, "messaging.batch.message_count=2", "taskmill.task.kind=email.send")
 	for _, res := range batch {
 		info, err := e.client.Get(ctx, res.ID)
 		if err != nil {
@@ -282,33 +294,43 @@ func TestMetricsCountEnqueuesAndAttempts(t *testing.T) {
 	}
 
 	var hs taskmill.Handlers
-	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(_ context.Context, task *taskmill.Task[sendEmail]) error {
-		if task.Args.To == "panic" {
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+		switch task.Args.To {
+		case "panic":
 			panic("boom")
+		case "slow":
+			<-ctx.Done()
+			return ctx.Err()
 		}
 		return nil
-	}), nil)
+	}), &taskmill.HandlerOptions{Timeout: 100 * time.Millisecond})
 	w := e.worker(t, &hs)
-	for _, id := range []int64{single.ID, batch[1].ID} {
+	slow, err := e.client.Enqueue(ctx, sendEmail{To: "slow"}, &taskmill.EnqueueOptions{Queue: "reports"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{single.ID, batch[1].ID, slow.ID} {
 		if _, err := w.RunTask(ctx, id); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	invalidType := "error.type=*errors.errorString " // the type of the invalid-argument error
+	invalidType := "error.type=invalid_argument "
 	wantPoints(t, "sent", e.points(t, "messaging.client.sent.messages"), []string{
-		"messaging.destination.name=emails messaging.operation.name=send messaging.system=taskmill messaging.taskmill.kind=email.send: 2",
-		"messaging.destination.name=reports messaging.operation.name=send messaging.system=taskmill messaging.taskmill.kind=email.send: 1",
-		invalidType + "messaging.destination.name=emails messaging.operation.name=send messaging.system=taskmill messaging.taskmill.kind=email.send: 1",
+		"messaging.destination.name=emails messaging.operation.name=send messaging.system=taskmill taskmill.task.kind=email.send: 2",
+		"messaging.destination.name=reports messaging.operation.name=send messaging.system=taskmill taskmill.task.kind=email.send: 2",
+		invalidType + "messaging.destination.name=emails messaging.operation.name=send messaging.system=taskmill taskmill.task.kind=email.send: 1",
 	})
 	wantPoints(t, "enqueue duration", e.points(t, "messaging.client.operation.duration"), []string{
-		"messaging.destination.name=emails messaging.operation.name=send messaging.operation.type=send messaging.system=taskmill messaging.taskmill.kind=email.send: 1",
-		"messaging.operation.name=send messaging.operation.type=send messaging.system=taskmill messaging.taskmill.kind=email.send: 1",
-		invalidType + "messaging.destination.name=emails messaging.operation.name=send messaging.operation.type=send messaging.system=taskmill messaging.taskmill.kind=email.send: 1",
+		"messaging.destination.name=emails messaging.operation.name=send messaging.operation.type=send messaging.system=taskmill taskmill.task.kind=email.send: 1",
+		"messaging.destination.name=reports messaging.operation.name=send messaging.operation.type=send messaging.system=taskmill taskmill.task.kind=email.send: 1",
+		"messaging.operation.name=send messaging.operation.type=send messaging.system=taskmill taskmill.task.kind=email.send: 1",
+		invalidType + "messaging.destination.name=emails messaging.operation.name=send messaging.operation.type=send messaging.system=taskmill taskmill.task.kind=email.send: 1",
 	})
 	wantPoints(t, "process duration", e.points(t, "messaging.process.duration"), []string{
-		"error.type=panic messaging.destination.name=emails messaging.operation.name=process messaging.system=taskmill messaging.taskmill.kind=email.send: 1",
-		"messaging.destination.name=reports messaging.operation.name=process messaging.system=taskmill messaging.taskmill.kind=email.send: 1",
+		"error.type=panic messaging.destination.name=emails messaging.operation.name=process messaging.system=taskmill taskmill.task.kind=email.send: 1",
+		"error.type=timeout messaging.destination.name=reports messaging.operation.name=process messaging.system=taskmill taskmill.task.kind=email.send: 1",
+		"messaging.destination.name=reports messaging.operation.name=process messaging.system=taskmill taskmill.task.kind=email.send: 1",
 	})
 }
 
@@ -346,7 +368,7 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 		}
 	})
 
-	const available = "messaging.destination.name=backlog messaging.taskmill.state=available: 3"
+	const available = "messaging.destination.name=backlog taskmill.task.state=available: 3"
 	deadline := time.Now().Add(30 * time.Second)
 	var counts []string
 	for counts = e.points(t, "taskmill.queue.tasks"); !slices.Contains(counts, available); counts = e.points(t, "taskmill.queue.tasks") {
@@ -356,11 +378,14 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	for _, s := range []string{"scheduled", "pending", "running", "retryable", "dead", "canceled"} {
-		if want := "messaging.destination.name=backlog messaging.taskmill.state=" + s + ": 0"; !slices.Contains(counts, want) {
+		if want := "messaging.destination.name=backlog taskmill.task.state=" + s + ": 0"; !slices.Contains(counts, want) {
 			t.Errorf("no zero for state %s in %q", s, counts)
 		}
 	}
 
+	if capped := e.points(t, "taskmill.queue.capped"); !slices.Contains(capped, "messaging.destination.name=backlog: 0") {
+		t.Errorf("got capped %q, want 0 for the backlog", capped)
+	}
 	var lag float64
 	for _, p := range e.points(t, "taskmill.queue.lag") {
 		if rest, ok := strings.CutPrefix(p, "messaging.destination.name=backlog: "); ok {
@@ -437,6 +462,20 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 		"error.type=*errors.errorString messaging.destination.name=orders messaging.operation.name=send messaging.system=kafka: 1",
 		"messaging.destination.name=orders messaging.operation.name=send messaging.system=kafka: 1",
 	})
+}
+
+// wantProcess fails the test unless span traces an attempt of a task of the
+// emails queue as a consumer child of send, linked to it.
+func wantProcess(t *testing.T, span, send sdktrace.ReadOnlySpan) {
+	t.Helper()
+	if span.SpanKind() != trace.SpanKindConsumer || span.Parent().SpanID() != send.SpanContext().SpanID() {
+		t.Errorf("process span: kind %s, parent %s; want a consumer child of the send span", span.SpanKind(), span.Parent().SpanID())
+	}
+	if links := span.Links(); len(links) != 1 || links[0].SpanContext.SpanID() != send.SpanContext().SpanID() {
+		t.Errorf("process span: got links %v, want one to the send span", links)
+	}
+	wantAttrs(t, span, "messaging.system=taskmill", "messaging.operation.name=process", "messaging.operation.type=process",
+		"messaging.destination.name=emails", "taskmill.task.kind=email.send")
 }
 
 // wantSend fails the test unless span traces the publishing of d, as a child

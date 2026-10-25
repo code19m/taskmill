@@ -48,7 +48,7 @@ configurable, so several installations can share a database. It must match
 | `schedules` | Recurring schedules and their next run times | Cold |
 | `workers` | Running worker processes | Cold: a heartbeat per process every 10 s |
 | `leader` | The elected maintainer | Cold |
-| `queue_stats` | Task counts per queue and state, refreshed by the maintainer | Cold |
+| `queue_stats` | Task counts per queue and state, with each count's oldest due task, refreshed by the maintainer | Cold |
 | `activity` | Task counts and ended attempts per minute and queue, for a day | Cold: a few rows every 10 s |
 | `migrations` | Applied schema migrations | Cold |
 
@@ -282,7 +282,7 @@ transaction that also updates the group if the task finished.
 | Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
 | Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers without a heartbeat for 5 minutes, and schedules that the maintainer does not define and that did not run or change for a day. |
 | History | Keeps partitions for today and the next 6 days, and drops a partition once its whole day is older than the retention period (see [Operational notes](#operational-notes)). |
-| Statistics | Every 10 seconds, counts each queue's tasks per state and stores the counts in `queue_stats` and the current minute of `activity`. |
+| Statistics | Every 10 seconds, counts each queue's tasks per state, finds each count's oldest due task, and stores both in `queue_stats` and the counts in the current minute of `activity`. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
 
 **Statistics read indexes only, and every count is capped,** so the cost
@@ -294,6 +294,17 @@ row per task. Scheduled and retryable tasks are read from `tasks_due_idx`,
 which is ordered by run time, not by queue, so they are counted together. A
 count that reaches its cap is stored with `capped = true`: it is a lower
 bound.
+
+**Lag comes with the counts.** Each row of `queue_stats` keeps, in
+`oldest_due_at`, the run time of the oldest due task it counted: for
+`available`, the first entry of `tasks_fetch_idx` per priority, one more
+probe per queue and priority; for `scheduled` and `retryable`, the oldest
+task whose run time has passed, which the count meets first because it reads
+`tasks_due_idx` in run time order. A queue's lag is then the age of its
+oldest `oldest_due_at` when it was counted, which `Client.Queues` reads
+without touching `tasks`. Only if more than 100,000 scheduled and retryable
+tasks are overdue can a queue's overdue tasks fall past the cap; the oldest
+ones, which set the largest lag, are always read.
 
 ### Listing
 

@@ -12,8 +12,8 @@ import (
 	"github.com/code19m/taskmill"
 )
 
-// observeTimeout bounds the reading of the queues at each collection, so that
-// a slow database does not hold up the application's other metrics.
+// observeTimeout bounds the reading of the statistics at each collection, so
+// that a slow database does not hold up the application's other metrics.
 const observeTimeout = 5 * time.Second
 
 // observedStates are the states that taskmill.queue.tasks reports, with zeros
@@ -24,32 +24,41 @@ var observedStates = []taskmill.State{
 }
 
 // ObserveQueues reports gauges of client's queues, read with
-// [taskmill.Client.Queues] at each collection:
+// [taskmill.Client.Queues] at each collection, from the statistics that the
+// maintainer refreshes every 10 seconds:
 //
-//   - taskmill.queue.tasks, the tasks of each queue per state
-//     (messaging.taskmill.state), as of the maintainer's latest count, which
-//     it refreshes every 10 seconds; completed tasks are not counted.
-//   - taskmill.queue.lag, in seconds, how long the oldest available task of
-//     each queue has waited since its run time, measured at the collection.
+//   - taskmill.queue.tasks: the tasks of each queue per state
+//     (taskmill.task.state), except completed ones. Counting stops at 10,000
+//     tasks per queue and state, and at 100,000 scheduled and retryable
+//     tasks across all queues, so on a large backlog a count is a lower
+//     bound.
+//   - taskmill.queue.capped: 1 when a count of the queue stopped at its cap,
+//     else 0.
+//   - taskmill.queue.lag: in seconds, how long the queue's oldest due task
+//     had waited, as [taskmill.QueueInfo.Lag] says. It stays right on a large
+//     backlog: alert on it, not on the counts.
 //
-// The gauges describe the whole installation, so every process that observes
-// it reports the same values: aggregate them with max, not sum, or observe
-// in one deployment only. Each collection runs two queries, bounded to 5
-// seconds; one that fails is reported to otel.Handle. Unregister the returned
-// registration to stop observing.
+// The gauges describe the whole installation, read from one small table, so
+// every process that observes it reports the same values: aggregate them with
+// max, not sum. A read takes at most 5 seconds; one that fails is reported to
+// otel.Handle. Unregister the returned registration to stop observing.
 func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Registration, error) {
 	if client == nil {
 		return nil, errors.New("taskmill/otel: client is nil")
 	}
-	tasks, err := in.meter.Int64ObservableGauge("taskmill.queue.tasks",
-		metric.WithDescription("Tasks per queue and state, as of the maintainer's latest count."),
-		metric.WithUnit("{task}"))
+	tasks, err := in.meter.Int64ObservableGauge("taskmill.queue.tasks", metric.WithUnit("{task}"),
+		metric.WithDescription("Tasks per queue and state, counted up to 10,000 per queue and state "+
+			"and 100,000 scheduled and retryable tasks in all."))
 	if err != nil {
 		return nil, fmt.Errorf("taskmill/otel: %w", err)
 	}
-	lag, err := in.meter.Float64ObservableGauge("taskmill.queue.lag",
-		metric.WithDescription("How long the oldest available task of the queue has waited since its run time."),
-		metric.WithUnit("s"))
+	capped, err := in.meter.Int64ObservableGauge("taskmill.queue.capped",
+		metric.WithDescription("1 when a count of the queue stopped at its cap and is a lower bound."))
+	if err != nil {
+		return nil, fmt.Errorf("taskmill/otel: %w", err)
+	}
+	lag, err := in.meter.Float64ObservableGauge("taskmill.queue.lag", metric.WithUnit("s"),
+		metric.WithDescription("How long the oldest due task of the queue has waited since its run time."))
 	if err != nil {
 		return nil, fmt.Errorf("taskmill/otel: %w", err)
 	}
@@ -61,12 +70,21 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 			return fmt.Errorf("taskmill/otel: observe queues: %w", err)
 		}
 		for _, q := range queues {
-			queue := semconv.MessagingDestinationName(q.Name)
+			queue := metric.WithAttributes(semconv.MessagingDestinationName(q.Name))
 			for _, s := range observedStates {
-				o.ObserveInt64(tasks, q.Counts[s], metric.WithAttributes(queue, stateKey.String(string(s))))
+				o.ObserveInt64(tasks, q.Counts[s],
+					metric.WithAttributes(semconv.MessagingDestinationName(q.Name), stateKey.String(string(s))))
 			}
-			o.ObserveFloat64(lag, q.Lag.Seconds(), metric.WithAttributes(queue))
+			o.ObserveInt64(capped, boolInt(q.Capped), queue)
+			o.ObserveFloat64(lag, q.Lag.Seconds(), queue)
 		}
 		return nil
-	}, tasks, lag)
+	}, tasks, capped, lag)
+}
+
+func boolInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
 }

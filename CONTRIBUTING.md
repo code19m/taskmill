@@ -153,9 +153,11 @@ Maintainers release from a green `main`:
 The `otel` module is released the same way, from
 [otel/CHANGELOG.md](otel/CHANGELOG.md), with tags named `otel/vX.Y.Z`. Its
 go.mod requires the oldest core release it works with. If it uses core changes
-that are not released yet, release the core first, then set that version in
-the `require` line of `otel/go.mod`, and only then tag the module. The
-`replace` line stays: users of the module ignore it.
+that are not released yet, release the core first. Before tagging, run
+`make otel-release-check RELEASING=1`: it builds and tests the module
+against the required core version, as users build it, and fails if that
+version is not released. The `replace` line stays: users of the module
+ignore it.
 
 Never move or delete a published tag: the Go checksum database keeps every
 version forever. Fix a bad release forward with a new patch release, and

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"slices"
 	"strings"
@@ -93,7 +94,11 @@ type EnqueueResult struct {
 // transaction commits, and the tasks exist only if it does.
 //
 // Middleware must call next at most once, and return its error. Returning nil
-// without calling next fails the enqueue.
+// without calling next fails the enqueue. If middleware fails after next
+// succeeded, an enqueue in the caller's transaction returns its error, so
+// that the caller can roll back; any other enqueue has committed, so it
+// returns the results and logs the error, and a retry does not duplicate the
+// tasks.
 type EnqueueMiddleware func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error
 
 // EnqueueTask is a task being enqueued, as [EnqueueMiddleware] sees it.
@@ -102,9 +107,8 @@ type EnqueueTask struct {
 	Queue string
 	Kind  string
 
-	// Metadata holds the task's metadata, from [EnqueueOptions.Metadata] and
-	// [ClientConfig.ContextMetadata]. It is never nil, and middleware may
-	// change it before calling next.
+	// Metadata holds the task's metadata, from [EnqueueOptions.Metadata]. It
+	// is never nil, and middleware may change it before calling next.
 	Metadata map[string]string
 
 	// Result is set once next returns nil.
@@ -182,7 +186,7 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 	}
 	tasks := make([]*resolvedTask, len(params))
 	for i, p := range params {
-		t, err := c.resolve(ctx, p)
+		t, err := resolve(p)
 		if err != nil {
 			return nil, inBatch(err, i, len(params))
 		}
@@ -225,12 +229,17 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 		inner := next
 		next = func(ctx context.Context) error { return m(ctx, views, inner) }
 	}
-	if err := next(ctx); err != nil {
-		return nil, err
-	}
-	if results == nil {
+	err := next(ctx)
+	switch {
+	case results == nil && err == nil:
 		return nil, errors.New("taskmill: enqueue middleware returned nil without enqueueing the tasks")
+	case results == nil || err == nil:
+		return results, err
+	case q.inTx():
+		return nil, err // the caller rolls back
 	}
+	c.logger.LogAttrs(ctx, slog.LevelWarn, "enqueue middleware failed after the tasks were enqueued",
+		slog.Int(logKeyTasks, len(results)), slog.Any(logKeyError, err))
 	return results, nil
 }
 
@@ -362,12 +371,12 @@ type resolvedTask struct {
 	dedupeKey          []byte
 	dedupeWindow       time.Duration
 	payload            []byte
-	meta               map[string]string // may belong to the caller: never modified
+	meta               map[string]string // may belong to the caller or the kind: never modified
 }
 
 // resolve merges a task's options over its kind's defaults and taskmill's,
 // and validates the result.
-func (c *Client) resolve(ctx context.Context, p EnqueueParams) (*resolvedTask, error) {
+func resolve(p EnqueueParams) (*resolvedTask, error) {
 	if p.Args == nil {
 		return nil, invalidArgument("args is nil")
 	}
@@ -422,13 +431,6 @@ func (c *Client) resolve(ctx context.Context, p EnqueueParams) (*resolvedTask, e
 	t.payload = payload
 
 	t.meta = o.Metadata
-	if c.contextMetadata != nil {
-		if fromCtx := c.contextMetadata(ctx); len(fromCtx) > 0 {
-			merged := maps.Clone(fromCtx)
-			maps.Copy(merged, t.meta)
-			t.meta = merged
-		}
-	}
 	return t, nil
 }
 

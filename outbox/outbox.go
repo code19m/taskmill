@@ -72,9 +72,9 @@ type Delivery struct {
 	// retried, so consumers can deduplicate by it. It is a UUIDv7.
 	ID string
 
-	// Metadata is the metadata that taskmill stored with the message, from
-	// [taskmill.ClientConfig.ContextMetadata] and enqueue middleware, such as
-	// the trace context of the transaction that stored it.
+	// Metadata is the metadata that [taskmill.EnqueueMiddleware] stored with
+	// the message, such as the trace context of the transaction that stored
+	// it.
 	Metadata map[string]string
 }
 

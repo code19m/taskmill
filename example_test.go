@@ -281,6 +281,7 @@ func ExampleMigrations() {
 	// Output:
 	// 0000_bootstrap
 	// 0001_initial
+	// 0002_queue_lag
 }
 
 // This example retries every dead task of one queue, once the cause of their

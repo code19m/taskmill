@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -327,29 +328,6 @@ func TestEnqueueFIFOGroupHasOneHead(t *testing.T) {
 	}
 }
 
-func TestEnqueueAddsContextMetadata(t *testing.T) {
-	t.Parallel()
-	type traceKey struct{}
-	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
-		ContextMetadata: func(ctx context.Context) map[string]string {
-			if v, ok := ctx.Value(traceKey{}).(string); ok {
-				return map[string]string{"traceparent": v, "source": "context"}
-			}
-			return nil
-		},
-	})
-
-	ctx := context.WithValue(t.Context(), traceKey{}, "00-abc-01")
-	res, err := e.client.Enqueue(ctx, sendEmail{}, &taskmill.EnqueueOptions{Metadata: map[string]string{"source": "options"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta := e.get(t, res.ID).Metadata
-	if meta["traceparent"] != "00-abc-01" || meta["source"] != "options" {
-		t.Fatalf("got metadata %v", meta)
-	}
-}
-
 func TestEnqueueMiddlewareWrapsEnqueues(t *testing.T) {
 	t.Parallel()
 	var calls []string
@@ -405,14 +383,17 @@ func TestEnqueueMiddlewareThatMisusesNext(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		mw    taskmill.EnqueueMiddleware
+		fails bool // the enqueue reports an error
 		tasks int
 	}{
 		{
 			name:  "returns nil without calling next",
 			mw:    func(context.Context, []*taskmill.EnqueueTask, func(context.Context) error) error { return nil },
+			fails: true,
 			tasks: 0,
 		},
 		{
+			// The first call committed the task; the second stores nothing.
 			name: "calls next twice",
 			mw: func(ctx context.Context, _ []*taskmill.EnqueueTask, next func(context.Context) error) error {
 				if err := next(ctx); err != nil {
@@ -420,19 +401,58 @@ func TestEnqueueMiddlewareThatMisusesNext(t *testing.T) {
 				}
 				return next(ctx)
 			},
+			fails: false,
 			tasks: 1,
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{c.mw}})
-			if _, err := e.client.Enqueue(t.Context(), sendEmail{}, nil); err == nil {
-				t.Fatal("the enqueue succeeded")
+			if _, err := e.client.Enqueue(t.Context(), sendEmail{}, nil); (err != nil) != c.fails {
+				t.Fatalf("got error %v, want an error: %t", err, c.fails)
 			}
 			if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != c.tasks {
 				t.Fatalf("got %d tasks, want %d", n, c.tasks)
 			}
 		})
+	}
+}
+
+func TestEnqueueMiddlewareThatFailsAfterNext(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	failAfter := func(ctx context.Context, _ []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		if err := next(ctx); err != nil {
+			return err
+		}
+		return errors.New("exporter unavailable")
+	}
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
+		Logger:            slog.New(logs),
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{failAfter},
+	})
+
+	// Outside the caller's transaction the task committed: the enqueue
+	// reports it, so that a retry does not enqueue it again.
+	res, err := e.client.Enqueue(t.Context(), sendEmail{}, nil)
+	if err != nil {
+		t.Fatalf("got %v, want the committed task", err)
+	}
+	e.wantState(t, res.ID, taskmill.StateAvailable)
+	if logs.count("enqueue middleware failed after the tasks were enqueued") != 1 {
+		t.Fatal("the middleware's error was not logged")
+	}
+
+	// In the caller's transaction, the error lets the caller roll back.
+	tx := e.begin(t)
+	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err == nil {
+		t.Fatal("the enqueue in a transaction hid the middleware's error")
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
+		t.Fatalf("got %d tasks, want only the first", n)
 	}
 }
 

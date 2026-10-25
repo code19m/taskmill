@@ -20,7 +20,8 @@ side, but not the rest:
   a task's metadata, but it cannot wrap the enqueue: it never learns the
   task's ID or whether the enqueue failed, so nothing can end a producer span.
 - **No lag.** `Client.Queues` counts tasks, but not how long the oldest one
-  has waited.
+  has waited. The counts are capped, so on a large backlog they cannot say
+  how far behind a queue is.
 - **No path to the broker.** The outbox's publisher does not see the metadata
   of the task that holds a message, so the trace stops at the outbox.
 
@@ -36,16 +37,26 @@ We considered a separate repository. It would let the module release on its
 own schedule, but every change that needs a new building block in the core
 would take two pull requests, and a core release before the module could use
 it. In one repository, a building block and its first user are reviewed,
-tested, and documented together. go.mod replaces the core with `../`, so CI
-tests the module against the core at the same commit; users of the module
-ignore that line. `make check` and CI lint, test, and scan every module.
+tested, and documented together. `make check` and CI lint, test, and scan
+every module.
+
+The module's go.mod replaces the core with `../`, so that every command in
+the repository builds it against the core at the same commit; users of the
+module ignore that line. A workspace (go.work) would do the same, but
+`go mod tidy` ignores workspaces, so it would fail whenever the module waits
+for a core release. Because the replace line hides the required version, a
+separate check, `make otel-release-check`, copies the module, drops the line,
+and builds and tests the copy against the core version that go.mod requires,
+as users build it. Until that version is released, the check only says so;
+when the module is released, it must pass.
 
 ### Versioning
 
 The module has its own semantic version. Each release requires the oldest
-core release that has the building blocks it uses. When a module release
-needs core changes that are not released yet, the core is released first,
-then the module's go.mod requires that version, then the module is tagged.
+core release that has the building blocks it uses. When the module starts to
+use a core change, its go.mod requires the next core version in the same pull
+request, and the release check fails if it does not. The core is then
+released before the module is tagged.
 
 The module stays below v1 while OpenTelemetry's messaging conventions are in
 development. Its Go API follows the core's compatibility policy, but the names
@@ -59,22 +70,31 @@ Only what the module cannot build on its own, with no dependency:
 1. **Enqueue middleware.** `ClientConfig.EnqueueMiddleware` wraps every
    enqueue: alone, in batches, inside the caller's transaction, and by
    schedules. It sees each task's resolved queue and kind, may change its
-   metadata before the tasks are stored, and sees their results. The worker's
-   `Middleware` already covers attempts.
-2. **Lag.** `QueueInfo.Lag` is how long a queue's oldest available task has
-   waited since its run time. `Client.Queues` measures it in the same query
-   that lists the queues, by reading one entry of the fetch index per queue
-   and priority.
+   metadata before the tasks are stored, and sees their results. It replaces
+   `ClientConfig.ContextMetadata`, which it covers in a few lines. A
+   middleware that fails after the tasks were stored outside the caller's
+   transaction does not fail the enqueue, whose tasks have committed: a retry
+   would duplicate them. The worker's `Middleware` already covers attempts.
+2. **Lag.** `QueueInfo.Lag` is how long a queue's oldest due task had
+   waited since its run time: an available task, or a scheduled or retryable
+   one whose run time has passed, so overdue retries and a maintainer that
+   stopped promoting show too. FIFO tasks that wait behind their group are
+   excluded: they wait by design. The maintainer measures it while it counts,
+   every 10 seconds, and stores it with the counts (migration 2), so
+   `Client.Queues`, which the dashboard reads every few seconds, reads it for
+   free. It is as fresh as the counts, but not capped like them.
 3. **Metadata in deliveries.** `outbox.Delivery.Metadata` carries the stored
    task's metadata, and with it the trace context, to the publisher.
-4. **Failure codes.** Failures that taskmill classifies itself report their
-   code, such as `panic`, through an `ErrorType() string` method, which
-   OpenTelemetry's `semconv.ErrorType` reads.
+4. **Error classes.** taskmill's errors name their class, such as
+   `invalid_argument`, `panic`, or `timeout`, through an `ErrorType() string`
+   method, which OpenTelemetry's `semconv.ErrorType` reads.
 
 ### What the module instruments
 
 The module follows OpenTelemetry's semantic conventions for messaging, with
-`messaging.system` set to `taskmill` and the queue as the destination:
+`messaging.system` set to `taskmill` and the queue as the destination. Its
+own attributes use the `taskmill.` namespace: `taskmill.task.kind`,
+`taskmill.task.attempt`, and `taskmill.task.state`.
 
 - **Enqueue.** A producer span, `send {queue}`, wraps each enqueue call, and
   its context is stored in the metadata of every task the call enqueues. A
@@ -85,10 +105,11 @@ The module follows OpenTelemetry's semantic conventions for messaging, with
   span already gives each task a creation context.
 - **Attempts.** A consumer span, `process {queue}`, wraps each attempt. Its
   parent is the producer span, so a task's work shows in the trace of the
-  request that enqueued it. The conventions allow this parent for a single
-  message, and link to the creation context otherwise; a span already in the
-  worker's context becomes a link instead. Spans carry the task's ID, kind,
-  and attempt.
+  request that enqueued it; the conventions allow this parent for a single
+  message. The span also links to the producer span, as the conventions ask
+  of every consumer span, and to a span already in the worker's context.
+  Spans carry the task's ID, kind, and attempt. When the attempt's context
+  ended, `error.type` names why, such as `timeout`.
 - **The outbox.** A wrapper around the user's publisher traces each delivery
   with a producer span, `send {topic}`, a child of the span that stored the
   message. Its context goes into the message's headers, so consumers behind
@@ -97,13 +118,20 @@ The module follows OpenTelemetry's semantic conventions for messaging, with
 - **Metrics.** `messaging.client.sent.messages` for enqueues and publishes,
   `messaging.client.operation.duration` for enqueues, and
   `messaging.process.duration` for attempts, with `error.type` on failures.
-  Two gauges describe the queues: `taskmill.queue.tasks`, per state, and
-  `taskmill.queue.lag`. Metric attributes are bounded: queue, kind, state,
-  and error type, never a task ID or an attempt number.
+  Three gauges describe the queues: `taskmill.queue.tasks`, per state;
+  `taskmill.queue.capped`, which says that a count stopped at its cap; and
+  `taskmill.queue.lag`, which backlog alerts use because it has no cap.
+  Metric attributes are bounded: queue, kind, state, and error type, never a
+  task ID or an attempt number.
 
-The queue gauges are separate, because they describe the whole installation
-and cost two queries per collection: an application turns them on where it
-wants them reported. Everything else is turned on with one value, created by
+The queue gauges are turned on by a call of their own, because they describe
+the whole installation rather than the process. Only the maintainer measures
+them, and it stores them, so every process that reports them reads the same
+small table and reports the same values: dashboards aggregate them with max.
+We considered reporting them only from the maintainer's process, but the
+maintainer moves between processes, and a gauge that moves with it breaks its
+series; reading the stored values costs each process one small query per
+collection. Everything else is turned on with one value, created by
 `otel.New`, whose middleware goes into the client's and the worker's
 configuration. It uses OpenTelemetry's global providers and propagator
 unless it is given others.
@@ -114,14 +142,12 @@ unless it is given others.
   connected traces from a request through its tasks and outbox messages to
   the consumers behind the broker, and standard metrics, with a few lines of
   setup.
-- The core gains three small extension points that other integrations can
-  use too, such as metrics for another system.
+- The core gains small extension points that other integrations can use
+  too, such as metrics for another system. Applications that used
+  `ContextMetadata` move to enqueue middleware.
 - Releasing takes one more step when the module needs new core features, and
   the repository has two modules to keep tidy, linted, and scanned.
 - Traces of tasks that retry for hours stay open for hours. Backends that
   limit a trace's duration may split them.
 - Every process that reports the queue gauges reports the same values, so
   dashboards aggregate them with max, not sum.
-- `ContextMetadata` overlaps with enqueue middleware, which can do what it
-  does. It stays for now, as the simpler tool; the API review before v1.0.0
-  decides whether to keep both.

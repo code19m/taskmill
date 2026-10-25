@@ -93,7 +93,7 @@ linters:
           allow:
             - $gostd
             - github.com/code19m/taskmill
-            - github.com/jackc/pgx/v5 # tests reach the database through the core's
+            - github.com/jackc/pgx/v5 # the tests connect to PostgreSQL
             - go.opentelemetry.io/otel # ADR 0005
 
     errcheck:

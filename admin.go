@@ -49,9 +49,12 @@ type QueueInfo struct {
 	Capped      bool
 	RefreshedAt time.Time // zero until the maintainer first counts the queue
 
-	// Lag is how long the queue's oldest available task has waited since its
-	// run time, measured at the call: zero when no task is available. It
-	// grows when workers fall behind, stop, or the queue is paused.
+	// Lag is how long the queue's oldest due task had waited since its run
+	// time when the queue was counted: an available task, or a scheduled or
+	// retryable one whose run time had passed. It grows when workers fall
+	// behind or stop, the queue is paused, or due tasks are not promoted.
+	// Tasks pending behind their FIFO group wait by design and do not count.
+	// Zero when no task is due. It is as fresh as the counts.
 	Lag time.Duration
 }
 
@@ -160,8 +163,7 @@ func (c *Client) changeQueue(ctx context.Context, name, sql string, args ...any)
 }
 
 // Queues returns every known queue: those with settings, those that workers
-// serve, and those that hold tasks, as of the latest statistics. Lag is
-// measured at the call.
+// serve, and those that hold tasks, as of the latest statistics.
 func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 	r, err := c.pool.Query(ctx, c.sql.listQueues)
 	if err != nil {
@@ -171,13 +173,11 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 	index := make(map[string]int)
 	for r.Next() {
 		var q QueueInfo
-		var lag int64
-		if err := r.Scan(&q.Name, &q.Settings.MaxRunning, &q.Paused, &q.Workers, &lag); err != nil {
+		if err := r.Scan(&q.Name, &q.Settings.MaxRunning, &q.Paused, &q.Workers); err != nil {
 			r.Close()
 			return nil, fmt.Errorf("taskmill: list queues: %w", err)
 		}
 		q.Counts = map[State]int64{}
-		q.Lag = time.Duration(lag) * time.Microsecond
 		index[q.Name] = len(out)
 		out = append(out, q)
 	}
@@ -196,7 +196,8 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 		var n int64
 		var capped bool
 		var at time.Time
-		if err := r.Scan(&name, &state, &n, &capped, &at); err != nil {
+		var oldest *time.Time
+		if err := r.Scan(&name, &state, &n, &capped, &at, &oldest); err != nil {
 			return nil, fmt.Errorf("taskmill: list queues: %w", err)
 		}
 		if i, ok := index[name]; ok {
@@ -204,6 +205,9 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 			q.Counts[State(state)] = n
 			q.Capped = q.Capped || capped
 			q.RefreshedAt = at
+			if oldest != nil {
+				q.Lag = max(q.Lag, at.Sub(*oldest))
+			}
 		}
 	}
 	if err := r.Err(); err != nil {
