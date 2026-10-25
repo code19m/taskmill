@@ -15,9 +15,8 @@ wherever you speak for the project.
 ## Reporting
 
 If someone breaks this code, open the **⋯** menu of their comment, issue,
-pull request, or discussion and choose **Report content**. You can send the
-report to the maintainers of this repository or to GitHub; either way, only
-they see it, not the person you report. Security issues go through the
+pull request, or discussion and choose **Report content**. The report is
+private: the person you report never sees it. Security issues go through the
 [security policy](SECURITY.md) instead.
 
 ## Enforcement
