@@ -6,10 +6,6 @@ version: 2
 
 project_name: taskmill-ui
 
-git:
-  # A tag such as otel/v0.1.0 releases a nested module, not taskmill-ui.
-  ignore_tags: ["*/*"]
-
 builds:
   - main: ./cmd/taskmill-ui
     env: [CGO_ENABLED=0]
@@ -23,8 +19,7 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}"
 
 archives:
-  - formats: [tar.gz]
-    format_overrides:
+  - format_overrides:
       - goos: windows
         formats: [zip]
     # The archives are reproducible too: no file takes its owner or time
@@ -47,11 +42,12 @@ kos:
   - repositories: [ghcr.io/code19m/taskmill-ui]
     bare: true
     # Static, with CA certificates and time zones, and nothing else.
-    # Dependabot does not update the digest: bump it with the Makefile's tools.
+    # Dependabot does not update the digest: see CONTRIBUTING.md#releasing.
     base_image: gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
     user: "65532:65532"
     platforms: [linux/amd64, linux/arm64]
-    tags: ["{{ .Version }}", "{{ if not .Prerelease }}latest{{ end }}"]
+    # The release workflow moves latest once the image is attested.
+    tags: ["{{ .Version }}"]
     creation_time: "{{ .CommitTimestamp }}"
     annotations:
       org.opencontainers.image.source: https://github.com/code19m/taskmill
@@ -64,7 +60,6 @@ changelog:
   disable: true # the notes come from CHANGELOG.md
 
 release:
-  name_template: "{{ .Tag }}"
   prerelease: auto
   # The release workflow publishes the draft once the attestations exist.
   draft: true

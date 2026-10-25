@@ -26,17 +26,16 @@ help: ## Show this help.
 	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: check
-check: tidy-check lint test vuln ## Run every check that CI runs.
+check: tidy-check lint test vuln ## Run every check that CI runs, except `make release-check`.
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format all Go files.
 	$(GOLANGCI_LINT) fmt
 
 .PHONY: lint
-lint: $(GOLANGCI_LINT) $(ACTIONLINT) $(GORELEASER) ## Run the Go, GitHub Actions, and GoReleaser linters.
+lint: $(GOLANGCI_LINT) $(ACTIONLINT) ## Run the Go and GitHub Actions linters.
 	$(GOLANGCI_LINT) run
 	$(ACTIONLINT)
-	$(GORELEASER) check
 
 .PHONY: test
 test: ## Run all tests with the race detector, in random order (needs `make db`).
@@ -82,28 +81,39 @@ db: ## Start a PostgreSQL container for the tests (TEST_POSTGRES picks the image
 db-stop: ## Remove the test PostgreSQL container.
 	docker rm -f taskmill-test-db
 
+# The release targets read TAG from the environment, in the shell, and never
+# expand it in make: a tag name is not trusted.
+
+.PHONY: release-check
+release-check: $(GORELEASER) ## Check .goreleaser.yaml (the first run builds GoReleaser, which takes minutes).
+	$(GORELEASER) check
+
+# A snapshot takes its version from the latest tag of taskmill itself, not of
+# a nested module such as otel/v0.1.0.
 .PHONY: snapshot
 snapshot: $(GORELEASER) $(SYFT) ## Build the release into ./dist and the image into Docker, publishing nothing.
-	PATH='$(dir $(SYFT))':"$$PATH" $(GORELEASER) release --snapshot --clean
-
-# The release workflow runs this for the tag it was pushed with.
-.PHONY: release
-release: $(GORELEASER) $(SYFT) ## Publish TAG, such as TAG=v1.0.0, as a draft release (the release workflow runs this).
-	notes=$$(mktemp) && $(MAKE) -s release-notes > "$$notes" && \
-		GORELEASER_CURRENT_TAG='$(TAG)' PATH='$(dir $(SYFT))':"$$PATH" $(GORELEASER) release --clean --release-notes="$$notes"
+	GORELEASER_CURRENT_TAG="$$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null)" \
+		PATH='$(dir $(SYFT))':"$$PATH" $(GORELEASER) release --snapshot --clean
 
 # A release's notes are its section of CHANGELOG.md, without the heading.
-.PHONY: release-notes
-release-notes: ## Print the notes of TAG, such as TAG=v1.0.0, from CHANGELOG.md.
-	$(if $(TAG),,$(error set TAG to the version, such as TAG=v1.0.0))
-	@awk -v version='$(TAG:v%=%)' ' \
-		/^## \[/ { if (on) exit; on = index($$0, "## [" version "]") == 1; next } \
+RELEASE_NOTES = test -n "$$TAG" || { echo 'set TAG to the version, such as TAG=v1.0.0' >&2; exit 1; }; \
+	awk -v version="$${TAG\#v}" ' \
+		/^\#\# \[/ { if (on) exit; on = index($$0, "\#\# [" version "]") == 1; next } \
 		on && /^\[.*\]: / { exit } \
 		on && (NF || notes != "") { notes = notes $$0 "\n" } \
 		END { \
-			if (notes == "") { print "CHANGELOG.md has no section for $(TAG)" > "/dev/stderr"; exit 1 } \
+			if (notes == "") { print "CHANGELOG.md has no section for " version > "/dev/stderr"; exit 1 } \
 			sub(/\n+$$/, "\n", notes); printf "%s", notes \
 		}' CHANGELOG.md
+
+.PHONY: release-notes
+release-notes: ## Print the notes of TAG, such as TAG=v1.0.0, from CHANGELOG.md.
+	@$(RELEASE_NOTES)
+
+.PHONY: release
+release: $(GORELEASER) $(SYFT) ## Publish TAG, such as TAG=v1.0.0, as a draft release (the release workflow runs this).
+	notes=$$(mktemp) && { $(RELEASE_NOTES); } > "$$notes" && \
+		GORELEASER_CURRENT_TAG="$$TAG" PATH='$(dir $(SYFT))':"$$PATH" $(GORELEASER) release --clean --release-notes="$$notes"
 
 .PHONY: tools
 tools: $(GOLANGCI_LINT) $(GOVULNCHECK) $(ACTIONLINT) $(GORELEASER) $(SYFT) ## Install the pinned development tools into ./bin.

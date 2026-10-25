@@ -14,7 +14,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Every job runs a Makefile target, so `make check` reproduces CI locally.
+# Every job runs a Makefile target, so `make check` reproduces CI locally,
+# except the GoReleaser job: `make release-check`.
 jobs:
   lint:
     name: Lint
@@ -79,12 +80,30 @@ jobs:
             Makefile
       - run: make vuln
 
+  # Apart from lint, since it builds GoReleaser: a broken config fails here,
+  # not at a release.
+  release-check:
+    name: Release config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            Makefile
+      - run: make release-check
+
   # The one check that branch protection requires, so that changing the
   # matrix needs no change to the repository's settings.
   ci-ok:
     name: CI OK
     if: always()
-    needs: [lint, test, vuln]
+    needs: [lint, test, vuln, release-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

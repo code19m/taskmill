@@ -534,9 +534,11 @@ often. Use it in one of three ways:
 
   In production, pin the tag of the taskmill version your applications run,
   such as `1.0.0`: a newer dashboard fails on an older schema with
-  `ErrSchemaOutdated`. `gh attestation verify` checks that a download was
-  built by taskmill's release workflow: pass it the archive, or
-  `oci://ghcr.io/code19m/taskmill-ui:1.0.0`, and `--repo code19m/taskmill`.
+  `ErrSchemaOutdated`. To check that a download was built by taskmill's
+  release workflow, pass the archive, or
+  `oci://ghcr.io/code19m/taskmill-ui:1.0.0`, to `gh attestation verify` with
+  `--repo code19m/taskmill --signer-workflow
+  code19m/taskmill/.github/workflows/release.yml`.
 - **Inside another web application,** in an `<iframe>`. List that
   application's origin in `ui.Config.FrameAncestors`; otherwise browsers
   refuse to show the interface in a frame. Add `?theme=light`,
