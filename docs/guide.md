@@ -14,6 +14,7 @@ promises taskmill makes, see the [task lifecycle](design/task-lifecycle.md).
 - [Schedules](#schedules)
 - [The outbox and the inbox](#the-outbox-and-the-inbox)
 - [Operating taskmill](#operating-taskmill)
+- [Several services](#several-services)
 - [Observability](#observability)
 - [Testing your code](#testing-your-code)
 - [Running in production](#running-in-production)
@@ -77,7 +78,8 @@ Record the version and name of every later one in that table.
 `ClientConfig` and `MigrateConfig`, for example one schema per service or
 per module. A worker uses its client's schema. A service that only enqueues
 tasks for another service creates a `Client` for that service's schema and
-registers no handlers.
+registers no handlers. For services with a database each, and for one admin
+application over several services, see [Several services](#several-services).
 
 ## Defining tasks
 
@@ -514,7 +516,9 @@ often. Use it in one of three ways:
   ```
 
   In your own server, `ui.Config.BasicAuth` does the same. Serve it over
-  HTTPS: basic authentication sends the password with every request.
+  HTTPS: basic authentication sends the password with every request. Set
+  `TASKMILL_UI_PREFIX` when a proxy forwards a path such as `/admin/jobs` to
+  it, and `TASKMILL_UI_FRAME_ANCESTORS` to the origins that may frame it.
 - **Inside another web application,** in an `<iframe>`. List that
   application's origin in `ui.Config.FrameAncestors`; otherwise browsers
   refuse to show the interface in a frame. Add `?theme=light`,
@@ -572,6 +576,88 @@ so for busy kinds whose completed tasks are not worth keeping, skip it:
 ```go
 taskmill.AddHandler(&handlers, &CacheWarmer{}, &taskmill.HandlerOptions{DiscardCompleted: true})
 ```
+
+## Several services
+
+Each service that runs its own tasks has its own installation. There are two
+setups:
+
+- **One database, a schema per service.** Each service migrates and works in
+  its own schema. A service enqueues a task for another with a `Client` for
+  that service's schema, in the same transaction as its own writes.
+- **A database per service.** A service hands work to another through a
+  broker: it stores a message with [the outbox](#the-outbox-and-the-inbox),
+  and the other service's inbox enqueues the task.
+
+**Dashboards.** Each service serves the dashboard of its own installation, on
+an address that only your admin application reaches. The admin application
+forwards a path per service to it, behind its own login:
+
+```go
+// In the orders service:
+mux.Handle("/admin/jobs/orders/", ui.Handler(client, &ui.Config{Prefix: "/admin/jobs/orders"}))
+
+// In the admin application:
+orders := httputil.NewSingleHostReverseProxy(ordersURL) // such as http://orders.internal:9090
+mux.Handle("/admin/jobs/orders/", requireAdmin(orders))
+```
+
+- Forward the path unchanged: the dashboard strips its `Prefix` itself and
+  builds its links with it.
+- Each service's database stays its own, and each dashboard runs the
+  taskmill version of its service.
+- An admin application in another language forwards the same way to
+  `taskmill-ui`, run next to each service with `TASKMILL_UI_PREFIX` set to
+  the forwarded path.
+- With one database, the admin application can instead mount a handler per
+  schema itself. Its taskmill version must then fit every schema: no newer
+  than the oldest, since newer code fails with `ErrSchemaOutdated`, and at
+  most one release older than the newest. Forwarding avoids this.
+
+**Viewers and operators.** `ReadOnly` applies to a whole handler. To let some
+people act and others only look, mount both and pick one per request:
+
+```go
+operate := ui.Handler(client, &ui.Config{Prefix: "/admin/jobs"})
+view := ui.Handler(client, &ui.Config{Prefix: "/admin/jobs", ReadOnly: true})
+mux.Handle("/admin/jobs/", requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+    if canOperate(r) {
+        operate.ServeHTTP(w, r)
+    } else {
+        view.ServeHTTP(w, r)
+    }
+})))
+```
+
+When the admin application forwards, it can tell the service the role in a
+header for the service to pick by. Set that header on every forwarded
+request, replacing any the browser sent, and trust it only on an address
+that nothing else reaches.
+
+**Who did what.** Every action is logged to `ui.Config.Logger` with the
+request's context. A log handler that reads the signed-in user from the
+context, where your login middleware put it, adds them to each entry:
+
+```go
+type withUser struct{ slog.Handler }
+
+func (h withUser) Handle(ctx context.Context, r slog.Record) error {
+    if user, ok := userFrom(ctx); ok {
+        r.AddAttrs(slog.String("user", user))
+    }
+    return h.Handler.Handle(ctx, r)
+}
+
+handler := ui.Handler(client, &ui.Config{Logger: slog.New(withUser{logger.Handler()})})
+```
+
+When the admin application forwards, every action passes through it as a
+`POST` request, so it can log each one with the user itself.
+
+**One view across services.** For a page of key numbers from every service,
+have each service report what it needs from the operations API, such as
+`Client.Queues` for its task counts per state, and show them together in the
+admin application.
 
 ## Observability
 
