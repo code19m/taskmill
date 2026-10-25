@@ -1,7 +1,8 @@
 // Package compat_test checks the promise that makes rolling deploys safe: the
-// latest release's client and worker run on a schema that the current code
-// migrated. It is a module of its own, which requires that release, so that
-// the current code is not part of its build.
+// latest release's client, worker, and dashboard run on a schema that the
+// current code migrated, beside tasks that the current code enqueued. It is a
+// module of its own, which requires that release, so that the current code is
+// not part of its build; ../cmd/compat is the current code's half.
 package compat_test
 
 import (
@@ -9,6 +10,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"slices"
@@ -20,6 +24,7 @@ import (
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/outbox"
+	"github.com/code19m/taskmill/ui"
 )
 
 // wait bounds each wait for the release's worker.
@@ -39,7 +44,7 @@ func TestReleaseOnCurrentSchema(t *testing.T) {
 	r.work(t)
 	r.runSchedule(t)
 	r.checkRuns(t)
-	r.checkReads(t)
+	r.checkDashboard(t)
 }
 
 // release is the latest release's client on a schema that the current code
@@ -52,8 +57,8 @@ type release struct {
 	published chan string
 }
 
-// newRelease migrates a fresh schema with the current code, and opens it
-// with the release, which restarts with Migrate as it would during a rolling
+// newRelease prepares a fresh schema with the current code, and opens it with
+// the release, which restarts with Migrate as it would during a rolling
 // deploy.
 func newRelease(t *testing.T) *release {
 	t.Helper()
@@ -66,7 +71,7 @@ func newRelease(t *testing.T) *release {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
-	schema := migrateCurrent(t, pool)
+	schema := runCurrent(t, pool)
 
 	version := schemaVersion(t, pool, schema)
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
@@ -79,7 +84,7 @@ func newRelease(t *testing.T) *release {
 	if err != nil {
 		t.Fatalf("the release's NewClient: %v", err)
 	}
-	return &release{pool: pool, client: client, box: outbox.New(client), ran: make(chan job, 16), published: make(chan string, 1)}
+	return &release{pool: pool, client: client, box: outbox.New(client), ran: make(chan job, 32), published: make(chan string, 1)}
 }
 
 // enqueue enqueues every task before the worker starts, so that the FIFO
@@ -175,20 +180,24 @@ func (r *release) runSchedule(t *testing.T) {
 	}
 }
 
-// checkRuns waits for every task to run once, and the message to be
-// published.
+// checkRuns waits for every task, the release's and the current code's, to
+// run once, and the message to be published.
 func (r *release) checkRuns(t *testing.T) {
 	t.Helper()
-	want := []string{"complete in a transaction", "enqueue in a transaction", "fifo", "fifo", "fifo", "retry", "schedule"}
+	want := []string{
+		"complete in a transaction", "current: deduplicated", "current: delayed",
+		"current: fifo", "current: fifo", "current: fifo",
+		"enqueue in a transaction", "fifo", "fifo", "fifo", "retry", "schedule",
+	}
 	var got []string
-	var fifo []int
+	groups := make(map[string][]int) // the order each FIFO group ran in
 	timeout := time.After(wait)
 	for len(got) < len(want) {
 		select {
 		case j := <-r.ran:
 			got = append(got, j.What)
-			if j.What == "fifo" {
-				fifo = append(fifo, j.Seq)
+			if j.Seq != 0 {
+				groups[j.What] = append(groups[j.What], j.Seq)
 			}
 		case <-timeout:
 			t.Fatalf("the release's worker ran %q, want each of %q", got, want)
@@ -197,8 +206,10 @@ func (r *release) checkRuns(t *testing.T) {
 	if slices.Sort(got); !slices.Equal(got, want) {
 		t.Fatalf("the release's worker ran %q, want %q", got, want)
 	}
-	if !slices.Equal(fifo, []int{1, 2, 3}) {
-		t.Fatalf("the FIFO group ran in the order %v", fifo)
+	for what, order := range groups {
+		if !slices.Equal(order, []int{1, 2, 3}) {
+			t.Fatalf("the FIFO group of %q ran in the order %v", what, order)
+		}
 	}
 	select {
 	case v := <-r.published:
@@ -210,23 +221,57 @@ func (r *release) checkRuns(t *testing.T) {
 	}
 }
 
-// checkReads makes the reads of the release's dashboard.
-func (r *release) checkReads(t *testing.T) {
+// checkDashboard requests each page of the release's dashboard, and takes
+// each action, with a task that it then retries.
+func (r *release) checkDashboard(t *testing.T) {
 	t.Helper()
-	ctx := t.Context()
-	_, err := r.client.List(ctx, &taskmill.ListParams{States: []taskmill.State{taskmill.StateCompleted}})
-	_, err2 := r.client.Queues(ctx)
-	_, err3 := r.client.Workers(ctx)
-	_, err4 := r.client.Schedules(ctx)
-	_, err5 := r.client.Activity(ctx, nil)
-	if err := errors.Join(err, err2, err3, err4, err5); err != nil {
-		t.Fatalf("the release's dashboard reads: %v", err)
+	later := &taskmill.EnqueueOptions{RunAt: time.Now().Add(time.Hour)}
+	retried, err := r.client.Enqueue(t.Context(), job{What: "retried from the dashboard"}, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := r.client.Enqueue(t.Context(), job{What: "deleted from the dashboard"}, later)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := ui.Handler(r.client, nil)
+	for _, page := range []string{
+		"/", "/tasks", "/tasks?state=completed", fmt.Sprintf("/tasks/%d", retried.ID),
+		"/choices/groups?search=current", "/schedules", "/workers",
+	} {
+		if code := serve(t, h, http.MethodGet, page); code != http.StatusOK {
+			t.Errorf("the release's dashboard: GET %s: status %d", page, code)
+		}
+	}
+	for _, action := range []string{
+		fmt.Sprintf("/tasks/%d/cancel", retried.ID), fmt.Sprintf("/tasks/%d/retry", retried.ID),
+		fmt.Sprintf("/tasks/%d/delete", deleted.ID), "/queues/default/pause", "/queues/default/resume",
+		"/schedules/compat/pause", "/schedules/compat/resume", "/schedules/compat/run",
+	} {
+		if code := serve(t, h, http.MethodPost, action); code != http.StatusSeeOther {
+			t.Errorf("the release's dashboard: POST %s: status %d", action, code)
+		}
+	}
+	timeout := time.After(wait)
+	for j := (job{}); j.What != "retried from the dashboard"; {
+		select {
+		case j = <-r.ran:
+		case <-timeout:
+			t.Fatal("the task retried from the dashboard did not run")
+		}
 	}
 }
 
-// migrateCurrent migrates a fresh schema with the current code, and drops it
-// when the test ends.
-func migrateCurrent(t *testing.T, pool *pgxpool.Pool) string {
+func serve(t *testing.T, h http.Handler, method, target string) int {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), method, target, nil))
+	return rec.Code
+}
+
+// runCurrent migrates a fresh schema with the current code, which then
+// enqueues its tasks there, and drops the schema when the test ends.
+func runCurrent(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
 	var b [6]byte
 	_, _ = rand.Read(b[:]) // never returns an error
@@ -238,10 +283,10 @@ func migrateCurrent(t *testing.T, pool *pgxpool.Pool) string {
 			t.Errorf("drop schema %s: %v", schema, err)
 		}
 	})
-	cmd := exec.CommandContext(t.Context(), "go", "run", "./internal/cmd/migrate", schema) //nolint:gosec // the schema name is made above
-	cmd.Dir = "../.."                                                                      // the current code's module
+	cmd := exec.CommandContext(t.Context(), "go", "run", "./internal/cmd/compat", schema) //nolint:gosec // the schema name is made above
+	cmd.Dir = "../.."                                                                     // the current code's module
 	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("migrate with the current code: %v\n%s", err, out)
+		t.Fatalf("the current code: %v\n%s", err, out)
 	}
 	return schema
 }

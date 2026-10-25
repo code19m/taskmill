@@ -87,7 +87,7 @@ jobs:
       - name: Compare the API with the latest release
         run: |
           status=0
-          make -s api > "$RUNNER_TEMP/api.txt" || status=$?
+          make -s api > "$RUNNER_TEMP/api.txt" 2>&1 || status=$?
           cat "$RUNNER_TEMP/api.txt"
           { echo '### API compared with the latest release'; echo '```text'; cat "$RUNNER_TEMP/api.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"

@@ -102,7 +102,8 @@ func (SendReceipt) Kind() string { return "email.send_receipt" }
 - Namespace kinds by module, such as `billing.invoice.send`.
 - Payloads are stored as JSON and decoded straight into the handler's type,
   so large integers stay exact. Keep payloads small: identifiers, not whole
-  records. The limit is 1 MiB of JSON.
+  records. The limit is 1 MiB of JSON, counting each number at the length
+  PostgreSQL writes it out: it stores `1e6` as `1000000`.
 - Change payloads only in compatible ways, such as adding fields. A payload
   that does not decode makes the task dead at once, with the code
   `invalid_payload`.

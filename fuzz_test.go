@@ -1,6 +1,7 @@
 package taskmill_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -81,11 +82,15 @@ func (rawArgs) Kind() string { return "raw" }
 
 // FuzzPayload enqueues any JSON text in a task's arguments, and decodes the
 // stored task as a handler does: Enqueue stores it or returns
-// ErrInvalidArgument, and the handler gets the value that was enqueued.
+// ErrInvalidArgument, PostgreSQL stores no more than the payload limit
+// counted, and the handler gets the value that was enqueued.
 func FuzzPayload(f *testing.F) {
 	for _, body := range []string{
 		`{}`, `[1, 2.50, -0, 1E2, 9007199254740993]`, `{"a": 1, "a": 2}`, `"\u00e9\\u0000"`, `"a\u0000b"`,
 		strings.Repeat("[", 64) + strings.Repeat("]", 64),
+		`[-12.50, 1E+6, -1.5e-3, 1.000e2, 0e-5, 123.456e-7, 1e-300, 1.7976931348623157e308, 5e-324, -0.000e10, 100e-1]`,
+		// A payload whose numbers PostgreSQL writes out to 1.2 MiB.
+		"[" + strings.Repeat("1e131071, ", 9) + "1e131071]",
 		// Text that PostgreSQL rejects once failed the call.
 		"\"\xc3\"", `"\ud800"`, `1e131072`, `0e-99999`,
 	} {
@@ -104,6 +109,14 @@ func FuzzPayload(f *testing.F) {
 		info, err := e.client.Get(t.Context(), res.ID)
 		if err != nil {
 			t.Fatal(err)
+		}
+		payload, _ := json.Marshal(rawArgs{Body: body}) // as Enqueue encoded it
+		var stored bytes.Buffer
+		if err := json.Compact(&stored, info.Payload); err != nil {
+			t.Fatal(err)
+		}
+		if counted := taskmill.StoredSize(payload); stored.Len() > counted || counted > 1<<20 {
+			t.Fatalf("enqueued %q, which counted as %d bytes, and PostgreSQL stored %d", body, counted, stored.Len())
 		}
 		var args rawArgs
 		if err := json.Unmarshal(info.Payload, &args); err != nil {

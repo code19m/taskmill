@@ -17,6 +17,10 @@ TEST_POSTGRES     ?= postgres:18-alpine
 # worker on the current schema. Each release updates it; see CONTRIBUTING.md.
 RELEASE := $(shell awk '$$1 == "github.com/code19m/taskmill" { print $$2 }' internal/compat/go.mod)
 
+# internal/compat must build against the release it requires, never against
+# the current code through a developer's go.work.
+COMPAT := cd internal/compat && GOWORK=off
+
 # How long `make fuzz` runs each fuzz target.
 FUZZTIME ?= 10s
 
@@ -42,7 +46,7 @@ fmt: $(GOLANGCI_LINT) ## Format all Go files.
 .PHONY: lint
 lint: $(GOLANGCI_LINT) $(ACTIONLINT) ## Run the Go and GitHub Actions linters.
 	$(GOLANGCI_LINT) run
-	cd internal/compat && $(GOLANGCI_LINT) run
+	$(COMPAT) $(GOLANGCI_LINT) run
 	$(ACTIONLINT)
 
 .PHONY: test
@@ -71,7 +75,8 @@ cover-report: ## Print the coverage of the last `make test` per package, in Mark
 
 .PHONY: fuzz
 fuzz: ## Run each fuzz target for FUZZTIME (needs `make db`).
-	@go test -list '^Fuzz' ./... | awk '/^Fuzz/ { names[++n] = $$1 } /^ok/ { for (i = 1; i <= n; i++) print $$2, names[i]; n = 0 }' | \
+	@targets=$$(go test -list '^Fuzz' ./...) || { echo "$$targets"; exit 1; }; \
+	echo "$$targets" | awk '/^Fuzz/ { names[++n] = $$1 } /^ok/ { for (i = 1; i <= n; i++) print $$2, names[i]; n = 0 }' | \
 	while read -r pkg name; do \
 		echo "$$pkg $$name"; \
 		TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -run='^$$' -fuzz="^$$name\$$" -fuzztime=$(FUZZTIME) $$pkg || exit 1; \
@@ -83,7 +88,7 @@ api: $(GORELEASE) ## Compare the API with the latest release, and suggest the ne
 
 .PHONY: compat
 compat: ## Run the latest release's client and worker on the current schema (needs `make db`).
-	cd internal/compat && TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -count=1 ./...
+	$(COMPAT) TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -count=1 ./...
 
 .PHONY: bench
 bench: ## Run the benchmarks and the chaos test against the test database (needs `make db`).
@@ -96,12 +101,12 @@ vuln: $(GOVULNCHECK) ## Scan for known vulnerabilities.
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum, here and in internal/compat.
 	go mod tidy
-	cd internal/compat && go mod tidy
+	$(COMPAT) go mod tidy
 
 .PHONY: tidy-check
 tidy-check: ## Fail if go.mod or go.sum is not tidy, here or in internal/compat.
 	go mod tidy -diff
-	cd internal/compat && go mod tidy -diff
+	$(COMPAT) go mod tidy -diff
 
 # The test database is thrown away, so a commit does not wait for the disk:
 # a slow disk on a CI machine would stall heartbeats past the tests' short

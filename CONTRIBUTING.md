@@ -155,8 +155,9 @@ docs: explain at-least-once delivery
 - The previous release's code must keep working on the new schema, so that
   rolling deploys work. `make compat` checks it: `internal/compat` is a
   module of its own that requires the latest release. Its test migrates a
-  schema with the current code, then runs the release's client, worker,
-  schedules, and outbox on it.
+  schema with the current code, which also enqueues grouped, delayed, and
+  deduplicated tasks there (`internal/cmd/compat`). Then it runs the
+  release's client, worker, schedules, outbox, and dashboard on that schema.
 - New migrations must be safe to run on a busy database: set `lock_timeout`,
   and avoid statements that hold long locks on `tasks`, such as table
   rewrites.

@@ -7,16 +7,29 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `Client.List`, `Client.Groups`, `Client.Activity`, and the schedule methods
+  return `ErrInvalidArgument` for a filter, search, or name longer than any
+  task or schedule can have. They returned an empty result, or `ErrNotFound`
+  for a schedule.
+- The 1 MiB payload limit counts each number at the length PostgreSQL writes
+  it out, as it stores `1e6` as `1000000`. A short payload of numbers with
+  large exponents no longer stores a value that is too large to fetch, which
+  blocked its queue.
+
 ### Fixed
 
 - `Client.List`, `Client.Groups`, `Client.Activity`, and the schedule methods
-  return `ErrInvalidArgument` for a filter, search, or name that no task or
-  schedule can have: too long, not valid UTF-8, or holding a NUL character.
-  They returned a database error, and the dashboard showed a server error.
+  return `ErrInvalidArgument` for a filter, search, or name that is not valid
+  UTF-8 or holds a NUL character. They returned a database error, and the
+  dashboard showed a server error.
 - Enqueueing returns `ErrInvalidArgument` for a payload that is not valid
   UTF-8, such as a `json.RawMessage` that holds a request body in another
-  encoding, or that PostgreSQL rejects, such as one with a number beyond the
-  range of `jsonb`. It returned a database error.
+  encoding, before the query, so the caller's transaction stays usable. A
+  payload that PostgreSQL itself rejects, such as one with a number beyond
+  the range of `jsonb`, returns `ErrInvalidArgument` too. Both returned a
+  database error.
 
 ## [0.1.0] - 2026-10-25
 

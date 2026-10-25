@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -364,23 +365,83 @@ func (c *Client) resolve(ctx context.Context, p EnqueueParams) (*resolvedTask, e
 }
 
 // encodePayload encodes args as JSON, and checks that jsonb can store it
-// within the payload limit.
+// within the payload limit. The checks run before the query, so a payload
+// that fails them leaves the caller's transaction usable.
 func encodePayload(kind string, args Args) ([]byte, error) {
 	payload, err := json.Marshal(args)
-	switch {
-	case err != nil:
+	if err != nil {
 		return nil, invalidArgument("encode payload of kind %q: %v", kind, err)
+	}
+	switch size := storedSize(payload); {
 	case bytes.Equal(payload, []byte("null")):
 		return nil, invalidArgument("payload of kind %q encodes to null", kind)
-	case len(payload) > maxPayloadBytes:
-		return nil, invalidArgument("payload of kind %q is %d bytes, more than the limit of %d",
-			kind, len(payload), maxPayloadBytes)
+	case size > maxPayloadBytes:
+		return nil, invalidArgument("payload of kind %q is %d bytes as stored, more than the limit of %d",
+			kind, size, maxPayloadBytes)
 	case !utf8.Valid(payload):
 		return nil, invalidArgument("payload of kind %q is not valid UTF-8", kind)
 	case hasNUL(payload):
 		return nil, invalidArgument("payload of kind %q contains a NUL character", kind)
 	}
 	return payload, nil
+}
+
+// storedSize returns at most the size of JSON text as PostgreSQL writes it
+// out of jsonb, where each number is written in full: 1e6 becomes 1000000,
+// so a short payload could grow past any limit, up to values that PostgreSQL
+// cannot read back. Strings are written as they came. jsonb also adds a
+// space after each comma and colon; that at most doubles the size, and the
+// limit leaves it out, as it always has. Counting stops past the limit.
+func storedSize(text []byte) int {
+	size := len(text)
+	inString := false
+	for i := 0; i < len(text) && size <= maxPayloadBytes; i++ {
+		switch c := text[i]; {
+		case inString && c == '\\':
+			i++ // the escaped byte cannot end the string
+		case c == '"':
+			inString = !inString
+		case !inString && (c == '-' || '0' <= c && c <= '9'):
+			end := i + 1
+			for end < len(text) && strings.IndexByte("+-.0123456789Ee", text[end]) >= 0 {
+				end++
+			}
+			size += numberSize(string(text[i:end])) - (end - i)
+			i = end - 1
+		}
+	}
+	return size
+}
+
+// numberSize returns at most the length of a JSON number as PostgreSQL
+// writes it: without an exponent, and with as many digits after the point as
+// the number has.
+func numberSize(num string) int {
+	sign := 0
+	if num[0] == '-' {
+		sign, num = 1, num[1:]
+	}
+	at := strings.IndexAny(num, "eE")
+	if at < 0 {
+		return sign + len(num) // written as it came
+	}
+	exp, err := strconv.Atoi(num[at+1:])
+	if err != nil {
+		return maxPayloadBytes + 1 // an exponent beyond the range of int
+	}
+	// Past the limit, a number is too long to write out, or a zero.
+	exp = max(-maxPayloadBytes-1, min(exp, maxPayloadBytes+1))
+	whole, frac, _ := strings.Cut(num[:at], ".")
+	digits := whole + frac
+	zeros := len(digits) - len(strings.TrimLeft(digits, "0"))
+	before := 1 // digits before the point
+	if zeros < len(digits) {
+		before = max(1, len(whole)+exp-zeros)
+	}
+	if after := len(frac) - exp; after > 0 {
+		return sign + before + 1 + after
+	}
+	return sign + before
 }
 
 // hasNUL reports whether JSON text encodes a NUL character, which jsonb

@@ -77,3 +77,9 @@ func ExplainFetch(ctx context.Context, c *Client, queue string, limit int) (stri
 func RunRetention(ctx context.Context, w *Worker) {
 	newMaintainer(w).retain(ctx)
 }
+
+// StoredSize returns at most the size of JSON text as PostgreSQL writes it
+// out of jsonb, as the payload limit counts it.
+func StoredSize(text []byte) int {
+	return storedSize(text)
+}
