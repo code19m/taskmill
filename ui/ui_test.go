@@ -28,7 +28,7 @@ type greet struct {
 
 func (greet) Kind() string { return "greet" }
 
-func setup(t *testing.T) *taskmill.Client {
+func setup(t testing.TB) *taskmill.Client {
 	t.Helper()
 	pool := testdb.Pool(t)
 	schema := testdb.Schema(t, pool)
