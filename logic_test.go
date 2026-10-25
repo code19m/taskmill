@@ -205,6 +205,30 @@ func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
 	}
 }
 
+func TestFailuresOfWorkThatRunsNowAndThen(t *testing.T) {
+	t.Parallel()
+	every := 200 * time.Millisecond
+	for _, c := range []struct {
+		pause time.Duration
+		want  []string
+	}{
+		// A job that fails at every run, a little over an interval apart,
+		// is one incident that escalates.
+		{3 * every / 2, []string{"WARN operation failed", "ERROR operation still failing failures=2"}},
+		// Failures two intervals apart, with no try between, are incidents
+		// of their own.
+		{3 * every, []string{"WARN operation failed", "WARN operation failed"}},
+	} {
+		f, l := newFailureLines(every)
+		f.observe(t.Context(), errors.New("timeout"))
+		time.Sleep(c.pause)
+		f.observe(t.Context(), errors.New("timeout"))
+		if !slices.Equal(l.lines, c.want) {
+			t.Errorf("failures %s apart: got lines %q, want %q", c.pause, l.lines, c.want)
+		}
+	}
+}
+
 func TestFailuresOfAFlappingOperationEscalateAndStayRare(t *testing.T) {
 	t.Parallel()
 	every := 50 * time.Millisecond

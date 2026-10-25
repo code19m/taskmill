@@ -146,15 +146,20 @@ func (m *maintainer) elect(ctx context.Context) bool {
 		err = nil // another worker leads
 	}
 	m.election.observe(ctx, err)
-	switch was := m.leader.Swap(leader); {
+	was := m.leader.Load() // only the main loop changes it
+	if leader && !was {
+		// A term starts without the incidents of the last one, whose work
+		// may have failed after it ended.
+		for _, f := range []*failures{m.promotion, m.rescues, m.schedules, m.pruning, m.stats, m.retention} {
+			f.reset()
+		}
+	}
+	m.leader.Store(leader)
+	switch {
 	case leader && !was:
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "elected maintainer")
 	case was && !leader:
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "no longer maintainer")
-		// The work stops here: a later term starts without its incidents.
-		for _, f := range []*failures{m.promotion, m.rescues, m.schedules, m.pruning, m.stats, m.retention} {
-			f.reset()
-		}
 	}
 	return leader
 }

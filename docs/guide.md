@@ -754,7 +754,9 @@ each one logs only three kinds of line about an incident:
 at most once a minute while it lasts, and `operation recovered` (Info) when
 the operation works again. An incident lasts while failures come less than
 a minute apart, even with successes between them: an operation that fails
-at every other try escalates too, and logs no more. A failure soon after a
+at every other try escalates too, and logs no more. Without a success
+between them, as for work that runs only now and then, failures may come up
+to two minutes apart. A failure soon after a
 line waits for the next one. `failures` counts the incident's failures, and
 `duration` runs from its first failure to its last. The `operation`
 attribute names it:
@@ -792,7 +794,7 @@ The last six run only on the maintainer.
 | `the worker does not serve the default queue of these registered kinds` | Warn | Tasks of `kinds` enqueued with their defaults wait for another worker. Add the queues, or run a worker that serves them. |
 | `the pool has fewer connections than the worker's concurrency plus 5; ...` | Warn | Handlers can take every connection and starve heartbeats. Raise `MaxConns`; see [Connections](#running-in-production). |
 | `elected maintainer` | Info | This worker now does the installation-wide work. |
-| `no longer maintainer` | Info | Another worker took over, or the election failed. The maintainer's work stops here, and so do its incidents, without `operation recovered`. |
+| `no longer maintainer` | Info | Another worker took over, or the election failed. The maintainer's work stops here; its incidents end without `operation recovered`. |
 | `resign maintainer failed; another worker leads when the lease expires` | Warn | The next maintainer starts within 10 seconds. |
 | `rescued tasks whose workers lost their leases` | Warn | `tasks` attempts failed because their workers stopped renewing them: a worker crashed or could not reach the database. The tasks retry; those that used all their attempts die. |
 | `dropped expired history` | Info | Retention dropped the history `partition`. |

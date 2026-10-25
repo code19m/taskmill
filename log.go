@@ -39,7 +39,9 @@ const (
 // error at most once per timing.failureReport while it lasts, and the
 // recovery. An incident lasts while failures come less than a report
 // interval apart, even with successes between them, so an operation that
-// fails at every other try escalates too, and logs no more.
+// fails at every other try escalates too, and logs no more. Without a try
+// between them, as for work that runs only now and then, failures may come
+// up to two intervals apart.
 type failures struct {
 	w         *Worker
 	operation string
@@ -81,8 +83,9 @@ func (f *failures) observe(ctx context.Context, err error) {
 	}
 
 	// An incident ends once its operation has not failed for a report
-	// interval: this failure starts another.
-	if f.count > 0 && !f.failing && now.Sub(f.last) >= every {
+	// interval after it worked again, or for two without a try: this failure
+	// starts another.
+	if gap := now.Sub(f.last); f.count > 0 && (!f.failing && gap >= every || gap >= 2*every) {
 		if f.pending {
 			f.recovered(ctx, now)
 		}
@@ -113,8 +116,7 @@ func (f *failures) recovered(ctx context.Context, now time.Time) {
 }
 
 // reset forgets the current incident without a line, for an operation that
-// stops running here, such as the maintainer's work when another worker
-// takes over.
+// starts running here again, such as the maintainer's work in a new term.
 func (f *failures) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
