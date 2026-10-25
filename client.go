@@ -21,12 +21,13 @@ const defaultSchema = "taskmill"
 // Client enqueues and manages tasks. It is safe for concurrent use, and an
 // application typically creates one per installation and shares it.
 type Client struct {
-	pool            *pgxpool.Pool
-	schema          string
-	sql             *statements
-	logger          *slog.Logger
-	notifier        *notifier
-	contextMetadata func(context.Context) map[string]string
+	pool              *pgxpool.Pool
+	schema            string
+	sql               *statements
+	logger            *slog.Logger
+	notifier          *notifier
+	contextMetadata   func(context.Context) map[string]string
+	enqueueMiddleware []EnqueueMiddleware
 
 	// historyGapUntil is when completions keep history again, in Unix
 	// nanoseconds, after one found no history partition.
@@ -47,6 +48,10 @@ type ClientConfig struct {
 	// added to the task's metadata, for example to carry a trace context from
 	// the producer to the handler. Metadata set in [EnqueueOptions] wins.
 	ContextMetadata func(ctx context.Context) map[string]string
+
+	// EnqueueMiddleware wraps every enqueue, in order: the first is the
+	// outermost.
+	EnqueueMiddleware []EnqueueMiddleware
 }
 
 // NewClient returns a client that uses pool for its own statements. cfg may
@@ -73,12 +78,13 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 	}
 
 	c := &Client{
-		pool:            pool,
-		schema:          schema,
-		sql:             newStatements(schema),
-		logger:          logger,
-		notifier:        newNotifier(pool, schema, logger),
-		contextMetadata: cfg.ContextMetadata,
+		pool:              pool,
+		schema:            schema,
+		sql:               newStatements(schema),
+		logger:            logger,
+		notifier:          newNotifier(pool, schema, logger),
+		contextMetadata:   cfg.ContextMetadata,
+		enqueueMiddleware: slices.Clone(cfg.EnqueueMiddleware),
 	}
 	if err := c.checkSchema(ctx); err != nil {
 		return nil, err

@@ -85,8 +85,8 @@ type TaskInfo struct {
 
 	GroupKey string
 
-	// Metadata holds the tags from [EnqueueOptions.Metadata] and
-	// [ClientConfig.ContextMetadata].
+	// Metadata holds the tags from [EnqueueOptions.Metadata],
+	// [ClientConfig.ContextMetadata], and [EnqueueMiddleware].
 	Metadata map[string]string
 
 	// Payload is the task's Args as stored, in JSON.

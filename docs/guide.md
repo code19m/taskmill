@@ -664,8 +664,67 @@ admin application.
 **Logs** go to the `*slog.Logger` in `ClientConfig.Logger`, which workers use
 too. By default they are discarded.
 
-**Middleware** wraps every attempt and sees its kind, queue, attempt,
-metadata, and timestamps. It is the place for metrics and tracing:
+**Traces and metrics** come from the `otel` module, which instruments
+taskmill with OpenTelemetry's conventions for messaging. It is a Go module
+of its own, so applications without OpenTelemetry download none of it:
+
+```sh
+go get github.com/code19m/taskmill/otel
+```
+
+```go
+import tmotel "github.com/code19m/taskmill/otel"
+
+tel := tmotel.New(nil) // OpenTelemetry's global providers and propagator
+client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{
+    EnqueueMiddleware: []taskmill.EnqueueMiddleware{tel.EnqueueMiddleware},
+})
+// ...
+worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
+    Handlers:   &handlers,
+    Middleware: []taskmill.Middleware{tel.Middleware}, // first, to measure the rest too
+})
+// ...
+_, err = tel.ObserveQueues(client) // the queue gauges
+```
+
+Set a propagator, such as `otel.SetTextMapPropagator(propagation.TraceContext{})`:
+without one, no trace context reaches the tasks. `tmotel.New` also takes a
+`Config` with other providers.
+
+| Signal | Name | What it measures |
+|---|---|---|
+| Span | `send {queue}` | Each enqueue call, one span per batch. Its context is stored in the tasks' metadata. |
+| Span | `process {queue}` | Each attempt, as a child of the `send` span. The handler's context carries it. |
+| Span | `send {topic}` | Each outbox delivery to the broker. |
+| Counter | `messaging.client.sent.messages` | Tasks enqueued, and outbox messages published. |
+| Histogram | `messaging.client.operation.duration` | How long enqueue calls take. |
+| Histogram | `messaging.process.duration` | How long attempts take. |
+| Gauge | `taskmill.queue.tasks` | Tasks per queue and state. |
+| Gauge | `taskmill.queue.lag` | How long each queue's oldest available task has waited. |
+
+- Metrics carry the queue as `messaging.destination.name`, the kind as
+  `messaging.taskmill.kind`, and on failure `error.type`, such as `panic`.
+  They never carry task IDs, so their cardinality stays bounded.
+- A task's attempts show in the trace of the request that enqueued it, even
+  a retry hours later.
+- Inside your transaction, the `send` span ends before the commit: a
+  rollback leaves a span for a task that never existed.
+- The queue gauges describe the whole installation, and cost two queries per
+  collection. Every process that reports them reports the same values:
+  aggregate them with max, not sum, or report them from one deployment.
+- For the outbox, wrap the publisher. Each delivery's span is a child of the
+  span that stored the message, and goes to the broker in the message's
+  headers, so consumers continue the trace:
+
+  ```go
+  outbox.New(client).AddRelay(&handlers, tel.Publisher("kafka", publisher))
+  ```
+
+**By hand**, the same extension points serve other tools. Worker
+`Middleware` wraps every attempt and sees its kind, queue, attempt, metadata,
+and timestamps; `ClientConfig.EnqueueMiddleware` wraps every enqueue, and may
+add metadata, such as a trace context, to the tasks it enqueues:
 
 ```go
 func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
@@ -679,39 +738,16 @@ func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Con
 
 Middleware must call `next` at most once. A handler's panic reaches it as an
 error. For a batch handler, middleware runs once per task, but the context it
-passes to `next` does not reach the handler.
-
-**Tracing across the queue.** `ClientConfig.ContextMetadata` turns the
-producer's context into task metadata on every enqueue, and middleware turns
-it back into a context. With OpenTelemetry:
-
-```go
-client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{
-    ContextMetadata: func(ctx context.Context) map[string]string {
-        carrier := propagation.MapCarrier{}
-        otel.GetTextMapPropagator().Inject(ctx, carrier)
-        return carrier
-    },
-})
-
-tracing := func(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
-    ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(task.Metadata))
-    ctx, span := tracer.Start(ctx, "taskmill "+task.Kind, trace.WithSpanKind(trace.SpanKindConsumer))
-    defer span.End()
-    err := next(ctx)
-    if err != nil {
-        span.RecordError(err)
-        span.SetStatus(codes.Error, err.Error())
-    }
-    return err
-}
-```
+passes to `next` does not reach the handler. `ClientConfig.ContextMetadata`
+is the simpler tool when you only need to copy values from the context into
+the metadata.
 
 **Queue depth** comes from `Client.Queues`, whose counts the maintainer
 refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
 backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
 and retryable tasks across all queues. `QueueInfo.Capped` means a count hit
-its cap and is a lower bound.
+its cap and is a lower bound. `QueueInfo.Lag`, measured at the call, is how
+long the queue's oldest available task has waited since its run time.
 
 **History** comes from `Client.Activity`: for each minute of the last 24
 hours, the most tasks counted in each state, and the attempts that completed

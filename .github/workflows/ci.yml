@@ -15,6 +15,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Every job runs a Makefile target, so `make check` reproduces CI locally.
+# The targets check every module of the repository: the core and otel/.
 jobs:
   lint:
     name: Lint
@@ -29,6 +30,7 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: |
             go.sum
+            otel/go.sum
             Makefile
       - run: make tidy-check lint
 
@@ -57,7 +59,9 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
-          cache-dependency-path: go.sum
+          cache-dependency-path: |
+            go.sum
+            otel/go.sum
       # The same database as `make db` locally, with the same settings.
       - run: make db TEST_POSTGRES=postgres:${{ matrix.postgres }}-alpine
       - run: make test
@@ -76,6 +80,7 @@ jobs:
           check-latest: true
           cache-dependency-path: |
             go.sum
+            otel/go.sum
             Makefile
       - run: make vuln
 

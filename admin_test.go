@@ -124,6 +124,39 @@ func TestQueuesAndWorkers(t *testing.T) {
 	})
 }
 
+func TestQueuesMeasureLag(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for _, q := range []string{"behind", "idle"} {
+		if err := e.client.UpdateQueue(t.Context(), q, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The oldest task has the lowest priority: lag spans every priority.
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{
+		Queue: "behind", Priority: taskmill.PriorityLow, RunAt: time.Now().Add(-time.Hour),
+	})
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{
+		Queue: "behind", Priority: taskmill.PriorityCritical, RunAt: time.Now().Add(-time.Minute),
+	})
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "idle", RunAt: time.Now().Add(time.Hour)})
+
+	queues, err := e.client.Queues(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lag := map[string]time.Duration{}
+	for _, q := range queues {
+		lag[q.Name] = q.Lag
+	}
+	if lag["behind"] < time.Hour || lag["behind"] > time.Hour+time.Minute {
+		t.Fatalf("got lag %s for the queue behind, want about an hour", lag["behind"])
+	}
+	if lag["idle"] != 0 {
+		t.Fatalf("got lag %s for a queue without available tasks", lag["idle"])
+	}
+}
+
 func TestListPagesNewestFirst(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

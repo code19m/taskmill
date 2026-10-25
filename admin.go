@@ -48,6 +48,11 @@ type QueueInfo struct {
 	Counts      map[State]int64
 	Capped      bool
 	RefreshedAt time.Time // zero until the maintainer first counts the queue
+
+	// Lag is how long the queue's oldest available task has waited since its
+	// run time, measured at the call: zero when no task is available. It
+	// grows when workers fall behind, stop, or the queue is paused.
+	Lag time.Duration
 }
 
 // Settings are the installation-wide settings, stored in the database and
@@ -155,7 +160,8 @@ func (c *Client) changeQueue(ctx context.Context, name, sql string, args ...any)
 }
 
 // Queues returns every known queue: those with settings, those that workers
-// serve, and those that hold tasks, as of the latest statistics.
+// serve, and those that hold tasks, as of the latest statistics. Lag is
+// measured at the call.
 func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 	r, err := c.pool.Query(ctx, c.sql.listQueues)
 	if err != nil {
@@ -165,11 +171,13 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 	index := make(map[string]int)
 	for r.Next() {
 		var q QueueInfo
-		if err := r.Scan(&q.Name, &q.Settings.MaxRunning, &q.Paused, &q.Workers); err != nil {
+		var lag int64
+		if err := r.Scan(&q.Name, &q.Settings.MaxRunning, &q.Paused, &q.Workers, &lag); err != nil {
 			r.Close()
 			return nil, fmt.Errorf("taskmill: list queues: %w", err)
 		}
 		q.Counts = map[State]int64{}
+		q.Lag = time.Duration(lag) * time.Microsecond
 		index[q.Name] = len(out)
 		out = append(out, q)
 	}

@@ -5,6 +5,11 @@ GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION   := v1.9.0
 ACTIONLINT_VERSION    := v1.7.12
 
+# The repository's modules: the core, and the integrations that need modules
+# of their own (docs/adr/0005-opentelemetry-in-a-module-of-its-own.md).
+# Targets that check code run in each.
+MODULES := . otel
+
 # The database that `make db` starts and `make test` uses.
 TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:54329/taskmill?sslmode=disable
 TEST_POSTGRES     ?= postgres:18-alpine
@@ -25,16 +30,18 @@ check: tidy-check lint test vuln ## Run every check that CI runs.
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format all Go files.
-	$(GOLANGCI_LINT) fmt
+	@for m in $(MODULES); do (cd $$m && $(GOLANGCI_LINT) fmt --config $(CURDIR)/.golangci.yml) || exit 1; done
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) $(ACTIONLINT) ## Run the Go and GitHub Actions linters.
-	$(GOLANGCI_LINT) run
+	@for m in $(MODULES); do (cd $$m && $(GOLANGCI_LINT) run --config $(CURDIR)/.golangci.yml) || exit 1; done
 	$(ACTIONLINT)
 
 .PHONY: test
 test: ## Run all tests with the race detector, in random order (needs `make db`).
-	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -shuffle=on -count=1 ./...
+	@for m in $(MODULES); do \
+		(cd $$m && TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -shuffle=on -count=1 ./...) || exit 1; \
+	done
 
 .PHONY: cover
 cover: ## Run all tests and open the coverage report in a browser (needs `make db`).
@@ -47,15 +54,15 @@ bench: ## Run the benchmarks and the chaos test against the test database (needs
 
 .PHONY: vuln
 vuln: $(GOVULNCHECK) ## Scan for known vulnerabilities.
-	$(GOVULNCHECK) ./...
+	@for m in $(MODULES); do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum.
-	go mod tidy
+	@for m in $(MODULES); do (cd $$m && go mod tidy) || exit 1; done
 
 .PHONY: tidy-check
 tidy-check: ## Fail if go.mod or go.sum is not tidy.
-	go mod tidy -diff
+	@for m in $(MODULES); do (cd $$m && go mod tidy -diff) || exit 1; done
 
 # The test database is thrown away, so a commit does not wait for the disk:
 # a slow disk on a CI machine would stall heartbeats past the tests' short

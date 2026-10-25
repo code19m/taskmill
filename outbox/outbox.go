@@ -71,6 +71,11 @@ type Delivery struct {
 	// ID is unique across services and stays the same when a delivery is
 	// retried, so consumers can deduplicate by it. It is a UUIDv7.
 	ID string
+
+	// Metadata is the metadata that taskmill stored with the message, from
+	// [taskmill.ClientConfig.ContextMetadata] and enqueue middleware, such as
+	// the trace context of the transaction that stored it.
+	Metadata map[string]string
 }
 
 // Publisher sends deliveries to a broker. It returns one error per delivery,
@@ -161,7 +166,11 @@ func (r relay) HandleBatch(ctx context.Context, tasks []*taskmill.Task[message])
 	ds := make([]Delivery, len(tasks))
 	for i, t := range tasks {
 		m := t.Args
-		ds[i] = Delivery{ID: m.ID, Message: Message{Topic: m.Topic, Key: m.Key, Value: m.Value, Headers: m.Headers}}
+		ds[i] = Delivery{
+			ID:       m.ID,
+			Message:  Message{Topic: m.Topic, Key: m.Key, Value: m.Value, Headers: m.Headers},
+			Metadata: t.Metadata,
+		}
 	}
 	return r.pub.Publish(ctx, ds)
 }

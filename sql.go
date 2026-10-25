@@ -729,6 +729,10 @@ INSERT INTO {s}.queues AS q (name, paused_at) VALUES ($1, CASE WHEN $2 THEN now(
 ON CONFLICT (name) DO UPDATE
 SET paused_at = CASE WHEN $2 THEN coalesce(q.paused_at, now()) END, updated_at = now()`),
 
+		// listQueues lists the known queues with their settings, workers, and
+		// lag in microseconds: how long the oldest available task has waited
+		// since its run time. The lag reads one entry of the fetch index per
+		// queue and priority.
 		listQueues: q(`
 WITH served AS (
     SELECT q AS name, count(*)::int AS workers FROM {s}.workers, unnest(queues) AS q GROUP BY q
@@ -737,7 +741,12 @@ WITH served AS (
     UNION SELECT queue FROM {s}.queue_stats
     UNION SELECT name FROM served
 )
-SELECT n.name, coalesce(q.max_running, 0), q.paused_at IS NOT NULL, coalesce(s.workers, 0)
+SELECT n.name, coalesce(q.max_running, 0), q.paused_at IS NOT NULL, coalesce(s.workers, 0),
+       coalesce((SELECT greatest(0, (extract(epoch FROM now() - min(o.run_at)) * 1000000)::bigint)
+                 FROM unnest('{1,2,3,4}'::smallint[]) AS p, -- every priority
+                 LATERAL (SELECT t.run_at FROM {s}.tasks t
+                          WHERE t.state = 'available' AND t.queue = n.name AND t.priority = p
+                          ORDER BY t.run_at LIMIT 1) o), 0)
 FROM names n
 LEFT JOIN {s}.queues q ON q.name = n.name
 LEFT JOIN served s ON s.name = n.name

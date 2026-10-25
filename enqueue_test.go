@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -345,6 +347,92 @@ func TestEnqueueAddsContextMetadata(t *testing.T) {
 	meta := e.get(t, res.ID).Metadata
 	if meta["traceparent"] != "00-abc-01" || meta["source"] != "options" {
 		t.Fatalf("got metadata %v", meta)
+	}
+}
+
+func TestEnqueueMiddlewareWrapsEnqueues(t *testing.T) {
+	t.Parallel()
+	var calls []string
+	outer := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		calls = append(calls, "outer")
+		err := next(ctx)
+		for _, task := range tasks {
+			calls = append(calls, fmt.Sprintf("%s/%s %d %t", task.Queue, task.Kind, task.Result.ID, task.Result.Duplicate))
+		}
+		return err
+	}
+	inner := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		calls = append(calls, "inner")
+		for _, task := range tasks {
+			task.Metadata["traceparent"] = "00-" + task.Kind
+		}
+		return next(ctx)
+	}
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{outer, inner},
+	})
+
+	callerMeta := map[string]string{"source": "caller"}
+	dedupe := &taskmill.EnqueueOptions{DedupeKey: "k", Metadata: callerMeta}
+	res, err := e.client.EnqueueMany(t.Context(), []taskmill.EnqueueParams{
+		{Args: sendEmail{}, Options: dedupe},
+		{Args: report{Name: "daily"}},
+		{Args: sendEmail{}, Options: dedupe}, // repeats the first task's dedupe key
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"outer", "inner",
+		fmt.Sprintf("default/email.send %d false", res[0].ID),
+		fmt.Sprintf("reports/report.build %d false", res[1].ID),
+		fmt.Sprintf("default/email.send %d true", res[0].ID),
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("got calls %q, want %q", calls, want)
+	}
+	meta := e.get(t, res[0].ID).Metadata
+	if meta["traceparent"] != "00-email.send" || meta["source"] != "caller" {
+		t.Fatalf("got metadata %v", meta)
+	}
+	if len(callerMeta) != 1 {
+		t.Fatalf("middleware changed the caller's metadata: %v", callerMeta)
+	}
+}
+
+func TestEnqueueMiddlewareThatMisusesNext(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		mw    taskmill.EnqueueMiddleware
+		tasks int
+	}{
+		{
+			name:  "returns nil without calling next",
+			mw:    func(context.Context, []*taskmill.EnqueueTask, func(context.Context) error) error { return nil },
+			tasks: 0,
+		},
+		{
+			name: "calls next twice",
+			mw: func(ctx context.Context, _ []*taskmill.EnqueueTask, next func(context.Context) error) error {
+				if err := next(ctx); err != nil {
+					return err
+				}
+				return next(ctx)
+			},
+			tasks: 1,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{c.mw}})
+			if _, err := e.client.Enqueue(t.Context(), sendEmail{}, nil); err == nil {
+				t.Fatal("the enqueue succeeded")
+			}
+			if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != c.tasks {
+				t.Fatalf("got %d tasks, want %d", n, c.tasks)
+			}
+		})
 	}
 }
 

@@ -7,6 +7,18 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ClientConfig.EnqueueMiddleware`, which wraps every enqueue, for tracing
+  and metrics: it sees the tasks' queues and kinds, may add to their
+  metadata, and sees their results.
+- `QueueInfo.Lag`: how long a queue's oldest available task has waited
+  since its run time.
+- `outbox.Delivery.Metadata`: the metadata stored with a message, such as
+  its trace context, for the publisher.
+- The `github.com/code19m/taskmill/otel` module, released on its own: traces
+  and metrics through OpenTelemetry. See its [changelog](otel/CHANGELOG.md).
+
 ## [0.1.0] - 2026-10-25
 
 Initial release.

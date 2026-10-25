@@ -25,8 +25,9 @@ make db
 make check
 ```
 
-`make check` runs everything CI runs. The first run installs the pinned
-development tools into `./bin`. `make help` lists every target:
+`make check` runs everything CI runs, in every module of the repository: the
+core, and the `otel` module in `otel/`, which has its own go.mod. The first
+run installs the pinned development tools into `./bin`. `make help` lists every target:
 
 | Target | What it does |
 |---|---|
@@ -147,6 +148,13 @@ Maintainers release from a green `main`:
 4. Make the Go module proxy fetch the version, so pkg.go.dev shows it:
    `GOPROXY=https://proxy.golang.org go list -m github.com/code19m/taskmill@vX.Y.Z`.
 5. Create the GitHub release from that CHANGELOG section.
+
+The `otel` module is released the same way, from
+[otel/CHANGELOG.md](otel/CHANGELOG.md), with tags named `otel/vX.Y.Z`. Its
+go.mod requires the oldest core release it works with. If it uses core changes
+that are not released yet, release the core first, then set that version in
+the `require` line of `otel/go.mod`, and only then tag the module. The
+`replace` line stays: users of the module ignore it.
 
 Never move or delete a published tag: the Go checksum database keeps every
 version forever. Fix a bad release forward with a new patch release, and
