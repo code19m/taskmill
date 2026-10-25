@@ -7,6 +7,17 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `Client.List`, `Client.Groups`, `Client.Activity`, and the schedule methods
+  return `ErrInvalidArgument` for a filter, search, or name that no task or
+  schedule can have: too long, not valid UTF-8, or holding a NUL character.
+  They returned a database error, and the dashboard showed a server error.
+- Enqueueing returns `ErrInvalidArgument` for a payload that is not valid
+  UTF-8, such as a `json.RawMessage` that holds a request body in another
+  encoding, or that PostgreSQL rejects, such as one with a number beyond the
+  range of `jsonb`. It returned a database error.
+
 ## [0.1.0] - 2026-10-25
 
 Initial release.

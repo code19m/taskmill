@@ -53,8 +53,8 @@ test: ## Run all tests with the race detector, in random order, and write covera
 cover: test ## Run all tests and open the coverage report in a browser (needs `make db`).
 	go tool cover -html=coverage.out
 
-# A block of code appears once for each test binary that covers it, so the
-# report counts each block once, as covered if any test ran it.
+# coverage.out lists each block of code with its statements and how often it
+# ran; the report sums the statements of the blocks that ran, per package.
 .PHONY: cover-report
 cover-report: ## Print the coverage of the last `make test` per package, in Markdown.
 	@echo '### Coverage'
@@ -63,12 +63,11 @@ cover-report: ## Print the coverage of the last `make test` per package, in Mark
 	@echo '|---|---:|'
 	@awk 'NR > 1 { n[$$1] = $$2; if ($$3 > 0) hit[$$1] = 1 } \
 		END { \
-			for (b in n) { p = b; sub(/\/[^\/]*:.*/, "", p); all[p] += n[b]; total += n[b]; \
-				if (b in hit) { cov[p] += n[b]; covered += n[b] } } \
-			for (p in all) printf "| `%s` | %.1f%% |\n", p, 100 * cov[p] / all[p] | "sort"; \
-			close("sort"); \
-			printf "| **Total** | **%.1f%%** |\n", 100 * covered / total \
-		}' coverage.out
+			for (b in n) { p = b; sub(/\/[^\/]*:.*/, "", p); all[p] += n[b]; if (b in hit) cov[p] += n[b] } \
+			for (p in all) print p, all[p], cov[p] + 0 \
+		}' coverage.out | sort | \
+	awk '{ printf "| `%s` | %.1f%% |\n", $$1, 100 * $$3 / $$2; all += $$2; cov += $$3 } \
+		END { printf "| **Total** | **%.1f%%** |\n", 100 * cov / all }'
 
 .PHONY: fuzz
 fuzz: ## Run each fuzz target for FUZZTIME (needs `make db`).

@@ -21,7 +21,8 @@ var (
 	ErrInvalidState = errors.New("taskmill: invalid state")
 
 	// ErrInvalidArgument means an argument or option is invalid: out of
-	// range, too long, or holding a NUL character.
+	// range, too long, or text that PostgreSQL cannot store, such as a NUL
+	// character.
 	ErrInvalidArgument = errors.New("taskmill: invalid argument")
 
 	// ErrSchemaOutdated means the database schema is missing or older than

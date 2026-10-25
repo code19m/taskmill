@@ -29,37 +29,46 @@ func FuzzList(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, cursor string, limit int, state, queue, kind, group string) {
-		p := &taskmill.ListParams{Cursor: cursor, Limit: limit}
-		if state != "" {
-			p.States = []taskmill.State{taskmill.State(state)}
+		p := &taskmill.ListParams{
+			Cursor: cursor, Limit: limit,
+			States: only(taskmill.State(state)), Queues: only(queue), Kinds: only(kind), GroupKeys: only(group),
 		}
-		for dst, v := range map[*[]string]string{&p.Queues: queue, &p.Kinds: kind, &p.GroupKeys: group} {
-			if v != "" {
-				*dst = []string{v}
-			}
-		}
-		res, err := e.client.List(t.Context(), p)
-		if errors.Is(err, taskmill.ErrInvalidArgument) {
+		if _, err := e.client.List(t.Context(), p); errors.Is(err, taskmill.ErrInvalidArgument) {
 			return
 		}
-		var last int64
-		for {
-			if err != nil {
-				t.Fatalf("List(%+v): %v", p, err)
-			}
-			for _, task := range res.Tasks {
-				if last != 0 && task.ID >= last {
-					t.Fatalf("List(%+v): task %d follows task %d", p, task.ID, last)
-				}
-				last = task.ID
-			}
-			if res.Next == "" {
-				return
-			}
-			p.Cursor = res.Next
-			res, err = e.client.List(t.Context(), p)
-		}
+		listPages(t, e.client, p)
 	})
+}
+
+// listPages lists every page of p, and fails t unless the tasks come newest
+// first.
+func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
+	t.Helper()
+	var last int64
+	for {
+		res, err := client.List(t.Context(), p)
+		if err != nil {
+			t.Fatalf("List(%+v): %v", p, err)
+		}
+		for _, task := range res.Tasks {
+			if last != 0 && task.ID >= last {
+				t.Fatalf("List(%+v): task %d follows task %d", p, task.ID, last)
+			}
+			last = task.ID
+		}
+		if res.Next == "" {
+			return
+		}
+		p.Cursor = res.Next
+	}
+}
+
+// only returns a filter that holds v, or no filter if v is empty.
+func only[T ~string](v T) []T {
+	if v == "" {
+		return nil
+	}
+	return []T{v}
 }
 
 // rawArgs is a task whose arguments hold any JSON text, as when a service

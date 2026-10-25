@@ -22,6 +22,9 @@ import (
 	"github.com/code19m/taskmill/outbox"
 )
 
+// wait bounds each wait for the release's worker.
+const wait = time.Minute
+
 // job is the task this check enqueues. What names the feature it exercises.
 type job struct {
 	What string `json:"what"`
@@ -31,85 +34,96 @@ type job struct {
 func (job) Kind() string { return "compat.job" }
 
 func TestReleaseOnCurrentSchema(t *testing.T) {
+	r := newRelease(t)
+	r.enqueue(t)
+	r.work(t)
+	r.runSchedule(t)
+	r.checkRuns(t)
+	r.checkReads(t)
+}
+
+// release is the latest release's client on a schema that the current code
+// migrated, and what its handlers did.
+type release struct {
+	pool      *pgxpool.Pool
+	client    *taskmill.Client
+	box       *outbox.Outbox
+	ran       chan job
+	published chan string
+}
+
+// newRelease migrates a fresh schema with the current code, and opens it
+// with the release, which restarts with Migrate as it would during a rolling
+// deploy.
+func newRelease(t *testing.T) *release {
+	t.Helper()
 	url := os.Getenv("TASKMILL_TEST_DATABASE_URL")
 	if url == "" {
 		t.Skip("TASKMILL_TEST_DATABASE_URL is not set; run `make db` and `make compat`")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
-	defer cancel()
-	pool, err := pgxpool.New(ctx, url)
+	pool, err := pgxpool.New(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
 	schema := migrateCurrent(t, pool)
 
-	// A release restarts with Migrate, which leaves a newer schema as it is.
 	version := schemaVersion(t, pool, schema)
-	if err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		t.Fatalf("the release's Migrate: %v", err)
 	}
 	if v := schemaVersion(t, pool, schema); v != version {
 		t.Fatalf("the release's Migrate changed the schema from version %d to %d", version, v)
 	}
-	client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: schema})
+	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema})
 	if err != nil {
 		t.Fatalf("the release's NewClient: %v", err)
 	}
+	return &release{pool: pool, client: client, box: outbox.New(client), ran: make(chan job, 16), published: make(chan string, 1)}
+}
 
-	ran := make(chan job, 16)
-	var handlers taskmill.Handlers
-	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[job](func(ctx context.Context, task *taskmill.Task[job]) error {
-		switch task.Args.What {
-		case "retry":
-			if task.Attempt == 1 {
-				return errors.New("the first attempt fails")
-			}
-		case "complete in a transaction":
-			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				return task.CompleteTx(ctx, taskmill.Pgx(tx))
-			}); err != nil {
-				return err
-			}
-		}
-		ran <- task.Args
-		return nil
-	}), &taskmill.HandlerOptions{Retry: taskmill.ExponentialBackoff{Base: time.Millisecond, Max: time.Millisecond}})
-	box := outbox.New(client)
-	published := make(chan string, 1)
-	box.AddRelay(&handlers, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
-		for _, d := range ds {
-			published <- string(d.Value)
-		}
-		return make([]error, len(ds))
-	}))
-
-	// Everything is enqueued before the worker starts, so that the FIFO group
-	// has tasks waiting behind its head.
-	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		_, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), job{What: "rolled back"}, nil)
+// enqueue enqueues every task before the worker starts, so that the FIFO
+// group has tasks waiting behind its head.
+func (r *release) enqueue(t *testing.T) {
+	t.Helper()
+	ctx := t.Context()
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		_, err := r.client.EnqueueTx(ctx, taskmill.Pgx(tx), job{What: "rolled back"}, nil)
 		return errors.Join(err, errors.New("roll back"))
 	}); err == nil {
 		t.Fatal("the transaction committed")
 	}
-	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		for _, j := range []job{{What: "enqueue in a transaction"}, {What: "retry"}, {What: "complete in a transaction"}} {
-			if _, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), j, nil); err != nil {
+			if _, err := r.client.EnqueueTx(ctx, taskmill.Pgx(tx), j, nil); err != nil {
 				return err
 			}
 		}
 		for seq := 1; seq <= 3; seq++ {
-			if _, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), job{What: "fifo", Seq: seq},
+			if _, err := r.client.EnqueueTx(ctx, taskmill.Pgx(tx), job{What: "fifo", Seq: seq},
 				&taskmill.EnqueueOptions{GroupKey: "group"}); err != nil {
 				return err
 			}
 		}
-		return box.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "compat", Value: []byte("message")})
+		return r.box.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "compat", Value: []byte("message")})
 	}); err != nil {
 		t.Fatalf("the release's EnqueueTx: %v", err)
 	}
+}
 
-	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
+// work runs the release's worker until the test ends.
+func (r *release) work(t *testing.T) {
+	t.Helper()
+	var handlers taskmill.Handlers
+	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[job](r.handle),
+		&taskmill.HandlerOptions{Retry: taskmill.ExponentialBackoff{Base: time.Millisecond, Max: time.Millisecond}})
+	r.box.AddRelay(&handlers, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
+		for _, d := range ds {
+			r.published <- string(d.Value)
+		}
+		return make([]error, len(ds))
+	}))
+	worker, err := taskmill.NewWorker(r.client, &taskmill.WorkerConfig{
 		Handlers:     &handlers,
 		PollInterval: 50 * time.Millisecond,
 		Schedules:    []taskmill.Schedule{{Name: "compat", Cron: "@yearly", Args: job{What: "schedule"}}},
@@ -117,71 +131,96 @@ func TestReleaseOnCurrentSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workerCtx, stop := context.WithCancel(ctx)
+	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- worker.Run(workerCtx) }()
-	defer func() {
+	go func() { done <- worker.Run(ctx) }()
+	t.Cleanup(func() {
 		stop()
 		if err := <-done; err != nil {
 			t.Errorf("the release's worker: %v", err)
 		}
-	}()
+	})
+}
 
-	// The maintainer stores the schedule when it starts; then it can run on
-	// demand.
-	for err := client.RunSchedule(ctx, "compat"); err != nil; err = client.RunSchedule(ctx, "compat") {
-		if !errors.Is(err, taskmill.ErrNotFound) {
+func (r *release) handle(ctx context.Context, task *taskmill.Task[job]) error {
+	switch task.Args.What {
+	case "retry":
+		if task.Attempt == 1 {
+			return errors.New("the first attempt fails")
+		}
+	case "complete in a transaction":
+		if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+			return task.CompleteTx(ctx, taskmill.Pgx(tx))
+		}); err != nil {
+			return err
+		}
+	}
+	r.ran <- task.Args
+	return nil
+}
+
+// runSchedule runs the schedule on demand, once the maintainer has stored it.
+func (r *release) runSchedule(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(wait)
+	for {
+		err := r.client.RunSchedule(t.Context(), "compat")
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, taskmill.ErrNotFound) || time.Now().After(deadline) {
 			t.Fatalf("the release's RunSchedule: %v", err)
 		}
-		sleep(ctx, 50*time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
+}
 
-	want := []string{"enqueue in a transaction", "retry", "complete in a transaction", "fifo", "fifo", "fifo", "schedule"}
+// checkRuns waits for every task to run once, and the message to be
+// published.
+func (r *release) checkRuns(t *testing.T) {
+	t.Helper()
+	want := []string{"complete in a transaction", "enqueue in a transaction", "fifo", "fifo", "fifo", "retry", "schedule"}
 	var got []string
 	var fifo []int
+	timeout := time.After(wait)
 	for len(got) < len(want) {
 		select {
-		case j := <-ran:
+		case j := <-r.ran:
 			got = append(got, j.What)
 			if j.What == "fifo" {
 				fifo = append(fifo, j.Seq)
 			}
-		case <-ctx.Done():
+		case <-timeout:
 			t.Fatalf("the release's worker ran %q, want each of %q", got, want)
 		}
 	}
-	slices.Sort(got)
-	slices.Sort(want)
-	if !slices.Equal(got, want) {
+	if slices.Sort(got); !slices.Equal(got, want) {
 		t.Fatalf("the release's worker ran %q, want %q", got, want)
 	}
 	if !slices.Equal(fifo, []int{1, 2, 3}) {
 		t.Fatalf("the FIFO group ran in the order %v", fifo)
 	}
 	select {
-	case v := <-published:
+	case v := <-r.published:
 		if v != "message" {
 			t.Fatalf("the release's relay published %q", v)
 		}
-	case <-ctx.Done():
+	case <-time.After(wait):
 		t.Fatal("the release's relay published nothing")
 	}
+}
 
-	// The release's dashboard reads these.
-	if _, err := client.List(ctx, &taskmill.ListParams{States: []taskmill.State{taskmill.StateCompleted}}); err != nil {
-		t.Errorf("the release's List: %v", err)
-	}
-	if _, err := client.Queues(ctx); err != nil {
-		t.Errorf("the release's Queues: %v", err)
-	}
-	if _, err := client.Workers(ctx); err != nil {
-		t.Errorf("the release's Workers: %v", err)
-	}
-	if _, err := client.Schedules(ctx); err != nil {
-		t.Errorf("the release's Schedules: %v", err)
-	}
-	if _, err := client.Activity(ctx, nil); err != nil {
-		t.Errorf("the release's Activity: %v", err)
+// checkReads makes the reads of the release's dashboard.
+func (r *release) checkReads(t *testing.T) {
+	t.Helper()
+	ctx := t.Context()
+	_, err := r.client.List(ctx, &taskmill.ListParams{States: []taskmill.State{taskmill.StateCompleted}})
+	_, err2 := r.client.Queues(ctx)
+	_, err3 := r.client.Workers(ctx)
+	_, err4 := r.client.Schedules(ctx)
+	_, err5 := r.client.Activity(ctx, nil)
+	if err := errors.Join(err, err2, err3, err4, err5); err != nil {
+		t.Fatalf("the release's dashboard reads: %v", err)
 	}
 }
 
@@ -199,8 +238,8 @@ func migrateCurrent(t *testing.T, pool *pgxpool.Pool) string {
 			t.Errorf("drop schema %s: %v", schema, err)
 		}
 	})
-	cmd := exec.CommandContext(t.Context(), "go", "run", "./internal/cmd/migrate", schema)
-	cmd.Dir = "../.." // the current code's module
+	cmd := exec.CommandContext(t.Context(), "go", "run", "./internal/cmd/migrate", schema) //nolint:gosec // the schema name is made above
+	cmd.Dir = "../.."                                                                      // the current code's module
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("migrate with the current code: %v\n%s", err, out)
 	}
@@ -214,11 +253,4 @@ func schemaVersion(t *testing.T, pool *pgxpool.Pool, schema string) int {
 		t.Fatal(err)
 	}
 	return v
-}
-
-func sleep(ctx context.Context, d time.Duration) {
-	select {
-	case <-time.After(d):
-	case <-ctx.Done():
-	}
 }

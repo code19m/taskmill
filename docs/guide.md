@@ -920,8 +920,9 @@ taskmill follows [Semantic Versioning](https://semver.org/).
   `Migrate`, or apply `Migrations`, before you roll out a new version.
 - **Old code works on a newer schema.** Each release's schema works with the
   previous release's workers and clients, so old and new versions can run
-  side by side during a rolling deploy. Code that is newer than its schema
-  fails in `NewClient` with `ErrSchemaOutdated`.
+  side by side during a rolling deploy; CI checks this for every change.
+  Code that is newer than its schema fails in `NewClient` with
+  `ErrSchemaOutdated`.
 - **The tables are internal.** Their layout can change in any release. Read
   and change tasks through `Client`, not with SQL.
 
