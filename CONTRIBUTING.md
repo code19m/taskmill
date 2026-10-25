@@ -1,7 +1,8 @@
 # Contributing to taskmill
 
 Thank you for helping. This guide covers how to set up the project, what we
-expect from every change, and how changes are merged.
+expect from every change, and how changes are merged. Everyone who takes part
+follows the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## Before you start
 
