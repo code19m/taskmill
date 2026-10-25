@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"net"
@@ -24,10 +25,18 @@ func TestShop(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The shop's log shows only if the test fails. It goes to a buffer, not
+	// to t's log: the client's trailing notification can log after t ends.
+	var logs lockedBuffer
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("the shop's log:\n%s", logs.String())
+		}
+	})
+
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan error, 1)
-	logger := slog.New(slog.NewTextHandler(t.Output(), &slog.HandlerOptions{Level: slog.LevelWarn}))
-	go func() { stopped <- runShop(ctx, pool, schema, ln, logger) }()
+	go func() { stopped <- runShop(ctx, pool, schema, ln, slog.New(slog.NewTextHandler(&logs, nil))) }()
 	stop := sync.OnceValue(func() error {
 		cancel()
 		select {
@@ -85,4 +94,22 @@ func waitCompleted(t *testing.T, client *taskmill.Client, kind string) {
 			t.Fatalf("no %s task completed within 30 seconds", kind)
 		}
 	}
+}
+
+// lockedBuffer is a buffer that goroutines may write to at once.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
