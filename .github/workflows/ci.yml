@@ -82,12 +82,14 @@ jobs:
           cache-dependency-path: |
             go.sum
             Makefile
+      # The report goes outside the checkout: gorelease stops on any file
+      # that git does not know.
       - name: Compare the API with the latest release
         run: |
           status=0
-          make -s api > api.txt || status=$?
-          cat api.txt
-          { echo '### API compared with the latest release'; echo '```text'; cat api.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          make -s api > "$RUNNER_TEMP/api.txt" || status=$?
+          cat "$RUNNER_TEMP/api.txt"
+          { echo '### API compared with the latest release'; echo '```text'; cat "$RUNNER_TEMP/api.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
   # The latest release's client and worker on a schema that the current code

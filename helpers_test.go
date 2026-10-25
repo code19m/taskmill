@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -79,7 +80,7 @@ func newEnvWith(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *
 	}
 	if cfg.Logger == nil {
 		// Warnings show in a failing test's log: a lost lease then says why.
-		cfg.Logger = slog.New(slog.NewTextHandler(tb.Output(), &slog.HandlerOptions{Level: slog.LevelWarn}))
+		cfg.Logger = slog.New(slog.NewTextHandler(newTestOutput(tb), &slog.HandlerOptions{Level: slog.LevelWarn}))
 	}
 	cfg.Schema = schema
 	client, err := taskmill.NewClient(tb.Context(), pool, cfg)
@@ -95,6 +96,35 @@ func newEnvWith(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *
 		}
 	})
 	return e
+}
+
+// testOutput writes to a test's output until the test ends, and then
+// discards. A client's trailing notification can log after its test ended,
+// when the pool it sends on is closed, and writing to a finished test's
+// output is a data race.
+type testOutput struct {
+	mu sync.Mutex
+	w  io.Writer // nil once the test ended
+}
+
+func newTestOutput(tb testing.TB) *testOutput {
+	tb.Helper()
+	o := &testOutput{w: tb.Output()}
+	tb.Cleanup(func() {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		o.w = nil
+	})
+	return o
+}
+
+func (o *testOutput) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.w == nil {
+		return len(p), nil
+	}
+	return o.w.Write(p)
 }
 
 // checkGroups fails the test unless every FIFO group satisfies the
