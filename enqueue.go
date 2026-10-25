@@ -5,11 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // DefaultQueue is the queue that tasks go to when neither the enqueue call
@@ -205,7 +208,7 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		b.queues, b.kinds, b.priorities, b.runAts, b.maxAttempts, nullable(b.groups),
 		b.dedupeKeys, b.dedupeWindows, b.payloads, b.metadata, c.schema, notify)
 	if err != nil {
-		return nil, fmt.Errorf("taskmill: enqueue: %w", err)
+		return nil, enqueueError(err)
 	}
 	defer r.Close()
 
@@ -215,7 +218,7 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		var ord, id int64
 		var duplicate bool
 		if err := r.Scan(&ord, &id, &duplicate); err != nil {
-			return nil, fmt.Errorf("taskmill: enqueue: %w", err)
+			return nil, enqueueError(err)
 		}
 		results[ord-1] = EnqueueResult{ID: id, Duplicate: duplicate}
 		if duplicate && id == 0 {
@@ -223,7 +226,7 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		}
 	}
 	if err := r.Err(); err != nil {
-		return nil, fmt.Errorf("taskmill: enqueue: %w", err)
+		return nil, enqueueError(err)
 	}
 	r.Close()
 
@@ -233,6 +236,17 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		}
 	}
 	return results, nil
+}
+
+// enqueueError wraps an error of the enqueue statement. A data exception
+// means that PostgreSQL rejected a value that the checks before it let
+// through, such as a number in the payload beyond the range of jsonb:
+// retrying cannot help.
+func enqueueError(err error) error {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && strings.HasPrefix(pgErr.Code, "22") { // data_exception
+		return fmt.Errorf("%w: the database rejected a value: %w", ErrInvalidArgument, err)
+	}
+	return fmt.Errorf("taskmill: enqueue: %w", err)
 }
 
 // resolveDuplicates finds the existing tasks of dedupe keys that a concurrent
@@ -361,6 +375,8 @@ func encodePayload(kind string, args Args) ([]byte, error) {
 	case len(payload) > maxPayloadBytes:
 		return nil, invalidArgument("payload of kind %q is %d bytes, more than the limit of %d",
 			kind, len(payload), maxPayloadBytes)
+	case !utf8.Valid(payload):
+		return nil, invalidArgument("payload of kind %q is not valid UTF-8", kind)
 	case hasNUL(payload):
 		return nil, invalidArgument("payload of kind %q contains a NUL character", kind)
 	}

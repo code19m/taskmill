@@ -49,7 +49,7 @@ type env struct {
 }
 
 // newEnv migrates a fresh schema and returns a client for it.
-func newEnv(t *testing.T) *env {
+func newEnv(t testing.TB) *env {
 	t.Helper()
 	return newEnvWith(t, testdb.Pool(t), nil)
 }
@@ -68,7 +68,7 @@ func (e *env) withLogger(t *testing.T, logger *slog.Logger) *env {
 }
 
 // newEnvWith is newEnv with a given pool and client configuration.
-func newEnvWith(t *testing.T, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *env {
+func newEnvWith(t testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *env {
 	t.Helper()
 	schema := testdb.Schema(t, pool)
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
@@ -101,7 +101,7 @@ func newEnvWith(t *testing.T, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *e
 // invariants in docs/design/task-lifecycle.md: its count matches its
 // unfinished tasks plus a halting dead head, it has exactly one head, and
 // every unfinished grouped task belongs to a group row.
-func (e *env) checkGroups(t *testing.T) {
+func (e *env) checkGroups(t testing.TB) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

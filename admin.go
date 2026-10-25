@@ -271,15 +271,15 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	if err != nil {
 		return nil, err
 	}
-	queues, err := nonEmpty("queue name", params.Queues)
+	queues, err := checkFilter("queue name", params.Queues, maxNameLength)
 	if err != nil {
 		return nil, err
 	}
-	kinds, err := nonEmpty("kind", params.Kinds)
+	kinds, err := checkFilter("kind", params.Kinds, maxNameLength)
 	if err != nil {
 		return nil, err
 	}
-	groups, err := nonEmpty("group key", params.GroupKeys)
+	groups, err := checkFilter("group key", params.GroupKeys, maxGroupKeyLength)
 	if err != nil {
 		return nil, err
 	}
@@ -320,13 +320,13 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	return &out, nil
 }
 
-// nonEmpty checks that a filter's values are not empty, and returns them as a
-// slice that is never nil: NULL would match nothing.
-func nonEmpty(what string, values []string) ([]string, error) {
+// checkFilter checks that a filter's values are valid names, and returns them
+// as a slice that is never nil: NULL would match nothing.
+func checkFilter(what string, values []string, maxLen int) ([]string, error) {
 	out := make([]string, 0, len(values))
 	for _, v := range values {
-		if v == "" {
-			return nil, invalidArgument("%s must not be empty", what)
+		if err := checkName(what, v, maxLen); err != nil {
+			return nil, err
 		}
 		out = append(out, v)
 	}
@@ -370,9 +370,14 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) ([]GroupInfo, 
 	case p.Limit < 0 || p.Limit > maxListLimit:
 		return nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
 	}
-	queues, err := nonEmpty("queue name", p.Queues)
+	queues, err := checkFilter("queue name", p.Queues, maxNameLength)
 	if err != nil {
 		return nil, err
+	}
+	if p.Search != "" {
+		if err := checkName("search", p.Search, maxGroupKeyLength); err != nil {
+			return nil, err
+		}
 	}
 	var out []GroupInfo
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {

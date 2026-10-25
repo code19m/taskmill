@@ -102,7 +102,7 @@ func activityParams(params *ActivityParams) (ActivityParams, []string, error) {
 	if p.Since.IsZero() {
 		p.Since = time.Now().Add(-time.Hour)
 	}
-	queues, err := nonEmpty("queue name", p.Queues)
+	queues, err := checkFilter("queue name", p.Queues, maxNameLength)
 	return p, queues, err
 }
 

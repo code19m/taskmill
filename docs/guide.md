@@ -108,7 +108,11 @@ func (SendReceipt) Kind() string { return "email.send_receipt" }
   `invalid_payload`.
 - PostgreSQL cannot store the NUL character (`\u0000`) in text or JSON. A
   payload, metadata, queue name, kind, or group key that holds one fails
-  with `ErrInvalidArgument`.
+  with `ErrInvalidArgument`, and so does a payload that is not valid UTF-8,
+  such as a `json.RawMessage` with a request body in another encoding. A
+  payload that PostgreSQL itself rejects, such as one with a number beyond
+  the range of `jsonb`, fails with `ErrInvalidArgument` too, but aborts the
+  transaction it was enqueued in.
 
 A kind can set its own defaults by implementing `ArgsWithDefaults`:
 
