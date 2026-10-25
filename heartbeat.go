@@ -41,9 +41,8 @@ func (w *Worker) heartbeat(ctx context.Context) {
 	// Leases first: on a slow database they need the beat's time more than
 	// the worker's own row, which only shows that it is alive.
 	w.renewLeases(ctx, ts)
-	if _, err := w.client.pool.Exec(ctx, w.client.sql.beatWorker, w.id); err != nil {
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "worker heartbeat failed", slog.Any(logKeyError, err))
-	}
+	_, err := w.client.pool.Exec(ctx, w.client.sql.beatWorker, w.id)
+	w.beatFailures.observe(ctx, err)
 }
 
 // renewLeases renews the leases of ts, and cancels the attempts that lost
@@ -59,9 +58,7 @@ func (w *Worker) renewLeases(ctx context.Context, ts []*tracked) {
 	}
 	sent := time.Now()
 	beats, err := w.renew(ctx, ids, tokens)
-	if err != nil {
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "lease heartbeat failed", slog.Any(logKeyError, err))
-	}
+	w.leaseFailures.observe(ctx, err)
 
 	for _, t := range ts {
 		b, owned := beats[t.att.id]

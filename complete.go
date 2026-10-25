@@ -240,7 +240,7 @@ func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedT
 		w.countCompleted(done)
 	}
 	if err != nil {
-		w.logger.LogAttrs(ctx, slog.LevelError, "complete tasks failed; they are rescued when their leases expire",
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "complete tasks failed; they are rescued when their leases expire",
 			slog.Int(logKeyTasks, len(ts)), slog.Any(logKeyError, err))
 	}
 }
@@ -259,11 +259,10 @@ func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context
 		tryCtx, cancel := context.WithTimeout(ctx, recordTimeout)
 		err := fn(tryCtx)
 		cancel()
+		w.resultFailures.observe(ctx, err)
 		if err == nil || ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
 			return err
 		}
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "record results failed; trying again",
-			slog.Int(logKeyTasks, len(ts)), slog.Duration(logKeyRetryIn, delay), slog.Any(logKeyError, err))
 		select {
 		case <-ctx.Done():
 			return err
@@ -394,9 +393,7 @@ func (c *Client) noteMissingHistory(ctx context.Context, err error) {
 		return
 	}
 	c.historyGapUntil.Store(time.Now().Add(historyGap).UnixNano())
-	c.logger.LogAttrs(ctx, slog.LevelError,
-		"task history has no partition for today, so completed tasks are not kept in history; "+
-			"the role that runs workers must own the taskmill tables to create the daily partitions",
+	c.logger.LogAttrs(ctx, slog.LevelError, "task history has no partition for today; completed tasks skip history",
 		slog.Any(logKeyError, err))
 }
 

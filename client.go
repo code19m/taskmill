@@ -354,7 +354,7 @@ func (c *Client) leaveGroup(ctx context.Context, q querier, queue, group string,
 	}
 	switch {
 	case !found:
-		c.logger.LogAttrs(ctx, slog.LevelWarn, "fifo group missing",
+		c.logger.LogAttrs(ctx, slog.LevelError, "fifo group missing",
 			slog.String(logKeyQueue, queue), slog.String(logKeyGroup, group), slog.Int64(logKeyTaskID, id))
 		return nil
 	case remaining == 0:

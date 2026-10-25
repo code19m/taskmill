@@ -273,17 +273,19 @@ func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.T
 	}
 	t.mu.Unlock()
 
-	if !start.IsZero() && (o.kind == outcomeRetry || o.kind == outcomeDead) {
+	if o.kind == outcomeRetry || o.kind == outcomeDead {
 		attrs := []slog.Attr{
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind),
-			slog.Int(logKeyAttempt, t.info.Attempt), slog.Duration(logKeyDuration, time.Since(start)),
-			slog.Any(logKeyError, o.err),
+			slog.Int(logKeyAttempt, t.info.Attempt), slog.Any(logKeyError, o.err),
+		}
+		if !start.IsZero() { // a handler ran
+			attrs = append(attrs, slog.Duration(logKeyDuration, time.Since(start)))
 		}
 		if o.kind == outcomeDead {
-			w.logger.LogAttrs(ctx, slog.LevelWarn, "attempt failed; the task is dead", attrs...)
+			w.logger.LogAttrs(ctx, slog.LevelError, "attempt failed; the task is dead", attrs...)
 		} else {
 			attrs = append(attrs, slog.Duration(logKeyRetryIn, o.delay))
-			w.logger.LogAttrs(ctx, slog.LevelInfo, "attempt failed; retrying", attrs...)
+			w.logger.LogAttrs(ctx, slog.LevelDebug, "attempt failed; retrying", attrs...)
 		}
 	}
 
@@ -342,8 +344,8 @@ func (w *Worker) record(ctx context.Context, t *tracked, o outcome) {
 		w.tally.add(t.info.Queue, 1, 0)
 	}
 	if err != nil {
-		w.logger.LogAttrs(ctx, slog.LevelError, "record attempt failed; the task is rescued when its lease expires",
-			slog.Int64(logKeyTaskID, t.att.id), slog.Any(logKeyError, err))
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "record attempt failed; the task is rescued when its lease expires",
+			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, err))
 	}
 }
 
@@ -394,11 +396,11 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 		return endedOther, err
 	case !found && t.att.completedInTx.Load():
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler failed after completing its task; it stays completed",
-			slog.Int64(logKeyTaskID, id), slog.Any(logKeyError, o.err))
+			slog.Int64(logKeyTaskID, id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, o.err))
 		return endedCompleted, nil
 	case !found:
 		w.logger.LogAttrs(ctx, slog.LevelDebug, "result discarded: the attempt lost its lease",
-			slog.Int64(logKeyTaskID, id))
+			slog.Int64(logKeyTaskID, id), slog.String(logKeyKind, t.info.Kind))
 		return endedOther, nil
 	}
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -275,10 +276,10 @@ func openSQL(t *testing.T) *sql.DB {
 	return db
 }
 
-// logRecorder is a slog handler that keeps the messages it receives.
+// logRecorder is a slog handler that keeps the records it receives.
 type logRecorder struct {
-	mu       sync.Mutex
-	messages []string
+	mu      sync.Mutex
+	records []slog.Record
 }
 
 func (*logRecorder) Enabled(context.Context, slog.Level) bool { return true }
@@ -286,7 +287,7 @@ func (*logRecorder) Enabled(context.Context, slog.Level) bool { return true }
 func (l *logRecorder) Handle(_ context.Context, r slog.Record) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.messages = append(l.messages, r.Message)
+	l.records = append(l.records, r.Clone())
 	return nil
 }
 
@@ -299,12 +300,19 @@ func (l *logRecorder) count(message string) int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	n := 0
-	for _, m := range l.messages {
-		if m == message {
+	for _, r := range l.records {
+		if r.Message == message {
 			n++
 		}
 	}
 	return n
+}
+
+// all returns the records received so far.
+func (l *logRecorder) all() []slog.Record {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.records)
 }
 
 // listenerPID returns the process ID of the backend that listens for the

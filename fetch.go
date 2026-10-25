@@ -16,6 +16,7 @@ import (
 func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 	poll := time.NewTicker(w.cfg.PollInterval)
 	defer poll.Stop()
+	fetches := newFailures(w, "fetch tasks", slog.String(logKeyQueue, q.name))
 
 	// notified reports that a notification caused the last fetch.
 	notified := false
@@ -33,15 +34,14 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 			continue
 		}
 		tasks, more, err := w.fetch(ctx, q, free)
+		fetches.observe(ctx, err)
+		w.dispatch(ctx, r, q, tasks)
 		if err != nil {
-			w.logger.LogAttrs(ctx, slog.LevelError, "fetch failed",
-				slog.String(logKeyQueue, q.name), slog.Any(logKeyError, err))
 			if !wait(false) {
 				return
 			}
 			continue
 		}
-		w.dispatch(ctx, r, q, tasks)
 		// A notification wakes every worker of the queue, and most find
 		// nothing: those pause before acting on the next one.
 		if !more && !wait(notified && len(tasks) == 0) {
@@ -79,6 +79,8 @@ func waitForWork(ctx context.Context, q *queueState, poll *time.Ticker, pause bo
 // every fetched task starts at once. A queue with an installation-wide
 // concurrency limit fetches only up to its remaining capacity. more reports
 // that the first lease took all it asked for, so more tasks may be waiting.
+// If filling the batches fails outside a transaction, it returns the tasks
+// leased before the error with the error: they must run.
 func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*tracked, more bool, err error) {
 	// The statements run on a context that outlives ctx: once tasks are
 	// leased, they must reach the worker even if it is stopping.
@@ -105,13 +107,8 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	}
 	more = limit > 0 && len(out) == limit
 	extra, err := w.fillBatches(dbCtx, q, lease, out, allowed-len(out))
-	switch {
-	case err != nil && tx != nil:
+	if err != nil && tx != nil {
 		return nil, false, err // rolled back: nothing was leased
-	case err != nil:
-		// The tasks leased so far are committed: run them.
-		w.logger.LogAttrs(ctx, slog.LevelError, "fill batch failed",
-			slog.String(logKeyQueue, q.name), slog.Any(logKeyError, err))
 	}
 	out = append(out, extra...)
 	if tx != nil {
@@ -127,7 +124,7 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 			cmp.Compare(a.info.ID, b.info.ID),
 		)
 	})
-	return out, more, nil
+	return out, more, err
 }
 
 // leaseFunc runs a fetch statement for up to limit tasks of q, with extra

@@ -35,8 +35,8 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) {
 		names = append(names, name)
 	}
 	settings, err := w.loadQueueSettings(ctx, names)
+	w.settingsFailures.observe(ctx, err)
 	if err != nil {
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "load queue settings failed", slog.Any(logKeyError, err))
 		return
 	}
 	// A queue without a row has the default settings: running, no limit.
@@ -90,8 +90,7 @@ func (w *Worker) listenLoop(ctx context.Context) {
 			w.logger.LogAttrs(ctx, slog.LevelError, "notifications disabled; polling only", slog.Any(logKeyError, err))
 			return
 		}
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "notification connection lost; polling until it is back",
-			slog.Any(logKeyError, err), slog.Duration(logKeyRetryIn, backoff))
+		w.listenFailures.observe(ctx, err) // workers poll meanwhile
 		select {
 		case <-ctx.Done():
 			return
@@ -116,6 +115,7 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 	if _, err := conn.Exec(ctx, "LISTEN "+w.client.schema); err != nil {
 		return false, err
 	}
+	w.listenFailures.observe(ctx, nil)
 	// Notifications may have been missed while disconnected.
 	for _, q := range w.queues {
 		q.nudge()

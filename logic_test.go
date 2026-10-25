@@ -3,10 +3,13 @@ package taskmill
 // Tests of logic that needs no database.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +149,7 @@ func TestWorkerServesTheDefaultQueuesOfItsKinds(t *testing.T) {
 func TestWhileLeased(t *testing.T) {
 	t.Parallel()
 	w := &Worker{cfg: WorkerConfig{LeaseDuration: 400 * time.Millisecond}, logger: slog.New(slog.DiscardHandler)}
+	w.resultFailures = newFailures(w, "record results")
 	ts := []*tracked{{lastBeat: time.Now()}}
 
 	calls := 0
@@ -173,5 +177,43 @@ func TestWhileLeased(t *testing.T) {
 	if err == nil || time.Since(start) > time.Second || calls < 2 {
 		t.Fatalf("got %v after %d tries in %s; it should give up once the lease may have expired",
 			err, calls, time.Since(start))
+	}
+}
+
+func TestFailuresOfAFlappingOperationLogRarelyAndAddUp(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	every := 100 * time.Millisecond
+	w := &Worker{logger: slog.New(slog.NewTextHandler(&out, nil)), timing: timing{failureReport: every}}
+	f := newFailures(w, "fetch tasks")
+	ctx := t.Context()
+
+	// The operation fails at every other try for half a second, then the
+	// quiet time passes and it succeeds once more.
+	start, tries := time.Now(), 0
+	for ; time.Since(start) < 500*time.Millisecond; tries++ {
+		f.observe(ctx, errors.New("timeout"))
+		f.observe(ctx, nil)
+		time.Sleep(time.Millisecond)
+	}
+	elapsed := time.Since(start)
+	time.Sleep(every)
+	f.observe(ctx, nil)
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if limit := 2 * (1 + int(elapsed/every)); len(lines) > limit {
+		t.Errorf("%d tries logged %d lines, want at most %d:\n%s", tries, len(lines), limit, out.String())
+	}
+	// Every failure is counted once, in the recovery lines.
+	counted := 0
+	for _, m := range regexp.MustCompile(`msg="operation recovered" .*failures=(\d+)`).FindAllStringSubmatch(out.String(), -1) {
+		n, _ := strconv.Atoi(m[1])
+		counted += n
+	}
+	if counted != tries {
+		t.Errorf("the recovery lines count %d failures, want %d:\n%s", counted, tries, out.String())
+	}
+	if last := lines[len(lines)-1]; !strings.Contains(last, `msg="operation recovered"`) {
+		t.Errorf("the last line is %s, want a recovery", last)
 	}
 }
