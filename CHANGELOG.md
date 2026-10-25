@@ -19,8 +19,9 @@ All notable changes to taskmill are recorded here. The format follows
   `operation failed` once, `operation still failing` at most once a minute,
   and `operation recovered` when it works again. These replace messages such
   as `fetch failed` and `maintenance step failed`.
-- A task that dies because no worker has a handler for its kind is now
-  logged, and a maintainer logs when it loses the role.
+- A task that dies because no worker has a handler for its kind, or because
+  its last attempt was rescued, is now logged, and a maintainer logs when it
+  loses the role.
 
 ## [0.1.0] - 2026-10-25
 

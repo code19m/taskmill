@@ -151,6 +151,10 @@ func (m *maintainer) elect(ctx context.Context) bool {
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "elected maintainer")
 	case was && !leader:
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "no longer maintainer")
+		// The work stops here: a later term starts without its incidents.
+		for _, f := range []*failures{m.promotion, m.rescues, m.schedules, m.pruning, m.stats, m.retention} {
+			f.reset()
+		}
 	}
 	return leader
 }
@@ -180,19 +184,19 @@ func (m *maintainer) promote(ctx context.Context) {
 	}
 }
 
+// leaseExpired is the error that a rescue records for the attempt it fails.
+const leaseExpired = "the worker lost its lease: it crashed, stopped, or lost the database"
+
 // rescue fails the attempts whose leases expired and updates their groups. It
 // skips tasks whose groups other transactions hold; a later cycle rescues
-// them. Each failed attempt counts in the activity once its batch commits.
+// them. Each failed attempt counts in the activity, and is logged, once its
+// batch commits.
 func (m *maintainer) rescue(ctx context.Context) {
 	var batch []swept
-	committed := func() {
-		for _, x := range batch {
-			m.w.tally.add(x.queue, 0, 1)
-		}
-	}
+	committed := func() { m.rescued(ctx, batch) }
 	err := m.sweep(ctx, committed, func(ctx context.Context, q querier) (int, error) {
 		r, err := q.query(ctx, m.c.sql.rescue,
-			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds())
+			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds(), leaseExpired)
 		if err != nil {
 			return 0, err
 		}
@@ -210,17 +214,29 @@ func (m *maintainer) rescue(ctx context.Context) {
 			if s == StateDead {
 				how = leftDeadHead
 			}
-			if err := m.c.leaveGroup(ctx, q, x.queue, x.group, x.id, how); err != nil {
+			if err := m.c.leaveGroup(ctx, m.w.logger, q, x.queue, x.group, x.id, how); err != nil {
 				return 0, err
 			}
-		}
-		if len(rows) > 0 {
-			m.w.logger.LogAttrs(ctx, slog.LevelWarn, "rescued tasks whose workers lost their leases",
-				slog.Int(logKeyTasks, len(rows)))
 		}
 		return len(rows), nil
 	})
 	m.rescues.observe(ctx, err)
+}
+
+// rescued counts and logs the failed attempts of a committed rescue batch.
+func (m *maintainer) rescued(ctx context.Context, batch []swept) {
+	if len(batch) > 0 {
+		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "rescued tasks whose workers lost their leases",
+			slog.Int(logKeyTasks, len(batch)))
+	}
+	for _, x := range batch {
+		m.w.tally.add(x.queue, 0, 1)
+		if State(x.state) == StateDead {
+			m.w.logger.LogAttrs(ctx, slog.LevelError, "attempt failed; the task is dead",
+				slog.Int64(logKeyTaskID, x.id), slog.String(logKeyKind, x.kind),
+				slog.Int(logKeyAttempt, x.attempt), slog.String(logKeyError, leaseExpired))
+		}
+	}
 }
 
 // sweep runs fn in transactions until a run handles less than a full batch,
@@ -245,8 +261,9 @@ func (m *maintainer) sweep(ctx context.Context, committed func(), fn func(contex
 
 // swept is a task that a maintenance sweep changed.
 type swept struct {
-	id                  int64
-	queue, group, state string
+	id                        int64
+	queue, group, state, kind string
+	attempt                   int
 }
 
 // collectSwept reads the tasks that a sweep changed, in a fixed order of queue
@@ -257,7 +274,7 @@ func collectSwept(r rows) ([]swept, error) {
 	var out []swept
 	for r.Next() {
 		var x swept
-		if err := r.Scan(&x.id, &x.queue, &x.group, &x.state); err != nil {
+		if err := r.Scan(&x.id, &x.queue, &x.group, &x.state, &x.kind, &x.attempt); err != nil {
 			return nil, err
 		}
 		out = append(out, x)

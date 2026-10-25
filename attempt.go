@@ -296,7 +296,7 @@ func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.T
 		err := w.whileLeased(context.WithoutCancel(ctx), ts, func(ctx context.Context) error {
 			return w.client.inTx(ctx, func(q querier) error {
 				var err error
-				done, err = w.client.complete(ctx, q, completionsOf(ts))
+				done, err = w.client.complete(ctx, w.logger, q, completionsOf(ts))
 				t.completedDirectly = err == nil && len(done) == 1
 				return err
 			})
@@ -410,11 +410,11 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 	}
 	switch s := State(state); {
 	case s == StateDead && group != "":
-		return ended, w.client.leaveGroup(ctx, q, queue, group, id, leftDeadHead)
+		return ended, w.client.leaveGroup(ctx, w.logger, q, queue, group, id, leftDeadHead)
 	case s.Finished() && group != "":
-		return ended, w.client.leaveGroup(ctx, q, queue, group, id, leftHead)
+		return ended, w.client.leaveGroup(ctx, w.logger, q, queue, group, id, leftHead)
 	case s == StateAvailable:
-		return ended, w.client.notifyAvailable(ctx, q, queue)
+		return ended, w.client.notifyAvailable(ctx, w.logger, q, queue)
 	}
 	return ended, nil
 }

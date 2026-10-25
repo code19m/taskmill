@@ -3,12 +3,11 @@ package taskmill
 // Tests of logic that needs no database.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -180,19 +179,43 @@ func TestWhileLeased(t *testing.T) {
 	}
 }
 
-func TestFailuresOfAFlappingOperationLogRarelyAndAddUp(t *testing.T) {
+func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
 	t.Parallel()
-	var out bytes.Buffer
 	every := 100 * time.Millisecond
-	w := &Worker{logger: slog.New(slog.NewTextHandler(&out, nil)), timing: timing{failureReport: every}}
-	f := newFailures(w, "fetch tasks")
-	ctx := t.Context()
+	f, l := newFailureLines(every)
+	ctx, boom := t.Context(), errors.New("timeout")
 
-	// The operation fails at every other try for half a second, then the
-	// quiet time passes and it succeeds once more.
+	f.observe(ctx, boom)
+	f.observe(ctx, nil)
+	// A failure soon after the recovery belongs to the same incident, and
+	// waits for the next line.
+	f.observe(ctx, boom)
+	f.observe(ctx, nil)
+	// Much later, a failure reports that incident's recovery, then starts
+	// another.
+	time.Sleep(2 * every)
+	f.observe(ctx, boom)
+
+	want := []string{
+		"WARN operation failed", "INFO operation recovered failures=1",
+		"INFO operation recovered failures=2", "WARN operation failed",
+	}
+	if !slices.Equal(l.lines, want) {
+		t.Errorf("got lines %q, want %q", l.lines, want)
+	}
+}
+
+func TestFailuresOfAFlappingOperationEscalateAndStayRare(t *testing.T) {
+	t.Parallel()
+	every := 50 * time.Millisecond
+	f, l := newFailureLines(every)
+	ctx, boom := t.Context(), errors.New("timeout")
+
+	// The operation fails at every other try for ten report intervals, then
+	// works again.
 	start, tries := time.Now(), 0
-	for ; time.Since(start) < 500*time.Millisecond; tries++ {
-		f.observe(ctx, errors.New("timeout"))
+	for ; time.Since(start) < 10*every; tries++ {
+		f.observe(ctx, boom)
 		f.observe(ctx, nil)
 		time.Sleep(time.Millisecond)
 	}
@@ -200,20 +223,58 @@ func TestFailuresOfAFlappingOperationLogRarelyAndAddUp(t *testing.T) {
 	time.Sleep(every)
 	f.observe(ctx, nil)
 
-	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if limit := 2 * (1 + int(elapsed/every)); len(lines) > limit {
-		t.Errorf("%d tries logged %d lines, want at most %d:\n%s", tries, len(lines), limit, out.String())
+	if limit := 2 * (1 + int(elapsed/every)); len(l.lines) > limit {
+		t.Errorf("%d tries logged %d lines, want at most %d: %q", tries, len(l.lines), limit, l.lines)
 	}
-	// Every failure is counted once, in the recovery lines.
-	counted := 0
-	for _, m := range regexp.MustCompile(`msg="operation recovered" .*failures=(\d+)`).FindAllStringSubmatch(out.String(), -1) {
-		n, _ := strconv.Atoi(m[1])
-		counted += n
+	// It is one incident: a warning, errors as it lasts, and a last line that
+	// counts every failure.
+	escalated := false
+	for i, line := range l.lines {
+		switch {
+		case i == 0 && line != "WARN operation failed":
+			t.Errorf("the first line is %q, want a warning", line)
+		case i > 0 && strings.HasPrefix(line, "WARN"):
+			t.Errorf("line %d warns again: %q", i, line)
+		case strings.HasPrefix(line, "ERROR operation still failing"):
+			escalated = true
+		}
 	}
-	if counted != tries {
-		t.Errorf("the recovery lines count %d failures, want %d:\n%s", counted, tries, out.String())
+	if !escalated {
+		t.Errorf("failures for %s logged no error: %q", elapsed, l.lines)
 	}
-	if last := lines[len(lines)-1]; !strings.Contains(last, `msg="operation recovered"`) {
-		t.Errorf("the last line is %s, want a recovery", last)
+	if last, want := l.lines[len(l.lines)-1], "INFO operation recovered failures="+strconv.Itoa(tries); last != want {
+		t.Errorf("the last line is %q, want %q", last, want)
 	}
 }
+
+// newFailureLines returns the failures of an operation with a report
+// interval of every, and the lines it logs.
+func newFailureLines(every time.Duration) (*failures, *lineLog) {
+	l := &lineLog{}
+	w := &Worker{logger: slog.New(l), timing: timing{failureReport: every}}
+	return newFailures(w, "fetch tasks"), l
+}
+
+// lineLog is a slog handler that keeps each line's level, message, and
+// failure count, for tests that log from one goroutine.
+type lineLog struct {
+	lines []string
+}
+
+func (*lineLog) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *lineLog) Handle(_ context.Context, r slog.Record) error {
+	line := r.Level.String() + " " + r.Message
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == logKeyFailures {
+			line += " failures=" + a.Value.String()
+		}
+		return true
+	})
+	l.lines = append(l.lines, line)
+	return nil
+}
+
+func (l *lineLog) WithAttrs([]slog.Attr) slog.Handler { return l }
+
+func (l *lineLog) WithGroup(string) slog.Handler { return l }

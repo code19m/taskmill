@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,13 +36,23 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	logs := &logRecorder{}
 	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
 
-	ran := make(chan struct{}, 1)
+	// Two tasks run across the outage: one succeeds and one fails, while the
+	// database is gone. Their next attempts take long enough for a heartbeat.
+	started, release := make(chan struct{}, 2), make(chan struct{})
 	w := newWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
-			ran <- struct{}{}
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			if task.Attempt > 1 {
+				time.Sleep(500 * time.Millisecond)
+				return nil
+			}
+			started <- struct{}{}
+			<-release
+			if task.Args.UserID == 2 {
+				return errors.New("try again")
+			}
 			return nil
 		}, nil),
-		Queues:        defaultQueue(1),
+		Queues:        defaultQueue(2),
 		PollInterval:  20 * time.Millisecond,
 		LeaseDuration: 600 * time.Millisecond,
 	})
@@ -50,46 +61,89 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	taskmill.SetTiming(w, timing)
 	startWorker(t, w)
 	e.waitListening(t)
-	before := e.enqueue(t, sendEmail{}, nil)
-	recv(t, ran, "a task before the outage")
-	e.waitState(t, before, taskmill.StateCompleted)
+	ids := []int64{e.enqueue(t, sendEmail{UserID: 1}, nil), e.enqueue(t, sendEmail{UserID: 2}, nil)}
+	recv(t, started, "the first task to start")
+	recv(t, started, "the second task to start")
 
 	down := time.Now()
 	db.cut(true)
+	close(release)
 	time.Sleep(3 * time.Second)
 	db.cut(false)
 
-	// The operations that the worker repeats every moment log their recovery
-	// once the database is back. Others, such as retention, recover at their
-	// next try.
-	var ops map[string]*opLines
+	// The tasks run again, and the operations that the worker repeats log
+	// their recovery. Others, such as retention, recover at their next try.
+	for _, id := range ids {
+		e.waitState(t, id, taskmill.StateCompleted)
+	}
+	var ops map[string][]slog.Record
 	waitFor(t, "the worker's operations to recover", func() bool {
-		ops = tallyOperations(logs.all())
-		for _, op := range []string{"fetch tasks", "listen for notifications", "record heartbeat", "elect maintainer"} {
-			if n := ops[op]; n == nil || n.last != "operation recovered" {
-				return false
-			}
-		}
-		return true
+		ops = operationLines(logs.all())
+		return recovered(ops, "fetch tasks", "listen for notifications", "record heartbeat", "elect maintainer",
+			"renew leases", "record results")
 	})
-	e.enqueue(t, sendEmail{}, nil)
-	recv(t, ran, "a task after the outage")
-
-	// An operation logs at most one failure line per FailureReport, however
-	// often it fails.
-	limit := 1 + int(time.Since(down)/timing.FailureReport)
-	for op, n := range ops {
-		if n.failed+n.still > limit {
-			t.Errorf("%s logged %d failure lines in %s, want at most %d", op, n.failed+n.still, time.Since(down), limit)
+	// The results that could not be recorded say so, once each.
+	for _, msg := range []string{
+		"complete tasks failed; they are rescued when their leases expire",
+		"record attempt failed; the task is rescued when its lease expires",
+	} {
+		if n := logs.count(msg); n != 1 {
+			t.Errorf("%q was logged %d times, want once", msg, n)
 		}
 	}
-	if f := ops["fetch tasks"]; f.failures < 25 || f.still == 0 {
-		t.Errorf("fetch tasks failed %d times and logged %d summaries; want at least 25 failures and a summary", f.failures, f.still)
+
+	// Each operation warns first, then logs at most one error per
+	// FailureReport, however often it fails.
+	limit := 1 + int(time.Since(down)/timing.FailureReport)
+	for op, lines := range ops {
+		checkIncident(t, op, lines, limit)
+	}
+	fetches := ops["fetch tasks"]
+	escalated := slices.ContainsFunc(fetches, func(r slog.Record) bool { return r.Level == slog.LevelError })
+	if n, _ := strconv.Atoi(attr(fetches[len(fetches)-1], "failures")); n < 25 || !escalated {
+		t.Errorf("fetch tasks failed %d times, escalated %v; want at least 25 failures and an error", n, escalated)
 	}
 	for _, r := range logs.all() {
 		if line := recordText(r); strings.Contains(line, testdb.URL(t)) || strings.Contains(line, "password") {
 			t.Errorf("a log line shows the connection string: %s", line)
 		}
+	}
+}
+
+func TestMaintainerWorkStartsCleanInANewTerm(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	logs := &logRecorder{}
+	w := newWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+		{Name: "ledger", Cron: "@hourly", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
+	}})
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	startWorker(t, w)
+	waitFor(t, "the schedule to be stored", func() bool { return e.count(t, "SELECT count(*) FROM {s}.schedules") == 1 })
+	e.exec(t, "UPDATE {s}.schedules SET next_run_at = now() - interval '1 second'")
+
+	// While a transaction holds the schedule's group, its run fails.
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'g' FOR UPDATE")
+	failed := func() int { return len(operationLines(logs.all())["run schedules"]) }
+	waitFor(t, "the schedule run to fail", func() bool { return failed() == 1 })
+
+	// Another worker leads for a while, then this one again: the failures of
+	// its new term are an incident of their own, not the old one going on.
+	e.exec(t, "UPDATE {s}.leader SET worker_id = 'another', expires_at = now() + interval '1 hour'")
+	waitFor(t, "the worker to lose the maintainer role", func() bool { return logs.count("no longer maintainer") == 1 })
+	e.exec(t, "DELETE FROM {s}.leader")
+	waitFor(t, "the worker to lead again", func() bool { return logs.count("elected maintainer") == 2 })
+	waitFor(t, "the schedule run to fail in the new term", func() bool { return failed() == 2 })
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the schedule run to recover", func() bool { return failed() == 3 })
+	want := []string{"operation failed", "operation failed", "operation recovered"}
+	if got := operationLines(logs.all())["run schedules"]; !slices.EqualFunc(got, want, func(r slog.Record, m string) bool {
+		return r.Message == m
+	}) {
+		t.Errorf("run schedules logged %v, want %q", got, want)
 	}
 }
 
@@ -142,35 +196,44 @@ func TestLogsLeaveOutPayloadsAndMetadata(t *testing.T) {
 	}
 }
 
-// opLines counts the lines that an operation logged about its failures.
-type opLines struct {
-	failed, still, recovered int
-	failures                 int    // failures that the recovery lines report
-	last                     string // the last message
+// checkIncident checks an operation's lines about an incident: a warning
+// first, then errors and recoveries, at most limit of them about failures.
+func checkIncident(t *testing.T, op string, lines []slog.Record, limit int) {
+	t.Helper()
+	levels := map[string]slog.Level{
+		"operation failed": slog.LevelWarn, "operation still failing": slog.LevelError, "operation recovered": slog.LevelInfo,
+	}
+	failing := 0
+	for i, r := range lines {
+		if r.Level != levels[r.Message] || (i == 0) != (r.Message == "operation failed") {
+			t.Errorf("%s line %d is %s %q", op, i, r.Level, r.Message)
+		}
+		if r.Message != "operation recovered" {
+			failing++
+		}
+	}
+	if failing > limit {
+		t.Errorf("%s logged %d failure lines, want at most %d", op, failing, limit)
+	}
 }
 
-// tallyOperations counts the lines of each operation in records.
-func tallyOperations(records []slog.Record) map[string]*opLines {
-	ops := map[string]*opLines{}
+// recovered reports whether each of the operations logged a recovery last.
+func recovered(ops map[string][]slog.Record, names ...string) bool {
+	for _, op := range names {
+		if lines := ops[op]; len(lines) == 0 || lines[len(lines)-1].Message != "operation recovered" {
+			return false
+		}
+	}
+	return true
+}
+
+// operationLines returns the lines that each operation logged about its
+// failures, in order.
+func operationLines(records []slog.Record) map[string][]slog.Record {
+	ops := map[string][]slog.Record{}
 	for _, r := range records {
-		op := attr(r, "operation")
-		if op == "" {
-			continue
-		}
-		n := ops[op]
-		if n == nil {
-			n = &opLines{}
-			ops[op] = n
-		}
-		switch n.last = r.Message; r.Message {
-		case "operation failed":
-			n.failed++
-		case "operation still failing":
-			n.still++
-		case "operation recovered":
-			n.recovered++
-			f, _ := strconv.Atoi(attr(r, "failures"))
-			n.failures += f
+		if op := attr(r, "operation"); op != "" {
+			ops[op] = append(ops[op], r)
 		}
 	}
 	return ops

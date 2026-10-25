@@ -742,18 +742,21 @@ points, err := client.Activity(ctx, &taskmill.ActivityParams{
 - **Debug**: routine events of single tasks, such as a retry.
 
 **Attributes** use the same keys for the same things: `task_id`, `kind`,
-`queue`, `attempt`, `worker_id` (on every line of a worker), `error`, and
-`duration`. No line shows a task's payload, its metadata, or a connection
+`queue`, `attempt`, `worker_id` (on every line about a worker's own work),
+`error`, and `duration`. No line shows a task's payload, its metadata, or a connection
 string. A handler's error is logged as the handler returned it, so keep
 secrets out of errors.
 
 **Repeated failures.** A worker repeats some operations all the time, such
 as fetching tasks. While the database is down, they fail at every try, but
-each one logs only three kinds of line: `operation failed` (Warn) when it
-starts failing, `operation still failing` (Error) at most once a minute
-while it keeps failing, and `operation recovered` (Info) when it works
-again. A failure soon after one of these lines is counted in the next one,
-so an operation that fails at every other try logs no more. The `operation`
+each one logs only three kinds of line about an incident:
+`operation failed` (Warn) when it starts, `operation still failing` (Error)
+at most once a minute while it lasts, and `operation recovered` (Info) when
+the operation works again. An incident lasts while failures come less than
+a minute apart, even with successes between them: an operation that fails
+at every other try escalates too, and logs no more. A failure soon after a
+line waits for the next one. `failures` counts the incident's failures, and
+`duration` runs from its first failure to its last. The `operation`
 attribute names it:
 
 | Operation | What it does | How often |
@@ -780,8 +783,8 @@ The last six run only on the maintainer.
 | Message | Level | What it means, and what to do |
 | --- | --- | --- |
 | `operation failed` | Warn | An operation above started failing; `error` says why. The worker tries again by itself. |
-| `operation still failing` | Error | It has failed `failures` times over `duration`. Fix what `error` names, often the database or a privilege. |
-| `operation recovered` | Info | It works again, after `failures` failures over `duration`. |
+| `operation still failing` | Error | It has failed for a minute or more. Fix what `error` names, often the database or a privilege. |
+| `operation recovered` | Info | It works again. |
 | `worker started` | Info | `Run` started, serving `queues`. |
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended; it waits up to `timeout` for `tasks`. |
 | `worker stopped` | Info | `Run` returned; `released` tasks went back to their queues. |
@@ -789,12 +792,12 @@ The last six run only on the maintainer.
 | `the worker does not serve the default queue of these registered kinds` | Warn | Tasks of `kinds` enqueued with their defaults wait for another worker. Add the queues, or run a worker that serves them. |
 | `the pool has fewer connections than the worker's concurrency plus 5; ...` | Warn | Handlers can take every connection and starve heartbeats. Raise `MaxConns`; see [Connections](#running-in-production). |
 | `elected maintainer` | Info | This worker now does the installation-wide work. |
-| `no longer maintainer` | Info | Another worker took over, or the election failed. |
+| `no longer maintainer` | Info | Another worker took over, or the election failed. The maintainer's work stops here, and so do its incidents, without `operation recovered`. |
 | `resign maintainer failed; another worker leads when the lease expires` | Warn | The next maintainer starts within 10 seconds. |
-| `rescued tasks whose workers lost their leases` | Warn | `tasks` attempts failed because their workers stopped renewing them: a worker crashed or could not reach the database. The tasks retry, or die if they used all their attempts. |
+| `rescued tasks whose workers lost their leases` | Warn | `tasks` attempts failed because their workers stopped renewing them: a worker crashed or could not reach the database. The tasks retry; those that used all their attempts die. |
 | `dropped expired history` | Info | Retention dropped the history `partition`. |
 | `attempt failed; retrying` | Debug | The handler failed; the task runs again in `retry_in`. |
-| `attempt failed; the task is dead` | Error | The task failed for good. Fix the cause, then retry or delete it. |
+| `attempt failed; the task is dead` | Error | The task failed for good, also when its last attempt was rescued. Fix the cause, then retry or delete it. |
 | `no handler for task kind; snoozing` | Warn | No handler of this worker knows `kind`. The task waits up to an hour for a worker that does; see [Deploys](#running-in-production). Later snoozes of the task log at Debug. |
 | `attempt lost its lease; canceling it` | Warn | The worker could not renew the lease in time, so the task may already run elsewhere. Check the database and the pool size. |
 | `result discarded: the attempt lost its lease` | Debug | The attempt ended after it lost its lease; its result does not count. |

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -163,6 +164,7 @@ type Task[A Args] struct {
 // attempt is one run of a task: the lease it holds and how it ended.
 type attempt struct {
 	client  *Client
+	logger  *slog.Logger // the worker's
 	id      int64
 	token   int32
 	discard bool // the kind keeps no history of completed tasks
@@ -190,7 +192,7 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 		return err
 	}
 	a := t.attempt
-	done, err := a.client.complete(ctx, q, []completion{{id: a.id, token: a.token, discard: a.discard}})
+	done, err := a.client.complete(ctx, a.logger, q, []completion{{id: a.id, token: a.token, discard: a.discard}})
 	if err != nil {
 		return err
 	}

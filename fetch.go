@@ -303,7 +303,9 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 	}
 	reg := w.handlers[info.Kind]
 	return &tracked{
-		att:      &attempt{client: w.client, id: info.ID, token: token, discard: reg != nil && reg.opts.DiscardCompleted},
+		att: &attempt{
+			client: w.client, logger: w.logger, id: info.ID, token: token, discard: reg != nil && reg.opts.DiscardCompleted,
+		},
 		info:     &info,
 		reg:      reg,
 		lastBeat: now,
