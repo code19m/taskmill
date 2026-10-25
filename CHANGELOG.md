@@ -7,6 +7,11 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The shop example, `examples/shop`: a small shop that uses most features,
+  with the dashboard. Run it with `go run ./examples/shop`.
+
 ## [0.1.0] - 2026-10-25
 
 Initial release.
