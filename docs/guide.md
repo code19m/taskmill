@@ -916,6 +916,7 @@ The last six run only on the maintainer.
 | `operation still failing` | Error | It has failed for a minute or more. Fix what `error` names, often the database or a privilege. |
 | `operation recovered` | Info | It works again. |
 | `worker started` | Info | `Run` started, serving `queues`. |
+| `worker was removed as stale; registering again` | Warn | The worker missed its heartbeats for 5 minutes, for example while its machine slept, and the maintainer removed it. It lists itself again and goes on; check what paused it. |
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended; it waits up to `timeout` for `tasks`. |
 | `worker stopped` | Info | `Run` returned; `released` tasks went back to their queues. |
 | `unregister worker failed` | Warn | The stopped worker stays listed until the maintainer deletes it, 5 minutes after its last heartbeat. |

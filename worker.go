@@ -356,6 +356,20 @@ type run struct {
 	inflight   sync.WaitGroup  // the running attempts and batches
 }
 
+// register lists the worker in the workers table, or lists it again, and
+// returns its queues' names.
+func (w *Worker) register(ctx context.Context) ([]string, error) {
+	names := make([]string, 0, len(w.queues)) // not nil: the column holds an array
+	names = slices.AppendSeq(names, maps.Keys(w.queues))
+	slices.Sort(names)
+	kinds := slices.Sorted(maps.Keys(w.handlers))
+	if kinds == nil {
+		kinds = []string{} // the column holds an array
+	}
+	_, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, names, w.host, w.version, kinds)
+	return names, err
+}
+
 // Run fetches and runs tasks until ctx is canceled. It then stops fetching,
 // waits up to DrainTimeout for running tasks, cancels and releases those
 // still running, and returns nil. It returns an error only if the worker
@@ -370,14 +384,8 @@ func (w *Worker) Run(ctx context.Context) error {
 	// values but not its cancellation.
 	base := context.WithoutCancel(ctx)
 
-	names := make([]string, 0, len(w.queues)) // not nil: the column holds an array
-	names = slices.AppendSeq(names, maps.Keys(w.queues))
-	slices.Sort(names)
-	kinds := slices.Sorted(maps.Keys(w.handlers))
-	if kinds == nil {
-		kinds = []string{} // the column holds an array
-	}
-	if _, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, names, w.host, w.version, kinds); err != nil {
+	names, err := w.register(ctx)
+	if err != nil {
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
 	w.beatFailures = newFailures(w, "record heartbeat")
