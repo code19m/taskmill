@@ -16,6 +16,7 @@ type Timing struct {
 	ShutdownGrace time.Duration
 	Reconnect     time.Duration
 	NoHandlerWait time.Duration
+	FailureReport time.Duration
 }
 
 // SetTiming applies t to w before it runs.
@@ -33,6 +34,7 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.reconnectMin, t.Reconnect)
 	set(&w.timing.reconnectMax, t.Reconnect)
 	set(&w.timing.noHandlerWait, t.NoHandlerWait)
+	set(&w.timing.failureReport, t.FailureReport)
 }
 
 // RunSchedules runs one pass over w's schedules, as its maintainer does each

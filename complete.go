@@ -92,7 +92,7 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*tracked) {
 	err := w.whileLeased(ctx, ts, func(ctx context.Context) error {
 		return w.client.inTx(ctx, func(q querier) error {
 			var err error
-			done, err = w.client.complete(ctx, q, completionsOf(ts))
+			done, err = w.client.complete(ctx, w.logger, q, completionsOf(ts))
 			return err
 		})
 	})
@@ -119,7 +119,7 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 		var done []completedTask
 		err := w.whileLeased(ctx, plain, func(ctx context.Context) error {
 			var err error
-			done, err = w.client.complete(ctx, pgxQuerier{q: w.client.pool}, completionsOf(plain))
+			done, err = w.client.complete(ctx, w.logger, pgxQuerier{q: w.client.pool}, completionsOf(plain))
 			return err
 		})
 		w.completed(ctx, plain, done, err)
@@ -201,7 +201,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 		}
 	}
 	if len(ready) > 0 {
-		if done, err = w.client.complete(ctx, q, completionsOf(ready)); err != nil {
+		if done, err = w.client.complete(ctx, w.logger, q, completionsOf(ready)); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -240,7 +240,7 @@ func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedT
 		w.countCompleted(done)
 	}
 	if err != nil {
-		w.logger.LogAttrs(ctx, slog.LevelError, "complete tasks failed; they are rescued when their leases expire",
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "complete tasks failed; they are rescued when their leases expire",
 			slog.Int(logKeyTasks, len(ts)), slog.Any(logKeyError, err))
 	}
 }
@@ -259,11 +259,10 @@ func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context
 		tryCtx, cancel := context.WithTimeout(ctx, recordTimeout)
 		err := fn(tryCtx)
 		cancel()
+		w.resultFailures.observe(ctx, err)
 		if err == nil || ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
 			return err
 		}
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "record results failed; trying again",
-			slog.Int(logKeyTasks, len(ts)), slog.Duration(logKeyRetryIn, delay), slog.Any(logKeyError, err))
 		select {
 		case <-ctx.Done():
 			return err
@@ -333,8 +332,9 @@ const historyGap = time.Minute
 // complete records successful attempts: it moves their tasks to history, or
 // deletes those whose kind keeps none, and advances their FIFO groups. It
 // returns the tasks it completed; an attempt that lost its lease is left
-// out. q must be a transaction if any task belongs to a FIFO group.
-func (c *Client) complete(ctx context.Context, q querier, cs []completion) ([]completedTask, error) {
+// out. q must be a transaction if any task belongs to a FIFO group. It logs
+// to the logger of the worker that completes.
+func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, cs []completion) ([]completedTask, error) {
 	ids := make([]int64, len(cs))
 	tokens := make([]int32, len(cs))
 	discard := make([]int64, 0) // not nil: the statement compares with every element
@@ -348,7 +348,7 @@ func (c *Client) complete(ctx context.Context, q querier, cs []completion) ([]co
 
 	done, err := c.completeTasks(ctx, q, ids, tokens, discard)
 	if err != nil {
-		c.noteMissingHistory(ctx, err)
+		c.noteMissingHistory(ctx, logger, err)
 		return nil, fmt.Errorf("taskmill: complete: %w", err)
 	}
 
@@ -388,15 +388,13 @@ func (c *Client) completeTasks(ctx context.Context, q querier, ids []int64, toke
 // history table has no CHECK constraint, so a check violation on it can only
 // mean a missing partition; the message is not read, as it may be
 // translated.
-func (c *Client) noteMissingHistory(ctx context.Context, err error) {
+func (c *Client) noteMissingHistory(ctx context.Context, logger *slog.Logger, err error) {
 	pgErr, ok := errors.AsType[*pgconn.PgError](err)
 	if !ok || pgErr.Code != "23514" || pgErr.TableName != "task_history" || pgErr.SchemaName != c.schema { // check_violation
 		return
 	}
 	c.historyGapUntil.Store(time.Now().Add(historyGap).UnixNano())
-	c.logger.LogAttrs(ctx, slog.LevelError,
-		"task history has no partition for today, so completed tasks are not kept in history; "+
-			"the role that runs workers must own the taskmill tables to create the daily partitions",
+	logger.LogAttrs(ctx, slog.LevelError, "task history has no partition for today; completed tasks skip history",
 		slog.Any(logKeyError, err))
 }
 

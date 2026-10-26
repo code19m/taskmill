@@ -26,19 +26,22 @@ make db
 make check
 ```
 
-`make check` runs everything CI runs. The first run installs the pinned
-development tools into `./bin`. `make help` lists every target:
+`make check` runs everything CI runs, in every module of the repository: the
+core, and the `otel` module in `otel/`, which has its own go.mod. The first
+run installs the pinned development tools into `./bin`. `make help` lists every target:
 
 | Target | What it does |
 |---|---|
 | `make db` | Start PostgreSQL in Docker for the tests (`make db-stop` removes it) |
-| `make check` | All CI checks: tidy, lint, test, vulnerability scan |
+| `make check` | All CI checks but `make release-check`: tidy, lint, test, vulnerability scan |
 | `make fmt` | Format the code with gofumpt and goimports |
 | `make lint` | Run golangci-lint and actionlint |
 | `make test` | Run the tests with the race detector, in random order |
 | `make cover` | Run the tests and open an HTML coverage report |
 | `make vuln` | Scan for known vulnerabilities with govulncheck |
 | `make bench` | Run the benchmarks and the chaos test, printing a Markdown report |
+| `make release-check` | Check `.goreleaser.yaml` with `goreleaser check` |
+| `make snapshot` | Build a release into `./dist` and its image into Docker, publishing nothing |
 
 ## Code standards
 
@@ -136,18 +139,76 @@ the same pull request.
 
 ## Releasing
 
-Maintainers release from a green `main`:
+Maintainers release from a green `main`. Pushing a tag publishes the release;
+the steps before and after it are manual:
 
-1. In CHANGELOG.md, move `[Unreleased]` to a section `## [X.Y.Z] - YYYY-MM-DD`.
+1. Check the pinned versions that Dependabot does not update: the tools at
+   the top of the Makefile, and the base image in `.goreleaser.yaml`, whose
+   current digest `docker buildx imagetools inspect
+   gcr.io/distroless/static-debian13:nonroot` shows. Bump the stale ones in a
+   pull request, and run `make snapshot` on it.
+2. In CHANGELOG.md, move `[Unreleased]` to a section `## [X.Y.Z] - YYYY-MM-DD`.
    Update the links at the bottom: `[Unreleased]` compares `vX.Y.Z...HEAD`,
-   and `[X.Y.Z]` points to the release.
-2. Check that `internal/migrations/released_test.go` pins the checksum of
+   and `[X.Y.Z]` points to the release. A pre-release, such as
+   `v1.0.0-rc.1`, needs a section of its own: `## [1.0.0-rc.1] - YYYY-MM-DD`.
+   `make release-notes TAG=vX.Y.Z` prints the section as the release will
+   show it, and fails if there is none.
+3. Check that `internal/migrations/released_test.go` pins the checksum of
    every migration in the release.
-3. Tag the release commit with an annotated tag, and push it:
-   `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
-4. Make the Go module proxy fetch the version, so pkg.go.dev shows it:
+4. Once that is merged, tag the release commit on `main` with an annotated
+   tag, and push it: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+   Tags are protected by a ruleset: only maintainers can create, move, or
+   delete `v*` tags.
+5. Make the Go module proxy fetch the version, so pkg.go.dev shows it:
    `GOPROXY=https://proxy.golang.org go list -m github.com/code19m/taskmill@vX.Y.Z`.
-5. Create the GitHub release from that CHANGELOG section.
+
+The tag starts the [release workflow](.github/workflows/release.yml), which
+runs [GoReleaser](https://goreleaser.com) as configured in
+[.goreleaser.yaml](.goreleaser.yaml). It refuses a tag that is not a version
+such as `v1.0.0` or `v1.0.0-rc.1`. It also refuses a tag that is not on
+`main`, a guard against mistakes rather than a security control. It
+publishes:
+
+- the GitHub release, with that CHANGELOG section as its notes. A tag with a
+  suffix, such as `v1.0.0-rc.1`, makes a pre-release.
+- `taskmill-ui` archives for Linux, macOS, and Windows, on amd64 and arm64,
+  with `checksums.txt` and an SPDX SBOM for each archive.
+- the container image `ghcr.io/code19m/taskmill-ui`, for linux/amd64 and
+  linux/arm64, tagged `X.Y.Z` and, unless it is a pre-release, `latest`. ko
+  builds it on distroless `static`, running as user 65532, and attaches its
+  SBOM in the registry.
+- a build provenance attestation for every archive, SBOM, and the image,
+  which `gh attestation verify` checks.
+
+In that order of time: GoReleaser uploads the archives to a draft release and
+pushes the image as `X.Y.Z`, which is public from then on. Then the
+attestations are made. Only after them does `latest` move to the image and the
+release get published. If the run fails, run it again: it replaces the draft,
+and pushes the same image again. The first release creates the image's
+package on GitHub; if it is private, make it public in the package's
+settings.
+
+The binaries are built with the latest Go, so they carry its security fixes,
+and they are reproducible: in a checkout of the tag, with the Go version,
+`GOOS`, and `GOARCH` that `go version -m` shows for a binary,
+`CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' ./cmd/taskmill-ui`
+builds the same bytes. `make snapshot` runs the release's build without
+publishing anything, and loads the linux/amd64 image into Docker as
+`goreleaser.ko.local`. Run it after changing `.goreleaser.yaml`.
+
+A nested module, such as `otel`, is released by a tag of its own, such as
+`otel/vX.Y.Z`, and step 5 with its module path. The workflow ignores those
+tags: such a module ships no binaries, and pkg.go.dev shows its versions. So
+it gets no GitHub release, and the releases page stays about taskmill.
+
+The `otel` module is released the same way, from
+[otel/CHANGELOG.md](otel/CHANGELOG.md), with tags named `otel/vX.Y.Z`. Its
+go.mod requires the oldest core release it works with. If it uses core changes
+that are not released yet, release the core first. Before tagging, run
+`make otel-release-check RELEASING=1`: it builds and tests the module
+against the required core version, as users build it, and fails if that
+version is not released. The `replace` line stays: users of the module
+ignore it.
 
 Never move or delete a published tag: the Go checksum database keeps every
 version forever. Fix a bad release forward with a new patch release, and

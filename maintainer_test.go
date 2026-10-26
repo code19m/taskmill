@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"testing"
 	"time"
 
@@ -15,8 +16,9 @@ import (
 func TestMaintainerRescuesExpiredLeases(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+	logs := &logRecorder{}
 	ran := make(chan int, 1)
-	runWorker(t, e, &taskmill.WorkerConfig{
+	runWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 			ran <- task.Attempt
 			return nil
@@ -42,6 +44,20 @@ func TestMaintainerRescuesExpiredLeases(t *testing.T) {
 	info := e.waitState(t, id, taskmill.StateCompleted)
 	if len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseExpired {
 		t.Fatalf("got errors %+v", info.Errors)
+	}
+
+	// A task whose crashed attempt was its last dies, and that needs a person.
+	last := e.count(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+	                                          lease_expires_at, attempted_at, attempted_by)
+	                    VALUES ('default', 'email.send', 'running', now(), '{}', 1, 1, 1,
+	                            now() - interval '1 second', now(), 'crashed')
+	                    RETURNING id`)
+	e.waitState(t, int64(last), taskmill.StateDead)
+	waitFor(t, "the dead task to be logged", func() bool { return logs.count("attempt failed; the task is dead") == 1 })
+	for _, r := range logs.all() {
+		if r.Message == "attempt failed; the task is dead" && (r.Level != slog.LevelError || attr(r, "task_id") != strconv.Itoa(last)) {
+			t.Errorf("the dead task was logged at %s with task_id %s, want an error with %d", r.Level, attr(r, "task_id"), last)
+		}
 	}
 }
 

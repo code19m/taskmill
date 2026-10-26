@@ -1,6 +1,9 @@
 # Pinned development tools, installed by the Makefile.
 /bin/
 
+# Releases that `make snapshot` builds.
+/dist/
+
 # Test binaries, coverage reports and profiles.
 *.test
 *.out
