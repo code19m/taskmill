@@ -394,7 +394,7 @@ func TestCancelWhileTheWorkerRecordsAResult(t *testing.T) {
 func TestNewClientRequiresReadCommitted(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -86,12 +86,20 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 // schemaVersion returns the schema's migration version, or 0 if it has none.
 func schemaVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int, error) {
 	var version int
-	err := pool.QueryRow(ctx, fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)).Scan(&version)
+	sql := fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)
+	err := pool.QueryRow(ctx, sql, unprepared).Scan(&version)
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42P01" { // undefined_table
 		return 0, nil
 	}
 	return version, err
 }
+
+// unprepared runs a statement without preparing it by name. Statements that
+// can fail to parse, such as reads of a table that may not exist yet, use it:
+// PgBouncer keeps the name of a statement whose parse failed, and disconnects
+// the client when it prepares that name again
+// (https://github.com/pgbouncer/pgbouncer/issues/1630).
+const unprepared = pgx.QueryExecModeSimpleProtocol
 
 // applyMigrations applies the migrations that the schema lacks, in tx. One
 // process migrates at a time; the others wait for its lock, then find nothing
@@ -99,6 +107,14 @@ func schemaVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int,
 // proxies.
 func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrations.Migration, logger *slog.Logger) error {
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "taskmill.migrate."+schema); err != nil {
+		return err
+	}
+	// Waiting for the lock does not make the connection read the catalog
+	// changes that the lock's holder committed meanwhile. Its cache can still
+	// hold that the schema does not exist, as schemaVersion found, and IF NOT
+	// EXISTS would then create the schema again and fail. Reading a catalog
+	// table makes the connection apply those changes first.
+	if _, err := tx.Exec(ctx, "SELECT FROM pg_catalog.pg_namespace LIMIT 0"); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, bootstrapSQL(schema)); err != nil {

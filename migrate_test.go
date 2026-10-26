@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
 )
@@ -61,6 +63,42 @@ func TestMigrateIsIdempotentAndConcurrencySafe(t *testing.T) {
 	partitions := e.count(t, "SELECT count(*) FROM pg_inherits WHERE inhparent = '{s}.task_history'::regclass")
 	if partitions != 7 {
 		t.Fatalf("history partitions: got %d, want 7", partitions)
+	}
+}
+
+func TestConcurrentMigratesOnWarmConnections(t *testing.T) {
+	t.Parallel()
+	const processes = 8
+	pool := testdb.PoolSize(t, processes)
+	// Open every connection first, as a running application has, so that
+	// the migrations start together rather than as each connection opens.
+	conns := make([]*pgxpool.Conn, processes)
+	for i := range conns {
+		c, err := pool.Acquire(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns[i] = c
+	}
+	for _, c := range conns {
+		c.Release()
+	}
+
+	for range 5 {
+		schema := testdb.Schema(t, pool)
+		var wg sync.WaitGroup
+		errs := make([]error, processes)
+		for i := range errs {
+			wg.Go(func() {
+				errs[i] = taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema})
+			})
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("concurrent Migrate %d: %v", i, err)
+			}
+		}
 	}
 }
 
