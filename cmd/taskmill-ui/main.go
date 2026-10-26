@@ -4,6 +4,9 @@
 //	go install github.com/code19m/taskmill/cmd/taskmill-ui@latest
 //	TASKMILL_DATABASE_URL=postgres://... TASKMILL_UI_PASSWORD=... taskmill-ui
 //
+// Each release also publishes it as binaries and as the container image
+// ghcr.io/code19m/taskmill-ui.
+//
 // It reads its settings from the environment:
 //
 //	TASKMILL_DATABASE_URL        the PostgreSQL connection string (required)
@@ -34,6 +37,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -52,6 +56,7 @@ const (
 	logKeyError    = "error"
 	logKeyPrefix   = "prefix"
 	logKeyReadOnly = "read_only"
+	logKeyVersion  = "version"
 )
 
 func main() {
@@ -139,7 +144,7 @@ func run(getenv func(string) string, logger *slog.Logger) error {
 		logger.LogAttrs(ctx, slog.LevelWarn,
 			"the dashboard has no password: set TASKMILL_UI_PASSWORD, unless something in front of it authenticates")
 	}
-	logger.LogAttrs(ctx, slog.LevelInfo, "taskmill-ui listening",
+	logger.LogAttrs(ctx, slog.LevelInfo, "taskmill-ui listening", slog.String(logKeyVersion, version()),
 		slog.String(logKeyAddr, cfg.addr), slog.String(logKeyPrefix, cfg.prefix), slog.Bool(logKeyReadOnly, cfg.readOnly))
 
 	errs := make(chan error, 1)
@@ -152,6 +157,20 @@ func run(getenv func(string) string, logger *slog.Logger) error {
 	shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdown)
+}
+
+// version returns taskmill's version as built into the binary, such as v1.0.0.
+func version() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+	for _, m := range append([]*debug.Module{&info.Main}, info.Deps...) {
+		if m.Path == "github.com/code19m/taskmill" {
+			return m.Version
+		}
+	}
+	return "unknown"
 }
 
 // handler returns the dashboard for client, set up as cfg says.

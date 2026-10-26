@@ -21,6 +21,10 @@ All notable changes to taskmill are recorded here. The format follows
   `timeout`, which OpenTelemetry reports as `error.type`.
 - The `github.com/code19m/taskmill/otel` module, released on its own: traces
   and metrics through OpenTelemetry. See its [changelog](otel/CHANGELOG.md).
+- Releases publish `taskmill-ui` binaries for Linux, macOS, and Windows, and
+  a container image, `ghcr.io/code19m/taskmill-ui`, for amd64 and arm64, with
+  checksums, SBOMs, and build provenance attestations.
+- `taskmill-ui` logs its version when it starts.
 
 ### Changed
 
