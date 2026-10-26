@@ -26,8 +26,9 @@ make db
 make check
 ```
 
-`make check` runs everything CI runs. The first run installs the pinned
-development tools into `./bin`. `make help` lists every target:
+`make check` runs everything CI runs, in every module of the repository: the
+core, and the `otel` module in `otel/`, which has its own go.mod. The first
+run installs the pinned development tools into `./bin`. `make help` lists every target:
 
 | Target | What it does |
 |---|---|
@@ -199,6 +200,15 @@ A nested module, such as `otel`, is released by a tag of its own, such as
 `otel/vX.Y.Z`, and step 5 with its module path. The workflow ignores those
 tags: such a module ships no binaries, and pkg.go.dev shows its versions. So
 it gets no GitHub release, and the releases page stays about taskmill.
+
+The `otel` module is released the same way, from
+[otel/CHANGELOG.md](otel/CHANGELOG.md), with tags named `otel/vX.Y.Z`. Its
+go.mod requires the oldest core release it works with. If it uses core changes
+that are not released yet, release the core first. Before tagging, run
+`make otel-release-check RELEASING=1`: it builds and tests the module
+against the required core version, as users build it, and fails if that
+version is not released. The `replace` line stays: users of the module
+ignore it.
 
 Never move or delete a published tag: the Go checksum database keeps every
 version forever. Fix a bad release forward with a new patch release, and

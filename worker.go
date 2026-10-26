@@ -78,9 +78,9 @@ var defaultTiming = timing{
 // Causes of a canceled attempt context, which decide how its result is
 // recorded.
 var (
-	errShutdown        = errors.New("taskmill: worker shutting down")
-	errCancelRequested = errors.New("taskmill: task canceled")
-	errAttemptTimeout  = errors.New("taskmill: attempt timed out")
+	errShutdown        = classError("taskmill: worker shutting down", "shutdown")
+	errCancelRequested = classError("taskmill: task canceled", "canceled")
+	errAttemptTimeout  = classError("taskmill: attempt timed out", "timeout")
 )
 
 // errListenConfig reports a ListenConfig that pgx cannot connect with.

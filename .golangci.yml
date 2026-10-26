@@ -74,14 +74,27 @@ linters:
     depguard:
       # Only the standard library and this module may be imported. Adding a
       # dependency means editing this list and recording why in an ADR; see
-      # docs/adr/0001-dependency-policy.md.
+      # docs/adr/0001-dependency-policy.md. The otel module, linted with this
+      # file too, has its own list.
       rules:
         main:
           list-mode: strict
+          files:
+            - $all
+            - "!**/otel/*.go"
           allow:
             - $gostd
             - github.com/code19m/taskmill
             - github.com/jackc/pgx/v5 # ADR 0004
+        otel:
+          list-mode: strict
+          files:
+            - "**/otel/*.go"
+          allow:
+            - $gostd
+            - github.com/code19m/taskmill
+            - github.com/jackc/pgx/v5 # the tests connect to PostgreSQL
+            - go.opentelemetry.io/otel # ADR 0005
 
     errcheck:
       check-type-assertions: true
@@ -93,6 +106,9 @@ linters:
       forbid:
         - pattern: ^(fmt\.Print(|f|ln)|print|println)$
           msg: a library must not write to stdout; use an injected *slog.Logger
+
+    gomoddirectives:
+      replace-local: true # otel/go.mod builds against the core next to it
 
     gocognit:
       min-complexity: 20
@@ -122,6 +138,7 @@ linters:
         - generic
         - stdlib
         - taskmill\.(Executor|querier|rows)$ # the sealed Executor, and unexported adapters over pgx and database/sql
+        - go\.opentelemetry\.io/otel/ # OpenTelemetry's API is made of interfaces
 
     misspell:
       locale: US

@@ -7,6 +7,16 @@ ACTIONLINT_VERSION    := v1.7.12
 GORELEASER_VERSION    := v2.19.0
 SYFT_VERSION          := v1.55.0
 
+# The repository's modules: the core, and the integrations that need modules
+# of their own (docs/adr/0005-opentelemetry-in-a-module-of-its-own.md).
+# Targets that check code run in each.
+MODULES := . otel
+
+# The core version that otel/go.mod requires. Its replace line builds the
+# module against the core next to it; `make otel-release-check` builds it
+# against this version instead, as its users do.
+OTEL_CORE := $(shell awk '$$1 == "github.com/code19m/taskmill" && $$2 ~ /^v/ { print $$2; exit }' otel/go.mod)
+
 # The database that `make db` starts and `make test` uses.
 TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:54329/taskmill?sslmode=disable
 TEST_POSTGRES     ?= postgres:18-alpine
@@ -23,23 +33,25 @@ SYFT          := $(BIN)/syft-$(SYFT_VERSION)/syft
 
 .PHONY: help
 help: ## Show this help.
-	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: check
-check: tidy-check lint test vuln ## Run every check that CI runs, except `make release-check`.
+check: tidy-check lint test vuln otel-release-check ## Run every check that CI runs, except `make release-check`.
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format all Go files.
-	$(GOLANGCI_LINT) fmt
+	@for m in $(MODULES); do (cd $$m && $(GOLANGCI_LINT) fmt --config $(CURDIR)/.golangci.yml) || exit 1; done
 
 .PHONY: lint
 lint: $(GOLANGCI_LINT) $(ACTIONLINT) ## Run the Go and GitHub Actions linters.
-	$(GOLANGCI_LINT) run
+	@for m in $(MODULES); do (cd $$m && $(GOLANGCI_LINT) run --config $(CURDIR)/.golangci.yml) || exit 1; done
 	$(ACTIONLINT)
 
 .PHONY: test
 test: ## Run all tests with the race detector, in random order (needs `make db`).
-	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -shuffle=on -count=1 ./...
+	@for m in $(MODULES); do \
+		(cd $$m && TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -shuffle=on -count=1 ./...) || exit 1; \
+	done
 
 .PHONY: cover
 cover: ## Run all tests and open the coverage report in a browser (needs `make db`).
@@ -50,17 +62,35 @@ cover: ## Run all tests and open the coverage report in a browser (needs `make d
 bench: ## Run the benchmarks and the chaos test against the test database (needs `make db`).
 	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go run ./internal/cmd/bench
 
+# The check works on a copy of the module without its replace line. Until the
+# required core version is released, it only says so, unless RELEASING is set:
+# then, as before tagging the module, an unreleased core fails it.
+.PHONY: otel-release-check
+otel-release-check: ## Build and test otel against the core version it requires (needs `make db`).
+	@tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
+	if ! go mod download -json github.com/code19m/taskmill@$(OTEL_CORE) > "$$tmp/core.json"; then \
+		if [ -z "$(RELEASING)" ] && grep -q 'unknown revision' "$$tmp/core.json"; then \
+			echo "taskmill $(OTEL_CORE) is not released yet: release it before the otel module."; exit 0; \
+		fi; \
+		cat "$$tmp/core.json"; exit 1; \
+	fi && \
+	cp -R otel "$$tmp/otel" && cd "$$tmp/otel" && \
+	go mod edit -dropreplace=github.com/code19m/taskmill && \
+	export GOWORK=off GOFLAGS=-mod=mod && go vet ./... && \
+	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -count=1 ./... && \
+	echo "otel builds and passes its tests with taskmill $(OTEL_CORE)."
+
 .PHONY: vuln
 vuln: $(GOVULNCHECK) ## Scan for known vulnerabilities.
-	$(GOVULNCHECK) ./...
+	@for m in $(MODULES); do (cd $$m && $(GOVULNCHECK) ./...) || exit 1; done
 
 .PHONY: tidy
 tidy: ## Tidy go.mod and go.sum.
-	go mod tidy
+	@for m in $(MODULES); do (cd $$m && go mod tidy) || exit 1; done
 
 .PHONY: tidy-check
 tidy-check: ## Fail if go.mod or go.sum is not tidy.
-	go mod tidy -diff
+	@for m in $(MODULES); do (cd $$m && go mod tidy -diff) || exit 1; done
 
 # The test database is thrown away, so a commit does not wait for the disk:
 # a slow disk on a CI machine would stall heartbeats past the tests' short

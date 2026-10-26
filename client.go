@@ -21,12 +21,12 @@ const defaultSchema = "taskmill"
 // Client enqueues and manages tasks. It is safe for concurrent use, and an
 // application typically creates one per installation and shares it.
 type Client struct {
-	pool            *pgxpool.Pool
-	schema          string
-	sql             *statements
-	logger          *slog.Logger
-	notifier        *notifier
-	contextMetadata func(context.Context) map[string]string
+	pool              *pgxpool.Pool
+	schema            string
+	sql               *statements
+	logger            *slog.Logger
+	notifier          *notifier
+	enqueueMiddleware []EnqueueMiddleware
 
 	// historyGapUntil is when completions keep history again, in Unix
 	// nanoseconds, after one found no history partition.
@@ -43,9 +43,17 @@ type ClientConfig struct {
 	// Default: logs are discarded.
 	Logger *slog.Logger
 
+	// EnqueueMiddleware wraps every enqueue, in order: the first is the
+	// outermost. It can add metadata to tasks, for example to carry a trace
+	// context from the producer to the handler.
+	EnqueueMiddleware []EnqueueMiddleware
+
 	// ContextMetadata, if set, is called on every enqueue and its result is
-	// added to the task's metadata, for example to carry a trace context from
-	// the producer to the handler. Metadata set in [EnqueueOptions] wins.
+	// added to the tasks' metadata. Metadata set in [EnqueueOptions] wins. It
+	// runs as the outermost enqueue middleware.
+	//
+	// Deprecated: use EnqueueMiddleware, which can do the same. ContextMetadata
+	// will be removed in v0.3.0.
 	ContextMetadata func(ctx context.Context) map[string]string
 }
 
@@ -73,12 +81,15 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 	}
 
 	c := &Client{
-		pool:            pool,
-		schema:          schema,
-		sql:             newStatements(schema),
-		logger:          logger,
-		notifier:        newNotifier(pool, schema, logger),
-		contextMetadata: cfg.ContextMetadata,
+		pool:              pool,
+		schema:            schema,
+		sql:               newStatements(schema),
+		logger:            logger,
+		notifier:          newNotifier(pool, schema, logger),
+		enqueueMiddleware: slices.Clone(cfg.EnqueueMiddleware),
+	}
+	if cfg.ContextMetadata != nil {
+		c.enqueueMiddleware = slices.Insert(c.enqueueMiddleware, 0, contextMetadata(cfg.ContextMetadata))
 	}
 	if err := c.checkSchema(ctx); err != nil {
 		return nil, err

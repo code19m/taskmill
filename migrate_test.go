@@ -48,8 +48,12 @@ func TestMigrateIsIdempotentAndConcurrencySafe(t *testing.T) {
 	}
 
 	e := &env{pool: pool, schema: schema}
-	if n := e.count(t, "SELECT count(*) FROM {s}.migrations"); n != 1 {
-		t.Fatalf("migrations recorded: got %d, want 1", n)
+	all, err := taskmill.Migrations(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, want := e.count(t, "SELECT count(*) FROM {s}.migrations"), len(all)-1; n != want { // all but the bootstrap
+		t.Fatalf("migrations recorded: got %d, want %d", n, want)
 	}
 	if n := e.count(t, "SELECT count(*) FROM {s}.settings"); n != 1 {
 		t.Fatalf("settings rows: got %d, want 1", n)

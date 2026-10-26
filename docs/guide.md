@@ -686,10 +686,88 @@ too, and the web interface's to `ui.Config.Logger`. By default they are
 discarded. The [log catalog](#log-catalog) lists every message, its level,
 and what to do.
 
-**Middleware** wraps every attempt and sees its kind, queue, attempt,
-metadata, and timestamps. It is the place for metrics and tracing:
+**Traces and metrics** come from the `otel` module, which instruments
+taskmill with OpenTelemetry's conventions for messaging. It is a Go module
+of its own, so applications without OpenTelemetry download none of it:
+
+```sh
+go get github.com/code19m/taskmill/otel
+```
 
 ```go
+import tmotel "github.com/code19m/taskmill/otel"
+
+tel := tmotel.New(nil) // OpenTelemetry's global providers and propagator
+client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{
+    EnqueueMiddleware: []taskmill.EnqueueMiddleware{tel.EnqueueMiddleware},
+})
+// ...
+worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
+    Handlers:   &handlers,
+    Middleware: []taskmill.Middleware{tel.Middleware}, // first, to measure the rest too
+})
+// ...
+_, err = tel.ObserveQueues(client) // the queue gauges
+```
+
+Set a propagator, such as `otel.SetTextMapPropagator(propagation.TraceContext{})`:
+without one, no trace context reaches the tasks. `tmotel.New` also takes a
+`Config` with other providers.
+
+| Signal | Name | What it measures |
+|---|---|---|
+| Span | `send {queue}` | Each enqueue call, one span per batch. Its context is stored in the tasks' metadata. |
+| Span | `process {queue}` | Each attempt, as a child of the `send` span. The handler's context carries it. |
+| Span | `send {topic}` | Each outbox delivery to the broker. |
+| Counter | `messaging.client.sent.messages` | Tasks enqueued, and outbox messages published. |
+| Histogram | `messaging.client.operation.duration` | How long enqueue calls take. |
+| Histogram | `messaging.process.duration` | How long attempts take. |
+| Gauge | `taskmill.queue.tasks` | Tasks per queue and state, up to the caps below. |
+| Gauge | `taskmill.queue.capped` | 1 when a count of the queue stopped at its cap. |
+| Gauge | `taskmill.queue.lag` | How long each queue's oldest due task has waited. Alert on it for backlogs. |
+| Gauge | `taskmill.stats.age` | How long ago the maintainer last counted. Alert when it passes a minute: no maintainer runs. |
+
+- Metrics carry the queue as `messaging.destination.name`, the kind as
+  `taskmill.task.kind`, and on failure `error.type`, such as `panic`,
+  `timeout`, or `invalid_argument`. They never carry task IDs, so their
+  cardinality stays bounded.
+- A task's attempts show in the trace of the request that enqueued it, even
+  a retry hours later.
+- Inside your transaction, the `send` span ends before the commit: a
+  rollback leaves a span for a task that never existed.
+- The queue gauges describe the whole installation, as the maintainer last
+  counted it, every 10 seconds. Every process that reports them reads the
+  same stored values: aggregate them with max, not sum. Lag keeps growing
+  when no maintainer runs, but a queue that was empty at the last count
+  shows none: `taskmill.stats.age` catches that.
+- For the outbox, wrap the publisher. Each delivery's span is a child of the
+  span that stored the message, and goes to the broker in the message's
+  headers, so consumers continue the trace:
+
+  ```go
+  outbox.New(client).AddRelay(&handlers, tel.Publisher("kafka", publisher))
+  ```
+
+**By hand**, the same extension points serve other tools. Worker
+`Middleware` wraps every attempt and sees its kind, queue, attempt, metadata,
+and timestamps; `ClientConfig.EnqueueMiddleware` wraps every enqueue, and may
+add metadata, such as a trace context, to the tasks it enqueues. This one
+copies values from the context into the metadata, keeping what the enqueue
+set, as the deprecated `ClientConfig.ContextMetadata` does until v0.3.0
+removes it:
+
+```go
+func FromContext(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+    for _, task := range tasks {
+        for k, v := range valuesOf(ctx) {
+            if _, set := task.Metadata[k]; !set {
+                task.Metadata[k] = v
+            }
+        }
+    }
+    return next(ctx)
+}
+
 func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
     start := time.Now()
     err := next(ctx)
@@ -699,41 +777,24 @@ func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Con
 }
 ```
 
-Middleware must call `next` at most once. A handler's panic reaches it as an
-error. For a batch handler, middleware runs once per task, but the context it
-passes to `next` does not reach the handler.
-
-**Tracing across the queue.** `ClientConfig.ContextMetadata` turns the
-producer's context into task metadata on every enqueue, and middleware turns
-it back into a context. With OpenTelemetry:
-
-```go
-client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{
-    ContextMetadata: func(ctx context.Context) map[string]string {
-        carrier := propagation.MapCarrier{}
-        otel.GetTextMapPropagator().Inject(ctx, carrier)
-        return carrier
-    },
-})
-
-tracing := func(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
-    ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(task.Metadata))
-    ctx, span := tracer.Start(ctx, "taskmill "+task.Kind, trace.WithSpanKind(trace.SpanKindConsumer))
-    defer span.End()
-    err := next(ctx)
-    if err != nil {
-        span.RecordError(err)
-        span.SetStatus(codes.Error, err.Error())
-    }
-    return err
-}
-```
+Middleware must call `next` at most once. A handler's panic reaches attempt
+middleware as an error. For a batch handler, middleware runs once per task,
+but the context it passes to `next` does not reach the handler. Enqueue
+middleware that fails after `next` stored the tasks fails an enqueue in your
+transaction, so that you can roll back; any other enqueue has committed, so
+it succeeds, and the error is logged.
 
 **Queue depth** comes from `Client.Queues`, whose counts the maintainer
 refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
 backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
 and retryable tasks across all queues. `QueueInfo.Capped` means a count hit
-its cap and is a lower bound.
+its cap and is a lower bound. `QueueInfo.Lag` is how long the queue's oldest
+due task has waited since its run time: an available task, or a scheduled or
+retryable one whose time has come. The maintainer finds that task when it
+counts, and `Client.Queues` measures its age by the database's clock, so lag
+has no cap, suits backlog alerts, and keeps growing when no maintainer runs.
+It may read high for up to one refresh, about 10 seconds. FIFO tasks waiting
+behind their group do not count.
 
 **History** comes from `Client.Activity`: for each minute of the last 24
 hours, the most tasks counted in each state, and the attempts that completed
@@ -830,6 +891,7 @@ The last six run only on the maintainer.
 | `task history has no partition for today; completed tasks skip history` | Error | The role that runs workers must own the taskmill tables; see [Database privileges](#running-in-production). |
 | `notifications disabled; polling only` | Error | `ListenConfig` was not created with `pgx.ParseConfig`. Fix it; until then the worker polls. |
 | `notification failed` | Warn | A wake-up for `queue` was not sent; its workers find the tasks at their next poll. |
+| `enqueue middleware failed after the tasks were enqueued` | Warn | An enqueue middleware returned `error` after the `tasks` committed, so the enqueue succeeded, and the middleware's work, such as a span, may be missing. Fix the middleware. |
 | `fifo group missing` | Error | A task's FIFO group has no row, which should not happen. Please report it. |
 | `applied migration` | Info | `Migrate` applied migration `version` (`name`) in `duration`. |
 | `prepare history partitions failed` | Warn | `Migrate` could not create history partitions; the maintainer tries again. |

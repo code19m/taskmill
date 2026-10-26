@@ -419,8 +419,9 @@ func (m *maintainer) untilNextDue(ctx context.Context) time.Duration {
 	return min(max(d, minMaintainerSleep), m.w.timing.maintainer)
 }
 
-// refreshStats counts each queue's tasks per state, up to the caps, and
-// stores the counts for [Client.Queues] and the current minute's activity.
+// refreshStats counts each queue's tasks per state, up to the caps, finds
+// each count's oldest due task, and stores both for [Client.Queues] and the
+// counts for the current minute's activity.
 func (m *maintainer) refreshStats(ctx context.Context) {
 	m.stats.observe(ctx, m.countStats(ctx))
 }
@@ -430,7 +431,8 @@ func (m *maintainer) countStats(ctx context.Context) error {
 	var queues, states []string
 	var counts []int64
 	var capped []bool
-	var dueTotal int64 // scheduled and retryable tasks counted, in all queues
+	var oldest []*time.Time // the run time of the oldest due task of each count
+	var dueTotal int64      // scheduled and retryable tasks counted, in all queues
 	r, err := m.c.pool.Query(ctx, m.c.sql.countStats, statsQueueCap, statsDueCap)
 	if err != nil {
 		return fmt.Errorf("count tasks: %w", err)
@@ -438,7 +440,8 @@ func (m *maintainer) countStats(ctx context.Context) error {
 	for r.Next() {
 		var state, queue string
 		var n int64
-		if err := r.Scan(&state, &queue, &n); err != nil {
+		var due *time.Time
+		if err := r.Scan(&state, &queue, &n, &due); err != nil {
 			r.Close()
 			return fmt.Errorf("count tasks: %w", err)
 		}
@@ -446,7 +449,7 @@ func (m *maintainer) countStats(ctx context.Context) error {
 			dueTotal += n
 		}
 		queues, states, counts = append(queues, queue), append(states, state), append(counts, n)
-		capped = append(capped, n >= statsQueueCap)
+		capped, oldest = append(capped, n >= statsQueueCap), append(oldest, due)
 	}
 	r.Close()
 	if err := r.Err(); err != nil {
@@ -454,7 +457,8 @@ func (m *maintainer) countStats(ctx context.Context) error {
 	}
 	// The scheduled and retryable counts share one cap: once it is hit,
 	// any queue may have more of them than counted, even none counted.
-	if dueTotal >= statsDueCap {
+	dueCapped := dueTotal >= statsDueCap
+	if dueCapped {
 		for i := range capped {
 			capped[i] = true
 		}
@@ -464,7 +468,7 @@ func (m *maintainer) countStats(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, m.c.sql.clearStats); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped); err != nil {
+		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped, oldest, dueCapped); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, m.c.sql.storeActivity)
