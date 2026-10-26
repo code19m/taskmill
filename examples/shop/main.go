@@ -254,6 +254,7 @@ type shop struct {
 	pool   *pgxpool.Pool
 	client *taskmill.Client
 	outbox *outbox.Outbox
+	schema string // taskmill's installation, which numbers its tasks
 	orders string // the quoted names of the shop's tables
 	ledger string
 	logger *slog.Logger
@@ -269,6 +270,7 @@ func openShop(ctx context.Context, pool *pgxpool.Pool, schema string, logger *sl
 	}
 	s := &shop{
 		pool:   pool,
+		schema: schema,
 		orders: pgx.Identifier{schema, "orders"}.Sanitize(),
 		ledger: pgx.Identifier{schema, "ledger_entries"}.Sanitize(),
 		logger: logger,
@@ -382,7 +384,7 @@ func (s *shop) handlers() *taskmill.Handlers {
 	var hs taskmill.Handlers
 	addReceiptsAndImages(&hs)
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[PostLedgerEntry](s.postLedgerEntry), nil)
-	taskmill.AddHandler(&hs, taskmill.HandlerFunc[SyncWithPartner](syncWithPartner), &taskmill.HandlerOptions{Timeout: 10 * time.Second})
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[SyncWithPartner](s.syncWithPartner), &taskmill.HandlerOptions{Timeout: 10 * time.Second})
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[BuildReport](
 		func(ctx context.Context, t *taskmill.Task[BuildReport]) error {
 			s.logger.LogAttrs(ctx, slog.LevelInfo, "the sales report is built", slog.Time(logKeyScheduledFor, t.RunAt))
@@ -439,15 +441,18 @@ func (s *shop) postLedgerEntry(ctx context.Context, t *taskmill.Task[PostLedgerE
 	})
 }
 
-func syncWithPartner(ctx context.Context, t *taskmill.Task[SyncWithPartner]) error {
+func (s *shop) syncWithPartner(ctx context.Context, t *taskmill.Task[SyncWithPartner]) error {
 	if oneIn(8) {
 		// The partner said "slow down": run again later, without using an
 		// attempt.
 		return taskmill.Snooze(5 * time.Second)
 	}
-	// The task's ID stays the same on every attempt. Sent as the partner's
-	// idempotency key, it makes the partner apply a repeated call once.
-	return partnerRequest{IdempotencyKey: "taskmill-" + strconv.FormatInt(t.ID, 10), OrderID: t.Args.OrderID}.send(ctx)
+	// The task's ID stays the same on every attempt, so as the partner's
+	// idempotency key it makes the partner apply a repeated call once. It is
+	// unique only within taskmill's schema, and the partner has other
+	// clients, so the key also names the service and the schema.
+	key := "shop/" + s.schema + "/" + strconv.FormatInt(t.ID, 10)
+	return partnerRequest{IdempotencyKey: key, OrderID: t.Args.OrderID}.send(ctx)
 }
 
 // partnerRequest is a call to the partner's API.

@@ -36,7 +36,7 @@ behind its own authentication: `requireAdmin` in main.go marks the place.
 | Enqueue in your own transaction | An order, its tasks, and its outbox messages commit together (`placeOrder`) |
 | Queues and defaults per kind | `EnqueueDefaults` puts each kind in its own queue |
 | Retries with backoff | One receipt in five fails at first, and is retried |
-| Idempotent handlers | A ledger entry is booked in the transaction that completes its task (`CompleteTx`); a partner call sends the task ID as its idempotency key |
+| Idempotent handlers | A ledger entry is booked in the transaction that completes its task (`CompleteTx`); a partner call's idempotency key is the task ID, with the service and schema |
 | Dead tasks | A receipt without an email address fails with `taskmill.Permanent` |
 | FIFO groups | Ledger entries post one at a time per account |
 | Deduplication | A receipt's `DedupeKey` admits one receipt per order, even if enqueued twice |
