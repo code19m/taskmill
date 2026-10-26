@@ -359,9 +359,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 
 // taskFilter reads the task list's filters from a query.
 func taskFilter(q url.Values) taskmill.TaskFilter {
-	f := taskmill.TaskFilter{
-		Queues: selected(q["queue"]), Kinds: selected(q["kind"]), GroupKeys: selected(q["group"]), AfterID: queryNumber(q, "after"),
-	}
+	f := taskmill.TaskFilter{Queues: selected(q["queue"]), Kinds: selected(q["kind"]), GroupKeys: selected(q["group"])}
 	for _, st := range selected(q["state"]) {
 		f.States = append(f.States, taskmill.State(st))
 	}
@@ -374,14 +372,10 @@ func filterQuery(f taskmill.TaskFilter) url.Values {
 	for _, st := range f.States {
 		v.Add("state", string(st))
 	}
-	if f.AfterID > 0 {
-		v.Set("after", strconv.FormatInt(f.AfterID, 10))
-	}
 	return v
 }
 
-// queryNumber reads a number of the query, such as a task ID; 0 if it is
-// not one.
+// queryNumber reads a count of tasks from the query; 0 if it is not one.
 func queryNumber(q url.Values, key string) int64 {
 	n, err := strconv.ParseInt(q.Get(key), 10, 64)
 	if err != nil || n < 0 {
@@ -434,7 +428,7 @@ type bulkAction struct {
 	Explain string // what it does
 	None    string // why it may find no task
 	path    string
-	do      func(*taskmill.Client, context.Context, *taskmill.TaskFilter) (taskmill.BulkResult, error)
+	do      func(*taskmill.Client, context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error)
 	count   func(*taskmill.TaskCounts) taskmill.TaskCount
 }
 
@@ -513,16 +507,12 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, row)
 		}
 	}
-	if f.AfterID > 0 {
-		rows = append(rows, filterRow{"After task", []string{strconv.FormatInt(f.AfterID, 10)}, true})
-	}
 	n := a.count(counts)
-	// The form carries how many tasks the run left so far, if it goes on.
+	// The form carries where a run that stopped early goes on.
 	action := filterQuery(f)
-	if left := queryNumber(r.URL.Query(), "left"); left > 0 {
-		action.Set("left", strconv.FormatInt(left, 10))
+	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+		action.Set("cursor", cursor)
 	}
-	f.AfterID = 0
 	s.render(w, r, http.StatusOK, "bulk.html", page{Title: a.Verb + " tasks", Nav: "tasks", Static: true, Dead: s.deadCount(r), Data: struct {
 		bulkAction
 		Filters    []filterRow
@@ -921,9 +911,11 @@ func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error,
 // bulkAction retries, cancels, or deletes every task that the filters in
 // the query select. It works for half the time left before the request's
 // deadline, so that it answers in time. If more tasks remain, it leads back
-// to its page, which goes on after the last task it went through. If it left
-// tasks that other work held, it leads back to its page from the start, which
-// offers to try those again.
+// to its page, whose form goes on where it stopped. If it left tasks that
+// other work held, it leads back to its page, which offers to try those
+// again. Otherwise it leads to the task list. Only its page carries where a
+// run goes on: the task list always shows every task that the filters
+// select.
 func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
 		return
@@ -938,7 +930,7 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	deadline, _ := r.Context().Deadline() // the deadline handler sets one
 	ctx, cancel := context.WithDeadlineCause(r.Context(), time.Now().Add(time.Until(deadline)/2), errBudget)
 	defer cancel()
-	res, err := a.do(s.client, ctx, &f)
+	res, err := a.do(s.client, ctx, &taskmill.BulkParams{Filter: f, Cursor: r.URL.Query().Get("cursor")})
 	more := err != nil && errors.Is(context.Cause(ctx), errBudget)
 	if err == nil || more || res.Changed > 0 {
 		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "web interface action",
@@ -949,28 +941,21 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		s.actionFailed(w, r, err, "/tasks?"+filterQuery(f).Encode())
 		return
 	}
-	// "left" carries the tasks that the run left so far from one request of
-	// it to the next; "skipped" tells them once the run ends.
-	left := queryNumber(r.URL.Query(), "left") + res.Skipped
-	query := url.Values{"count": {strconv.FormatInt(res.Changed, 10)}}
+	query := filterQuery(f)
+	query.Set("count", strconv.FormatInt(res.Changed, 10))
 	target := "/tasks?"
 	switch {
 	case more:
-		f.AfterID = res.LastID
 		target = a.path + "?"
 		query.Set("done", name+"-more")
-		if left > 0 {
-			query.Set("left", strconv.FormatInt(left, 10))
-		}
-	case left > 0:
-		f.AfterID = 0
+		query.Set("cursor", res.Next)
+	case res.Skipped > 0:
 		target = a.path + "?"
 		query.Set("done", name+"-skipped")
-		query.Set("skipped", strconv.FormatInt(left, 10))
+		query.Set("skipped", strconv.FormatInt(res.Skipped, 10))
 	default:
 		query.Set("done", name+"-all")
 	}
-	maps.Copy(query, filterQuery(f))
 	http.Redirect(w, r, s.path(target+query.Encode()), http.StatusSeeOther)
 }
 

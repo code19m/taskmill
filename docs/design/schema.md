@@ -360,9 +360,14 @@ statement timeout.
     fail with a deadlock. A transaction per new group would avoid the wait
     too, but cost a transaction per group when every group is new, as after
     canceling a whole queue.
-  - **Exact counts.** A batch whose statements ran commits even if the
-    caller's context ends meanwhile, so the number of changed tasks is
-    exact, and `BulkResult.LastID` is where a later call goes on.
+  - **Exact counts, and going on.** A batch whose statements ran commits
+    even if the caller's context ends meanwhile, so the number of changed
+    tasks is exact. An action that stops early returns a cursor to go on: at
+    the first task it skipped, if any, or else after the last task it went
+    through. Going on at the first skipped task keeps no state between
+    calls, and still brings a group that the action left back in order: the
+    tasks that the action changed since no longer match, so reading past
+    them again is cheap.
   - **Delete goes through two tables.** It reads the next batch of both
     tasks and history, and goes up to the end of the shorter one, so that
     one position covers both.

@@ -42,11 +42,6 @@ type TaskFilter struct {
 	// GroupKeys limits the tasks to those of these FIFO groups. Empty means
 	// all tasks.
 	GroupKeys []string
-
-	// AfterID limits the tasks to those with greater IDs: enqueued later. A
-	// bulk action that stopped early goes on from its [BulkResult.LastID].
-	// Zero means all tasks.
-	AfterID int64
 }
 
 // empty reports whether f sets none of the filters that select tasks by
@@ -75,6 +70,17 @@ type TaskCounts struct {
 	Retry, Cancel, Delete TaskCount
 }
 
+// BulkParams selects the tasks of a bulk action, such as
+// [Client.RetryMatching].
+type BulkParams struct {
+	// Filter selects the tasks. It must not be empty.
+	Filter TaskFilter
+
+	// Cursor goes on with an action that stopped early, from its
+	// [BulkResult.Next].
+	Cursor string
+}
+
 // BulkResult reports what a bulk action did.
 type BulkResult struct {
 	// Changed is how many tasks it changed.
@@ -86,9 +92,11 @@ type BulkResult struct {
 	// tasks of a group it left. Run the action again to act on them.
 	Skipped int64
 
-	// LastID is the ID of the last task that it went through. If it stopped
-	// early, set [TaskFilter.AfterID] to it to go on from there.
-	LastID int64
+	// Next goes on with the action, as [BulkParams.Cursor], if it stopped
+	// before it went through every task: at the first task it skipped, if it
+	// skipped any, so that a group it left comes back in order. Empty if it
+	// went through every task.
+	Next string
 }
 
 // The states, and those that each bulk action applies to.
@@ -118,7 +126,7 @@ func match(filter *TaskFilter, states []State) (*matching, error) {
 	if filter == nil {
 		filter = &TaskFilter{}
 	}
-	m := matching{after: filter.AfterID, left: groupSet{queues: []string{}, groups: []string{}}}
+	m := matching{left: groupSet{queues: []string{}, groups: []string{}}}
 	var err error
 	if m.queues, err = checkFilter("queue name", filter.Queues, maxNameLength); err != nil {
 		return nil, err
@@ -128,9 +136,6 @@ func match(filter *TaskFilter, states []State) (*matching, error) {
 	}
 	if m.groups, err = checkFilter("group key", filter.GroupKeys, maxGroupKeyLength); err != nil {
 		return nil, err
-	}
-	if m.after < 0 {
-		return nil, invalidArgument("AfterID must not be negative")
 	}
 	for _, s := range filter.States {
 		if !s.valid() {
@@ -171,7 +176,7 @@ func (c *Client) Count(ctx context.Context, filter *TaskFilter) (*TaskCounts, er
 		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
 			return err
 		}
-		r, err := tx.Query(ctx, c.sql.countTasks, m.queues, m.kinds, m.groups, states, m.after)
+		r, err := tx.Query(ctx, c.sql.countTasks, m.queues, m.kinds, m.groups, states)
 		if err != nil {
 			return err
 		}
@@ -214,9 +219,9 @@ func (c *TaskCount) plus(other TaskCount) {
 	c.Capped = c.Capped || other.Capped
 }
 
-// RetryMatching retries the dead and canceled tasks that match filter, as
-// [Client.Retry] retries each one. The filter must not be empty: to retry
-// every dead task, set its States.
+// RetryMatching retries the dead and canceled tasks that match the filter of
+// params, as [Client.Retry] retries each one. The filter must not be empty:
+// to retry every dead task, set its States.
 //
 // It goes through the tasks enqueued before it started, oldest first, in
 // batches of 1,000, each in a short transaction of its own. It reads each
@@ -224,9 +229,10 @@ func (c *TaskCount) plus(other TaskCount) {
 // meanwhile, and it ends however fast new tasks arrive. It skips the tasks,
 // the FIFO groups, and the dedupe keys that other transactions hold at that
 // moment, never waiting while it holds rows. If ctx ends first, it returns
-// what it did before, with an error; each batch commits whole or not at all.
-func (c *Client) RetryMatching(ctx context.Context, filter *TaskFilter) (BulkResult, error) {
-	m, err := c.bulk(ctx, filter, retryStates)
+// what it did before, with an error and [BulkResult.Next] to go on; each
+// batch commits whole or not at all.
+func (c *Client) RetryMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
+	m, err := c.bulk(ctx, params, retryStates)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -237,12 +243,12 @@ func (c *Client) RetryMatching(ctx context.Context, filter *TaskFilter) (BulkRes
 	return res, nil
 }
 
-// CancelMatching cancels the unfinished tasks that match filter, as
-// [Client.Cancel] cancels each one, counting running tasks, which become
-// canceled when their attempts end. It skips running tasks already asked to
-// stop, and otherwise works like [Client.RetryMatching].
-func (c *Client) CancelMatching(ctx context.Context, filter *TaskFilter) (BulkResult, error) {
-	m, err := c.bulk(ctx, filter, cancelStates)
+// CancelMatching cancels the unfinished tasks that match the filter of
+// params, as [Client.Cancel] cancels each one, counting running tasks, which
+// become canceled when their attempts end. It skips running tasks already
+// asked to stop, and otherwise works like [Client.RetryMatching].
+func (c *Client) CancelMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
+	m, err := c.bulk(ctx, params, cancelStates)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -253,11 +259,11 @@ func (c *Client) CancelMatching(ctx context.Context, filter *TaskFilter) (BulkRe
 	return res, nil
 }
 
-// DeleteMatching deletes the tasks that match filter, except running ones,
-// as [Client.Delete] deletes each one, completed tasks in history included.
-// It works like [Client.RetryMatching].
-func (c *Client) DeleteMatching(ctx context.Context, filter *TaskFilter) (BulkResult, error) {
-	m, err := c.bulk(ctx, filter, deleteStates)
+// DeleteMatching deletes the tasks that match the filter of params, except
+// running ones, as [Client.Delete] deletes each one, completed tasks in
+// history included. It works like [Client.RetryMatching].
+func (c *Client) DeleteMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
+	m, err := c.bulk(ctx, params, deleteStates)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -268,15 +274,20 @@ func (c *Client) DeleteMatching(ctx context.Context, filter *TaskFilter) (BulkRe
 	return res, nil
 }
 
-// bulk checks the filter of a bulk action that applies to states, and notes
+// bulk checks the params of a bulk action that applies to states, and notes
 // the last task enqueued before the action starts.
-func (c *Client) bulk(ctx context.Context, filter *TaskFilter, states []State) (*matching, error) {
-	if filter.empty() {
+func (c *Client) bulk(ctx context.Context, params *BulkParams, states []State) (*matching, error) {
+	if params == nil || params.Filter.empty() {
 		return nil, invalidArgument("the filter must not be empty")
 	}
-	m, err := match(filter, states)
+	m, err := match(&params.Filter, states)
 	if err != nil {
 		return nil, err
+	}
+	if params.Cursor != "" {
+		if m.after, err = decodeCursor(params.Cursor); err != nil || m.after < 0 {
+			return nil, invalidArgument("invalid cursor")
+		}
 	}
 	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
 		return nil, fmt.Errorf("taskmill: read the last task: %w", err)
@@ -288,6 +299,7 @@ func (c *Client) bulk(ctx context.Context, filter *TaskFilter, states []State) (
 type step struct {
 	end              int64    // the batch went through the tasks up to this one
 	changed, skipped int      // tasks
+	firstSkipped     int64    // the first task it skipped, or 0
 	left             groupSet // groups that a retry left
 }
 
@@ -295,14 +307,25 @@ type step struct {
 // through the last task. A batch whose statements ran commits even if ctx
 // ends meanwhile, so that the result is exact.
 func (c *Client) inBatches(ctx context.Context, m *matching, batch func(q querier) (step, error)) (BulkResult, error) {
-	res := BulkResult{LastID: m.after}
+	var res BulkResult
+	var firstSkipped int64
+	// stop returns what the action did when it stops early, with where to go
+	// on: before the first task it skipped, so that the next run takes that
+	// task first, or else after the last task it went through.
+	stop := func(err error) (BulkResult, error) {
+		res.Next = encodeCursor(m.after)
+		if firstSkipped > 0 {
+			res.Next = encodeCursor(firstSkipped - 1)
+		}
+		return res, err
+	}
 	for m.after < m.last {
 		if err := ctx.Err(); err != nil {
-			return res, err
+			return stop(err)
 		}
 		tx, err := c.pool.Begin(ctx)
 		if err != nil {
-			return res, err
+			return stop(err)
 		}
 		var s step
 		if _, err = tx.Exec(ctx, bulkSettings); err == nil {
@@ -316,13 +339,15 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch func(q querie
 		}
 		cancel()
 		if err != nil {
-			return res, err
+			return stop(err)
 		}
 		m.after = s.end
 		m.left.queues, m.left.groups = append(m.left.queues, s.left.queues...), append(m.left.groups, s.left.groups...)
 		res.Changed += int64(s.changed)
 		res.Skipped += int64(s.skipped)
-		res.LastID = s.end
+		if firstSkipped == 0 {
+			firstSkipped = s.firstSkipped
+		}
 	}
 	return res, nil
 }
@@ -382,17 +407,20 @@ func (s *step) held(ts []bulkTask) []bulkTask {
 		if t.held {
 			out = append(out, t)
 		} else {
-			s.skipped++
+			s.skip(t, nil)
 		}
 	}
 	return out
 }
 
-// skip counts a task that a retry leaves, and leaves its group, recorded in
-// left, for the rest of the action.
+// skip counts a task that the action leaves. A retry, which passes left,
+// also leaves the task's group, recorded there, for the rest of the action.
 func (s *step) skip(t bulkTask, left map[[2]string]bool) {
 	s.skipped++
-	if key := [2]string{t.queue, t.group}; t.group != "" && !left[key] {
+	if s.firstSkipped == 0 || t.id < s.firstSkipped {
+		s.firstSkipped = t.id
+	}
+	if key := [2]string{t.queue, t.group}; left != nil && t.group != "" && !left[key] {
 		left[key] = true
 		s.left.add(t.queue, t.group)
 	}

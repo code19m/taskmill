@@ -289,10 +289,10 @@ func ExampleMigrations() {
 func ExampleClient_RetryMatching() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
-	res, err := client.RetryMatching(ctx, &taskmill.TaskFilter{
+	res, err := client.RetryMatching(ctx, &taskmill.BulkParams{Filter: taskmill.TaskFilter{
 		Queues: []string{"emails"},
 		States: []taskmill.State{taskmill.StateDead},
-	})
+	}})
 	if err != nil {
 		log.Fatal(err)
 	}

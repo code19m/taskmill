@@ -585,9 +585,9 @@ WITH released AS (
 )
 DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[])`),
 
-		// countTasks counts the tasks after task $5 in each state of $4 that
-		// match the filters, up to {cap} per state. Each state has a branch of
-		// its own, which reads that state's index.
+		// countTasks counts the tasks in each state of $4 that match the
+		// filters, up to {cap} per state. Each state has a branch of its own,
+		// which reads that state's index.
 		countTasks: q(countTasks()),
 
 		// fetch leases up to $2 available tasks of queue $1 for $3
@@ -922,14 +922,13 @@ ORDER BY w.id`),
 		// listTasks pages through live tasks and history, newest first. Each
 		// branch is limited on its own, so both can use their indexes. It runs
 		// with custom plans, so that the planner sees which filters are set.
-		// $9 is the task that the listed ones come after.
 		listTasks: q(`
 SELECT ` + taskColumns + ` FROM (
     (SELECT ` + taskColumns + ` FROM {s}.tasks
      WHERE $6 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
        AND (cardinality($2::text[]) = 0 OR state = ANY($2::text[]::{s}.task_state[]))
        AND (cardinality($3::text[]) = 0 OR kind = ANY($3::text[]))
-       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4 AND id > $9
+       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4
      ORDER BY id DESC LIMIT $5)
     UNION ALL
     (SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(group_key, ''),
@@ -937,7 +936,7 @@ SELECT ` + taskColumns + ` FROM (
      FROM {s}.task_history
      WHERE $7 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
        AND (cardinality($3::text[]) = 0 OR kind = ANY($3::text[]))
-       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4 AND id > $9
+       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4
      ORDER BY id DESC LIMIT $5)
 ) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
        created_at, run_at, attempted_at, finalized_at)
@@ -1121,7 +1120,7 @@ func countTasks() string {
 		b.WriteString(`
 SELECT '` + string(s) + `', n, unflagged FROM (
     SELECT count(*) AS n, count(*) FILTER (WHERE c.cancel_requested_at IS NULL) AS unflagged
-    FROM (` + from + taskFilter + ` AND t.id > $5 LIMIT {cap} + 1) c) x
+    FROM (` + from + taskFilter + ` LIMIT {cap} + 1) c) x
 WHERE '` + string(s) + `' = ANY($4::text[])`)
 	}
 	return b.String()

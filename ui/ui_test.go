@@ -360,7 +360,7 @@ func TestBulkActionStopsInTime(t *testing.T) {
 	}
 	h := ui.Handler(client, nil)
 	form := regexp.MustCompile(`<form class="bulk-actions" method="post" action="([^"]*)">`)
-	target, total, after := "/tasks/bulk/cancel?queue=default", 0, int64(0)
+	target, total := "/tasks/bulk/cancel?queue=default", 0
 	for range 200 {
 		ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
 		req := httptest.NewRequestWithContext(ctx, http.MethodPost, target, nil)
@@ -373,20 +373,20 @@ func TestBulkActionStopsInTime(t *testing.T) {
 		n, _ := strconv.Atoi(q.Get("count"))
 		total += n
 		if q.Get("done") == "cancel-all" {
-			if total != 30000 {
-				t.Fatalf("canceled %d tasks in all, want 30,000", total)
+			// The task list shows every task again.
+			if total != 30000 || loc.Path != "/tasks" || q.Has("cursor") {
+				t.Fatalf("canceled %d tasks in all, then went to %q; want 30,000, and the task list", total, loc)
 			}
 			return
 		}
-		// It goes on after the last task it went through.
-		next, _ := strconv.ParseInt(q.Get("after"), 10, 64)
-		if rec.Code != http.StatusSeeOther || loc.Path != "/tasks/bulk/cancel" || q.Get("done") != "cancel-more" || next < after {
+		// Its page goes on where it stopped.
+		if rec.Code != http.StatusSeeOther || loc.Path != "/tasks/bulk/cancel" || q.Get("done") != "cancel-more" || q.Get("cursor") == "" {
 			t.Fatalf("slow bulk cancel: %d to %q", rec.Code, loc)
 		}
-		after = next
 		_, body, _ := get(t, h, loc.String())
 		match := form.FindStringSubmatch(body)
-		if !strings.Contains(body, html.EscapeString(number(n)+" tasks canceled so far; more remain.")) || match == nil {
+		if !strings.Contains(body, html.EscapeString(number(n)+" tasks canceled so far; more remain.")) || match == nil ||
+			!strings.Contains(match[1], "cursor=") {
 			t.Fatalf("the page after a partial cancel:\n%s", body)
 		}
 		target = html.UnescapeString(match[1])

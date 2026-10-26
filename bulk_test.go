@@ -12,6 +12,11 @@ import (
 	"github.com/code19m/taskmill"
 )
 
+// bulk returns the params of a bulk action on the tasks that f selects.
+func bulk(f *taskmill.TaskFilter) *taskmill.BulkParams {
+	return &taskmill.BulkParams{Filter: *f}
+}
+
 // die makes a task dead, as a worker does when its last attempt fails; a
 // group's head halts its group.
 func (e *env) die(t *testing.T, id int64) {
@@ -82,7 +87,7 @@ func TestRetryMatching(t *testing.T) {
 	waits := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "busy"})
 	e.cancel(t, waits)
 
-	res, err := e.client.RetryMatching(ctx, &taskmill.TaskFilter{Kinds: []string{"email.send"}})
+	res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}}))
 	if err != nil || res.Changed != 6 {
 		t.Fatalf("retried %d tasks, %v; want 6", res.Changed, err)
 	}
@@ -96,7 +101,7 @@ func TestRetryMatching(t *testing.T) {
 	if info := e.get(t, dead); info.Attempt != 0 || !info.FinalizedAt.IsZero() {
 		t.Fatalf("retried task has attempt %d, finalized at %v", info.Attempt, info.FinalizedAt)
 	}
-	if res, err := e.client.RetryMatching(ctx, &taskmill.TaskFilter{Kinds: []string{"email.send"}}); err != nil || res.Changed != 0 {
+	if res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}})); err != nil || res.Changed != 0 {
 		t.Fatalf("second retry: %d tasks, %v; want none", res.Changed, err)
 	}
 }
@@ -120,7 +125,7 @@ func TestCancelMatching(t *testing.T) {
 	elsewhere := e.enqueue(t, sendEmail{}, nil)
 
 	// Canceling a head promotes the next task of its group.
-	res, err := e.client.CancelMatching(ctx, &taskmill.TaskFilter{Queues: []string{"mail"}, States: []taskmill.State{taskmill.StateAvailable}})
+	res, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{Queues: []string{"mail"}, States: []taskmill.State{taskmill.StateAvailable}}))
 	if err != nil || res.Changed != 2 {
 		t.Fatalf("canceled %d available tasks, %v; want 2", res.Changed, err)
 	}
@@ -128,7 +133,7 @@ func TestCancelMatching(t *testing.T) {
 		keyed: taskmill.StateCanceled, head: taskmill.StateCanceled, second: taskmill.StateAvailable, third: taskmill.StatePending,
 	})
 
-	res, err = e.client.CancelMatching(ctx, &taskmill.TaskFilter{Queues: []string{"mail"}})
+	res, err = e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{Queues: []string{"mail"}}))
 	if err != nil || res.Changed != 4 {
 		t.Fatalf("canceled %d tasks, %v; want 4", res.Changed, err)
 	}
@@ -146,7 +151,7 @@ func TestCancelMatching(t *testing.T) {
 		t.Fatalf("the dedupe key was not released: %+v, %v", res, err)
 	}
 	// A running task asked to stop is not counted again.
-	if res, err := e.client.CancelMatching(ctx, &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateRunning}}); err != nil || res.Changed != 0 {
+	if res, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateRunning}})); err != nil || res.Changed != 0 {
 		t.Fatalf("second cancel: %d tasks, %v; want none", res.Changed, err)
 	}
 }
@@ -166,13 +171,13 @@ func TestDeleteMatching(t *testing.T) {
 	e.die(t, halting)
 
 	// Deleting the dead head that halts its group resumes the group.
-	res, err := e.client.DeleteMatching(ctx, &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}})
+	res, err := e.client.DeleteMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}))
 	if err != nil || res.Changed != 1 {
 		t.Fatalf("deleted %d dead tasks, %v; want 1", res.Changed, err)
 	}
 	e.wantState(t, next, taskmill.StateAvailable)
 
-	res, err = e.client.DeleteMatching(ctx, &taskmill.TaskFilter{Queues: []string{"mail"}})
+	res, err = e.client.DeleteMatching(ctx, bulk(&taskmill.TaskFilter{Queues: []string{"mail"}}))
 	if err != nil || res.Changed != 4 {
 		t.Fatalf("deleted %d tasks, %v; want 4", res.Changed, err)
 	}
@@ -209,14 +214,14 @@ func TestBulkActionsWorkInBatches(t *testing.T) {
 	all := &taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
 	for _, step := range []struct {
 		name string
-		do   func(context.Context, *taskmill.TaskFilter) (taskmill.BulkResult, error)
+		do   func(context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error)
 		want map[string]int
 	}{
 		{"cancel", e.client.CancelMatching, map[string]int{"canceled": 2500}},
 		{"retry", e.client.RetryMatching, map[string]int{"available": 1001, "pending": 1499}},
 		{"delete", e.client.DeleteMatching, map[string]int{}},
 	} {
-		res, err := step.do(ctx, all)
+		res, err := step.do(ctx, bulk(all))
 		if err != nil || res.Changed != 2500 {
 			t.Fatalf("%s: %d tasks, %v; want 2500", step.name, res.Changed, err)
 		}
@@ -284,7 +289,7 @@ func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 	}
 	// Free the first pages, and cancel the newest tasks first, so that their
 	// rows move there, before the older ones.
-	if _, err := e.client.DeleteMatching(ctx, &taskmill.TaskFilter{Kinds: []string{"report"}}); err != nil {
+	if _, err := e.client.DeleteMatching(ctx, bulk(&taskmill.TaskFilter{Kinds: []string{"report"}})); err != nil {
 		t.Fatal(err)
 	}
 	e.exec(t, "VACUUM {s}.tasks")
@@ -292,20 +297,20 @@ func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 		e.cancel(t, res[i].ID)
 	}
 	g := &taskmill.TaskFilter{GroupKeys: []string{"g"}}
-	if _, err := e.client.CancelMatching(ctx, g); err != nil {
+	if _, err := e.client.CancelMatching(ctx, bulk(g)); err != nil {
 		t.Fatal(err)
 	}
 
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", res[0].ID)
-	got, err := e.client.RetryMatching(ctx, g)
+	got, err := e.client.RetryMatching(ctx, bulk(g))
 	if err != nil || got.Changed != 0 || got.Skipped != 1500 {
 		t.Fatalf("with the oldest task held: %+v, %v; want the whole group left", got, err)
 	}
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	got, err = e.client.RetryMatching(ctx, g)
+	got, err = e.client.RetryMatching(ctx, bulk(g))
 	if err != nil || got.Changed != 1500 || got.Skipped != 0 {
 		t.Fatalf("once released: %+v, %v; want all 1,500", got, err)
 	}
@@ -327,7 +332,7 @@ func TestRetryLeavesAGroupItCannotJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.client.CancelMatching(ctx, &taskmill.TaskFilter{GroupKeys: []string{"g"}}); err != nil {
+	if _, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{GroupKeys: []string{"g"}})); err != nil {
 		t.Fatal(err)
 	}
 	g := &taskmill.TaskFilter{GroupKeys: []string{"g"}, States: []taskmill.State{taskmill.StateCanceled}}
@@ -336,14 +341,14 @@ func TestRetryLeavesAGroupItCannotJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := e.client.RetryMatching(ctx, g)
+	got, err := e.client.RetryMatching(ctx, bulk(g))
 	if err != nil || got.Changed != 0 || got.Skipped != 1500 {
 		t.Fatalf("while the group's row is created: %+v, %v; want the whole group left", got, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got, err = e.client.RetryMatching(ctx, g); err != nil || got.Changed != 1500 {
+	if got, err = e.client.RetryMatching(ctx, bulk(g)); err != nil || got.Changed != 1500 {
 		t.Fatalf("once created: %+v, %v; want all 1,500", got, err)
 	}
 	e.wantHead(t, "g", int(head.ID))
@@ -378,10 +383,10 @@ func TestBulkActionsSkipHeldRows(t *testing.T) {
 		}
 	}
 
-	if res, err := e.client.RetryMatching(ctx, &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}); err != nil || res.Changed != 1 {
+	if res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})); err != nil || res.Changed != 1 {
 		t.Fatalf("retried %d tasks, %v; want only the one not held", res.Changed, err)
 	}
-	if res, err := e.client.CancelMatching(ctx, &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateAvailable}}); err != nil || res.Changed != 1 {
+	if res, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateAvailable}})); err != nil || res.Changed != 1 {
 		t.Fatalf("canceled %d tasks, %v; want only the retried one", res.Changed, err)
 	}
 	wantStates(t, e, map[int64]taskmill.State{
@@ -396,10 +401,10 @@ func TestBulkActionsSkipHeldRows(t *testing.T) {
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if res, err := e.client.RetryMatching(ctx, &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}); err != nil || res.Changed != 3 {
+	if res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})); err != nil || res.Changed != 3 {
 		t.Fatalf("retried %d tasks once released, %v; want 3", res.Changed, err)
 	}
-	if res, err := e.client.CancelMatching(ctx, &taskmill.TaskFilter{Kinds: []string{"email.send"}}); err != nil || res.Changed != 5 {
+	if res, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}})); err != nil || res.Changed != 5 {
 		t.Fatalf("canceled %d tasks once released, %v; want 5", res.Changed, err)
 	}
 }
@@ -426,7 +431,7 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 	}
 
 	start := time.Now()
-	res, err := e.client.RetryMatching(ctx, &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})
+	res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}))
 	if err != nil || res.Changed != 1 || res.Skipped != 1 || time.Since(start) > 2*time.Second {
 		t.Fatalf("retried %+v in %v, %v; want the one of group a, at once, and group b left", res, time.Since(start), err)
 	}
@@ -438,10 +443,44 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if res, err := e.client.RetryMatching(ctx, &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}); err != nil || res.Changed != 1 {
+	if res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})); err != nil || res.Changed != 1 {
 		t.Fatalf("retried %d tasks once released, %v; want 1", res.Changed, err)
 	}
 	e.wantState(t, inB, taskmill.StateAvailable)
+}
+
+// A run that stops early goes on, in the next run, at the first task it
+// skipped: a FIFO group that it left comes back in order.
+func TestRetryGoesOnInGroupOrder(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	canceled := func(n int, group string) {
+		e.exec(t, `INSERT INTO {s}.tasks (queue, run_at, kind, finalized_at, state, cancel_requested_at, payload, max_attempts, group_key)
+		           SELECT 'default', now(), 'email.send', now(), 'canceled', now(), '{}', 3, nullif($1, '')
+		           FROM generate_series(1, $2)`, group, n)
+	}
+	canceled(1, "g")
+	oldest := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
+	canceled(30000, "")
+	canceled(1500, "g")
+	all := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}
+
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", oldest)
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond) // a click that runs out of time
+	first, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: all})
+	cancel()
+	if err == nil && first.Next != "" || err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("first run: %+v, %v", first, err)
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	rest, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: all, Cursor: first.Next})
+	if err != nil || first.Changed+rest.Changed != 31501 || rest.Skipped != 0 || rest.Next != "" {
+		t.Fatalf("then %+v after %+v, %v; want every task retried", rest, first, err)
+	}
+	e.wantHead(t, "g", int(oldest))
 }
 
 // Each batch reads about its own tasks only, however many the action went
@@ -506,18 +545,17 @@ func TestBulkActionsStopMidway(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
 	all := &taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
-	res, err := e.client.CancelMatching(ctx, all)
-	if !errors.Is(err, context.DeadlineExceeded) || res.Changed >= 30000 {
-		t.Fatalf("canceled %d tasks, %v; want it to stop midway", res.Changed, err)
+	res, err := e.client.CancelMatching(ctx, bulk(all))
+	if !errors.Is(err, context.DeadlineExceeded) || res.Changed >= 30000 || res.Next == "" {
+		t.Fatalf("canceled %+v, %v; want it to stop midway", res, err)
 	}
 	if canceled := e.states(t)["canceled"]; canceled != int(res.Changed) {
 		t.Fatalf("said it canceled %d tasks, but %d are", res.Changed, canceled)
 	}
 	e.checkGroups(t)
-	// It goes on after the last task it went through.
-	all.AfterID = res.LastID
-	rest, err := e.client.CancelMatching(t.Context(), all)
-	if err != nil || res.Changed+rest.Changed != 30000 {
+	// It goes on where it stopped.
+	rest, err := e.client.CancelMatching(t.Context(), &taskmill.BulkParams{Filter: *all, Cursor: res.Next})
+	if err != nil || res.Changed+rest.Changed != 30000 || rest.Next != "" {
 		t.Fatalf("canceled %d, then %d tasks, %v; want 30,000 in all", res.Changed, rest.Changed, err)
 	}
 }
@@ -525,18 +563,22 @@ func TestBulkActionsStopMidway(t *testing.T) {
 func TestBulkActionsCheckTheFilter(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	actions := map[string]func(context.Context, *taskmill.TaskFilter) (taskmill.BulkResult, error){
+	actions := map[string]func(context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error){
 		"retry": e.client.RetryMatching, "cancel": e.client.CancelMatching, "delete": e.client.DeleteMatching,
 	}
-	for _, filter := range []*taskmill.TaskFilter{
+	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
+	for _, params := range []*taskmill.BulkParams{
 		nil,
 		{},
-		{States: []taskmill.State{"lost"}},
-		{Queues: []string{""}},
+		{Filter: taskmill.TaskFilter{States: []taskmill.State{"lost"}}},
+		{Filter: taskmill.TaskFilter{Queues: []string{""}}},
+		{Filter: dead, Cursor: "%%%"},
+		{Filter: dead, Cursor: "LTE"},                        // -1
+		{Filter: dead, Cursor: "OTIyMzM3MjAzNjg1NDc3NTgwOA"}, // 2^63
 	} {
 		for name, do := range actions {
-			if _, err := do(t.Context(), filter); !errors.Is(err, taskmill.ErrInvalidArgument) {
-				t.Errorf("%s with filter %+v: got %v, want ErrInvalidArgument", name, filter, err)
+			if _, err := do(t.Context(), params); !errors.Is(err, taskmill.ErrInvalidArgument) {
+				t.Errorf("%s with %+v: got %v, want ErrInvalidArgument", name, params, err)
 			}
 		}
 	}
@@ -551,7 +593,7 @@ func TestCount(t *testing.T) {
 	ctx := t.Context()
 	e.completeIn(t, "done")
 	e.enqueue(t, sendEmail{}, nil)
-	second := e.enqueue(t, sendEmail{}, nil)
+	e.enqueue(t, sendEmail{}, nil)
 	e.die(t, e.enqueue(t, sendEmail{}, nil))
 	e.enqueue(t, report{}, nil)
 	running := e.enqueue(t, sendEmail{}, nil)
@@ -574,11 +616,11 @@ func TestCount(t *testing.T) {
 		t.Fatalf("all tasks: %+v, %v; want %+v", got, err, want)
 	}
 	got, err = e.client.Count(ctx, &taskmill.TaskFilter{
-		Kinds: []string{"email.send"}, States: []taskmill.State{taskmill.StateAvailable, taskmill.StateCompleted}, AfterID: second - 1,
+		Kinds: []string{"email.send"}, States: []taskmill.State{taskmill.StateAvailable, taskmill.StateCompleted},
 	})
 	want = &taskmill.TaskCounts{
-		States: map[taskmill.State]taskmill.TaskCount{taskmill.StateAvailable: n(1), taskmill.StateCompleted: n(0)},
-		Cancel: n(1), Delete: n(1),
+		States: map[taskmill.State]taskmill.TaskCount{taskmill.StateAvailable: n(2), taskmill.StateCompleted: n(1)},
+		Cancel: n(2), Delete: n(3),
 	}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("filtered: %+v, %v; want %+v", got, err, want)

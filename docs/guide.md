@@ -562,9 +562,9 @@ offers the bulk actions once filters are set. Each leads to a page that
 shows the filters and how many tasks the action changes, counted once, with
 a button that does it; the page is the same with or without JavaScript. A
 bulk action works for half the time the request has left, 5 seconds; if
-more tasks remain, its page says so and offers to go on after the last task
-it went through. If other work held some tasks, the page says how many, and
-offers to try them again.
+more tasks remain, its page says so and offers to go on where it stopped.
+If other work held some tasks, the page says how many, and offers to try
+them again.
 
 **The operations API**, the `Client` methods below, offers the same to your
 own code and tools:
@@ -610,9 +610,13 @@ skips a task of a group also skips the group's later tasks, so that a later
 run retries the group in order. `BulkResult.Skipped` counts the tasks they
 skipped: run them again to act on those.
 
-If the context ends first, they return what they did before, with an error;
-each batch commits whole or not at all. To go on from there, set
-`TaskFilter.AfterID` to `BulkResult.LastID`, the last task they went through.
+They take a `BulkParams`, the filter and a cursor. If the context ends
+first, they return what they did before, with an error; each batch commits
+whole or not at all. `BulkResult.Next` then goes on, as `BulkParams.Cursor`:
+at the first task they skipped, if any, so that a group they left comes back
+in order, or else after the last task they went through. It is empty once
+they went through every task. A cursor only narrows an action to later
+tasks; it never selects tasks that the filter does not.
 
 A filter by kind or FIFO group alone has no index of its own. A retry with
 such a filter then reads every dead and canceled task after its position in

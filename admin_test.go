@@ -84,7 +84,7 @@ func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
 				return err
 			},
 			"RetryMatching group": func() error {
-				_, err := e.client.RetryMatching(ctx, &taskmill.TaskFilter{GroupKeys: []string{s}})
+				_, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: taskmill.TaskFilter{GroupKeys: []string{s}}})
 				return err
 			},
 			"Groups queue":  func() error { _, err := e.client.Groups(ctx, &taskmill.GroupParams{Queues: []string{s}}); return err },

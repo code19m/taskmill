@@ -91,7 +91,7 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	if states == nil {
 		states = deleteStates
 	}
-	m, err := c.bulk(ctx, filter, states)
+	m, err := c.bulk(ctx, &BulkParams{Filter: *filter}, states)
 	if err != nil {
 		return 0, err
 	}

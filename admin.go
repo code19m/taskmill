@@ -287,7 +287,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 			return err
 		}
 		r, err := tx.Query(ctx, c.sql.listTasks,
-			m.queues, m.states, m.kinds, before, limit+1, len(m.states) > 0, m.history, m.groups, m.after)
+			m.queues, m.states, m.kinds, before, limit+1, len(m.states) > 0, m.history, m.groups)
 		if err != nil {
 			return err
 		}
@@ -306,8 +306,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	}
 	if len(out.Tasks) > limit {
 		out.Tasks = out.Tasks[:limit]
-		last := out.Tasks[limit-1].ID
-		out.Next = base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(last, 10)))
+		out.Next = encodeCursor(out.Tasks[limit-1].ID)
 	}
 	return &out, nil
 }
@@ -406,12 +405,22 @@ func listBounds(p *ListParams) (limit int, before int64, err error) {
 	if p.Cursor == "" {
 		return limit, math.MaxInt64, nil
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(p.Cursor)
-	if err != nil {
-		return 0, 0, invalidArgument("invalid cursor")
-	}
-	if before, err = strconv.ParseInt(string(raw), 10, 64); err != nil {
+	if before, err = decodeCursor(p.Cursor); err != nil {
 		return 0, 0, invalidArgument("invalid cursor")
 	}
 	return limit, before, nil
+}
+
+// encodeCursor and decodeCursor turn a task ID into the opaque cursor of a
+// list or a bulk action, and back.
+func encodeCursor(id int64) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(id, 10)))
+}
+
+func decodeCursor(cursor string) (int64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(string(raw), 10, 64)
 }
