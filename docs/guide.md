@@ -243,8 +243,10 @@ about a second.
 **Handlers must be idempotent:** running a task twice must have the same
 effect as running it once. taskmill runs every task at least once, and a
 task can run twice: for example, when a worker crashes after the work was
-done but before the result was recorded. Pass the task ID to external
-services as an idempotency key, or use transactional completion.
+done but before the result was recorded. Send external services an
+idempotency key made from the task ID and a namespace, such as your service's
+name and taskmill's schema: a task ID is unique only within its schema. Or
+use transactional completion.
 
 **Respect the context.** A canceled context means the task was canceled, its
 lease was lost, its timeout passed, or the worker is shutting down. Return
@@ -876,6 +878,7 @@ The last six run only on the maintainer.
 | `operation still failing` | Error | It has failed for a minute or more. Fix what `error` names, often the database or a privilege. |
 | `operation recovered` | Info | It works again. |
 | `worker started` | Info | `Run` started, serving `queues`. |
+| `worker was removed as stale; registering again` | Warn | The worker missed its heartbeats for 5 minutes, for example while its machine slept, and the maintainer removed it. It lists itself again and goes on; check what paused it. |
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended; it waits up to `timeout` for `tasks`. |
 | `worker stopped` | Info | `Run` returned; `released` tasks went back to their queues. |
 | `unregister worker failed` | Warn | The stopped worker stays listed until the maintainer deletes it, 5 minutes after its last heartbeat. |
