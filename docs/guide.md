@@ -243,8 +243,10 @@ about a second.
 **Handlers must be idempotent:** running a task twice must have the same
 effect as running it once. taskmill runs every task at least once, and a
 task can run twice: for example, when a worker crashes after the work was
-done but before the result was recorded. Pass the task ID to external
-services as an idempotency key, or use transactional completion.
+done but before the result was recorded. Send external services an
+idempotency key made from the task ID and a namespace, such as your service's
+name and taskmill's schema: a task ID is unique only within its schema. Or
+use transactional completion.
 
 **Respect the context.** A canceled context means the task was canceled, its
 lease was lost, its timeout passed, or the worker is shutting down. Return
