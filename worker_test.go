@@ -745,7 +745,9 @@ func TestRunTwiceFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
-	waitFor(t, "the worker to register", func() bool { return e.count(t, "SELECT count(*) FROM {s}.workers") == 1 })
+	// Listening comes after registering: canceling as soon as the worker's
+	// row shows could stop Run while it still waits for that insert's reply.
+	e.waitListening(t)
 
 	second, cancelSecond := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancelSecond()
