@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -67,10 +68,19 @@ func (p *proc) kill() {
 	_ = p.cmd.Wait()
 }
 
-// stop stops the process gracefully, and fails if it fails.
+// stop stops the process gracefully, and fails if it fails. A process that
+// had not yet set up its signal handling ends by the signal, which is fine.
 func (p *proc) stop() {
 	_ = p.cmd.Process.Signal(syscall.SIGTERM)
-	p.wait()
+	err := p.cmd.Wait()
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+		if ws, ok := exit.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGTERM {
+			return
+		}
+	}
+	if err != nil {
+		fail(fmt.Errorf("child process: %w", err))
+	}
 }
 
 // wait waits for the process to end, and fails if it fails.
