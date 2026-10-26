@@ -92,6 +92,26 @@ All notable changes to taskmill are recorded here. The format follows
   usable. A payload that PostgreSQL itself rejects, such as a string with an
   unpaired surrogate escape, returns `ErrInvalidArgument` too. All returned
   a database error.
+- Through PgBouncer in transaction mode with `max_prepared_statements` set,
+  `Migrate` failed on a new schema, and `NewClient` could fail right after it
+  found a schema not migrated. PgBouncer keeps the name of a prepared
+  statement whose parse failed, and disconnects the client that prepares it
+  again ([pgbouncer#1630](https://github.com/pgbouncer/pgbouncer/issues/1630)).
+  taskmill now reads the schema version without a prepared statement.
+- `Migrate` called by several processes at once on a new schema could fail
+  with a duplicate key on the schema's name, when their connections were
+  already open, as a running application's are. A migration that waited for
+  another's lock trusted its connection's stale view that the schema did not
+  exist yet.
+- Recording an attempt's result and renewing leases could read the whole
+  index of running tasks, which holds an entry for every task that ran since
+  the last vacuum, when the statistics had been taken while few tasks ran.
+  With millions of tasks waiting, a completion read about 4,000 pages instead
+  of 240, and a heartbeat 8,600. They now look each task up by its ID.
+- Promoting due tasks could scan the whole `tasks` table every second, when
+  many tasks were scheduled far ahead while others waited available: with 10
+  million scheduled tasks, each promotion took 1.2 seconds instead of under a
+  millisecond. It now stays on its index.
 
 ## [0.1.0] - 2026-10-25
 

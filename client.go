@@ -104,7 +104,7 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 func (c *Client) checkSchema(ctx context.Context) error {
 	var version int
 	var isolation string
-	err := c.pool.QueryRow(ctx, c.sql.schemaVersion).Scan(&version, &isolation)
+	err := c.pool.QueryRow(ctx, c.sql.schemaVersion, unprepared).Scan(&version, &isolation)
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42P01" { // undefined_table
 		return fmt.Errorf("%w: schema %q is not migrated", ErrSchemaOutdated, c.schema)
 	}

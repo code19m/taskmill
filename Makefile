@@ -24,6 +24,11 @@ OTEL_CORE := $(shell awk '$$1 == "github.com/code19m/taskmill" && $$2 ~ /^v/ { p
 TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:54329/taskmill?sslmode=disable
 TEST_POSTGRES     ?= postgres:18-alpine
 
+# PgBouncer in transaction mode, in front of that database, for
+# `make test-pgbouncer`.
+PGBOUNCER     := edoburu/pgbouncer:v1.25.2-p0@sha256:7d7a27d9e90985cab5cf42256f5c13a3120baa4b055b69df37beb272b89b2340
+PGBOUNCER_URL := postgres://postgres:postgres@localhost:54328/taskmill?sslmode=disable
+
 # The latest release: the version of taskmill that internal/compat requires.
 # `make api` compares the API with it, and `make compat` runs its client and
 # worker on the current schema. Each release updates it; see CONTRIBUTING.md.
@@ -52,7 +57,7 @@ help: ## Show this help.
 	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: check
-check: tidy-check lint test vuln otel-release-check compat ## Run every check that CI runs, except `make release-check` and `make api`.
+check: tidy-check lint test test-pgbouncer vuln otel-release-check compat ## Run every check that CI runs, except `make release-check` and `make api`.
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format all Go files.
@@ -70,6 +75,23 @@ test: ## Run all tests with the race detector, in random order, and write each m
 	@for m in $(MODULES); do \
 		(cd $$m && TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -shuffle=on -count=1 -coverprofile=coverage.out ./...) || exit 1; \
 	done
+
+# Every module's tests through PgBouncer, with workers listening on a direct
+# connection, which PgBouncer cannot provide. PgBouncer reaches the database
+# through the port that `make db` publishes, at the IPv4 address of Docker's
+# bridge network: host names of the host can resolve to IPv6 addresses that
+# containers cannot reach.
+.PHONY: test-pgbouncer
+test-pgbouncer: ## Run all tests through PgBouncer in transaction mode (needs `make db`).
+	@docker rm -f taskmill-test-pgbouncer >/dev/null 2>&1 || true
+	@docker run -d --name taskmill-test-pgbouncer -p 54328:5432 \
+		-e DB_HOST=$$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}') -e DB_PORT=54329 -e DB_NAME=taskmill -e DB_USER=postgres -e DB_PASSWORD=postgres \
+		-e AUTH_TYPE=scram-sha-256 -e POOL_MODE=transaction -e MAX_CLIENT_CONN=1000 -e DEFAULT_POOL_SIZE=40 \
+		-e MAX_PREPARED_STATEMENTS=1000 $(PGBOUNCER) >/dev/null
+	@status=0; for m in $(MODULES); do \
+		(cd $$m && TASKMILL_TEST_DATABASE_URL='$(PGBOUNCER_URL)' TASKMILL_TEST_LISTEN_URL='$(TEST_DATABASE_URL)' \
+			go test -race -shuffle=on -count=1 ./...) || { status=1; break; }; \
+	done; docker rm -f taskmill-test-pgbouncer >/dev/null; exit $$status
 
 .PHONY: cover
 cover: test ## Run all tests and open the core's coverage report in a browser (needs `make db`).
@@ -109,8 +131,12 @@ compat: ## Run the latest release's client and worker on the current schema (nee
 	$(COMPAT) TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -count=1 ./...
 
 .PHONY: bench
-bench: ## Run the benchmarks and the chaos test against the test database (needs `make db`).
+bench: ## Run the benchmarks and the fault scenarios against the test database (needs `make db`).
 	TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go run ./internal/cmd/bench
+
+.PHONY: faults
+faults: ## Run the fault scenarios as the nightly CI run does, against databases of their own (needs Docker).
+	./internal/cmd/bench/faults.sh
 
 # The check works on a copy of the module without its replace line. Until the
 # required core version is released, it only says so, unless RELEASING is set:
