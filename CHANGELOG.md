@@ -99,6 +99,10 @@ All notable changes to taskmill are recorded here. The format follows
   usable. A payload that PostgreSQL itself rejects, such as a string with an
   unpaired surrogate escape, returns `ErrInvalidArgument` too. All returned
   a database error.
+- `Migrate` works for a role that owns its schema but may not create schemas
+  in the database. It ran `CREATE SCHEMA IF NOT EXISTS` every time, and
+  PostgreSQL checks that privilege before it checks whether the schema
+  exists, so the role could not install or upgrade taskmill.
 
 ## [0.1.0] - 2026-10-25
 

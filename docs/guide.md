@@ -1139,7 +1139,7 @@ kind: Deployment
 metadata:
   name: worker
 spec:
-  replicas: 2
+  replicas: 2 # leave it out when an autoscaler sets the replicas
   selector:
     matchLabels: {app: worker}
   template:
@@ -1167,17 +1167,21 @@ spec:
 **Connections.** A worker uses at most its pool's `MaxConns`, plus one
 connection for notifications; a client, such as `taskmill-ui` or a web
 server that only enqueues, uses its pool alone. Add them up against the
-database's `max_connections`, less what it reserves for administrators:
+database's `max_connections`, less what it reserves for administrators.
+During a rollout, new pods start while old ones still drain, so count each
+Deployment's most pods: its replicas, or the autoscaler's maximum, plus its
+`maxSurge` and `maxUnavailable`, 25% each by default:
 
 ```text
-worker replicas × (MaxConns + 1) + taskmill-ui replicas × MaxConns + your other pools
+worker pods × (MaxConns + 1) + taskmill-ui pods × MaxConns + your other pools
 ```
 
-Count the autoscaler's maximum of replicas, not the usual number. Set every
-pool's size with `pool_max_conns` in its URL: pgx's default is the larger of
-4 and the number of CPUs it sees, and in a container that is the node's CPU
-count, not the pod's limit. For example, 10 workers with `pool_max_conns=15`
-use up to 160 connections.
+Set every pool's size with `pool_max_conns` in its URL: pgx's default is
+the larger of 4 and the number of CPUs it sees, and in a container that is
+the node's CPU count, not the pod's limit. For example, 10 worker replicas
+with `pool_max_conns=15` run up to 15 pods in a default rollout, with up to
+240 connections. A `maxSurge` of 0 for the workers lowers that, and slows
+their rollouts.
 
 **PgBouncer** in transaction mode carries the pools, as
 [Connection poolers](#running-in-production) says: give it the pools'
@@ -1262,13 +1266,15 @@ spec:
     - {name: http, port: 80, targetPort: http}
 ```
 
-**Autoscaling.** Scale workers on how many tasks wait, or on how long they
-wait. The [queue gauges](#observability) report both; every process reports
-the same values for the whole installation, so read them with `max`. With
-Prometheus, they are `taskmill_queue_tasks`, labeled
+**Autoscaling.** Scale workers on the tasks they have to run: the available
+ones, which wait, plus the running ones, which keep workers busy. Scaling on
+the available ones alone stops busy workers in the middle of a backlog. The
+[queue gauges](#observability) report both, and how long tasks wait; every
+process reports the same values for the whole installation, so read them
+with `max`. With Prometheus, they are `taskmill_queue_tasks`, labeled
 `messaging_destination_name` and `taskmill_task_state`, and
-`taskmill_queue_lag_seconds`. This KEDA `ScaledObject` adds a worker per 100
-available tasks of the default queue:
+`taskmill_queue_lag_seconds`. This KEDA `ScaledObject` runs a worker per 10
+of those tasks of the default queue, a worker's concurrency:
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
@@ -1283,21 +1289,32 @@ spec:
     - type: prometheus
       metadata:
         serverAddress: http://prometheus.monitoring.svc:9090
-        query: max(taskmill_queue_tasks{messaging_destination_name="default", taskmill_task_state="available"})
-        threshold: "100"
+        query: sum(max by (taskmill_task_state) (taskmill_queue_tasks{messaging_destination_name="default", taskmill_task_state=~"available|running"}))
+        threshold: "10"
 ```
+
+- **Scaling down stops workers that may run tasks.** Each drains for
+  `DrainTimeout`, and a task still running then starts over on another
+  worker. Keep `DrainTimeout`, and with it the grace period, above your
+  tasks' usual length. A stabilization window in the `ScaledObject`'s
+  `advanced.horizontalPodAutoscalerConfig.behavior.scaleDown` also keeps a
+  short dip from stopping workers.
 
 - **Keep one worker.** The maintainer runs in workers. With none, due
   retries and schedules are never promoted, and a queue that was empty at
   its last count never shows a backlog, so nothing scales the workers up
   again. To scale to zero, run a worker without handlers in a Deployment of
   its own, as the maintainer, and set `NoMaintainer` on the scaled ones.
+  Then report the figures that KEDA reads from a process that stays up,
+  such as that maintainer or your web server.
 - **Lag** scales on the oldest task's wait instead: query
   `max(taskmill_queue_lag_seconds{messaging_destination_name="default"})`,
   set the trigger's `metricType: Value`, and a `threshold` in seconds.
   Unlike the counts, which stop at 10,000, lag has no cap.
 - **Without OpenTelemetry,** KEDA's Metrics API scaler reads a number from
-  JSON. Serve it from `Client.Queues`, next to the health check:
+  JSON. Serve it from `Client.Queues`, in a process that is always up, such
+  as your web server: a worker that KEDA stopped answers nothing, and at
+  zero workers nothing would scale them up again.
 
   ```go
   mux.HandleFunc("GET /queues", func(w http.ResponseWriter, r *http.Request) {
@@ -1306,35 +1323,23 @@ spec:
           http.Error(w, "taskmill: list queues failed", http.StatusServiceUnavailable)
           return
       }
-      available := map[string]int64{}
+      tasks := map[string]int64{} // per queue: available and running
       for _, q := range queues {
-          available[q.Name] = q.Counts[taskmill.StateAvailable]
+          tasks[q.Name] = q.Counts[taskmill.StateAvailable] + q.Counts[taskmill.StateRunning]
       }
-      _ = json.NewEncoder(w).Encode(available)
+      _ = json.NewEncoder(w).Encode(tasks)
   })
   ```
 
-  Put a Service in front of the workers' port, and give the
-  `ScaledObject` this trigger instead:
-
-  ```yaml
-  apiVersion: v1
-  kind: Service
-  metadata:
-    name: worker
-  spec:
-    selector: {app: worker}
-    ports:
-      - {name: health, port: 8081, targetPort: health}
-  ```
+  Give the `ScaledObject` this trigger instead:
 
   ```yaml
     triggers:
       - type: metrics-api
         metadata:
-          url: http://worker.myapp.svc:8081/queues # the Service, in namespace myapp
+          url: http://web.myapp.svc/queues # your web server's Service, in namespace myapp
           valueLocation: default
-          targetValue: "100"
+          targetValue: "10"
   ```
 - Do not point KEDA's PostgreSQL scaler at taskmill's tables. They are
   internal and change between releases; `Client.Queues` and the gauges are
@@ -1348,7 +1353,8 @@ PostgreSQL, Neon, and Supabase, can run it. Mind these points:
 - **Privileges.** Give the application a role of its own that owns
   taskmill's schema, as [Database privileges](#running-in-production) says.
   To create the schema, `Migrate` needs the CREATE privilege on the
-  database; or create the schema yourself, owned by that role.
+  database. Without it, create the schema yourself, owned by that role:
+  `Migrate` then only fills it.
 - **The primary only.** taskmill writes on every fetch: use the writer
   endpoint, such as Aurora's cluster endpoint, never a reader.
 - **Built-in poolers** run in transaction mode, so they follow the

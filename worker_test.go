@@ -1681,10 +1681,11 @@ func TestWorkerRemovedAsStaleRegistersAgain(t *testing.T) {
 	// What the maintainer does to a worker that missed its heartbeats for 5
 	// minutes, such as one on a machine that slept, while it kept working.
 	e.exec(t, "DELETE FROM {s}.workers")
-	waitFor(t, "the worker to register again", func() bool {
-		return e.count(t, "SELECT count(*) FROM {s}.workers") == 1
+	const logged = "worker was removed as stale; registering again"
+	waitFor(t, "the worker to register again, and say so", func() bool {
+		return logs.count(logged) > 0 && e.count(t, "SELECT count(*) FROM {s}.workers") == 1
 	})
-	if n := logs.count("worker was removed as stale; registering again"); n != 1 {
+	if n := logs.count(logged); n != 1 {
 		t.Fatalf("the new registration was logged %d times, want once", n)
 	}
 }
