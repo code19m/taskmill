@@ -39,10 +39,23 @@ type maintainer struct {
 	leader atomic.Bool
 
 	lastElection time.Time // used by the main loop only
+
+	// The failures of each kind of work, which it logs only now and then.
+	election, promotion, rescues, schedules, pruning, stats, retention *failures
 }
 
 func newMaintainer(w *Worker) *maintainer {
-	return &maintainer{w: w, c: w.client}
+	return &maintainer{
+		w:         w,
+		c:         w.client,
+		election:  newFailures(w, "elect maintainer"),
+		promotion: newFailures(w, "promote due tasks"),
+		rescues:   newFailures(w, "rescue expired leases"),
+		schedules: newFailures(w, "run schedules"),
+		pruning:   newFailures(w, "delete removed schedules"),
+		stats:     newFailures(w, "refresh statistics"),
+		retention: newFailures(w, "apply retention"),
+	}
 }
 
 func (m *maintainer) run(ctx context.Context) {
@@ -129,11 +142,24 @@ func (m *maintainer) elect(ctx context.Context) bool {
 	var id string
 	err := m.c.pool.QueryRow(ctx, m.c.sql.electLeader, m.w.id, m.w.timing.leaderLease.Microseconds()).Scan(&id)
 	leader := err == nil
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		m.log(ctx, slog.LevelWarn, "maintainer election", err)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = nil // another worker leads
 	}
-	if m.leader.Swap(leader) != leader && leader {
+	m.election.observe(ctx, err)
+	was := m.leader.Load() // only the main loop changes it
+	if leader && !was {
+		// A term starts without the incidents of the last one, whose work
+		// may have failed after it ended.
+		for _, f := range []*failures{m.promotion, m.rescues, m.schedules, m.pruning, m.stats, m.retention} {
+			f.reset()
+		}
+	}
+	m.leader.Store(leader)
+	switch {
+	case leader && !was:
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "elected maintainer")
+	case was && !leader:
+		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "no longer maintainer")
 	}
 	return leader
 }
@@ -145,7 +171,8 @@ func (m *maintainer) resign(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
 	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignLeader, m.w.id); err != nil {
-		m.log(ctx, slog.LevelWarn, "resign maintainer", err)
+		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "resign maintainer failed; another worker leads when the lease expires",
+			slog.Any(logKeyError, err))
 	}
 }
 
@@ -155,29 +182,26 @@ func (m *maintainer) promote(ctx context.Context) {
 	for {
 		var promoted int
 		err := m.c.pool.QueryRow(ctx, m.c.sql.promoteDue, m.c.schema).Scan(&promoted)
-		if err != nil {
-			m.log(ctx, slog.LevelError, "promote due tasks", err)
-			return
-		}
-		if promoted < maintenanceBatch {
+		if err != nil || promoted < maintenanceBatch {
+			m.promotion.observe(ctx, err)
 			return
 		}
 	}
 }
 
+// leaseExpired is the error that a rescue records for the attempt it fails.
+const leaseExpired = "the worker lost its lease: it crashed, stopped, or lost the database"
+
 // rescue fails the attempts whose leases expired and updates their groups. It
 // skips tasks whose groups other transactions hold; a later cycle rescues
-// them. Each failed attempt counts in the activity once its batch commits.
+// them. Each failed attempt counts in the activity, and is logged, once its
+// batch commits.
 func (m *maintainer) rescue(ctx context.Context) {
 	var batch []swept
-	committed := func() {
-		for _, x := range batch {
-			m.w.tally.add(x.queue, 0, 1)
-		}
-	}
-	m.sweep(ctx, "rescue expired leases", committed, func(ctx context.Context, q querier) (int, error) {
+	committed := func() { m.rescued(ctx, batch) }
+	err := m.sweep(ctx, committed, func(ctx context.Context, q querier) (int, error) {
 		r, err := q.query(ctx, m.c.sql.rescue,
-			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds())
+			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds(), leaseExpired)
 		if err != nil {
 			return 0, err
 		}
@@ -195,21 +219,34 @@ func (m *maintainer) rescue(ctx context.Context) {
 			if s == StateDead {
 				how = leftDeadHead
 			}
-			if err := m.c.leaveGroup(ctx, q, x.queue, x.group, x.id, how); err != nil {
+			if err := m.c.leaveGroup(ctx, m.w.logger, q, x.queue, x.group, x.id, how); err != nil {
 				return 0, err
 			}
 		}
-		if len(rows) > 0 {
-			m.w.logger.LogAttrs(ctx, slog.LevelWarn, "rescued tasks whose workers lost their leases",
-				slog.Int(logKeyTasks, len(rows)))
-		}
 		return len(rows), nil
 	})
+	m.rescues.observe(ctx, err)
+}
+
+// rescued counts and logs the failed attempts of a committed rescue batch.
+func (m *maintainer) rescued(ctx context.Context, batch []swept) {
+	if len(batch) > 0 {
+		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "rescued tasks whose workers lost their leases",
+			slog.Int(logKeyTasks, len(batch)))
+	}
+	for _, x := range batch {
+		m.w.tally.add(x.queue, 0, 1)
+		if State(x.state) == StateDead {
+			m.w.logger.LogAttrs(ctx, slog.LevelError, "attempt failed; the task is dead",
+				slog.Int64(logKeyTaskID, x.id), slog.String(logKeyKind, x.kind),
+				slog.Int(logKeyAttempt, x.attempt), slog.String(logKeyError, leaseExpired))
+		}
+	}
 }
 
 // sweep runs fn in transactions until a run handles less than a full batch,
 // and calls committed after each transaction commits.
-func (m *maintainer) sweep(ctx context.Context, what string, committed func(), fn func(context.Context, querier) (int, error)) {
+func (m *maintainer) sweep(ctx context.Context, committed func(), fn func(context.Context, querier) (int, error)) error {
 	for {
 		var n int
 		err := m.c.inTx(ctx, func(q querier) error {
@@ -218,20 +255,20 @@ func (m *maintainer) sweep(ctx context.Context, what string, committed func(), f
 			return err
 		})
 		if err != nil {
-			m.log(ctx, slog.LevelError, what, err)
-			return
+			return err
 		}
 		committed()
 		if n < maintenanceBatch {
-			return
+			return nil
 		}
 	}
 }
 
 // swept is a task that a maintenance sweep changed.
 type swept struct {
-	id                  int64
-	queue, group, state string
+	id                        int64
+	queue, group, state, kind string
+	attempt                   int
 }
 
 // collectSwept reads the tasks that a sweep changed, in a fixed order of queue
@@ -242,7 +279,7 @@ func collectSwept(r rows) ([]swept, error) {
 	var out []swept
 	for r.Next() {
 		var x swept
-		if err := r.Scan(&x.id, &x.queue, &x.group, &x.state); err != nil {
+		if err := r.Scan(&x.id, &x.queue, &x.group, &x.state, &x.kind, &x.attempt); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
@@ -255,29 +292,42 @@ func collectSwept(r rows) ([]swept, error) {
 
 // retain applies retention: it keeps the next week's history partitions
 // ready, drops expired ones, and deletes old dead and canceled tasks, expired
-// dedupe keys, and workers that stopped without unregistering.
+// dedupe keys, old activity, and workers that stopped without unregistering.
 func (m *maintainer) retain(ctx context.Context) {
+	m.retention.observe(ctx, m.applyRetention(ctx))
+}
+
+// applyRetention does the work of retain, and returns the errors of the
+// steps that failed: one step's failure does not stop the others.
+func (m *maintainer) applyRetention(ctx context.Context) error {
+	var errs []error
 	if err := ensureHistoryPartitions(ctx, m.c.pool, m.c.schema, time.Now(), historyDaysAhead); err != nil {
 		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42501" { // insufficient_privilege
 			err = fmt.Errorf("%w; the role that runs workers must own the taskmill tables", err)
 		}
-		m.log(ctx, slog.LevelError, "prepare history partitions", err)
+		errs = append(errs, err)
 	}
 
 	var historySecs, deadSecs int64
 	if err := m.c.pool.QueryRow(ctx, m.c.sql.retention).Scan(&historySecs, &deadSecs); err != nil {
-		m.log(ctx, slog.LevelError, "read retention settings", err)
-		return
+		return errors.Join(append(errs, fmt.Errorf("read retention settings: %w", err))...)
 	}
 	if err := m.dropHistory(ctx, time.Duration(historySecs)*time.Second); err != nil {
-		m.log(ctx, slog.LevelError, "drop expired history", err)
+		errs = append(errs, fmt.Errorf("drop expired history: %w", err))
 	}
-	m.deleteInBatches(ctx, "delete old dead and canceled tasks", m.c.sql.deleteFinished, deadSecs)
-	m.deleteInBatches(ctx, "delete expired dedupe keys", m.c.sql.deleteDedupeKeys)
-	m.deleteInBatches(ctx, "delete old activity", m.c.sql.deleteActivity, activityRetention.Seconds())
+	if err := m.deleteInBatches(ctx, m.c.sql.deleteFinished, deadSecs); err != nil {
+		errs = append(errs, fmt.Errorf("delete old dead and canceled tasks: %w", err))
+	}
+	if err := m.deleteInBatches(ctx, m.c.sql.deleteDedupeKeys); err != nil {
+		errs = append(errs, fmt.Errorf("delete expired dedupe keys: %w", err))
+	}
+	if err := m.deleteInBatches(ctx, m.c.sql.deleteActivity, activityRetention.Seconds()); err != nil {
+		errs = append(errs, fmt.Errorf("delete old activity: %w", err))
+	}
 	if _, err := m.c.pool.Exec(ctx, m.c.sql.deleteWorkers, staleWorkerAge.Seconds()); err != nil {
-		m.log(ctx, slog.LevelWarn, "delete stale workers", err)
+		errs = append(errs, fmt.Errorf("delete stale workers: %w", err))
 	}
+	return errors.Join(errs...)
 }
 
 // dropHistory detaches and drops the history partitions whose whole day is
@@ -349,15 +399,11 @@ func (m *maintainer) dropPartition(ctx context.Context, name string, pending boo
 
 // deleteInBatches runs a delete statement that deletes up to one batch,
 // until it deletes less than a full batch.
-func (m *maintainer) deleteInBatches(ctx context.Context, what, sql string, args ...any) {
+func (m *maintainer) deleteInBatches(ctx context.Context, sql string, args ...any) error {
 	for {
 		tag, err := m.c.pool.Exec(ctx, sql, args...)
-		if err != nil {
-			m.log(ctx, slog.LevelError, what, err)
-			return
-		}
-		if tag.RowsAffected() < maintenanceBatch {
-			return
+		if err != nil || tag.RowsAffected() < maintenanceBatch {
+			return err
 		}
 	}
 }
@@ -373,18 +419,15 @@ func (m *maintainer) untilNextDue(ctx context.Context) time.Duration {
 	return min(max(d, minMaintainerSleep), m.w.timing.maintainer)
 }
 
-// log reports a failed maintenance step.
-func (m *maintainer) log(ctx context.Context, level slog.Level, step string, err error) {
-	if ctx.Err() != nil {
-		return // shutting down
-	}
-	m.w.logger.LogAttrs(ctx, level, "maintenance step failed", slog.String(logKeyStep, step), slog.Any(logKeyError, err))
-}
-
 // refreshStats counts each queue's tasks per state, up to the caps, finds
 // each count's oldest due task, and stores both for [Client.Queues] and the
 // counts for the current minute's activity.
 func (m *maintainer) refreshStats(ctx context.Context) {
+	m.stats.observe(ctx, m.countStats(ctx))
+}
+
+// countStats does the work of refreshStats.
+func (m *maintainer) countStats(ctx context.Context) error {
 	var queues, states []string
 	var counts []int64
 	var capped []bool
@@ -392,8 +435,7 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 	var dueTotal int64      // scheduled and retryable tasks counted, in all queues
 	r, err := m.c.pool.Query(ctx, m.c.sql.countStats, statsQueueCap, statsDueCap)
 	if err != nil {
-		m.log(ctx, slog.LevelError, "refresh statistics", err)
-		return
+		return fmt.Errorf("count tasks: %w", err)
 	}
 	for r.Next() {
 		var state, queue string
@@ -401,8 +443,7 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 		var due *time.Time
 		if err := r.Scan(&state, &queue, &n, &due); err != nil {
 			r.Close()
-			m.log(ctx, slog.LevelError, "refresh statistics", err)
-			return
+			return fmt.Errorf("count tasks: %w", err)
 		}
 		if s := State(state); s == StateScheduled || s == StateRetryable {
 			dueTotal += n
@@ -412,8 +453,7 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 	}
 	r.Close()
 	if err := r.Err(); err != nil {
-		m.log(ctx, slog.LevelError, "refresh statistics", err)
-		return
+		return fmt.Errorf("count tasks: %w", err)
 	}
 	// The scheduled and retryable counts share one cap: once it is hit,
 	// any queue may have more of them than counted, even none counted.
@@ -435,6 +475,7 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 		return err
 	})
 	if err != nil {
-		m.log(ctx, slog.LevelError, "store statistics", err)
+		return fmt.Errorf("store counts: %w", err)
 	}
+	return nil
 }

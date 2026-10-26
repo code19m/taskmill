@@ -56,6 +56,7 @@ type timing struct {
 	noHandlerWait   time.Duration // how long it waits for a handler before it becomes dead
 	reconnectMin    time.Duration // first wait before reconnecting the listener
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
+	failureReport   time.Duration // how often an operation that keeps failing logs, at most
 }
 
 var defaultTiming = timing{
@@ -71,6 +72,7 @@ var defaultTiming = timing{
 	noHandlerWait:   time.Hour,
 	reconnectMin:    time.Second,
 	reconnectMax:    30 * time.Second,
+	failureReport:   time.Minute,
 }
 
 // Causes of a canceled attempt context, which decide how its result is
@@ -111,6 +113,13 @@ type Worker struct {
 
 	completions   chan *tracked // successful attempts of Run, for the completer
 	completerDone chan struct{} // closed when the current Run's completer returns
+
+	// The failures of operations that the worker repeats, which it logs
+	// only now and then. Leases and results are renewed and recorded by
+	// RunTask too; Run's loops get theirs anew for each run, and each
+	// queue's fetches and the maintainer's work have their own.
+	leaseFailures, resultFailures                                    *failures
+	beatFailures, settingsFailures, activityFailures, listenFailures *failures
 }
 
 // WorkerConfig configures a [Worker]. The zero value is valid: a worker
@@ -228,6 +237,8 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 	if w.listen == nil {
 		w.listen = client.pool.Config().ConnConfig.Copy()
 	}
+	w.leaseFailures = newFailures(w, "renew leases")
+	w.resultFailures = newFailures(w, "record results")
 	var err error
 	if w.schedules, err = compileSchedules(c.Schedules); err != nil {
 		return nil, err
@@ -369,6 +380,10 @@ func (w *Worker) Run(ctx context.Context) error {
 	if _, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, names, w.host, w.version, kinds); err != nil {
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
+	w.beatFailures = newFailures(w, "record heartbeat")
+	w.settingsFailures = newFailures(w, "load queue settings")
+	w.activityFailures = newFailures(w, "record activity")
+	w.listenFailures = newFailures(w, "listen for notifications")
 	w.refreshQueueSettings(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)

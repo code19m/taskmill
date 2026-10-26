@@ -650,11 +650,10 @@ SET state = CASE
     finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
     lease_expires_at = NULL,
     errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', now(),
-                 'message', 'the worker lost its lease: it crashed, stopped, or lost the database',
-                 'code', 'lease_expired'))
+                 'message', $3::text, 'code', 'lease_expired'))
 FROM expired
 WHERE t.id = expired.id
-RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text`),
+RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`),
 
 		// pendingDetach lists the history partitions whose detach was
 		// interrupted, which must be finalized before they can be dropped.
