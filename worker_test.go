@@ -741,7 +741,7 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 func TestRunTwiceFails(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	w, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{NoMaintainer: true})
+	w, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{NoMaintainer: true, ListenConfig: testdb.ListenConfig(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
