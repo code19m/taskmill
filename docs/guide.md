@@ -662,7 +662,9 @@ admin application.
 ## Observability
 
 **Logs** go to the `*slog.Logger` in `ClientConfig.Logger`, which workers use
-too. By default they are discarded.
+too, and the web interface's to `ui.Config.Logger`. By default they are
+discarded. The [log catalog](#log-catalog) lists every message, its level,
+and what to do.
 
 **Middleware** wraps every attempt and sees its kind, queue, attempt,
 metadata, and timestamps. It is the place for metrics and tracing:
@@ -725,6 +727,100 @@ points, err := client.Activity(ctx, &taskmill.ActivityParams{
     Step:  5 * time.Minute, // one point per 5 minutes
 })
 ```
+
+### Log catalog
+
+**Levels.** Every message has one level, chosen by what it asks of you:
+
+- **Error**: a person must act. A task is dead, an operation has failed for
+  a minute, or a privilege is missing.
+- **Warn**: something failed or looks wrong, but taskmill goes on and
+  recovers on its own. Act if it lasts.
+- **Info**: lifecycle: a worker starts or stops, the maintainer changes,
+  migrations run, an operation recovers, or someone acts in the web
+  interface.
+- **Debug**: routine events of single tasks, such as a retry.
+
+**Attributes** use the same keys for the same things: `task_id`, `kind`,
+`queue`, `attempt`, `worker_id` (on every line about a worker's own work),
+`error`, and `duration`. No line shows a task's payload, its metadata, or a connection
+string. A handler's error is logged as the handler returned it, so keep
+secrets out of errors.
+
+**Repeated failures.** A worker repeats some operations all the time, such
+as fetching tasks. While the database is down, they fail at every try, but
+each one logs only three kinds of line about an incident:
+`operation failed` (Warn) when it starts, `operation still failing` (Error)
+at most once a minute while it lasts, and `operation recovered` (Info) when
+the operation works again. An incident lasts while failures come less than
+a minute apart, even with successes between them: an operation that fails
+at every other try escalates too, and logs no more. Without a success
+between them, as for work that runs only now and then, failures may come up
+to two minutes apart. A failure soon after a
+line waits for the next one. `failures` counts the incident's failures, and
+`duration` runs from its first failure to its last. The `operation`
+attribute names it:
+
+| Operation | What it does | How often |
+| --- | --- | --- |
+| `fetch tasks` | Leases tasks of the queue in `queue` | Every poll |
+| `renew leases` | Renews the leases of running tasks | Every third of the lease |
+| `record heartbeat` | Shows that the worker is alive | Every third of the lease |
+| `record results` | Records attempts that ended | After each attempt |
+| `load queue settings` | Reads pauses and concurrency limits | Every 10 seconds |
+| `record activity` | Writes the counts for the charts | Every 10 seconds |
+| `listen for notifications` | Keeps the notification connection; the worker polls meanwhile | Backoff, 1 to 30 seconds |
+| `elect maintainer` | Takes or keeps the maintainer role | Every 1 to 2 seconds |
+| `promote due tasks` | Makes scheduled and retryable tasks available | As they come due |
+| `rescue expired leases` | Fails attempts whose workers lost their leases | Every second |
+| `run schedules` | Enqueues due schedule runs | Every second |
+| `refresh statistics` | Counts tasks for `Client.Queues` | Every 10 seconds |
+| `apply retention` | Drops expired history and old rows | Every minute |
+| `delete removed schedules` | Deletes schedules no worker defines | Every minute |
+
+The last six run only on the maintainer.
+
+**Messages.**
+
+| Message | Level | What it means, and what to do |
+| --- | --- | --- |
+| `operation failed` | Warn | An operation above started failing; `error` says why. The worker tries again by itself. |
+| `operation still failing` | Error | It has failed for a minute or more. Fix what `error` names, often the database or a privilege. |
+| `operation recovered` | Info | It works again. |
+| `worker started` | Info | `Run` started, serving `queues`. |
+| `worker stopping; waiting for running tasks` | Info | `Run`'s context ended; it waits up to `timeout` for `tasks`. |
+| `worker stopped` | Info | `Run` returned; `released` tasks went back to their queues. |
+| `unregister worker failed` | Warn | The stopped worker stays listed until the maintainer deletes it, 5 minutes after its last heartbeat. |
+| `the worker does not serve the default queue of these registered kinds` | Warn | Tasks of `kinds` enqueued with their defaults wait for another worker. Add the queues, or run a worker that serves them. |
+| `the pool has fewer connections than the worker's concurrency plus 5; ...` | Warn | Handlers can take every connection and starve heartbeats. Raise `MaxConns`; see [Connections](#running-in-production). |
+| `elected maintainer` | Info | This worker now does the installation-wide work. |
+| `no longer maintainer` | Info | Another worker took over, or the election failed. The maintainer's work stops here; its incidents end without `operation recovered`. |
+| `resign maintainer failed; another worker leads when the lease expires` | Warn | The next maintainer starts within 10 seconds. |
+| `rescued tasks whose workers lost their leases` | Warn | `tasks` attempts failed because their workers stopped renewing them: a worker crashed or could not reach the database. The tasks retry; those that used all their attempts die. |
+| `dropped expired history` | Info | Retention dropped the history `partition`. |
+| `attempt failed; retrying` | Debug | The handler failed; the task runs again in `retry_in`. |
+| `attempt failed; the task is dead` | Error | The task failed for good, also when its last attempt was rescued. Fix the cause, then retry or delete it. |
+| `no handler for task kind; snoozing` | Warn | No handler of this worker knows `kind`. The task waits up to an hour for a worker that does; see [Deploys](#running-in-production). Later snoozes of the task log at Debug. |
+| `attempt lost its lease; canceling it` | Warn | The worker could not renew the lease in time, so the task may already run elsewhere. Check the database and the pool size. |
+| `result discarded: the attempt lost its lease` | Debug | The attempt ended after it lost its lease; its result does not count. |
+| `handler ignored shutdown; releasing its task` | Warn | The handler did not return after its context was canceled. The task runs again; make the handler honor its context. |
+| `handler failed after completing its task; it stays completed` | Warn | The handler returned an error after `CompleteTx` committed. Fix the handler. |
+| `record attempt failed; the task is rescued when its lease expires` | Warn | The attempt's result could not be written in time; the task is retried later. |
+| `complete tasks failed; they are rescued when their leases expire` | Warn | `tasks` successful attempts could not be recorded; they run again. |
+| `task history has no partition for today; completed tasks skip history` | Error | The role that runs workers must own the taskmill tables; see [Database privileges](#running-in-production). |
+| `notifications disabled; polling only` | Error | `ListenConfig` was not created with `pgx.ParseConfig`. Fix it; until then the worker polls. |
+| `notification failed` | Warn | A wake-up for `queue` was not sent; its workers find the tasks at their next poll. |
+| `fifo group missing` | Error | A task's FIFO group has no row, which should not happen. Please report it. |
+| `applied migration` | Info | `Migrate` applied migration `version` (`name`) in `duration`. |
+| `prepare history partitions failed` | Warn | `Migrate` could not create history partitions; the maintainer tries again. |
+| `web interface action` | Info | Someone did `action` on `target` in the web interface. |
+| `web interface request failed` | Warn | A page or action failed, often because the database is out of reach. |
+| `web interface request timed out` | Warn | The database did not answer within 10 seconds. |
+| `read activity failed`, `read filter choices failed`, `search groups failed` | Warn | A page shows less: its charts, its filter choices, or its group search. |
+| `render page failed` | Error | A page template failed. Please report it. |
+| `taskmill-ui listening` | Info | The command serves the web interface on `addr`. |
+| `the dashboard has no password: ...` | Warn | Set `TASKMILL_UI_PASSWORD`, unless something in front of it authenticates. |
+| `taskmill-ui stopped` | Error | The command could not start or serve; `error` says why. |
 
 ## Testing your code
 
@@ -879,8 +975,8 @@ rename kinds.
 - Dead tasks: the `StateDead` counts in `Client.Queues`.
 - No maintainer: no worker in `Client.Workers` has `Maintainer` set.
   Schedules and retries then stop.
-- Error logs from workers, such as a failed maintenance step or a missing
-  history partition, and warnings about rescued tasks.
+- Error logs: each one needs a person, as the [log catalog](#log-catalog)
+  says. Also warnings about rescued tasks.
 - The snapshot ages above.
 
 **Retrying after an incident.** There is no bulk retry yet. Page through the
