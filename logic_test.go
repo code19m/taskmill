@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +148,7 @@ func TestWorkerServesTheDefaultQueuesOfItsKinds(t *testing.T) {
 func TestWhileLeased(t *testing.T) {
 	t.Parallel()
 	w := &Worker{cfg: WorkerConfig{LeaseDuration: 400 * time.Millisecond}, logger: slog.New(slog.DiscardHandler)}
+	w.resultFailures = newFailures(w, "record results")
 	ts := []*tracked{{lastBeat: time.Now()}}
 
 	calls := 0
@@ -175,3 +178,127 @@ func TestWhileLeased(t *testing.T) {
 			err, calls, time.Since(start))
 	}
 }
+
+func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
+	t.Parallel()
+	every := 100 * time.Millisecond
+	f, l := newFailureLines(every)
+	ctx, boom := t.Context(), errors.New("timeout")
+
+	f.observe(ctx, boom)
+	f.observe(ctx, nil)
+	// A failure soon after the recovery belongs to the same incident, and
+	// waits for the next line.
+	f.observe(ctx, boom)
+	f.observe(ctx, nil)
+	// Much later, a failure reports that incident's recovery, then starts
+	// another.
+	time.Sleep(2 * every)
+	f.observe(ctx, boom)
+
+	want := []string{
+		"WARN operation failed", "INFO operation recovered failures=1",
+		"INFO operation recovered failures=2", "WARN operation failed",
+	}
+	if !slices.Equal(l.lines, want) {
+		t.Errorf("got lines %q, want %q", l.lines, want)
+	}
+}
+
+func TestFailuresOfWorkThatRunsNowAndThen(t *testing.T) {
+	t.Parallel()
+	every := 200 * time.Millisecond
+	for _, c := range []struct {
+		pause time.Duration
+		want  []string
+	}{
+		// A job that fails at every run, a little over an interval apart,
+		// is one incident that escalates.
+		{3 * every / 2, []string{"WARN operation failed", "ERROR operation still failing failures=2"}},
+		// Failures two intervals apart, with no try between, are incidents
+		// of their own.
+		{3 * every, []string{"WARN operation failed", "WARN operation failed"}},
+	} {
+		f, l := newFailureLines(every)
+		f.observe(t.Context(), errors.New("timeout"))
+		time.Sleep(c.pause)
+		f.observe(t.Context(), errors.New("timeout"))
+		if !slices.Equal(l.lines, c.want) {
+			t.Errorf("failures %s apart: got lines %q, want %q", c.pause, l.lines, c.want)
+		}
+	}
+}
+
+func TestFailuresOfAFlappingOperationEscalateAndStayRare(t *testing.T) {
+	t.Parallel()
+	every := 50 * time.Millisecond
+	f, l := newFailureLines(every)
+	ctx, boom := t.Context(), errors.New("timeout")
+
+	// The operation fails at every other try for ten report intervals, then
+	// works again.
+	start, tries := time.Now(), 0
+	for ; time.Since(start) < 10*every; tries++ {
+		f.observe(ctx, boom)
+		f.observe(ctx, nil)
+		time.Sleep(time.Millisecond)
+	}
+	elapsed := time.Since(start)
+	time.Sleep(every)
+	f.observe(ctx, nil)
+
+	if limit := 2 * (1 + int(elapsed/every)); len(l.lines) > limit {
+		t.Errorf("%d tries logged %d lines, want at most %d: %q", tries, len(l.lines), limit, l.lines)
+	}
+	// It is one incident: a warning, errors as it lasts, and a last line that
+	// counts every failure.
+	escalated := false
+	for i, line := range l.lines {
+		switch {
+		case i == 0 && line != "WARN operation failed":
+			t.Errorf("the first line is %q, want a warning", line)
+		case i > 0 && strings.HasPrefix(line, "WARN"):
+			t.Errorf("line %d warns again: %q", i, line)
+		case strings.HasPrefix(line, "ERROR operation still failing"):
+			escalated = true
+		}
+	}
+	if !escalated {
+		t.Errorf("failures for %s logged no error: %q", elapsed, l.lines)
+	}
+	if last, want := l.lines[len(l.lines)-1], "INFO operation recovered failures="+strconv.Itoa(tries); last != want {
+		t.Errorf("the last line is %q, want %q", last, want)
+	}
+}
+
+// newFailureLines returns the failures of an operation with a report
+// interval of every, and the lines it logs.
+func newFailureLines(every time.Duration) (*failures, *lineLog) {
+	l := &lineLog{}
+	w := &Worker{logger: slog.New(l), timing: timing{failureReport: every}}
+	return newFailures(w, "fetch tasks"), l
+}
+
+// lineLog is a slog handler that keeps each line's level, message, and
+// failure count, for tests that log from one goroutine.
+type lineLog struct {
+	lines []string
+}
+
+func (*lineLog) Enabled(context.Context, slog.Level) bool { return true }
+
+func (l *lineLog) Handle(_ context.Context, r slog.Record) error {
+	line := r.Level.String() + " " + r.Message
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == logKeyFailures {
+			line += " failures=" + a.Value.String()
+		}
+		return true
+	})
+	l.lines = append(l.lines, line)
+	return nil
+}
+
+func (l *lineLog) WithAttrs([]slog.Attr) slog.Handler { return l }
+
+func (l *lineLog) WithGroup(string) slog.Handler { return l }

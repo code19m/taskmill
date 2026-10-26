@@ -733,7 +733,7 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	if ctx.Err() != nil {
 		return
 	}
-	s.logger.LogAttrs(ctx, slog.LevelError, "web interface request failed",
+	s.logger.LogAttrs(ctx, slog.LevelWarn, "web interface request failed",
 		slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
 	s.render(w, r, http.StatusInternalServerError, "error.html", page{Title: "Something went wrong", Data: problem{
 		"The request failed; the server log has the details.", "/", "Back to the overview",
