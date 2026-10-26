@@ -14,7 +14,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Every job runs a Makefile target, so `make check` reproduces CI locally.
+# Every job runs a Makefile target, so `make check` reproduces CI locally,
+# except the GoReleaser job (`make release-check`) and the API job (`make
+# api`, which needs a committed tree). The targets check every module of the
+# repository: the core and otel/, and internal/compat where it applies.
 jobs:
   lint:
     name: Lint
@@ -27,9 +30,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache-dependency-path: |
+          cache-dependency-path: | # one cache per job, so that each job can save its own
             go.sum
+            otel/go.sum
+            internal/compat/go.sum
             Makefile
+            .golangci.yml
       - run: make tidy-check lint
 
   test:
@@ -57,10 +63,61 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
           check-latest: true
-          cache-dependency-path: go.sum
+          cache-dependency-path: |
+            go.sum
+            otel/go.sum
       # The same database as `make db` locally, with the same settings.
       - run: make db TEST_POSTGRES=postgres:${{ matrix.postgres }}-alpine
       - run: make test
+      - name: Write the coverage to the job summary
+        if: matrix.go == 'stable'
+        run: make -s cover-report >> "$GITHUB_STEP_SUMMARY"
+
+  # gorelease compares the API with the latest release. Before v1.0.0 it only
+  # reports incompatible changes; from v1.0.0 on they fail the check. See
+  # CONTRIBUTING.md#checks.
+  api:
+    name: API compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            Makefile
+      # The report goes outside the checkout: gorelease stops on any file
+      # that git does not know.
+      - name: Compare the API with the latest release
+        run: |
+          status=0
+          make -s api > "$RUNNER_TEMP/api.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/api.txt"
+          { echo '### API compared with the latest release'; echo '```text'; cat "$RUNNER_TEMP/api.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  # The latest release's client and worker on a schema that the current code
+  # migrated: old and new versions run side by side during a rolling deploy.
+  compat:
+    name: Rolling deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            go.sum
+            internal/compat/go.sum
+      - run: make db
+      - run: make compat
 
   vuln:
     name: Vulnerabilities
@@ -76,15 +133,58 @@ jobs:
           check-latest: true
           cache-dependency-path: |
             go.sum
+            otel/go.sum
             Makefile
       - run: make vuln
+
+  # otel/go.mod builds the module against the core next to it. This job
+  # builds and tests it against the core version that it requires instead, as
+  # its users do. Until that version is released, it only says so.
+  otel-release:
+    name: Otel on its required core
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: otel/go.sum
+      - run: make db
+      - run: make otel-release-check
+
+  # Apart from lint, since it builds GoReleaser: a broken config fails here,
+  # not at a release.
+  release-check:
+    name: Release config
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: |
+            Makefile
+            .goreleaser.yaml
+      # The notes recipe runs under CI's make on every pull request, not first
+      # at a release.
+      - name: Check the release notes recipe
+        env:
+          TAG: v0.1.0
+        run: test "$(make -s release-notes | head -n 1)" = "Initial release."
+      - run: make release-check
 
   # The one check that branch protection requires, so that changing the
   # matrix needs no change to the repository's settings.
   ci-ok:
     name: CI OK
     if: always()
-    needs: [lint, test, vuln]
+    needs: [lint, test, vuln, api, compat, otel-release, release-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

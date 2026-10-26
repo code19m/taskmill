@@ -45,9 +45,23 @@ type QueueInfo struct {
 	// Counting stops at 10,000 tasks per state, and at 100,000 scheduled
 	// and retryable tasks across all queues; Capped reports that a count
 	// stopped early and is a lower bound.
-	Counts      map[State]int64
-	Capped      bool
-	RefreshedAt time.Time // zero until the maintainer first counts the queue
+	Counts map[State]int64
+	Capped bool
+
+	// RefreshedAt is when the maintainer last counted the queue: zero until
+	// it first does. It stops moving when no maintainer runs.
+	RefreshedAt time.Time
+
+	// Lag is how long the queue's oldest due task has waited since its run
+	// time, by the database's clock at the call: an available task, or a
+	// scheduled or retryable one whose run time has passed. It grows when
+	// workers fall behind or stop, the queue is paused, or due tasks are not
+	// promoted, and keeps growing when no maintainer runs. Tasks pending
+	// behind their FIFO group wait by design and do not count. Zero when no
+	// task was due at the last count. The maintainer finds the oldest task
+	// when it counts, so for up to one refresh, about 10 seconds, Lag may
+	// read high: a task that finished since still counts.
+	Lag time.Duration
 }
 
 // Settings are the installation-wide settings, stored in the database and
@@ -188,7 +202,8 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 		var n int64
 		var capped bool
 		var at time.Time
-		if err := r.Scan(&name, &state, &n, &capped, &at); err != nil {
+		var lag int64
+		if err := r.Scan(&name, &state, &n, &capped, &at, &lag); err != nil {
 			return nil, fmt.Errorf("taskmill: list queues: %w", err)
 		}
 		if i, ok := index[name]; ok {
@@ -196,6 +211,7 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 			q.Counts[State(state)] = n
 			q.Capped = q.Capped || capped
 			q.RefreshedAt = at
+			q.Lag = max(q.Lag, time.Duration(lag)*time.Microsecond)
 		}
 	}
 	if err := r.Err(); err != nil {
@@ -271,15 +287,15 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	if err != nil {
 		return nil, err
 	}
-	queues, err := nonEmpty("queue name", params.Queues)
+	queues, err := checkFilter("queue name", params.Queues, maxNameLength)
 	if err != nil {
 		return nil, err
 	}
-	kinds, err := nonEmpty("kind", params.Kinds)
+	kinds, err := checkFilter("kind", params.Kinds, maxNameLength)
 	if err != nil {
 		return nil, err
 	}
-	groups, err := nonEmpty("group key", params.GroupKeys)
+	groups, err := checkFilter("group key", params.GroupKeys, maxGroupKeyLength)
 	if err != nil {
 		return nil, err
 	}
@@ -320,13 +336,13 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	return &out, nil
 }
 
-// nonEmpty checks that a filter's values are not empty, and returns them as a
-// slice that is never nil: NULL would match nothing.
-func nonEmpty(what string, values []string) ([]string, error) {
+// checkFilter checks that a filter's values are valid names, and returns them
+// as a slice that is never nil: NULL would match nothing.
+func checkFilter(what string, values []string, maxLen int) ([]string, error) {
 	out := make([]string, 0, len(values))
 	for _, v := range values {
-		if v == "" {
-			return nil, invalidArgument("%s must not be empty", what)
+		if err := checkName(what, v, maxLen); err != nil {
+			return nil, err
 		}
 		out = append(out, v)
 	}
@@ -370,9 +386,14 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) ([]GroupInfo, 
 	case p.Limit < 0 || p.Limit > maxListLimit:
 		return nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
 	}
-	queues, err := nonEmpty("queue name", p.Queues)
+	queues, err := checkFilter("queue name", p.Queues, maxNameLength)
 	if err != nil {
 		return nil, err
+	}
+	if p.Search != "" {
+		if err := checkName("search", p.Search, maxGroupKeyLength); err != nil {
+			return nil, err
+		}
 	}
 	var out []GroupInfo
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {

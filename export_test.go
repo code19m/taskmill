@@ -16,6 +16,7 @@ type Timing struct {
 	ShutdownGrace time.Duration
 	Reconnect     time.Duration
 	NoHandlerWait time.Duration
+	FailureReport time.Duration
 }
 
 // SetTiming applies t to w before it runs.
@@ -33,6 +34,7 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.reconnectMin, t.Reconnect)
 	set(&w.timing.reconnectMax, t.Reconnect)
 	set(&w.timing.noHandlerWait, t.NoHandlerWait)
+	set(&w.timing.failureReport, t.FailureReport)
 }
 
 // RunSchedules runs one pass over w's schedules, as its maintainer does each
@@ -89,4 +91,11 @@ func explain(ctx context.Context, c *Client, settings, sql string, args ...any) 
 // RunRetention applies retention once, as w's maintainer does every minute.
 func RunRetention(ctx context.Context, w *Worker) {
 	newMaintainer(w).retain(ctx)
+}
+
+// StoredSize returns at most the size of JSON text as PostgreSQL writes it
+// out of jsonb, as the payload limit counts it.
+func StoredSize(text []byte) int {
+	size, _ := storedSize(text)
+	return size
 }

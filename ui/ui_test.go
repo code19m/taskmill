@@ -28,16 +28,16 @@ type greet struct {
 
 func (greet) Kind() string { return "greet" }
 
-func setup(t *testing.T) *taskmill.Client {
-	t.Helper()
-	pool := testdb.Pool(t)
-	schema := testdb.Schema(t, pool)
-	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
-		t.Fatal(err)
+func setup(tb testing.TB) *taskmill.Client {
+	tb.Helper()
+	pool := testdb.Pool(tb)
+	schema := testdb.Schema(tb, pool)
+	if err := taskmill.Migrate(tb.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		tb.Fatal(err)
 	}
-	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema})
+	client, err := taskmill.NewClient(tb.Context(), pool, &taskmill.ClientConfig{Schema: schema})
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
 	return client
 }

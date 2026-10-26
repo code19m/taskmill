@@ -1574,8 +1574,7 @@ func TestCompletionWithoutHistoryPartition(t *testing.T) {
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 0 {
 		t.Fatalf("%d tasks left", n)
 	}
-	if logs.count("task history has no partition for today, so completed tasks are not kept in history; "+
-		"the role that runs workers must own the taskmill tables to create the daily partitions") != 1 {
+	if logs.count("task history has no partition for today; completed tasks skip history") != 1 {
 		t.Fatal("the missing partition was not logged once")
 	}
 }

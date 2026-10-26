@@ -428,6 +428,10 @@ func (s *server) readChoices(r *http.Request) (c choices, complete bool) {
 // the group filter when it has more groups than it lists.
 func (s *server) groupChoicesJSON(w http.ResponseWriter, r *http.Request) {
 	found, err := s.client.Groups(r.Context(), &taskmill.GroupParams{Search: r.URL.Query().Get("search"), Limit: groupChoices})
+	if errors.Is(err, taskmill.ErrInvalidArgument) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		if r.Context().Err() == nil {
 			s.logger.LogAttrs(r.Context(), slog.LevelWarn, "search groups failed", slog.Any(logKeyError, err))
@@ -733,7 +737,7 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	if ctx.Err() != nil {
 		return
 	}
-	s.logger.LogAttrs(ctx, slog.LevelError, "web interface request failed",
+	s.logger.LogAttrs(ctx, slog.LevelWarn, "web interface request failed",
 		slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
 	s.render(w, r, http.StatusInternalServerError, "error.html", page{Title: "Something went wrong", Data: problem{
 		"The request failed; the server log has the details.", "/", "Back to the overview",

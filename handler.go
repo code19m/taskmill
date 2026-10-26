@@ -269,3 +269,7 @@ type failure struct {
 
 func (f *failure) Error() string { return f.err.Error() }
 func (f *failure) Unwrap() error { return f.err }
+
+// ErrorType returns the failure's code, which OpenTelemetry's
+// semconv.ErrorType reports as the error.type of the attempt.
+func (f *failure) ErrorType() string { return string(f.code) }

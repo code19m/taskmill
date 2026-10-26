@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -60,6 +61,32 @@ func TestDiscardCompletedSkipsHistory(t *testing.T) {
 	}
 }
 
+func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	for _, s := range []string{"a\x00b", "\xff", strings.Repeat("q", 257)} {
+		for name, call := range map[string]func() error{
+			"List queue":    func() error { _, err := e.client.List(ctx, &taskmill.ListParams{Queues: []string{s}}); return err },
+			"List kind":     func() error { _, err := e.client.List(ctx, &taskmill.ListParams{Kinds: []string{s}}); return err },
+			"List group":    func() error { _, err := e.client.List(ctx, &taskmill.ListParams{GroupKeys: []string{s}}); return err },
+			"Groups queue":  func() error { _, err := e.client.Groups(ctx, &taskmill.GroupParams{Queues: []string{s}}); return err },
+			"Groups search": func() error { _, err := e.client.Groups(ctx, &taskmill.GroupParams{Search: s}); return err },
+			"Activity queue": func() error {
+				_, err := e.client.Activity(ctx, &taskmill.ActivityParams{Queues: []string{s}})
+				return err
+			},
+			"PauseSchedule":  func() error { return e.client.PauseSchedule(ctx, s) },
+			"ResumeSchedule": func() error { return e.client.ResumeSchedule(ctx, s) },
+			"RunSchedule":    func() error { return e.client.RunSchedule(ctx, s) },
+		} {
+			if err := call(); !errors.Is(err, taskmill.ErrInvalidArgument) {
+				t.Errorf("%s(%q): got %v, want ErrInvalidArgument", name, s, err)
+			}
+		}
+	}
+}
+
 func TestSettings(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -110,6 +137,10 @@ func TestQueuesAndWorkers(t *testing.T) {
 	if byName["mail"].Workers != 1 || byName["limited"].Settings.MaxRunning != 2 {
 		t.Fatalf("got %+v", byName)
 	}
+	// Queues without tasks are counted too, so they show when.
+	if byName["limited"].RefreshedAt.IsZero() || byName["mail"].RefreshedAt.IsZero() {
+		t.Fatalf("empty queues were not counted: %+v", byName)
+	}
 
 	waitFor(t, "the only worker to be elected maintainer", func() bool {
 		workers, err := e.client.Workers(t.Context())
@@ -121,6 +152,63 @@ func TestQueuesAndWorkers(t *testing.T) {
 			t.Fatalf("got workers %+v", workers)
 		}
 		return workers[0].Maintainer
+	})
+}
+
+func TestQueuesMeasureLag(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// The oldest available task has the lowest priority: lag spans every
+	// priority.
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{
+		Queue: "behind", Priority: taskmill.PriorityLow, RunAt: time.Now().Add(-time.Hour),
+	})
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{
+		Queue: "behind", Priority: taskmill.PriorityCritical, RunAt: time.Now().Add(-time.Minute),
+	})
+	// A retry that is overdue counts, and so does its wait before it is
+	// promoted.
+	retry := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "retrying"})
+	e.exec(t, "UPDATE {s}.tasks SET state = 'retryable', run_at = now() - interval '30 minutes' WHERE id = $1", retry)
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "idle", RunAt: time.Now().Add(time.Hour)})
+	stop := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: noopHandlers(),
+		Queues:   map[string]taskmill.QueueOptions{"mail": {}},
+	})
+
+	lag := map[string]time.Duration{}
+	waitFor(t, "statistics to count every queue", func() bool {
+		queues, err := e.client.Queues(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range queues {
+			lag[q.Name] = q.Lag
+		}
+		return len(lag) >= 4 && lag["behind"] > 0 && lag["retrying"] > 0
+	})
+	for queue, want := range map[string]time.Duration{"behind": time.Hour, "retrying": 30 * time.Minute} {
+		if lag[queue] < want || lag[queue] > want+time.Minute {
+			t.Errorf("queue %s: got lag %s, want about %s", queue, lag[queue], want)
+		}
+	}
+	if lag["idle"] != 0 {
+		t.Errorf("got lag %s for a queue without due tasks", lag["idle"])
+	}
+
+	// Without a maintainer, the lag keeps growing, by the database's clock.
+	stop()
+	waitFor(t, "the lag to grow without a maintainer", func() bool {
+		queues, err := e.client.Queues(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range queues {
+			if q.Name == "behind" {
+				return q.Lag > lag["behind"]+500*time.Millisecond
+			}
+		}
+		return false
 	})
 }
 

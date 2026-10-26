@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"time"
 
@@ -135,25 +134,30 @@ type scheduleState struct {
 
 // runSchedules enqueues the due runs of the worker's schedules.
 func (m *maintainer) runSchedules(ctx context.Context) {
-	if len(m.w.schedules) == 0 {
-		return
+	if len(m.w.schedules) > 0 {
+		m.schedules.observe(ctx, m.enqueueDue(ctx))
 	}
+}
+
+// enqueueDue does the work of runSchedules, and returns the errors of the
+// schedules that failed: one schedule's failure does not stop the others.
+func (m *maintainer) enqueueDue(ctx context.Context) error {
 	var now time.Time
 	if err := m.c.pool.QueryRow(ctx, "SELECT now()").Scan(&now); err != nil {
-		m.log(ctx, slog.LevelError, "read database time", err)
-		return
+		return fmt.Errorf("read database time: %w", err)
 	}
 	states, err := m.loadSchedules(ctx)
 	if err != nil {
-		m.log(ctx, slog.LevelError, "load schedules", err)
-		return
+		return fmt.Errorf("load schedules: %w", err)
 	}
+	var errs []error
 	for i := range m.w.schedules {
 		s := &m.w.schedules[i]
 		if err := m.runSchedule(ctx, s, states[s.Name], now); err != nil {
-			m.log(ctx, slog.LevelError, "run schedule "+s.Name, err)
+			errs = append(errs, fmt.Errorf("schedule %s: %w", s.Name, err))
 		}
 	}
+	return errors.Join(errs...)
 }
 
 func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleState, error) {
@@ -239,9 +243,8 @@ func (m *maintainer) pruneSchedules(ctx context.Context) {
 	for i, s := range m.w.schedules {
 		names[i] = s.Name
 	}
-	if _, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, names); err != nil {
-		m.log(ctx, slog.LevelError, "delete removed schedules", err)
-	}
+	_, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, names)
+	m.pruning.observe(ctx, err)
 }
 
 func jsonEqual(a, b []byte) bool {
@@ -295,6 +298,9 @@ func (c *Client) ResumeSchedule(ctx context.Context, name string) error {
 // run stays as it was. It returns [ErrNotFound] for an unknown schedule, and
 // [ErrInvalidState] for a paused one.
 func (c *Client) RunSchedule(ctx context.Context, name string) error {
+	if err := checkName("schedule name", name, maxNameLength); err != nil {
+		return err
+	}
 	var paused bool
 	if err := c.pool.QueryRow(ctx, c.sql.runSchedule, name).Scan(&paused); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -309,6 +315,9 @@ func (c *Client) RunSchedule(ctx context.Context, name string) error {
 }
 
 func (c *Client) setSchedulePaused(ctx context.Context, name string, paused bool) error {
+	if err := checkName("schedule name", name, maxNameLength); err != nil {
+		return err
+	}
 	verb := "resume"
 	if paused {
 		verb = "pause"

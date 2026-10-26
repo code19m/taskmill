@@ -21,12 +21,12 @@ const defaultSchema = "taskmill"
 // Client enqueues and manages tasks. It is safe for concurrent use, and an
 // application typically creates one per installation and shares it.
 type Client struct {
-	pool            *pgxpool.Pool
-	schema          string
-	sql             *statements
-	logger          *slog.Logger
-	notifier        *notifier
-	contextMetadata func(context.Context) map[string]string
+	pool              *pgxpool.Pool
+	schema            string
+	sql               *statements
+	logger            *slog.Logger
+	notifier          *notifier
+	enqueueMiddleware []EnqueueMiddleware
 
 	// historyGapUntil is when completions keep history again, in Unix
 	// nanoseconds, after one found no history partition.
@@ -43,9 +43,17 @@ type ClientConfig struct {
 	// Default: logs are discarded.
 	Logger *slog.Logger
 
+	// EnqueueMiddleware wraps every enqueue, in order: the first is the
+	// outermost. It can add metadata to tasks, for example to carry a trace
+	// context from the producer to the handler.
+	EnqueueMiddleware []EnqueueMiddleware
+
 	// ContextMetadata, if set, is called on every enqueue and its result is
-	// added to the task's metadata, for example to carry a trace context from
-	// the producer to the handler. Metadata set in [EnqueueOptions] wins.
+	// added to the tasks' metadata. Metadata set in [EnqueueOptions] wins. It
+	// runs as the outermost enqueue middleware.
+	//
+	// Deprecated: use EnqueueMiddleware, which can do the same. ContextMetadata
+	// will be removed in v0.3.0.
 	ContextMetadata func(ctx context.Context) map[string]string
 }
 
@@ -73,12 +81,15 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 	}
 
 	c := &Client{
-		pool:            pool,
-		schema:          schema,
-		sql:             newStatements(schema),
-		logger:          logger,
-		notifier:        newNotifier(pool, schema, logger),
-		contextMetadata: cfg.ContextMetadata,
+		pool:              pool,
+		schema:            schema,
+		sql:               newStatements(schema),
+		logger:            logger,
+		notifier:          newNotifier(pool, schema, logger),
+		enqueueMiddleware: slices.Clone(cfg.EnqueueMiddleware),
+	}
+	if cfg.ContextMetadata != nil {
+		c.enqueueMiddleware = slices.Insert(c.enqueueMiddleware, 0, contextMetadata(cfg.ContextMetadata))
 	}
 	if err := c.checkSchema(ctx); err != nil {
 		return nil, err
@@ -188,7 +199,7 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64) error {
 	if s == StatePending {
 		how = leftWaiting
 	}
-	if err := c.leaveGroup(ctx, q, queue, group, id, how); err != nil {
+	if err := c.leaveGroup(ctx, c.logger, q, queue, group, id, how); err != nil {
 		return fail(err)
 	}
 	return nil
@@ -225,7 +236,7 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
 	}
 	if !pending {
-		if err := c.notifyAvailable(ctx, q, queue); err != nil {
+		if err := c.notifyAvailable(ctx, c.logger, q, queue); err != nil {
 			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
 		}
 	}
@@ -307,7 +318,7 @@ func (c *Client) delete(ctx context.Context, q querier, id int64) error {
 	if s == StatePending {
 		how = leftWaiting
 	}
-	if err := c.leaveGroup(ctx, q, queue, group, id, how); err != nil {
+	if err := c.leaveGroup(ctx, c.logger, q, queue, group, id, how); err != nil {
 		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
 	}
 	return nil
@@ -337,8 +348,8 @@ const (
 
 // leaveGroup updates a FIFO group after one of its counted tasks finished or
 // was removed. Callers run it in the same transaction as the change to the
-// task.
-func (c *Client) leaveGroup(ctx context.Context, q querier, queue, group string, id int64, how leaving) error {
+// task, and pass their logger: a worker's names it.
+func (c *Client) leaveGroup(ctx context.Context, logger *slog.Logger, q querier, queue, group string, id int64, how leaving) error {
 	if how == leftDeadHead {
 		halted, err := q.exec(ctx, c.sql.haltGroup, queue, group, id)
 		if err != nil || halted == 1 {
@@ -354,7 +365,7 @@ func (c *Client) leaveGroup(ctx context.Context, q querier, queue, group string,
 	}
 	switch {
 	case !found:
-		c.logger.LogAttrs(ctx, slog.LevelWarn, "fifo group missing",
+		logger.LogAttrs(ctx, slog.LevelError, "fifo group missing",
 			slog.String(logKeyQueue, queue), slog.String(logKeyGroup, group), slog.Int64(logKeyTaskID, id))
 		return nil
 	case remaining == 0:
@@ -443,14 +454,14 @@ func (c *Client) promoteGroups(ctx context.Context, q querier, s groupSet) error
 // notifyAvailable announces new available tasks in queue, inside q's
 // transaction, when the throttle allows it. In a transaction, a failed
 // notification aborts the transaction, so it is returned; outside one, it
-// is only logged.
-func (c *Client) notifyAvailable(ctx context.Context, q querier, queue string) error {
+// is only logged, to logger.
+func (c *Client) notifyAvailable(ctx context.Context, logger *slog.Logger, q querier, queue string) error {
 	if !c.notifier.allow(ctx, queue) {
 		return nil
 	}
 	_, err := q.exec(ctx, notifySQL, c.schema, notifyAvailable+"|"+queue)
 	if err != nil && !q.inTx() {
-		c.logger.LogAttrs(ctx, slog.LevelWarn, "notification failed",
+		logger.LogAttrs(ctx, slog.LevelWarn, "notification failed",
 			slog.String(logKeyQueue, queue), slog.Any(logKeyError, err))
 		return nil
 	}
