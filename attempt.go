@@ -273,17 +273,19 @@ func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.T
 	}
 	t.mu.Unlock()
 
-	if !start.IsZero() && (o.kind == outcomeRetry || o.kind == outcomeDead) {
+	if o.kind == outcomeRetry || o.kind == outcomeDead {
 		attrs := []slog.Attr{
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind),
-			slog.Int(logKeyAttempt, t.info.Attempt), slog.Duration(logKeyDuration, time.Since(start)),
-			slog.Any(logKeyError, o.err),
+			slog.Int(logKeyAttempt, t.info.Attempt), slog.Any(logKeyError, o.err),
+		}
+		if !start.IsZero() { // a handler ran
+			attrs = append(attrs, slog.Duration(logKeyDuration, time.Since(start)))
 		}
 		if o.kind == outcomeDead {
-			w.logger.LogAttrs(ctx, slog.LevelWarn, "attempt failed; the task is dead", attrs...)
+			w.logger.LogAttrs(ctx, slog.LevelError, "attempt failed; the task is dead", attrs...)
 		} else {
 			attrs = append(attrs, slog.Duration(logKeyRetryIn, o.delay))
-			w.logger.LogAttrs(ctx, slog.LevelInfo, "attempt failed; retrying", attrs...)
+			w.logger.LogAttrs(ctx, slog.LevelDebug, "attempt failed; retrying", attrs...)
 		}
 	}
 
@@ -294,7 +296,7 @@ func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.T
 		err := w.whileLeased(context.WithoutCancel(ctx), ts, func(ctx context.Context) error {
 			return w.client.inTx(ctx, func(q querier) error {
 				var err error
-				done, err = w.client.complete(ctx, q, completionsOf(ts))
+				done, err = w.client.complete(ctx, w.logger, q, completionsOf(ts))
 				t.completedDirectly = err == nil && len(done) == 1
 				return err
 			})
@@ -342,8 +344,8 @@ func (w *Worker) record(ctx context.Context, t *tracked, o outcome) {
 		w.tally.add(t.info.Queue, 1, 0)
 	}
 	if err != nil {
-		w.logger.LogAttrs(ctx, slog.LevelError, "record attempt failed; the task is rescued when its lease expires",
-			slog.Int64(logKeyTaskID, t.att.id), slog.Any(logKeyError, err))
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "record attempt failed; the task is rescued when its lease expires",
+			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, err))
 	}
 }
 
@@ -394,11 +396,11 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 		return endedOther, err
 	case !found && t.att.completedInTx.Load():
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler failed after completing its task; it stays completed",
-			slog.Int64(logKeyTaskID, id), slog.Any(logKeyError, o.err))
+			slog.Int64(logKeyTaskID, id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, o.err))
 		return endedCompleted, nil
 	case !found:
 		w.logger.LogAttrs(ctx, slog.LevelDebug, "result discarded: the attempt lost its lease",
-			slog.Int64(logKeyTaskID, id))
+			slog.Int64(logKeyTaskID, id), slog.String(logKeyKind, t.info.Kind))
 		return endedOther, nil
 	}
 
@@ -408,11 +410,11 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 	}
 	switch s := State(state); {
 	case s == StateDead && group != "":
-		return ended, w.client.leaveGroup(ctx, q, queue, group, id, leftDeadHead)
+		return ended, w.client.leaveGroup(ctx, w.logger, q, queue, group, id, leftDeadHead)
 	case s.Finished() && group != "":
-		return ended, w.client.leaveGroup(ctx, q, queue, group, id, leftHead)
+		return ended, w.client.leaveGroup(ctx, w.logger, q, queue, group, id, leftHead)
 	case s == StateAvailable:
-		return ended, w.client.notifyAvailable(ctx, q, queue)
+		return ended, w.client.notifyAvailable(ctx, w.logger, q, queue)
 	}
 	return ended, nil
 }

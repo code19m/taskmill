@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"log/slog"
 	"maps"
 	"slices"
 	"sync"
@@ -247,10 +246,9 @@ func (w *Worker) flushActivity(ctx context.Context) {
 		minutes[i], queues[i] = time.Unix(k.minute, 0), k.queue
 		completed[i], failed[i] = int32(min(c.completed, 1<<31-1)), int32(min(c.failed, 1<<31-1)) //nolint:gosec // capped
 	}
-	if _, err := w.client.pool.Exec(ctx, w.client.sql.addActivity, minutes, queues, completed, failed); err != nil {
+	_, err := w.client.pool.Exec(ctx, w.client.sql.addActivity, minutes, queues, completed, failed)
+	w.activityFailures.observe(ctx, err)
+	if err != nil {
 		w.tally.restore(counts)
-		if ctx.Err() == nil {
-			w.logger.LogAttrs(ctx, slog.LevelWarn, "record activity failed; trying again", slog.Any(logKeyError, err))
-		}
 	}
 }

@@ -46,10 +46,10 @@ to point at a busy database, even with pages refreshing every 5 seconds.
   the web interface or the operations API. The `taskmill-ui` command only
   serves the web interface.
 - **Integrations that need third-party modules,** such as OpenTelemetry or
-  broker clients, inside the core module. Middleware and
-  `ClientConfig.ContextMetadata` cover tracing and metrics, and the guide
-  shows how. Such integrations would be separate Go modules
-  ([ADR 0001](../adr/0001-dependency-policy.md)).
+  broker clients, inside the core module. They are separate Go modules
+  ([ADR 0001](../adr/0001-dependency-policy.md)), built on the core's
+  middleware for enqueues and attempts: the `otel` module instruments
+  taskmill with OpenTelemetry ([ADR 0005](../adr/0005-opentelemetry-in-a-module-of-its-own.md)).
 - **A public SQL interface.** The tables are internal, so that they can
   change. A stable SQL function to enqueue from other languages or from
   triggers can be added once users need it.
