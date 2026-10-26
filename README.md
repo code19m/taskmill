@@ -32,6 +32,13 @@ together with your data.
   messages per second. This was on an Apple M5 laptop with PostgreSQL 18 in
   Docker; see the [benchmarks](docs/benchmarks.md).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
+  <img alt="The dashboard's overview: task counts, charts of the last hour's tasks and attempts, and the queues" src="docs/images/dashboard-light.png">
+</picture>
+
+The dashboard, here showing the [shop example](examples/shop).
+
 > **Status:** taskmill is new, with no known production users yet. Before
 > v1.0.0, minor releases may change the API, and the
 > [changelog](CHANGELOG.md) says how to migrate. See
@@ -125,7 +132,9 @@ func main() {
 }
 ```
 
-A runnable version is `Example` in [example_test.go](example_test.go). A
+A runnable version is `Example` in [example_test.go](example_test.go). For a
+whole application with its dashboard, run the
+[shop example](examples/shop): `make db`, then `go run ./examples/shop`. A
 handler that returns an error is retried with backoff, by default for about
 13 hours, and then the task becomes dead. `taskmill.Permanent(err)` makes it
 dead at once, and `taskmill.Snooze(d)` runs it again later without using an
@@ -139,6 +148,8 @@ attempt.
   pkg.go.dev.
 - **[Design](docs/design):** the task lifecycle and its guarantees, and the
   storage schema.
+- **[Shop example](examples/shop):** a small shop that uses most features,
+  with its dashboard.
 - **[Benchmarks](docs/benchmarks.md):** performance targets and measured
   results.
 - **[Decisions](docs/adr):** why taskmill is built the way it is.
