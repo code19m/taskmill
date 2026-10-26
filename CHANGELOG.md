@@ -25,6 +25,8 @@ All notable changes to taskmill are recorded here. The format follows
   a container image, `ghcr.io/code19m/taskmill-ui`, for amd64 and arm64, with
   checksums, SBOMs, and build provenance attestations.
 - `taskmill-ui` logs its version when it starts.
+- The shop example, `examples/shop`: a small shop that uses most features,
+  with the dashboard. Run it with `go run ./examples/shop`.
 
 ### Changed
 
@@ -64,8 +66,6 @@ All notable changes to taskmill are recorded here. The format follows
       },
   },
   ```
-- The shop example, `examples/shop`: a small shop that uses most features,
-  with the dashboard. Run it with `go run ./examples/shop`.
 
 ## [0.1.0] - 2026-10-25
 

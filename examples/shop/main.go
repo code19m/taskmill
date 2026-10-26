@@ -2,21 +2,21 @@
 // dashboard. Orders enqueue their receipts and ledger entries in the order's
 // own transaction, ledger entries post in order per account, images resize
 // in batches, a partner API is called under a limit across all workers, a
-// report runs every minute, and an outbox publishes order events. Some tasks
-// fail on purpose, so the dashboard has something to show.
+// report runs every minute, and an outbox publishes order events. Some orders
+// are bad on purpose, so the dashboard has something to show.
 //
 //	make db
 //	go run ./examples/shop
 //
 // The dashboard is at http://localhost:8090/taskmill/. The shop reads the
-// database from TASKMILL_DATABASE_URL, by default the one that `make db`
-// starts. It keeps everything in the schema taskmill_example_shop, which it
-// drops and creates again at every start, and touches no other schema.
-// Ctrl-C stops it.
+// database from SHOP_DATABASE_URL, by default the one that `make db` starts.
+// It keeps its tables and taskmill's in the schema taskmill_example_shop, and
+// touches no other schema. Ctrl-C stops it.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -50,7 +50,6 @@ const (
 const (
 	logKeyError        = "error"
 	logKeyKind         = "kind"
-	logKeyOrder        = "order_id"
 	logKeyScheduledFor = "scheduled_for"
 	logKeyTook         = "took"
 	logKeyURL          = "url"
@@ -131,6 +130,13 @@ type LegacyInvoice struct {
 
 func (LegacyInvoice) Kind() string { return "legacy.invoice" }
 
+// orderEvent is an event about an order, as the outbox publishes it.
+type orderEvent struct {
+	Type    string `json:"type"`
+	OrderID int64  `json:"order_id"`
+	Cents   int64  `json:"cents,omitempty"`
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(logger); err != nil {
@@ -144,7 +150,7 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	url := os.Getenv("TASKMILL_DATABASE_URL")
+	url := os.Getenv("SHOP_DATABASE_URL")
 	if url == "" {
 		url = defaultDatabaseURL
 	}
@@ -152,11 +158,11 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	// Both workers share this pool. Handlers that use the pool must not
-	// starve the workers, so give it a connection for every task that may
-	// run at once, plus 5 per worker: 60 + 6 + 10. See Connections in
-	// docs/guide.md.
-	cfg.MaxConns = 80
+	// The workers and the ledger handler, which writes through it, share
+	// this pool. So that handlers cannot starve the workers' heartbeats, it
+	// has a connection for every task that may run at once, plus 5 per
+	// worker: see Connections in docs/guide.md.
+	cfg.MaxConns = 6*10 + 4 + 2 + 2*5 // the main worker's 6 queues of 10, the other's 4 and 2
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return err
@@ -171,7 +177,7 @@ func run(logger *slog.Logger) error {
 }
 
 // runShop runs the shop in schema, with its dashboard on ln, until ctx ends.
-// It drops the schema first, so every run starts afresh. It closes ln.
+// It closes ln.
 func runShop(ctx context.Context, pool *pgxpool.Pool, schema string, ln net.Listener, logger *slog.Logger) error {
 	defer func() { _ = ln.Close() }() // the server closes it too, once it serves
 
@@ -185,7 +191,7 @@ func runShop(ctx context.Context, pool *pgxpool.Pool, schema string, ln net.List
 
 	// The main worker runs every kind, and serves each kind's default queue.
 	primary, err := taskmill.NewWorker(s.client, &taskmill.WorkerConfig{
-		Handlers:   allHandlers(s.outbox, logger),
+		Handlers:   s.handlers(),
 		Schedules:  schedules,
 		Middleware: []taskmill.Middleware{logSlow(logger)},
 	})
@@ -205,9 +211,10 @@ func runShop(ctx context.Context, pool *pgxpool.Pool, schema string, ln net.List
 		return err
 	}
 
-	// The dashboard, mounted under a path of the shop's own server.
+	// The dashboard, mounted under a path of the shop's own server. It can
+	// retry, delete, and pause, so only operators may reach it.
 	mux := http.NewServeMux()
-	mux.Handle("/taskmill/", ui.Handler(s.client, &ui.Config{Prefix: "/taskmill", Logger: logger}))
+	mux.Handle("/taskmill/", requireAdmin(ui.Handler(s.client, &ui.Config{Prefix: "/taskmill", Logger: logger})))
 	mux.Handle("GET /{$}", http.RedirectHandler("/taskmill/", http.StatusFound))
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
@@ -237,30 +244,45 @@ func runShop(ctx context.Context, pool *pgxpool.Pool, schema string, ln net.List
 	return err
 }
 
-// shop is the application: its orders, and the taskmill client and outbox it
+// requireAdmin stands for the shop's own authentication. In production, it
+// must let only operators through to the dashboard.
+func requireAdmin(next http.Handler) http.Handler { return next } // your authentication
+
+// shop is the application: its tables, and the taskmill client and outbox it
 // enqueues with.
 type shop struct {
 	pool   *pgxpool.Pool
 	client *taskmill.Client
 	outbox *outbox.Outbox
-	orders string // the quoted name of the orders table
+	orders string // the quoted names of the shop's tables
+	ledger string
 	logger *slog.Logger
 }
 
-// openShop creates the schema afresh, with taskmill's tables and the shop's
-// orders table.
+// openShop creates the schema, with taskmill's tables and the shop's, unless
+// they exist. A restart keeps the shop's data.
 func openShop(ctx context.Context, pool *pgxpool.Pool, schema string, logger *slog.Logger) (*shop, error) {
-	if _, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+pgx.Identifier{schema}.Sanitize()+" CASCADE"); err != nil {
-		return nil, err
-	}
 	// Migrate creates the schema and taskmill's tables, or upgrades them.
 	// It is safe to call from every process at start.
 	if err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Schema: schema, Logger: logger}); err != nil {
 		return nil, err
 	}
-	s := &shop{pool: pool, orders: pgx.Identifier{schema, "orders"}.Sanitize(), logger: logger}
-	if _, err := pool.Exec(ctx, "CREATE TABLE "+s.orders+
-		" (id bigint PRIMARY KEY, account_id bigint NOT NULL, cents bigint NOT NULL, created_at timestamptz NOT NULL DEFAULT now())"); err != nil {
+	s := &shop{
+		pool:   pool,
+		orders: pgx.Identifier{schema, "orders"}.Sanitize(),
+		ledger: pgx.Identifier{schema, "ledger_entries"}.Sanitize(),
+		logger: logger,
+	}
+	if _, err := pool.Exec(ctx, "CREATE TABLE IF NOT EXISTS "+s.orders+` (
+			id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			account_id bigint NOT NULL,
+			cents      bigint NOT NULL,
+			created_at timestamptz NOT NULL DEFAULT now());
+		CREATE TABLE IF NOT EXISTS `+s.ledger+` (
+			order_id   bigint PRIMARY KEY, -- an order posts once
+			account_id bigint NOT NULL,
+			cents      bigint NOT NULL,
+			posted_at  timestamptz NOT NULL DEFAULT now())`); err != nil {
 		return nil, err
 	}
 	client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: schema, Logger: logger})
@@ -275,45 +297,50 @@ func openShop(ctx context.Context, pool *pgxpool.Pool, schema string, logger *sl
 	return s, nil
 }
 
-// placeOrders places an order every second until ctx ends, the way the
-// shop's web pages would.
+// placeOrders places an order every second until ctx ends, as the shop's
+// customers would.
 func (s *shop) placeOrders(ctx context.Context) {
-	s.seed(ctx)
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
-	for id := int64(1); ; id++ {
+	for n := int64(1); ; n++ {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		}
-		if err := s.placeOrder(ctx, id); err != nil && ctx.Err() == nil {
-			s.logger.LogAttrs(ctx, slog.LevelError, "the order failed", slog.Int64(logKeyOrder, id), slog.Any(logKeyError, err))
+		if err := s.placeOrder(ctx, n); err != nil && ctx.Err() == nil {
+			s.logger.LogAttrs(ctx, slog.LevelError, "the order failed", slog.Any(logKeyError, err))
 		}
 	}
 }
 
-// placeOrder stores an order with everything it triggers in one transaction:
-// its tasks and messages exist if and only if the order does.
-func (s *shop) placeOrder(ctx context.Context, id int64) error {
-	account := 1 + id%4
+// placeOrder stores the nth order since the start with everything it
+// triggers, in one transaction: its tasks and messages exist if and only if
+// the order does. Some orders are bad on purpose.
+func (s *shop) placeOrder(ctx context.Context, n int64) error {
+	account := 1 + n%4
 	cents := 1000 + rand.Int64N(9000) //nolint:gosec // a made-up amount needs no secure randomness
-	if id == 13 {
-		cents = -500 // a bad entry, which halts account 2's ledger
+	if n == 13 {
+		cents = -500 // a bad amount, which halts account 2's ledger and the order's outbox key
 	}
-	email := "customer" + strconv.FormatInt(id, 10) + "@example.com"
-	if id%17 == 0 {
+	email := "customer" + strconv.FormatInt(n, 10) + "@example.com"
+	if n%17 == 0 {
 		email = "" // a receipt that can never be sent
 	}
-	key := "order-" + strconv.FormatInt(id, 10)
 
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "INSERT INTO "+s.orders+" (id, account_id, cents) VALUES ($1, $2, $3)", id, account, cents); err != nil {
+		var id int64
+		if err := tx.QueryRow(ctx, "INSERT INTO "+s.orders+" (account_id, cents) VALUES ($1, $2) RETURNING id", account, cents).Scan(&id); err != nil {
 			return err
 		}
+		key := "order-" + strconv.FormatInt(id, 10)
+		// A dedupe key: one receipt per order, even if enqueued twice.
+		receipt := &taskmill.EnqueueOptions{DedupeKey: "receipt-" + key}
+		if n%10 == 0 {
+			receipt.Priority = taskmill.PriorityCritical // a VIP: the receipt runs before every other waiting one
+		}
 		params := []taskmill.EnqueueParams{
-			// A dedupe key: one receipt per order, even if enqueued twice.
-			{Args: SendReceipt{OrderID: id, Email: email}, Options: &taskmill.EnqueueOptions{DedupeKey: "receipt-" + key}},
+			{Args: SendReceipt{OrderID: id, Email: email}, Options: receipt},
 			// A FIFO group per account: its entries post one at a time, in order.
 			{Args: PostLedgerEntry{AccountID: account, OrderID: id, Cents: cents}, Options: &taskmill.EnqueueOptions{
 				GroupKey: "account-" + strconv.FormatInt(account, 10),
@@ -321,10 +348,15 @@ func (s *shop) placeOrder(ctx context.Context, id int64) error {
 			// A delayed task.
 			{Args: RemindCustomer{OrderID: id}, Options: &taskmill.EnqueueOptions{RunAt: time.Now().Add(2 * time.Minute)}},
 		}
-		if id%3 == 0 {
+		if n == 1 {
+			// No worker handles this kind: the task waits, without using
+			// attempts, and is dead after an hour.
+			params = append(params, taskmill.EnqueueParams{Args: LegacyInvoice{OrderID: id}})
+		}
+		if n%3 == 0 {
 			params = append(params, taskmill.EnqueueParams{Args: SyncWithPartner{OrderID: id}})
 		}
-		if id%5 == 0 {
+		if n%5 == 0 {
 			for i := range int64(30) {
 				params = append(params, taskmill.EnqueueParams{Args: ResizeImage{ImageID: id*100 + i}})
 			}
@@ -335,40 +367,25 @@ func (s *shop) placeOrder(ctx context.Context, id int64) error {
 		}
 		// The outbox stores events in the same transaction. A relay
 		// publishes them later, in order per key.
+		placed, _ := json.Marshal(orderEvent{Type: "order.placed", OrderID: id, Cents: cents}) // a struct of numbers and strings always encodes
+		paid, _ := json.Marshal(orderEvent{Type: "order.paid", OrderID: id})
 		return s.outbox.Store(ctx, taskmill.Pgx(tx),
-			outbox.Message{Topic: "orders", Key: []byte(key), Value: fmt.Appendf(nil, `{"type":"order.placed","order_id":%d,"cents":%d}`, id, cents)},
-			outbox.Message{Topic: "orders", Key: []byte(key), Value: fmt.Appendf(nil, `{"type":"order.paid","order_id":%d}`, id)},
+			outbox.Message{Topic: "orders", Key: []byte(key), Value: placed},
+			outbox.Message{Topic: "orders", Key: []byte(key), Value: paid},
 		)
 	})
 }
 
-// seed enqueues a few tasks that show other features at once, outside a
-// transaction of the shop's.
-func (s *shop) seed(ctx context.Context) {
-	_, err := s.client.EnqueueMany(ctx, []taskmill.EnqueueParams{
-		// No worker handles this kind: it waits, without using attempts,
-		// and becomes dead after an hour.
-		{Args: LegacyInvoice{OrderID: 1}},
-		// A priority: this receipt runs before every other waiting one.
-		{Args: SendReceipt{OrderID: 900, Email: "vip@example.com"}, Options: &taskmill.EnqueueOptions{Priority: taskmill.PriorityCritical}},
-		// A task that runs in half an hour.
-		{Args: SendReceipt{OrderID: 901, Email: "later@example.com"}, Options: &taskmill.EnqueueOptions{RunAt: time.Now().Add(30 * time.Minute)}},
-	})
-	if err != nil && ctx.Err() == nil {
-		s.logger.LogAttrs(ctx, slog.LevelError, "the seed tasks failed", slog.Any(logKeyError, err))
-	}
-}
-
-// allHandlers returns a handler for every kind except LegacyInvoice, and the
+// handlers returns a handler for every kind except LegacyInvoice, and the
 // outbox's relay.
-func allHandlers(ob *outbox.Outbox, logger *slog.Logger) *taskmill.Handlers {
+func (s *shop) handlers() *taskmill.Handlers {
 	var hs taskmill.Handlers
 	addReceiptsAndImages(&hs)
-	taskmill.AddHandler(&hs, taskmill.HandlerFunc[PostLedgerEntry](postLedgerEntry), nil)
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[PostLedgerEntry](s.postLedgerEntry), nil)
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[SyncWithPartner](syncWithPartner), &taskmill.HandlerOptions{Timeout: 10 * time.Second})
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[BuildReport](
 		func(ctx context.Context, t *taskmill.Task[BuildReport]) error {
-			logger.LogAttrs(ctx, slog.LevelInfo, "the sales report is built", slog.Time(logKeyScheduledFor, t.RunAt))
+			s.logger.LogAttrs(ctx, slog.LevelInfo, "the sales report is built", slog.Time(logKeyScheduledFor, t.RunAt))
 			return nil
 		},
 	), nil)
@@ -377,7 +394,7 @@ func allHandlers(ob *outbox.Outbox, logger *slog.Logger) *taskmill.Handlers {
 			return work(ctx, 50*time.Millisecond)
 		},
 	), nil)
-	ob.AddRelay(&hs, outbox.PublisherFunc(publish))
+	s.outbox.AddRelay(&hs, outbox.PublisherFunc(publish))
 	return &hs
 }
 
@@ -402,21 +419,45 @@ func sendReceipt(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
 	return nil
 }
 
-func postLedgerEntry(ctx context.Context, t *taskmill.Task[PostLedgerEntry]) error {
+// postLedgerEntry books the entry and completes its task in one transaction.
+// A task can run more than once, after a crash or a lost lease, but the entry
+// is booked once.
+func (s *shop) postLedgerEntry(ctx context.Context, t *taskmill.Task[PostLedgerEntry]) error {
 	if t.Args.Cents < 0 {
 		// The dead entry halts its account's group: later entries wait
 		// instead of posting out of order.
 		return taskmill.Permanent(fmt.Errorf("order %d has a negative amount, %d cents", t.Args.OrderID, t.Args.Cents))
 	}
-	return work(ctx, 100*time.Millisecond)
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, "INSERT INTO "+s.ledger+" (order_id, account_id, cents) VALUES ($1, $2, $3)",
+			t.Args.OrderID, t.Args.AccountID, t.Args.Cents); err != nil {
+			return err
+		}
+		// Fails with taskmill.ErrLeaseLost if another attempt took the task
+		// over; the entry then rolls back.
+		return t.CompleteTx(ctx, taskmill.Pgx(tx))
+	})
 }
 
-func syncWithPartner(ctx context.Context, _ *taskmill.Task[SyncWithPartner]) error {
+func syncWithPartner(ctx context.Context, t *taskmill.Task[SyncWithPartner]) error {
 	if oneIn(8) {
 		// The partner said "slow down": run again later, without using an
 		// attempt.
 		return taskmill.Snooze(5 * time.Second)
 	}
+	// The task's ID stays the same on every attempt. Sent as the partner's
+	// idempotency key, it makes the partner apply a repeated call once.
+	return partnerRequest{IdempotencyKey: "taskmill-" + strconv.FormatInt(t.ID, 10), OrderID: t.Args.OrderID}.send(ctx)
+}
+
+// partnerRequest is a call to the partner's API.
+type partnerRequest struct {
+	IdempotencyKey string
+	OrderID        int64
+}
+
+// send stands for the partner's API, which applies each idempotency key once.
+func (partnerRequest) send(ctx context.Context) error {
 	return work(ctx, randomDuration(800*time.Millisecond, 2*time.Second))
 }
 
@@ -433,13 +474,18 @@ func (resizeImages) HandleBatch(ctx context.Context, tasks []*taskmill.Task[Resi
 	return errs
 }
 
-// publish stands for a broker client, such as Kafka's. The broker rejects
-// order 13's first message, so that key halts in the outbox.
+// publish stands for a broker client, such as Kafka's. The broker rejects an
+// order.placed event with a negative amount, so that order's key halts in the
+// outbox: its order.paid event waits behind the dead one.
 func publish(_ context.Context, ds []outbox.Delivery) []error {
 	errs := make([]error, len(ds))
 	for i, d := range ds {
-		if string(d.Key) == "order-13" {
-			errs[i] = taskmill.Permanent(errors.New("the broker rejects the message: schema mismatch"))
+		var ev orderEvent
+		switch err := json.Unmarshal(d.Value, &ev); {
+		case err != nil:
+			errs[i] = taskmill.Permanent(err)
+		case ev.Cents < 0:
+			errs[i] = taskmill.Permanent(errors.New("the broker rejects the message: a negative amount"))
 		}
 	}
 	return errs

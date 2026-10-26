@@ -37,17 +37,19 @@ func TestShop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan error, 1)
 	go func() { stopped <- runShop(ctx, pool, schema, ln, slog.New(slog.NewTextHandler(&logs, nil))) }()
-	stop := sync.OnceValue(func() error {
+	// Stopping, as on Ctrl-C, must return nil in time. This runs also when
+	// the test fails early, and then says why the shop failed.
+	t.Cleanup(func() {
 		cancel()
 		select {
 		case err := <-stopped:
-			return err
+			if err != nil {
+				t.Errorf("the shop stopped with %v", err)
+			}
 		case <-time.After(30 * time.Second):
-			t.Fatal("the shop did not stop within 30 seconds")
-			return nil
+			t.Error("the shop did not stop within 30 seconds")
 		}
 	})
-	t.Cleanup(func() { _ = stop() })
 
 	// The root redirects to the dashboard. The listener queues the request
 	// until the shop has set up its schema and serves.
@@ -72,9 +74,29 @@ func TestShop(t *testing.T) {
 	}
 	waitCompleted(t, client, SendReceipt{}.Kind())
 	waitCompleted(t, client, PostLedgerEntry{}.Kind())
+}
 
-	if err := stop(); err != nil {
-		t.Fatalf("the shop stopped with %v", err)
+// TestShopRestarts opens the shop twice on one schema: the second start keeps
+// what the first one stored.
+func TestShopRestarts(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	schema := testdb.Schema(t, pool)
+	logger := slog.New(slog.DiscardHandler)
+
+	s, err := openShop(t.Context(), pool, schema, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.placeOrder(t.Context(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if s, err = openShop(t.Context(), pool, schema, logger); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	var orders int
+	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM "+s.orders).Scan(&orders); err != nil || orders != 1 {
+		t.Fatalf("after a restart: %d orders, %v; want 1", orders, err)
 	}
 }
 
