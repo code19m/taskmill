@@ -650,11 +650,10 @@ SET state = CASE
     finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
     lease_expires_at = NULL,
     errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', now(),
-                 'message', 'the worker lost its lease: it crashed, stopped, or lost the database',
-                 'code', 'lease_expired'))
+                 'message', $3::text, 'code', 'lease_expired'))
 FROM expired
 WHERE t.id = expired.id
-RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text`),
+RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`),
 
 		// pendingDetach lists the history partitions whose detach was
 		// interrupted, which must be finalized before they can be dropped.
@@ -743,7 +742,13 @@ LEFT JOIN {s}.queues q ON q.name = n.name
 LEFT JOIN served s ON s.name = n.name
 ORDER BY n.name`),
 
-		queueStats: q(`SELECT queue, state::text, tasks, capped, refreshed_at FROM {s}.queue_stats`),
+		// queueStats reads the statistics, with the lag of each count in
+		// microseconds by the database's clock now: 0 for a count without a
+		// due task.
+		queueStats: q(`
+SELECT queue, state::text, tasks, capped, refreshed_at,
+       greatest(0, (extract(epoch FROM now() - oldest_due_at) * 1000000)::bigint)
+FROM {s}.queue_stats`),
 
 		updateSettings: q(`
 UPDATE {s}.settings
@@ -789,10 +794,13 @@ ORDER BY queue, group_key
 LIMIT $3`),
 
 		// countStats counts each queue's tasks per state, except completed
-		// ones. The states whose indexes lead with the queue are counted per
-		// queue, up to $1 tasks each: their queues are found with one index
-		// probe per queue. Scheduled and retryable tasks are counted across
-		// all queues, up to $2 in all. Every branch reads only an index.
+		// ones, with the run time of the oldest due task of each count. The
+		// states whose indexes lead with the queue are counted per queue, up
+		// to $1 tasks each: their queues are found with one index probe per
+		// queue, and the oldest available task with one more per priority.
+		// Scheduled and retryable tasks are counted across all queues, oldest
+		// first, up to $2 in all, so the due ones come first. Every branch
+		// reads only an index.
 		countStats: q(`
 WITH RECURSIVE available AS (
     (SELECT queue FROM {s}.tasks WHERE state = 'available' ORDER BY queue LIMIT 1)
@@ -816,34 +824,45 @@ WITH RECURSIVE available AS (
     FROM finished x WHERE x.queue IS NOT NULL
 )
 SELECT 'available', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue LIMIT $1) c)
+       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue LIMIT $1) c),
+       (SELECT min(o.run_at) FROM unnest('{1,2,3,4}'::smallint[]) AS p, -- every priority
+        LATERAL (SELECT t.run_at FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue AND t.priority = p
+                 ORDER BY t.run_at LIMIT 1) o)
 FROM available x WHERE x.queue IS NOT NULL
 UNION ALL
 SELECT 'running', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'running' AND t.queue = x.queue LIMIT $1) c)
+       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'running' AND t.queue = x.queue LIMIT $1) c), NULL
 FROM running x WHERE x.queue IS NOT NULL
 UNION ALL
 SELECT 'pending', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'pending' AND t.queue = x.queue LIMIT $1) c)
+       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'pending' AND t.queue = x.queue LIMIT $1) c), NULL
 FROM pending x WHERE x.queue IS NOT NULL
 UNION ALL
 SELECT 'dead', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'dead' AND t.queue = x.queue LIMIT $1) c)
+       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'dead' AND t.queue = x.queue LIMIT $1) c), NULL
 FROM finished x WHERE x.queue IS NOT NULL
 UNION ALL
 SELECT 'canceled', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'canceled' AND t.queue = x.queue LIMIT $1) c)
+       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'canceled' AND t.queue = x.queue LIMIT $1) c), NULL
 FROM finished x WHERE x.queue IS NOT NULL
 UNION ALL
-SELECT state::text, queue, count(*) FROM (
-    SELECT state, queue FROM {s}.tasks WHERE state IN ('scheduled', 'retryable') LIMIT $2
+SELECT state::text, queue, count(*), min(run_at) FILTER (WHERE run_at <= now()) FROM (
+    SELECT state, queue, run_at FROM {s}.tasks WHERE state IN ('scheduled', 'retryable') ORDER BY run_at LIMIT $2
 ) due GROUP BY state, queue`),
 
 		clearStats: q(`DELETE FROM {s}.queue_stats`),
+		// storeStats stores the counts, and a zero count for every other known
+		// queue, so that each one shows when it was counted, even an empty
+		// installation. $6 marks those zeros as capped once the shared cap
+		// was hit.
 		storeStats: q(`
-INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at)
-SELECT q, s::{s}.task_state, n, c, now()
-FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[]) AS u(q, s, n, c)`),
+INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at, oldest_due_at)
+SELECT q, s::{s}.task_state, n, c, now(), o
+FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[]) AS u(q, s, n, c, o)
+UNION ALL
+SELECT k.name, 'available', 0, $6, now(), NULL
+FROM (SELECT name FROM {s}.queues UNION SELECT unnest(queues) FROM {s}.workers) AS k(name)
+WHERE NOT k.name = ANY($1::text[])`),
 
 		// storeActivity copies the counts just stored in queue_stats into the
 		// current minute's activity, with zeros for every other known queue,

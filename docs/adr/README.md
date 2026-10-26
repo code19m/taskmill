@@ -10,6 +10,7 @@ the way it does.
 | [0002](0002-supported-versions.md) | Supported Go and PostgreSQL versions | Accepted |
 | [0003](0003-outbox-on-the-shared-engine.md) | Build the outbox on the shared engine | Accepted |
 | [0004](0004-pgx-as-the-postgresql-driver.md) | Use pgx as the PostgreSQL driver | Accepted |
+| [0005](0005-opentelemetry-in-a-module-of-its-own.md) | OpenTelemetry in a module of its own | Proposed |
 
 ## Writing an ADR
 

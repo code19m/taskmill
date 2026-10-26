@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -348,12 +351,19 @@ func TestEnqueueFIFOGroupHasOneHead(t *testing.T) {
 func TestEnqueueAddsContextMetadata(t *testing.T) {
 	t.Parallel()
 	type traceKey struct{}
+	var seen string // what the enqueue middleware saw: ContextMetadata runs outside it
 	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
 		ContextMetadata: func(ctx context.Context) map[string]string {
 			if v, ok := ctx.Value(traceKey{}).(string); ok {
 				return map[string]string{"traceparent": v, "source": "context"}
 			}
 			return nil
+		},
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{
+			func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+				seen = tasks[0].Metadata["traceparent"]
+				return next(ctx)
+			},
 		},
 	})
 
@@ -363,8 +373,136 @@ func TestEnqueueAddsContextMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	meta := e.get(t, res.ID).Metadata
-	if meta["traceparent"] != "00-abc-01" || meta["source"] != "options" {
+	if meta["traceparent"] != "00-abc-01" || meta["source"] != "options" || seen != "00-abc-01" {
+		t.Fatalf("got metadata %v; the middleware saw %q", meta, seen)
+	}
+}
+
+func TestEnqueueMiddlewareWrapsEnqueues(t *testing.T) {
+	t.Parallel()
+	var calls []string
+	outer := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		calls = append(calls, "outer")
+		err := next(ctx)
+		for _, task := range tasks {
+			calls = append(calls, fmt.Sprintf("%s/%s %d %t", task.Queue, task.Kind, task.Result.ID, task.Result.Duplicate))
+		}
+		return err
+	}
+	inner := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		calls = append(calls, "inner")
+		for _, task := range tasks {
+			task.Metadata["traceparent"] = "00-" + task.Kind
+		}
+		return next(ctx)
+	}
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{outer, inner},
+	})
+
+	callerMeta := map[string]string{"source": "caller"}
+	dedupe := &taskmill.EnqueueOptions{DedupeKey: "k", Metadata: callerMeta}
+	res, err := e.client.EnqueueMany(t.Context(), []taskmill.EnqueueParams{
+		{Args: sendEmail{}, Options: dedupe},
+		{Args: report{Name: "daily"}},
+		{Args: sendEmail{}, Options: dedupe}, // repeats the first task's dedupe key
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"outer", "inner",
+		fmt.Sprintf("default/email.send %d false", res[0].ID),
+		fmt.Sprintf("reports/report.build %d false", res[1].ID),
+		fmt.Sprintf("default/email.send %d true", res[0].ID),
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("got calls %q, want %q", calls, want)
+	}
+	meta := e.get(t, res[0].ID).Metadata
+	if meta["traceparent"] != "00-email.send" || meta["source"] != "caller" {
 		t.Fatalf("got metadata %v", meta)
+	}
+	if len(callerMeta) != 1 {
+		t.Fatalf("middleware changed the caller's metadata: %v", callerMeta)
+	}
+}
+
+func TestEnqueueMiddlewareThatMisusesNext(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		mw    taskmill.EnqueueMiddleware
+		fails bool // the enqueue reports an error
+		tasks int
+	}{
+		{
+			name:  "returns nil without calling next",
+			mw:    func(context.Context, []*taskmill.EnqueueTask, func(context.Context) error) error { return nil },
+			fails: true,
+			tasks: 0,
+		},
+		{
+			// The first call committed the task; the second stores nothing.
+			name: "calls next twice",
+			mw: func(ctx context.Context, _ []*taskmill.EnqueueTask, next func(context.Context) error) error {
+				if err := next(ctx); err != nil {
+					return err
+				}
+				return next(ctx)
+			},
+			fails: false,
+			tasks: 1,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{c.mw}})
+			if _, err := e.client.Enqueue(t.Context(), sendEmail{}, nil); (err != nil) != c.fails {
+				t.Fatalf("got error %v, want an error: %t", err, c.fails)
+			}
+			if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != c.tasks {
+				t.Fatalf("got %d tasks, want %d", n, c.tasks)
+			}
+		})
+	}
+}
+
+func TestEnqueueMiddlewareThatFailsAfterNext(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	failAfter := func(ctx context.Context, _ []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		if err := next(ctx); err != nil {
+			return err
+		}
+		return errors.New("exporter unavailable")
+	}
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
+		Logger:            slog.New(logs),
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{failAfter},
+	})
+
+	// Outside the caller's transaction the task committed: the enqueue
+	// reports it, so that a retry does not enqueue it again.
+	res, err := e.client.Enqueue(t.Context(), sendEmail{}, nil)
+	if err != nil {
+		t.Fatalf("got %v, want the committed task", err)
+	}
+	e.wantState(t, res.ID, taskmill.StateAvailable)
+	if logs.count("enqueue middleware failed after the tasks were enqueued") != 1 {
+		t.Fatal("the middleware's error was not logged")
+	}
+
+	// In the caller's transaction, the error lets the caller roll back.
+	tx := e.begin(t)
+	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err == nil {
+		t.Fatal("the enqueue in a transaction hid the middleware's error")
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
+		t.Fatalf("got %d tasks, want only the first", n)
 	}
 }
 

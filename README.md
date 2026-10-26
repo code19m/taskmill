@@ -25,8 +25,8 @@ together with your data.
   transactional guarantee, in order per key.
 - **Operable.** A live web dashboard that you mount in your application,
   embed in your admin panel, or run on its own; an operations API;
-  structured logs through `log/slog`; and middleware for metrics and
-  tracing.
+  structured logs through `log/slog`; and OpenTelemetry traces and metrics
+  from an optional module.
 - **Small and fast.** One direct dependency, pgx. One worker drained a backlog
   at over 35,000 tasks per second, and one relay published over 35,000 outbox
   messages per second. This was on an Apple M5 laptop with PostgreSQL 18 in
@@ -150,6 +150,7 @@ attempt.
 | [`taskmill/ui`](https://pkg.go.dev/github.com/code19m/taskmill/ui) | The web interface, as an `http.Handler` |
 | [`taskmill/cmd/taskmill-ui`](https://pkg.go.dev/github.com/code19m/taskmill/cmd/taskmill-ui) | The web interface as a dashboard of its own |
 | [`taskmill/taskmilltest`](https://pkg.go.dev/github.com/code19m/taskmill/taskmilltest) | Helpers to test your code against a real PostgreSQL |
+| [`taskmill/otel`](https://pkg.go.dev/github.com/code19m/taskmill/otel) | OpenTelemetry traces and metrics, in a module of its own |
 
 ## Contributing
 

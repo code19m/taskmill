@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -85,6 +88,52 @@ type EnqueueResult struct {
 	Duplicate bool
 }
 
+// EnqueueMiddleware wraps every enqueue, for tracing or metrics, including
+// the enqueues of schedules. It receives the tasks being enqueued, at least
+// one, validated and with their options resolved, in the order of the call.
+// It may change their metadata, for example to carry a trace context to the
+// handler, and then calls next, which stores the tasks and sets their
+// results. Inside the caller's transaction, next returns before the
+// transaction commits, and the tasks exist only if it does.
+//
+// Middleware must call next at most once, and return its error. Returning nil
+// without calling next fails the enqueue. If middleware fails after next
+// succeeded, an enqueue in the caller's transaction returns its error, so
+// that the caller can roll back; any other enqueue has committed, so it
+// returns the results and logs the error, and a retry does not duplicate the
+// tasks.
+type EnqueueMiddleware func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error
+
+// contextMetadata is the enqueue middleware of the deprecated
+// [ClientConfig.ContextMetadata]: it adds the metadata that fromCtx returns
+// to the tasks, unless the enqueue set the same key.
+func contextMetadata(fromCtx func(context.Context) map[string]string) EnqueueMiddleware {
+	return func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error {
+		for k, v := range fromCtx(ctx) {
+			for _, task := range tasks {
+				if _, set := task.Metadata[k]; !set {
+					task.Metadata[k] = v
+				}
+			}
+		}
+		return next(ctx)
+	}
+}
+
+// EnqueueTask is a task being enqueued, as [EnqueueMiddleware] sees it.
+// Changes to fields other than Metadata are ignored.
+type EnqueueTask struct {
+	Queue string
+	Kind  string
+
+	// Metadata holds the task's metadata, from [EnqueueOptions.Metadata]. It
+	// is never nil, and middleware may change it before calling next.
+	Metadata map[string]string
+
+	// Result is set once next returns nil.
+	Result EnqueueResult
+}
+
 // Enqueue enqueues one task in its own transaction. opts may be nil.
 func (c *Client) Enqueue(ctx context.Context, args Args, opts *EnqueueOptions) (EnqueueResult, error) {
 	res, err := c.enqueue(ctx, pgxQuerier{q: c.pool}, []EnqueueParams{{Args: args, Options: opts}})
@@ -154,20 +203,77 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 	if len(params) == 0 {
 		return nil, nil
 	}
+	tasks := make([]*resolvedTask, len(params))
+	for i, p := range params {
+		t, err := resolve(p)
+		if err != nil {
+			return nil, inBatch(err, i, len(params))
+		}
+		tasks[i] = t
+	}
+	if len(c.enqueueMiddleware) == 0 {
+		return c.store(ctx, q, tasks)
+	}
+	return c.storeThrough(ctx, q, tasks)
+}
 
+// storeThrough stores tasks through the enqueue middleware.
+func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedTask) ([]EnqueueResult, error) {
+	views := make([]*EnqueueTask, len(tasks))
+	for i, t := range tasks {
+		meta := make(map[string]string, len(t.meta)) // t.meta may belong to the caller
+		maps.Copy(meta, t.meta)
+		views[i] = &EnqueueTask{Queue: t.queue, Kind: t.kind, Metadata: meta}
+	}
+	var results []EnqueueResult
+	var called atomic.Bool
+	next := func(ctx context.Context) error {
+		if called.Swap(true) {
+			return errors.New("taskmill: enqueue middleware called next twice")
+		}
+		for i, v := range views {
+			tasks[i].meta = v.Metadata
+		}
+		res, err := c.store(ctx, q, tasks)
+		if err != nil {
+			return err
+		}
+		for i, v := range views {
+			v.Result = res[i]
+		}
+		results = res
+		return nil
+	}
+	for _, m := range slices.Backward(c.enqueueMiddleware) {
+		inner := next
+		next = func(ctx context.Context) error { return m(ctx, views, inner) }
+	}
+	err := next(ctx)
+	switch {
+	case results == nil && err == nil:
+		return nil, errors.New("taskmill: enqueue middleware returned nil without enqueueing the tasks")
+	case results == nil || err == nil:
+		return results, err
+	case q.inTx():
+		return nil, err // the caller rolls back
+	}
+	c.logger.LogAttrs(ctx, slog.LevelWarn, "enqueue middleware failed after the tasks were enqueued",
+		slog.Int(logKeyTasks, len(results)), slog.Any(logKeyError, err))
+	return results, nil
+}
+
+// store writes resolved tasks with one statement.
+func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([]EnqueueResult, error) {
 	b := enqueueBatch{due: make(map[string]bool), plain: true}
-	pos := make([]int, len(params))     // the batch row of params[i]
-	repeat := make([]bool, len(params)) // params[i] repeats an earlier dedupe key of the batch
-	rowOf := make(map[string]int)       // the batch row of each dedupe key
+	pos := make([]int, len(tasks))     // the batch row of tasks[i]
+	repeat := make([]bool, len(tasks)) // tasks[i] repeats an earlier dedupe key of the batch
+	rowOf := make(map[string]int)      // the batch row of each dedupe key
 	now := time.Now()
 
-	for i, p := range params {
-		t, err := c.resolve(ctx, p)
+	for i, t := range tasks {
+		meta, err := encodeMetadata(t.meta)
 		if err != nil {
-			if len(params) > 1 {
-				err = fmt.Errorf("%w (task %d of %d)", err, i+1, len(params))
-			}
-			return nil, err
+			return nil, inBatch(err, i, len(tasks))
 		}
 		if t.dedupeKey != nil {
 			if row, ok := rowOf[string(t.dedupeKey)]; ok {
@@ -177,7 +283,7 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 			rowOf[string(t.dedupeKey)] = len(b.queues)
 		}
 		pos[i] = len(b.queues)
-		b.add(t, now)
+		b.add(t, meta, now)
 	}
 
 	results, err := c.runEnqueue(ctx, q, &b)
@@ -185,12 +291,20 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 		return nil, err
 	}
 
-	out := make([]EnqueueResult, len(params))
-	for i := range params {
+	out := make([]EnqueueResult, len(tasks))
+	for i := range tasks {
 		out[i] = results[pos[i]]
 		out[i].Duplicate = out[i].Duplicate || repeat[i]
 	}
 	return out, nil
+}
+
+// inBatch says which task of a batch of n an error is about.
+func inBatch(err error, i, n int) error {
+	if n == 1 {
+		return err
+	}
+	return fmt.Errorf("%w (task %d of %d)", err, i+1, n)
 }
 
 func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]EnqueueResult, error) {
@@ -286,12 +400,13 @@ type resolvedTask struct {
 	runAt              time.Time
 	dedupeKey          []byte
 	dedupeWindow       time.Duration
-	payload, metadata  []byte
+	payload            []byte
+	meta               map[string]string // may belong to the caller or the kind: never modified
 }
 
 // resolve merges a task's options over its kind's defaults and taskmill's,
 // and validates the result.
-func (c *Client) resolve(ctx context.Context, p EnqueueParams) (*resolvedTask, error) {
+func resolve(p EnqueueParams) (*resolvedTask, error) {
 	if p.Args == nil {
 		return nil, invalidArgument("args is nil")
 	}
@@ -345,23 +460,23 @@ func (c *Client) resolve(ctx context.Context, p EnqueueParams) (*resolvedTask, e
 	}
 	t.payload = payload
 
-	meta := o.Metadata
-	if c.contextMetadata != nil {
-		if fromCtx := c.contextMetadata(ctx); len(fromCtx) > 0 {
-			merged := maps.Clone(fromCtx)
-			maps.Copy(merged, meta)
-			meta = merged
-		}
-	}
+	t.meta = o.Metadata
+	return t, nil
+}
+
+// encodeMetadata encodes a task's metadata as JSON, which jsonb can store.
+func encodeMetadata(meta map[string]string) ([]byte, error) {
 	if len(meta) == 0 {
-		t.metadata = []byte("{}")
-	} else if t.metadata, err = json.Marshal(meta); err != nil {
+		return []byte("{}"), nil
+	}
+	text, err := json.Marshal(meta)
+	if err != nil {
 		return nil, invalidArgument("encode metadata: %v", err)
 	}
-	if hasNUL(t.metadata) {
+	if hasNUL(text) {
 		return nil, invalidArgument("metadata contains a NUL character")
 	}
-	return t, nil
+	return text, nil
 }
 
 // encodePayload encodes args as JSON, and checks that jsonb can store it
@@ -503,9 +618,9 @@ func (t *resolvedTask) validate() error {
 	return nil
 }
 
-// add appends t to the batch. now is the batch's time, which decides whether
-// t is due at once.
-func (b *enqueueBatch) add(t *resolvedTask, now time.Time) {
+// add appends t, with its encoded metadata, to the batch. now is the batch's
+// time, which decides whether t is due at once.
+func (b *enqueueBatch) add(t *resolvedTask, metadata []byte, now time.Time) {
 	b.queues = append(b.queues, t.queue)
 	b.kinds = append(b.kinds, t.kind)
 	b.groups = append(b.groups, t.group)
@@ -515,7 +630,7 @@ func (b *enqueueBatch) add(t *resolvedTask, now time.Time) {
 	b.dedupeKeys = append(b.dedupeKeys, t.dedupeKey)
 	b.dedupeWindows = append(b.dedupeWindows, t.dedupeWindow.Microseconds())
 	b.payloads = append(b.payloads, string(t.payload))
-	b.metadata = append(b.metadata, string(t.metadata))
+	b.metadata = append(b.metadata, string(metadata))
 	b.plain = b.plain && t.dedupeKey == nil && t.group == ""
 	if !t.runAt.After(now) {
 		b.due[t.queue] = true

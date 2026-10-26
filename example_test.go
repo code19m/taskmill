@@ -221,6 +221,35 @@ func ExampleMiddleware() {
 	}
 }
 
+type requestIDKey struct{}
+
+// This example tags every task with the ID of the request that enqueued it,
+// and logs the tasks that were enqueued.
+func ExampleEnqueueMiddleware() {
+	tagRequests := taskmill.EnqueueMiddleware(func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		if id, ok := ctx.Value(requestIDKey{}).(string); ok {
+			for _, task := range tasks {
+				task.Metadata["request_id"] = id
+			}
+		}
+		if err := next(ctx); err != nil {
+			return err
+		}
+		for _, task := range tasks {
+			log.Printf("enqueued task %d (%s) in queue %s", task.Result.ID, task.Kind, task.Queue)
+		}
+		return nil
+	})
+	ctx := context.Background()
+	var pool *pgxpool.Pool // from pgxpool.New
+	_, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{tagRequests},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 // receiptMailer sends receipts in bulk.
 type receiptMailer struct{}
 
@@ -252,6 +281,7 @@ func ExampleMigrations() {
 	// Output:
 	// 0000_bootstrap
 	// 0001_initial
+	// 0002_queue_lag
 }
 
 // This example retries every dead task of one queue, once the cause of their
