@@ -27,6 +27,13 @@ All notable changes to taskmill are recorded here. The format follows
 - `taskmill-ui` logs its version when it starts.
 - The shop example, `examples/shop`: a small shop that uses most features,
   with the dashboard. Run it with `go run ./examples/shop`.
+- `Worker.Health`, for readiness probes: nil while `Run` runs and its last
+  heartbeat reached the database within `LeaseDuration`. It reads only
+  memory.
+- A guide section, [Running on Kubernetes](docs/guide.md#running-on-kubernetes):
+  shutdown and probes, Deployments for workers and `taskmill-ui`,
+  migrations, connection budgets, PgBouncer, autoscaling with KEDA, and
+  managed PostgreSQL.
 
 ### Changed
 
@@ -88,6 +95,9 @@ All notable changes to taskmill are recorded here. The format follows
   usable. A payload that PostgreSQL itself rejects, such as a string with an
   unpaired surrogate escape, returns `ErrInvalidArgument` too. All returned
   a database error.
+- A worker whose row the maintainer deleted, after 5 minutes cut off from
+  the database, registers again at its next heartbeat. It used to keep
+  running unlisted in `Client.Workers` and uncounted in `QueueInfo.Workers`.
 
 ## [0.1.0] - 2026-10-25
 

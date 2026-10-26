@@ -104,9 +104,10 @@ type Worker struct {
 	schedules []compiledSchedule
 
 	running   atomic.Bool
-	released  atomic.Int64   // tasks given back during the current Run's shutdown
-	tally     tally          // ended attempts not yet added to the activity
-	recording sync.WaitGroup // Run's attempts whose results are being recorded
+	reached   atomic.Pointer[time.Time] // when Run last reached the database; nil while it does not run
+	released  atomic.Int64              // tasks given back during the current Run's shutdown
+	tally     tally                     // ended attempts not yet added to the activity
+	recording sync.WaitGroup            // Run's attempts whose results are being recorded
 
 	mu       sync.Mutex
 	attempts map[int64]*tracked // attempts that Run and RunTask are running or recording
@@ -365,27 +366,23 @@ func (w *Worker) Run(ctx context.Context) error {
 		return errors.New("taskmill: worker is already running")
 	}
 	defer w.running.Store(false)
+	defer w.reached.Store(nil)
 
 	// Work that must finish during shutdown runs on base, which keeps ctx's
 	// values but not its cancellation.
 	base := context.WithoutCancel(ctx)
 
-	names := make([]string, 0, len(w.queues)) // not nil: the column holds an array
-	names = slices.AppendSeq(names, maps.Keys(w.queues))
-	slices.Sort(names)
-	kinds := slices.Sorted(maps.Keys(w.handlers))
-	if kinds == nil {
-		kinds = []string{} // the column holds an array
-	}
-	if _, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, names, w.host, w.version, kinds); err != nil {
+	if err := w.register(ctx); err != nil {
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
+	now := time.Now()
+	w.reached.Store(&now)
 	w.beatFailures = newFailures(w, "record heartbeat")
 	w.settingsFailures = newFailures(w, "load queue settings")
 	w.activityFailures = newFailures(w, "record activity")
 	w.listenFailures = newFailures(w, "listen for notifications")
 	w.refreshQueueSettings(ctx)
-	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
+	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, w.queueNames()))
 	w.warnUnservedKinds(ctx)
 	w.checkPoolSize(ctx)
 
@@ -431,6 +428,25 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	w.logger.LogAttrs(stopCtx, slog.LevelInfo, "worker stopped", slog.Int64(logKeyReleased, w.released.Load()))
 	return nil
+}
+
+// register records the worker in the database, which lists it in
+// [Client.Workers] and counts it in [QueueInfo.Workers].
+func (w *Worker) register(ctx context.Context) error {
+	kinds := slices.Sorted(maps.Keys(w.handlers))
+	if kinds == nil {
+		kinds = []string{} // the column holds an array
+	}
+	_, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, w.queueNames(), w.host, w.version, kinds)
+	return err
+}
+
+// queueNames returns the names of the worker's queues, in order.
+func (w *Worker) queueNames() []string {
+	names := make([]string, 0, len(w.queues)) // not nil: the column holds an array
+	names = slices.AppendSeq(names, maps.Keys(w.queues))
+	slices.Sort(names)
+	return names
 }
 
 // checkPoolSize warns if handlers that use the client's pool could take all
