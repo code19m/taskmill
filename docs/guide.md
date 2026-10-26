@@ -519,6 +519,26 @@ often. Use it in one of three ways:
   HTTPS: basic authentication sends the password with every request. Set
   `TASKMILL_UI_PREFIX` when a proxy forwards a path such as `/admin/jobs` to
   it, and `TASKMILL_UI_FRAME_ANCESTORS` to the origins that may frame it.
+
+  Each [release](https://github.com/code19m/taskmill/releases) also has it
+  as binaries for Linux, macOS, and Windows, and as a container image for
+  amd64 and arm64: static, about 16 MB, and running as an unprivileged user.
+  In a container, set `TASKMILL_UI_ADDR=:8080`, since the default listens
+  only inside the container:
+
+  ```sh
+  docker run -p 8080:8080 -e TASKMILL_UI_ADDR=:8080 \
+    -e TASKMILL_DATABASE_URL=postgres://... -e TASKMILL_UI_PASSWORD=... \
+    ghcr.io/code19m/taskmill-ui:latest
+  ```
+
+  In production, pin the tag of the taskmill version your applications run,
+  such as `1.0.0`: a newer dashboard fails on an older schema with
+  `ErrSchemaOutdated`. To check that a download was built by taskmill's
+  release workflow, pass the archive, or
+  `oci://ghcr.io/code19m/taskmill-ui:1.0.0`, to `gh attestation verify` with
+  `--repo code19m/taskmill --signer-workflow
+  code19m/taskmill/.github/workflows/release.yml`.
 - **Inside another web application,** in an `<iframe>`. List that
   application's origin in `ui.Config.FrameAncestors`; otherwise browsers
   refuse to show the interface in a frame. Add `?theme=light`,
@@ -818,7 +838,7 @@ The last six run only on the maintainer.
 | `web interface request timed out` | Warn | The database did not answer within 10 seconds. |
 | `read activity failed`, `read filter choices failed`, `search groups failed` | Warn | A page shows less: its charts, its filter choices, or its group search. |
 | `render page failed` | Error | A page template failed. Please report it. |
-| `taskmill-ui listening` | Info | The command serves the web interface on `addr`. |
+| `taskmill-ui listening` | Info | The command, taskmill `version`, serves the web interface on `addr`. |
 | `the dashboard has no password: ...` | Warn | Set `TASKMILL_UI_PASSWORD`, unless something in front of it authenticates. |
 | `taskmill-ui stopped` | Error | The command could not start or serve; `error` says why. |
 

@@ -4,6 +4,8 @@
 GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION   := v1.9.0
 ACTIONLINT_VERSION    := v1.7.12
+GORELEASER_VERSION    := v2.19.0
+SYFT_VERSION          := v1.55.0
 
 # The database that `make db` starts and `make test` uses.
 TEST_DATABASE_URL ?= postgres://postgres:postgres@localhost:54329/taskmill?sslmode=disable
@@ -13,15 +15,18 @@ BIN           := $(CURDIR)/bin
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 GOVULNCHECK   := $(BIN)/govulncheck-$(GOVULNCHECK_VERSION)
 ACTIONLINT    := $(BIN)/actionlint-$(ACTIONLINT_VERSION)
+GORELEASER    := $(BIN)/goreleaser-$(GORELEASER_VERSION)
+# GoReleaser runs syft by name, so it gets a directory of its own on PATH.
+SYFT          := $(BIN)/syft-$(SYFT_VERSION)/syft
 
 .DEFAULT_GOAL := help
 
 .PHONY: help
 help: ## Show this help.
-	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  %-12s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: check
-check: tidy-check lint test vuln ## Run every check that CI runs.
+check: tidy-check lint test vuln ## Run every check that CI runs, except `make release-check`.
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format all Go files.
@@ -76,12 +81,48 @@ db: ## Start a PostgreSQL container for the tests (TEST_POSTGRES picks the image
 db-stop: ## Remove the test PostgreSQL container.
 	docker rm -f taskmill-test-db
 
+# The release targets read TAG only in the shell, quoted, since a tag name is
+# not trusted. Make passes a TAG from the environment to the shell unchanged,
+# but expands one given on its command line (`make TAG=...`) when it exports
+# it, so the release workflow sets TAG in the environment.
+
+.PHONY: release-check
+release-check: $(GORELEASER) ## Check .goreleaser.yaml (the first run builds GoReleaser, which takes minutes).
+	$(GORELEASER) check
+
+# A snapshot takes its version from the latest tag of taskmill itself, not of
+# a nested module such as otel/v0.1.0.
+.PHONY: snapshot
+snapshot: $(GORELEASER) $(SYFT) ## Build the release into ./dist and the image into Docker, publishing nothing.
+	GORELEASER_CURRENT_TAG="$$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null)" \
+		PATH='$(dir $(SYFT))':"$$PATH" $(GORELEASER) release --snapshot --clean
+
+# A release's notes are its section of CHANGELOG.md, without the heading.
+RELEASE_NOTES = test -n "$$TAG" || { echo 'set TAG to the version, such as TAG=v1.0.0' >&2; exit 1; }; \
+	awk -v version="$${TAG\#v}" ' \
+		/^\#\# \[/ { if (on) exit; on = index($$0, "\#\# [" version "]") == 1; next } \
+		on && /^\[.*\]: / { exit } \
+		on && (NF || notes != "") { notes = notes $$0 "\n" } \
+		END { \
+			if (notes == "") { print "CHANGELOG.md has no section for " version > "/dev/stderr"; exit 1 } \
+			sub(/\n+$$/, "\n", notes); printf "%s", notes \
+		}' CHANGELOG.md
+
+.PHONY: release-notes
+release-notes: ## Print the notes of TAG, such as TAG=v1.0.0, from CHANGELOG.md.
+	@$(RELEASE_NOTES)
+
+.PHONY: release
+release: $(GORELEASER) $(SYFT) ## Publish TAG, such as TAG=v1.0.0, as a draft release (the release workflow runs this).
+	notes=$$(mktemp) && { $(RELEASE_NOTES); } > "$$notes" && \
+		GORELEASER_CURRENT_TAG="$$TAG" PATH='$(dir $(SYFT))':"$$PATH" $(GORELEASER) release --clean --release-notes="$$notes"
+
 .PHONY: tools
-tools: $(GOLANGCI_LINT) $(GOVULNCHECK) $(ACTIONLINT) ## Install the pinned development tools into ./bin.
+tools: $(GOLANGCI_LINT) $(GOVULNCHECK) $(ACTIONLINT) $(GORELEASER) $(SYFT) ## Install the pinned development tools into ./bin.
 
 .PHONY: clean
-clean: ## Remove installed tools and generated reports.
-	rm -rf $(BIN) coverage.out
+clean: ## Remove installed tools, generated reports, and built releases.
+	rm -rf $(BIN) coverage.out dist
 
 $(GOLANGCI_LINT):
 	GOBIN=$(BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
@@ -94,3 +135,11 @@ $(GOVULNCHECK):
 $(ACTIONLINT):
 	GOBIN=$(BIN) go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 	mv $(BIN)/actionlint $@
+
+$(GORELEASER):
+	GOBIN=$(BIN) go install github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
+	mv $(BIN)/goreleaser $@
+
+# Syft names itself in every SBOM, so it is told its version.
+$(SYFT):
+	GOBIN=$(dir $@) go install -ldflags='-X main.version=$(SYFT_VERSION:v%=%)' github.com/anchore/syft/cmd/syft@$(SYFT_VERSION)
