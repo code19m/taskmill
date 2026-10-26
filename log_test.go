@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,15 +14,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
 )
 
 func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	t.Parallel()
-	db := newProxy(t)
+	// The worker reaches the database through proxies, which the test cuts:
+	// one for its pool, and one for its notifications, which may need a
+	// direct connection of their own.
+	db, direct := newProxy(t, testdb.URL(t)), newProxy(t, testdb.DirectURL(t))
+	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = db.host, db.port, nil
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
 	logs := &logRecorder{}
-	e := newEnvWith(t, db.pool(t), &taskmill.ClientConfig{Logger: slog.New(logs)})
+	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
 
 	// Two tasks run across the outage: one succeeds and one fails, while the
 	// database is gone. Their next attempts take long enough for a heartbeat.
@@ -41,6 +64,7 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 		Queues:        defaultQueue(2),
 		PollInterval:  20 * time.Millisecond,
 		LeaseDuration: 600 * time.Millisecond,
+		ListenConfig:  listen,
 	})
 	timing := testTiming
 	timing.FailureReport = time.Second
@@ -53,9 +77,11 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 
 	down := time.Now()
 	db.cut(true)
+	direct.cut(true)
 	close(release)
 	time.Sleep(3 * time.Second)
 	db.cut(false)
+	direct.cut(false)
 
 	// The tasks run again, and the operations that the worker repeats log
 	// their recovery. Others, such as retention, recover at their next try.
@@ -267,4 +293,100 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// proxy forwards connections to a database, and can cut them all, as
+// a database that goes away does.
+type proxy struct {
+	host   string
+	port   uint16
+	target string
+
+	mu    sync.Mutex
+	down  bool
+	conns map[net.Conn]bool
+}
+
+func newProxy(t *testing.T, url string) *proxy {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	portNum, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &proxy{
+		host:   host,
+		port:   uint16(portNum),
+		target: net.JoinHostPort(cfg.ConnConfig.Host, strconv.Itoa(int(cfg.ConnConfig.Port))),
+		conns:  map[net.Conn]bool{},
+	}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go p.forward(c)
+		}
+	}()
+	// Cleanups run last first: the database stays reachable until the
+	// pool closes.
+	t.Cleanup(func() {
+		_ = ln.Close()
+		p.cut(true)
+	})
+	return p
+}
+
+// cut closes every connection and refuses new ones, or accepts them again.
+func (p *proxy) cut(down bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.down = down
+	if down {
+		for c := range p.conns {
+			_ = c.Close()
+		}
+		clear(p.conns)
+	}
+}
+
+func (p *proxy) forward(client net.Conn) {
+	server, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(context.Background(), "tcp", p.target)
+	p.mu.Lock()
+	if err != nil || p.down {
+		p.mu.Unlock()
+		_ = client.Close()
+		if server != nil {
+			_ = server.Close()
+		}
+		return
+	}
+	p.conns[client], p.conns[server] = true, true
+	p.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(server, client)
+		_ = server.Close()
+		close(done)
+	}()
+	_, _ = io.Copy(client, server)
+	_ = client.Close()
+	<-done
+	p.mu.Lock()
+	delete(p.conns, client)
+	delete(p.conns, server)
+	p.mu.Unlock()
 }

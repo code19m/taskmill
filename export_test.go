@@ -51,15 +51,55 @@ func PruneSchedules(ctx context.Context, w *Worker) {
 
 // ExplainFetch returns the plan of a fetch from queue, as a worker runs it.
 func ExplainFetch(ctx context.Context, c *Client, queue string, limit int) (string, error) {
+	return explain(ctx, c, planSettings, c.sql.fetch, queue, limit, int64(1), "w")
+}
+
+// ExplainPromote returns the plan of the statement that promotes due tasks.
+func ExplainPromote(ctx context.Context, c *Client) (string, error) {
+	return explain(ctx, c, "", c.sql.promoteDue, c.schema)
+}
+
+// ExplainLeased returns the plans of the statements that find tasks by their
+// attempts: the completion, the heartbeat, and the lock of a grouped
+// completion.
+func ExplainLeased(ctx context.Context, c *Client) (string, error) {
+	ids, tokens := []int64{1, 2, 3}, []int32{1, 1, 1}
+	var plans []string
+	for _, s := range []struct {
+		sql  string
+		args []any
+	}{
+		{c.sql.complete, []any{ids, tokens, []int64{}}},
+		{c.sql.heartbeat, []any{ids, tokens, int64(1)}},
+		{c.sql.lockLeased, []any{ids, tokens}},
+		{c.sql.fail, []any{int64(1), int32(1), "retryable", int64(1), `{"message": "m"}`}},
+		{c.sql.snooze, []any{int64(1), int32(1), int64(1), nil}},
+		{c.sql.release, []any{int64(1), int32(1)}},
+		{c.sql.cancelRunning, []any{int64(1), int32(1)}},
+	} {
+		plan, err := explain(ctx, c, "", s.sql, s.args...)
+		if err != nil {
+			return "", err
+		}
+		plans = append(plans, plan)
+	}
+	return strings.Join(plans, "\n"), nil
+}
+
+// explain returns the plan of sql, after settings if any, in a transaction
+// that it rolls back.
+func explain(ctx context.Context, c *Client, settings, sql string, args ...any) (string, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, planSettings); err != nil {
-		return "", err
+	if settings != "" {
+		if _, err := tx.Exec(ctx, settings); err != nil {
+			return "", err
+		}
 	}
-	r, err := tx.Query(ctx, "EXPLAIN "+c.sql.fetch, queue, limit, int64(1), "w")
+	r, err := tx.Query(ctx, "EXPLAIN "+sql, args...)
 	if err != nil {
 		return "", err
 	}

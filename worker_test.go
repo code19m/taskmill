@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -33,11 +34,14 @@ var testTiming = taskmill.Timing{
 }
 
 // newWorker returns a worker with test timing that polls every 50 ms unless
-// cfg says otherwise.
+// cfg says otherwise, and listens as testdb.ListenConfig says.
 func newWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) *taskmill.Worker {
 	t.Helper()
 	if cfg.PollInterval == 0 {
 		cfg.PollInterval = 50 * time.Millisecond
+	}
+	if cfg.ListenConfig == nil {
+		cfg.ListenConfig = testdb.ListenConfig(t)
 	}
 	w, err := taskmill.NewWorker(e.client, cfg)
 	if err != nil {
@@ -738,7 +742,7 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 func TestRunTwiceFails(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	w, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{NoMaintainer: true})
+	w, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{NoMaintainer: true, ListenConfig: testdb.ListenConfig(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1207,8 +1211,18 @@ func TestShutdownFitsTheGracePeriod(t *testing.T) {
 
 func TestHealthFollowsTheDatabase(t *testing.T) {
 	t.Parallel()
-	db := newProxy(t)
-	e := newEnvWith(t, db.pool(t), nil)
+	db := newProxy(t, testdb.URL(t))
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = db.host, db.port, nil
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	e := newEnvWith(t, pool, nil)
 	const lease = 600 * time.Millisecond
 	w := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: lease})
 	if w.Health() == nil {
@@ -1606,6 +1620,25 @@ func TestFetchStaysOnItsIndexWithStaleStatistics(t *testing.T) {
 	}
 	if strings.Contains(plan, "Sort") || strings.Contains(plan, "Bitmap") || !strings.Contains(plan, "tasks_fetch_idx") {
 		t.Fatalf("the fetch does not read its index in order:\n%s", plan)
+	}
+}
+
+func TestLeasedTasksAreFoundByID(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// The statistics see no running task, as they do after a quiet moment,
+	// while tasks_running_idx may hold the entries of many finished tasks
+	// that vacuum has not removed yet.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'default', 'email.send', 'available', now(), '{}', 1 FROM generate_series(1, 50000)`)
+	e.exec(t, "ANALYZE {s}.tasks")
+
+	plans, err := taskmill.ExplainLeased(t.Context(), e.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plans, "tasks_running_idx") || strings.Contains(plans, "Seq Scan on tasks") {
+		t.Fatalf("leased tasks are not found by their IDs:\n%s", plans)
 	}
 }
 

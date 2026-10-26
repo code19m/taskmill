@@ -1024,7 +1024,9 @@ mode except notifications, which need a session. pgx caches prepared
 statements, so use PgBouncer 1.21 or newer with `max_prepared_statements`
 set, or set pgx's `DefaultQueryExecMode` to `QueryExecModeExec`. Point
 `WorkerConfig.ListenConfig` at a direct connection, created with
-`pgx.ParseConfig`. Without it, workers fall back to polling.
+`pgx.ParseConfig`. Without it, workers fall back to polling. A nightly CI run
+passes every test through PgBouncer this way (target F8 in
+[Benchmarks](benchmarks.md#reliability-under-faults)).
 
 ```go
 cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec // not needed with max_prepared_statements
@@ -1184,9 +1186,9 @@ with `pool_max_conns=15` run up to 15 pods in a default rollout, with up to
 their rollouts.
 
 **PgBouncer** in transaction mode carries the pools, as
-[Connection poolers](#running-in-production) says: give it the pools'
-connections, and point `WorkerConfig.ListenConfig` and `Migrate` at the
-database itself. Each worker replica then holds one direct connection.
+[Connection poolers](#running-in-production) says, `Migrate`'s included.
+Point `WorkerConfig.ListenConfig` at the database itself: each worker
+replica then holds one direct connection.
 
 **Migrations.** `Migrate` is safe from many pods at once: one applies the
 migrations in a single transaction, while the others wait for its lock and
@@ -1210,8 +1212,8 @@ spec:
           image: registry.example.com/myapp:1.4.0
           args: [migrate] # calls taskmill.Migrate and exits
           env:
-            - name: DATABASE_URL # direct, not through PgBouncer
-              valueFrom: {secretKeyRef: {name: myapp-db, key: direct-url}}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: myapp-db, key: url}}
 ```
 
 A migration stays compatible with the previous release, so old pods keep

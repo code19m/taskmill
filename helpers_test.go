@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -378,116 +376,4 @@ func (e *env) setDefaultQueue(t *testing.T, settings *taskmill.QueueSettings) {
 	if err := e.client.UpdateQueue(t.Context(), taskmill.DefaultQueue, settings); err != nil {
 		t.Fatalf("update the default queue: %v", err)
 	}
-}
-
-// proxy forwards connections to the test database, and can cut them all, as
-// a database that goes away does.
-type proxy struct {
-	host   string
-	port   uint16
-	target string
-
-	mu    sync.Mutex
-	down  bool
-	conns map[net.Conn]bool
-}
-
-func newProxy(t *testing.T) *proxy {
-	t.Helper()
-	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	host, port, err := net.SplitHostPort(ln.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	portNum, err := strconv.ParseUint(port, 10, 16)
-	if err != nil {
-		t.Fatal(err)
-	}
-	p := &proxy{
-		host:   host,
-		port:   uint16(portNum),
-		target: net.JoinHostPort(cfg.ConnConfig.Host, strconv.Itoa(int(cfg.ConnConfig.Port))),
-		conns:  map[net.Conn]bool{},
-	}
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				return
-			}
-			go p.forward(c)
-		}
-	}()
-	// Cleanups run last first: the database stays reachable until the
-	// pool closes.
-	t.Cleanup(func() {
-		_ = ln.Close()
-		p.cut(true)
-	})
-	return p
-}
-
-// pool returns a pool that reaches the test database through p.
-func (p *proxy) pool(t *testing.T) *pgxpool.Pool {
-	t.Helper()
-	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = p.host, p.port, nil
-	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return pool
-}
-
-// cut closes every connection and refuses new ones, or accepts them again.
-func (p *proxy) cut(down bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.down = down
-	if down {
-		for c := range p.conns {
-			_ = c.Close()
-		}
-		clear(p.conns)
-	}
-}
-
-func (p *proxy) forward(client net.Conn) {
-	server, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(context.Background(), "tcp", p.target)
-	p.mu.Lock()
-	if err != nil || p.down {
-		p.mu.Unlock()
-		_ = client.Close()
-		if server != nil {
-			_ = server.Close()
-		}
-		return
-	}
-	p.conns[client], p.conns[server] = true, true
-	p.mu.Unlock()
-
-	done := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(server, client)
-		_ = server.Close()
-		close(done)
-	}()
-	_, _ = io.Copy(client, server)
-	_ = client.Close()
-	<-done
-	p.mu.Lock()
-	delete(p.conns, client)
-	delete(p.conns, server)
-	p.mu.Unlock()
 }
