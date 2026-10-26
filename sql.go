@@ -128,6 +128,12 @@ func newStatements(schema string) *statements {
 		// {trimmed} is a task's errors without the oldest entry once it holds
 		// keptErrors, so that appending one keeps at most keptErrors.
 		"{trimmed}", "(CASE WHEN jsonb_array_length(errors) >= "+strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
+		// {leased} checks that a task is leased. The statements that find
+		// tasks by their attempts look each one up by ID, and compare the
+		// state as text, so that the planner cannot read tasks_running_idx
+		// instead: statistics taken while few tasks ran make that index look
+		// small, but until vacuum it keeps an entry for every task that ran.
+		"{leased}", "state::text = 'running'",
 	)
 	q := func(sql string) string { return r.Replace(sql) }
 
@@ -234,8 +240,9 @@ SELECT ids.ord, ids.id, false FROM ids CROSS JOIN notified ORDER BY ids.ord`),
 		complete: q(`
 WITH done AS (
     DELETE FROM {s}.tasks
-    WHERE (id, lease_token) IN (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t))
-      AND state = 'running'
+    WHERE id = ANY($1::bigint[])
+      AND (id, lease_token) IN (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t))
+      AND {leased}
     RETURNING id, created_at, run_at, attempted_at, priority, attempt, max_attempts,
               queue, kind, group_key, attempted_by, payload, metadata, errors
 ), kept AS (
@@ -365,13 +372,13 @@ WITH attempts AS (
     SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t)
 ), locked AS (
     SELECT id FROM {s}.tasks
-    WHERE (id, lease_token) IN (SELECT i, t FROM attempts) AND state = 'running'
+    WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}
     FOR UPDATE SKIP LOCKED
 )
 SELECT id, true FROM locked
 UNION ALL
 SELECT id, false FROM {s}.tasks
-WHERE (id, lease_token) IN (SELECT i, t FROM attempts) AND state = 'running'`),
+WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}`),
 
 		// decrementGroups is decrementGroup for groups ($1, $2), whose heads
 		// $3 finished. The caller holds the groups' locks.
@@ -507,7 +514,7 @@ WITH attempts AS (
     SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t)
 ), locked AS (
     SELECT id FROM {s}.tasks
-    WHERE (id, lease_token) IN (SELECT i, t FROM attempts) AND state = 'running'
+    WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}
     FOR UPDATE SKIP LOCKED
 ), renewed AS (
     UPDATE {s}.tasks t
@@ -519,7 +526,7 @@ WITH attempts AS (
 SELECT id, true, cancel_requested FROM renewed
 UNION ALL
 SELECT id, false, cancel_requested_at IS NOT NULL FROM {s}.tasks
-WHERE (id, lease_token) IN (SELECT i, t FROM attempts) AND state = 'running'`),
+WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}`),
 
 		// fail records a failed attempt: retryable after a delay of $4
 		// microseconds, or dead. $5 is the error as a JSON object. A task
@@ -532,7 +539,7 @@ SET state = CASE WHEN cancel_requested_at IS NOT NULL THEN 'canceled' ELSE $3::{
     finalized_at = CASE WHEN cancel_requested_at IS NOT NULL OR $3::{s}.task_state = 'dead' THEN now() END,
     lease_expires_at = NULL,
     errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt, 'at', now()) || $5::jsonb)
-WHERE id = $1 AND lease_token = $2 AND state = 'running'
+WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
 
 		// snooze runs the task again after $3 microseconds and gives the
@@ -553,7 +560,7 @@ SET state = CASE
     errors = CASE WHEN $4::jsonb IS NULL THEN errors
                   ELSE {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt - 1, 'at', now()) || $4::jsonb)
              END
-WHERE id = $1 AND lease_token = $2 AND state = 'running'
+WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
 
 		// release gives a task back during shutdown, attempt included. A task
@@ -564,13 +571,13 @@ SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'cancele
     attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
     finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
     lease_expires_at = NULL
-WHERE id = $1 AND lease_token = $2 AND state = 'running'
+WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
 
 		cancelRunning: q(`
 UPDATE {s}.tasks
 SET state = 'canceled', finalized_at = now(), lease_expires_at = NULL
-WHERE id = $1 AND lease_token = $2 AND state = 'running'
+WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, '')`),
 
 		queueSettings: q(`SELECT name, paused_at IS NOT NULL, coalesce(max_running, 0) FROM {s}.queues WHERE name = ANY($1)`),

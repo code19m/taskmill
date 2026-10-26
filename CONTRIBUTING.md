@@ -34,10 +34,11 @@ has its own go.mod. The first run installs the pinned development tools into
 | Target | What it does |
 |---|---|
 | `make db` | Start PostgreSQL in Docker for the tests (`make db-stop` removes it) |
-| `make check` | All CI checks but `make release-check` and `make api`: tidy, lint, test, vulnerability scan, rolling deploy |
+| `make check` | All CI checks but `make release-check` and `make api`: tidy, lint, test, test through PgBouncer, vulnerability scan, rolling deploy |
 | `make fmt` | Format the code with gofumpt and goimports |
 | `make lint` | Run golangci-lint and actionlint |
 | `make test` | Run the tests with the race detector, in random order, and write `coverage.out` |
+| `make test-pgbouncer` | Run the tests through PgBouncer in transaction mode, as CI does |
 | `make cover` | Run the tests and open an HTML coverage report |
 | `make cover-report` | Print the coverage of the last `make test` per package |
 | `make vuln` | Scan for known vulnerabilities with govulncheck |

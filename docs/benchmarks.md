@@ -50,7 +50,7 @@ shows the shape of the results, not the numbers on the reference hardware.
 |---|---|---|
 | T1 | Enqueue one task per transaction, 16 producers: ≥ 15,000 tasks/s | 8,460 tasks/s; 8,015 to 16,379 across runs: below target in two runs of three, see below |
 | T2 | Enqueue in batches of 100, 8 producers: ≥ 150,000 tasks/s | 189,110 tasks/s; 175,120 to 366,130 |
-| T3 | End to end: enqueue, fetch, run, complete, history kept: ≥ 20,000 tasks/s | 17,046 tasks/s end to end, sustained: below target on this laptop. One worker with 64 slots draining 200,000 queued tasks: 31,382 tasks/s |
+| T3 | End to end: enqueue, fetch, run, complete, history kept: ≥ 20,000 tasks/s | 16,879 tasks/s end to end, sustained: below target on this laptop. One worker with 64 slots draining 200,000 queued tasks: 31,382 tasks/s |
 | T4 | T3 with FIFO groups, 100,000 keys: ≥ 5,000 tasks/s | One worker with 64 slots draining 200,000 tasks in 100,000 groups: 25,769 tasks/s |
 | T5 | Outbox relay with a batch publisher, 10,000 keys: ≥ 10,000 messages/s | One relay worker with 8 slots draining 200,000 messages on 10,000 keys: 26,818 messages/s |
 
@@ -65,10 +65,14 @@ quiet one reached 16,379 tasks/s.
 **T3 end to end** ran 8 producers, enqueueing batches of 100 and holding back
 while 20,000 tasks waited, beside 2 workers with 64 slots each. Fewer slots
 per worker batch less: 4 workers with 16 slots each ran 15,536 tasks/s, with
-0.58 statements per task. Draining a backlog is faster at first, but
-slows as it goes: dead index entries of finished tasks pile up in the fetch's
-path until autovacuum, which wakes once a minute, removes them. Four drains
-of 200,000 tasks in a row ran 39,000, 27,000, 19,000, and 15,000 tasks/s.
+0.58 statements per task. Draining a backlog slows as it goes, and that is
+taskmill's doing, not this laptop's: four drains of 200,000 tasks in a row,
+before the fix described under S1 and S2, ran 39,000, 27,000, 19,000, and
+15,000 tasks/s. Each fetch reads the queue's entries in `tasks_fetch_idx`
+from the front, where the entries of the tasks fetched before stay, marked
+dead, until autovacuum removes them, at most once a minute; and until that
+fix, each completion read all of `tasks_running_idx`, which grows the same
+way.
 
 ### Latency
 
@@ -105,9 +109,9 @@ the first targets left out:
 
 | ID | Target | Result |
 |---|---|---|
-| S1 | T3 with 10 million scheduled and 1 million available tasks waiting: within 20% of T3 | 13,365 tasks/s against 19,117 without them: 70%, below target on this laptop |
-| S2 | T3 with 100,000 FIFO groups holding pending tasks in another queue: within 10% of T3 | 16,750 tasks/s against 19,117: 88%, below target on this laptop |
-| S3 | 100 queues served by 50 worker processes: maintainer cycle under 1 s | Slowest iterations: main loop 131 ms, promotion loop 291 ms, statistics 235 ms, at 100 tasks/s: pass. At 1,000 tasks/s, up to 1.7 s; see below |
+| S1 | T3 with 10 million scheduled and 1 million available tasks waiting: within 20% of T3 | Two runs: 14,869 tasks/s against 17,164 without them, 87%; and 16,257 against 18,539, 88%: pass |
+| S2 | T3 with 100,000 FIFO groups holding pending tasks in another queue: within 10% of T3 | Two runs: 12,522 tasks/s against 17,164, 73%; and 16,671 against 18,539, 89.9%: just below target here |
+| S3 | 100 queues served by 50 worker processes: maintainer cycle under 1 s | At 100 tasks/s, slowest iterations: main loop 131 ms, promotion loop 291 ms, statistics 235 ms: pass. At 1,000 tasks/s, up to 1.7 s: fails, by design, see below |
 
 S1 and S2 compare T3 end to end with and without the waiting tasks, which
 were vacuumed, analyzed, and written to disk before the run, as tasks that
@@ -121,22 +125,27 @@ seconds instead of 0.2 milliseconds. It is fixed; see the
 [changelog](../CHANGELOG.md). With the fix, an earlier form of S1, which
 drained backlogs, rose from 46% to 58% of T3.
 
-**S1 and S2 still miss on this laptop.** The waiting tasks make every index
-bigger than this database's shared buffers, and between autovacuum runs, the
-indexes that the fetch, the completion, and the heartbeats read fill with
-dead entries. Under statistics taken while no task ran, the completion's
-plan reads all of `tasks_running_idx`, live and dead entries alike, instead
-of looking each task up by ID. Autovacuum itself is fast: about a second, even
-on the table of 11 million tasks. These need a run on the reference hardware,
-and a look at the plans of those statements.
+**S1 and S2 found a second bug.** Recording an attempt's result and renewing
+leases read `tasks_running_idx` whenever statistics, taken while few tasks
+ran, made that index look small. Until vacuum, it keeps an entry for every
+task that ran, so with millions of tasks waiting, a completion read about
+4,000 pages instead of 240, and a heartbeat 8,600. They now look each task up
+by its ID; see the [changelog](../CHANGELOG.md). Measured back to back on the
+same database, S1 rose from 63% to 87% of T3, and S2 from 57% to 73%; a
+second run with the fix measured 88% and 89.9%. Runs here move by up to a
+fifth: T3 alone measured 17,164 to 20,859 tasks/s on the same code, so S2,
+at the edge of its target, needs a run on the reference hardware.
 
 **S3** ran one maintainer while 50 worker processes served 100 queues each,
 with concurrency 1, and 100 tasks a second arrived in random queues, a fifth
 of them delayed; a worker process was killed every 10 seconds. Each loop's
-iteration is the time of its statements in order. At 1,000 tasks a second,
-this database's 4 CPUs saturate, and the promotion loop took up to 1.7
-seconds: the 50 idle processes alone poll 100 queues each every second, 5,000
-fetches a second, about 2 CPUs of this database.
+iteration is the time of its statements in order. **At 1,000 tasks a second
+it fails, and the cause is a design cost:** every worker polls every queue it
+serves once a second, even while notifications work, so 50 processes with
+100 queues each fetch 5,000 times a second with nothing to do. That took
+about 2 of this database's 4 CPUs; with the tasks on top, the CPUs saturated,
+and the promotion loop took up to 1.7 seconds. Idle polling is tracked as an
+issue of its own.
 
 ### Resource use
 
@@ -186,11 +195,11 @@ table, so the counts include calls whose worker died before reporting.
 | F1 | 1 million tasks while a random worker is killed every 10 s: every task completes; none is lost or stuck | 60,000 completed, 0 left: pass |
 | F2 | F1: every task appears exactly once in history | 60,000 distinct of 60,000: pass |
 | F3 | F1: extra handler calls ≤ kills × worker concurrency | 417 extra, bound 976: pass |
-| F4 | 10,000 FIFO groups of 100 tasks, 5% of attempts failing: no handler sees a task before the one ahead of it; nothing after a dead head runs | 1 million tasks: 0 calls before the task ahead completed, 0 after their own, 0 past a dead head; 991,892 completed, 153 dead heads, 7,955 waiting behind them, 0 lost: pass |
+| F4 | 10,000 FIFO groups of 100 tasks, 5% of attempts failing: no handler sees a task before the one ahead of it; nothing after a dead head runs | 1 million tasks: 0 calls before the task ahead completed, 0 after their own, 0 past a dead head; 993,523 completed, none twice; 137 dead heads, 6,340 tasks waiting behind them; each task accounted for, 0 lost; groups exact: pass |
 | F5 | 1 million enqueues of 100,000 dedupe keys from 20 processes at once: exactly 100,000 tasks | 100,000 tasks; 100,000 enqueues reported a new task, 0 results named another task; FIFO groups exact: pass |
-| F6 | PostgreSQL restarted during a run: workers resume within 10 s; no task lost | Shut down cleanly: back after 1.1 s, workers resumed 0.55 s later. Crashed and down for 15 s: workers resumed 0.21 s after it was back. 60,000 completed once, 0 left: pass |
+| F6 | PostgreSQL restarted during a run: workers resume within 10 s; no task lost | Shut down cleanly: back after 0.7 s, and a task fetched after it completed 0.17 s later. Crashed and down for 15 s: 0.41 s after it was back. 60,000 completed once, 0 left: pass |
 | F7 | A worker cut off from the database for longer than its lease: its late result is rejected; the task completes once | 0 of 16 tasks completed by the cut worker's stale attempts; 116 completed once, 0 left; the cut worker ran new tasks on its own: pass |
-| F8 | The integration suite behind PgBouncer in transaction mode: passes, with `LISTEN` on a direct connection | Every test passes through PgBouncer 1.25.2, after two fixes: pass |
+| F8 | The integration suite behind PgBouncer in transaction mode: passes, with `LISTEN` on a direct connection | Every test passes through PgBouncer 1.25.2, after two fixes; CI checks it on every pull request: pass |
 | F9 | Application servers' clocks 5 minutes off: no early or late starts beyond L4 | Database clock 5 minutes ahead: 0 early starts, p99 432 ms late, 0 leases lost. 5 minutes behind: 0 early, p99 677 ms, 0 leases lost: pass |
 
 **F1 to F3** ran 60,000 tasks through 4 worker processes with 16 slots each, and
@@ -199,12 +208,13 @@ extra calls are the at-least-once guarantee at work: a killed worker's
 running tasks run again after their leases expire.
 
 **F4** also killed one of 4 worker processes every 2 seconds, which the
-target does not ask for: 121 kills in 4 minutes, beside 52,206 failed
+target does not ask for: 93 kills in 3 minutes, beside 52,283 failed
 attempts. It allowed 3 attempts per task, so that some heads died and halted
 their groups. Each call's start is compared with when the tasks of its
 group completed: a call of a task before the one ahead of it completed, or
 after its own task completed, is a violation, and so is any call past a dead
-head.
+head. Each of the million tasks is checked, one by one, to have completed
+once, to be a dead head that halts its group, or to wait behind one.
 
 **F5** took 16 seconds. It gave every fifth key a FIFO group as well, and
 the groups' counts stayed exact. No producer saw an error: the enqueues of
@@ -212,7 +222,9 @@ one key do not deadlock each other.
 
 **F6** restarted PostgreSQL twice during the run: once shutting down cleanly,
 and once killed with `SIGKILL` and kept down for 15 seconds, longer than the
-maintainer's lease.
+maintainer's lease. Workers count as resumed once a task that they fetched
+after the database was back completes; the results of attempts from before
+the restart do not count.
 
 **F7** cut a worker off with a proxy inside the benchmark, which held all its
 traffic, as a network partition does. Half of its 16 handlers returned during
@@ -231,10 +243,11 @@ disconnects the client that prepares it again
 PgBouncer's shared, open connections made happen every time: a migration
 that waited for another's lock trusted its connection's stale view that the
 schema did not exist yet. It fails directly against PostgreSQL too, once the
-connections are open. Three tests that need a
-session of their own, for a session setting, a startup parameter, or
-`LISTEN`, now connect directly: through a transaction pooler, a session
-setting leaks into other clients.
+connections are open. Four tests that need a session of their own, for a
+session setting, a startup parameter, or `LISTEN`, now connect directly:
+through a transaction pooler, a session setting leaks into other clients.
+`make test-pgbouncer` runs the tests this way, and CI runs it on every pull
+request.
 
 **F9** ran the timing scenario (L4) against PostgreSQL under libfaketime,
 its clock 5 minutes ahead of the application's, and again 5 minutes behind.
@@ -250,8 +263,9 @@ clock waited 5 minutes more, as their run times said, and none started early.
 - It ran on a shared laptop, not the reference hardware, with end-to-end
   runs of 60 seconds instead of 10 minutes, and a soak of 1 hour instead
   of 4.
-- T1, T3 end to end, S1, and S2 miss their targets here, as described above.
-  They need a run on the reference hardware before v1.0.0.
+- T1, T3 end to end, and S2 miss their targets here, S2 by a hair in one of
+  its two runs, as described above. They need a run on the reference
+  hardware before v1.0.0.
 - L5 and L6 were revised, as described above.
 
 ## Running the benchmarks
@@ -287,11 +301,16 @@ scenarios, longer runs, or another database. The program recreates its own
 schema, `taskmill_bench`.
 
 `make faults` runs the fault scenarios as the nightly CI run does: F1 to F7
-at a tenth of their size, the tests through PgBouncer for F8, and the timing
-scenario against databases whose clocks are 5 minutes ahead and behind for
-F9. It starts those databases itself and removes them afterwards;
-[`faults.sh`](../internal/cmd/bench/faults.sh) shows how. A database with a
-skewed clock runs PostgreSQL under libfaketime:
+at a tenth of their size, and the timing scenario against databases whose
+clocks are 5 minutes ahead and behind for F9. It starts those databases
+itself and removes them afterwards;
+[`faults.sh`](../internal/cmd/bench/faults.sh) shows how.
+`make test-pgbouncer` runs the tests through PgBouncer for F8, against the
+database that `make db` starts, and CI runs it on every pull request.
+
+A database with a skewed clock runs PostgreSQL under libfaketime. Pass the
+skew to the timing scenario, which then fails, rather than skips F9, when
+the database's clock is not off by that much:
 
 ```sh
 printf 'FROM postgres:18-alpine\nRUN apk add --no-cache libfaketime\n' | docker build -t taskmill-faketime -
@@ -299,4 +318,6 @@ docker run -d --name taskmill-bench-skew -p 54333:5432 \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill \
   -e LD_PRELOAD=/usr/lib/faketime/libfaketime.so.1 -e FAKETIME=+5m -e DONT_FAKE_MONOTONIC=1 \
   taskmill-faketime
+go run ./internal/cmd/bench -db 'postgres://postgres:postgres@localhost:54333/taskmill?sslmode=disable' \
+  -scenarios timing -skew 5m
 ```

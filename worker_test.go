@@ -1530,6 +1530,25 @@ func TestFetchStaysOnItsIndexWithStaleStatistics(t *testing.T) {
 	}
 }
 
+func TestLeasedTasksAreFoundByID(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// The statistics see no running task, as they do after a quiet moment,
+	// while tasks_running_idx may hold the entries of many finished tasks
+	// that vacuum has not removed yet.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'default', 'email.send', 'available', now(), '{}', 1 FROM generate_series(1, 50000)`)
+	e.exec(t, "ANALYZE {s}.tasks")
+
+	plans, err := taskmill.ExplainLeased(t.Context(), e.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plans, "tasks_running_idx") || strings.Contains(plans, "Seq Scan on tasks") {
+		t.Fatalf("leased tasks are not found by their IDs:\n%s", plans)
+	}
+}
+
 func TestMiddlewareCannotRunAHandlerTwice(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

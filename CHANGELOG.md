@@ -97,6 +97,11 @@ All notable changes to taskmill are recorded here. The format follows
   already open, as a running application's are. A migration that waited for
   another's lock trusted its connection's stale view that the schema did not
   exist yet.
+- Recording an attempt's result and renewing leases could read the whole
+  index of running tasks, which holds an entry for every task that ran since
+  the last vacuum, when the statistics had been taken while few tasks ran.
+  With millions of tasks waiting, a completion read about 4,000 pages instead
+  of 240, and a heartbeat 8,600. They now look each task up by its ID.
 - Promoting due tasks could scan the whole `tasks` table every second, when
   many tasks were scheduled far ahead while others waited available: with 10
   million scheduled tasks, each promotion took 1.2 seconds instead of under a

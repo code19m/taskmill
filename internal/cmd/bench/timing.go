@@ -33,8 +33,10 @@ const timingRun = 75 * time.Second
 // retries, snoozes, and schedule runs. Leases last 3 seconds, and some tasks
 // run for longer, renewing theirs. Against a database whose clock is off from
 // this machine's by minutes, as docs/benchmarks.md shows how to start, the
-// same checks are F9: application servers' clocks out of sync.
-func benchTiming(ctx context.Context, pool *pgxpool.Pool) {
+// same checks are F9: application servers' clocks out of sync. wantSkew is
+// the offset the run expects, if any: a database whose clock is not off by
+// it fails F9 rather than skipping it.
+func benchTiming(ctx context.Context, pool *pgxpool.Pool, wantSkew time.Duration) {
 	c := fresh(ctx, pool)
 	mustExec(ctx, pool, `CREATE TABLE {s}.starts (n integer NOT NULL, attempt integer NOT NULL,
     early boolean NOT NULL, late_us bigint NOT NULL)`)
@@ -106,9 +108,13 @@ SELECT (SELECT count(*) FROM {s}.task_history WHERE errors @> '[{"code": "lease_
 		"%s of 2,100 completed, %s waiting, %d left; %d schedule runs at %d times | %s |\n",
 		commas(completed), commas(waiting), unfinished, runs, scheduled,
 		verdict(completed+waiting == 2100 && unfinished == 0 && runs > 0 && runs == scheduled))
-	if skew.Abs() < time.Minute {
+	switch {
+	case wantSkew != 0 && (skew-wantSkew).Abs() > 30*time.Second:
+		fmt.Printf("| F9 | Clocks out of sync | The database's clock is %s off, not the expected %s | %s |\n",
+			skew, wantSkew, verdict(false))
+	case skew.Abs() < time.Minute:
 		fmt.Println("| F9 | Clocks out of sync | Not run: the database's clock is within a minute of this machine's | |")
-	} else {
+	default:
 		fmt.Printf("| F9 | Clocks %s apart: no early start, none late beyond L4, no lease lost while renewed | "+
 			"%d early, p99 %s late, %d leases lost | %s |\n", skew.Abs(), early, pct(lates, 99), lost,
 			verdict(early == 0 && pct(lates, 99) <= 1500*time.Millisecond && lost == 0))

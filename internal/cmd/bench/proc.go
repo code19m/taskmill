@@ -102,6 +102,21 @@ func runChild(ctx context.Context, url, spec string) {
 	if err := json.Unmarshal([]byte(spec), &cfg); err != nil {
 		fail(err)
 	}
+	// The parent writes to stdin, which ends when the parent does, however
+	// it ends: the child stops then too, rather than go on taking tasks.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	waves := [3]chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
+	go func() {
+		defer cancel()
+		lines := bufio.NewScanner(os.Stdin)
+		for lines.Scan() {
+			if n, err := strconv.Atoi(strings.TrimPrefix(lines.Text(), "release ")); err == nil && n > 0 && n < len(waves) {
+				close(waves[n])
+			}
+		}
+	}()
+
 	pool := connect(ctx, url, cmp.Or(cfg.Conns, 64))
 	defer pool.Close()
 	c, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: schema})
@@ -113,7 +128,7 @@ func runChild(ctx context.Context, url, spec string) {
 	}
 	switch cfg.Role {
 	case "worker":
-		runWorker(ctx, c, pool, cfg)
+		runWorker(ctx, c, pool, cfg, waves)
 	case "producer":
 		runProducer(ctx, c, pool, cfg)
 	default:
@@ -142,16 +157,9 @@ func (hold) Kind() string { return "bench.hold" }
 // stepFailures is the percentage of order scenario attempts that fail.
 const stepFailures = 5
 
-func runWorker(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, cfg child) {
-	waves := [3]chan struct{}{make(chan struct{}), make(chan struct{}), make(chan struct{})}
-	go func() {
-		lines := bufio.NewScanner(os.Stdin)
-		for lines.Scan() {
-			if n, err := strconv.Atoi(strings.TrimPrefix(lines.Text(), "release ")); err == nil && n > 0 && n < len(waves) {
-				close(waves[n])
-			}
-		}
-	}()
+// runWorker runs a worker with the benchmark's handlers. The handlers of
+// hold tasks wait for their wave's channel to close.
+func runWorker(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, cfg child, waves [3]chan struct{}) {
 	insert := func(ctx context.Context, sql string, args ...any) error {
 		_, err := pool.Exec(ctx, q(sql), args...)
 		return err

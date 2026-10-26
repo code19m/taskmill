@@ -59,6 +59,33 @@ func ExplainPromote(ctx context.Context, c *Client) (string, error) {
 	return explain(ctx, c, "", c.sql.promoteDue, c.schema)
 }
 
+// ExplainLeased returns the plans of the statements that find tasks by their
+// attempts: the completion, the heartbeat, and the lock of a grouped
+// completion.
+func ExplainLeased(ctx context.Context, c *Client) (string, error) {
+	ids, tokens := []int64{1, 2, 3}, []int32{1, 1, 1}
+	var plans []string
+	for _, s := range []struct {
+		sql  string
+		args []any
+	}{
+		{c.sql.complete, []any{ids, tokens, []int64{}}},
+		{c.sql.heartbeat, []any{ids, tokens, int64(1)}},
+		{c.sql.lockLeased, []any{ids, tokens}},
+		{c.sql.fail, []any{int64(1), int32(1), "retryable", int64(1), `{"message": "m"}`}},
+		{c.sql.snooze, []any{int64(1), int32(1), int64(1), nil}},
+		{c.sql.release, []any{int64(1), int32(1)}},
+		{c.sql.cancelRunning, []any{int64(1), int32(1)}},
+	} {
+		plan, err := explain(ctx, c, "", s.sql, s.args...)
+		if err != nil {
+			return "", err
+		}
+		plans = append(plans, plan)
+	}
+	return strings.Join(plans, "\n"), nil
+}
+
 // explain returns the plan of sql, after settings if any, in a transaction
 // that it rolls back.
 func explain(ctx context.Context, c *Client, settings, sql string, args ...any) (string, error) {

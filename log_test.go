@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -22,7 +23,15 @@ import (
 
 func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	t.Parallel()
-	db := newProxy(t)
+	// The worker reaches the database through proxies, which the test cuts:
+	// one for its pool, and one for its notifications, which may need a
+	// direct connection of their own.
+	db, direct := newProxy(t, testdb.URL(t)), newProxy(t, testdb.DirectURL(t))
+	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
 	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +64,7 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 		Queues:        defaultQueue(2),
 		PollInterval:  20 * time.Millisecond,
 		LeaseDuration: 600 * time.Millisecond,
+		ListenConfig:  listen,
 	})
 	timing := testTiming
 	timing.FailureReport = time.Second
@@ -67,9 +77,11 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 
 	down := time.Now()
 	db.cut(true)
+	direct.cut(true)
 	close(release)
 	time.Sleep(3 * time.Second)
 	db.cut(false)
+	direct.cut(false)
 
 	// The tasks run again, and the operations that the worker repeats log
 	// their recovery. Others, such as retention, recover at their next try.
@@ -281,7 +293,7 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// proxy forwards connections to the test database, and can cut them all, as
+// proxy forwards connections to a database, and can cut them all, as
 // a database that goes away does.
 type proxy struct {
 	host   string
@@ -293,9 +305,9 @@ type proxy struct {
 	conns map[net.Conn]bool
 }
 
-func newProxy(t *testing.T) *proxy {
+func newProxy(t *testing.T, url string) *proxy {
 	t.Helper()
-	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		t.Fatal(err)
 	}

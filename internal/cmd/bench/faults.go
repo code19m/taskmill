@@ -74,14 +74,27 @@ SELECT count(*) FROM {s}.steps x LEFT JOIN {s}.done p ON p.g = x.g AND p.s = x.s
 WHERE x.s > 1 AND (p.at IS NULL OR x.at <= p.at)`)
 	again := scalar(ctx, pool, `SELECT count(*) FROM {s}.steps x JOIN {s}.done d USING (g, s) WHERE x.at >= d.at`)
 	pastDead := scalar(ctx, pool, `SELECT count(*) FROM {s}.steps x JOIN {s}.dead d ON d.g = x.g AND x.s > d.s`)
-	// Every task completed, is a dead head that halts its group, or waits
-	// behind one.
+	// Every task, each one checked, completed once, is a dead head that
+	// halts its group, or waits behind one.
 	done := scalar(ctx, pool, "SELECT count(*) FROM {s}.done")
+	twice := done - scalar(ctx, pool, "SELECT count(*) FROM (SELECT DISTINCT g, s FROM {s}.done) d")
 	halted := scalar(ctx, pool, "SELECT count(*) FROM {s}.dead d JOIN {s}.groups g ON g.halted_task_id = d.id")
 	waiting := scalar(ctx, pool, `
 SELECT count(*) FROM {s}.tasks t JOIN {s}.dead d ON d.g = (t.payload->>'g')::int AND d.s < (t.payload->>'s')::int
 WHERE t.state = 'pending'`)
-	lost := int64(groups*size) - done - halted - waiting
+	// The distinct tasks that are accounted for, each by its group and
+	// place: completed, a dead head that halts its group, or waiting behind
+	// one. Any task missing from them is lost.
+	lost := int64(groups*size) - scalar(ctx, pool, `
+SELECT count(*) FROM (
+    SELECT g, s FROM {s}.done
+    UNION
+    SELECT d.g, d.s FROM {s}.dead d JOIN {s}.groups h ON h.halted_task_id = d.id
+    UNION
+    SELECT w.g, w.s FROM (SELECT (payload->>'g')::int AS g, (payload->>'s')::int AS s FROM {s}.tasks WHERE state = 'pending') w
+    JOIN {s}.dead d ON d.g = w.g AND d.s < w.s
+) a WHERE g BETWEEN 0 AND $1 - 1 AND s BETWEEN 1 AND $2`, groups, size)
+	broken := brokenGroups(ctx, pool)
 	failed := scalar(ctx, pool, "SELECT count(*) FROM {s}.steps WHERE NOT ok")
 
 	fmt.Println("## FIFO order under faults")
@@ -95,9 +108,10 @@ WHERE t.state = 'pending'`)
 	fmt.Println("|---|---|---|---|")
 	fmt.Printf("| F4 | No handler sees a task before the one ahead of it completes, or after its own | "+
 		"%d early, %d after completing | %s |\n", early, again, verdict(early == 0 && again == 0))
-	fmt.Printf("| F4 | Nothing after a dead head runs; every task completes or waits behind one | "+
-		"%d runs past a dead head; %s completed, %s waiting, %d lost | %s |\n",
-		pastDead, commas(done), commas(waiting), lost, verdict(pastDead == 0 && lost == 0))
+	fmt.Printf("| F4 | Nothing after a dead head runs; every task completes once or waits behind one | "+
+		"%d runs past a dead head; %s completed, %d twice, %s waiting, %d lost; %d broken groups | %s |\n",
+		pastDead, commas(done), twice, commas(waiting), lost, broken,
+		verdict(pastDead == 0 && twice == 0 && lost == 0 && broken == 0))
 	fmt.Println()
 }
 
@@ -183,32 +197,42 @@ func benchRestart(ctx context.Context, pool *pgxpool.Pool, url, container string
 		workers[i] = spawn(ctx, url, child{Role: "worker", Concurrency: concurrency})
 	}
 
+	docker := func(args ...string) {
+		if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil { //nolint:gosec // the operator's container
+			fail(fmt.Errorf("docker %v: %w: %s", args, err, out))
+		}
+	}
 	// The crashed database stays down for longer than the maintainer's lease.
 	restarts := []struct {
-		name string
-		cmds [][]string
+		name    string
+		restart func()
 	}{
-		{"shut down cleanly", [][]string{{"restart", container}}},
-		{"crashed and down for 15 s", [][]string{{"kill", "--signal", "KILL", container}, {"sleep", "15"}, {"start", container}}},
+		{"shut down cleanly", func() { docker("restart", container) }},
+		{"crashed and down for 15 s", func() {
+			docker("kill", "--signal", "KILL", container)
+			time.Sleep(15 * time.Second)
+			docker("start", container)
+		}},
 	}
 	var rows []string
 	resumedInTime := true
 	for i, r := range restarts {
 		waitFor(ctx, 5*time.Minute, "progress", func() bool { return history(ctx, pool) >= n*(i+1)/3 })
 		begin := time.Now()
-		for _, args := range r.cmds {
-			if args[0] == "sleep" {
-				time.Sleep(15 * time.Second)
-				continue
-			}
-			if out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput(); err != nil { //nolint:gosec // the operator's container
-				fail(fmt.Errorf("docker %v: %w: %s", args, err, out))
-			}
-		}
+		r.restart()
 		waitFor(ctx, time.Minute, "the database", func() bool { return pool.Ping(ctx) == nil })
 		down := time.Since(begin)
-		base := scalar(ctx, pool, "SELECT count(*) FROM {s}.task_history")
-		resumed := waitFor(ctx, time.Minute, "workers to resume", func() bool { return int64(history(ctx, pool)) > base })
+		// Workers resumed once a task that they fetched after the restart
+		// completed; completions of earlier attempts do not count.
+		var back time.Time
+		if err := pool.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&back); err != nil {
+			fail(err)
+		}
+		resumed := waitFor(ctx, time.Minute, "workers to resume", func() bool {
+			var fetched bool
+			err := pool.QueryRow(ctx, q("SELECT EXISTS (SELECT FROM {s}.task_history WHERE attempted_at > $1)"), back).Scan(&fetched)
+			return err == nil && fetched
+		})
 		resumedInTime = resumedInTime && resumed <= 10*time.Second
 		rows = append(rows, fmt.Sprintf("%s: back after %s, workers resumed %s later",
 			r.name, down.Round(100*time.Millisecond), resumed.Round(10*time.Millisecond)))

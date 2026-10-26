@@ -1,9 +1,9 @@
 name: Faults
 
-# The fault scenarios of docs/benchmarks.md, F1 to F9, at a tenth of their
-# size, against databases of their own. They take about 15 minutes: too long
-# for every pull request, so they run nightly, and on pull requests that
-# change them.
+# The fault scenarios of docs/benchmarks.md, F1 to F7 at a tenth of their
+# size and F9, against databases of their own. They take about 10 minutes:
+# too long for every pull request, so they run nightly, and on pull requests
+# that change them. F8 runs on every pull request, in CI.
 on:
   schedule:
     - cron: "17 2 * * *"
