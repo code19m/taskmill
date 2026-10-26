@@ -45,11 +45,10 @@ func (w *Worker) heartbeat(ctx context.Context) {
 	w.renewLeases(ctx, ts)
 	tag, err := w.client.pool.Exec(ctx, w.client.sql.beatWorker, w.id)
 	if err == nil && tag.RowsAffected() == 0 {
-		// The worker's row is gone: the maintainer deletes workers without a
-		// heartbeat for 5 minutes, as one cut off from the database is.
-		if err = w.register(ctx); err == nil {
-			w.logger.LogAttrs(ctx, slog.LevelInfo, "worker registered again")
-		}
+		// The maintainer removed this worker as stale, after a pause such as
+		// the machine's sleep, while it kept working: it registers again.
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "worker was removed as stale; registering again")
+		_, err = w.register(ctx)
 	}
 	w.beatFailures.observe(ctx, err)
 	if err == nil {

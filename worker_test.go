@@ -1234,23 +1234,6 @@ func TestHealthFollowsTheDatabase(t *testing.T) {
 	}
 }
 
-func TestWorkerRegistersAgainAfterItsRowIsDeleted(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	logs := &logRecorder{}
-	runWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{LeaseDuration: 600 * time.Millisecond})
-	registered := func() bool { return e.count(t, "SELECT count(*) FROM {s}.workers") == 1 }
-	waitFor(t, "the worker to register", registered)
-
-	// The maintainer deletes a worker cut off for 5 minutes, which may then
-	// come back.
-	e.exec(t, "DELETE FROM {s}.workers")
-	waitFor(t, "the worker to register again", registered)
-	if n := logs.count("worker registered again"); n != 1 {
-		t.Errorf("the worker logged that it registered again %d times, want once", n)
-	}
-}
-
 func TestListenerReconnects(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -1685,4 +1668,23 @@ func TestWorkerWarnsAboutUnservedKinds(t *testing.T) {
 	waitFor(t, "a warning that the reports queue is not served", func() bool {
 		return logs.count("the worker does not serve the default queue of these registered kinds") == 1
 	})
+}
+
+func TestWorkerRemovedAsStaleRegistersAgain(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	logs := &logRecorder{}
+	runWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{
+		Handlers: noopHandlers(), NoMaintainer: true, LeaseDuration: 300 * time.Millisecond,
+	})
+	e.waitListening(t)
+	// What the maintainer does to a worker that missed its heartbeats for 5
+	// minutes, such as one on a machine that slept, while it kept working.
+	e.exec(t, "DELETE FROM {s}.workers")
+	waitFor(t, "the worker to register again", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.workers") == 1
+	})
+	if n := logs.count("worker was removed as stale; registering again"); n != 1 {
+		t.Fatalf("the new registration was logged %d times, want once", n)
+	}
 }

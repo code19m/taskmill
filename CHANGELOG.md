@@ -84,6 +84,10 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Fixed
 
+- A worker that the maintainer removed as stale, after a pause such as its
+  machine's sleep, lists itself again at its next heartbeat. It went on
+  running tasks but stayed missing from `Client.Workers` and the dashboard,
+  which could also mean no maintainer was shown.
 - `Client.List`, `Client.Groups`, `Client.Activity`, and the schedule methods
   return `ErrInvalidArgument` for a filter, search, or name that is not valid
   UTF-8 or holds a NUL character. They returned a database error, and the
@@ -95,9 +99,6 @@ All notable changes to taskmill are recorded here. The format follows
   usable. A payload that PostgreSQL itself rejects, such as a string with an
   unpaired surrogate escape, returns `ErrInvalidArgument` too. All returned
   a database error.
-- A worker whose row the maintainer deleted, after 5 minutes cut off from
-  the database, registers again at its next heartbeat. It used to keep
-  running unlisted in `Client.Workers` and uncounted in `QueueInfo.Workers`.
 
 ## [0.1.0] - 2026-10-25
 
