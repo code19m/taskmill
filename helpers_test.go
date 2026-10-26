@@ -51,9 +51,9 @@ type env struct {
 }
 
 // newEnv migrates a fresh schema and returns a client for it.
-func newEnv(t *testing.T) *env {
-	t.Helper()
-	return newEnvWith(t, testdb.Pool(t), nil)
+func newEnv(tb testing.TB) *env {
+	tb.Helper()
+	return newEnvWith(tb, testdb.Pool(tb), nil)
 }
 
 // withLogger returns a copy of e whose client, and the workers created with
@@ -70,29 +70,29 @@ func (e *env) withLogger(t *testing.T, logger *slog.Logger) *env {
 }
 
 // newEnvWith is newEnv with a given pool and client configuration.
-func newEnvWith(t *testing.T, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *env {
-	t.Helper()
-	schema := testdb.Schema(t, pool)
-	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
-		t.Fatalf("migrate: %v", err)
+func newEnvWith(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *env {
+	tb.Helper()
+	schema := testdb.Schema(tb, pool)
+	if err := taskmill.Migrate(tb.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		tb.Fatalf("migrate: %v", err)
 	}
 	if cfg == nil {
 		cfg = &taskmill.ClientConfig{}
 	}
 	if cfg.Logger == nil {
-		cfg.Logger = testLogger(t)
+		cfg.Logger = testLogger(tb)
 	}
 	cfg.Schema = schema
-	client, err := taskmill.NewClient(t.Context(), pool, cfg)
+	client, err := taskmill.NewClient(tb.Context(), pool, cfg)
 	if err != nil {
-		t.Fatalf("new client: %v", err)
+		tb.Fatalf("new client: %v", err)
 	}
 	e := &env{pool: pool, schema: schema, client: client}
 	// Cleanups run last first, so this check runs after the test's workers
 	// stopped.
-	t.Cleanup(func() {
-		if !e.rawGroups && !t.Failed() {
-			e.checkGroups(t)
+	tb.Cleanup(func() {
+		if !e.rawGroups && !tb.Failed() {
+			e.checkGroups(tb)
 		}
 	})
 	return e
@@ -102,8 +102,8 @@ func newEnvWith(t *testing.T, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *e
 // invariants in docs/design/task-lifecycle.md: its count matches its
 // unfinished tasks plus a halting dead head, it has exactly one head, and
 // every unfinished grouped task belongs to a group row.
-func (e *env) checkGroups(t *testing.T) {
-	t.Helper()
+func (e *env) checkGroups(tb testing.TB) {
+	tb.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var broken []string
@@ -129,21 +129,21 @@ FROM {s}.tasks t
 WHERE t.group_key IS NOT NULL AND t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
   AND NOT EXISTS (SELECT 1 FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key)`, e.schema))
 	if err != nil {
-		t.Fatalf("check groups: %v", err)
+		tb.Fatalf("check groups: %v", err)
 	}
 	defer r.Close()
 	for r.Next() {
 		var s string
 		if err := r.Scan(&s); err != nil {
-			t.Fatalf("check groups: %v", err)
+			tb.Fatalf("check groups: %v", err)
 		}
 		broken = append(broken, s)
 	}
 	if err := r.Err(); err != nil {
-		t.Fatalf("check groups: %v", err)
+		tb.Fatalf("check groups: %v", err)
 	}
 	for _, s := range broken {
-		t.Errorf("FIFO invariant broken: %s", s)
+		tb.Errorf("FIFO invariant broken: %s", s)
 	}
 }
 
@@ -276,14 +276,14 @@ func openSQL(t *testing.T) *sql.DB {
 	return db
 }
 
-// testLogger writes warnings to t's log, which shows when the test fails: a
-// lost lease then says why. It drops what arrives once t's cleanup starts,
+// testLogger writes warnings to tb's log, which shows when the test fails: a
+// lost lease then says why. It drops what arrives once tb's cleanup starts,
 // such as a trailing notification that fails on the closed pool: writing to
 // a finished test's log is a data race.
-func testLogger(t *testing.T) *slog.Logger {
-	t.Helper()
-	w := &testWriter{out: t.Output()}
-	t.Cleanup(func() {
+func testLogger(tb testing.TB) *slog.Logger {
+	tb.Helper()
+	w := &testWriter{out: tb.Output()}
+	tb.Cleanup(func() {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		w.out = nil

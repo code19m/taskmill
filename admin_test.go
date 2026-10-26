@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -57,6 +58,32 @@ func TestDiscardCompletedSkipsHistory(t *testing.T) {
 	})
 	if n := e.count(t, "SELECT count(*) FROM {s}.task_history"); n != 0 {
 		t.Fatalf("history holds %d tasks", n)
+	}
+}
+
+func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	for _, s := range []string{"a\x00b", "\xff", strings.Repeat("q", 257)} {
+		for name, call := range map[string]func() error{
+			"List queue":    func() error { _, err := e.client.List(ctx, &taskmill.ListParams{Queues: []string{s}}); return err },
+			"List kind":     func() error { _, err := e.client.List(ctx, &taskmill.ListParams{Kinds: []string{s}}); return err },
+			"List group":    func() error { _, err := e.client.List(ctx, &taskmill.ListParams{GroupKeys: []string{s}}); return err },
+			"Groups queue":  func() error { _, err := e.client.Groups(ctx, &taskmill.GroupParams{Queues: []string{s}}); return err },
+			"Groups search": func() error { _, err := e.client.Groups(ctx, &taskmill.GroupParams{Search: s}); return err },
+			"Activity queue": func() error {
+				_, err := e.client.Activity(ctx, &taskmill.ActivityParams{Queues: []string{s}})
+				return err
+			},
+			"PauseSchedule":  func() error { return e.client.PauseSchedule(ctx, s) },
+			"ResumeSchedule": func() error { return e.client.ResumeSchedule(ctx, s) },
+			"RunSchedule":    func() error { return e.client.RunSchedule(ctx, s) },
+		} {
+			if err := call(); !errors.Is(err, taskmill.ErrInvalidArgument) {
+				t.Errorf("%s(%q): got %v, want ErrInvalidArgument", name, s, err)
+			}
+		}
 	}
 }
 

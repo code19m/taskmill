@@ -26,22 +26,30 @@ make db
 make check
 ```
 
-`make check` runs everything CI runs, in every module of the repository: the
-core, and the `otel` module in `otel/`, which has its own go.mod. The first
-run installs the pinned development tools into `./bin`. `make help` lists every target:
+`make check` runs the checks that CI runs (see [Checks](#checks)), in every
+module of the repository: the core, and the `otel` module in `otel/`, which
+has its own go.mod. The first run installs the pinned development tools into
+`./bin`. `make help` lists every target:
 
 | Target | What it does |
 |---|---|
 | `make db` | Start PostgreSQL in Docker for the tests (`make db-stop` removes it) |
-| `make check` | All CI checks but `make release-check`: tidy, lint, test, vulnerability scan |
+| `make check` | All CI checks but `make release-check` and `make api`: tidy, lint, test, vulnerability scan, rolling deploy |
 | `make fmt` | Format the code with gofumpt and goimports |
 | `make lint` | Run golangci-lint and actionlint |
-| `make test` | Run the tests with the race detector, in random order |
+| `make test` | Run the tests with the race detector, in random order, and write `coverage.out` |
 | `make cover` | Run the tests and open an HTML coverage report |
+| `make cover-report` | Print the coverage of the last `make test` per package |
 | `make vuln` | Scan for known vulnerabilities with govulncheck |
+| `make api` | Compare the API of the last commit with the latest release |
+| `make compat` | Run the latest release's client and worker on the current schema |
+| `make fuzz` | Run each fuzz target for `FUZZTIME`, 10 seconds by default |
 | `make bench` | Run the benchmarks and the chaos test, printing a Markdown report |
 | `make release-check` | Check `.goreleaser.yaml` with `goreleaser check` |
 | `make snapshot` | Build a release into `./dist` and its image into Docker, publishing nothing |
+
+`make check` leaves out `make api`: gorelease compares committed code, so it
+stops on uncommitted changes. Commit, then run it.
 
 ## Code standards
 
@@ -81,6 +89,31 @@ Every change is held to the same bar:
 - A bug fix includes a test that fails without the fix.
 - `Example` functions compile with the tests. Those that need no database
   include an `// Output:` comment, so they run as tests too.
+- Input from outside, such as the dashboard's query parameters, list
+  cursors, and task payloads, has a fuzz target. Every test run replays its
+  seeds; add the input of each bug a fuzzer finds as a seed.
+
+## Checks
+
+A pull request merges only when CI passes. Each check but CodeQL is a
+Makefile target, so you can run it locally:
+
+| Check | Target | What fails it |
+|---|---|---|
+| Lint | `make lint` | A finding of golangci-lint or actionlint, in any module or in `internal/compat`. |
+| Test | `make test` | A failing test, on each supported Go and PostgreSQL. The job of the newest Go writes the coverage per package to its summary; no level of coverage is required. |
+| Vulnerabilities | `make vuln` | A known vulnerability in code that taskmill calls. |
+| API compatibility | `make api` | [gorelease](https://pkg.go.dev/golang.org/x/exp/cmd/gorelease) compares the API with the latest release, and the job summary lists the changes and the lowest version that allows them. Before v1.0.0, a minor release may break the API, so only a module that does not build or has a bad `go.mod` fails. From v1.0.0 on, an incompatible change fails too: it needs a new major version. |
+| Rolling deploy | `make compat` | The latest release's client, worker, or dashboard failing on a schema that the current code migrated; see [Schema migrations](#schema-migrations). |
+| otel release | `make otel-release-check` | The `otel` module failing to build or pass its tests against the core version it requires, once that version is released. |
+| GoReleaser | `make release-check` | An invalid `.goreleaser.yaml`. |
+| CodeQL | — | Code scanning reports new alerts on the pull request and in the Security tab. |
+
+Two more run on a schedule. **Fuzz** runs each fuzz target for 3 minutes
+every day (`make fuzz FUZZTIME=3m`); a failing input is kept as an artifact
+of the run, for the fix and its seed. **Scorecard** rates the project's
+security practices each week and on every push to `main`, for the badge in
+the README.
 
 ## Commit messages
 
@@ -126,7 +159,11 @@ docs: explain at-least-once delivery
 - A schema change is a new file in `internal/migrations`. Released
   migrations never change; a test pins their checksums.
 - The previous release's code must keep working on the new schema, so that
-  rolling deploys work.
+  rolling deploys work. `make compat` checks it: `internal/compat` is a
+  module of its own that requires the latest release. Its test migrates a
+  schema with the current code, which also enqueues grouped, delayed, and
+  deduplicated tasks there (`internal/cmd/compat`). Then it runs the
+  release's client, worker, schedules, outbox, and dashboard on that schema.
 - New migrations must be safe to run on a busy database: set `lock_timeout`,
   and avoid statements that hold long locks on `tasks`, such as table
   rewrites.
@@ -147,20 +184,28 @@ the steps before and after it are manual:
    current digest `docker buildx imagetools inspect
    gcr.io/distroless/static-debian13:nonroot` shows. Bump the stale ones in a
    pull request, and run `make snapshot` on it.
-2. In CHANGELOG.md, move `[Unreleased]` to a section `## [X.Y.Z] - YYYY-MM-DD`.
+2. Choose the version: at least the one that the API check suggests for the
+   release commit. A release with only fixes is a patch release; one that
+   adds to the API, or before v1.0.0 breaks it, is a minor release.
+3. In CHANGELOG.md, move `[Unreleased]` to a section `## [X.Y.Z] - YYYY-MM-DD`.
    Update the links at the bottom: `[Unreleased]` compares `vX.Y.Z...HEAD`,
    and `[X.Y.Z]` points to the release. A pre-release, such as
    `v1.0.0-rc.1`, needs a section of its own: `## [1.0.0-rc.1] - YYYY-MM-DD`.
    `make release-notes TAG=vX.Y.Z` prints the section as the release will
    show it, and fails if there is none.
-3. Check that `internal/migrations/released_test.go` pins the checksum of
+4. Check that `internal/migrations/released_test.go` pins the checksum of
    every migration in the release.
-4. Once that is merged, tag the release commit on `main` with an annotated
+5. Once that is merged, tag the release commit on `main` with an annotated
    tag, and push it: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
    Tags are protected by a ruleset: only maintainers can create, move, or
    delete `v*` tags.
-5. Make the Go module proxy fetch the version, so pkg.go.dev shows it:
+6. Make the Go module proxy fetch the version, so pkg.go.dev shows it:
    `GOPROXY=https://proxy.golang.org go list -m github.com/code19m/taskmill@vX.Y.Z`.
+7. Point the checks at the new release: in `internal/compat`, run
+   `go get github.com/code19m/taskmill@vX.Y.Z && go mod tidy`, and merge
+   that. Until then, the API check fails once the proxy knows the new
+   version, because gorelease compares only with the newest release of a
+   major version.
 
 The tag starts the [release workflow](.github/workflows/release.yml), which
 runs [GoReleaser](https://goreleaser.com) as configured in
@@ -197,7 +242,7 @@ publishing anything, and loads the linux/amd64 image into Docker as
 `goreleaser.ko.local`. Run it after changing `.goreleaser.yaml`.
 
 A nested module, such as `otel`, is released by a tag of its own, such as
-`otel/vX.Y.Z`, and step 5 with its module path. The workflow ignores those
+`otel/vX.Y.Z`, and step 6 with its module path. The workflow ignores those
 tags: such a module ships no binaries, and pkg.go.dev shows its versions. So
 it gets no GitHub release, and the releases page stays about taskmill.
 
