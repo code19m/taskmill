@@ -120,13 +120,13 @@ func match(filter *TaskFilter, states []State) (*matching, error) {
 	}
 	m := matching{after: filter.AfterID, left: groupSet{queues: []string{}, groups: []string{}}}
 	var err error
-	if m.queues, err = nonEmpty("queue name", filter.Queues); err != nil {
+	if m.queues, err = checkFilter("queue name", filter.Queues, maxNameLength); err != nil {
 		return nil, err
 	}
-	if m.kinds, err = nonEmpty("kind", filter.Kinds); err != nil {
+	if m.kinds, err = checkFilter("kind", filter.Kinds, maxNameLength); err != nil {
 		return nil, err
 	}
-	if m.groups, err = nonEmpty("group key", filter.GroupKeys); err != nil {
+	if m.groups, err = checkFilter("group key", filter.GroupKeys, maxGroupKeyLength); err != nil {
 		return nil, err
 	}
 	if m.after < 0 {

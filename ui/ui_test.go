@@ -30,28 +30,28 @@ type greet struct {
 
 func (greet) Kind() string { return "greet" }
 
-func setup(t *testing.T) *taskmill.Client {
-	t.Helper()
-	client, _, _ := setupDB(t)
+func setup(tb testing.TB) *taskmill.Client {
+	tb.Helper()
+	client, _, _ := setupDB(tb)
 	return client
 }
 
 // setupDB migrates a fresh schema, and returns a client for it, with its
 // pool and name. When the test ends, it checks the schema's FIFO groups.
-func setupDB(t *testing.T) (*taskmill.Client, *pgxpool.Pool, string) {
-	t.Helper()
-	pool := testdb.Pool(t)
-	schema := testdb.Schema(t, pool)
-	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
-		t.Fatal(err)
+func setupDB(tb testing.TB) (*taskmill.Client, *pgxpool.Pool, string) {
+	tb.Helper()
+	pool := testdb.Pool(tb)
+	schema := testdb.Schema(tb, pool)
+	if err := taskmill.Migrate(tb.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		tb.Fatal(err)
 	}
-	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema})
+	client, err := taskmill.NewClient(tb.Context(), pool, &taskmill.ClientConfig{Schema: schema})
 	if err != nil {
-		t.Fatal(err)
+		tb.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if !t.Failed() {
-			testdb.CheckGroups(t, pool, schema)
+	tb.Cleanup(func() {
+		if !tb.Failed() {
+			testdb.CheckGroups(tb, pool, schema)
 		}
 	})
 	return client, pool, schema

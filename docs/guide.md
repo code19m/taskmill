@@ -102,13 +102,20 @@ func (SendReceipt) Kind() string { return "email.send_receipt" }
 - Namespace kinds by module, such as `billing.invoice.send`.
 - Payloads are stored as JSON and decoded straight into the handler's type,
   so large integers stay exact. Keep payloads small: identifiers, not whole
-  records. The limit is 1 MiB of JSON.
+  records. The limit is 1 MiB of JSON, counting each number at the length
+  PostgreSQL writes it out: it stores `1e6` as `1000000`.
 - Change payloads only in compatible ways, such as adding fields. A payload
   that does not decode makes the task dead at once, with the code
   `invalid_payload`.
 - PostgreSQL cannot store the NUL character (`\u0000`) in text or JSON. A
   payload, metadata, queue name, kind, or group key that holds one fails
-  with `ErrInvalidArgument`.
+  with `ErrInvalidArgument`. So does a payload that is not valid UTF-8, such
+  as a `json.RawMessage` with a request body in another encoding, or that
+  holds a number beyond the range of PostgreSQL's `numeric` type. These
+  checks run before the query, so your transaction stays usable. A payload
+  that PostgreSQL itself rejects, such as a string with an unpaired
+  surrogate escape (`"\ud800"`), fails with `ErrInvalidArgument` too, but
+  aborts the transaction it was enqueued in.
 
 A kind can set its own defaults by implementing `ArgsWithDefaults`:
 
@@ -1135,8 +1142,9 @@ taskmill follows [Semantic Versioning](https://semver.org/).
   `Migrate`, or apply `Migrations`, before you roll out a new version.
 - **Old code works on a newer schema.** Each release's schema works with the
   previous release's workers and clients, so old and new versions can run
-  side by side during a rolling deploy. Code that is newer than its schema
-  fails in `NewClient` with `ErrSchemaOutdated`.
+  side by side during a rolling deploy; CI checks this for every change.
+  Code that is newer than its schema fails in `NewClient` with
+  `ErrSchemaOutdated`.
 - **The tables are internal.** Their layout can change in any release. Read
   and change tasks through `Client`, not with SQL.
 
