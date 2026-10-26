@@ -26,10 +26,11 @@ All notable changes to taskmill are recorded here. The format follows
   dashboard showed a server error.
 - Enqueueing returns `ErrInvalidArgument` for a payload that is not valid
   UTF-8, such as a `json.RawMessage` that holds a request body in another
-  encoding, before the query, so the caller's transaction stays usable. A
-  payload that PostgreSQL itself rejects, such as one with a number beyond
-  the range of `jsonb`, returns `ErrInvalidArgument` too. Both returned a
-  database error.
+  encoding, or that holds a number beyond the range of PostgreSQL's
+  `numeric` type, before the query, so the caller's transaction stays
+  usable. A payload that PostgreSQL itself rejects, such as a string with an
+  unpaired surrogate escape, returns `ErrInvalidArgument` too. All returned
+  a database error.
 
 ## [0.1.0] - 2026-10-25
 

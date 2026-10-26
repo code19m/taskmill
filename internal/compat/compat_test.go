@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -234,7 +235,12 @@ func (r *release) checkDashboard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := ui.Handler(r.client, nil)
+	if _, err := r.client.Activity(t.Context(), nil); err != nil {
+		t.Errorf("the release's Activity: %v", err)
+	}
+	// A page that cannot read part of its data, such as the overview's
+	// charts, still shows, and logs a warning instead.
+	h := ui.Handler(r.client, &ui.Config{Logger: slog.New(failOnWarn{t})})
 	for _, page := range []string{
 		"/", "/tasks", "/tasks?state=completed", fmt.Sprintf("/tasks/%d", retried.ID),
 		"/choices/groups?search=current", "/schedules", "/workers",
@@ -261,6 +267,26 @@ func (r *release) checkDashboard(t *testing.T) {
 		}
 	}
 }
+
+// failOnWarn is a slog handler that fails the test on each warning or error.
+type failOnWarn struct{ t *testing.T }
+
+func (failOnWarn) Enabled(_ context.Context, level slog.Level) bool { return level >= slog.LevelWarn }
+
+func (h failOnWarn) Handle(_ context.Context, r slog.Record) error {
+	h.t.Helper()
+	var attrs []string
+	r.Attrs(func(a slog.Attr) bool {
+		attrs = append(attrs, a.String())
+		return true
+	})
+	h.t.Errorf("the release's dashboard logged %s %q %v", r.Level, r.Message, attrs)
+	return nil
+}
+
+func (h failOnWarn) WithAttrs([]slog.Attr) slog.Handler { return h }
+
+func (h failOnWarn) WithGroup(string) slog.Handler { return h }
 
 func serve(t *testing.T, h http.Handler, method, target string) int {
 	t.Helper()

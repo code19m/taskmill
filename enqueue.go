@@ -241,8 +241,8 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 
 // enqueueError wraps an error of the enqueue statement. A data exception
 // means that PostgreSQL rejected a value that the checks before it let
-// through, such as a number in the payload beyond the range of jsonb:
-// retrying cannot help.
+// through, such as an unpaired surrogate escape in the payload: retrying
+// cannot help.
 func enqueueError(err error) error {
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && strings.HasPrefix(pgErr.Code, "22") { // data_exception
 		return fmt.Errorf("%w: the database rejected a value: %w", ErrInvalidArgument, err)
@@ -372,12 +372,14 @@ func encodePayload(kind string, args Args) ([]byte, error) {
 	if err != nil {
 		return nil, invalidArgument("encode payload of kind %q: %v", kind, err)
 	}
-	switch size := storedSize(payload); {
+	size, numbersFit := storedSize(payload)
+	switch {
 	case bytes.Equal(payload, []byte("null")):
 		return nil, invalidArgument("payload of kind %q encodes to null", kind)
 	case size > maxPayloadBytes:
-		return nil, invalidArgument("payload of kind %q is %d bytes as stored, more than the limit of %d",
-			kind, size, maxPayloadBytes)
+		return nil, invalidArgument("payload of kind %q is more than %d bytes as stored", kind, maxPayloadBytes)
+	case !numbersFit:
+		return nil, invalidArgument("payload of kind %q holds a number beyond the range of PostgreSQL's numeric type", kind)
 	case !utf8.Valid(payload):
 		return nil, invalidArgument("payload of kind %q is not valid UTF-8", kind)
 	case hasNUL(payload):
@@ -386,16 +388,24 @@ func encodePayload(kind string, args Args) ([]byte, error) {
 	return payload, nil
 }
 
+// Limits of PostgreSQL's numeric type, in which jsonb stores numbers.
+const (
+	maxNumericWhole = 131_072 // digits before the point
+	maxNumericScale = 16_383  // digits after the point
+)
+
 // storedSize returns at most the size of JSON text as PostgreSQL writes it
 // out of jsonb, where each number is written in full: 1e6 becomes 1000000,
 // so a short payload could grow past any limit, up to values that PostgreSQL
 // cannot read back. Strings are written as they came. jsonb also adds a
 // space after each comma and colon; that at most doubles the size, and the
 // limit leaves it out, as it always has. Counting stops past the limit.
-func storedSize(text []byte) int {
-	size := len(text)
+// numbersFit reports whether every number counted fits PostgreSQL's numeric
+// type.
+func storedSize(text []byte) (size int, numbersFit bool) {
+	size, numbersFit = len(text), true
 	inString := false
-	for i := 0; i < len(text) && size <= maxPayloadBytes; i++ {
+	for i := 0; i < len(text) && size <= maxPayloadBytes && numbersFit; i++ {
 		switch c := text[i]; {
 		case inString && c == '\\':
 			i++ // the escaped byte cannot end the string
@@ -406,42 +416,49 @@ func storedSize(text []byte) int {
 			for end < len(text) && strings.IndexByte("+-.0123456789Ee", text[end]) >= 0 {
 				end++
 			}
-			size += numberSize(string(text[i:end])) - (end - i)
+			var n int
+			n, numbersFit = numberSize(text[i:end])
+			size += n - (end - i)
 			i = end - 1
 		}
 	}
-	return size
+	return size, numbersFit
 }
 
 // numberSize returns at most the length of a JSON number as PostgreSQL
 // writes it: without an exponent, and with as many digits after the point as
-// the number has.
-func numberSize(num string) int {
-	sign := 0
-	if num[0] == '-' {
-		sign, num = 1, num[1:]
+// the number has. fits reports whether the number fits PostgreSQL's numeric
+// type.
+func numberSize(num []byte) (size int, fits bool) {
+	digits := bytes.TrimPrefix(num, []byte("-"))
+	sign := len(num) - len(digits)
+	exp := 0
+	if at := bytes.IndexAny(digits, "eE"); at >= 0 {
+		var err error
+		if exp, err = strconv.Atoi(string(digits[at+1:])); err != nil {
+			return 0, false // beyond the range of int
+		}
+		digits = digits[:at]
 	}
-	at := strings.IndexAny(num, "eE")
-	if at < 0 {
-		return sign + len(num) // written as it came
+	// Past this bound, a number is beyond numeric's range, or a zero; within
+	// it, the sums below cannot overflow.
+	bound := len(digits) + maxNumericWhole + 1
+	exp = max(-bound, min(exp, bound))
+	whole, frac, _ := bytes.Cut(digits, []byte("."))
+	zeros := len(whole) - len(bytes.TrimLeft(whole, "0"))
+	if zeros == len(whole) {
+		zeros += len(frac) - len(bytes.TrimLeft(frac, "0"))
 	}
-	exp, err := strconv.Atoi(num[at+1:])
-	if err != nil {
-		return maxPayloadBytes + 1 // an exponent beyond the range of int
-	}
-	// Past the limit, a number is too long to write out, or a zero.
-	exp = max(-maxPayloadBytes-1, min(exp, maxPayloadBytes+1))
-	whole, frac, _ := strings.Cut(num[:at], ".")
-	digits := whole + frac
-	zeros := len(digits) - len(strings.TrimLeft(digits, "0"))
 	before := 1 // digits before the point
-	if zeros < len(digits) {
+	if zeros < len(whole)+len(frac) {
 		before = max(1, len(whole)+exp-zeros)
 	}
-	if after := len(frac) - exp; after > 0 {
-		return sign + before + 1 + after
+	after := max(0, len(frac)-exp)
+	size = sign + before
+	if after > 0 {
+		size += 1 + after
 	}
-	return sign + before
+	return size, before <= maxNumericWhole && after <= maxNumericScale
 }
 
 // hasNUL reports whether JSON text encodes a NUL character, which jsonb
