@@ -90,6 +90,11 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 		{"NUL in queue", sendEmail{}, &taskmill.EnqueueOptions{Queue: "a\x00b"}},
 		{"NUL in payload", sendEmail{To: "a\x00b"}, nil},
 		{"NUL in metadata", sendEmail{}, &taskmill.EnqueueOptions{Metadata: map[string]string{"k": "a\x00b"}}},
+		{"invalid UTF-8 in payload", rawArgs{Body: json.RawMessage("\"\xff\"")}, nil},
+		{"payload over 1 MiB as stored", rawArgs{Body: json.RawMessage("[" + strings.Repeat("1e131071,", 8) + "1e131071]")}, nil},
+		{"number with too many digits before the point", rawArgs{Body: json.RawMessage("1e131072")}, nil},
+		{"number with too many digits after the point", rawArgs{Body: json.RawMessage("1e-16384")}, nil},
+		{"zero with too many digits after the point", rawArgs{Body: json.RawMessage("0e-99999")}, nil},
 	}
 	// Runs after the parallel subtests, once the test's context is canceled.
 	t.Cleanup(func() {
@@ -102,14 +107,29 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := e.client.Enqueue(t.Context(), tt.args, tt.opts)
+			tx := e.begin(t)
+			_, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), tt.args, tt.opts)
 			if !errors.Is(err, taskmill.ErrInvalidArgument) {
 				t.Fatalf("got %v, want ErrInvalidArgument", err)
 			}
 			if n := strings.Count(err.Error(), "taskmill:"); n != 1 {
 				t.Errorf("%q names the package %d times", err, n)
 			}
+			// The checks run before the query: the caller's transaction goes on.
+			e.txExec(t, tx, "SELECT 1")
 		})
+	}
+}
+
+func TestEnqueueStoresNumbersAtTheEdgesOfNumeric(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// The most digits before and after the point that PostgreSQL's numeric
+	// type holds, and a zero with a large exponent.
+	for _, body := range []string{"1e131071", "1e-16383", "0e99999", "0." + strings.Repeat("0", 99) + "1e100"} {
+		if _, err := e.client.Enqueue(t.Context(), rawArgs{Body: json.RawMessage(body)}, nil); err != nil {
+			t.Errorf("enqueue %.20s: %v", body, err)
+		}
 	}
 }
 

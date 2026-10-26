@@ -298,6 +298,9 @@ func (c *Client) ResumeSchedule(ctx context.Context, name string) error {
 // run stays as it was. It returns [ErrNotFound] for an unknown schedule, and
 // [ErrInvalidState] for a paused one.
 func (c *Client) RunSchedule(ctx context.Context, name string) error {
+	if err := checkName("schedule name", name, maxNameLength); err != nil {
+		return err
+	}
 	var paused bool
 	if err := c.pool.QueryRow(ctx, c.sql.runSchedule, name).Scan(&paused); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -312,6 +315,9 @@ func (c *Client) RunSchedule(ctx context.Context, name string) error {
 }
 
 func (c *Client) setSchedulePaused(ctx context.Context, name string, paused bool) error {
+	if err := checkName("schedule name", name, maxNameLength); err != nil {
+		return err
+	}
 	verb := "resume"
 	if paused {
 		verb = "pause"

@@ -21,7 +21,8 @@ var (
 	ErrInvalidState = classError("taskmill: invalid state", "invalid_state")
 
 	// ErrInvalidArgument means an argument or option is invalid: out of
-	// range, too long, or holding a NUL character.
+	// range, too long, or text that PostgreSQL cannot store, such as a NUL
+	// character.
 	ErrInvalidArgument = classError("taskmill: invalid argument", "invalid_argument")
 
 	// ErrSchemaOutdated means the database schema is missing or older than
