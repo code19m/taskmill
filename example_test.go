@@ -289,12 +289,14 @@ func ExampleMigrations() {
 func ExampleClient_RetryMatching() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
-	n, err := client.RetryMatching(ctx, &taskmill.TaskFilter{
+	res, err := client.RetryMatching(ctx, &taskmill.TaskFilter{
 		Queues: []string{"emails"},
 		States: []taskmill.State{taskmill.StateDead},
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Printf("retried %d tasks", n)
+	// Other transactions held the skipped tasks, or their FIFO groups: run it
+	// again for them.
+	log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
 }

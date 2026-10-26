@@ -458,7 +458,10 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	request.End()
-	page, err := e.client.List(t.Context(), &taskmill.ListParams{Queues: []string{outbox.Queue}})
+	// The schema holds only the outbox's tasks. List takes no filter here:
+	// its type differs between the core next to this module and the release
+	// that the module requires.
+	page, err := e.client.List(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

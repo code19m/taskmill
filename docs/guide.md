@@ -553,7 +553,9 @@ offers the bulk actions once filters are set. Each leads to a page that
 shows the filters and how many tasks the action changes, counted once, with
 a button that does it; the page is the same with or without JavaScript. A
 bulk action works for half the time the request has left, 5 seconds; if
-more tasks remain, its page says so and offers to go on.
+more tasks remain, its page says so and offers to go on after the last task
+it went through. If other work held some tasks, the page says how many, and
+offers to try them again.
 
 **The operations API**, the `Client` methods below, offers the same to your
 own code and tools:
@@ -562,12 +564,12 @@ own code and tools:
 |---|---|
 | `Get` | Returns a task, unfinished, finished, or from history |
 | `List` | Pages through tasks by queues, states, kinds, and FIFO groups, newest first |
-| `Count` | How many tasks match a `TaskFilter`, the filter of `List`: in each state, up to 10,000 per state, and how many each bulk action would change |
+| `Count` | How many tasks match a `TaskFilter`, the filter of `List`: in each state, and how many each bulk action would change; each count stops at 10,000 tasks a state, and says so |
 | `Groups` | The FIFO groups that have unfinished tasks, which of them are halted, and by which task |
 | `Cancel`, `CancelTx` | Cancels a waiting task, or asks a running task's worker to stop it |
 | `Retry` | Runs a dead or canceled task again, with fresh attempts |
 | `Delete` | Deletes a task that is not running |
-| `CancelMatching`, `RetryMatching`, `DeleteMatching` | The same for every task that matches a `TaskFilter`, in batches; they return how many tasks they changed |
+| `CancelMatching`, `RetryMatching`, `DeleteMatching` | The same for every task that matches a `TaskFilter`, in batches; they say how many tasks they changed and skipped |
 | `Queues` | Every queue with its settings, workers, and task counts per state |
 | `UpdateQueue`, `PauseQueue`, `ResumeQueue` | Change a queue's installation-wide settings |
 | `Schedules`, `PauseSchedule`, `ResumeSchedule`, `RunSchedule` | List schedules, pause and resume them, and run one now |
@@ -594,9 +596,19 @@ batches of 1,000, each in a short transaction of its own, so they never hold
 locks for long, and a large retry keeps each FIFO group in order. They read
 each task once, so a retry never retries a task twice, and they end however
 fast new tasks arrive. They skip the tasks, FIFO groups, and dedupe keys that
-another transaction holds at that moment, rather than wait; run them again
-to act on those. If the context ends first, they return how many tasks they
-changed before, with an error; each batch commits whole or not at all.
+another transaction holds at that moment, rather than wait. A retry that
+skips a task of a group also skips the group's later tasks, so that a later
+run retries the group in order. `BulkResult.Skipped` counts the tasks they
+skipped: run them again to act on those.
+
+If the context ends first, they return what they did before, with an error;
+each batch commits whole or not at all. To go on from there, set
+`TaskFilter.AfterID` to `BulkResult.LastID`, the last task they went through.
+
+A filter by kind or FIFO group alone has no index of its own. A retry with
+such a filter then reads every dead and canceled task after its position in
+each batch: about 135 ms a batch for 1 million dead tasks. Add a queue or a
+state to the filter where you can.
 
 A running task's cancellation takes effect when its attempt ends, however it
 ends: a failure, a snooze, or a release at shutdown. If the handler completes
@@ -921,7 +933,7 @@ The last six run only on the maintainer.
 | `fifo group missing` | Error | A task's FIFO group has no row, which should not happen. Please report it. |
 | `applied migration` | Info | `Migrate` applied migration `version` (`name`) in `duration`. |
 | `prepare history partitions failed` | Warn | `Migrate` could not create history partitions; the maintainer tries again. |
-| `web interface action` | Info | Someone did `action` on `target` in the web interface. |
+| `web interface action` | Info | Someone did `action` on `target` in the web interface. A bulk action also has `tasks`, how many it changed, and `skipped`, how many other work held. |
 | `web interface request failed` | Warn | A page or action failed, often because the database is out of reach. |
 | `web interface request timed out` | Warn | The database did not answer within 10 seconds. |
 | `read activity failed`, `read filter choices failed`, `search groups failed` | Warn | A page shows less: its charts, its filter choices, or its group search. |

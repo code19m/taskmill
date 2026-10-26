@@ -450,6 +450,7 @@
     if (url.searchParams.has("done")) {
       url.searchParams.delete("done");
       url.searchParams.delete("count");
+      url.searchParams.delete("skipped");
       history.replaceState(history.state, "", url);
     }
   }

@@ -61,6 +61,7 @@ const (
 	logKeyPath   = "path"
 	logKeyTarget = "target"
 	logKeyTasks  = "tasks"
+	logKeySkip   = "skipped"
 )
 
 const (
@@ -358,7 +359,9 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 
 // taskFilter reads the task list's filters from a query.
 func taskFilter(q url.Values) taskmill.TaskFilter {
-	f := taskmill.TaskFilter{Queues: selected(q["queue"]), Kinds: selected(q["kind"]), GroupKeys: selected(q["group"])}
+	f := taskmill.TaskFilter{
+		Queues: selected(q["queue"]), Kinds: selected(q["kind"]), GroupKeys: selected(q["group"]), AfterID: queryNumber(q, "after"),
+	}
 	for _, st := range selected(q["state"]) {
 		f.States = append(f.States, taskmill.State(st))
 	}
@@ -371,7 +374,33 @@ func filterQuery(f taskmill.TaskFilter) url.Values {
 	for _, st := range f.States {
 		v.Add("state", string(st))
 	}
+	if f.AfterID > 0 {
+		v.Set("after", strconv.FormatInt(f.AfterID, 10))
+	}
 	return v
+}
+
+// queryNumber reads a number of the query, such as a task ID; 0 if it is
+// not one.
+func queryNumber(q url.Values, key string) int64 {
+	n, err := strconv.ParseInt(q.Get(key), 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// tasks says how many tasks n is: "1 task", "1,234 tasks", or "10,000+
+// tasks" for a count that stopped at its cap.
+func tasks(n taskmill.TaskCount) string {
+	switch {
+	case n.Capped:
+		return number(n.N) + "+ tasks"
+	case n.N == 1:
+		return "1 task"
+	default:
+		return number(n.N) + " tasks"
+	}
 }
 
 // bulkLinks lead to the pages of the bulk actions on the tasks that the
@@ -405,8 +434,8 @@ type bulkAction struct {
 	Explain string // what it does
 	None    string // why it may find no task
 	path    string
-	do      func(*taskmill.Client, context.Context, *taskmill.TaskFilter) (int64, error)
-	count   func(*taskmill.TaskCounts) int64
+	do      func(*taskmill.Client, context.Context, *taskmill.TaskFilter) (taskmill.BulkResult, error)
+	count   func(*taskmill.TaskCounts) taskmill.TaskCount
 }
 
 var bulkActions = map[string]bulkAction{
@@ -416,7 +445,7 @@ var bulkActions = map[string]bulkAction{
 		None:    "Retry applies to dead and canceled tasks.",
 		path:    "/tasks/bulk/retry",
 		do:      (*taskmill.Client).RetryMatching,
-		count:   func(c *taskmill.TaskCounts) int64 { return c.Retry },
+		count:   func(c *taskmill.TaskCounts) taskmill.TaskCount { return c.Retry },
 	},
 	"cancel": {
 		Verb: "Cancel", Icon: "cancel",
@@ -424,7 +453,7 @@ var bulkActions = map[string]bulkAction{
 		None:    "Cancel applies to unfinished tasks, except running tasks already asked to stop.",
 		path:    "/tasks/bulk/cancel",
 		do:      (*taskmill.Client).CancelMatching,
-		count:   func(c *taskmill.TaskCounts) int64 { return c.Cancel },
+		count:   func(c *taskmill.TaskCounts) taskmill.TaskCount { return c.Cancel },
 	},
 	"delete": {
 		Verb: "Delete", Icon: "trash", Danger: true,
@@ -432,7 +461,7 @@ var bulkActions = map[string]bulkAction{
 		None:    "Delete applies to every task except running ones.",
 		path:    "/tasks/bulk/delete",
 		do:      (*taskmill.Client).DeleteMatching,
-		count:   func(c *taskmill.TaskCounts) int64 { return c.Delete },
+		count:   func(c *taskmill.TaskCounts) taskmill.TaskCount { return c.Delete },
 	},
 }
 
@@ -462,7 +491,6 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		}})
 		return
 	}
-	query := filterQuery(f).Encode()
 	counts, err := s.client.Count(r.Context(), &f)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		s.render(w, r, http.StatusBadRequest, "error.html",
@@ -485,21 +513,23 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, row)
 		}
 	}
-	n := a.count(counts)
-	tasks := number(n) + " tasks"
-	switch {
-	case counts.Capped:
-		tasks = number(n) + "+ tasks"
-	case n == 1:
-		tasks = "1 task"
+	if f.AfterID > 0 {
+		rows = append(rows, filterRow{"After task", []string{strconv.FormatInt(f.AfterID, 10)}, true})
 	}
+	n := a.count(counts)
+	// The form carries how many tasks the run left so far, if it goes on.
+	action := filterQuery(f)
+	if left := queryNumber(r.URL.Query(), "left"); left > 0 {
+		action.Set("left", strconv.FormatInt(left, 10))
+	}
+	f.AfterID = 0
 	s.render(w, r, http.StatusOK, "bulk.html", page{Title: a.Verb + " tasks", Nav: "tasks", Static: true, Dead: s.deadCount(r), Data: struct {
 		bulkAction
 		Filters    []filterRow
 		N          int64
 		Tasks      string
 		Path, Back string
-	}{a, rows, n, tasks, s.path(a.path + "?" + query), s.path("/tasks?" + query)}})
+	}{a, rows, n.N, tasks(n), s.path(a.path + "?" + action.Encode()), s.path("/tasks?" + filterQuery(f).Encode())}})
 }
 
 // groupChoices is how many FIFO groups a filter lists; it searches the rest.
@@ -770,14 +800,17 @@ var notices = map[string]string{
 	"schedule-run":    "The schedule runs within a second.",
 	"retry-all":       "{tasks} retried. They run again with fresh attempts.",
 	"retry-more":      "{tasks} retried so far; more remain.",
+	"retry-skipped":   "{tasks} retried; other work held {skipped}. Try again for those.",
 	"cancel-all":      "{tasks} canceled. Running tasks stop when their handlers return.",
 	"cancel-more":     "{tasks} canceled so far; more remain.",
+	"cancel-skipped":  "{tasks} canceled; other work held {skipped}. Try again for those.",
 	"delete-all":      "{tasks} deleted.",
 	"delete-more":     "{tasks} deleted so far; more remain.",
+	"delete-skipped":  "{tasks} deleted; other work held {skipped}. Try again for those.",
 }
 
-// notice returns the notice that a query asks for, with the number of tasks
-// in its "count" parameter for a bulk action.
+// notice returns the notice that a query asks for, with the numbers of
+// tasks in its "count" and "skipped" parameters for a bulk action.
 func notice(q url.Values) string {
 	text := notices[q.Get("done")]
 	if !strings.Contains(text, "{tasks}") {
@@ -787,11 +820,8 @@ func notice(q url.Values) string {
 	if err != nil || n < 0 {
 		return ""
 	}
-	tasks := number(n) + " tasks"
-	if n == 1 {
-		tasks = "1 task"
-	}
-	return strings.Replace(text, "{tasks}", tasks, 1)
+	text = strings.Replace(text, "{tasks}", tasks(taskmill.TaskCount{N: n}), 1)
+	return strings.Replace(text, "{skipped}", tasks(taskmill.TaskCount{N: queryNumber(q, "skipped")}), 1)
 }
 
 func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
@@ -886,8 +916,10 @@ func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error,
 
 // bulkAction retries, cancels, or deletes every task that the filters in
 // the query select. It works for half the time left before the request's
-// deadline, so that it answers in time; if more tasks remain, it leads back
-// to its page, which offers to go on.
+// deadline, so that it answers in time. If more tasks remain, it leads back
+// to its page, which goes on after the last task it went through. If it left
+// tasks that other work held, it leads back to its page from the start, which
+// offers to try those again.
 func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
 		return
@@ -899,26 +931,42 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := taskFilter(r.URL.Query())
-	query := filterQuery(f)
 	deadline, _ := r.Context().Deadline() // the deadline handler sets one
 	ctx, cancel := context.WithDeadlineCause(r.Context(), time.Now().Add(time.Until(deadline)/2), errBudget)
 	defer cancel()
-	n, err := a.do(s.client, ctx, &f)
+	res, err := a.do(s.client, ctx, &f)
 	more := err != nil && errors.Is(context.Cause(ctx), errBudget)
-	if err == nil || more || n > 0 {
+	if err == nil || more || res.Changed > 0 {
 		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "web interface action",
-			slog.String(logKeyAction, name+" tasks"), slog.String(logKeyTarget, query.Encode()), slog.Int64(logKeyTasks, n))
+			slog.String(logKeyAction, name+" tasks"), slog.String(logKeyTarget, filterQuery(f).Encode()),
+			slog.Int64(logKeyTasks, res.Changed), slog.Int64(logKeySkip, res.Skipped))
 	}
 	if err != nil && !more {
-		s.actionFailed(w, r, err, "/tasks?"+query.Encode())
+		s.actionFailed(w, r, err, "/tasks?"+filterQuery(f).Encode())
 		return
 	}
-	target, done := "/tasks?", name+"-all"
-	if more {
-		target, done = a.path+"?", name+"-more"
+	// "left" carries the tasks that the run left so far from one request of
+	// it to the next; "skipped" tells them once the run ends.
+	left := queryNumber(r.URL.Query(), "left") + res.Skipped
+	query := url.Values{"count": {strconv.FormatInt(res.Changed, 10)}}
+	target := "/tasks?"
+	switch {
+	case more:
+		f.AfterID = res.LastID
+		target = a.path + "?"
+		query.Set("done", name+"-more")
+		if left > 0 {
+			query.Set("left", strconv.FormatInt(left, 10))
+		}
+	case left > 0:
+		f.AfterID = 0
+		target = a.path + "?"
+		query.Set("done", name+"-skipped")
+		query.Set("skipped", strconv.FormatInt(left, 10))
+	default:
+		query.Set("done", name+"-all")
 	}
-	query.Set("done", done)
-	query.Set("count", strconv.FormatInt(n, 10))
+	maps.Copy(query, filterQuery(f))
 	http.Redirect(w, r, s.path(target+query.Encode()), http.StatusSeeOther)
 }
 

@@ -359,21 +359,70 @@ func TestBulkActionStopsInTime(t *testing.T) {
 		}
 	}
 	h := ui.Handler(client, nil)
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	defer cancel()
-	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/tasks/bulk/cancel?queue=default", nil)
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	loc, _ := url.Parse(rec.Header().Get("Location"))
-	q := loc.Query()
-	n, _ := strconv.Atoi(q.Get("count"))
-	if rec.Code != http.StatusSeeOther || loc.Path != "/tasks/bulk/cancel" || q.Get("done") != "cancel-more" || n >= 30000 {
-		t.Fatalf("slow bulk cancel: %d to %q", rec.Code, loc)
+	form := regexp.MustCompile(`<form class="bulk-actions" method="post" action="([^"]*)">`)
+	target, total, after := "/tasks/bulk/cancel?queue=default", 0, int64(0)
+	for range 200 {
+		ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
+		req := httptest.NewRequestWithContext(ctx, http.MethodPost, target, nil)
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		cancel()
+		loc, _ := url.Parse(rec.Header().Get("Location"))
+		q := loc.Query()
+		n, _ := strconv.Atoi(q.Get("count"))
+		total += n
+		if q.Get("done") == "cancel-all" {
+			if total != 30000 {
+				t.Fatalf("canceled %d tasks in all, want 30,000", total)
+			}
+			return
+		}
+		// It goes on after the last task it went through.
+		next, _ := strconv.ParseInt(q.Get("after"), 10, 64)
+		if rec.Code != http.StatusSeeOther || loc.Path != "/tasks/bulk/cancel" || q.Get("done") != "cancel-more" || next < after {
+			t.Fatalf("slow bulk cancel: %d to %q", rec.Code, loc)
+		}
+		after = next
+		_, body, _ := get(t, h, loc.String())
+		match := form.FindStringSubmatch(body)
+		if !strings.Contains(body, html.EscapeString(number(n)+" tasks canceled so far; more remain.")) || match == nil {
+			t.Fatalf("the page after a partial cancel:\n%s", body)
+		}
+		target = html.UnescapeString(match[1])
 	}
-	_, body, _ := get(t, h, loc.String())
-	if !strings.Contains(body, html.EscapeString(number(n)+" tasks canceled so far; more remain.")) || !strings.Contains(body, "Cancel ") {
-		t.Fatalf("the page after a partial cancel:\n%s", body)
+	t.Fatal("the cancel did not end")
+}
+
+// A bulk action that left tasks that other work held says so, and leads back
+// to its page to try again.
+func TestBulkActionTellsWhatItLeft(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	var ids []int64
+	for range 3 {
+		res, err := client.Enqueue(t.Context(), greet{Name: "x"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, res.ID)
+	}
+	tx, err := pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(t.Context(), `SELECT FROM `+schema+`.tasks WHERE id = $1 FOR UPDATE`, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	h := ui.Handler(client, nil)
+	rec := post(t, h, "/tasks/bulk/cancel?queue=default", "same-origin")
+	if loc := rec.Header().Get("Location"); loc != "/tasks/bulk/cancel?count=2&done=cancel-skipped&queue=default&skipped=1" {
+		t.Fatalf("bulk cancel with a held task: %d to %q", rec.Code, loc)
+	}
+	_, body, _ := get(t, h, rec.Header().Get("Location"))
+	if !strings.Contains(body, "2 tasks canceled; other work held 1 task. Try again for those.") || !strings.Contains(body, "Cancel 1 task</button>") {
+		t.Fatalf("the page after a cancel that left a task:\n%s", body)
 	}
 }
 

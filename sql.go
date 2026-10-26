@@ -70,6 +70,7 @@ type statements struct {
 	retryTasks      string
 	cancelTasks     string
 	deleteTasks     string
+	pickCompleted   string
 	deleteCompleted string
 	countTasks      string
 
@@ -164,17 +165,28 @@ func newStatements(schema string) *statements {
 		"{trimmed}", "(CASE WHEN jsonb_array_length(errors) >= "+strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
 	)
 	q := func(sql string) string { return r.Replace(sql) }
-	pick := func(cond string) string {
+	pick := func(cond, gates string) string {
 		return q(`
-SELECT t.id, t.state::text, t.queue, coalesce(t.group_key, ''),
-       EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key)
-FROM {s}.tasks t
-WHERE ` + cond + ` AND t.id > $5 AND t.id <= $6
-  AND t.state = ANY($4::text[]::{s}.task_state[]) AND ` + taskFilter + `
-  AND ` + groupFree + `
-ORDER BY t.id
-LIMIT {batch}
-FOR UPDATE OF t SKIP LOCKED`)
+WITH candidates AS (
+    SELECT t.id, t.queue, coalesce(t.group_key, '') AS group_key FROM {s}.tasks t
+    WHERE ` + cond + ` AND t.id > $5 AND t.id <= $6
+      AND t.state = ANY($4::text[]::{s}.task_state[]) AND ` + taskFilter + `
+    ORDER BY t.id
+    LIMIT {batch}
+), picked AS (
+    SELECT t.id, t.state::text AS state,
+           EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key) AS in_group
+    FROM {s}.tasks t
+    WHERE t.id = ANY(ARRAY(SELECT id FROM candidates)) AND ` + cond + `
+      AND t.state = ANY($4::text[]::{s}.task_state[])
+      AND NOT EXISTS (SELECT FROM unnest($7::text[], $8::text[]) AS u(queue, group_key)
+                      WHERE u.queue = t.queue AND u.group_key = t.group_key)
+      AND ` + groupFree + gates + `
+    FOR UPDATE OF t SKIP LOCKED
+)
+SELECT c.id, c.queue, c.group_key, p.id IS NOT NULL, coalesce(p.state, ''), coalesce(p.in_group, false)
+FROM candidates c LEFT JOIN picked p ON p.id = c.id
+ORDER BY c.id`)
 	}
 
 	return &statements{
@@ -476,18 +488,20 @@ WHERE queue = $1 AND group_key = $2 AND halted_task_id = $3`),
 		lastTask: q(`
 SELECT greatest((SELECT coalesce(max(id), 0) FROM {s}.tasks), (SELECT coalesce(max(id), 0) FROM {s}.task_history))`),
 
-		// The pick statements lock the next batch of the tasks that a bulk
+		// The pick statements read the next batch of the tasks that a bulk
 		// action changes, in ID order after $5 up to $6: those of states $4
 		// that match the filters. Each batch starts where the last one ended,
 		// so a bulk action reads each task once, and the oldest tasks of a
-		// FIFO group come first. They skip the tasks, the FIFO groups, and the
-		// dedupe keys that other transactions hold, and report whether each
-		// task's group had a row, which they then hold. A cancel skips running
-		// tasks already asked to stop.
-		pickRetry: pick(`t.state IN ('dead', 'canceled')`),
+		// FIFO group come first. They return each of them, and whether they
+		// hold its lock: they skip the tasks, the FIFO groups, and the dedupe
+		// keys that other transactions hold, the groups ($7, $8) that the
+		// action left before, and tasks that changed meanwhile. They report
+		// whether each task's group had a row, which they then hold. A cancel
+		// skips running tasks already asked to stop.
+		pickRetry: pick(`t.state IN ('dead', 'canceled')`, ``),
 		pickCancel: pick(`t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
-  AND t.cancel_requested_at IS NULL AND ` + keyFree),
-		pickDelete: pick(`t.state <> 'running' AND ` + keyFree),
+      AND t.cancel_requested_at IS NULL`, ` AND `+keyFree),
+		pickDelete: pick(`t.state <> 'running'`, ` AND `+keyFree),
 
 		// releaseHalts ends the halts of the groups that tasks $1 halt, and
 		// returns those tasks. The caller holds the tasks' and the groups'
@@ -548,27 +562,32 @@ WITH released AS (
 )
 DELETE FROM {s}.tasks WHERE id = ANY($1::bigint[])`),
 
-		// deleteCompleted deletes the next batch of the completed tasks that
-		// match the filters, in ID order after $4 up to $5, and releases their
-		// dedupe keys, skipping tasks whose keys other transactions hold. It
-		// returns how many it deleted, and the last ID.
-		deleteCompleted: q(`
-WITH picked AS (
+		// pickCompleted is a pick statement for the completed tasks in history,
+		// after $4 up to $5.
+		pickCompleted: q(`
+WITH candidates AS (
     SELECT t.id FROM {s}.task_history t
-    WHERE t.id > $4 AND t.id <= $5 AND ` + taskFilter + ` AND ` + keyFree + `
+    WHERE t.id > $4 AND t.id <= $5 AND ` + taskFilter + `
     ORDER BY t.id
     LIMIT {batch}
+), picked AS (
+    SELECT t.id FROM {s}.task_history t
+    WHERE t.id = ANY(ARRAY(SELECT id FROM candidates)) AND ` + keyFree + `
     FOR UPDATE SKIP LOCKED
-), released AS (
-    DELETE FROM {s}.dedupe_keys WHERE task_id = ANY(ARRAY(SELECT id FROM picked))
-), deleted AS (
-    DELETE FROM {s}.task_history WHERE id = ANY(ARRAY(SELECT id FROM picked))
 )
-SELECT count(*), coalesce(max(id), 0) FROM picked`),
+SELECT c.id, p.id IS NOT NULL FROM candidates c LEFT JOIN picked p ON p.id = c.id ORDER BY c.id`),
 
-		// countTasks counts the tasks in each state of $4 that match the
-		// filters, up to {cap} per state. Each state has a branch of its own,
-		// which reads that state's index.
+		// deleteCompleted deletes the picked completed tasks $1, and releases
+		// their dedupe keys.
+		deleteCompleted: q(`
+WITH released AS (
+    DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])
+)
+DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[])`),
+
+		// countTasks counts the tasks after task $5 in each state of $4 that
+		// match the filters, up to {cap} per state. Each state has a branch of
+		// its own, which reads that state's index.
 		countTasks: q(countTasks()),
 
 		// fetch leases up to $2 available tasks of queue $1 for $3
@@ -903,13 +922,14 @@ ORDER BY w.id`),
 		// listTasks pages through live tasks and history, newest first. Each
 		// branch is limited on its own, so both can use their indexes. It runs
 		// with custom plans, so that the planner sees which filters are set.
+		// $9 is the task that the listed ones come after.
 		listTasks: q(`
 SELECT ` + taskColumns + ` FROM (
     (SELECT ` + taskColumns + ` FROM {s}.tasks
      WHERE $6 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
        AND (cardinality($2::text[]) = 0 OR state = ANY($2::text[]::{s}.task_state[]))
        AND (cardinality($3::text[]) = 0 OR kind = ANY($3::text[]))
-       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4
+       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4 AND id > $9
      ORDER BY id DESC LIMIT $5)
     UNION ALL
     (SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(group_key, ''),
@@ -917,7 +937,7 @@ SELECT ` + taskColumns + ` FROM (
      FROM {s}.task_history
      WHERE $7 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
        AND (cardinality($3::text[]) = 0 OR kind = ANY($3::text[]))
-       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4
+       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4 AND id > $9
      ORDER BY id DESC LIMIT $5)
 ) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
        created_at, run_at, attempted_at, finalized_at)
@@ -1101,7 +1121,7 @@ func countTasks() string {
 		b.WriteString(`
 SELECT '` + string(s) + `', n, unflagged FROM (
     SELECT count(*) AS n, count(*) FILTER (WHERE c.cancel_requested_at IS NULL) AS unflagged
-    FROM (` + from + taskFilter + ` LIMIT {cap} + 1) c) x
+    FROM (` + from + taskFilter + ` AND t.id > $5 LIMIT {cap} + 1) c) x
 WHERE '` + string(s) + `' = ANY($4::text[])`)
 	}
 	return b.String()

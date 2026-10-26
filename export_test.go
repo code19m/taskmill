@@ -86,7 +86,7 @@ func RunRetention(ctx context.Context, w *Worker) {
 // the task tables read.
 func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFilter, after int64) (int64, error) {
 	sql, states := map[string]string{
-		"retry": c.sql.pickRetry, "cancel": c.sql.pickCancel, "delete": c.sql.pickDelete, "history": c.sql.deleteCompleted,
+		"retry": c.sql.pickRetry, "cancel": c.sql.pickCancel, "delete": c.sql.pickDelete, "history": c.sql.pickCompleted,
 	}[action], map[string][]State{"retry": retryStates, "cancel": cancelStates}[action]
 	if states == nil {
 		states = deleteStates
@@ -95,7 +95,7 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	if err != nil {
 		return 0, err
 	}
-	args := []any{m.queues, m.kinds, m.groups, m.states, after, m.last}
+	args := []any{m.queues, m.kinds, m.groups, m.states, after, m.last, m.left.queues, m.left.groups}
 	if action == "history" {
 		args = []any{m.queues, m.kinds, m.groups, after, m.last}
 	}

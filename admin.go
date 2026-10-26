@@ -287,7 +287,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 			return err
 		}
 		r, err := tx.Query(ctx, c.sql.listTasks,
-			m.queues, m.states, m.kinds, before, limit+1, len(m.states) > 0, m.history, m.groups)
+			m.queues, m.states, m.kinds, before, limit+1, len(m.states) > 0, m.history, m.groups, m.after)
 		if err != nil {
 			return err
 		}

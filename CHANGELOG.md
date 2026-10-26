@@ -12,7 +12,8 @@ All notable changes to taskmill are recorded here. The format follows
 - Bulk actions by filter: `Client.RetryMatching`, `CancelMatching`, and
   `DeleteMatching` act on every task that matches the queues, kinds, states,
   and FIFO groups of a `TaskFilter`, oldest first, in short batches that skip
-  rows other transactions hold, and return how many tasks they changed.
+  rows other transactions hold. Their `BulkResult` says how many tasks they
+  changed and skipped, and where to go on with `TaskFilter.AfterID`.
   `Client.Count` counts the matching tasks per state, and those each bulk
   action would change. `State.CanRetry`, `CanCancel`, and `CanDelete` say
   which actions a state allows.

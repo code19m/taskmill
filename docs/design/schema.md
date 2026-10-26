@@ -341,12 +341,16 @@ statement timeout.
     it ends however fast tasks arrive. And a retry larger than a batch keeps
     a group in order: the group's oldest task becomes its head.
   - **No waiting while holding rows.** The batch's one statement that picks
-    tasks locks them, the rows of their groups, and the rows of their dedupe
-    keys, all with `SKIP LOCKED`, as rescue does, and leaves out the tasks
-    whose rows another transaction holds. Then the batch changes only rows
-    it holds: the tasks, their groups in a few statements for all of them,
-    and the next task of each group whose head left, promoted in a statement
-    of its own, as completions do.
+    tasks reads the next 1,000 without locks, then locks those it can, the
+    rows of their groups, and the rows of their dedupe keys, all with
+    `SKIP LOCKED`, as rescue does, and checks again that they match. It
+    returns all 1,000, so that the batch knows which ones it skipped. Then
+    the batch changes only rows it holds: the tasks, their groups in a few
+    statements for all of them, and the next task of each group whose head
+    left, promoted in a statement of its own, as completions do.
+  - **Groups stay in order.** Once a retry skips a task of a group, it skips
+    the group's later tasks too, until it ends, and counts them as skipped.
+    A later run then retries the group's tasks oldest first.
   - **One bounded wait.** A retry into a group that has no row creates the
     row. A concurrent enqueue may be creating the same row, uncommitted, and
     an insert must wait for it to decide. The batch inserts under a
@@ -358,7 +362,14 @@ statement timeout.
     canceling a whole queue.
   - **Exact counts.** A batch whose statements ran commits even if the
     caller's context ends meanwhile, so the number of changed tasks is
-    exact.
+    exact, and `BulkResult.LastID` is where a later call goes on.
+  - **Delete goes through two tables.** It reads the next batch of both
+    tasks and history, and goes up to the end of the shorter one, so that
+    one position covers both.
+  - **The remaining limit.** A filter by kind or FIFO group alone has no
+    index. A retry with one reads the dead and canceled entries of
+    `tasks_finished_idx` after its position in each batch: with 20,000 of
+    1 million dead tasks matching, about 135 ms a batch.
 
 ## FIFO groups
 
