@@ -181,8 +181,8 @@ func TestWhileLeased(t *testing.T) {
 
 func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
 	t.Parallel()
-	every := 100 * time.Millisecond
-	f, l := newFailureLines(every)
+	every := time.Second
+	f, l, clock := newFailureLines(every)
 	ctx, boom := t.Context(), errors.New("timeout")
 
 	f.observe(ctx, boom)
@@ -193,7 +193,7 @@ func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
 	f.observe(ctx, nil)
 	// Much later, a failure reports that incident's recovery, then starts
 	// another.
-	time.Sleep(2 * every)
+	clock.advance(2 * every)
 	f.observe(ctx, boom)
 
 	want := []string{
@@ -207,7 +207,7 @@ func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
 
 func TestFailuresOfWorkThatRunsNowAndThen(t *testing.T) {
 	t.Parallel()
-	every := 200 * time.Millisecond
+	every := time.Second
 	for _, c := range []struct {
 		pause time.Duration
 		want  []string
@@ -219,9 +219,9 @@ func TestFailuresOfWorkThatRunsNowAndThen(t *testing.T) {
 		// of their own.
 		{3 * every, []string{"WARN operation failed", "WARN operation failed"}},
 	} {
-		f, l := newFailureLines(every)
+		f, l, clock := newFailureLines(every)
 		f.observe(t.Context(), errors.New("timeout"))
-		time.Sleep(c.pause)
+		clock.advance(c.pause)
 		f.observe(t.Context(), errors.New("timeout"))
 		if !slices.Equal(l.lines, c.want) {
 			t.Errorf("failures %s apart: got lines %q, want %q", c.pause, l.lines, c.want)
@@ -231,20 +231,19 @@ func TestFailuresOfWorkThatRunsNowAndThen(t *testing.T) {
 
 func TestFailuresOfAFlappingOperationEscalateAndStayRare(t *testing.T) {
 	t.Parallel()
-	every := 50 * time.Millisecond
-	f, l := newFailureLines(every)
+	every := time.Second
+	f, l, clock := newFailureLines(every)
 	ctx, boom := t.Context(), errors.New("timeout")
 
 	// The operation fails at every other try for ten report intervals, then
 	// works again.
-	start, tries := time.Now(), 0
-	for ; time.Since(start) < 10*every; tries++ {
+	elapsed, tries := 10*every, 0
+	for ; tries < int(elapsed/(20*time.Millisecond)); tries++ {
 		f.observe(ctx, boom)
 		f.observe(ctx, nil)
-		time.Sleep(time.Millisecond)
+		clock.advance(20 * time.Millisecond)
 	}
-	elapsed := time.Since(start)
-	time.Sleep(every)
+	clock.advance(every)
 	f.observe(ctx, nil)
 
 	if limit := 2 * (1 + int(elapsed/every)); len(l.lines) > limit {
@@ -272,12 +271,19 @@ func TestFailuresOfAFlappingOperationEscalateAndStayRare(t *testing.T) {
 }
 
 // newFailureLines returns the failures of an operation with a report
-// interval of every, and the lines it logs.
-func newFailureLines(every time.Duration) (*failures, *lineLog) {
-	l := &lineLog{}
+// interval of every, the lines it logs, and its clock.
+func newFailureLines(every time.Duration) (*failures, *lineLog, *testClock) {
+	l, clock := &lineLog{}, &testClock{now: time.Unix(1_700_000_000, 0)}
 	w := &Worker{logger: slog.New(l), timing: timing{failureReport: every}}
-	return newFailures(w, "fetch tasks"), l
+	f := newFailures(w, "fetch tasks")
+	f.now = func() time.Time { return clock.now }
+	return f, l, clock
 }
+
+// testClock is a clock that moves only when a test advances it.
+type testClock struct{ now time.Time }
+
+func (c *testClock) advance(d time.Duration) { c.now = c.now.Add(d) }
 
 // lineLog is a slog handler that keeps each line's level, message, and
 // failure count, for tests that log from one goroutine.

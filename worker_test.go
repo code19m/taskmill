@@ -748,7 +748,9 @@ func TestRunTwiceFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
-	waitFor(t, "the worker to register", func() bool { return e.count(t, "SELECT count(*) FROM {s}.workers") == 1 })
+	// Listening comes after registering: canceling as soon as the worker's
+	// row shows could stop Run while it still waits for that insert's reply.
+	e.waitListening(t)
 
 	second, cancelSecond := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancelSecond()
@@ -1608,4 +1610,23 @@ func TestWorkerWarnsAboutUnservedKinds(t *testing.T) {
 	waitFor(t, "a warning that the reports queue is not served", func() bool {
 		return logs.count("the worker does not serve the default queue of these registered kinds") == 1
 	})
+}
+
+func TestWorkerRemovedAsStaleRegistersAgain(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	logs := &logRecorder{}
+	runWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{
+		Handlers: noopHandlers(), NoMaintainer: true, LeaseDuration: 300 * time.Millisecond,
+	})
+	e.waitListening(t)
+	// What the maintainer does to a worker that missed its heartbeats for 5
+	// minutes, such as one on a machine that slept, while it kept working.
+	e.exec(t, "DELETE FROM {s}.workers")
+	waitFor(t, "the worker to register again", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.workers") == 1
+	})
+	if n := logs.count("worker was removed as stale; registering again"); n != 1 {
+		t.Fatalf("the new registration was logged %d times, want once", n)
+	}
 }

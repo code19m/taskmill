@@ -208,8 +208,8 @@ func TestLogsLeaveOutPayloadsAndMetadata(t *testing.T) {
 	}
 }
 
-// checkIncident checks an operation's lines about an incident: a warning
-// first, then errors and recoveries, at most limit of them about failures.
+// checkIncident checks an operation's lines about its incidents: a warning
+// first, each line at its message's level, and at most limit about failures.
 func checkIncident(t *testing.T, op string, lines []slog.Record, limit int) {
 	t.Helper()
 	levels := map[string]slog.Level{
@@ -217,7 +217,9 @@ func checkIncident(t *testing.T, op string, lines []slog.Record, limit int) {
 	}
 	failing := 0
 	for i, r := range lines {
-		if r.Level != levels[r.Message] || (i == 0) != (r.Message == "operation failed") {
+		// A later line may warn again: on a slow machine a call can fail once
+		// more well after the database came back, which is a new incident.
+		if r.Level != levels[r.Message] || i == 0 && r.Message != "operation failed" {
 			t.Errorf("%s line %d is %s %q", op, i, r.Level, r.Message)
 		}
 		if r.Message != "operation recovered" {
