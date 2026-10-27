@@ -340,9 +340,11 @@ func TestWorkerCancelsRunningTask(t *testing.T) {
 func TestHandlerContextSaysWhyItEnded(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+	started := make(chan struct{}, 2)
 	cause := make(chan error, 1)
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
 			<-ctx.Done()
 			cause <- context.Cause(ctx)
 			return ctx.Err()
@@ -354,18 +356,28 @@ func TestHandlerContextSaysWhyItEnded(t *testing.T) {
 	if _, err := w.RunTask(t.Context(), e.enqueue(t, sendEmail{}, nil)); err != nil {
 		t.Fatal(err)
 	}
+	recv(t, started, "the handler to start")
 	if err := recv(t, cause, "the timeout"); !errors.Is(err, taskmill.ErrAttemptTimeout) {
 		t.Fatalf("got cause %v, want ErrAttemptTimeout", err)
 	}
 
-	// RunTask's context ends, as a worker's does when it shuts down.
-	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	// RunTask's context ends while the handler runs, as a worker's does when
+	// it shuts down.
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	if _, err := w.RunTask(ctx, e.enqueue(t, sendEmail{}, nil)); err != nil {
-		t.Fatal(err)
-	}
+	id := e.enqueue(t, sendEmail{}, nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.RunTask(ctx, id)
+		done <- err
+	}()
+	recv(t, started, "the handler to start")
+	cancel()
 	if err := recv(t, cause, "the shutdown"); !errors.Is(err, taskmill.ErrShutdown) {
 		t.Fatalf("got cause %v, want ErrShutdown", err)
+	}
+	if err := recv(t, done, "RunTask to return"); err != nil {
+		t.Fatal(err)
 	}
 }
 
