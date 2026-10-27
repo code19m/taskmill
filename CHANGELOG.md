@@ -7,6 +7,17 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- An idle queue polls once a minute instead of every `PollInterval` while
+  notifications reach its worker, which checks that once a minute by sending
+  itself one. 50 idle worker processes serving 100 queues sent the database
+  about 5,600 transactions a second, and now send about 30. Queues still poll
+  every `PollInterval` until the first check, while the notification
+  connection is down, through a transaction-pooling proxy without
+  `ListenConfig`, and while their installation-wide concurrency limit holds
+  tasks back. A worker logs when notifications start or stop arriving.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added

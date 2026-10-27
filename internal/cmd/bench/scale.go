@@ -164,7 +164,7 @@ func bulk(ctx context.Context, c *taskmill.Client, n int, task func(i int) taskm
 // killed every 10 seconds, leaving leases to rescue. The benchmark is the
 // maintainer, and times each of its statements.
 func benchQueues(ctx context.Context, pool *pgxpool.Pool, url string, d time.Duration) {
-	const queues, procs, perSecond = 100, 50, 100
+	const queues, procs, perSecond = 100, 50, 1000
 	d = max(d, time.Minute)
 	c := fresh(ctx, pool)
 	steps := &stepTracer{}

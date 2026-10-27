@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -120,6 +121,16 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 	for _, q := range w.queues {
 		q.nudge()
 	}
+	// Whether notifications reach the worker shows only once one arrives,
+	// and stops being known when the connection ends.
+	probeCtx, stopProbes := context.WithCancel(ctx)
+	var probes sync.WaitGroup
+	probes.Go(func() { w.probeLoop(probeCtx) })
+	defer func() {
+		stopProbes()
+		probes.Wait()
+		w.stopNotifying()
+	}()
 	for {
 		n, err := conn.WaitForNotification(ctx)
 		if err != nil {
@@ -127,6 +138,43 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 		}
 		w.handleNotification(ctx, n.Payload)
 	}
+}
+
+// probeLoop sends this worker a notification at once, and then every
+// idlePoll, and finds that notifications do not arrive if one has not
+// arrived by the time of the next. They do not through a transaction-pooling
+// proxy, from a listener on another database, or on a connection that broke
+// without a word.
+func (w *Worker) probeLoop(ctx context.Context) {
+	tick := time.NewTicker(w.timing.idlePoll)
+	defer tick.Stop()
+	for first := true; ; first = false {
+		w.probed.Store(false)
+		sendCtx, cancel := context.WithTimeout(ctx, cleanupTimeout)
+		_, _ = w.client.pool.Exec(sendCtx, notifySQL, w.client.schema, notifyProbe+"|"+w.id) // a probe lost to an error counts as missing
+		cancel()
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		if !w.probed.Load() && (w.stopNotifying() || first) {
+			w.logger.LogAttrs(ctx, slog.LevelWarn, "notifications do not arrive; idle queues poll every PollInterval")
+		}
+	}
+}
+
+// stopNotifying notes that notifications may no longer reach the worker, so
+// its idle queues poll every PollInterval again, starting now. It reports
+// whether they reached it until now.
+func (w *Worker) stopNotifying() bool {
+	if !w.notifying.Swap(false) {
+		return false
+	}
+	for _, q := range w.queues {
+		q.nudge()
+	}
+	return true
 }
 
 // connectListener opens the notification connection. pgx panics on a
@@ -165,6 +213,14 @@ func (w *Worker) handleNotification(ctx context.Context, payload string) {
 	case notifyQueue:
 		if w.queues[arg] != nil {
 			w.refreshQueueSettings(ctx)
+		}
+	case notifyProbe:
+		if arg != w.id {
+			return
+		}
+		w.probed.Store(true)
+		if !w.notifying.Swap(true) {
+			w.logger.LogAttrs(ctx, slog.LevelInfo, "notifications arrive; idle queues poll once a minute")
 		}
 	}
 }

@@ -17,6 +17,7 @@ type Timing struct {
 	Reconnect     time.Duration
 	NoHandlerWait time.Duration
 	FailureReport time.Duration
+	IdlePoll      time.Duration
 }
 
 // SetTiming applies t to w before it runs.
@@ -35,6 +36,12 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.reconnectMax, t.Reconnect)
 	set(&w.timing.noHandlerWait, t.NoHandlerWait)
 	set(&w.timing.failureReport, t.FailureReport)
+	set(&w.timing.idlePoll, t.IdlePoll)
+}
+
+// Notifying reports whether notifications reach w, as its last probe showed.
+func Notifying(w *Worker) bool {
+	return w.notifying.Load()
 }
 
 // RunSchedules runs one pass over w's schedules, as its maintainer does each

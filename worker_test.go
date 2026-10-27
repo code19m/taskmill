@@ -31,6 +31,7 @@ var testTiming = taskmill.Timing{
 	Stats:         200 * time.Millisecond,
 	ShutdownGrace: 200 * time.Millisecond,
 	Reconnect:     100 * time.Millisecond,
+	IdlePoll:      250 * time.Millisecond,
 }
 
 // newWorker returns a worker with test timing that polls every 50 ms unless

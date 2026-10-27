@@ -514,15 +514,29 @@ When enqueue or promotion makes tasks available, the client sends
 `pg_notify` on a channel named after the schema, with the payload
 `a|<queue>`, so idle workers fetch at once instead of waiting for their next
 poll. The same channel carries `c|<id>`, which asks the worker running task
-`<id>` to cancel it, and `q|<queue>`, which tells workers that the queue's
-settings changed. Notifications are delivered only when the transaction
-commits.
+`<id>` to cancel it, `q|<queue>`, which tells workers that the queue's
+settings changed, and `p|<worker>`, a probe that a worker sends itself.
+Notifications are delivered only when the transaction commits.
 
 Each notifying transaction takes a global lock at commit. At high commit
 rates this lock becomes a bottleneck: in a pgbench test before taskmill had
 any Go code, a `NOTIFY` in every enqueue capped throughput near 10,000 tasks
-per second. So a client sends at most one notification per queue per 50 ms,
-and workers also poll as a fallback. `LISTEN` needs a session, so each
+per second. So a client sends at most one notification per queue per 50 ms:
+the first in its own transaction, and one for the rest when the 50 ms end.
+
+**Polling.** Workers poll each queue as a fallback, and how often depends on
+whether notifications reach them, which a worker checks by sending itself a
+probe every minute: an unanswered probe means they do not, whatever the
+reason, such as a proxy in the way or a connection that broke without a
+word. While they do, an idle queue polls once a minute, only for
+notifications that were never sent, such as the trailing one of a producer
+that crashed, so idle workers cost little however many queues and replicas
+there are. While they do not, it polls every `PollInterval`, and so does a
+queue whose installation-wide concurrency limit held tasks back, since
+finishing a task sends no notification. Losing the notification connection,
+or a probe, makes every queue fetch at once and poll every `PollInterval`
+again; a new connection makes them fetch at once too, since notifications
+may have been missed meanwhile. `LISTEN` needs a session, so each
 worker holds one dedicated connection for it, made with the pool's settings
 unless `WorkerConfig.ListenConfig` says otherwise. Behind a
 transaction-pooling proxy, `ListenConfig` must point at the database

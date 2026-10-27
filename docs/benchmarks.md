@@ -111,7 +111,7 @@ the first targets left out:
 |---|---|---|
 | S1 | T3 with 10 million scheduled and 1 million available tasks waiting: within 20% of T3 | Two runs: 14,869 tasks/s against 17,164 without them, 87%; and 16,257 against 18,539, 88%: pass |
 | S2 | T3 with 100,000 FIFO groups holding pending tasks in another queue: within 10% of T3 | Two runs: 12,522 tasks/s against 17,164, 73%; and 16,671 against 18,539, 89.9%: just below target here |
-| S3 | 100 queues served by 50 worker processes: maintainer cycle under 1 s | At 100 tasks/s, slowest iterations: main loop 131 ms, promotion loop 291 ms, statistics 235 ms: pass. At 1,000 tasks/s, up to 1.7 s: fails, by design, see below |
+| S3 | 100 queues served by 50 worker processes: maintainer cycle under 1 s | At 100 tasks/s, slowest iterations: main loop 131 ms, promotion loop 291 ms, statistics 235 ms: pass. At 1,000 tasks/s, after idle polling was fixed on 2026-10-27: 0.8 s in one run, 1.6 to 2.1 s in three others: fails, see below |
 
 S1 and S2 compare T3 end to end with and without the waiting tasks, which
 were vacuumed, analyzed, and written to disk before the run, as tasks that
@@ -140,12 +140,17 @@ at the edge of its target, needs a run on the reference hardware.
 with concurrency 1, and 100 tasks a second arrived in random queues, a fifth
 of them delayed; a worker process was killed every 10 seconds. Each loop's
 iteration is the time of its statements in order. **At 1,000 tasks a second
-it fails, and the cause is a design cost:** every worker polls every queue it
-serves once a second, even while notifications work, so 50 processes with
-100 queues each fetch 5,000 times a second with nothing to do. That took
-about 2 of this database's 4 CPUs; with the tasks on top, the CPUs saturated,
-and the promotion loop took up to 1.7 seconds. Idle polling is tracked as an
-issue of its own.
+it fails, and the causes are design costs.** First, every worker polled every
+queue it serves once a second, even while notifications worked, so the 50
+idle processes alone sent 5,600 transactions a second, 1.2 of this
+database's 4 CPUs. Since 2026-10-27, an idle queue polls once a minute while
+notifications reach its worker, and the same idle processes send 26
+transactions a second (E6). Second, a notification wakes every worker that
+serves its queue: at 1,000 tasks a second spread over 100 queues, about
+1,000 notifications a second each wake 50 processes, which fetch, and all
+but one find nothing. That still saturates this database's 4 CPUs, at about
+7,000 transactions a second, so the maintainer's loops still exceed a
+second.
 
 ### Resource use
 
@@ -156,7 +161,7 @@ issue of its own.
 | E3 | `tasks` heap and index size during a 4-hour run at half of T3: within 2× of their size after the first hour | 36 million tasks in 1 hour at 10,000 tasks/s, none left waiting: heap 167 MiB throughout, indexes 88 to 116 MiB; at most 283 MiB, 1.06× its size after 15 minutes: pass |
 | E4 | Database connections: a client uses its pool only; a worker, its pool plus one `LISTEN` connection | A client with a pool of 8 used at most 8; a worker with a pool of 8 and 64 slots, at most 9, one of them listening: pass |
 | E5 | Worker memory: idle ≤ 30 MiB RSS; ≤ 8 KiB per running task | 17.3 MiB idle; 7.9 KiB per running task, with 10,000 running: pass |
-| E6 | An idle worker's load: one fetch per queue per poll interval, plus heartbeats | 1.05 fetches per queue per poll, 3 worker heartbeats in 30 s, 8 other statements: pass |
+| E6 | An idle worker's load, revised on 2026-10-27: while notifications arrive, about one fetch per queue per minute, plus heartbeats; while they do not, one per queue per poll interval | Notifications arriving, 10 queues for 3 minutes: 46 fetches, 4.6 per queue, of which 3 at start; 17 worker heartbeats; 25 other statements, such as probes: pass |
 
 **E1 counts every statement,** including the `BEGIN`, settings, and `COMMIT`
 that a fetch sends with it in one round trip (see
@@ -180,8 +185,12 @@ waiting. The process is the benchmark program, a little bigger than a worker
 alone. macOS counts resident memory a little differently from Linux.
 
 **E6** counts the statements of a worker that serves 10 idle queues and stays
-out of the maintainer election. Each poll fetches from each queue, and so do
-the start of `Run` and the start of the notification connection.
+out of the maintainer election. Each queue fetches when `Run` starts, when
+the notification connection starts, and once more before the worker's first
+probe shows that notifications arrive; then once a minute. Before
+2026-10-27, an idle queue polled every second: 316 fetches in 30 seconds
+here. Its target was revised with the design: the poll interval now applies
+only while notifications do not arrive.
 
 ### Reliability under faults
 
@@ -266,7 +275,10 @@ clock waited 5 minutes more, as their run times said, and none started early.
 - T1, T3 end to end, and S2 miss their targets here, S2 by a hair in one of
   its two runs, as described above. They need a run on the reference
   hardware before v1.0.0.
-- L5 and L6 were revised, as described above.
+- L5 and L6 were revised, as described above, and E6 with the idle polling
+  of 2026-10-27.
+- S3 misses at 1,000 tasks a second, because each notification wakes every
+  worker of its queue.
 
 ## Running the benchmarks
 

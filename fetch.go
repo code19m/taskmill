@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math/rand/v2"
 	"slices"
 	"time"
 
@@ -14,14 +15,13 @@ import (
 // fetchLoop fetches tasks for one queue whenever it has free capacity, until
 // ctx is canceled.
 func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
-	poll := time.NewTicker(w.cfg.PollInterval)
-	defer poll.Stop()
 	fetches := newFailures(w, "fetch tasks", slog.String(logKeyQueue, q.name))
 
-	// notified reports that a notification caused the last fetch.
-	notified := false
+	// notified reports that a notification caused the last fetch, and held
+	// that the queue's concurrency limit held tasks back.
+	notified, held := false, false
 	wait := func(pause bool) (ok bool) {
-		ok, notified = waitForWork(ctx, q, poll, pause)
+		ok, notified = waitForWork(ctx, q, w.pollWait(held), pause)
 		return ok
 	}
 
@@ -33,7 +33,8 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 			}
 			continue
 		}
-		tasks, more, err := w.fetch(ctx, q, free)
+		tasks, more, limited, err := w.fetch(ctx, q, free)
+		held = limited
 		fetches.observe(ctx, err)
 		w.dispatch(ctx, r, q, tasks)
 		if err != nil {
@@ -50,11 +51,30 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 	}
 }
 
+// pollWait returns how long an idle queue waits before it fetches again,
+// unless a notification or a freed slot wakes it first. While notifications
+// reach the worker, it polls every idlePoll, give or take a tenth so that
+// workers started together poll apart: only for notifications that were
+// never sent, such as the trailing one of a producer that crashed. Otherwise
+// it polls every PollInterval, and so does a queue whose installation-wide
+// limit held tasks back: no notification says when another worker's task of
+// that queue ends.
+func (w *Worker) pollWait(held bool) time.Duration {
+	if held || !w.notifying.Load() {
+		return w.cfg.PollInterval
+	}
+	d := max(w.timing.idlePoll, w.cfg.PollInterval)
+	if spread := d / 5; spread > 0 {
+		d += rand.N(spread) - spread/2 //nolint:gosec // spreads polls, no security role
+	}
+	return d
+}
+
 // waitForWork waits for a nudge, a freed slot, or the poll. It reports false
 // if ctx ends first, and whether a nudge woke it. If pause is set, it first
 // lets a moment pass, which gathers the nudges that arrive meanwhile into one
 // fetch.
-func waitForWork(ctx context.Context, q *queueState, poll *time.Ticker, pause bool) (ok, nudged bool) {
+func waitForWork(ctx context.Context, q *queueState, poll time.Duration, pause bool) (ok, nudged bool) {
 	if pause {
 		select {
 		case <-ctx.Done():
@@ -62,6 +82,8 @@ func waitForWork(ctx context.Context, q *queueState, poll *time.Ticker, pause bo
 		case <-time.After(emptyFetchCooldown):
 		}
 	}
+	timer := time.NewTimer(poll)
+	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return false, false
@@ -69,7 +91,7 @@ func waitForWork(ctx context.Context, q *queueState, poll *time.Ticker, pause bo
 		return true, true
 	case <-q.freed:
 		return true, false
-	case <-poll.C:
+	case <-timer.C:
 		return true, false
 	}
 }
@@ -78,10 +100,11 @@ func waitForWork(ctx context.Context, q *queueState, poll *time.Ticker, pause bo
 // batches of batch kinds among them with more tasks of those kinds, so that
 // every fetched task starts at once. A queue with an installation-wide
 // concurrency limit fetches only up to its remaining capacity. more reports
-// that the first lease took all it asked for, so more tasks may be waiting.
+// that the first lease took all it asked for, so more tasks may be waiting,
+// and held that the limit kept it from asking for as many as slots.
 // If filling the batches fails outside a transaction, it returns the tasks
 // leased before the error with the error: they must run.
-func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*tracked, more bool, err error) {
+func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*tracked, more, held bool, err error) {
 	// The statements run on a context that outlives ctx: once tasks are
 	// leased, they must reach the worker even if it is stopping.
 	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
@@ -94,7 +117,7 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	var tx pgx.Tx
 	if q.maxRunning.Load() > 0 {
 		if tx, allowed, err = w.beginLimited(dbCtx, q); err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 		defer func() { _ = tx.Rollback(dbCtx) }() // a no-op after commit
 		lease = w.leaseIn(tx)
@@ -103,17 +126,18 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	limit := min(slots, allowed)
 	out, err := lease(dbCtx, q, w.client.sql.fetch, limit)
 	if err != nil {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	more = limit > 0 && len(out) == limit
+	held = allowed < slots && len(out) == limit
 	extra, err := w.fillBatches(dbCtx, q, lease, out, allowed-len(out))
 	if err != nil && tx != nil {
-		return nil, false, err // rolled back: nothing was leased
+		return nil, false, false, err // rolled back: nothing was leased
 	}
 	out = append(out, extra...)
 	if tx != nil {
 		if err := tx.Commit(dbCtx); err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 	}
 
@@ -124,7 +148,7 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 			cmp.Compare(a.info.ID, b.info.ID),
 		)
 	})
-	return out, more, err
+	return out, more, held, err
 }
 
 // leaseFunc runs a fetch statement for up to limit tasks of q, with extra

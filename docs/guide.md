@@ -317,7 +317,16 @@ takes part in maintenance.
 `Run` blocks until its context is canceled. It returns an error only if the
 worker cannot start. A worker fetches from each queue up to its free slots,
 in priority, run time, and enqueue order. PostgreSQL notifications wake it as
-soon as tasks are enqueued, and it polls every second as a fallback.
+soon as tasks are enqueued. Every minute, a worker sends itself a
+notification to check that they arrive. While they do, an idle queue polls
+only once a minute, for notifications that were never sent, such as one a
+crashed producer owed. While they do not, it polls every `PollInterval`, one
+second by default: until the first check, while the notification connection
+is down, and through a transaction-pooling proxy without `ListenConfig`. A
+queue whose installation-wide concurrency limit held tasks back polls every
+`PollInterval` too, since no notification says when another worker's task of
+it ends. So idle workers cost the database little, however many queues and
+replicas there are.
 
 **Shutting down.** When the context is canceled, `Run` stops fetching and
 waits up to `DrainTimeout` (20 seconds) for running tasks. Then it cancels
@@ -902,7 +911,7 @@ attribute names it:
 | `record results` | Records attempts that ended | After each attempt |
 | `load queue settings` | Reads pauses and concurrency limits | Every 10 seconds |
 | `record activity` | Writes the counts for the charts | Every 10 seconds |
-| `listen for notifications` | Keeps the notification connection; the worker polls meanwhile | Backoff, 1 to 30 seconds |
+| `listen for notifications` | Keeps the notification connection; idle queues poll every `PollInterval` meanwhile | Backoff, 1 to 30 seconds |
 | `elect maintainer` | Takes or keeps the maintainer role | Every 1 to 2 seconds |
 | `promote due tasks` | Makes scheduled and retryable tasks available | As they come due |
 | `rescue expired leases` | Fails attempts whose workers lost their leases | Every second |
@@ -943,6 +952,8 @@ The last six run only on the maintainer.
 | `complete tasks failed; they are rescued when their leases expire` | Warn | `tasks` successful attempts could not be recorded; they run again. |
 | `task history has no partition for today; completed tasks skip history` | Error | The role that runs workers must own the taskmill tables; see [Database privileges](#running-in-production). |
 | `notifications disabled; polling only` | Error | `ListenConfig` was not created with `pgx.ParseConfig`. Fix it; until then the worker polls. |
+| `notifications arrive; idle queues poll once a minute` | Info | The worker's check found that notifications reach it, at start or after they did not. |
+| `notifications do not arrive; idle queues poll every PollInterval` | Warn | The worker's check notification did not come back within a minute. Through a transaction-pooling proxy, point `ListenConfig` at a direct connection; check also that it reaches the primary of the same database. The worker keeps checking. |
 | `notification failed` | Warn | A wake-up for `queue` was not sent; its workers find the tasks at their next poll. |
 | `enqueue middleware failed after the tasks were enqueued` | Warn | An enqueue middleware returned `error` after the `tasks` committed, so the enqueue succeeded, and the middleware's work, such as a span, may be missing. Fix the middleware. |
 | `fifo group missing` | Error | A task's FIFO group has no row, which should not happen. Please report it. |
@@ -1066,7 +1077,8 @@ mode except notifications, which need a session. pgx caches prepared
 statements, so use PgBouncer 1.21 or newer with `max_prepared_statements`
 set, or set pgx's `DefaultQueryExecMode` to `QueryExecModeExec`. Point
 `WorkerConfig.ListenConfig` at a direct connection, created with
-`pgx.ParseConfig`. Without it, workers fall back to polling. A nightly CI run
+`pgx.ParseConfig`. Without it, notifications do not reach the worker, which
+finds that out within a minute and polls every `PollInterval`. A nightly CI run
 passes every test through PgBouncer this way (target F8 in
 [Benchmarks](benchmarks.md#reliability-under-faults)).
 
@@ -1415,8 +1427,9 @@ PostgreSQL, Neon, and Supabase, can run it. Mind these points:
   than `LeaseDuration` may run again elsewhere. If that costs more
   than a crashed worker's tasks waiting longer, raise `LeaseDuration` above
   your provider's failover time.
-- **Neon's scale to zero** never happens while workers run, because they
-  poll every second: budget for a compute that stays on.
+- **Neon's scale to zero** never happens while workers run, because their
+  heartbeats reach the database every 10 seconds: budget for a compute that
+  stays on.
 
 ## Upgrading
 
@@ -1459,7 +1472,7 @@ taskmill follows [Semantic Versioning](https://semver.org/).
 | `HandlerOptions.BatchSize` | 100 | 1,000 |
 | `QueueOptions.Concurrency` | 10 slots per queue and worker | — |
 | `LeaseDuration` | 30 seconds; heartbeats every 10 seconds | At least 100 ms |
-| `PollInterval` | 1 second | — |
+| `PollInterval` | 1 second, while notifications do not arrive; once a minute while they do | — |
 | `DrainTimeout` | 20 seconds, then 5 seconds for handlers to return | — |
 | Unknown kind | Snoozed 1 minute at a time; dead after 1 hour | — |
 | Maintainer takeover | Within about 12 seconds | — |

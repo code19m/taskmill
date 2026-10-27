@@ -24,9 +24,10 @@ func benchResources(ctx context.Context, pool *pgxpool.Pool, url string, d time.
 	perTask := (busyRSS - idleRSS) * 1024 / running
 	steps := idleLoad(ctx, pool, url, d, queues)
 	fetches, beats := steps.count("fetch"), steps.count("worker heartbeat")
-	// Each poll fetches from each queue, and so does the start of Run and of
-	// the notification connection.
-	polls := int(d/time.Second) + 2
+	// Each queue fetches when Run starts, when its notification connection
+	// starts, and once more until the first probe shows that notifications
+	// arrive; then once a minute.
+	polls := 3 + int(d/time.Minute)
 	others := 0
 	for _, step := range []string{"lease heartbeat", "settings", "activity", "other"} {
 		others += steps.count(step)
@@ -43,9 +44,9 @@ func benchResources(ctx context.Context, pool *pgxpool.Pool, url string, d time.
 	fmt.Printf("| E5 | Worker process memory, idle | %.1f MiB RSS | %s |\n", float64(idleRSS)/1024, verdict(idleRSS <= 30*1024))
 	fmt.Printf("| E5 | Worker process memory per running task, %s tasks | %.1f KiB | %s |\n",
 		commas(running), float64(perTask)/1024, verdict(perTask <= 8*1024))
-	fmt.Printf("| E6 | An idle worker serving %d queues for %s, polling every second | %d fetches (%.2f per queue per poll), "+
+	fmt.Printf("| E6 | An idle worker serving %d queues for %s, notifications arriving | %d fetches (%.1f per queue), "+
 		"%d worker heartbeats, %d other statements | %s |\n", queues, d, fetches,
-		float64(fetches)/float64(queues*int(d/time.Second)), beats, others, verdict(fetches <= queues*polls))
+		float64(fetches)/float64(queues), beats, others, verdict(fetches <= queues*polls))
 	fmt.Println()
 }
 

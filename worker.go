@@ -57,6 +57,7 @@ type timing struct {
 	reconnectMin    time.Duration // first wait before reconnecting the listener
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
 	failureReport   time.Duration // how often an operation that keeps failing logs, at most
+	idlePoll        time.Duration // how often idle queues poll while notifications arrive
 }
 
 var defaultTiming = timing{
@@ -73,6 +74,7 @@ var defaultTiming = timing{
 	reconnectMin:    time.Second,
 	reconnectMax:    30 * time.Second,
 	failureReport:   time.Minute,
+	idlePoll:        time.Minute,
 }
 
 // Causes of a canceled attempt context, which decide how its result is
@@ -106,6 +108,8 @@ type Worker struct {
 	running   atomic.Bool
 	reached   atomic.Pointer[time.Time] // when Run last reached the database; nil while it does not run
 	released  atomic.Int64              // tasks given back during the current Run's shutdown
+	notifying atomic.Bool               // notifications reach the worker, as its last probe showed
+	probed    atomic.Bool               // the probe sent last has arrived
 	tally     tally                     // ended attempts not yet added to the activity
 	recording sync.WaitGroup            // Run's attempts whose results are being recorded
 
@@ -141,8 +145,11 @@ type WorkerConfig struct {
 	// heartbeat. Heartbeats are sent every third of it. Default: 30 seconds.
 	LeaseDuration time.Duration
 
-	// PollInterval is how often idle queues are checked when no notification
-	// arrives. Default: 1 second.
+	// PollInterval is how often idle queues are checked while notifications
+	// do not reach the worker: before its notification connection works, or
+	// through a transaction-pooling proxy without ListenConfig. While they
+	// do, they wake the worker, and idle queues are checked once a minute,
+	// for notifications that were never sent. Default: 1 second.
 	PollInterval time.Duration
 
 	// DrainTimeout is how long Run waits for running tasks after its context
@@ -163,8 +170,9 @@ type WorkerConfig struct {
 
 	// ListenConfig is the connection that receives notifications. Set it to
 	// a direct connection when the pool goes through a transaction-pooling
-	// proxy, which cannot deliver them. Create it with [pgx.ParseConfig].
-	// Default: the pool's configuration.
+	// proxy, which cannot deliver them: the worker then polls every
+	// PollInterval. Create it with [pgx.ParseConfig]. Default: the pool's
+	// configuration.
 	ListenConfig *pgx.ConnConfig
 }
 
