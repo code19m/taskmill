@@ -60,6 +60,11 @@ All notable changes to taskmill are recorded here. The format follows
 - **Breaking:** `ClientConfig.ContextMetadata`, deprecated in v0.2.0. Use
   enqueue middleware, as the v0.2.0 entry below shows.
 
+### Fixed
+
+- The module no longer includes a 20 MB binary of the example shop, which
+  v0.2.0 shipped by mistake and every download of it carried.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added
