@@ -4,6 +4,9 @@
 # Releases that `make snapshot` builds.
 /dist/
 
+# The example's binary, from `go build` in its directory.
+/examples/shop/shop
+
 # Test binaries, coverage reports and profiles.
 *.test
 *.out
