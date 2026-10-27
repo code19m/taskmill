@@ -463,22 +463,24 @@ ob.AddRelay(&handlers, outbox.PublisherFunc(func(ctx context.Context, ds []outbo
         errs[i] = kafka.Produce(ctx, d.Topic, d.Key, d.Value, d.ID) // one error per delivery
     }
     return errs
-}))
+}), nil) // nil: the default RelayOptions
 worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers}) // serves outbox.Queue
 ```
 
 - Messages with the same topic and key are published one at a time, in the
   order they were stored; messages without a key, in any order. A batch
-  holds up to 100 deliveries, never two with the same topic and key.
+  holds up to `RelayOptions.BatchSize` deliveries, 100 by default and at
+  most 1,000, never two with the same topic and key.
 - Delivery is at least once. Each `Delivery.ID` is a UUIDv7 that stays the
   same across retries, so consumers can deduplicate by it.
 - Keys and header values are `[]byte`, so binary data is safe. `Value` is
   stored base64-encoded, so the 1 MiB payload limit allows about 750 KiB.
-- Each `Publish` call has 1 minute; then its context is canceled.
-  Deliveries without a nil result are retried quickly at first, then every
-  5 minutes, up to 10,000 times: about a month. Return
-  `taskmill.Permanent(err)` for a delivery that can never succeed. A message
-  that becomes dead halts its key until an operator retries or deletes it.
+- Each `Publish` call has `RelayOptions.Timeout`, 1 minute by default; then
+  its context is canceled. Deliveries without a nil result are retried
+  quickly at first, then every 5 minutes, up to 10,000 times: about a month.
+  Return `taskmill.Permanent(err)` for a delivery that can never succeed. A
+  message that becomes dead halts its key until an operator retries or
+  deletes it.
 - `Store` rejects a message without a topic with an error that wraps
   `taskmill.ErrInvalidArgument`. Published messages are not kept in history.
 
@@ -797,7 +799,7 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
   headers, so consumers continue the trace:
 
   ```go
-  outbox.New(client).AddRelay(&handlers, tel.Publisher("kafka", publisher))
+  outbox.New(client).AddRelay(&handlers, tel.Publisher("kafka", publisher), nil)
   ```
 
 **By hand**, the same extension points serve other tools. Worker
@@ -1469,4 +1471,6 @@ taskmill follows [Semantic Versioning](https://semver.org/).
 | `List` page | 100 tasks | 1,000 tasks; 5 seconds per query |
 | Queue statistics | Refreshed every 10 seconds | 10,000 per queue and state; 100,000 scheduled and retryable in all |
 | Removed schedules | Deleted after 24 hours without a run or change | — |
-| Outbox | 100 deliveries per batch; 1 minute per `Publish` | 10,000 tries, about a month; about 750 KiB of `Value` |
+| `RelayOptions.BatchSize` | 100 deliveries per `Publish` | 1,000 |
+| `RelayOptions.Timeout` | 1 minute per `Publish` | — |
+| Outbox messages | — | 10,000 tries, about a month; about 750 KiB of `Value` |

@@ -7,6 +7,15 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `outbox.Outbox.AddRelay` takes `*outbox.RelayOptions`, whose
+  `BatchSize` and `Timeout` set the most deliveries per `Publish` call and
+  the time each call has, as `HandlerOptions` do for other batch handlers.
+  nil or zero values keep the defaults, 100 deliveries and 1 minute, and
+  values out of range make `NewWorker` fail with `ErrInvalidArgument`. To
+  migrate, pass nil: `ob.AddRelay(&handlers, publisher, nil)`.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added

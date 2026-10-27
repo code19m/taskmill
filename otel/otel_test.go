@@ -445,7 +445,7 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 		return errs
 	})
 	var hs taskmill.Handlers
-	ob.AddRelay(&hs, e.in.Publisher("kafka", broker))
+	ob.AddRelay(&hs, e.in.Publisher("kafka", broker), nil)
 	w := e.worker(t, &hs)
 
 	ctx, request := e.tracer.Start(t.Context(), "request")
