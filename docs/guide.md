@@ -472,22 +472,24 @@ ob.AddRelay(&handlers, outbox.PublisherFunc(func(ctx context.Context, ds []outbo
         errs[i] = kafka.Produce(ctx, d.Topic, d.Key, d.Value, d.ID) // one error per delivery
     }
     return errs
-}))
+}), nil) // nil: the default RelayOptions
 worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers}) // serves outbox.Queue
 ```
 
 - Messages with the same topic and key are published one at a time, in the
   order they were stored; messages without a key, in any order. A batch
-  holds up to 100 deliveries, never two with the same topic and key.
+  holds up to `RelayOptions.BatchSize` deliveries, 100 by default and at
+  most 1,000, never two with the same topic and key.
 - Delivery is at least once. Each `Delivery.ID` is a UUIDv7 that stays the
   same across retries, so consumers can deduplicate by it.
 - Keys and header values are `[]byte`, so binary data is safe. `Value` is
   stored base64-encoded, so the 1 MiB payload limit allows about 750 KiB.
-- Each `Publish` call has 1 minute; then its context is canceled.
-  Deliveries without a nil result are retried quickly at first, then every
-  5 minutes, up to 10,000 times: about a month. Return
-  `taskmill.Permanent(err)` for a delivery that can never succeed. A message
-  that becomes dead halts its key until an operator retries or deletes it.
+- Each `Publish` call has `RelayOptions.Timeout`, 1 minute by default; then
+  its context is canceled. Deliveries without a nil result are retried
+  quickly at first, then every 5 minutes, up to 10,000 times: about a month.
+  Return `taskmill.Permanent(err)` for a delivery that can never succeed. A
+  message that becomes dead halts its key until an operator retries or
+  deletes it.
 - `Store` rejects a message without a topic with an error that wraps
   `taskmill.ErrInvalidArgument`. Published messages are not kept in history.
 
@@ -806,7 +808,7 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
   headers, so consumers continue the trace:
 
   ```go
-  outbox.New(client).AddRelay(&handlers, tel.Publisher("kafka", publisher))
+  outbox.New(client).AddRelay(&handlers, tel.Publisher("kafka", publisher), nil)
   ```
 
 **By hand**, the same extension points serve other tools. Worker
@@ -1433,19 +1435,47 @@ PostgreSQL, Neon, and Supabase, can run it. Mind these points:
 
 ## Upgrading
 
-taskmill follows [Semantic Versioning](https://semver.org/).
+taskmill follows [Semantic Versioning](https://semver.org/). From v1.0.0 on,
+this is its compatibility promise:
 
-- **Before v1.0.0,** a minor release (v0.x.0) may break the API; a patch
-  release never does. The [changelog](../CHANGELOG.md) marks each breaking
-  change with **Breaking:** and says how to migrate. Only the latest minor
+- **Breaking changes come only in a new major version,** under a new import
+  path, such as `github.com/code19m/taskmill/v2`. Minor releases add
+  features and patch releases fix bugs; code that builds against an earlier
+  v1 release keeps building and working. CI compares every change with the
+  latest release and fails on one that breaks the API. Only the latest minor
   release gets fixes, including security fixes.
-- **Interfaces you implement never grow.** `Args`, `Handler`,
-  `BatchHandler`, `RetryPolicy`, and `outbox.Publisher` keep their methods.
-  New capabilities arrive as new optional interfaces, the way
+- **Deprecated names stay until v2.** A replaced identifier is marked
+  `// Deprecated:`, says what to use instead, and keeps working until the
+  next major version. The [changelog](../CHANGELOG.md) lists each
+  deprecation.
+- **Interfaces never grow.** `Args`, `ArgsWithDefaults`, `Handler`,
+  `BatchHandler`, `RetryPolicy`, and `outbox.Publisher`, which you implement,
+  and `PgxQuerier` and `SQLQuerier`, which your transactions and pools
+  satisfy, keep their methods. The function types `HandlerFunc`,
+  `Middleware`, `EnqueueMiddleware`, and `outbox.PublisherFunc` keep their
+  signatures. New capabilities arrive as new optional interfaces, the way
   `ArgsWithDefaults` extends `Args`. Configuration structs grow only with
-  fields whose zero value keeps the old behavior.
-- **Deprecation comes first.** An identifier is marked `// Deprecated:` for at
-  least one minor release before it is removed.
+  fields whose zero value keeps the old behavior. `Executor` is sealed: only
+  taskmill implements it.
+- **Stored and reported names never change.** They are kept in the database,
+  or your code compares them:
+  - the `State` values, such as `available` and `dead`; no state is added
+    within v1;
+  - the `ErrorCode` values in a task's error history, such as `timeout`;
+  - the error classes that `ErrorType()` reports for OpenTelemetry's
+    `error.type`: `not_found`, `lease_lost`, `invalid_state`,
+    `invalid_argument`, `schema_outdated`, and the error codes;
+  - the outbox's queue, `outbox.Queue` (`outbox`), and its task kind,
+    `taskmill.outbox.message`.
+
+  A minor release may add an error code or class, so treat an unknown one
+  like any other failure.
+- **Some things are not covered.** Log messages and their attributes may
+  change in a minor release; the [log catalog](#log-catalog) lists them.
+  Error messages may change too: test errors with `errors.Is`. The `otel`
+  module stays below v1, and its span, attribute, and metric names follow
+  OpenTelemetry's conventions as they settle, announced in its changelog
+  ([ADR 0005](adr/0005-opentelemetry-in-a-module-of-its-own.md)).
 - **Migrations only move forward.** There are no down migrations. Run
   `Migrate`, or apply `Migrations`, before you roll out a new version.
 - **Old code works on a newer schema.** Each release's schema works with the
@@ -1453,8 +1483,16 @@ taskmill follows [Semantic Versioning](https://semver.org/).
   side by side during a rolling deploy; CI checks this for every change.
   Code that is newer than its schema fails in `NewClient` with
   `ErrSchemaOutdated`.
-- **The tables are internal.** Their layout can change in any release. Read
-  and change tasks through `Client`, not with SQL.
+- **One table is public: `migrations`.** If you apply `Migrations` with your
+  own tool, you record each version in `<schema>.migrations`. It keeps its
+  name and its columns: `version` (`integer`, the primary key), `name`
+  (`text`), and `applied_at` (`timestamptz`, default `now()`). Every other
+  table is internal, and its layout can change in any release: read and
+  change tasks through `Client`, not with SQL.
+
+**From v0.x.** Before v1.0.0, a minor release could break the API. The
+changelog marks each such change with **Breaking:** and says how to migrate:
+read those entries for every release you skip.
 
 ## Defaults and limits
 
@@ -1482,4 +1520,6 @@ taskmill follows [Semantic Versioning](https://semver.org/).
 | `List` page | 100 tasks | 1,000 tasks; 5 seconds per query |
 | Queue statistics | Refreshed every 10 seconds | 10,000 per queue and state; 100,000 scheduled and retryable in all |
 | Removed schedules | Deleted after 24 hours without a run or change | — |
-| Outbox | 100 deliveries per batch; 1 minute per `Publish` | 10,000 tries, about a month; about 750 KiB of `Value` |
+| `RelayOptions.BatchSize` | 100 deliveries per `Publish` | 1,000 |
+| `RelayOptions.Timeout` | 1 minute per `Publish` | — |
+| Outbox messages | — | 10,000 tries, about a month; about 750 KiB of `Value` |
