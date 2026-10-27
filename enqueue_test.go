@@ -350,7 +350,15 @@ func TestEnqueueFIFOGroupHasOneHead(t *testing.T) {
 
 func TestEnqueueLimitsLeaveTheTransactionUsable(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	grow := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		for _, task := range tasks {
+			if task.Metadata["grow"] != "" {
+				task.Metadata["blob"] = strings.Repeat("x", 64<<10)
+			}
+		}
+		return next(ctx)
+	}
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{grow}})
 	many := make([]taskmill.EnqueueParams, 10_001)
 	for i := range many {
 		many[i] = taskmill.EnqueueParams{Args: sendEmail{}}
@@ -366,6 +374,9 @@ func TestEnqueueLimitsLeaveTheTransactionUsable(t *testing.T) {
 		params []taskmill.EnqueueParams
 	}{
 		{"metadata over 64 KiB", []taskmill.EnqueueParams{{Args: sendEmail{}, Options: bigMetadata}}},
+		{"metadata that middleware grows over 64 KiB", []taskmill.EnqueueParams{{
+			Args: sendEmail{}, Options: &taskmill.EnqueueOptions{Metadata: map[string]string{"grow": "yes"}},
+		}}},
 		{"more than 10,000 tasks", many},
 		{"more than 64 MiB in one call", heavy},
 	} {
@@ -381,8 +392,14 @@ func TestEnqueueLimitsLeaveTheTransactionUsable(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 3 {
-		t.Fatalf("got %d tasks, want the 3 enqueued after the failures", n)
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 4 {
+		t.Fatalf("got %d tasks, want the 4 enqueued after the failures", n)
+	}
+
+	// Sizes count what is stored: & takes one byte, not the six of \u0026.
+	amps := &taskmill.EnqueueOptions{Metadata: map[string]string{"k": strings.Repeat("&", 20_000)}}
+	if _, err := e.client.Enqueue(t.Context(), sendEmail{}, amps); err != nil {
+		t.Fatalf("20,000 ampersands: %v", err)
 	}
 }
 

@@ -770,6 +770,10 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 		{"schedule with a dedupe window", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 			{Name: "x", Cron: "@daily", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{DedupeWindow: time.Hour}},
 		}}},
+		{"schedule with oversized metadata", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{{
+			Name: "x", Cron: "@daily", Args: sendEmail{},
+			Options: &taskmill.EnqueueOptions{Metadata: map[string]string{"k": strings.Repeat("x", 64<<10)}},
+		}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1723,10 +1727,16 @@ func TestMiddlewareThatSkipsTheHandlerFailsTheAttempt(t *testing.T) {
 		return nil
 	}), nil)
 	taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { runs.Add(1) }), nil)
+	var seen error // what the outer middleware got from its next
+	outer := taskmill.Middleware(func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+		seen = next(ctx)
+		return seen
+	})
 	skip := taskmill.Middleware(func(context.Context, *taskmill.TaskInfo, func(context.Context) error) error { return nil })
-	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Middleware: []taskmill.Middleware{skip}})
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Middleware: []taskmill.Middleware{outer, skip}})
 
 	for _, args := range []taskmill.Args{sendEmail{}, report{}} { // a single task, and a batch
+		seen = nil
 		info, err := w.RunTask(t.Context(), e.enqueue(t, args, nil))
 		if err != nil {
 			t.Fatal(err)
@@ -1735,9 +1745,48 @@ func TestMiddlewareThatSkipsTheHandlerFailsTheAttempt(t *testing.T) {
 			!strings.Contains(info.Errors[0].Message, "without running the handler") {
 			t.Fatalf("%s: got task %s with errors %+v, want a retry", args.Kind(), info.State, info.Errors)
 		}
+		if seen == nil {
+			t.Fatalf("%s: the outer middleware saw no failure", args.Kind())
+		}
 	}
 	if runs.Load() != 0 {
 		t.Fatalf("the handlers ran %d times", runs.Load())
+	}
+}
+
+func TestMiddlewareThatSkipsSomeTasksOfABatch(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	got := make(chan []string, 1)
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler[report](&hs, batchFunc(func(tasks []*taskmill.Task[report]) {
+		names := make([]string, len(tasks))
+		for i, task := range tasks {
+			names[i] = task.Args.Name
+		}
+		got <- names
+	}), &taskmill.HandlerOptions{Retry: taskmill.ExponentialBackoff{Base: time.Hour}})
+	skip := taskmill.Middleware(func(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
+		if strings.Contains(string(task.Payload), "skip") {
+			return nil
+		}
+		return next(ctx)
+	})
+	var ids []int64
+	for _, name := range []string{"a", "skip-b", "c", "skip-d"} {
+		ids = append(ids, e.enqueue(t, report{Name: name}, nil))
+	}
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Middleware: []taskmill.Middleware{skip}})
+
+	if names := recv(t, got, "the batch"); !slices.Equal(names, []string{"a", "c"}) {
+		t.Fatalf("the batch handler got %q, want only the tasks not skipped", names)
+	}
+	for i, id := range ids {
+		want := taskmill.StateCompleted
+		if i%2 == 1 {
+			want = taskmill.StateRetryable
+		}
+		e.waitState(t, id, want)
 	}
 }
 

@@ -839,10 +839,11 @@ func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Con
 }
 ```
 
-Middleware must call `next` at most once. Middleware that returns nil
-without calling `next` fails the attempt, or the enqueue: the task is retried
-with backoff, as after a handler's error. A handler's panic reaches attempt
-middleware as an error. For a batch handler, middleware runs once per task,
+Middleware must call `next` at most once. Attempt middleware that returns nil
+without calling `next` fails the attempt, which is retried with backoff, as
+after a handler's error. Enqueue middleware that does so fails the call, and
+nothing is stored. Either way, the middleware outside it sees the error. A
+handler's panic reaches attempt middleware as an error. For a batch handler, middleware runs once per task,
 but the context it passes to `next` does not reach the handler. Enqueue
 middleware that fails after `next` stored the tasks fails an enqueue in your
 transaction, so that you can roll back; any other enqueue has committed, so

@@ -13,11 +13,6 @@ All notable changes to taskmill are recorded here. The format follows
   `ErrLeaseLost`, the causes that `context.Cause` gives for a handler's
   context that ended. The error classes that `ErrorType()` returns, such as
   `invalid_argument`, are now part of the API.
-- Limits on one enqueue call, checked before any statement, so that the
-  caller's transaction stays usable: 64 KiB of encoded metadata per task,
-  after enqueue middleware, and 10,000 tasks and 64 MiB of payload and
-  metadata per call, which `outbox.Store` follows too. Calls beyond them fail
-  with `ErrInvalidArgument`.
 
 ### Changed
 
@@ -28,10 +23,21 @@ All notable changes to taskmill are recorded here. The format follows
   names the `migrations` table as the one public table, and what the promise
   leaves out: log and error messages, and the `otel` module's names.
 - **Breaking:** attempt middleware that returns nil without calling `next`
-  fails the attempt, which is retried with backoff, as enqueue middleware
-  already does. Before, the task was completed although its handler never
-  ran. Middleware that skips a task on purpose returns an error, such as
-  `taskmill.Snooze(d)` or `taskmill.Permanent(err)`.
+  fails the attempt, which is retried with backoff. Before, the task was
+  completed although its handler never ran. Middleware that skips a task on
+  purpose returns an error, such as `taskmill.Snooze(d)` or
+  `taskmill.Permanent(err)`. Such a failure, and an enqueue middleware's that
+  returns nil without calling `next`, now reaches the middleware outside it
+  as an error from its `next`, so tracing and metrics record it.
+- **Breaking:** limits on one enqueue call, checked before any statement, so
+  that the caller's transaction stays usable: at most 64 KiB of encoded
+  metadata per task, after enqueue middleware, and at most 10,000 tasks and
+  64 MiB of payload and metadata per call. They apply to `EnqueueMany`,
+  `EnqueueManyTx`, and `outbox.Store`, and to the metadata of schedules,
+  which `NewWorker` checks. Calls beyond them fail with `ErrInvalidArgument`.
+  To migrate, split larger calls into chunks within both limits, and keep
+  each task's metadata within 64 KiB. Sizes now count `&`, `<`, and `>` as
+  one byte each, as stored, not as JSON escapes.
 - **Breaking:** `CodeLeaseExpired` is now `CodeLeaseLost`, with the value
   `lease_lost`, like `ErrLeaseLost`. Error history entries recorded before
   keep `lease_expired`: code that reads them checks for both.

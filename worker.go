@@ -173,7 +173,8 @@ type QueueOptions struct {
 // tracing. It must call next at most once, and must not modify task.
 // Returning without calling next fails the attempt with the returned error,
 // or with an error that says so if it returns nil: the task is retried with
-// backoff, as after a handler's error. Enqueue middleware works the same way.
+// backoff, as after a handler's error, and the middleware outside sees that
+// error from its next.
 // A handler's panic reaches middleware as an error. For a batch handler,
 // middleware runs once per task, but the context it passes to next does not
 // reach the handler.

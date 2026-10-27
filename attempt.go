@@ -119,8 +119,9 @@ func safeBatch(ctx context.Context, reg *registration, infos []*TaskInfo, atts [
 }
 
 // invoke runs call through the middleware chain, turning panics into errors.
-// It runs call at most once, whatever the middleware does, and fails the
-// attempt if the middleware returned nil without calling it.
+// It runs call at most once, whatever the middleware does. A middleware that
+// returns nil without calling its next fails at once, so that the middleware
+// outside it sees the failure too.
 func (w *Worker) invoke(ctx context.Context, t *tracked, call func(context.Context) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -141,12 +142,19 @@ func (w *Worker) invoke(ctx context.Context, t *tracked, call func(context.Conte
 	}
 	for _, m := range slices.Backward(w.cfg.Middleware) {
 		inner := next
-		next = func(ctx context.Context) error { return m(ctx, t.info, inner) }
+		next = func(ctx context.Context) error {
+			var reached atomic.Bool
+			err := m(ctx, t.info, func(ctx context.Context) error {
+				reached.Store(true)
+				return inner(ctx)
+			})
+			if err == nil && !reached.Load() {
+				return errors.New("taskmill: middleware returned nil without running the handler")
+			}
+			return err
+		}
 	}
-	if err := next(ctx); err != nil || called.Load() {
-		return err
-	}
-	return errors.New("taskmill: middleware returned nil without running the handler")
+	return next(ctx)
 }
 
 func panicFailure(r any) *failure {

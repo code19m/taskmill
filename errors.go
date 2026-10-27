@@ -63,7 +63,6 @@ type classified struct {
 func classError(msg, class string) error { return &classified{msg: msg, class: class} }
 
 // Error implements the error interface.
-
 func (e *classified) Error() string { return e.msg }
 
 // ErrorType returns the error's class, such as "invalid_argument".

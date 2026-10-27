@@ -136,6 +136,9 @@ func checkScheduledTask(args Args, opts EnqueueOptions) error {
 	if err := t.validate(); err != nil {
 		return err
 	}
+	if _, err := encodeMetadata(opts.Metadata); err != nil {
+		return err
+	}
 	_, err := encodePayload(kind, args)
 	return err
 }
