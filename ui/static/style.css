@@ -278,7 +278,7 @@ code, pre { font-family: var(--font-mono); }
 }
 .topbar h1 { white-space: nowrap; font-size: var(--text-heading); font-weight: 600; letter-spacing: -0.01em; }
 .topbar .meta { white-space: nowrap; font-size: var(--text-label); color: var(--ink-ghost); font-variant-numeric: tabular-nums; }
-.topbar .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.topbar .right { margin-left: auto; min-width: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
 .task-heading { display: flex; align-items: center; gap: 10px; }
 .crumb { color: var(--ink-faint); font-size: var(--text-label); }
 .crumb-sep { color: var(--ink-ghost); opacity: .6; }
@@ -480,6 +480,10 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .callout > div { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 .error-card { gap: 14px; align-items: flex-start; max-width: 560px; padding: 20px; }
+.bulk-card { max-width: 640px; }
+.bulk-card .props { border-bottom: 1px solid var(--line); }
+.bulk-card .card-body { display: grid; gap: 14px; padding: 16px; color: var(--ink-muted); font-size: var(--text-label); }
+.bulk-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .error-card p { color: var(--ink-muted); font-size: var(--text-label); }
 
 /* ---------- tables ---------- */

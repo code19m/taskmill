@@ -2,6 +2,7 @@ package taskmill_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -32,7 +33,7 @@ func FuzzList(f *testing.F) {
 	f.Fuzz(func(t *testing.T, cursor string, limit int, state, queue, kind, group string) {
 		p := &taskmill.ListParams{
 			Cursor: cursor, Limit: limit,
-			States: only(taskmill.State(state)), Queues: only(queue), Kinds: only(kind), GroupKeys: only(group),
+			Filter: taskmill.TaskFilter{States: only(taskmill.State(state)), Queues: only(queue), Kinds: only(kind), GroupKeys: only(group)},
 		}
 		if _, err := e.client.List(t.Context(), p); errors.Is(err, taskmill.ErrInvalidArgument) {
 			return
@@ -127,5 +128,34 @@ func FuzzPayload(f *testing.F) {
 		if (errWant == nil) != (errGot == nil) || !reflect.DeepEqual(want, got) {
 			t.Fatalf("enqueued %q, the handler got %q", body, args.Body)
 		}
+	})
+}
+
+// FuzzBulkCursor checks that a bulk action takes any cursor that it gave, and
+// refuses any other with ErrInvalidArgument, never with another error.
+func FuzzBulkCursor(f *testing.F) {
+	for _, cursor := range []string{"", "MA", "LTE", "%%%", "OTIyMzM3MjAzNjg1NDc3NTgwOA", "MTAw"} {
+		f.Add(cursor)
+	}
+	e := newEnv(f)
+	for i := range 3 {
+		if _, err := e.client.Enqueue(f.Context(), sendEmail{UserID: int64(i)}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
+			f.Fatal(err)
+		}
+	}
+	f.Fuzz(func(t *testing.T, cursor string) {
+		params := &taskmill.BulkParams{Filter: taskmill.TaskFilter{GroupKeys: []string{"g"}}, Cursor: cursor}
+		for _, do := range []func(context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error){
+			e.client.CancelMatching, e.client.RetryMatching,
+		} {
+			res, err := do(t.Context(), params)
+			if err != nil && !errors.Is(err, taskmill.ErrInvalidArgument) {
+				t.Fatalf("cursor %q: %v", cursor, err)
+			}
+			if err == nil && res.Next != "" {
+				t.Fatalf("cursor %q: a finished action gave %q", cursor, res.Next)
+			}
+		}
+		e.checkGroups(t)
 	})
 }

@@ -9,6 +9,18 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Added
 
+- Bulk actions by filter: `Client.RetryMatching`, `CancelMatching`, and
+  `DeleteMatching` act on every task that matches the queues, kinds, states,
+  and FIFO groups of a `TaskFilter`, oldest first, in short batches that skip
+  rows other transactions hold. They take `BulkParams`, a filter and a
+  cursor, and their `BulkResult` says how many tasks they changed and
+  skipped, and, if they stopped early, gives the cursor to go on.
+  `Client.Count` counts the matching tasks per state, and those each bulk
+  action would change. `State.CanRetry`, `CanCancel`, and `CanDelete` say
+  which actions a state allows.
+- The dashboard's task list offers the bulk actions when filters are set.
+  Each leads to a page that shows the filters and the number of tasks it
+  changes, and does it.
 - `ClientConfig.EnqueueMiddleware`, which wraps every enqueue, for tracing
   and metrics: it sees the tasks' queues and kinds, may add to their
   metadata, and sees their results.
@@ -37,6 +49,11 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Changed
 
+- **Breaking:** `ListParams` holds its filters in a `Filter TaskFilter`
+  field, which the bulk actions and `Count` take too, instead of its own
+  `Queues`, `States`, `Kinds`, and `GroupKeys` fields. To migrate, move them
+  into `Filter`: `&taskmill.ListParams{Filter: taskmill.TaskFilter{Queues:
+  q}, Limit: 100}`.
 - Logs follow one level policy: Error when a person must act, Warn when
   taskmill recovers on its own, Info for lifecycle, Debug for routine events
   of single tasks. A dead task now logs at Error, a retry at Debug, and a

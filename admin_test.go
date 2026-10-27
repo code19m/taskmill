@@ -67,9 +67,26 @@ func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
 	ctx := t.Context()
 	for _, s := range []string{"a\x00b", "\xff", strings.Repeat("q", 257)} {
 		for name, call := range map[string]func() error{
-			"List queue":    func() error { _, err := e.client.List(ctx, &taskmill.ListParams{Queues: []string{s}}); return err },
-			"List kind":     func() error { _, err := e.client.List(ctx, &taskmill.ListParams{Kinds: []string{s}}); return err },
-			"List group":    func() error { _, err := e.client.List(ctx, &taskmill.ListParams{GroupKeys: []string{s}}); return err },
+			"List queue": func() error {
+				_, err := e.client.List(ctx, &taskmill.ListParams{Filter: taskmill.TaskFilter{Queues: []string{s}}})
+				return err
+			},
+			"List kind": func() error {
+				_, err := e.client.List(ctx, &taskmill.ListParams{Filter: taskmill.TaskFilter{Kinds: []string{s}}})
+				return err
+			},
+			"List group": func() error {
+				_, err := e.client.List(ctx, &taskmill.ListParams{Filter: taskmill.TaskFilter{GroupKeys: []string{s}}})
+				return err
+			},
+			"Count kind": func() error {
+				_, err := e.client.Count(ctx, &taskmill.TaskFilter{Kinds: []string{s}})
+				return err
+			},
+			"RetryMatching group": func() error {
+				_, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: taskmill.TaskFilter{GroupKeys: []string{s}}})
+				return err
+			},
 			"Groups queue":  func() error { _, err := e.client.Groups(ctx, &taskmill.GroupParams{Queues: []string{s}}); return err },
 			"Groups search": func() error { _, err := e.client.Groups(ctx, &taskmill.GroupParams{Search: s}); return err },
 			"Activity queue": func() error {
@@ -252,16 +269,16 @@ func TestListPagesNewestFirst(t *testing.T) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
 
-	completed, err := e.client.List(t.Context(), &taskmill.ListParams{States: []taskmill.State{taskmill.StateCompleted}})
+	completed, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(completed.Tasks) != 1 || completed.Tasks[0].ID != ids[5] || completed.Tasks[0].State != taskmill.StateCompleted {
 		t.Fatalf("completed tasks: %+v", completed.Tasks)
 	}
-	available, err := e.client.List(t.Context(), &taskmill.ListParams{
+	available, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{
 		Queues: []string{taskmill.DefaultQueue}, States: []taskmill.State{taskmill.StateAvailable}, Kinds: []string{"email.send"},
-	})
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +288,7 @@ func TestListPagesNewestFirst(t *testing.T) {
 	if _, err := e.client.List(t.Context(), &taskmill.ListParams{Cursor: "%%%"}); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("bad cursor: got %v", err)
 	}
-	unknown := &taskmill.ListParams{States: []taskmill.State{"bogus"}}
+	unknown := &taskmill.ListParams{Filter: taskmill.TaskFilter{States: []taskmill.State{"bogus"}}}
 	if _, err := e.client.List(t.Context(), unknown); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("unknown state: got %v", err)
 	}
@@ -287,7 +304,7 @@ func TestListSomeQueues(t *testing.T) {
 		queues []string
 		want   int
 	}{{nil, 3}, {[]string{"a", "b"}, 2}, {[]string{"c"}, 1}, {[]string{"none"}, 0}} {
-		res, err := e.client.List(t.Context(), &taskmill.ListParams{Queues: c.queues})
+		res, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{Queues: c.queues}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -295,7 +312,7 @@ func TestListSomeQueues(t *testing.T) {
 			t.Fatalf("queues %v: got %d tasks, want %d", c.queues, len(res.Tasks), c.want)
 		}
 	}
-	if _, err := e.client.List(t.Context(), &taskmill.ListParams{Queues: []string{""}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+	if _, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{Queues: []string{""}}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("empty queue name: got %v", err)
 	}
 }
@@ -307,7 +324,7 @@ func TestListSomeGroups(t *testing.T) {
 	b := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"})
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "c"})
 	a2 := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
-	page, err := e.client.List(t.Context(), &taskmill.ListParams{GroupKeys: []string{"a", "b"}})
+	page, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{GroupKeys: []string{"a", "b"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

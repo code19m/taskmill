@@ -129,6 +129,9 @@ Notes on specific transitions:
 - **16.** Only `dead` and `canceled` tasks can be retried. To run completed
   work again, enqueue a new task, so that re-running work is always an
   explicit choice.
+- **14, 16, and 18.** Bulk actions apply these transitions to every task
+  that matches a filter, with the same rules, in batches that each commit
+  whole.
 
 ## Invariants
 

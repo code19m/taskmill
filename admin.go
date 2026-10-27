@@ -90,20 +90,8 @@ type WorkerInfo struct {
 
 // ListParams filters and pages [Client.List].
 type ListParams struct {
-	// Queues limits the result to tasks of these queues. Empty means all
-	// queues.
-	Queues []string
-
-	// States limits the result to tasks in these states. Empty means all.
-	States []State
-
-	// Kinds limits the result to tasks of these kinds. Empty means all
-	// kinds.
-	Kinds []string
-
-	// GroupKeys limits the result to the tasks of these FIFO groups. Empty
-	// means all tasks.
-	GroupKeys []string
+	// Filter selects the tasks. Its zero value selects every task.
+	Filter TaskFilter
 
 	// Limit is the page size. Default: 100. Maximum: 1,000.
 	Limit int
@@ -283,19 +271,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	if err != nil {
 		return nil, err
 	}
-	states, live, history, err := listStates(params.States)
-	if err != nil {
-		return nil, err
-	}
-	queues, err := checkFilter("queue name", params.Queues, maxNameLength)
-	if err != nil {
-		return nil, err
-	}
-	kinds, err := checkFilter("kind", params.Kinds, maxNameLength)
-	if err != nil {
-		return nil, err
-	}
-	groups, err := checkFilter("group key", params.GroupKeys, maxGroupKeyLength)
+	m, err := match(&params.Filter, allStates)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +287,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 			return err
 		}
 		r, err := tx.Query(ctx, c.sql.listTasks,
-			queues, states, kinds, before, limit+1, live, history, groups)
+			m.queues, m.states, m.kinds, before, limit+1, len(m.states) > 0, m.history, m.groups)
 		if err != nil {
 			return err
 		}
@@ -330,8 +306,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	}
 	if len(out.Tasks) > limit {
 		out.Tasks = out.Tasks[:limit]
-		last := out.Tasks[limit-1].ID
-		out.Next = base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(last, 10)))
+		out.Next = encodeCursor(out.Tasks[limit-1].ID)
 	}
 	return &out, nil
 }
@@ -417,26 +392,6 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) ([]GroupInfo, 
 	return out, nil
 }
 
-// listStates splits a state filter into the states of unfinished tasks, and
-// reports whether the list reads the tasks table and the history.
-func listStates(filter []State) (states []string, live, history bool, err error) {
-	states = make([]string, 0, len(filter))
-	for _, s := range filter {
-		if !s.valid() {
-			return nil, false, false, invalidArgument("unknown state %q", s)
-		}
-		if s == StateCompleted {
-			history = true
-			continue
-		}
-		states = append(states, string(s))
-	}
-	if len(filter) == 0 {
-		return states, true, true, nil
-	}
-	return states, len(states) > 0, history, nil
-}
-
 // listBounds validates a page size and decodes a cursor into the ID that
 // the page starts below.
 func listBounds(p *ListParams) (limit int, before int64, err error) {
@@ -450,12 +405,22 @@ func listBounds(p *ListParams) (limit int, before int64, err error) {
 	if p.Cursor == "" {
 		return limit, math.MaxInt64, nil
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(p.Cursor)
-	if err != nil {
-		return 0, 0, invalidArgument("invalid cursor")
-	}
-	if before, err = strconv.ParseInt(string(raw), 10, 64); err != nil {
+	if before, err = decodeCursor(p.Cursor); err != nil {
 		return 0, 0, invalidArgument("invalid cursor")
 	}
 	return limit, before, nil
+}
+
+// encodeCursor and decodeCursor turn a task ID into the opaque cursor of a
+// list or a bulk action, and back.
+func encodeCursor(id int64) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.FormatInt(id, 10)))
+}
+
+func decodeCursor(cursor string) (int64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(string(raw), 10, 64)
 }

@@ -6,13 +6,13 @@
   <h1 class="task-heading"><span class="mono">#{{$t.ID}}</span>{{template "state" $t.State}}</h1>
   {{if not .ReadOnly}}
   <div class="right">
-    {{if or (eq (print $t.State) "dead") (eq (print $t.State) "canceled")}}
+    {{if $t.State.CanRetry}}
     <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/retry" data-confirm="It runs again with a fresh set of attempts." data-confirm-title="Retry task #{{$t.ID}}?" data-confirm-label="Retry"><button class="btn primary">{{template "icon" "retry"}}Retry</button></form>
     {{end}}
-    {{if not $t.State.Finished}}
+    {{if $t.State.CanCancel}}
     <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/cancel" data-confirm="{{if eq (print $t.State) "running"}}Its handler's context is canceled, and the task becomes canceled when the handler returns.{{else}}It will not run.{{end}}" data-confirm-title="Cancel task #{{$t.ID}}?" data-confirm-label="Cancel task"><button class="btn">{{template "icon" "cancel"}}Cancel</button></form>
     {{end}}
-    {{if ne (print $t.State) "running"}}
+    {{if $t.State.CanDelete}}
     <form method="post" action="{{path "/tasks/"}}{{$t.ID}}/delete" data-confirm="This cannot be undone." data-confirm-title="Delete task #{{$t.ID}}?" data-confirm-label="Delete" data-confirm-danger><button class="btn danger">{{template "icon" "trash"}}Delete</button></form>
     {{end}}
   </div>

@@ -3,6 +3,13 @@
 <header class="topbar">
   <h1>{{.Title}}</h1>
   {{if $d.Paged}}<span class="meta">older</span>{{end}}
+  {{with $d.Bulk}}
+  <div class="right">
+    {{with .Retry}}<a class="btn primary" href="{{.}}">{{template "icon" "retry"}}Retry all</a>{{end}}
+    {{with .Cancel}}<a class="btn" href="{{.}}">{{template "icon" "cancel"}}Cancel all</a>{{end}}
+    {{with .Delete}}<a class="btn danger" href="{{.}}">{{template "icon" "trash"}}Delete all</a>{{end}}
+  </div>
+  {{end}}
 </header>
 <div class="page">
 <form class="filters" method="get" action="{{path "/tasks"}}" data-filters>

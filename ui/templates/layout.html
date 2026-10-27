@@ -39,7 +39,7 @@
 </header>
 {{with .Notice}}<div class="toast" role="status" data-toast>{{template "icon-check"}}<span class="toast-message">{{.}}</span></div>{{end}}
 <div class="main">
-<main id="main" class="content" tabindex="-1"{{if .Nav}} data-live{{end}}>
+<main id="main" class="content" tabindex="-1"{{if and .Nav (not .Static)}} data-live{{end}}>
 {{end}}
 
 {{define "foot"}}

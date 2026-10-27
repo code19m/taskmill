@@ -79,7 +79,7 @@ func Enqueued[A taskmill.Args](tb testing.TB, client *taskmill.Client) []*taskmi
 		tb.Fatalf("taskmilltest: %v", err)
 	}
 	var out []*taskmill.Task[A]
-	params := &taskmill.ListParams{Kinds: []string{kind}, Limit: 1000}
+	params := &taskmill.ListParams{Filter: taskmill.TaskFilter{Kinds: []string{kind}}, Limit: 1000}
 	for {
 		page, err := client.List(tb.Context(), params)
 		if err != nil {
@@ -194,7 +194,7 @@ func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig) {
 // falls between a task's end and its successor's start.
 func busyQueue(ctx context.Context, client *taskmill.Client) (string, error) {
 	page, err := client.List(ctx, &taskmill.ListParams{
-		States: []taskmill.State{taskmill.StateAvailable, taskmill.StateRunning},
+		Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateAvailable, taskmill.StateRunning}},
 		Limit:  1,
 	})
 	if err != nil || len(page.Tasks) == 0 {

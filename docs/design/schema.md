@@ -328,6 +328,53 @@ statement timeout.
   other unfinished tasks.
 - **Cancel and Delete** release the task's dedupe key in the same
   transaction.
+- **Bulk actions** (`RetryMatching`, `CancelMatching`, `DeleteMatching`) do
+  the same to every task that matches a filter, in batches of 1,000, each in
+  a transaction of its own.
+  - **Keyset by ID.** A batch takes the next 1,000 matching tasks in ID
+    order after the last one of the previous batch, up to the newest task
+    when the action started. So each batch starts where the last one ended,
+    through the primary key or a state's partial index, and the work grows
+    with the tasks the action reads, not with their square: on 2 million
+    tasks, canceling 500,000 of one queue kept a steady pace of about 40,000 per second.
+    It also reads each task once, so a retry never retries a task twice, and
+    it ends however fast tasks arrive. And a retry larger than a batch keeps
+    a group in order: the group's oldest task becomes its head.
+  - **No waiting while holding rows.** The batch's one statement that picks
+    tasks reads the next 1,000 without locks, then locks those it can, the
+    rows of their groups, and the rows of their dedupe keys, all with
+    `SKIP LOCKED`, as rescue does, and checks again that they match. It
+    returns all 1,000, so that the batch knows which ones it skipped. Then
+    the batch changes only rows it holds: the tasks, their groups in a few
+    statements for all of them, and the next task of each group whose head
+    left, promoted in a statement of its own, as completions do.
+  - **Groups stay in order.** Once a retry skips a task of a group, it skips
+    the group's later tasks too, until it ends, and counts them as skipped.
+    A later run then retries the group's tasks oldest first.
+  - **One bounded wait.** A retry into a group that has no row creates the
+    row. A concurrent enqueue may be creating the same row, uncommitted, and
+    an insert must wait for it to decide. The batch inserts under a
+    savepoint with a lock timeout of 100 ms, far below the deadlock timeout
+    of 1 s, and on timeout leaves those groups' tasks for a later run. So it
+    never stalls an application transaction for long, and never makes one
+    fail with a deadlock. A transaction per new group would avoid the wait
+    too, but cost a transaction per group when every group is new, as after
+    canceling a whole queue.
+  - **Exact counts, and going on.** A batch whose statements ran commits
+    even if the caller's context ends meanwhile, so the number of changed
+    tasks is exact. An action that stops early returns a cursor to go on: at
+    the first task it skipped, if any, or else after the last task it went
+    through. Going on at the first skipped task keeps no state between
+    calls, and still brings a group that the action left back in order: the
+    tasks that the action changed since no longer match, so reading past
+    them again is cheap.
+  - **Delete goes through two tables.** It reads the next batch of both
+    tasks and history, and goes up to the end of the shorter one, so that
+    one position covers both.
+  - **The remaining limit.** A filter by kind or FIFO group alone has no
+    index. A retry with one reads the dead and canceled entries of
+    `tasks_finished_idx` after its position in each batch: with 20,000 of
+    1 million dead tasks matching, about 135 ms a batch.
 
 ## FIFO groups
 

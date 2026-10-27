@@ -103,7 +103,9 @@ func TestShopRestarts(t *testing.T) {
 // waitCompleted waits up to 30 seconds for a task of kind to complete.
 func waitCompleted(t *testing.T, client *taskmill.Client, kind string) {
 	t.Helper()
-	params := &taskmill.ListParams{Kinds: []string{kind}, States: []taskmill.State{taskmill.StateCompleted}, Limit: 1}
+	params := &taskmill.ListParams{
+		Filter: taskmill.TaskFilter{Kinds: []string{kind}, States: []taskmill.State{taskmill.StateCompleted}}, Limit: 1,
+	}
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
 		page, err := client.List(t.Context(), params)
 		if err != nil {

@@ -24,9 +24,9 @@ together with your data.
 - **An outbox, too.** Publish to Kafka, NATS, or RabbitMQ with the same
   transactional guarantee, in order per key.
 - **Operable.** A live web dashboard that you mount in your application,
-  embed in your admin panel, or run on its own; an operations API;
-  structured logs through `log/slog`; and OpenTelemetry traces and metrics
-  from an optional module.
+  embed in your admin panel, or run on its own; an operations API, with bulk
+  actions on every task that matches a filter; structured logs through
+  `log/slog`; and OpenTelemetry traces and metrics from an optional module.
 - **Small and fast.** One direct dependency, pgx. One worker drained a backlog
   at over 35,000 tasks per second, and one relay published over 35,000 outbox
   messages per second. This was on an Apple M5 laptop with PostgreSQL 18 in

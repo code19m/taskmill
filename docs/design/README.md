@@ -26,7 +26,7 @@ works without it, and nothing needs a JavaScript build step or third-party
 code. Applications mount it on their own router behind their own
 authentication, or run it on its own with basic authentication through the
 `taskmill-ui` command. It reads only through the operations API and the
-statistics the maintainer keeps. The task list's query stops after 5
+statistics the maintainer keeps. The task list's queries stop after 5
 seconds, and the other pages read small tables or single rows, so it is safe
 to point at a busy database, even with pages refreshing every 5 seconds.
 
@@ -53,6 +53,3 @@ to point at a busy database, even with pages refreshing every 5 seconds.
 - **A public SQL interface.** The tables are internal, so that they can
   change. A stable SQL function to enqueue from other languages or from
   triggers can be added once users need it.
-- **Bulk actions, for now.** Retrying, canceling, or deleting many tasks at
-  once waits for a later release. Until then, page with `List` and act on
-  each task; the [guide](../guide.md#running-in-production) shows how.
