@@ -1459,7 +1459,8 @@ this is its compatibility promise:
   - the `ErrorCode` values in a task's error history, such as `timeout`;
   - the error classes that `ErrorType()` reports for OpenTelemetry's
     `error.type`: `not_found`, `lease_lost`, `invalid_state`,
-    `invalid_argument`, `schema_outdated`, and the error codes;
+    `invalid_argument`, `schema_outdated`, the causes `canceled`, `timeout`,
+    and `shutdown`, and the error codes;
   - the outbox's queue, `outbox.Queue` (`outbox`), and its task kind,
     `taskmill.outbox.message`.
 
