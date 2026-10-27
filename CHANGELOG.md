@@ -33,6 +33,11 @@ All notable changes to taskmill are recorded here. The format follows
   before its transaction committed, or never came, waits two seconds at
   most. A worker logs when notifications start or stop arriving.
 
+### Fixed
+
+- The module no longer includes a 20 MB binary of the example shop, which
+  v0.2.0 shipped by mistake and every download of it carried.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added
