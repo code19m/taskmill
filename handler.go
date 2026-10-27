@@ -19,9 +19,9 @@ import (
 // with [Permanent] to make the task dead at once, or return [Snooze] to run it
 // again later without using an attempt.
 //
-// Handle must return promptly once ctx is canceled: that means the task was
-// canceled, its lease was lost, its attempt timed out, or the worker is
-// shutting down.
+// Handle must return promptly once ctx is canceled. [context.Cause] says
+// why: [ErrTaskCanceled], [ErrLeaseLost], [ErrAttemptTimeout], or
+// [ErrShutdown].
 type Handler[A Args] interface {
 	Handle(ctx context.Context, task *Task[A]) error
 }
@@ -44,9 +44,10 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 // task of a batch kind, it fills that task's batch with more available tasks
 // of the kind, so a batch kind can share a queue with other kinds.
 //
-// ctx is canceled when the batch times out or the worker shuts down, but not
-// when one of its tasks is canceled or loses its lease: the batch runs to the
-// end, and then that task becomes canceled, or its result is discarded.
+// ctx is canceled when the batch times out or the worker shuts down, with
+// the cause [ErrAttemptTimeout] or [ErrShutdown], but not when one of its
+// tasks is canceled or loses its lease: the batch runs to the end, and then
+// that task becomes canceled, or its result is discarded.
 type BatchHandler[A Args] interface {
 	HandleBatch(ctx context.Context, tasks []*Task[A]) []error
 }

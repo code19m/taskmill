@@ -31,11 +31,16 @@ const (
 	maxGroupKeyLength   = 256
 	maxAttemptsLimit    = 10_000
 	maxPayloadBytes     = 1 << 20 // protects the database from oversized rows
+	maxMetadataBytes    = 64 << 10
+	maxEnqueueTasks     = 10_000   // most tasks of one enqueue call
+	maxEnqueueBytes     = 64 << 20 // most payload and metadata of one enqueue call
 )
 
 // EnqueueOptions control how a task is enqueued. Zero values mean "not set":
 // a field set in the call wins over the kind's defaults (see
-// [ArgsWithDefaults]), which win over taskmill's defaults.
+// [ArgsWithDefaults]), which win over taskmill's defaults. Metadata merges
+// key by key instead: the call's keys win over the same keys of the
+// defaults, and the other keys of both are kept.
 type EnqueueOptions struct {
 	// Queue is the queue to enqueue into, at most 128 characters.
 	// Default: [DefaultQueue].
@@ -67,7 +72,8 @@ type EnqueueOptions struct {
 	DedupeWindow time.Duration
 
 	// Metadata is stored with the task and passed to its handler, for
-	// example for tracing. Default: none.
+	// example for tracing. Encoded as JSON, it may take at most 64 KiB,
+	// including what [EnqueueMiddleware] adds. Default: none.
 	Metadata map[string]string
 }
 
@@ -103,22 +109,6 @@ type EnqueueResult struct {
 // returns the results and logs the error, and a retry does not duplicate the
 // tasks.
 type EnqueueMiddleware func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error
-
-// contextMetadata is the enqueue middleware of the deprecated
-// [ClientConfig.ContextMetadata]: it adds the metadata that fromCtx returns
-// to the tasks, unless the enqueue set the same key.
-func contextMetadata(fromCtx func(context.Context) map[string]string) EnqueueMiddleware {
-	return func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error {
-		for k, v := range fromCtx(ctx) {
-			for _, task := range tasks {
-				if _, set := task.Metadata[k]; !set {
-					task.Metadata[k] = v
-				}
-			}
-		}
-		return next(ctx)
-	}
-}
 
 // EnqueueTask is a task being enqueued, as [EnqueueMiddleware] sees it.
 // Changes to fields other than Metadata are ignored.
@@ -158,7 +148,8 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 }
 
 // EnqueueMany enqueues several tasks in one round trip and one transaction.
-// Results are in the same order as params.
+// Results are in the same order as params. One call takes at most 10,000
+// tasks, with at most 64 MiB of payload and metadata in all.
 func (c *Client) EnqueueMany(ctx context.Context, params []EnqueueParams) ([]EnqueueResult, error) {
 	return c.enqueue(ctx, pgxQuerier{q: c.pool}, params)
 }
@@ -202,6 +193,9 @@ type enqueueBatch struct {
 func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams) ([]EnqueueResult, error) {
 	if len(params) == 0 {
 		return nil, nil
+	}
+	if len(params) > maxEnqueueTasks {
+		return nil, invalidArgument("%d tasks in one call, more than the limit of %d", len(params), maxEnqueueTasks)
 	}
 	tasks := make([]*resolvedTask, len(params))
 	for i, p := range params {
@@ -269,11 +263,16 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 	repeat := make([]bool, len(tasks)) // tasks[i] repeats an earlier dedupe key of the batch
 	rowOf := make(map[string]int)      // the batch row of each dedupe key
 	now := time.Now()
+	size := 0 // the payload and metadata of the call
 
 	for i, t := range tasks {
 		meta, err := encodeMetadata(t.meta)
 		if err != nil {
 			return nil, inBatch(err, i, len(tasks))
+		}
+		if size += len(t.payload) + len(meta); size > maxEnqueueBytes {
+			return nil, invalidArgument("%d tasks hold more than the limit of %d bytes of payload and metadata in one call",
+				len(tasks), maxEnqueueBytes)
 		}
 		if t.dedupeKey != nil {
 			if row, ok := rowOf[string(t.dedupeKey)]; ok {
@@ -472,6 +471,9 @@ func encodeMetadata(meta map[string]string) ([]byte, error) {
 	text, err := json.Marshal(meta)
 	if err != nil {
 		return nil, invalidArgument("encode metadata: %v", err)
+	}
+	if len(text) > maxMetadataBytes {
+		return nil, invalidArgument("metadata is %d bytes, more than the limit of %d", len(text), maxMetadataBytes)
 	}
 	if hasNUL(text) {
 		return nil, invalidArgument("metadata contains a NUL character")

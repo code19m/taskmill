@@ -23,7 +23,7 @@ func (w *Worker) runOne(parent context.Context, t *tracked) {
 	t.cancel = cancel
 	t.mu.Unlock()
 	if t.cancelRequested.Load() {
-		cancel(errCancelRequested)
+		cancel(ErrTaskCanceled)
 	}
 	if t.lost.Load() {
 		cancel(ErrLeaseLost)
@@ -33,7 +33,7 @@ func (w *Worker) runOne(parent context.Context, t *tracked) {
 		return
 	}
 
-	ctx, cancelTimeout := context.WithTimeoutCause(ctx, t.reg.opts.Timeout, errAttemptTimeout)
+	ctx, cancelTimeout := context.WithTimeoutCause(ctx, t.reg.opts.Timeout, ErrAttemptTimeout)
 	start := time.Now()
 	err := w.invoke(ctx, t, func(ctx context.Context) error { return t.reg.run(ctx, t.info, t.att) })
 	cause := context.Cause(ctx)
@@ -48,7 +48,7 @@ func (w *Worker) runBatch(parent context.Context, tasks []*tracked) {
 	reg := tasks[0].reg
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
-	ctx, cancelTimeout := context.WithTimeoutCause(ctx, reg.opts.Timeout, errAttemptTimeout)
+	ctx, cancelTimeout := context.WithTimeoutCause(ctx, reg.opts.Timeout, ErrAttemptTimeout)
 	defer cancelTimeout()
 
 	type arrival struct {
@@ -119,7 +119,8 @@ func safeBatch(ctx context.Context, reg *registration, infos []*TaskInfo, atts [
 }
 
 // invoke runs call through the middleware chain, turning panics into errors.
-// It runs call at most once, whatever the middleware does.
+// It runs call at most once, whatever the middleware does, and fails the
+// attempt if the middleware returned nil without calling it.
 func (w *Worker) invoke(ctx context.Context, t *tracked, call func(context.Context) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -142,7 +143,10 @@ func (w *Worker) invoke(ctx context.Context, t *tracked, call func(context.Conte
 		inner := next
 		next = func(ctx context.Context) error { return m(ctx, t.info, inner) }
 	}
-	return next(ctx)
+	if err := next(ctx); err != nil || called.Load() {
+		return err
+	}
+	return errors.New("taskmill: middleware returned nil without running the handler")
 }
 
 func panicFailure(r any) *failure {
@@ -181,7 +185,7 @@ func classify(t *tracked, err, cause error) outcome {
 		return outcome{kind: outcomeComplete}
 	case t.cancelRequested.Load():
 		return outcome{kind: outcomeCancel}
-	case errors.Is(cause, errShutdown):
+	case errors.Is(cause, ErrShutdown):
 		return outcome{kind: outcomeRelease}
 	}
 
@@ -199,7 +203,7 @@ func classify(t *tracked, err, cause error) outcome {
 	if _, ok := errors.AsType[*PermanentError](err); ok {
 		o.kind = outcomeDead
 	}
-	if errors.Is(cause, errAttemptTimeout) && o.code == "" {
+	if errors.Is(cause, ErrAttemptTimeout) && o.code == "" {
 		o.code = CodeTimeout
 	}
 	if o.kind == outcomeRetry {

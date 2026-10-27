@@ -86,8 +86,8 @@ func benchTiming(ctx context.Context, pool *pgxpool.Pool, wantSkew time.Duration
 	unfinished := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks") - waiting
 	completed := scalar(ctx, pool, "SELECT count(*) FROM {s}.task_history WHERE (payload->>'n')::int >= 0")
 	lost := scalar(ctx, pool, `
-SELECT (SELECT count(*) FROM {s}.task_history WHERE errors @> '[{"code": "lease_expired"}]')
-     + (SELECT count(*) FROM {s}.tasks WHERE errors @> '[{"code": "lease_expired"}]')`)
+SELECT (SELECT count(*) FROM {s}.task_history WHERE errors @> '[{"code": "lease_lost"}]')
+     + (SELECT count(*) FROM {s}.tasks WHERE errors @> '[{"code": "lease_lost"}]')`)
 	late := percentiles(lates)
 	clock := skew.String() + " ahead of"
 	if skew < 0 {

@@ -7,6 +7,41 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ErrTaskCanceled`, `ErrAttemptTimeout`, and `ErrShutdown`: with
+  `ErrLeaseLost`, the causes that `context.Cause` gives for a handler's
+  context that ended. The error classes that `ErrorType()` returns, such as
+  `invalid_argument`, are now part of the API.
+- Limits on one enqueue call, checked before any statement, so that the
+  caller's transaction stays usable: 64 KiB of encoded metadata per task,
+  after enqueue middleware, and 10,000 tasks and 64 MiB of payload and
+  metadata per call, which `outbox.Store` follows too. Calls beyond them fail
+  with `ErrInvalidArgument`.
+
+### Changed
+
+- **Breaking:** attempt middleware that returns nil without calling `next`
+  fails the attempt, which is retried with backoff, as enqueue middleware
+  already does. Before, the task was completed although its handler never
+  ran. Middleware that skips a task on purpose returns an error, such as
+  `taskmill.Snooze(d)` or `taskmill.Permanent(err)`.
+- **Breaking:** `CodeLeaseExpired` is now `CodeLeaseLost`, with the value
+  `lease_lost`, like `ErrLeaseLost`. Error history entries recorded before
+  keep `lease_expired`: code that reads them checks for both.
+- **Breaking:** `NewWorker` rejects a `Schedule` whose `Options` set `RunAt`,
+  `DedupeKey`, or `DedupeWindow`, with `ErrInvalidArgument`, instead of
+  silently replacing them: the schedule sets them itself. Remove them from the
+  options.
+- `Worker.Run` on a running worker fails with `ErrInvalidState`, and
+  `NewClient` with a pool that does not use READ COMMITTED with
+  `ErrInvalidArgument`. Code that matched their messages can use `errors.Is`.
+
+### Removed
+
+- **Breaking:** `ClientConfig.ContextMetadata`, deprecated in v0.2.0. Use
+  enqueue middleware, as the v0.2.0 entry below shows.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added

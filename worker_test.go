@@ -314,10 +314,12 @@ func TestWorkerCancelsRunningTask(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	started := make(chan struct{})
+	cause := make(chan error, 1)
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
 			close(started)
 			<-ctx.Done()
+			cause <- context.Cause(ctx)
 			return context.Cause(ctx)
 		}, &taskmill.HandlerOptions{Timeout: time.Minute}),
 		Queues: defaultQueue(1),
@@ -329,7 +331,42 @@ func TestWorkerCancelsRunningTask(t *testing.T) {
 	if err := e.client.Cancel(t.Context(), id); err != nil {
 		t.Fatal(err)
 	}
+	if err := recv(t, cause, "the handler's context to end"); !errors.Is(err, taskmill.ErrTaskCanceled) {
+		t.Fatalf("got cause %v, want ErrTaskCanceled", err)
+	}
 	e.waitState(t, id, taskmill.StateCanceled)
+}
+
+func TestHandlerContextSaysWhyItEnded(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	cause := make(chan error, 1)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			<-ctx.Done()
+			cause <- context.Cause(ctx)
+			return ctx.Err()
+		}, &taskmill.HandlerOptions{Timeout: 200 * time.Millisecond}),
+		NoMaintainer: true,
+	})
+
+	// The attempt runs out of time.
+	if _, err := w.RunTask(t.Context(), e.enqueue(t, sendEmail{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, cause, "the timeout"); !errors.Is(err, taskmill.ErrAttemptTimeout) {
+		t.Fatalf("got cause %v, want ErrAttemptTimeout", err)
+	}
+
+	// RunTask's context ends, as a worker's does when it shuts down.
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := w.RunTask(ctx, e.enqueue(t, sendEmail{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, cause, "the shutdown"); !errors.Is(err, taskmill.ErrShutdown) {
+		t.Fatalf("got cause %v, want ErrShutdown", err)
+	}
 }
 
 func TestWorkerDrainsRunningTasksOnShutdown(t *testing.T) {
@@ -724,6 +761,15 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 		{"schedule with a bad queue", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 			{Name: "x", Cron: "@daily", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{Queue: "a\x00b"}},
 		}}},
+		{"schedule with a run time", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+			{Name: "x", Cron: "@daily", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{RunAt: time.Now()}},
+		}}},
+		{"schedule with a dedupe key", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+			{Name: "x", Cron: "@daily", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{DedupeKey: "k"}},
+		}}},
+		{"schedule with a dedupe window", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+			{Name: "x", Cron: "@daily", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{DedupeWindow: time.Hour}},
+		}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -755,8 +801,8 @@ func TestRunTwiceFails(t *testing.T) {
 
 	second, cancelSecond := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancelSecond()
-	if err := w.Run(second); err == nil || second.Err() != nil {
-		t.Fatalf("second Run: got %v, want an immediate error", err)
+	if err := w.Run(second); !errors.Is(err, taskmill.ErrInvalidState) || second.Err() != nil {
+		t.Fatalf("second Run: got %v, want an immediate ErrInvalidState", err)
 	}
 	cancel()
 	if err := <-done; err != nil {
@@ -1074,7 +1120,7 @@ func testLostLease(t *testing.T, lose func(e *env, id int64) (release func())) {
 	// The first attempt's success was discarded: the task is rescued once its
 	// lease expires, and completes on its second attempt.
 	info := e.waitState(t, id, taskmill.StateCompleted)
-	if info.Attempt != 2 || len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseExpired {
+	if info.Attempt != 2 || len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseLost {
 		t.Fatalf("got attempt %d with errors %+v, want attempt 2 after a lost lease", info.Attempt, info.Errors)
 	}
 }
@@ -1664,6 +1710,34 @@ func TestMiddlewareCannotRunAHandlerTwice(t *testing.T) {
 	if runs.Load() != 1 || info.State != taskmill.StateRetryable ||
 		!strings.Contains(info.Errors[0].Message, "next twice") {
 		t.Fatalf("the handler ran %d times; task %s with errors %+v", runs.Load(), info.State, info.Errors)
+	}
+}
+
+func TestMiddlewareThatSkipsTheHandlerFailsTheAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var runs atomic.Int32
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error {
+		runs.Add(1)
+		return nil
+	}), nil)
+	taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { runs.Add(1) }), nil)
+	skip := taskmill.Middleware(func(context.Context, *taskmill.TaskInfo, func(context.Context) error) error { return nil })
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Middleware: []taskmill.Middleware{skip}})
+
+	for _, args := range []taskmill.Args{sendEmail{}, report{}} { // a single task, and a batch
+		info, err := w.RunTask(t.Context(), e.enqueue(t, args, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.State != taskmill.StateRetryable || len(info.Errors) != 1 ||
+			!strings.Contains(info.Errors[0].Message, "without running the handler") {
+			t.Fatalf("%s: got task %s with errors %+v, want a retry", args.Kind(), info.State, info.Errors)
+		}
+	}
+	if runs.Load() != 0 {
+		t.Fatalf("the handlers ran %d times", runs.Load())
 	}
 }
 

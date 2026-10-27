@@ -248,7 +248,7 @@ type stepTime struct {
 // stepTexts name the steps by a part of their statements' text.
 var stepTexts = []struct{ step, text string }{
 	{"election", q("INSERT INTO {s}.leader")},
-	{"rescue", "'lease_expired'"},
+	{"rescue", "'lease_lost'"},
 	{"promotion", "WITH due AS"},
 	{"next due", "min(run_at) - now()"},
 	{"statistics", "WITH RECURSIVE available"},

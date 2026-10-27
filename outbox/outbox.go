@@ -108,8 +108,10 @@ func New(client *taskmill.Client) *Outbox {
 }
 
 // Store saves msgs in the outbox inside the caller's transaction, so they are
-// published only if the transaction commits. A message without a topic fails
-// with an error that wraps [taskmill.ErrInvalidArgument].
+// published only if the transaction commits. A message without a topic, or a
+// call over the limits of [taskmill.Client.EnqueueMany], 10,000 messages and
+// 64 MiB, fails with an error that wraps [taskmill.ErrInvalidArgument], and
+// leaves the transaction usable.
 func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Message) error {
 	if o.client == nil {
 		return fmt.Errorf("%w: outbox client is nil", taskmill.ErrInvalidArgument)

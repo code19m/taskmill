@@ -348,33 +348,41 @@ func TestEnqueueFIFOGroupHasOneHead(t *testing.T) {
 	}
 }
 
-func TestEnqueueAddsContextMetadata(t *testing.T) {
+func TestEnqueueLimitsLeaveTheTransactionUsable(t *testing.T) {
 	t.Parallel()
-	type traceKey struct{}
-	var seen string // what the enqueue middleware saw: ContextMetadata runs outside it
-	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
-		ContextMetadata: func(ctx context.Context) map[string]string {
-			if v, ok := ctx.Value(traceKey{}).(string); ok {
-				return map[string]string{"traceparent": v, "source": "context"}
-			}
-			return nil
-		},
-		EnqueueMiddleware: []taskmill.EnqueueMiddleware{
-			func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
-				seen = tasks[0].Metadata["traceparent"]
-				return next(ctx)
-			},
-		},
-	})
-
-	ctx := context.WithValue(t.Context(), traceKey{}, "00-abc-01")
-	res, err := e.client.Enqueue(ctx, sendEmail{}, &taskmill.EnqueueOptions{Metadata: map[string]string{"source": "options"}})
-	if err != nil {
-		t.Fatal(err)
+	e := newEnv(t)
+	many := make([]taskmill.EnqueueParams, 10_001)
+	for i := range many {
+		many[i] = taskmill.EnqueueParams{Args: sendEmail{}}
 	}
-	meta := e.get(t, res.ID).Metadata
-	if meta["traceparent"] != "00-abc-01" || meta["source"] != "options" || seen != "00-abc-01" {
-		t.Fatalf("got metadata %v; the middleware saw %q", meta, seen)
+	heavy := make([]taskmill.EnqueueParams, 65) // each payload just under its own limit of 1 MiB
+	for i := range heavy {
+		heavy[i] = taskmill.EnqueueParams{Args: sendEmail{To: strings.Repeat("x", 1<<20-64)}}
+	}
+	bigMetadata := &taskmill.EnqueueOptions{Metadata: map[string]string{"k": strings.Repeat("x", 64<<10)}}
+
+	for _, c := range []struct {
+		name   string
+		params []taskmill.EnqueueParams
+	}{
+		{"metadata over 64 KiB", []taskmill.EnqueueParams{{Args: sendEmail{}, Options: bigMetadata}}},
+		{"more than 10,000 tasks", many},
+		{"more than 64 MiB in one call", heavy},
+	} {
+		tx := e.begin(t)
+		if _, err := e.client.EnqueueManyTx(t.Context(), taskmill.Pgx(tx), c.params); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Fatalf("%s: got %v, want ErrInvalidArgument", c.name, err)
+		}
+		// No statement ran, so the caller's transaction goes on.
+		if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err != nil {
+			t.Fatalf("%s: the transaction is no longer usable: %v", c.name, err)
+		}
+		if err := tx.Commit(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 3 {
+		t.Fatalf("got %d tasks, want the 3 enqueued after the failures", n)
 	}
 }
 
