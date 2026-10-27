@@ -132,13 +132,12 @@ func TestSettings(t *testing.T) {
 	}
 	want(48*time.Hour, 30*24*time.Hour)
 
-	// Concurrent updates apply one after the other: neither loses the
-	// other's change.
-	inOrder(t, e, "FROM {s}.settings FOR UPDATE",
-		func(held func()) error {
-			return e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { held(); s.DeadRetention = 10 * 24 * time.Hour })
+	// Concurrent updates of different settings both land.
+	interleave(t,
+		func(wait func()) error {
+			return e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { wait(); s.DeadRetention = 10 * 24 * time.Hour })
 		},
-		func() error {
+		func(ctx context.Context) error {
 			return e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention = 72 * time.Hour })
 		})
 	want(72*time.Hour, 10*24*time.Hour)
@@ -182,14 +181,31 @@ func TestUpdateQueue(t *testing.T) {
 		}
 	}
 
-	// Concurrent updates apply one after the other.
+	// Concurrent updates never lose each other's changes.
 	increment := func(s *taskmill.QueueSettings) { s.MaxRunning++ }
-	inOrder(t, e, "FROM {s}.queues WHERE name = $1 FOR UPDATE",
-		func(held func()) error {
-			return e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { held(); increment(s) })
+	interleave(t,
+		func(wait func()) error {
+			return e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { wait(); increment(s) })
 		},
-		func() error { return e.client.UpdateQueue(ctx, "partner", increment) })
+		func(ctx context.Context) error { return e.client.UpdateQueue(ctx, "partner", increment) })
 	want(6, true)
+
+	// An update that updates the same queue does not deadlock: the inner
+	// update lands first, and the outer one runs again on its result.
+	inner := sync.OnceValue(func() error {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { s.MaxRunning = 9 })
+	})
+	if err := e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) {
+		if err := inner(); err != nil {
+			t.Error(err)
+		}
+		increment(s)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want(10, true)
 
 	// Zero removes the limit.
 	if err := e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { s.MaxRunning = 0 }); err != nil {
@@ -198,28 +214,63 @@ func TestUpdateQueue(t *testing.T) {
 	want(0, true)
 }
 
-// inOrder runs first, which calls held while it holds a row lock, then
-// second, which waits for that lock in a statement that contains fragment,
-// and fails the test unless both succeed.
-func inOrder(t *testing.T, e *env, fragment string, first func(held func()) error, second func() error) {
+// interleave runs first and, while first's update waits in wait, runs second
+// to the end, with a context that ends it if it waits for first. It fails the
+// test unless both succeed. wait blocks only on its first call, so an update
+// that runs again does not wait.
+func interleave(t *testing.T, first func(wait func()) error, second func(ctx context.Context) error) {
 	t.Helper()
-	locked, release := make(chan struct{}), make(chan struct{})
-	errs := make(chan error, 2)
+	waiting, release := make(chan struct{}), make(chan struct{})
+	errs := make(chan error, 1)
 	go func() {
-		errs <- first(func() {
-			close(locked)
+		errs <- first(sync.OnceFunc(func() {
+			close(waiting)
 			<-release
-		})
+		}))
 	}()
-	<-locked
-	go func() { errs <- second() }()
-	e.waitBlocked(t, fragment)
-	close(release)
-	for range 2 {
-		if err := recv(t, errs, "an update"); err != nil {
-			t.Fatal(err)
-		}
+	select {
+	case <-waiting:
+	case err := <-errs:
+		t.Fatalf("the first update ended before its update ran: %v", err)
 	}
+	func() {
+		defer close(release) // also when second fails the test
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		if err := second(ctx); err != nil {
+			t.Fatalf("the second update: %v", err)
+		}
+	}()
+	if err := recv(t, errs, "the first update"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSlowUpdateDoesNotHoldUpFetches(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	limit := func(n int) func(*taskmill.QueueSettings) {
+		return func(s *taskmill.QueueSettings) { s.MaxRunning = n }
+	}
+	if err := e.client.UpdateQueue(ctx, taskmill.DefaultQueue, limit(2)); err != nil {
+		t.Fatal(err)
+	}
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: noopHandlers(),
+		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}},
+	})
+
+	// Fetches from a queue with a limit lock its row, which an update leaves
+	// alone while its update runs.
+	interleave(t,
+		func(wait func()) error {
+			return e.client.UpdateQueue(ctx, taskmill.DefaultQueue, func(s *taskmill.QueueSettings) { wait(); limit(3)(s) })
+		},
+		func(context.Context) error {
+			e.waitState(t, e.enqueue(t, sendEmail{}, nil), taskmill.StateCompleted)
+			return nil
+		})
 }
 
 func TestQueuesAndWorkers(t *testing.T) {
@@ -496,6 +547,40 @@ func TestGroups(t *testing.T) {
 	for _, params := range []taskmill.GroupParams{{Limit: -1}, {Cursor: "%%%"}, {Cursor: "b25seS1vbmU"}} { // "only-one"
 		if _, err := e.client.Groups(t.Context(), &params); !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Fatalf("%+v: got %v, want ErrInvalidArgument", params, err)
+		}
+	}
+}
+
+func TestGroupPagesReadOnlyTheirRows(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.rawGroups = true // groups written by hand, without tasks
+	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
+	           SELECT q, format('key-%s', lpad(i::text, 4, '0')), 1,
+	                  CASE WHEN i % 10 = 0 THEN i END, CASE WHEN i % 10 = 0 THEN now() END
+	           FROM unnest('{a,b,c,d,e,f,g,h}'::text[]) AS q, generate_series(1, 1000) AS i`)
+	e.exec(t, "ANALYZE {s}.groups")
+	page, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Queues: []string{"b"}, Limit: 990})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A page far into the groups reads at most one more row than it returns
+	// from each queue it reads, whether it asks for queues or halted groups:
+	// none of the groups before it, or of the queues it does not ask for.
+	for _, params := range []taskmill.GroupParams{
+		{},
+		{Halted: true},
+		{Queues: []string{"a", "b", "g"}},
+		{Queues: []string{"a", "b", "g"}, Halted: true},
+	} {
+		params.Limit, params.Cursor = 10, page.Next
+		read, err := taskmill.GroupRowsRead(t.Context(), e.client, &params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if most := int64(max(1, len(params.Queues)) * (params.Limit + 1)); read > most {
+			t.Errorf("%+v: read %d rows of groups, want at most %d", params, read, most)
 		}
 	}
 }

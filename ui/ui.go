@@ -211,7 +211,7 @@ type page struct {
 	Static   bool   // the page does not update itself
 	ReadOnly bool
 	Notice   string
-	Dead     int64 // dead tasks, for the navigation; 0 if unknown
+	Dead     taskmill.TaskCount // dead tasks, for the navigation; zero if unknown
 	Data     any
 }
 
@@ -308,7 +308,7 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	t := sumQueues(queues)
-	s.render(w, r, http.StatusOK, "overview.html", page{Title: "Overview", Nav: "overview", Dead: t.Dead.N, Data: struct {
+	s.render(w, r, http.StatusOK, "overview.html", page{Title: "Overview", Nav: "overview", Dead: t.Dead, Data: struct {
 		Queues          []taskmill.QueueInfo
 		States          []taskmill.State
 		Totals          totals
@@ -379,7 +379,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	if filtered && !s.readOnly {
 		bulk = s.bulkLinks(f)
 	}
-	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead.N, Data: struct {
+	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
 		Tasks                         []taskmill.TaskInfo
 		States, Queues, Kinds, Groups filter
 		Filtered, Paged               bool
@@ -807,14 +807,14 @@ func (s *server) workers(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, http.StatusOK, "workers.html", page{Title: "Workers", Nav: "workers", Dead: s.deadCount(r), Data: workers})
 }
 
-// deadCount returns the dead tasks of every queue, or 0 if they cannot be
+// deadCount returns the dead tasks of every queue, or zero if they cannot be
 // read; it only feeds the navigation.
-func (s *server) deadCount(r *http.Request) int64 {
+func (s *server) deadCount(r *http.Request) taskmill.TaskCount {
 	queues, err := s.client.Queues(r.Context())
 	if err != nil {
-		return 0
+		return taskmill.TaskCount{}
 	}
-	return sumQueues(queues).Dead.N
+	return sumQueues(queues).Dead
 }
 
 // notices are the messages shown after an action, by the code in the

@@ -348,10 +348,13 @@ rate-limited API, set `MaxRunning`:
 err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
 ```
 
-`UpdateQueue` passes the queue's current settings to your function, and
-saves what it changes, in one transaction, so the settings you leave alone,
-or that a later version adds, keep their values. A zero `MaxRunning` removes
-the limit. Workers apply the change within 10 seconds.
+`UpdateQueue` passes a copy of the queue's current settings to your
+function, and saves what it changes, so the settings you leave alone, or that
+a later version adds, keep their values. It holds no lock while your function
+runs: if another update changed the settings meanwhile, it runs your function
+again on the new settings, so the function must only change the settings it
+gets. A zero `MaxRunning` removes the limit. Workers apply the change within
+10 seconds.
 
 ## Ordering and deduplication
 
@@ -855,13 +858,15 @@ it succeeds, and the error is logged.
 refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
 backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
 and retryable tasks across all queues. Each count in `QueueInfo.Counts` says
-whether it hit its cap, `TaskCount.Capped`, and so is a lower bound. `QueueInfo.Lag` is how long the queue's oldest
-due task has waited since its run time: an available task, or a scheduled or
-retryable one whose time has come. The maintainer finds that task when it
-counts, and `Client.Queues` measures its age by the database's clock, so lag
-has no cap, suits backlog alerts, and keeps growing when no maintainer runs.
-It may read high for up to one refresh, about 10 seconds. FIFO tasks waiting
-behind their group do not count.
+whether it hit its cap, `TaskCount.Capped`, and so is a lower bound. Once the
+shared cap is hit, every queue's scheduled and retryable counts are capped,
+even at zero. `QueueInfo.Lag` is how long the queue's oldest due task has
+waited since its run time: an available task, or a scheduled or retryable one
+whose time has come. The maintainer finds that task when it counts, and
+`Client.Queues` measures its age by the database's clock, so lag has no cap,
+suits backlog alerts, and keeps growing when no maintainer runs. It may read
+high for up to one refresh, about 10 seconds. FIFO tasks waiting behind their
+group do not count.
 
 **History** comes from `Client.Activity`: for each minute of the last 24
 hours, the most tasks counted in each state, and the attempts that completed

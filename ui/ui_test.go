@@ -150,6 +150,22 @@ func TestPagesRender(t *testing.T) {
 	}
 }
 
+func TestNavMarksACappedDeadCount(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	// The maintainer stopped counting the dead tasks at the cap.
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.queue_stats (queue, state, tasks, capped, refreshed_at)
+	    VALUES ('mail', 'dead', 10000, true, now())`); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+	for _, path := range []string{"/", "/tasks?state=dead", "/workers"} {
+		if _, body, _ := get(t, h, path); !strings.Contains(body, `<span>Dead</span><span class="count mono">10,000&#43;</span>`) {
+			t.Errorf("%s: want the nav's dead count marked as capped\n%s", path, body)
+		}
+	}
+}
+
 func TestOverviewPeriods(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)

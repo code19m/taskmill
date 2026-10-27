@@ -46,7 +46,8 @@ type QueueInfo struct {
 	// Counts holds the number of tasks per state, except completed tasks.
 	// Counting stops at 10,000 tasks per state, and at 100,000 scheduled
 	// and retryable tasks across all queues; a count's Capped reports that
-	// it stopped early and is a lower bound.
+	// it stopped early and is a lower bound. Once the shared cap is hit,
+	// every queue's scheduled and retryable counts are capped, even at zero.
 	Counts map[State]TaskCount
 
 	// RefreshedAt is when the maintainer last counted the queue: zero until
@@ -109,13 +110,25 @@ type ListResult struct {
 	Next string
 }
 
+// updateAttempts bounds how often [Client.UpdateQueue] and
+// [Client.UpdateSettings] read the settings, update them, and find that they
+// changed meanwhile, before they give up with errKeptChanging.
+const updateAttempts = 5
+
+var errKeptChanging = errors.New("the settings kept changing during the update; try again")
+
 // UpdateQueue changes a queue's installation-wide settings for every worker,
-// and creates the queue if needed. update gets the current settings and
-// changes the ones it means to, so that settings it does not know of, such
-// as those of a later version, keep their values. Concurrent updates of a
-// queue apply one after the other: none loses another's change. Workers
-// apply the change within 10 seconds, and at once if they receive
-// notifications.
+// and creates the queue if needed. update gets a copy of the current
+// settings and changes the ones it means to, so that settings it does not
+// know of, such as those of a later version, keep their values.
+//
+// No lock is held while update runs. The settings are written back only if
+// they did not change meanwhile; if they did, update runs again on the new
+// settings, up to 5 times before UpdateQueue gives up with an error. So
+// concurrent updates never lose each other's changes, and update may run
+// more than once: it must only change the settings it gets, with no I/O and
+// no calls to the Client. Workers apply the change within 10 seconds, and at
+// once if they receive notifications.
 //
 //	err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
 func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*QueueSettings)) error {
@@ -125,40 +138,33 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 	if update == nil {
 		return invalidArgument("update is nil")
 	}
-	err := pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, c.sql.addQueue, name); err != nil {
-			return err
-		}
+	for range updateAttempts {
 		var limit *int
-		if err := tx.QueryRow(ctx, c.sql.lockQueue, name).Scan(&limit); err != nil {
-			return err
+		if err := c.pool.QueryRow(ctx, c.sql.readQueue, name).Scan(&limit); err != nil {
+			return fmt.Errorf("taskmill: update queue %q: %w", name, err)
 		}
 		var s QueueSettings
 		if limit != nil {
 			s.MaxRunning = *limit
 		}
 		update(&s)
+		var next *int
 		switch {
 		case s.MaxRunning < 0:
 			return invalidArgument("MaxRunning must not be negative")
-		case s.MaxRunning == 0:
-			limit = nil
-		default:
-			limit = &s.MaxRunning
+		case s.MaxRunning > 0:
+			next = &s.MaxRunning
 		}
-		if _, err := tx.Exec(ctx, c.sql.updateQueue, name, limit); err != nil {
-			return err
+		var swapped int
+		err := c.pool.QueryRow(ctx, c.sql.swapQueue, name, limit, next, c.schema, notifyQueue+"|"+name).Scan(&swapped)
+		if err != nil {
+			return fmt.Errorf("taskmill: update queue %q: %w", name, err)
 		}
-		_, err := tx.Exec(ctx, notifySQL, c.schema, notifyQueue+"|"+name)
-		return err
-	})
-	if errors.Is(err, ErrInvalidArgument) {
-		return err
+		if swapped == 1 {
+			return nil
+		}
 	}
-	if err != nil {
-		return fmt.Errorf("taskmill: update queue %q: %w", name, err)
-	}
-	return nil
+	return fmt.Errorf("taskmill: update queue %q: %w", name, errKeptChanging)
 }
 
 // PauseQueue stops workers from fetching the queue's tasks. Tasks already
@@ -254,21 +260,23 @@ func (c *Client) Settings(ctx context.Context) (*Settings, error) {
 	}, nil
 }
 
-// UpdateSettings changes the installation-wide settings. update gets the
-// current settings and changes the ones it means to, so that settings it
-// does not know of, such as those of a later version, keep their values. A
-// setting changed to zero goes back to its default. Concurrent updates apply
-// one after the other: none loses another's change.
+// UpdateSettings changes the installation-wide settings. update gets a copy
+// of the current settings and changes the ones it means to, so that settings
+// it does not know of, such as those of a later version, keep their values.
+// A setting changed to zero goes back to its default. Like
+// [Client.UpdateQueue], it holds no lock while update runs, and runs update
+// again if the settings changed meanwhile, so update must only change the
+// settings it gets.
 //
 //	err := client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention = 48 * time.Hour })
 func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) error {
 	if update == nil {
 		return invalidArgument("update is nil")
 	}
-	err := pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
+	for range updateAttempts {
 		var history, dead int64
-		if err := tx.QueryRow(ctx, c.sql.lockSettings).Scan(&history, &dead); err != nil {
-			return err
+		if err := c.pool.QueryRow(ctx, c.sql.readSettings).Scan(&history, &dead); err != nil {
+			return fmt.Errorf("taskmill: update settings: %w", err)
 		}
 		s := Settings{
 			HistoryRetention: time.Duration(history) * time.Microsecond,
@@ -280,16 +288,15 @@ func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) err
 		if s.HistoryRetention < minRetention || s.DeadRetention < minRetention {
 			return invalidArgument("retention periods must be at least %s", minRetention)
 		}
-		_, err := tx.Exec(ctx, c.sql.updateSettings, s.HistoryRetention.Microseconds(), s.DeadRetention.Microseconds())
-		return err
-	})
-	if errors.Is(err, ErrInvalidArgument) {
-		return err
+		tag, err := c.pool.Exec(ctx, c.sql.swapSettings, history, dead, s.HistoryRetention.Microseconds(), s.DeadRetention.Microseconds())
+		if err != nil {
+			return fmt.Errorf("taskmill: update settings: %w", err)
+		}
+		if tag.RowsAffected() == 1 {
+			return nil
+		}
 	}
-	if err != nil {
-		return fmt.Errorf("taskmill: update settings: %w", err)
-	}
-	return nil
+	return fmt.Errorf("taskmill: update settings: %w", errKeptChanging)
 }
 
 // Workers returns the registered worker processes. A worker that stopped
@@ -433,38 +440,16 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult
 	if params != nil {
 		p = *params
 	}
-	switch {
-	case p.Limit == 0:
-		p.Limit = defaultListLimit
-	case p.Limit < 0 || p.Limit > maxListLimit:
-		return nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
-	}
-	queues, err := checkFilter("queue name", p.Queues, maxNameLength)
+	sql, args, err := c.groupsQuery(&p)
 	if err != nil {
 		return nil, err
 	}
-	if p.Search != "" {
-		if err := checkName("search", p.Search, maxGroupKeyLength); err != nil {
-			return nil, err
-		}
-	}
-	var afterQueue, afterKey string
-	if p.Cursor != "" {
-		if afterQueue, afterKey, err = decodeGroupCursor(p.Cursor); err != nil {
-			return nil, err
-		}
-	}
 	var out GroupsResult
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
+		if _, err := tx.Exec(ctx, groupsSettings); err != nil {
 			return err
 		}
-		// Custom plans see whether only halted groups are asked for, and so
-		// read their index.
-		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
-			return err
-		}
-		r, err := tx.Query(ctx, c.sql.listGroups, queues, p.Search, p.Limit+1, p.Halted, afterQueue, afterKey)
+		r, err := tx.Query(ctx, sql, args...)
 		if err != nil {
 			return err
 		}
@@ -484,6 +469,41 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult
 		out.Next = base64.RawURLEncoding.EncodeToString([]byte(last.Queue + "\x00" + last.Key))
 	}
 	return &out, nil
+}
+
+// groupsSettings start the read of a page of groups. Custom plans see
+// whether only halted groups are asked for, and so read their index.
+const groupsSettings = `SELECT set_config('statement_timeout', '` + listTimeout + `', true), set_config('plan_cache_mode', 'force_custom_plan', true)`
+
+// groupsQuery checks p, sets its default limit, and returns the statement
+// that reads its page, one group more than the limit, with its arguments.
+func (c *Client) groupsQuery(p *GroupParams) (sql string, args []any, err error) {
+	switch {
+	case p.Limit == 0:
+		p.Limit = defaultListLimit
+	case p.Limit < 0 || p.Limit > maxListLimit:
+		return "", nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
+	}
+	queues, err := checkFilter("queue name", p.Queues, maxNameLength)
+	if err != nil {
+		return "", nil, err
+	}
+	if p.Search != "" {
+		if err := checkName("search", p.Search, maxGroupKeyLength); err != nil {
+			return "", nil, err
+		}
+	}
+	var afterQueue, afterKey string
+	if p.Cursor != "" {
+		if afterQueue, afterKey, err = decodeGroupCursor(p.Cursor); err != nil {
+			return "", nil, err
+		}
+	}
+	args = []any{p.Search, p.Limit + 1, p.Halted, afterQueue, afterKey}
+	if len(queues) == 0 {
+		return c.sql.listGroups, args, nil
+	}
+	return c.sql.listQueueGroups, append(args, queues), nil
 }
 
 // decodeGroupCursor decodes the cursor of a page of groups into the queue

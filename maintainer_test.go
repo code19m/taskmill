@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strconv"
 	"strings"
 	"testing"
@@ -307,28 +308,85 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small", RunAt: time.Now().Add(time.Hour)})
 	runWorker(t, e, &taskmill.WorkerConfig{}) // the maintainer refreshes statistics
 
-	var big, small taskmill.QueueInfo
-	waitFor(t, "statistics for both queues", func() bool {
+	counted := countedQueues(t, e, "big", "small")
+	if got := counted["big"].Counts[taskmill.StateAvailable]; got != (taskmill.TaskCount{N: 10_000, Capped: true}) {
+		t.Errorf("big: got %+v available; want 10,000, capped", got)
+	}
+	want := map[taskmill.State]taskmill.TaskCount{
+		taskmill.StateAvailable: {N: 5},
+		taskmill.StateScheduled: {N: 1},
+	}
+	if got := counted["small"].Counts; !maps.Equal(got, want) {
+		t.Errorf("small: got %+v; want %+v", got, want)
+	}
+}
+
+func TestStatisticsCapTheDueCountsOfEveryQueue(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'flood', 'email.send', 'scheduled', now() + interval '1 hour', '{}', 1 FROM generate_series(1, 100000)`)
+	for range 3 {
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small"})
+	}
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT 'small', 'email.send', 'dead', now(), '{}', 1, now() FROM generate_series(1, 2)`)
+	e.exec(t, `INSERT INTO {s}.queues (name) VALUES ('idle')`)
+	runWorker(t, e, &taskmill.WorkerConfig{}) // the maintainer refreshes statistics
+
+	// The shared cap was hit by flood alone, so small may have scheduled and
+	// retryable tasks that were not counted, but its other counts are exact.
+	counted := countedQueues(t, e, "flood", "small", "idle")
+	want := map[taskmill.State]taskmill.TaskCount{
+		taskmill.StateAvailable: {N: 3},
+		taskmill.StateDead:      {N: 2},
+		taskmill.StateCanceled:  {N: 0},
+		taskmill.StateScheduled: {N: 0, Capped: true},
+		taskmill.StateRetryable: {N: 0, Capped: true},
+	}
+	if got := counted["small"].Counts; !maps.Equal(got, want) {
+		t.Errorf("small: got %+v; want %+v", got, want)
+	}
+	want = map[taskmill.State]taskmill.TaskCount{
+		taskmill.StateScheduled: {N: 100_000, Capped: true},
+		taskmill.StateRetryable: {N: 0, Capped: true},
+	}
+	if got := counted["flood"].Counts; !maps.Equal(got, want) {
+		t.Errorf("flood: got %+v; want %+v", got, want)
+	}
+	want = map[taskmill.State]taskmill.TaskCount{
+		taskmill.StateAvailable: {N: 0},
+		taskmill.StateScheduled: {N: 0, Capped: true},
+		taskmill.StateRetryable: {N: 0, Capped: true},
+	}
+	if got := counted["idle"].Counts; !maps.Equal(got, want) { // a known queue without tasks
+		t.Errorf("idle: got %+v; want %+v", got, want)
+	}
+}
+
+// countedQueues waits until the maintainer has counted the named queues, and
+// returns them by name.
+func countedQueues(t *testing.T, e *env, names ...string) map[string]taskmill.QueueInfo {
+	t.Helper()
+	out := make(map[string]taskmill.QueueInfo)
+	waitFor(t, "statistics for every queue", func() bool {
 		queues, err := e.client.Queues(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, q := range queues {
-			switch q.Name {
-			case "big":
-				big = q
-			case "small":
-				small = q
+			if !q.RefreshedAt.IsZero() {
+				out[q.Name] = q
 			}
 		}
-		return !big.RefreshedAt.IsZero() && !small.RefreshedAt.IsZero()
+		for _, name := range names {
+			if _, ok := out[name]; !ok {
+				return false
+			}
+		}
+		return true
 	})
-	if got := big.Counts[taskmill.StateAvailable]; got != (taskmill.TaskCount{N: 10_000, Capped: true}) {
-		t.Errorf("big: got %+v available; want 10,000, capped", got)
-	}
-	if small.Counts[taskmill.StateAvailable] != (taskmill.TaskCount{N: 5}) || small.Counts[taskmill.StateScheduled] != (taskmill.TaskCount{N: 1}) {
-		t.Errorf("small: got %+v; want 5 available and 1 scheduled, none capped", small.Counts)
-	}
+	return out
 }
 
 func TestSlowRetentionDoesNotDelayPromotion(t *testing.T) {

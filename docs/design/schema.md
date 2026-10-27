@@ -41,7 +41,7 @@ configurable, so several installations can share a database. It must match
 |---|---|---|
 | `tasks` | Unfinished, dead, and canceled tasks | Hot: every enqueue, fetch, heartbeat, and result |
 | `task_history` | Completed tasks, one partition per day | Hot: one insert per completion; append-only |
-| `groups` | One row per FIFO group with unfinished tasks | Warm: grouped enqueues and completions only |
+| `groups` | One row per FIFO group with unfinished tasks or a dead task that halts it | Warm: grouped enqueues and completions only |
 | `dedupe_keys` | Dedupe keys and their windows | Warm: deduplicated enqueues only |
 | `queues` | Per-queue state: paused, and the concurrency limit | Cold |
 | `settings` | Installation-wide retention, in a single row | Cold |
@@ -95,11 +95,15 @@ to avoid. A kind that needs no history skips it with
 
 ### `groups`
 
-One row per FIFO group that has unfinished tasks. Its row lock serializes the
-enqueues and completions of a group. Its `tasks` column counts the group's
-unfinished tasks, which decides the head, and `halted_task_id` names the dead
-head that halts it. A partial index on `halted_task_id` lets retention skip
-the dead heads that keep their groups halted, without scanning every group.
+One row per FIFO group that has unfinished tasks or a dead task that halts
+it. Its row lock serializes the enqueues and completions of a group. Its
+`tasks` column counts the group's unfinished tasks and the dead head that
+halts it, if any, which decides the head; a group halted by its only task
+counts 1. `halted_task_id` names that dead head. Two partial indexes cover
+the halted groups only, so they stay small: one on `halted_task_id` lets
+retention skip the dead heads that keep their groups halted, without
+scanning every group, and one on `(queue, group_key)` lets `Client.Groups`
+page through the halted groups in its order.
 
 ### `dedupe_keys`
 
@@ -293,7 +297,9 @@ loose index scan, so finding the queues costs one probe per queue, not one
 row per task. Scheduled and retryable tasks are read from `tasks_due_idx`,
 which is ordered by run time, not by queue, so they are counted together. A
 count that reaches its cap is stored with `capped = true`: it is a lower
-bound.
+bound. Once the shared cap is hit, every queue's scheduled and retryable
+counts are capped, stored as capped zeros where none were counted, while
+its other counts keep their own flags.
 
 **Lag comes with the counts.** Each row of `queue_stats` keeps, in
 `oldest_due_at`, the run time of the oldest due task it counted: for

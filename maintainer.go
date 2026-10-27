@@ -459,8 +459,10 @@ func (m *maintainer) countStats(ctx context.Context) error {
 	// any queue may have more of them than counted, even none counted.
 	dueCapped := dueTotal >= statsDueCap
 	if dueCapped {
-		for i := range capped {
-			capped[i] = true
+		for i, s := range states {
+			if s := State(s); s == StateScheduled || s == StateRetryable {
+				capped[i] = true
+			}
 		}
 	}
 

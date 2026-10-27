@@ -32,8 +32,8 @@ var observedStates = []taskmill.State{
 //     tasks per queue and state, and at 100,000 scheduled and retryable
 //     tasks across all queues, so on a large backlog a count is a lower
 //     bound.
-//   - taskmill.queue.capped: 1 when a count of the queue stopped at its cap,
-//     else 0.
+//   - taskmill.queue.capped: per state, as taskmill.queue.tasks, 1 when
+//     that count stopped at its cap, else 0.
 //   - taskmill.queue.lag: in seconds, how long the queue's oldest due task
 //     has waited, as [taskmill.QueueInfo.Lag] says: it may read up to one
 //     refresh high. It stays right on a large backlog, and keeps growing
