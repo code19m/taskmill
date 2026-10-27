@@ -22,6 +22,11 @@ All notable changes to taskmill are recorded here. The format follows
   values out of range make `NewWorker` fail with `ErrInvalidArgument`. To
   migrate, pass nil: `ob.AddRelay(&handlers, publisher, nil)`.
 
+### Fixed
+
+- The module no longer includes a 20 MB binary of the example shop, which
+  v0.2.0 shipped by mistake and every download of it carried.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added
