@@ -11,7 +11,8 @@ import (
 // change is a new migration. Add each migration here in the release that
 // first includes it.
 var released = map[string]string{
-	"0001_initial.sql": "06870e1f69b1b32fbb34f3148c4745bb525340b1b4629b754a6043240109a834", // v0.1.0
+	"0001_initial.sql":   "06870e1f69b1b32fbb34f3148c4745bb525340b1b4629b754a6043240109a834", // v0.1.0
+	"0002_queue_lag.sql": "83a3d0a44fb06bcebd9b4bfb7f66ac0cba42c834b511a7487b50be433a8dec22", // v0.2.0
 }
 
 func TestReleasedMigrationsAreUnchanged(t *testing.T) {

@@ -10,6 +10,8 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-27
+
 Initial release, for taskmill v0.2.0 or newer.
 
 ### Added
@@ -25,4 +27,5 @@ Initial release, for taskmill v0.2.0 or newer.
 - A wrapper for the outbox's publisher, which traces each delivery and carries
   the trace to the broker in the message's headers.
 
-[Unreleased]: https://github.com/code19m/taskmill/commits/main/otel
+[Unreleased]: https://github.com/code19m/taskmill/compare/otel/v0.1.0...HEAD
+[0.1.0]: https://github.com/code19m/taskmill/tree/otel/v0.1.0/otel
