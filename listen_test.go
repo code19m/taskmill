@@ -63,6 +63,9 @@ func TestIdleWorkerFetchesRarelyWhileNotificationsArrive(t *testing.T) {
 	e, fetches := newCountedEnv(t)
 	w, started := startIdleWorker(t, e, time.Minute, nil)
 	waitFor(t, "notifications to arrive", func() bool { return taskmill.Notifying(w) })
+	// The fetches of the start, of the listener's start, and of the polls
+	// that were already waiting end first.
+	time.Sleep(200 * time.Millisecond)
 
 	before := fetches.n.Load()
 	time.Sleep(time.Second)
