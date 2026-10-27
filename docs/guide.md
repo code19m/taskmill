@@ -319,8 +319,11 @@ worker cannot start. A worker fetches from each queue up to its free slots,
 in priority, run time, and enqueue order. PostgreSQL notifications wake it as
 soon as tasks are enqueued. Every minute, a worker sends itself a
 notification to check that they arrive. While they do, an idle queue polls
-only once a minute, for notifications that were never sent, such as one a
-crashed producer owed. While they do not, it polls every `PollInterval`, one
+only once a minute: every second, the maintainer also notifies each queue
+whose next task has waited longer than a second, so a task whose
+notification came before its transaction committed, or never came, waits
+two seconds at most. While
+they do not, it polls every `PollInterval`, one
 second by default: until the first check, while the notification connection
 is down, and through a transaction-pooling proxy without `ListenConfig`. A
 queue whose installation-wide concurrency limit held tasks back polls every
@@ -916,13 +919,14 @@ attribute names it:
 | `listen for notifications` | Keeps the notification connection; idle queues poll every `PollInterval` meanwhile | Backoff, 1 to 30 seconds |
 | `elect maintainer` | Takes or keeps the maintainer role | Every 1 to 2 seconds |
 | `promote due tasks` | Makes scheduled and retryable tasks available | As they come due |
+| `wake queues` | Notifies the queues whose tasks wait | Every second |
 | `rescue expired leases` | Fails attempts whose workers lost their leases | Every second |
 | `run schedules` | Enqueues due schedule runs | Every second |
 | `refresh statistics` | Counts tasks for `Client.Queues` | Every 10 seconds |
 | `apply retention` | Drops expired history and old rows | Every minute |
 | `delete removed schedules` | Deletes schedules no worker defines | Every minute |
 
-The last six run only on the maintainer.
+The last seven run only on the maintainer.
 
 **Messages.**
 

@@ -148,8 +148,9 @@ type WorkerConfig struct {
 	// PollInterval is how often idle queues are checked while notifications
 	// do not reach the worker: before its notification connection works, or
 	// through a transaction-pooling proxy without ListenConfig. While they
-	// do, they wake the worker, and idle queues are checked once a minute,
-	// for notifications that were never sent. Default: 1 second.
+	// do, they wake the worker, and so does the maintainer every second for
+	// each queue whose tasks wait, so idle queues are checked only once a
+	// minute, in case both fail. Default: 1 second.
 	PollInterval time.Duration
 
 	// DrainTimeout is how long Run waits for running tasks after its context

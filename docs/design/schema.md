@@ -523,15 +523,21 @@ rates this lock becomes a bottleneck: in a pgbench test before taskmill had
 any Go code, a `NOTIFY` in every enqueue capped throughput near 10,000 tasks
 per second. So a client sends at most one notification per queue per 50 ms:
 the first in its own transaction, and one for the rest when the 50 ms end.
+That one can arrive before the transactions it stands for commit, and a
+producer can crash before sending it. So once a second, the maintainer also
+notifies every queue that is not paused and whose next task has waited
+longer than a second, in one statement with one index probe per queue. A
+queue whose tasks start at once gets nothing, and one whose workers are all
+busy gets a notification that changes nothing; a task whose notification
+came too early, or never, waits two seconds at most.
 
 **Polling.** Workers poll each queue as a fallback, and how often depends on
 whether notifications reach them, which a worker checks by sending itself a
 probe every minute: an unanswered probe means they do not, whatever the
 reason, such as a proxy in the way or a connection that broke without a
-word. While they do, an idle queue polls once a minute, only for
-notifications that were never sent, such as the trailing one of a producer
-that crashed, so idle workers cost little however many queues and replicas
-there are. While they do not, it polls every `PollInterval`, and so does a
+word. While they do, an idle queue polls once a minute, only in case the
+maintainer's notifications fail too, so idle workers cost little however
+many queues and replicas there are. While they do not, it polls every `PollInterval`, and so does a
 queue whose installation-wide concurrency limit held tasks back, since
 finishing a task sends no notification. Losing the notification connection,
 or a probe, makes every queue fetch at once and poll every `PollInterval`

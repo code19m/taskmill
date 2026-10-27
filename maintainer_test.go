@@ -178,6 +178,40 @@ func TestPromotionStaysOnItsIndexBesideABacklog(t *testing.T) {
 	}
 }
 
+func TestMaintainerWakesQueuesWhoseTasksWait(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT q, 'email.send', 'available', now() - interval '1 minute', '{}', 1
+	           FROM unnest(ARRAY['waiting', 'paused']) q`)
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "fresh"})
+	if err := e.client.PauseQueue(ctx, "paused"); err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := pgx.Connect(ctx, testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(t.Context()) }()
+	if _, err := conn.Exec(ctx, "LISTEN "+e.schema); err != nil {
+		t.Fatal(err)
+	}
+	taskmill.WakeQueues(ctx, newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()}))
+
+	n, err := conn.WaitForNotification(ctx)
+	if err != nil || n.Payload != "a|waiting" {
+		t.Fatalf("got notification %v, %v; want a|waiting", n, err)
+	}
+	quiet, stop := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer stop()
+	if n, err := conn.WaitForNotification(quiet); err == nil {
+		t.Fatalf("got notification %q; a paused queue, or one whose task just arrived, is not woken", n.Payload)
+	}
+}
+
 func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

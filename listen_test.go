@@ -36,21 +36,21 @@ func newCountedEnv(t *testing.T) (*env, *fetchCounter) {
 	return newEnvWith(t, pool, nil), fetches
 }
 
-// startIdleWorker runs a worker that polls every 20 ms while notifications do
-// not reach it, and every idlePoll while they do, and listens on listen, or
-// as testdb says if it is nil.
-func startIdleWorker(t *testing.T, e *env, idlePoll time.Duration, listen *pgx.ConnConfig) (*taskmill.Worker, <-chan struct{}) {
+// startIdleWorker runs a worker of idleQueues that polls every 20 ms while
+// notifications do not reach it, and every idlePoll while they do. cfg, which
+// may be nil, sets the rest of its configuration.
+func startIdleWorker(t *testing.T, e *env, idlePoll time.Duration, cfg *taskmill.WorkerConfig) (*taskmill.Worker, <-chan struct{}) {
 	t.Helper()
+	if cfg == nil {
+		cfg = &taskmill.WorkerConfig{}
+	}
 	started := make(chan struct{}, 10)
-	w := newWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
-			started <- struct{}{}
-			return nil
-		}, nil),
-		Queues:       idleQueues,
-		PollInterval: 20 * time.Millisecond,
-		ListenConfig: listen,
-	})
+	cfg.Handlers = handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+		started <- struct{}{}
+		return nil
+	}, nil)
+	cfg.Queues, cfg.PollInterval = idleQueues, 20*time.Millisecond
+	w := newWorker(t, e, cfg)
 	timing := testTiming
 	timing.IdlePoll = idlePoll
 	taskmill.SetTiming(w, timing)
@@ -94,7 +94,7 @@ func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 	listen.Database = "postgres"
 	logs := &logRecorder{}
 	e = e.withLogger(t, slog.New(logs))
-	w, started := startIdleWorker(t, e, 200*time.Millisecond, listen)
+	w, started := startIdleWorker(t, e, 200*time.Millisecond, &taskmill.WorkerConfig{ListenConfig: listen})
 	waitFor(t, "the worker to find that notifications do not arrive", func() bool {
 		return logs.count("notifications do not arrive; idle queues poll every PollInterval") == 1
 	})
@@ -127,7 +127,7 @@ func TestIdleWorkerPollsWhileItsListenerIsCut(t *testing.T) {
 		t.Fatal(err)
 	}
 	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
-	w, started := startIdleWorker(t, e, time.Minute, listen)
+	w, started := startIdleWorker(t, e, time.Minute, &taskmill.WorkerConfig{ListenConfig: listen})
 	waitFor(t, "notifications to arrive", func() bool { return taskmill.Notifying(w) })
 
 	// While the listener is cut, notifications are lost, and the worker
@@ -148,7 +148,8 @@ func TestIdleWorkerPollsWhileItsListenerIsCut(t *testing.T) {
 func TestIdleWorkerFindsATaskWhoseNotificationWasLost(t *testing.T) {
 	t.Parallel()
 	e, _ := newCountedEnv(t)
-	w, started := startIdleWorker(t, e, time.Second, nil)
+	// Without a maintainer to wake its queues, only the idle poll finds it.
+	w, started := startIdleWorker(t, e, time.Second, &taskmill.WorkerConfig{NoMaintainer: true})
 	waitFor(t, "notifications to arrive", func() bool { return taskmill.Notifying(w) })
 
 	// The task becomes available without a notification, as when the
@@ -159,6 +160,32 @@ func TestIdleWorkerFindsATaskWhoseNotificationWasLost(t *testing.T) {
 	recv(t, started, "the task to start")
 	if d := time.Since(begin); d > 1500*time.Millisecond {
 		t.Fatalf("the task started after %s, beyond the idle poll of 1 s", d)
+	}
+}
+
+func TestIdleWorkerFindsATaskCommittedAfterItsNotification(t *testing.T) {
+	t.Parallel()
+	e, _ := newCountedEnv(t)
+	w, started := startIdleWorker(t, e, time.Minute, nil)
+	waitFor(t, "notifications to arrive", func() bool { return taskmill.Notifying(w) })
+
+	// The first enqueue notifies; the second, within the throttle's 50 ms,
+	// leaves its notification to the end of that window, which comes before
+	// its transaction commits. The maintainer then wakes the queue.
+	e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the first task to start")
+	tx := e.begin(t)
+	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	begin := time.Now()
+	recv(t, started, "the second task to start")
+	if d := time.Since(begin); d > time.Second {
+		t.Fatalf("the task started %s after its transaction committed", d)
 	}
 }
 

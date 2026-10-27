@@ -28,7 +28,10 @@ All notable changes to taskmill are recorded here. The format follows
   every `PollInterval` until the first check, while the notification
   connection is down, through a transaction-pooling proxy without
   `ListenConfig`, and while their installation-wide concurrency limit holds
-  tasks back. A worker logs when notifications start or stop arriving.
+  tasks back. Every second, the maintainer now notifies each queue whose next
+  task has waited longer than a second, so a task whose notification came
+  before its transaction committed, or never came, waits two seconds at
+  most. A worker logs when notifications start or stop arriving.
 
 ## [0.2.0] - 2026-10-27
 

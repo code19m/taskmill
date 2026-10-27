@@ -50,6 +50,12 @@ func RunSchedules(ctx context.Context, w *Worker) {
 	newMaintainer(w).runSchedules(ctx)
 }
 
+// WakeQueues notifies the queues that hold available tasks, as w's
+// maintainer does each cycle.
+func WakeQueues(ctx context.Context, w *Worker) {
+	newMaintainer(w).wake(ctx)
+}
+
 // PruneSchedules deletes the stored schedules that w does not define, as its
 // maintainer does once a minute.
 func PruneSchedules(ctx context.Context, w *Worker) {

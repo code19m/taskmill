@@ -29,10 +29,10 @@ const (
 )
 
 // maintainer does the installation-wide work of one elected worker. Its main
-// loop elects the leader, then rescues expired leases and enqueues schedules
-// once per interval. Due tasks are promoted in a loop of their own, as they
-// come due, and statistics and retention in another, so that slow work in
-// one never delays the others.
+// loop elects the leader, then wakes queues whose tasks wait, rescues expired
+// leases, and enqueues schedules once per interval. Due tasks are promoted in
+// a loop of their own, as they come due, and statistics and retention in
+// another, so that slow work in one never delays the others.
 type maintainer struct {
 	w      *Worker
 	c      *Client
@@ -41,7 +41,7 @@ type maintainer struct {
 	lastElection time.Time // used by the main loop only
 
 	// The failures of each kind of work, which it logs only now and then.
-	election, promotion, rescues, schedules, pruning, stats, retention *failures
+	election, promotion, waking, rescues, schedules, pruning, stats, retention *failures
 }
 
 func newMaintainer(w *Worker) *maintainer {
@@ -50,6 +50,7 @@ func newMaintainer(w *Worker) *maintainer {
 		c:         w.client,
 		election:  newFailures(w, "elect maintainer"),
 		promotion: newFailures(w, "promote due tasks"),
+		waking:    newFailures(w, "wake queues"),
 		rescues:   newFailures(w, "rescue expired leases"),
 		schedules: newFailures(w, "run schedules"),
 		pruning:   newFailures(w, "delete removed schedules"),
@@ -79,7 +80,8 @@ func (m *maintainer) run(ctx context.Context) {
 }
 
 // cycle renews or tries to take the leadership, and if this worker leads,
-// rescues expired leases and enqueues due schedules.
+// wakes queues whose tasks wait, rescues expired leases, and enqueues due
+// schedules.
 func (m *maintainer) cycle(ctx context.Context) {
 	if !m.leader.Load() && time.Since(m.lastElection) < m.w.timing.election {
 		return
@@ -88,6 +90,7 @@ func (m *maintainer) cycle(ctx context.Context) {
 	if !m.elect(ctx) {
 		return
 	}
+	m.wake(ctx)
 	m.rescue(ctx)
 	m.runSchedules(ctx)
 }
@@ -187,6 +190,19 @@ func (m *maintainer) promote(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// wake notifies every queue that is not paused and whose next task waited
+// longer than a maintenance interval. A task can become available without a
+// notification that comes after it: the throttle's trailing notification can
+// come before the transactions that it stands for commit, and a producer can
+// crash before sending it. Idle queues poll rarely while notifications
+// arrive, so this finds such tasks within two intervals, with one statement
+// for the whole installation. A queue whose workers are all busy is woken
+// too, which changes nothing; a queue whose tasks start at once is not.
+func (m *maintainer) wake(ctx context.Context) {
+	_, err := m.c.pool.Exec(ctx, m.c.sql.wakeQueues, m.c.schema, m.w.timing.maintainer.Microseconds())
+	m.waking.observe(ctx, err)
 }
 
 // leaseExpired is the error that a rescue records for the attempt it fails.
