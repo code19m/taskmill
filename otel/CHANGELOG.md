@@ -10,10 +10,11 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
-For taskmill v0.3.0 or newer.
-
 ### Changed
 
+- Requires taskmill v0.3.0, whose `outbox.Outbox.AddRelay` takes relay
+  options, and whose queue counts each say whether they stopped at their
+  cap; the examples pass nil relay options.
 - **Breaking:** `taskmill.queue.capped` has the attribute
   `taskmill.task.state`, as `taskmill.queue.tasks` has: it is 1 when the
   count of the queue's tasks in that state stopped at its cap, so each count

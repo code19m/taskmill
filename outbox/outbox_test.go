@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,10 +93,10 @@ func (b *broker) count() int {
 	return n
 }
 
-func run(t *testing.T, client *taskmill.Client, ob *outbox.Outbox, pub outbox.Publisher) {
+func run(t *testing.T, client *taskmill.Client, ob *outbox.Outbox, pub outbox.Publisher, opts *outbox.RelayOptions) {
 	t.Helper()
 	var hs taskmill.Handlers
-	ob.AddRelay(&hs, pub)
+	ob.AddRelay(&hs, pub, opts)
 	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs, PollInterval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +116,7 @@ func TestStoreCommitsWithTheTransaction(t *testing.T) {
 	t.Parallel()
 	client, ob, pool := setup(t)
 	b := newBroker(false)
-	run(t, client, ob, b)
+	run(t, client, ob, b, nil)
 	ctx := t.Context()
 
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -164,7 +165,7 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	run(t, client, ob, b)
+	run(t, client, ob, b, nil)
 
 	waitFor(t, func() bool { return b.count() == keys*perKey })
 	b.mu.Lock()
@@ -221,7 +222,7 @@ func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 			published = append(published, string(d.Value))
 		}
 		return errs
-	}))
+	}), nil)
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return ob.Store(ctx, taskmill.Pgx(tx),
 			outbox.Message{Topic: "orders", Key: []byte("7"), Value: []byte("first")},
@@ -271,14 +272,115 @@ func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 	})
 }
 
-func TestAddRelayWithoutPublisherIsReported(t *testing.T) {
+func TestAddRelayReportsInvalidArguments(t *testing.T) {
 	t.Parallel()
 	client, ob, _ := setup(t)
-	var hs taskmill.Handlers
-	ob.AddRelay(&hs, nil)
-	_, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs})
-	if !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	pub := outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error { return make([]error, len(ds)) })
+	for _, c := range []struct {
+		name  string
+		pub   outbox.Publisher
+		opts  *outbox.RelayOptions
+		valid bool
+	}{
+		{"no options", pub, nil, true},
+		{"zero options", pub, &outbox.RelayOptions{}, true},
+		{"the largest batch", pub, &outbox.RelayOptions{BatchSize: 1000, Timeout: time.Second}, true},
+		{"no publisher", nil, nil, false},
+		{"a negative batch size", pub, &outbox.RelayOptions{BatchSize: -1}, false},
+		{"a batch over 1,000", pub, &outbox.RelayOptions{BatchSize: 1001}, false},
+		{"a negative timeout", pub, &outbox.RelayOptions{Timeout: -time.Second}, false},
+	} {
+		var hs taskmill.Handlers
+		ob.AddRelay(&hs, c.pub, c.opts)
+		_, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs})
+		if c.valid && err != nil || !c.valid && !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("%s: got %v", c.name, err)
+		}
+	}
+}
+
+func TestRelayHonorsItsBatchSize(t *testing.T) {
+	t.Parallel()
+	client, ob, pool := setup(t)
+	const stored, size = 7, 3
+	msgs := make([]outbox.Message, stored)
+	for i := range msgs {
+		msgs[i] = outbox.Message{Topic: "events", Value: []byte(strconv.Itoa(i))}
+	}
+	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error { return ob.Store(t.Context(), taskmill.Pgx(tx), msgs...) })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	var batches []int // deliveries per call
+	run(t, client, ob, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
+		mu.Lock()
+		defer mu.Unlock()
+		batches = append(batches, len(ds))
+		return make([]error, len(ds))
+	}), &outbox.RelayOptions{BatchSize: size})
+
+	// All the messages wait when the relay starts; with the default size,
+	// one call would take them all.
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		total := 0
+		for _, n := range batches {
+			total += n
+		}
+		return total == stored
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if slices.Max(batches) > size {
+		t.Fatalf("batches of %v deliveries, want at most %d", batches, size)
+	}
+}
+
+func TestRelayHonorsItsTimeout(t *testing.T) {
+	t.Parallel()
+	client, ob, pool := setup(t)
+	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Topic: "events", Value: []byte("v")})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The broker hangs on the first call, which ends at the relay's timeout;
+	// the delivery is then retried. The call's deadline is at most the
+	// timeout away, not the default minute.
+	const timeout = 200 * time.Millisecond
+	var calls atomic.Int32
+	hung, published := make(chan time.Duration, 1), make(chan struct{})
+	run(t, client, ob, outbox.PublisherFunc(func(ctx context.Context, ds []outbox.Delivery) []error {
+		if calls.Add(1) == 1 {
+			left := time.Hour // no deadline
+			if deadline, ok := ctx.Deadline(); ok {
+				left = time.Until(deadline)
+			}
+			<-ctx.Done()
+			hung <- left
+			return []error{ctx.Err()}
+		}
+		close(published)
+		return make([]error, len(ds))
+	}), &outbox.RelayOptions{Timeout: timeout})
+
+	select {
+	case left := <-hung:
+		if left > timeout {
+			t.Fatalf("the hung call had %s left, want at most %s", left, timeout)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the hung call was not canceled")
+	}
+	select {
+	case <-published:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the delivery was not retried")
 	}
 }
 
@@ -291,7 +393,7 @@ func TestBinaryKeysAndHeadersArriveIntact(t *testing.T) {
 			got <- d
 		}
 		return make([]error, len(ds))
-	}))
+	}), nil)
 
 	key := []byte{0xff, 0x00, 0x1f, 0x80} // not UTF-8, with a NUL byte
 	header := []byte{0x00, 0xfe}
