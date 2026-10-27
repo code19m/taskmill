@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-27
+
 ### Added
 
 - Bulk actions by filter: `Client.RetryMatching`, `CancelMatching`, and
@@ -169,5 +171,6 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/code19m/taskmill/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/code19m/taskmill/releases/tag/v0.1.0
