@@ -1004,7 +1004,7 @@ LIMIT $2`),
 SELECT g.queue, g.group_key, g.tasks, coalesce(g.halted_task_id, 0)
 FROM (SELECT DISTINCT unnest($6::text[])) AS u(q),
 LATERAL (
-    SELECT * FROM {s}.groups g
+    SELECT g.queue, g.group_key, g.tasks, g.halted_task_id FROM {s}.groups g
     WHERE g.queue = u.q AND g.group_key > CASE WHEN u.q = $4 THEN $5 ELSE '' END
       AND g.tasks > 0
       AND ($1 = '' OR strpos(lower(g.group_key), lower($1)) > 0)
@@ -1081,7 +1081,7 @@ SELECT state::text, queue, count(*), min(run_at) FILTER (WHERE run_at <= now()) 
 		// each one missing those counts gets them as capped zeros.
 		storeStats: q(`
 WITH u AS (
-    SELECT * FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[]) AS u(q, s, n, c, o)
+    SELECT q, s, n, c, o FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[]) AS u(q, s, n, c, o)
 ), k AS (
     SELECT name FROM {s}.queues UNION SELECT unnest(queues) FROM {s}.workers UNION SELECT q FROM u
 )

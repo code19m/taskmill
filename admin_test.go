@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -267,9 +268,22 @@ func TestSlowUpdateDoesNotHoldUpFetches(t *testing.T) {
 		func(wait func()) error {
 			return e.client.UpdateQueue(ctx, taskmill.DefaultQueue, func(s *taskmill.QueueSettings) { wait(); limit(3)(s) })
 		},
-		func(context.Context) error {
-			e.waitState(t, e.enqueue(t, sendEmail{}, nil), taskmill.StateCompleted)
-			return nil
+		func(ctx context.Context) error {
+			res, err := e.client.Enqueue(ctx, sendEmail{}, nil)
+			if err != nil {
+				return err
+			}
+			for {
+				task, err := e.client.Get(ctx, res.ID)
+				if err != nil || task.State == taskmill.StateCompleted {
+					return err
+				}
+				select {
+				case <-ctx.Done():
+					return fmt.Errorf("task %d is %s: %w", res.ID, task.State, ctx.Err())
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
 		})
 }
 
