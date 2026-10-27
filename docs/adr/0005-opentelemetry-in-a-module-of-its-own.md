@@ -1,6 +1,6 @@
 # 0005. OpenTelemetry in a module of its own
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-25
 
 ## Context

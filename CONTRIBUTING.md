@@ -68,6 +68,14 @@ Every change is held to the same bar:
 - **Errors carry context.** Wrap with `fmt.Errorf("...: %w", err)`. Conditions
   that callers must handle are exposed as sentinel errors (`ErrX`) or error
   types (`XError`).
+- **Method names follow one pattern.** Tasks are the client's main resource,
+  so their methods are bare verbs: `Get`, `List`, `Count`, `Cancel`, `Retry`,
+  `Delete`, and, for the forms that act on every task a filter matches, the
+  same verb with `Matching`, such as `CancelMatching`. Other resources take
+  their name: a plural noun reads them (`Queues`, `Groups`, `Schedules`,
+  `Workers`), and a verb and noun act on one (`PauseQueue`, `UpdateQueue`,
+  `RunSchedule`). A method that runs in the caller's transaction adds `Tx`,
+  such as `EnqueueTx`.
 - **No new dependencies without an ADR.** The `depguard` linter enforces the
   allowlist. See [ADR 0001](docs/adr/0001-dependency-policy.md).
 - **Library manners.** No global state, no `init` functions, no writing to
@@ -105,7 +113,7 @@ Makefile target, so you can run it locally:
 | Lint | `make lint` | A finding of golangci-lint or actionlint, in any module or in `internal/compat`. |
 | Test | `make test` | A failing test, on each supported Go and PostgreSQL. The job of the newest Go writes the coverage per package to its summary; no level of coverage is required. |
 | Vulnerabilities | `make vuln` | A known vulnerability in code that taskmill calls. |
-| API compatibility | `make api` | [gorelease](https://pkg.go.dev/golang.org/x/exp/cmd/gorelease) compares the API with the latest release, and the job summary lists the changes and the lowest version that allows them. Before v1.0.0, a minor release may break the API, so only a module that does not build or has a bad `go.mod` fails. From v1.0.0 on, an incompatible change fails too: it needs a new major version. |
+| API compatibility | `make api` | [gorelease](https://pkg.go.dev/golang.org/x/exp/cmd/gorelease) compares the API with the latest release, and the job summary lists the changes and the lowest version that allows them. Before v1.0.0, a minor release may break the API, so only a module that does not build or has a bad `go.mod` fails. Once the latest release is v1.0.0 or later, an incompatible change fails too ("Incompatible changes were detected"): it needs a new major version. This follows from the release that `internal/compat` requires; nothing else changes. |
 | Rolling deploy | `make compat` | The latest release's client, worker, or dashboard failing on a schema that the current code migrated; see [Schema migrations](#schema-migrations). |
 | otel release | `make otel-release-check` | The `otel` module failing to build or pass its tests against the core version it requires, once that version is released. |
 | GoReleaser | `make release-check` | An invalid `.goreleaser.yaml`. |
@@ -152,9 +160,10 @@ docs: explain at-least-once delivery
   `[Unreleased]`, in the right category: Added, Changed, Deprecated, Removed,
   Fixed, or Security. A breaking change starts with **Breaking:** and says
   how to migrate.
-- **Follow the [compatibility policy](docs/guide.md#upgrading).** Interfaces
-  that users implement never grow, and a removal is deprecated for at least
-  one minor release first.
+- **Follow the [compatibility policy](docs/guide.md#upgrading).** From
+  v1.0.0 on, no change breaks the API: interfaces never grow, a replaced
+  identifier is deprecated and stays until v2, and stored names, such as the
+  `State` values, never change.
 
 ## Schema migrations
 
