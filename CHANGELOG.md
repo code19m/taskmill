@@ -9,6 +9,12 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Changed
 
+- The guide's [Upgrading](docs/guide.md#upgrading) section states the
+  compatibility promise from v1.0.0 on: breaking changes only in a new major
+  version, deprecated names kept until then, interfaces that never grow, and
+  names that never change, such as the `State` values and error classes. It
+  names the `migrations` table as the one public table, and what the promise
+  leaves out: log and error messages, and the `otel` module's names.
 - **Breaking:** `Client.UpdateQueue` and `Client.UpdateSettings` take a
   function that changes the current settings, which they read and write back
   in one transaction, instead of settings that replace them all. A setting
