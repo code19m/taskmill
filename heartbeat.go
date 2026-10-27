@@ -2,6 +2,8 @@ package taskmill
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 )
@@ -49,6 +51,28 @@ func (w *Worker) heartbeat(ctx context.Context) {
 		_, err = w.register(ctx)
 	}
 	w.beatFailures.observe(ctx, err)
+	if err == nil {
+		now := time.Now()
+		w.reached.Store(&now)
+	}
+}
+
+// Health reports whether the worker runs and is in touch with the database:
+// nil while Run runs and its last heartbeat succeeded within LeaseDuration,
+// and otherwise an error that says why. A worker out of touch for that long
+// can no longer keep its tasks' leases. Health reads only memory, so a
+// readiness probe may call it often. It fails while the database is out of
+// reach, which restarting the worker does not fix: do not base a liveness
+// probe on it.
+func (w *Worker) Health() error {
+	at := w.reached.Load()
+	if at == nil {
+		return errors.New("taskmill: the worker is not running")
+	}
+	if since := time.Since(*at); since > w.cfg.LeaseDuration {
+		return fmt.Errorf("taskmill: the worker has not reached the database for %s", since.Round(time.Second))
+	}
+	return nil
 }
 
 // renewLeases renews the leases of ts, and cancels the attempts that lost

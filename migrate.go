@@ -109,15 +109,23 @@ func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrat
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "taskmill.migrate."+schema); err != nil {
 		return err
 	}
-	// Waiting for the lock does not make the connection read the catalog
-	// changes that the lock's holder committed meanwhile. Its cache can still
-	// hold that the schema does not exist, as schemaVersion found, and IF NOT
-	// EXISTS would then create the schema again and fail. Reading a catalog
-	// table makes the connection apply those changes first.
-	if _, err := tx.Exec(ctx, "SELECT FROM pg_catalog.pg_namespace LIMIT 0"); err != nil {
+	// CREATE SCHEMA IF NOT EXISTS would not do. PostgreSQL checks the CREATE
+	// privilege on the database before it checks whether the schema exists,
+	// and a role that owns its schema may lack it. And waiting for the lock
+	// does not make the connection read the catalog changes that the lock's
+	// holder committed meanwhile: its cache can still hold that the schema
+	// does not exist, as schemaVersion found. Reading the catalog table
+	// applies those changes, and sees a schema created meanwhile.
+	var exists bool
+	if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT FROM pg_catalog.pg_namespace WHERE nspname = $1)", schema).Scan(&exists); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, bootstrapSQL(schema)); err != nil {
+	if !exists {
+		if _, err := tx.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(ctx, migrationsTableSQL(schema)); err != nil {
 		return err
 	}
 
@@ -141,10 +149,15 @@ func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrat
 	return nil
 }
 
-// bootstrapSQL creates the schema and the table that records migrations.
+// bootstrapSQL creates the schema and the table that records migrations,
+// for tools other than Migrate.
 func bootstrapSQL(schema string) string {
-	return fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %[1]s;
-CREATE TABLE IF NOT EXISTS %[1]s.migrations (
+	return fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s;\n", schema) + migrationsTableSQL(schema)
+}
+
+// migrationsTableSQL creates the table that records migrations.
+func migrationsTableSQL(schema string) string {
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %[1]s.migrations (
     version    integer PRIMARY KEY,
     name       text NOT NULL,
     applied_at timestamptz NOT NULL DEFAULT now()

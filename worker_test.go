@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -1157,6 +1158,96 @@ func TestHandlerThatIgnoresShutdownIsReleased(t *testing.T) {
 	e.wantState(t, id, taskmill.StateAvailable)
 }
 
+func TestShutdownFitsTheGracePeriod(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	const drain = time.Second
+	started, unblock := make(chan struct{}, 2), make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	// The worker's own timing: the grace after the drain is a fixed 5 seconds.
+	w, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			if task.Args.UserID == 1 {
+				<-unblock // ignores its context
+				return nil
+			}
+			<-ctx.Done()
+			return ctx.Err()
+		}, &taskmill.HandlerOptions{Timeout: time.Hour}),
+		Queues:       defaultQueue(2),
+		DrainTimeout: drain,
+		NoMaintainer: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	ids := []int64{e.enqueue(t, sendEmail{UserID: 1}, nil), e.enqueue(t, sendEmail{UserID: 2}, nil)}
+	recv(t, started, "the first task to start")
+	recv(t, started, "the second task to start")
+
+	// SIGTERM, through signal.NotifyContext. A process stops in time if its
+	// termination grace period is DrainTimeout plus 10 seconds.
+	stopping := time.Now()
+	cancel()
+	if err := recv(t, done, "Run to return"); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(stopping); took < drain || took > drain+10*time.Second {
+		t.Errorf("Run returned %s after its context ended, want between %s and %s", took, drain, drain+10*time.Second)
+	}
+	for _, id := range ids {
+		if info := e.get(t, id); info.State != taskmill.StateAvailable || info.Attempt != 0 {
+			t.Errorf("task %d is %s with attempt %d, want available with 0", id, info.State, info.Attempt)
+		}
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
+		t.Error("the stopped worker is still registered")
+	}
+}
+
+func TestHealthFollowsTheDatabase(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = db.host, db.port, nil
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	e := newEnvWith(t, pool, nil)
+	const lease = 600 * time.Millisecond
+	w := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: lease})
+	if w.Health() == nil {
+		t.Fatal("a worker that does not run is healthy")
+	}
+	stop := startWorker(t, w)
+	waitFor(t, "the worker to be healthy", func() bool { return w.Health() == nil })
+
+	// Without the database, it turns unhealthy once it could have lost its
+	// leases, and healthy again at its first heartbeat once it is back.
+	cut := time.Now()
+	db.cut(true)
+	waitFor(t, "the worker to be unhealthy", func() bool { return w.Health() != nil })
+	if d := time.Since(cut); d < 2*lease/3 {
+		t.Errorf("the worker turned unhealthy %s after the database went away, before its lease of %s could end", d, lease)
+	}
+	db.cut(false)
+	waitFor(t, "the worker to be healthy again", func() bool { return w.Health() == nil })
+
+	stop()
+	if w.Health() == nil {
+		t.Error("a stopped worker is healthy")
+	}
+}
+
 func TestListenerReconnects(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -1623,10 +1714,11 @@ func TestWorkerRemovedAsStaleRegistersAgain(t *testing.T) {
 	// What the maintainer does to a worker that missed its heartbeats for 5
 	// minutes, such as one on a machine that slept, while it kept working.
 	e.exec(t, "DELETE FROM {s}.workers")
-	waitFor(t, "the worker to register again", func() bool {
-		return e.count(t, "SELECT count(*) FROM {s}.workers") == 1
+	const logged = "worker was removed as stale; registering again"
+	waitFor(t, "the worker to register again, and say so", func() bool {
+		return logs.count(logged) > 0 && e.count(t, "SELECT count(*) FROM {s}.workers") == 1
 	})
-	if n := logs.count("worker was removed as stale; registering again"); n != 1 {
+	if n := logs.count(logged); n != 1 {
 		t.Fatalf("the new registration was logged %d times, want once", n)
 	}
 }

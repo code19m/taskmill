@@ -104,9 +104,10 @@ type Worker struct {
 	schedules []compiledSchedule
 
 	running   atomic.Bool
-	released  atomic.Int64   // tasks given back during the current Run's shutdown
-	tally     tally          // ended attempts not yet added to the activity
-	recording sync.WaitGroup // Run's attempts whose results are being recorded
+	reached   atomic.Pointer[time.Time] // when Run last reached the database; nil while it does not run
+	released  atomic.Int64              // tasks given back during the current Run's shutdown
+	tally     tally                     // ended attempts not yet added to the activity
+	recording sync.WaitGroup            // Run's attempts whose results are being recorded
 
 	mu       sync.Mutex
 	attempts map[int64]*tracked // attempts that Run and RunTask are running or recording
@@ -379,6 +380,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		return errors.New("taskmill: worker is already running")
 	}
 	defer w.running.Store(false)
+	defer w.reached.Store(nil)
 
 	// Work that must finish during shutdown runs on base, which keeps ctx's
 	// values but not its cancellation.
@@ -388,6 +390,8 @@ func (w *Worker) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
+	now := time.Now()
+	w.reached.Store(&now)
 	w.beatFailures = newFailures(w, "record heartbeat")
 	w.settingsFailures = newFailures(w, "load queue settings")
 	w.activityFailures = newFailures(w, "record activity")
