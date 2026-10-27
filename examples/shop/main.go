@@ -396,7 +396,9 @@ func (s *shop) handlers() *taskmill.Handlers {
 			return work(ctx, 50*time.Millisecond)
 		},
 	), nil)
-	s.outbox.AddRelay(&hs, outbox.PublisherFunc(publish))
+	// The relay publishes up to 100 messages per call by default. A broker
+	// that does not answer within 10 seconds is tried again later.
+	s.outbox.AddRelay(&hs, outbox.PublisherFunc(publish), &outbox.RelayOptions{Timeout: 10 * time.Second})
 	return &hs
 }
 
