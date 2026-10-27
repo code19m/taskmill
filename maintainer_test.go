@@ -323,11 +323,11 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 		}
 		return !big.RefreshedAt.IsZero() && !small.RefreshedAt.IsZero()
 	})
-	if big.Counts[taskmill.StateAvailable] != 10_000 || !big.Capped {
-		t.Errorf("big: got %v available, capped %v; want 10000, capped", big.Counts[taskmill.StateAvailable], big.Capped)
+	if got := big.Counts[taskmill.StateAvailable]; got != (taskmill.TaskCount{N: 10_000, Capped: true}) {
+		t.Errorf("big: got %+v available; want 10,000, capped", got)
 	}
-	if small.Counts[taskmill.StateAvailable] != 5 || small.Counts[taskmill.StateScheduled] != 1 || small.Capped {
-		t.Errorf("small: got %v, capped %v; want 5 available and 1 scheduled", small.Counts, small.Capped)
+	if small.Counts[taskmill.StateAvailable] != (taskmill.TaskCount{N: 5}) || small.Counts[taskmill.StateScheduled] != (taskmill.TaskCount{N: 1}) {
+		t.Errorf("small: got %+v; want 5 available and 1 scheduled, none capped", small.Counts)
 	}
 }
 

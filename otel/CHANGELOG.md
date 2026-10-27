@@ -10,6 +10,16 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+For taskmill v0.3.0 or newer.
+
+### Changed
+
+- **Breaking:** `taskmill.queue.capped` has the attribute
+  `taskmill.task.state`, as `taskmill.queue.tasks` has: it is 1 when the
+  count of the queue's tasks in that state stopped at its cap, so each count
+  says whether it is a lower bound. Dashboards and alerts that read it per
+  queue take the maximum over the states.
+
 ## [0.1.0] - 2026-10-27
 
 Initial release, for taskmill v0.2.0 or newer.

@@ -88,17 +88,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if c.addr == "" {
 		c.addr = "localhost:8080"
 	}
-	if c.prefix != "" && !strings.HasPrefix(c.prefix, "/") {
-		return c, fmt.Errorf("TASKMILL_UI_PREFIX: %q is not a path: start it with /", c.prefix)
-	}
 	c.frameAncestors = strings.FieldsFunc(getenv("TASKMILL_UI_FRAME_ANCESTORS"), func(r rune) bool {
 		return r == ',' || unicode.IsSpace(r)
 	})
-	for _, origin := range c.frameAncestors {
-		if strings.Contains(origin, ";") {
-			return c, fmt.Errorf("TASKMILL_UI_FRAME_ANCESTORS: %q holds a semicolon", origin)
-		}
-	}
 	if v := getenv("TASKMILL_UI_READ_ONLY"); v != "" {
 		readOnly, err := strconv.ParseBool(v)
 		if err != nil {
@@ -133,9 +125,13 @@ func run(getenv func(string) string, logger *slog.Logger) error {
 		return err
 	}
 
+	h, err := handler(client, cfg, logger)
+	if err != nil {
+		return err
+	}
 	server := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           handler(client, cfg, logger),
+		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
 		WriteTimeout:      30 * time.Second, // pages take at most 10 seconds to read
 		IdleTimeout:       2 * time.Minute,
@@ -174,9 +170,13 @@ func version() string {
 }
 
 // handler returns the dashboard for client, set up as cfg says.
-func handler(client *taskmill.Client, cfg config, logger *slog.Logger) http.Handler {
-	return ui.Handler(client, &ui.Config{
+func handler(client *taskmill.Client, cfg config, logger *slog.Logger) (http.Handler, error) {
+	h, err := ui.New(client, &ui.Config{
 		Prefix: cfg.prefix, ReadOnly: cfg.readOnly, BasicAuth: cfg.auth,
 		FrameAncestors: cfg.frameAncestors, Logger: logger,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("TASKMILL_UI_*: %w", err)
+	}
+	return h, nil
 }

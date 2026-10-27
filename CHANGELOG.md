@@ -7,6 +7,34 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `Client.UpdateQueue` and `Client.UpdateSettings` take a
+  function that changes the current settings, which they read and write back
+  in one transaction, instead of settings that replace them all. A setting
+  that your code leaves alone, or that a later version adds, keeps its value,
+  and concurrent updates no longer lose each other's changes. To migrate,
+  set the fields you mean to:
+  `client.UpdateQueue(ctx, name, func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })`.
+  A nil function is an `ErrInvalidArgument`; `UpdateSettings(ctx, nil)` no
+  longer resets retention.
+- **Breaking:** `Client.Groups` pages through every group, like `List`: it
+  returns a `*GroupsResult` with `Groups` and a `Next` cursor, which
+  `GroupParams.Cursor` takes, and `GroupParams.Halted` finds the halted
+  groups. Before, it returned at most 1,000 groups. To migrate, read
+  `res.Groups`, and follow `res.Next` for more. Its documentation now says
+  exactly what it lists: the groups with unfinished tasks or a dead task that
+  halts them, which `GroupInfo.Tasks` counts too.
+- **Breaking:** `QueueInfo.Counts` holds a `TaskCount` per state, as
+  `Client.Count` does, with its own `Capped` flag, and `QueueInfo.Capped` is
+  gone. To migrate, read `Counts[state].N`, and `Counts[state].Capped` for
+  whether that count stopped at its cap.
+- **Breaking:** `ui.New(client, cfg)` replaces `ui.Handler`, and returns an
+  error that wraps `taskmill.ErrInvalidArgument` instead of panicking on a
+  configuration it refuses: a nil client, a `Prefix` without a leading slash,
+  an empty `BasicAuth` username or password, or a bad `FrameAncestors` entry.
+  To migrate, check the error: `dashboard, err := ui.New(client, cfg)`.
+
 ## [0.2.0] - 2026-10-27
 
 ### Added

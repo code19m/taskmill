@@ -449,6 +449,23 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 	e.wantState(t, inB, taskmill.StateAvailable)
 }
 
+// A run whose context ends before it starts can go on all the same.
+func TestBulkActionsGoOnFromAnyStop(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.enqueue(t, sendEmail{}, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	all := taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
+	res, err := e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: all})
+	if !errors.Is(err, context.Canceled) || res.Next == "" {
+		t.Fatalf("canceled run: %+v, %v; want a cursor to go on", res, err)
+	}
+	if res, err = e.client.CancelMatching(t.Context(), &taskmill.BulkParams{Filter: all, Cursor: res.Next}); err != nil || res.Changed != 1 {
+		t.Fatalf("going on: %+v, %v; want the task canceled", res, err)
+	}
+}
+
 // A run that stops early goes on, in the next run, at the first task it
 // skipped: a FIFO group that it left comes back in order.
 func TestRetryGoesOnInGroupOrder(t *testing.T) {

@@ -131,8 +131,11 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	if states == nil {
 		states = deleteStates
 	}
-	m, err := c.bulk(ctx, &BulkParams{Filter: *filter}, states)
+	m, err := checkBulk(&BulkParams{Filter: *filter}, states)
 	if err != nil {
+		return 0, err
+	}
+	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
 		return 0, err
 	}
 	args := []any{m.queues, m.kinds, m.groups, m.states, after, m.last, m.left.queues, m.left.groups}

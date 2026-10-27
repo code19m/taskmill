@@ -508,7 +508,7 @@ func TestWorkerConcurrency(t *testing.T) {
 func TestQueueConcurrencyLimitAcrossWorkers(t *testing.T) {
 	t.Parallel()
 	e := newEnvWith(t, testdb.PoolSize(t, 16), nil)
-	e.setDefaultQueue(t, &taskmill.QueueSettings{MaxRunning: 1})
+	e.limitDefaultQueue(t, 1)
 	var active, peak atomic.Int32
 	hs := handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 		n := active.Add(1)

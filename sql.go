@@ -105,10 +105,12 @@ type statements struct {
 	pauseSchedule   string
 	runSchedule     string
 
+	addQueue         string
 	updateQueue      string
 	pauseQueue       string
 	listQueues       string
 	queueStats       string
+	lockSettings     string
 	updateSettings   string
 	listWorkers      string
 	listTasks        string
@@ -891,9 +893,11 @@ WHERE name = $1 AND next_run_at = $3 AND paused_at IS NULL`),
 SELECT name, queue, kind, cron, timezone, next_run_at, last_run_at, paused_at IS NOT NULL
 FROM {s}.schedules ORDER BY name`),
 
-		updateQueue: q(`
-INSERT INTO {s}.queues AS q (name, max_running) VALUES ($1, $2)
-ON CONFLICT (name) DO UPDATE SET max_running = EXCLUDED.max_running, updated_at = now()`),
+		// addQueue creates queue $1's row if it has none, so that the row
+		// can be locked.
+		addQueue: q(`INSERT INTO {s}.queues (name) VALUES ($1) ON CONFLICT (name) DO NOTHING`),
+
+		updateQueue: q(`UPDATE {s}.queues SET max_running = $2, updated_at = now() WHERE name = $1`),
 
 		pauseQueue: q(`
 INSERT INTO {s}.queues AS q (name, paused_at) VALUES ($1, CASE WHEN $2 THEN now() END)
@@ -921,6 +925,12 @@ ORDER BY n.name`),
 SELECT queue, state::text, tasks, capped, refreshed_at,
        greatest(0, (extract(epoch FROM now() - oldest_due_at) * 1000000)::bigint)
 FROM {s}.queue_stats`),
+
+		// lockSettings locks the settings and reads their retention periods in
+		// microseconds, which updateSettings writes back.
+		lockSettings: q(`
+SELECT (extract(epoch FROM history_retention) * 1000000)::bigint, (extract(epoch FROM dead_retention) * 1000000)::bigint
+FROM {s}.settings FOR UPDATE`),
 
 		updateSettings: q(`
 UPDATE {s}.settings
@@ -956,12 +966,16 @@ SELECT ` + taskColumns + ` FROM (
        created_at, run_at, attempted_at, finalized_at)
 ORDER BY id DESC LIMIT $5`),
 
-		// listGroups reads FIFO groups in the order of the primary key, so a
-		// page with no search reads only that many rows of it.
+		// listGroups reads a page of FIFO groups in the order of the primary
+		// key, after group ($5, $6) where the last page ended, so a page with
+		// no search reads only that many rows of it. Halted groups only ($4)
+		// read the index of halted groups.
 		listGroups: q(`
 SELECT queue, group_key, tasks, coalesce(halted_task_id, 0) FROM {s}.groups
 WHERE tasks > 0 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
   AND ($2 = '' OR strpos(lower(group_key), lower($2)) > 0)
+  AND (NOT $4 OR halted_task_id IS NOT NULL)
+  AND (queue, group_key) > ($5, $6)
 ORDER BY queue, group_key
 LIMIT $3`),
 

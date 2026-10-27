@@ -345,11 +345,13 @@ one process. To limit a queue across all workers, for example to protect a
 rate-limited API, set `MaxRunning`:
 
 ```go
-err := client.UpdateQueue(ctx, "partner-api", &taskmill.QueueSettings{MaxRunning: 4})
+err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
 ```
 
-`UpdateQueue` replaces the queue's settings: a zero `MaxRunning`, or nil
-settings, removes the limit. Workers apply the change within 10 seconds.
+`UpdateQueue` passes the queue's current settings to your function, and
+saves what it changes, in one transaction, so the settings you leave alone,
+or that a later version adds, keep their values. A zero `MaxRunning` removes
+the limit. Workers apply the change within 10 seconds.
 
 ## Ordering and deduplication
 
@@ -373,9 +375,11 @@ _, err := client.Enqueue(ctx, PostLedgerEntry{...}, &taskmill.EnqueueOptions{Gro
   order you asked for. A canceled head does not halt its group.
 - Producers that enqueue into the same group wait for each other's
   transactions, so keep those transactions short.
-- `TaskFilter.GroupKeys`, in `ListParams.Filter`, lists the tasks of chosen groups, and
-  `Client.Groups` finds the groups that have unfinished tasks and those that
-  are halted. The web interface links each task to its group.
+- `TaskFilter.GroupKeys`, in `ListParams.Filter`, lists the tasks of chosen
+  groups. `Client.Groups` pages through the groups that have a row, those
+  with unfinished tasks or halted by a dead task, ordered by queue and key;
+  `GroupParams.Halted` finds the halted ones. The web interface links each
+  task to its group.
 
 **Deduplication.** A `DedupeKey` admits at most one task: while its window
 lasts, enqueueing the same kind with the same key in the same queue creates
@@ -513,10 +517,15 @@ often. Use it in one of three ways:
 - **In your application,** behind your own authentication:
 
   ```go
-  mux.Handle("/taskmill/", requireAdmin(ui.Handler(client, &ui.Config{Prefix: "/taskmill"})))
+  dashboard, err := ui.New(client, &ui.Config{Prefix: "/taskmill"})
+  // ...
+  mux.Handle("/taskmill/", requireAdmin(dashboard))
   ```
 
   The handler strips `Prefix` itself; do not wrap it in `http.StripPrefix`.
+  `ui.New` returns an error that wraps `taskmill.ErrInvalidArgument` for a
+  configuration that would serve the dashboard wrongly, such as a `Prefix`
+  that does not start with a slash.
 - **On its own,** with the `taskmill-ui` command. It reads its settings from
   the environment, and asks for a password when `TASKMILL_UI_PASSWORD` is
   set:
@@ -575,15 +584,15 @@ own code and tools:
 | `Get` | Returns a task, unfinished, finished, or from history |
 | `List` | Pages through tasks by queues, states, kinds, and FIFO groups, newest first |
 | `Count` | How many tasks match a `TaskFilter`, the filter of `List`: in each state, and how many each bulk action would change; each count stops at 10,000 tasks a state, and says so |
-| `Groups` | The FIFO groups that have unfinished tasks, which of them are halted, and by which task |
+| `Groups` | Pages through the FIFO groups: those with unfinished tasks or a dead task that halts them, and by which task |
 | `Cancel`, `CancelTx` | Cancels a waiting task, or asks a running task's worker to stop it |
 | `Retry` | Runs a dead or canceled task again, with fresh attempts |
 | `Delete` | Deletes a task that is not running |
 | `CancelMatching`, `RetryMatching`, `DeleteMatching` | The same for every task that matches a `TaskFilter`, in batches; they say how many tasks they changed and skipped |
 | `Queues` | Every queue with its settings, workers, and task counts per state |
-| `UpdateQueue`, `PauseQueue`, `ResumeQueue` | Change a queue's installation-wide settings |
+| `UpdateQueue`, `PauseQueue`, `ResumeQueue` | Change a queue's installation-wide settings: `UpdateQueue` changes the current settings with your function |
 | `Schedules`, `PauseSchedule`, `ResumeSchedule`, `RunSchedule` | List schedules, pause and resume them, and run one now |
-| `Settings`, `UpdateSettings` | Retention of history, and of dead and canceled tasks |
+| `Settings`, `UpdateSettings` | Retention of history, and of dead and canceled tasks: `UpdateSettings` changes the current settings with your function |
 | `Workers` | The running workers, the queues and kinds they serve, and which one is the maintainer |
 | `Activity` | Task counts and ended attempts per minute, for the last day |
 
@@ -667,7 +676,9 @@ forwards a path per service to it, behind its own login:
 
 ```go
 // In the orders service:
-mux.Handle("/admin/jobs/orders/", ui.Handler(client, &ui.Config{Prefix: "/admin/jobs/orders"}))
+dashboard, err := ui.New(client, &ui.Config{Prefix: "/admin/jobs/orders"})
+// ...
+mux.Handle("/admin/jobs/orders/", dashboard)
 
 // In the admin application:
 orders := httputil.NewSingleHostReverseProxy(ordersURL) // such as http://orders.internal:9090
@@ -690,8 +701,10 @@ mux.Handle("/admin/jobs/orders/", requireAdmin(orders))
 people act and others only look, mount both and pick one per request:
 
 ```go
-operate := ui.Handler(client, &ui.Config{Prefix: "/admin/jobs"})
-view := ui.Handler(client, &ui.Config{Prefix: "/admin/jobs", ReadOnly: true})
+operate, err := ui.New(client, &ui.Config{Prefix: "/admin/jobs"})
+// ...
+view, err := ui.New(client, &ui.Config{Prefix: "/admin/jobs", ReadOnly: true})
+// ...
 mux.Handle("/admin/jobs/", requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
     if canOperate(r) {
         operate.ServeHTTP(w, r)
@@ -720,7 +733,7 @@ func (h withUser) Handle(ctx context.Context, r slog.Record) error {
     return h.Handler.Handle(ctx, r)
 }
 
-handler := ui.Handler(client, &ui.Config{Logger: slog.New(withUser{logger.Handler()})})
+handler, err := ui.New(client, &ui.Config{Logger: slog.New(withUser{logger.Handler()})})
 ```
 
 When the admin application forwards, every action passes through it as a
@@ -775,7 +788,7 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
 | Histogram | `messaging.client.operation.duration` | How long enqueue calls take. |
 | Histogram | `messaging.process.duration` | How long attempts take. |
 | Gauge | `taskmill.queue.tasks` | Tasks per queue and state, up to the caps below. |
-| Gauge | `taskmill.queue.capped` | 1 when a count of the queue stopped at its cap. |
+| Gauge | `taskmill.queue.capped` | 1 when the count of the queue's tasks in a state stopped at its cap. |
 | Gauge | `taskmill.queue.lag` | How long each queue's oldest due task has waited. Alert on it for backlogs. |
 | Gauge | `taskmill.stats.age` | How long ago the maintainer last counted. Alert when it passes a minute: no maintainer runs. |
 
@@ -839,8 +852,8 @@ it succeeds, and the error is logged.
 **Queue depth** comes from `Client.Queues`, whose counts the maintainer
 refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
 backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
-and retryable tasks across all queues. `QueueInfo.Capped` means a count hit
-its cap and is a lower bound. `QueueInfo.Lag` is how long the queue's oldest
+and retryable tasks across all queues. Each count in `QueueInfo.Counts` says
+whether it hit its cap, `TaskCount.Capped`, and so is a lower bound. `QueueInfo.Lag` is how long the queue's oldest
 due task has waited since its run time: an available task, or a scheduled or
 retryable one whose time has come. The maintainer finds that task when it
 counts, and `Client.Queues` measures its age by the database's clock, so lag

@@ -4,9 +4,11 @@ import (
 	"cmp"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -43,10 +45,9 @@ type QueueInfo struct {
 
 	// Counts holds the number of tasks per state, except completed tasks.
 	// Counting stops at 10,000 tasks per state, and at 100,000 scheduled
-	// and retryable tasks across all queues; Capped reports that a count
-	// stopped early and is a lower bound.
-	Counts map[State]int64
-	Capped bool
+	// and retryable tasks across all queues; a count's Capped reports that
+	// it stopped early and is a lower bound.
+	Counts map[State]TaskCount
 
 	// RefreshedAt is when the maintainer last counted the queue: zero until
 	// it first does. It stops moving when no maintainer runs.
@@ -108,22 +109,56 @@ type ListResult struct {
 	Next string
 }
 
-// UpdateQueue sets a queue's installation-wide settings for every worker, and
-// creates the queue if needed. Passing nil, or a zero MaxRunning, removes the
-// limit. Workers apply the change within 10 seconds, and at once if they
-// receive notifications.
-func (c *Client) UpdateQueue(ctx context.Context, name string, settings *QueueSettings) error {
-	if settings == nil {
-		settings = &QueueSettings{}
+// UpdateQueue changes a queue's installation-wide settings for every worker,
+// and creates the queue if needed. update gets the current settings and
+// changes the ones it means to, so that settings it does not know of, such
+// as those of a later version, keep their values. Concurrent updates of a
+// queue apply one after the other: none loses another's change. Workers
+// apply the change within 10 seconds, and at once if they receive
+// notifications.
+//
+//	err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
+func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*QueueSettings)) error {
+	if err := checkName("queue", name, maxNameLength); err != nil {
+		return err
 	}
-	if settings.MaxRunning < 0 {
-		return invalidArgument("MaxRunning must not be negative")
+	if update == nil {
+		return invalidArgument("update is nil")
 	}
-	var maxRunning *int
-	if settings.MaxRunning > 0 {
-		maxRunning = &settings.MaxRunning
+	err := pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, c.sql.addQueue, name); err != nil {
+			return err
+		}
+		var limit *int
+		if err := tx.QueryRow(ctx, c.sql.lockQueue, name).Scan(&limit); err != nil {
+			return err
+		}
+		var s QueueSettings
+		if limit != nil {
+			s.MaxRunning = *limit
+		}
+		update(&s)
+		switch {
+		case s.MaxRunning < 0:
+			return invalidArgument("MaxRunning must not be negative")
+		case s.MaxRunning == 0:
+			limit = nil
+		default:
+			limit = &s.MaxRunning
+		}
+		if _, err := tx.Exec(ctx, c.sql.updateQueue, name, limit); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, notifySQL, c.schema, notifyQueue+"|"+name)
+		return err
+	})
+	if errors.Is(err, ErrInvalidArgument) {
+		return err
 	}
-	return c.changeQueue(ctx, name, c.sql.updateQueue, maxRunning)
+	if err != nil {
+		return fmt.Errorf("taskmill: update queue %q: %w", name, err)
+	}
+	return nil
 }
 
 // PauseQueue stops workers from fetching the queue's tasks. Tasks already
@@ -171,7 +206,7 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 			r.Close()
 			return nil, fmt.Errorf("taskmill: list queues: %w", err)
 		}
-		q.Counts = map[State]int64{}
+		q.Counts = map[State]TaskCount{}
 		index[q.Name] = len(out)
 		out = append(out, q)
 	}
@@ -196,8 +231,7 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 		}
 		if i, ok := index[name]; ok {
 			q := &out[i]
-			q.Counts[State(state)] = n
-			q.Capped = q.Capped || capped
+			q.Counts[State(state)] = TaskCount{N: n, Capped: capped}
 			q.RefreshedAt = at
 			q.Lag = max(q.Lag, time.Duration(lag)*time.Microsecond)
 		}
@@ -220,18 +254,39 @@ func (c *Client) Settings(ctx context.Context) (*Settings, error) {
 	}, nil
 }
 
-// UpdateSettings changes the installation-wide settings. Zero fields reset
-// to their defaults.
-func (c *Client) UpdateSettings(ctx context.Context, settings *Settings) error {
-	if settings == nil {
-		settings = &Settings{}
+// UpdateSettings changes the installation-wide settings. update gets the
+// current settings and changes the ones it means to, so that settings it
+// does not know of, such as those of a later version, keep their values. A
+// setting changed to zero goes back to its default. Concurrent updates apply
+// one after the other: none loses another's change.
+//
+//	err := client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention = 48 * time.Hour })
+func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) error {
+	if update == nil {
+		return invalidArgument("update is nil")
 	}
-	history := cmp.Or(settings.HistoryRetention, defaultHistoryRetention)
-	dead := cmp.Or(settings.DeadRetention, defaultDeadRetention)
-	if history < minRetention || dead < minRetention {
-		return invalidArgument("retention periods must be at least %s", minRetention)
+	err := pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
+		var history, dead int64
+		if err := tx.QueryRow(ctx, c.sql.lockSettings).Scan(&history, &dead); err != nil {
+			return err
+		}
+		s := Settings{
+			HistoryRetention: time.Duration(history) * time.Microsecond,
+			DeadRetention:    time.Duration(dead) * time.Microsecond,
+		}
+		update(&s)
+		s.HistoryRetention = cmp.Or(s.HistoryRetention, defaultHistoryRetention)
+		s.DeadRetention = cmp.Or(s.DeadRetention, defaultDeadRetention)
+		if s.HistoryRetention < minRetention || s.DeadRetention < minRetention {
+			return invalidArgument("retention periods must be at least %s", minRetention)
+		}
+		_, err := tx.Exec(ctx, c.sql.updateSettings, s.HistoryRetention.Microseconds(), s.DeadRetention.Microseconds())
+		return err
+	})
+	if errors.Is(err, ErrInvalidArgument) {
+		return err
 	}
-	if _, err := c.pool.Exec(ctx, c.sql.updateSettings, history.Microseconds(), dead.Microseconds()); err != nil {
+	if err != nil {
 		return fmt.Errorf("taskmill: update settings: %w", err)
 	}
 	return nil
@@ -324,7 +379,8 @@ func checkFilter(what string, values []string, maxLen int) ([]string, error) {
 	return out, nil
 }
 
-// GroupParams selects the FIFO groups that [Client.Groups] returns.
+// GroupParams selects and pages the FIFO groups that [Client.Groups]
+// returns.
 type GroupParams struct {
 	// Queues limits the result to groups of these queues. Empty means all
 	// queues.
@@ -334,23 +390,45 @@ type GroupParams struct {
 	// case. Empty means all groups.
 	Search string
 
-	// Limit is the most groups returned. Default: 100. Maximum: 1,000.
+	// Halted limits the result to the groups that a dead task halts.
+	Halted bool
+
+	// Limit is the page size. Default: 100. Maximum: 1,000.
 	Limit int
+
+	// Cursor continues from a previous page's [GroupsResult.Next].
+	Cursor string
 }
 
-// GroupInfo is a FIFO group that has unfinished tasks.
+// GroupsResult is one page of FIFO groups, ordered by queue and key.
+type GroupsResult struct {
+	Groups []GroupInfo
+
+	// Next is the cursor for the next page, or empty on the last page.
+	Next string
+}
+
+// GroupInfo is a FIFO group that has a row: one that has unfinished tasks,
+// or that a dead task halts.
 type GroupInfo struct {
 	Queue string
 	Key   string
-	Tasks int // unfinished tasks in the group
+
+	// Tasks is how many tasks the group counts: its unfinished tasks, and
+	// the dead task that halts it, if any. A group halted by its only task
+	// counts 1.
+	Tasks int
 
 	// HaltedBy is the dead task that halts the group, or 0 if it runs.
 	HaltedBy int64
 }
 
-// Groups returns the FIFO groups that have unfinished tasks, ordered by
-// queue and key. Like [Client.List], the query is canceled after 5 seconds.
-func (c *Client) Groups(ctx context.Context, params *GroupParams) ([]GroupInfo, error) {
+// Groups returns the FIFO groups that have unfinished tasks or a dead task
+// that halts them, one page at a time, ordered by queue and key. Like
+// [Client.List], each page's query is canceled after 5 seconds; a search
+// that matches few of very many groups can reach that limit and return an
+// error.
+func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult, error) {
 	p := GroupParams{}
 	if params != nil {
 		p = *params
@@ -370,16 +448,27 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) ([]GroupInfo, 
 			return nil, err
 		}
 	}
-	var out []GroupInfo
+	var afterQueue, afterKey string
+	if p.Cursor != "" {
+		if afterQueue, afterKey, err = decodeGroupCursor(p.Cursor); err != nil {
+			return nil, err
+		}
+	}
+	var out GroupsResult
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
 			return err
 		}
-		r, err := tx.Query(ctx, c.sql.listGroups, queues, p.Search, p.Limit)
+		// Custom plans see whether only halted groups are asked for, and so
+		// read their index.
+		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
+			return err
+		}
+		r, err := tx.Query(ctx, c.sql.listGroups, queues, p.Search, p.Limit+1, p.Halted, afterQueue, afterKey)
 		if err != nil {
 			return err
 		}
-		out, err = pgx.CollectRows(r, func(r pgx.CollectableRow) (GroupInfo, error) {
+		out.Groups, err = pgx.CollectRows(r, func(r pgx.CollectableRow) (GroupInfo, error) {
 			var g GroupInfo
 			err := r.Scan(&g.Queue, &g.Key, &g.Tasks, &g.HaltedBy)
 			return g, err
@@ -389,7 +478,26 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) ([]GroupInfo, 
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: list groups: %w", err)
 	}
-	return out, nil
+	if len(out.Groups) > p.Limit {
+		out.Groups = out.Groups[:p.Limit]
+		last := out.Groups[p.Limit-1]
+		out.Next = base64.RawURLEncoding.EncodeToString([]byte(last.Queue + "\x00" + last.Key))
+	}
+	return &out, nil
+}
+
+// decodeGroupCursor decodes the cursor of a page of groups into the queue
+// and key of the group that the page starts after.
+func decodeGroupCursor(cursor string) (queue, key string, err error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return "", "", invalidArgument("invalid cursor")
+	}
+	queue, key, ok := strings.Cut(string(raw), "\x00")
+	if !ok || checkName("queue", queue, maxNameLength) != nil || checkName("group key", key, maxGroupKeyLength) != nil {
+		return "", "", invalidArgument("invalid cursor")
+	}
+	return queue, key, nil
 }
 
 // listBounds validates a page size and decodes a cursor into the ID that

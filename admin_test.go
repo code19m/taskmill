@@ -2,6 +2,7 @@ package taskmill_test
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"slices"
 	"strings"
@@ -89,6 +90,10 @@ func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
 			},
 			"Groups queue":  func() error { _, err := e.client.Groups(ctx, &taskmill.GroupParams{Queues: []string{s}}); return err },
 			"Groups search": func() error { _, err := e.client.Groups(ctx, &taskmill.GroupParams{Search: s}); return err },
+			"Groups cursor": func() error {
+				_, err := e.client.Groups(ctx, &taskmill.GroupParams{Cursor: base64.RawURLEncoding.EncodeToString([]byte("q\x00" + s))})
+				return err
+			},
 			"Activity queue": func() error {
 				_, err := e.client.Activity(ctx, &taskmill.ActivityParams{Queues: []string{s}})
 				return err
@@ -107,22 +112,113 @@ func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
 func TestSettings(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	s, err := e.client.Settings(t.Context())
-	if err != nil {
+	ctx := t.Context()
+	want := func(history, dead time.Duration) {
+		t.Helper()
+		s, err := e.client.Settings(ctx)
+		if err != nil || s.HistoryRetention != history || s.DeadRetention != dead {
+			t.Fatalf("settings: %+v, %v; want history %s, dead %s", s, err, history, dead)
+		}
+	}
+	want(7*24*time.Hour, 30*24*time.Hour)
+	if err := e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention = 48 * time.Hour }); err != nil {
 		t.Fatal(err)
 	}
-	if s.HistoryRetention != 7*24*time.Hour || s.DeadRetention != 30*24*time.Hour {
-		t.Fatalf("defaults: %+v", s)
+	want(48*time.Hour, 30*24*time.Hour)
+	for _, update := range []func(*taskmill.Settings){nil, func(s *taskmill.Settings) { s.DeadRetention = time.Minute }} {
+		if err := e.client.UpdateSettings(ctx, update); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Fatalf("got %v, want ErrInvalidArgument", err)
+		}
 	}
-	if err := e.client.UpdateSettings(t.Context(), &taskmill.Settings{HistoryRetention: 48 * time.Hour}); err != nil {
+	want(48*time.Hour, 30*24*time.Hour)
+
+	// Concurrent updates apply one after the other: neither loses the
+	// other's change.
+	inOrder(t, e, "FROM {s}.settings FOR UPDATE",
+		func(held func()) error {
+			return e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { held(); s.DeadRetention = 10 * 24 * time.Hour })
+		},
+		func() error {
+			return e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention = 72 * time.Hour })
+		})
+	want(72*time.Hour, 10*24*time.Hour)
+
+	// A setting changed to zero goes back to its default.
+	if err := e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention = 0 }); err != nil {
 		t.Fatal(err)
 	}
-	if s, _ = e.client.Settings(t.Context()); s.HistoryRetention != 48*time.Hour || s.DeadRetention != 30*24*time.Hour {
-		t.Fatalf("after update: %+v", s)
+	want(7*24*time.Hour, 10*24*time.Hour)
+}
+
+func TestUpdateQueue(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	want := func(maxRunning int, paused bool) {
+		t.Helper()
+		queues, err := e.client.Queues(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		i := slices.IndexFunc(queues, func(q taskmill.QueueInfo) bool { return q.Name == "partner" })
+		if i < 0 || queues[i].Settings.MaxRunning != maxRunning || queues[i].Paused != paused {
+			t.Fatalf("queues: %+v; want partner with max %d, paused %v", queues, maxRunning, paused)
+		}
 	}
-	err = e.client.UpdateSettings(t.Context(), &taskmill.Settings{DeadRetention: time.Minute})
-	if !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("too short retention: got %v", err)
+	// It creates the queue, and keeps what update does not change.
+	if err := e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { s.MaxRunning = 3 }); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.client.PauseQueue(ctx, "partner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { s.MaxRunning++ }); err != nil {
+		t.Fatal(err)
+	}
+	want(4, true)
+	for _, update := range []func(*taskmill.QueueSettings){nil, func(s *taskmill.QueueSettings) { s.MaxRunning = -1 }} {
+		if err := e.client.UpdateQueue(ctx, "partner", update); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Fatalf("got %v, want ErrInvalidArgument", err)
+		}
+	}
+
+	// Concurrent updates apply one after the other.
+	increment := func(s *taskmill.QueueSettings) { s.MaxRunning++ }
+	inOrder(t, e, "FROM {s}.queues WHERE name = $1 FOR UPDATE",
+		func(held func()) error {
+			return e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { held(); increment(s) })
+		},
+		func() error { return e.client.UpdateQueue(ctx, "partner", increment) })
+	want(6, true)
+
+	// Zero removes the limit.
+	if err := e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { s.MaxRunning = 0 }); err != nil {
+		t.Fatal(err)
+	}
+	want(0, true)
+}
+
+// inOrder runs first, which calls held while it holds a row lock, then
+// second, which waits for that lock in a statement that contains fragment,
+// and fails the test unless both succeed.
+func inOrder(t *testing.T, e *env, fragment string, first func(held func()) error, second func() error) {
+	t.Helper()
+	locked, release := make(chan struct{}), make(chan struct{})
+	errs := make(chan error, 2)
+	go func() {
+		errs <- first(func() {
+			close(locked)
+			<-release
+		})
+	}()
+	<-locked
+	go func() { errs <- second() }()
+	e.waitBlocked(t, fragment)
+	close(release)
+	for range 2 {
+		if err := recv(t, errs, "an update"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -132,7 +228,7 @@ func TestQueuesAndWorkers(t *testing.T) {
 	for range 3 {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "backlog"})
 	}
-	if err := e.client.UpdateQueue(t.Context(), "limited", &taskmill.QueueSettings{MaxRunning: 2}); err != nil {
+	if err := e.client.UpdateQueue(t.Context(), "limited", func(s *taskmill.QueueSettings) { s.MaxRunning = 2 }); err != nil {
 		t.Fatal(err)
 	}
 	runWorker(t, e, &taskmill.WorkerConfig{
@@ -149,7 +245,7 @@ func TestQueuesAndWorkers(t *testing.T) {
 		for _, q := range queues {
 			byName[q.Name] = q
 		}
-		return byName["backlog"].Counts[taskmill.StateAvailable] == 3
+		return byName["backlog"].Counts[taskmill.StateAvailable].N == 3
 	})
 	if byName["mail"].Workers != 1 || byName["limited"].Settings.MaxRunning != 2 {
 		t.Fatalf("got %+v", byName)
@@ -347,7 +443,8 @@ func TestGroups(t *testing.T) {
 	for _, key := range []string{"Account-1", "account-2", "account-2", "order-9"} {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: key})
 	}
-	// A dead head halts its group, and the task behind it waits.
+	// A dead head halts its group, and the task behind it waits. A group
+	// halted by its only task is listed too.
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			return taskmill.Permanent(errors.New("rejected"))
@@ -356,31 +453,50 @@ func TestGroups(t *testing.T) {
 	})
 	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "other", GroupKey: "order-9"})
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "other", GroupKey: "order-9"})
+	solo := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "other", GroupKey: "solo"})
 	e.waitState(t, head, taskmill.StateDead)
+	e.waitState(t, solo, taskmill.StateDead)
 
+	all := []taskmill.GroupInfo{
+		{Queue: taskmill.DefaultQueue, Key: "Account-1", Tasks: 1},
+		{Queue: taskmill.DefaultQueue, Key: "account-2", Tasks: 2},
+		{Queue: taskmill.DefaultQueue, Key: "order-9", Tasks: 1},
+		{Queue: "other", Key: "order-9", Tasks: 2, HaltedBy: head},
+		{Queue: "other", Key: "solo", Tasks: 1, HaltedBy: solo},
+	}
 	for _, c := range []struct {
 		params taskmill.GroupParams
 		want   []taskmill.GroupInfo
 	}{
-		{taskmill.GroupParams{Search: "ACCOUNT"}, []taskmill.GroupInfo{
-			{Queue: taskmill.DefaultQueue, Key: "Account-1", Tasks: 1},
-			{Queue: taskmill.DefaultQueue, Key: "account-2", Tasks: 2},
-		}},
-		{taskmill.GroupParams{Queues: []string{"other"}}, []taskmill.GroupInfo{
-			{Queue: "other", Key: "order-9", Tasks: 2, HaltedBy: head},
-		}},
-		{taskmill.GroupParams{Limit: 1}, []taskmill.GroupInfo{{Queue: taskmill.DefaultQueue, Key: "Account-1", Tasks: 1}}},
+		{taskmill.GroupParams{}, all},
+		{taskmill.GroupParams{Search: "ACCOUNT"}, all[:2]},
+		{taskmill.GroupParams{Queues: []string{"other"}}, all[3:]},
+		{taskmill.GroupParams{Halted: true}, all[3:]},
+		{taskmill.GroupParams{Halted: true, Search: "solo"}, all[4:]},
+		// Pages of 2 go through every group, in order.
+		{taskmill.GroupParams{Limit: 2}, all},
 	} {
-		got, err := e.client.Groups(t.Context(), &c.params)
-		if err != nil {
-			t.Fatal(err)
+		var got []taskmill.GroupInfo
+		params := c.params
+		for {
+			page, err := e.client.Groups(t.Context(), &params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, page.Groups...)
+			if page.Next == "" {
+				break
+			}
+			params.Cursor = page.Next
 		}
 		if !slices.Equal(got, c.want) {
 			t.Fatalf("%+v: got %+v, want %+v", c.params, got, c.want)
 		}
 	}
-	if _, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Limit: -1}); !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("negative limit: got %v", err)
+	for _, params := range []taskmill.GroupParams{{Limit: -1}, {Cursor: "%%%"}, {Cursor: "b25seS1vbmU"}} { // "only-one"
+		if _, err := e.client.Groups(t.Context(), &params); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Fatalf("%+v: got %v, want ErrInvalidArgument", params, err)
+		}
 	}
 }
 

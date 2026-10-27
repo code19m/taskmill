@@ -59,7 +59,7 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 		return nil, fmt.Errorf("taskmill/otel: %w", err)
 	}
 	capped, err := in.meter.Int64ObservableGauge("taskmill.queue.capped",
-		metric.WithDescription("1 when a count of the queue stopped at its cap and is a lower bound."))
+		metric.WithDescription("1 when the count of the queue's tasks in the state stopped at its cap and is a lower bound."))
 	if err != nil {
 		return nil, fmt.Errorf("taskmill/otel: %w", err)
 	}
@@ -87,10 +87,10 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 			}
 			queue := metric.WithAttributes(semconv.MessagingDestinationName(q.Name))
 			for _, s := range observedStates {
-				o.ObserveInt64(tasks, q.Counts[s],
-					metric.WithAttributes(semconv.MessagingDestinationName(q.Name), stateKey.String(string(s))))
+				state := metric.WithAttributes(semconv.MessagingDestinationName(q.Name), stateKey.String(string(s)))
+				o.ObserveInt64(tasks, q.Counts[s].N, state)
+				o.ObserveInt64(capped, boolInt(q.Counts[s].Capped), state)
 			}
-			o.ObserveInt64(capped, boolInt(q.Capped), queue)
 			o.ObserveFloat64(lag, q.Lag.Seconds(), queue)
 		}
 		if !counted.IsZero() {
