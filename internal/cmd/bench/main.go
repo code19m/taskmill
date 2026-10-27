@@ -320,7 +320,7 @@ func benchFIFO(ctx context.Context, pool *pgxpool.Pool, n int) {
 	ob.AddRelay(&hs, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
 		published.Add(int64(len(ds)))
 		return make([]error, len(ds))
-	}))
+	}), nil)
 	relay := runUntil(ctx, c, &hs, outbox.Queue, 8, func() bool { return published.Load() >= int64(n) })
 
 	fmt.Println("## Ordering")

@@ -81,9 +81,9 @@ type Delivery struct {
 // Publisher sends deliveries to a broker. It returns one error per delivery,
 // in the same order: nil marks that delivery as published, an error retries
 // it later, and an error wrapped with [taskmill.Permanent] makes it dead at
-// once. A batch holds at most 100 deliveries, never two with the same topic
-// and key. Each call has 1 minute: then its context is canceled, and the
-// deliveries without a nil result are retried.
+// once. A batch holds at most [RelayOptions.BatchSize] deliveries, never two
+// with the same topic and key. Each call has [RelayOptions.Timeout]: then its
+// context is canceled, and the deliveries without a nil result are retried.
 type Publisher interface {
 	Publish(ctx context.Context, deliveries []Delivery) []error
 }
@@ -133,16 +133,30 @@ func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Messag
 	return err
 }
 
+// RelayOptions configure a relay. The zero value keeps the defaults.
+type RelayOptions struct {
+	// BatchSize is the most deliveries that one call of the publisher
+	// receives. Default: 100. Maximum: 1,000.
+	BatchSize int
+
+	// Timeout bounds each call of the publisher. Default: 1 minute.
+	Timeout time.Duration
+}
+
 // AddRelay registers the batch handler that publishes stored messages through
-// pub. A worker with no Queues set serves [Queue] for it. A nil pub is
-// reported by [taskmill.NewWorker].
-func (*Outbox) AddRelay(hs *taskmill.Handlers, pub Publisher) {
-	opts := &taskmill.HandlerOptions{Retry: relayRetry, DiscardCompleted: true}
+// pub. opts may be nil. A worker with no Queues set serves [Queue] for it.
+// [taskmill.NewWorker] reports a nil pub, or options out of range, as an
+// error that wraps [taskmill.ErrInvalidArgument].
+func (*Outbox) AddRelay(hs *taskmill.Handlers, pub Publisher, opts *RelayOptions) {
+	ho := &taskmill.HandlerOptions{Retry: relayRetry, DiscardCompleted: true}
+	if opts != nil {
+		ho.BatchSize, ho.Timeout = opts.BatchSize, opts.Timeout
+	}
 	if pub == nil {
-		taskmill.AddBatchHandler[message](hs, nil, opts)
+		taskmill.AddBatchHandler[message](hs, nil, ho)
 		return
 	}
-	taskmill.AddBatchHandler[message](hs, relay{pub: pub}, opts)
+	taskmill.AddBatchHandler[message](hs, relay{pub: pub}, ho)
 }
 
 // message is the stored form of a Message.

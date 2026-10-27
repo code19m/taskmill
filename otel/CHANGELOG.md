@@ -10,6 +10,11 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+### Changed
+
+- Requires taskmill v0.3.0, whose `outbox.Outbox.AddRelay` takes relay
+  options; the examples pass nil. This module's API is unchanged.
+
 ## [0.1.0] - 2026-10-27
 
 Initial release, for taskmill v0.2.0 or newer.
