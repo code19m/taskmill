@@ -29,10 +29,11 @@ const (
 )
 
 // maintainer does the installation-wide work of one elected worker. Its main
-// loop elects the leader, then wakes queues whose tasks wait, rescues expired
-// leases, and enqueues schedules once per interval. Due tasks are promoted in
-// a loop of their own, as they come due, and statistics and retention in
-// another, so that slow work in one never delays the others.
+// loop elects the leader, then rescues expired leases and enqueues schedules
+// once per interval. Queues whose tasks wait are woken in a loop of their
+// own, which is the heartbeat that workers count on, due tasks are promoted
+// in another, as they come due, and statistics and retention in a third, so
+// that slow work in one never delays the others.
 type maintainer struct {
 	w      *Worker
 	c      *Client
@@ -61,6 +62,7 @@ func newMaintainer(w *Worker) *maintainer {
 
 func (m *maintainer) run(ctx context.Context) {
 	var loops sync.WaitGroup
+	loops.Go(func() { m.wakeLoop(ctx) })
 	loops.Go(func() { m.promoteLoop(ctx) })
 	loops.Go(func() { m.housekeep(ctx) })
 	defer loops.Wait()
@@ -80,8 +82,7 @@ func (m *maintainer) run(ctx context.Context) {
 }
 
 // cycle renews or tries to take the leadership, and if this worker leads,
-// wakes queues whose tasks wait, rescues expired leases, and enqueues due
-// schedules.
+// rescues expired leases and enqueues due schedules.
 func (m *maintainer) cycle(ctx context.Context) {
 	if !m.leader.Load() && time.Since(m.lastElection) < m.w.timing.election {
 		return
@@ -90,9 +91,25 @@ func (m *maintainer) cycle(ctx context.Context) {
 	if !m.elect(ctx) {
 		return
 	}
-	m.wake(ctx)
 	m.rescue(ctx)
 	m.runSchedules(ctx)
+}
+
+// wakeLoop wakes the queues whose tasks wait, which sends the heartbeat, once
+// per interval while this worker leads.
+func (m *maintainer) wakeLoop(ctx context.Context) {
+	tick := time.NewTicker(m.w.timing.maintainer)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		if m.leader.Load() {
+			m.wake(ctx)
+		}
+	}
 }
 
 // promoteLoop promotes due tasks while this worker leads, as they come due.
@@ -153,7 +170,7 @@ func (m *maintainer) elect(ctx context.Context) bool {
 	if leader && !was {
 		// A term starts without the incidents of the last one, whose work
 		// may have failed after it ended.
-		for _, f := range []*failures{m.promotion, m.rescues, m.schedules, m.pruning, m.stats, m.retention} {
+		for _, f := range []*failures{m.promotion, m.waking, m.rescues, m.schedules, m.pruning, m.stats, m.retention} {
 			f.reset()
 		}
 	}
@@ -193,13 +210,14 @@ func (m *maintainer) promote(ctx context.Context) {
 }
 
 // wake notifies every queue that is not paused and whose next task waited
-// longer than a maintenance interval. A task can become available without a
-// notification that comes after it: the throttle's trailing notification can
-// come before the transactions that it stands for commit, and a producer can
-// crash before sending it. Idle queues poll rarely while notifications
-// arrive, so this finds such tasks within two intervals, with one statement
-// for the whole installation. A queue whose workers are all busy is woken
-// too, which changes nothing; a queue whose tasks start at once is not.
+// longer than a maintenance interval, and sends the heartbeat. A task can
+// become available without a notification that comes after it: the
+// throttle's trailing notification can come before the transactions that it
+// stands for commit, and a producer can crash before sending it. Idle queues
+// poll rarely while heartbeats arrive, so this finds such tasks within two
+// intervals, with one statement for the whole installation. A queue whose
+// workers are all busy is woken too, which changes nothing; a queue whose
+// tasks start at once is not.
 func (m *maintainer) wake(ctx context.Context) {
 	_, err := m.c.pool.Exec(ctx, m.c.sql.wakeQueues, m.c.schema, m.w.timing.maintainer.Microseconds())
 	m.waking.observe(ctx, err)

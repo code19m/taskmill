@@ -104,7 +104,10 @@ func (w *Worker) listenLoop(ctx context.Context) {
 // listenOnce listens on one connection until it breaks. It reports whether
 // it got as far as listening.
 func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
-	conn, err := w.connectListener(ctx)
+	// A network that drops packets would stall the connection for good.
+	startCtx, cancel := context.WithTimeout(ctx, listenTimeout)
+	defer cancel()
+	conn, err := w.connectListener(startCtx)
 	if err != nil {
 		return false, err
 	}
@@ -113,7 +116,7 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 		defer cancel()
 		_ = conn.Close(closeCtx)
 	}()
-	if _, err := conn.Exec(ctx, "LISTEN "+w.client.schema); err != nil {
+	if _, err := conn.Exec(startCtx, "LISTEN "+w.client.schema); err != nil {
 		return false, err
 	}
 	w.listenFailures.observe(ctx, nil)
@@ -121,45 +124,65 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 	for _, q := range w.queues {
 		q.nudge()
 	}
-	// Whether notifications reach the worker shows only once one arrives,
-	// and stops being known when the connection ends.
-	probeCtx, stopProbes := context.WithCancel(ctx)
-	var probes sync.WaitGroup
-	probes.Go(func() { w.probeLoop(probeCtx) })
+	// The connection is replaced when the maintainer's heartbeats stop on
+	// it, since it may have died without a word.
+	connCtx, replace := context.WithCancel(ctx)
+	beats := make(chan struct{}, 1)
+	var watch sync.WaitGroup
+	watch.Go(func() { w.watchHeartbeats(connCtx, beats, replace) })
 	defer func() {
-		stopProbes()
-		probes.Wait()
+		replace()
+		watch.Wait()
 		w.stopNotifying()
 	}()
 	for {
-		n, err := conn.WaitForNotification(ctx)
-		if err != nil {
+		n, err := conn.WaitForNotification(connCtx)
+		switch {
+		case err == nil:
+			w.handleNotification(ctx, n.Payload, beats)
+		case ctx.Err() == nil && connCtx.Err() != nil:
+			return true, nil // replaced: watchHeartbeats said why
+		default:
 			return true, err
 		}
-		w.handleNotification(ctx, n.Payload)
 	}
 }
 
-// probeLoop sends this worker a notification at once, and then every
-// idlePoll, and finds that notifications do not arrive if one has not
-// arrived by the time of the next. They do not through a transaction-pooling
-// proxy, from a listener on another database, or on a connection that broke
-// without a word.
-func (w *Worker) probeLoop(ctx context.Context) {
-	tick := time.NewTicker(w.timing.idlePoll)
-	defer tick.Stop()
-	for first := true; ; first = false {
-		w.probed.Store(false)
-		sendCtx, cancel := context.WithTimeout(ctx, cleanupTimeout)
-		_, _ = w.client.pool.Exec(sendCtx, notifySQL, w.client.schema, notifyProbe+"|"+w.id) // a probe lost to an error counts as missing
-		cancel()
+// heartbeatsMissed is how many of the maintainer's heartbeats, one per
+// maintenance interval, may go missing before a worker stops counting on
+// notifications. More than one, so that a slow wake does not count.
+const heartbeatsMissed = 3
+
+// watchHeartbeats watches the maintainer's heartbeats on one connection.
+// While they arrive, notifications reach the worker, and the maintainer
+// wakes the queues whose notifications were lost, so idle queues poll only
+// every idlePoll. Without them, they poll every PollInterval: no maintainer
+// may run, an older one may, or notifications do not arrive. If heartbeats
+// stop after they arrived, it calls replace too, since the connection may
+// have died without a word.
+func (w *Worker) watchHeartbeats(ctx context.Context, beats <-chan struct{}, replace context.CancelFunc) {
+	timeout := heartbeatsMissed * w.timing.maintainer
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
-		}
-		if !w.probed.Load() && (w.stopNotifying() || first) {
-			w.logger.LogAttrs(ctx, slog.LevelWarn, "notifications do not arrive; idle queues poll every PollInterval")
+		case <-beats:
+			timer.Reset(timeout)
+			if !w.notifying.Swap(true) {
+				w.silent.Store(false)
+				w.logger.LogAttrs(ctx, slog.LevelInfo, "maintainer heartbeats arrive; idle queues poll once a minute")
+			}
+		case <-timer.C:
+			timer.Reset(timeout)
+			if !w.silent.Swap(true) {
+				w.logger.LogAttrs(ctx, slog.LevelWarn, "maintainer heartbeats do not arrive; idle queues poll every PollInterval")
+			}
+			if w.stopNotifying() {
+				replace()
+				return
+			}
 		}
 	}
 }
@@ -189,7 +212,9 @@ func (w *Worker) connectListener(ctx context.Context) (conn *pgx.Conn, err error
 	return pgx.ConnectConfig(ctx, w.listen)
 }
 
-func (w *Worker) handleNotification(ctx context.Context, payload string) {
+// handleNotification acts on a notification, and passes the maintainer's
+// heartbeats to beats.
+func (w *Worker) handleNotification(ctx context.Context, payload string, beats chan<- struct{}) {
 	kind, arg, ok := strings.Cut(payload, "|")
 	if !ok {
 		return
@@ -214,13 +239,10 @@ func (w *Worker) handleNotification(ctx context.Context, payload string) {
 		if w.queues[arg] != nil {
 			w.refreshQueueSettings(ctx)
 		}
-	case notifyProbe:
-		if arg != w.id {
-			return
-		}
-		w.probed.Store(true)
-		if !w.notifying.Swap(true) {
-			w.logger.LogAttrs(ctx, slog.LevelInfo, "notifications arrive; idle queues poll once a minute")
+	case notifyHeartbeat:
+		select {
+		case beats <- struct{}{}:
+		default: // the watcher has not taken the last one yet
 		}
 	}
 }

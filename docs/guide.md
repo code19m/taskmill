@@ -317,15 +317,19 @@ takes part in maintenance.
 `Run` blocks until its context is canceled. It returns an error only if the
 worker cannot start. A worker fetches from each queue up to its free slots,
 in priority, run time, and enqueue order. PostgreSQL notifications wake it as
-soon as tasks are enqueued. Every minute, a worker sends itself a
-notification to check that they arrive. While they do, an idle queue polls
-only once a minute: every second, the maintainer also notifies each queue
-whose next task has waited longer than a second, so a task whose
-notification came before its transaction committed, or never came, waits
-two seconds at most. While
-they do not, it polls every `PollInterval`, one
-second by default: until the first check, while the notification connection
-is down, and through a transaction-pooling proxy without `ListenConfig`. A
+soon as tasks are enqueued. Every second, the maintainer also notifies each
+queue whose next task has waited longer than a second, for notifications
+that came before their transaction committed or never came, and sends a
+heartbeat notification with it. While a worker hears these heartbeats, an
+idle queue polls only once a minute. A worker that hears none for 3 seconds
+polls every `PollInterval`, one second by default, starting at once, and
+replaces its notification connection if heartbeats had arrived on it, since
+the connection may have died without a word. That happens before the first
+heartbeat, while no maintainer runs (one that crashed holds the role until
+its 10-second lease runs out), while the maintainer runs an older version
+during an upgrade, and through a transaction-pooling proxy without
+`ListenConfig`. Either way, a task whose notification came too early or was
+lost starts within about 3 seconds, or `PollInterval` if that is longer. A
 queue whose installation-wide concurrency limit held tasks back polls every
 `PollInterval` too, since no notification says when another worker's task of
 it ends. So idle workers cost the database little, however many queues and
@@ -919,7 +923,7 @@ attribute names it:
 | `listen for notifications` | Keeps the notification connection; idle queues poll every `PollInterval` meanwhile | Backoff, 1 to 30 seconds |
 | `elect maintainer` | Takes or keeps the maintainer role | Every 1 to 2 seconds |
 | `promote due tasks` | Makes scheduled and retryable tasks available | As they come due |
-| `wake queues` | Notifies the queues whose tasks wait | Every second |
+| `wake queues` | Notifies the queues whose tasks wait, and sends the heartbeat | Every second |
 | `rescue expired leases` | Fails attempts whose workers lost their leases | Every second |
 | `run schedules` | Enqueues due schedule runs | Every second |
 | `refresh statistics` | Counts tasks for `Client.Queues` | Every 10 seconds |
@@ -958,8 +962,8 @@ The last seven run only on the maintainer.
 | `complete tasks failed; they are rescued when their leases expire` | Warn | `tasks` successful attempts could not be recorded; they run again. |
 | `task history has no partition for today; completed tasks skip history` | Error | The role that runs workers must own the taskmill tables; see [Database privileges](#running-in-production). |
 | `notifications disabled; polling only` | Error | `ListenConfig` was not created with `pgx.ParseConfig`. Fix it; until then the worker polls. |
-| `notifications arrive; idle queues poll once a minute` | Info | The worker's check found that notifications reach it, at start or after they did not. |
-| `notifications do not arrive; idle queues poll every PollInterval` | Warn | The worker's check notification did not come back within a minute. Through a transaction-pooling proxy, point `ListenConfig` at a direct connection; check also that it reaches the primary of the same database. The worker keeps checking. |
+| `maintainer heartbeats arrive; idle queues poll once a minute` | Info | The maintainer's heartbeats reach the worker, at start or after they did not. |
+| `maintainer heartbeats do not arrive; idle queues poll every PollInterval` | Warn | None came for 3 seconds. No maintainer runs: every worker has `NoMaintainer`, or the last one stopped and its lease has not run out yet. Or the maintainer runs an older version, during an upgrade. Or notifications do not reach the worker: through a transaction-pooling proxy, point `ListenConfig` at a direct connection to the primary of the same database. If heartbeats had arrived, the worker also replaces its notification connection. It logs this again only after heartbeats arrived again. |
 | `notification failed` | Warn | A wake-up for `queue` was not sent; its workers find the tasks at their next poll. |
 | `enqueue middleware failed after the tasks were enqueued` | Warn | An enqueue middleware returned `error` after the `tasks` committed, so the enqueue succeeded, and the middleware's work, such as a span, may be missing. Fix the middleware. |
 | `fifo group missing` | Error | A task's FIFO group has no row, which should not happen. Please report it. |
@@ -1084,7 +1088,8 @@ statements, so use PgBouncer 1.21 or newer with `max_prepared_statements`
 set, or set pgx's `DefaultQueryExecMode` to `QueryExecModeExec`. Point
 `WorkerConfig.ListenConfig` at a direct connection, created with
 `pgx.ParseConfig`. Without it, notifications do not reach the worker, which
-finds that out within a minute and polls every `PollInterval`. A nightly CI run
+finds that out when no maintainer heartbeat comes for 3 seconds, and polls
+every `PollInterval`. A nightly CI run
 passes every test through PgBouncer this way (target F8 in
 [Benchmarks](benchmarks.md#reliability-under-faults)).
 
@@ -1514,7 +1519,7 @@ read those entries for every release you skip.
 | `HandlerOptions.BatchSize` | 100 | 1,000 |
 | `QueueOptions.Concurrency` | 10 slots per queue and worker | — |
 | `LeaseDuration` | 30 seconds; heartbeats every 10 seconds | At least 100 ms |
-| `PollInterval` | 1 second, while notifications do not arrive; once a minute while they do | — |
+| `PollInterval` | 1 second, while the maintainer's heartbeats do not arrive; once a minute while they do | — |
 | `DrainTimeout` | 20 seconds, then 5 seconds for handlers to return | — |
 | Unknown kind | Snoozed 1 minute at a time; dead after 1 hour | — |
 | Maintainer takeover | Within about 12 seconds | — |

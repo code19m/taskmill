@@ -199,11 +199,18 @@ func TestMaintainerWakesQueuesWhoseTasksWait(t *testing.T) {
 	if _, err := conn.Exec(ctx, "LISTEN "+e.schema); err != nil {
 		t.Fatal(err)
 	}
-	taskmill.WakeQueues(ctx, newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()}))
+	// Tasks that waited longer than a maintenance interval wake their queue.
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()})
+	timing := testTiming
+	timing.Maintainer = 10 * time.Second
+	taskmill.SetTiming(w, timing)
+	taskmill.WakeQueues(ctx, w)
 
-	n, err := conn.WaitForNotification(ctx)
-	if err != nil || n.Payload != "a|waiting" {
-		t.Fatalf("got notification %v, %v; want a|waiting", n, err)
+	for _, want := range []string{"a|waiting", "h|"} {
+		n, err := conn.WaitForNotification(ctx)
+		if err != nil || n.Payload != want {
+			t.Fatalf("got notification %v, %v; want %s", n, err, want)
+		}
 	}
 	quiet, stop := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer stop()

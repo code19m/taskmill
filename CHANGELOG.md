@@ -22,21 +22,21 @@ All notable changes to taskmill are recorded here. The format follows
   values out of range make `NewWorker` fail with `ErrInvalidArgument`. To
   migrate, pass nil: `ob.AddRelay(&handlers, publisher, nil)`.
 - An idle queue polls once a minute instead of every `PollInterval` while
-  notifications reach its worker, which checks that once a minute by sending
-  itself one. 50 idle worker processes serving 100 queues sent the database
-  about 5,600 transactions a second, and now send about 30. Queues still poll
-  every `PollInterval` until the first check, while the notification
-  connection is down, through a transaction-pooling proxy without
-  `ListenConfig`, and while their installation-wide concurrency limit holds
-  tasks back. Every second, the maintainer now notifies each queue whose next
-  task has waited longer than a second, so a task whose notification came
-  before its transaction committed, or never came, waits two seconds at
-  most. A worker logs when notifications start or stop arriving.
-
-### Fixed
-
-- The module no longer includes a 20 MB binary of the example shop, which
-  v0.2.0 shipped by mistake and every download of it carried.
+  the maintainer's heartbeats reach its worker. Every second, the maintainer
+  notifies each queue whose next task has waited longer than a second, which
+  finds tasks whose notification came before their transaction committed or
+  never came, and sends a heartbeat with it. A worker that hears none for 3
+  seconds polls every `PollInterval` again, starting at once, and replaces
+  its notification connection if heartbeats had arrived on it: no maintainer
+  may run, an older one may during an upgrade, notifications may not reach
+  the worker, or the connection may have died without a word. Either way,
+  such a task starts within about 3 seconds, or `PollInterval` if that is
+  longer. A queue whose installation-wide concurrency limit holds tasks back
+  still polls every `PollInterval`. 50 idle worker processes serving 100
+  queues sent the database about 5,600 transactions a second, and now send
+  about 150 on average, and 400 in the busiest 10 seconds. A worker logs
+  when heartbeats start or stop arriving, and gives up opening its
+  notification connection after 10 seconds, to try again.
 
 ## [0.2.0] - 2026-10-27
 

@@ -31,6 +31,7 @@ const (
 	recordRetryFirst   = 100 * time.Millisecond // first wait before trying to record a result again
 	recordRetryMax     = 2 * time.Second        // longest wait between those tries
 	cleanupTimeout     = 5 * time.Second        // bound on best-effort cleanup, such as closing a connection
+	listenTimeout      = 10 * time.Second       // bound on opening the notification connection and listening
 	maxFetch           = 1000                   // most tasks one fetch leases
 	completionBatch    = 500                    // most completions recorded in one statement
 	completionLinger   = 2 * time.Millisecond   // wait for more completions to batch with
@@ -57,7 +58,7 @@ type timing struct {
 	reconnectMin    time.Duration // first wait before reconnecting the listener
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
 	failureReport   time.Duration // how often an operation that keeps failing logs, at most
-	idlePoll        time.Duration // how often idle queues poll while notifications arrive
+	idlePoll        time.Duration // how often idle queues poll while the maintainer's heartbeats arrive
 }
 
 var defaultTiming = timing{
@@ -108,8 +109,8 @@ type Worker struct {
 	running   atomic.Bool
 	reached   atomic.Pointer[time.Time] // when Run last reached the database; nil while it does not run
 	released  atomic.Int64              // tasks given back during the current Run's shutdown
-	notifying atomic.Bool               // notifications reach the worker, as its last probe showed
-	probed    atomic.Bool               // the probe sent last has arrived
+	notifying atomic.Bool               // the maintainer's heartbeats arrive, so notifications reach the worker
+	silent    atomic.Bool               // the worker logged that heartbeats do not arrive, and none has since
 	tally     tally                     // ended attempts not yet added to the activity
 	recording sync.WaitGroup            // Run's attempts whose results are being recorded
 
@@ -145,12 +146,16 @@ type WorkerConfig struct {
 	// heartbeat. Heartbeats are sent every third of it. Default: 30 seconds.
 	LeaseDuration time.Duration
 
-	// PollInterval is how often idle queues are checked while notifications
-	// do not reach the worker: before its notification connection works, or
-	// through a transaction-pooling proxy without ListenConfig. While they
-	// do, they wake the worker, and so does the maintainer every second for
-	// each queue whose tasks wait, so idle queues are checked only once a
-	// minute, in case both fail. Default: 1 second.
+	// PollInterval is how often idle queues are checked while the
+	// maintainer's heartbeats do not reach the worker: before the first one,
+	// once none came for 3 seconds, while no maintainer of this version or
+	// later runs, or through a transaction-pooling proxy without
+	// ListenConfig. While they arrive, every second, notifications wake the
+	// worker, and the maintainer wakes each queue whose next task waited more
+	// than a second, so idle queues are checked only once a minute. Either
+	// way, a task whose notification came too early or was lost starts
+	// within about 3 seconds, or PollInterval if that is longer. Default: 1
+	// second.
 	PollInterval time.Duration
 
 	// DrainTimeout is how long Run waits for running tasks after its context

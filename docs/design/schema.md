@@ -515,7 +515,7 @@ When enqueue or promotion makes tasks available, the client sends
 `a|<queue>`, so idle workers fetch at once instead of waiting for their next
 poll. The same channel carries `c|<id>`, which asks the worker running task
 `<id>` to cancel it, `q|<queue>`, which tells workers that the queue's
-settings changed, and `p|<worker>`, a probe that a worker sends itself.
+settings changed, and `h|`, the maintainer's heartbeat.
 Notifications are delivered only when the transaction commits.
 
 Each notifying transaction takes a global lock at commit. At high commit
@@ -528,21 +528,25 @@ producer can crash before sending it. So once a second, the maintainer also
 notifies every queue that is not paused and whose next task has waited
 longer than a second, in one statement with one index probe per queue. A
 queue whose tasks start at once gets nothing, and one whose workers are all
-busy gets a notification that changes nothing; a task whose notification
-came too early, or never, waits two seconds at most.
+busy gets a notification that changes nothing. The same statement sends
+`h|`, the maintainer's heartbeat, which shows workers that the wake ran and
+that notifications reach them.
 
 **Polling.** Workers poll each queue as a fallback, and how often depends on
-whether notifications reach them, which a worker checks by sending itself a
-probe every minute: an unanswered probe means they do not, whatever the
-reason, such as a proxy in the way or a connection that broke without a
-word. While they do, an idle queue polls once a minute, only in case the
-maintainer's notifications fail too, so idle workers cost little however
-many queues and replicas there are. While they do not, it polls every `PollInterval`, and so does a
-queue whose installation-wide concurrency limit held tasks back, since
-finishing a task sends no notification. Losing the notification connection,
-or a probe, makes every queue fetch at once and poll every `PollInterval`
-again; a new connection makes them fetch at once too, since notifications
-may have been missed meanwhile. `LISTEN` needs a session, so each
+the maintainer's heartbeats. While they arrive, notifications reach the
+worker and the maintainer wakes every queue whose task waits, so an idle
+queue polls only once a minute, which bounds the harm of a fault in either,
+and idle workers cost little however many queues and replicas there are. A
+worker that hears no heartbeat for 3 seconds, whatever the reason (no
+maintainer, an older one, a proxy in the way, or a connection that died
+without a word), polls every `PollInterval`, starting at once, and replaces
+its notification connection if heartbeats had arrived on it. So a task
+whose notification came too early or was lost starts within about 3
+seconds, or `PollInterval` if that is longer. A queue whose
+installation-wide concurrency limit held tasks back polls every
+`PollInterval` too, since finishing a task sends no notification. A new
+connection makes every queue fetch at once, since notifications may have
+been missed meanwhile. `LISTEN` needs a session, so each
 worker holds one dedicated connection for it, made with the pool's settings
 unless `WorkerConfig.ListenConfig` says otherwise. Behind a
 transaction-pooling proxy, `ListenConfig` must point at the database

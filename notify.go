@@ -20,7 +20,7 @@ const (
 	notifyAvailable = "a" // tasks became available in queue <argument>
 	notifyCancel    = "c" // cancel the running task with ID <argument>
 	notifyQueue     = "q" // the settings of queue <argument> changed
-	notifyProbe     = "p" // the worker with ID <argument> checks that notifications reach it
+	notifyHeartbeat = "h" // the maintainer woke the queues whose tasks wait; no argument
 
 	notifySQL = "SELECT pg_notify($1, $2)"
 )

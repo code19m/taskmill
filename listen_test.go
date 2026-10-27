@@ -2,8 +2,10 @@ package taskmill_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -37,9 +39,9 @@ func newCountedEnv(t *testing.T) (*env, *fetchCounter) {
 }
 
 // startIdleWorker runs a worker of idleQueues that polls every 20 ms while
-// notifications do not reach it, and every idlePoll while they do. cfg, which
-// may be nil, sets the rest of its configuration.
-func startIdleWorker(t *testing.T, e *env, idlePoll time.Duration, cfg *taskmill.WorkerConfig) (*taskmill.Worker, <-chan struct{}) {
+// the maintainer's heartbeats do not reach it, and every hour, as tests do,
+// while they do. cfg, which may be nil, sets the rest of its configuration.
+func startIdleWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) (*taskmill.Worker, <-chan struct{}) {
 	t.Helper()
 	if cfg == nil {
 		cfg = &taskmill.WorkerConfig{}
@@ -51,18 +53,15 @@ func startIdleWorker(t *testing.T, e *env, idlePoll time.Duration, cfg *taskmill
 	}, nil)
 	cfg.Queues, cfg.PollInterval = idleQueues, 20*time.Millisecond
 	w := newWorker(t, e, cfg)
-	timing := testTiming
-	timing.IdlePoll = idlePoll
-	taskmill.SetTiming(w, timing)
 	startWorker(t, w)
 	return w, started
 }
 
-func TestIdleWorkerFetchesRarelyWhileNotificationsArrive(t *testing.T) {
+func TestIdleWorkerFetchesRarelyWhileHeartbeatsArrive(t *testing.T) {
 	t.Parallel()
 	e, fetches := newCountedEnv(t)
-	w, started := startIdleWorker(t, e, time.Minute, nil)
-	waitFor(t, "notifications to arrive", func() bool { return taskmill.Notifying(w) })
+	w, started := startIdleWorker(t, e, nil)
+	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
 	// The fetches of the start, of the listener's start, and of the polls
 	// that were already waiting end first.
 	time.Sleep(200 * time.Millisecond)
@@ -82,6 +81,10 @@ func TestIdleWorkerFetchesRarelyWhileNotificationsArrive(t *testing.T) {
 	}
 }
 
+// heartbeatsMissing is what a worker logs when the maintainer's heartbeats do
+// not arrive.
+const heartbeatsMissing = "maintainer heartbeats do not arrive; idle queues poll every PollInterval"
+
 func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 	t.Parallel()
 	e, fetches := newCountedEnv(t)
@@ -94,9 +97,9 @@ func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 	listen.Database = "postgres"
 	logs := &logRecorder{}
 	e = e.withLogger(t, slog.New(logs))
-	w, started := startIdleWorker(t, e, 200*time.Millisecond, &taskmill.WorkerConfig{ListenConfig: listen})
-	waitFor(t, "the worker to find that notifications do not arrive", func() bool {
-		return logs.count("notifications do not arrive; idle queues poll every PollInterval") == 1
+	w, started := startIdleWorker(t, e, &taskmill.WorkerConfig{ListenConfig: listen})
+	waitFor(t, "the worker to find that heartbeats do not arrive", func() bool {
+		return logs.count(heartbeatsMissing) == 1
 	})
 	if taskmill.Notifying(w) {
 		t.Fatal("the worker counts on notifications that do not arrive")
@@ -113,8 +116,31 @@ func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 	if d := time.Since(begin); d > time.Second {
 		t.Fatalf("pickup took %s", d)
 	}
-	if n := logs.count("notifications do not arrive; idle queues poll every PollInterval"); n != 1 {
-		t.Fatalf("the worker said %d times that notifications do not arrive, want once", n)
+	if n := logs.count(heartbeatsMissing); n != 1 {
+		t.Fatalf("the worker said %d times that heartbeats do not arrive, want once", n)
+	}
+}
+
+func TestIdleWorkerPollsWhileTheMaintainerFailsOver(t *testing.T) {
+	t.Parallel()
+	e, _ := newCountedEnv(t)
+	// A maintainer that crashed holds the role until its lease runs out, so
+	// no heartbeat comes, and nothing wakes a queue whose notification was
+	// lost.
+	e.exec(t, `INSERT INTO {s}.leader (name, worker_id, elected_at, expires_at)
+	           VALUES ('maintainer', 'crashed', now(), now() + interval '1 minute')`)
+	w, started := startIdleWorker(t, e, nil)
+	time.Sleep(500 * time.Millisecond)
+	if taskmill.Notifying(w) {
+		t.Fatal("the worker counts on notifications without heartbeats")
+	}
+
+	begin := time.Now()
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           VALUES ('a', 'email.send', 'available', now(), '{}', 1)`)
+	recv(t, started, "the task to start")
+	if d := time.Since(begin); d > time.Second {
+		t.Fatalf("the task started after %s, beyond PollInterval", d)
 	}
 }
 
@@ -127,8 +153,8 @@ func TestIdleWorkerPollsWhileItsListenerIsCut(t *testing.T) {
 		t.Fatal(err)
 	}
 	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
-	w, started := startIdleWorker(t, e, time.Minute, &taskmill.WorkerConfig{ListenConfig: listen})
-	waitFor(t, "notifications to arrive", func() bool { return taskmill.Notifying(w) })
+	w, started := startIdleWorker(t, e, &taskmill.WorkerConfig{ListenConfig: listen})
+	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
 
 	// While the listener is cut, notifications are lost, and the worker
 	// finds tasks by polling.
@@ -142,42 +168,66 @@ func TestIdleWorkerPollsWhileItsListenerIsCut(t *testing.T) {
 	}
 
 	direct.cut(false)
-	waitFor(t, "notifications to arrive again", func() bool { return taskmill.Notifying(w) })
+	waitFor(t, "heartbeats to arrive again", func() bool { return taskmill.Notifying(w) })
+}
+
+func TestIdleWorkerReplacesAListenerThatFallsSilent(t *testing.T) {
+	t.Parallel()
+	e, _ := newCountedEnv(t)
+	direct := newProxy(t, testdb.DirectURL(t))
+	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
+	w, started := startIdleWorker(t, e, &taskmill.WorkerConfig{ListenConfig: listen})
+	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
+
+	// The listener's connection stays open but carries nothing, as after a
+	// failover or a partition that drops packets: no error says so.
+	direct.frozen.Store(true)
+	waitFor(t, "the worker to stop counting on notifications", func() bool { return !taskmill.Notifying(w) })
+	begin := time.Now()
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "c"})
+	recv(t, started, "the task to start")
+	if d := time.Since(begin); d > time.Second {
+		t.Fatalf("pickup took %s", d)
+	}
+	waitFor(t, "the silent listener to close", func() bool { return e.listenerPID(t) == 0 })
 }
 
 func TestIdleWorkerFindsATaskWhoseNotificationWasLost(t *testing.T) {
 	t.Parallel()
 	e, _ := newCountedEnv(t)
-	// Without a maintainer to wake its queues, only the idle poll finds it.
-	w, started := startIdleWorker(t, e, time.Second, &taskmill.WorkerConfig{NoMaintainer: true})
-	waitFor(t, "notifications to arrive", func() bool { return taskmill.Notifying(w) })
+	w, started := startIdleWorker(t, e, nil)
+	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
 
 	// The task becomes available without a notification, as when the
-	// producer that owed it crashed.
+	// producer that owed it crashed. The maintainer wakes its queue.
 	begin := time.Now()
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 	           VALUES ('a', 'email.send', 'available', now(), '{}', 1)`)
 	recv(t, started, "the task to start")
-	if d := time.Since(begin); d > 1500*time.Millisecond {
-		t.Fatalf("the task started after %s, beyond the idle poll of 1 s", d)
+	if d := time.Since(begin); d > time.Second {
+		t.Fatalf("the task started after %s", d)
 	}
 }
 
 func TestIdleWorkerFindsATaskCommittedAfterItsNotification(t *testing.T) {
 	t.Parallel()
 	e, _ := newCountedEnv(t)
-	w, started := startIdleWorker(t, e, time.Minute, nil)
-	waitFor(t, "notifications to arrive", func() bool { return taskmill.Notifying(w) })
+	w, started := startIdleWorker(t, e, nil)
+	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
 
 	// The first enqueue notifies; the second, within the throttle's 50 ms,
 	// leaves its notification to the end of that window, which comes before
 	// its transaction commits. The maintainer then wakes the queue.
 	e.enqueue(t, sendEmail{}, nil)
-	recv(t, started, "the first task to start")
 	tx := e.begin(t)
 	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err != nil {
 		t.Fatal(err)
 	}
+	recv(t, started, "the first task to start")
 	time.Sleep(200 * time.Millisecond)
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
@@ -187,6 +237,118 @@ func TestIdleWorkerFindsATaskCommittedAfterItsNotification(t *testing.T) {
 	if d := time.Since(begin); d > time.Second {
 		t.Fatalf("the task started %s after its transaction committed", d)
 	}
+}
+
+// TestEveryWayATaskBecomesAvailableNotifies checks that each way a task
+// becomes available notifies its queue. Without a maintainer, no heartbeat
+// or wake comes, and the workers poll once an hour, so only a notification
+// starts a task in time. Each way uses a queue of its own, and acts well
+// after the queue's last notification, so that the throttle lets it notify
+// in its own transaction.
+func TestEveryWayATaskBecomesAvailableNotifies(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	const gap = 200 * time.Millisecond // longer than the throttle's window
+	ran := make(chan int64, 10)
+	var mu sync.Mutex
+	runs := map[int64]int{}
+	queues := map[string]taskmill.QueueOptions{}
+	for _, q := range []string{"enqueue", "retry", "bulk", "group", "snooze"} {
+		queues[q] = taskmill.QueueOptions{}
+	}
+	idle := func(hs *taskmill.Handlers, queues map[string]taskmill.QueueOptions) *taskmill.WorkerConfig {
+		return &taskmill.WorkerConfig{Handlers: hs, Queues: queues, NoMaintainer: true, PollInterval: time.Hour}
+	}
+	runWorker(t, e, idle(handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+		mu.Lock()
+		runs[task.ID]++
+		first := runs[task.ID] == 1
+		mu.Unlock()
+		ran <- task.ID
+		switch {
+		case !first:
+			return nil
+		case task.Queue == "retry" || task.Queue == "bulk":
+			return errors.New("fails once") // dead after its one attempt
+		case task.Queue == "snooze":
+			time.Sleep(gap)
+			return taskmill.Snooze(0)
+		case task.Queue == "group":
+			time.Sleep(gap) // then the next task of its group becomes its head
+		}
+		return nil
+	}, nil), queues))
+	e.waitListening(t)
+
+	// runsSoon fails the test unless task id runs within a second.
+	runsSoon := func(how string, id int64) {
+		t.Helper()
+		select {
+		case got := <-ran:
+			if got != id {
+				t.Fatalf("%s: task %d ran, want %d", how, got, id)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%s: task %d did not run within a second", how, id)
+		}
+	}
+	once := &taskmill.EnqueueOptions{MaxAttempts: 1}
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "enqueue"})
+	runsSoon("enqueue", id)
+
+	once.Queue = "retry"
+	id = e.enqueue(t, sendEmail{}, once)
+	runsSoon("first run", id)
+	e.waitState(t, id, taskmill.StateDead)
+	time.Sleep(gap)
+	if err := e.client.Retry(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	runsSoon("retry", id)
+
+	once.Queue = "bulk"
+	id = e.enqueue(t, sendEmail{}, once)
+	runsSoon("first run", id)
+	e.waitState(t, id, taskmill.StateDead)
+	time.Sleep(gap)
+	if _, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"bulk"}}}); err != nil {
+		t.Fatal(err)
+	}
+	runsSoon("bulk retry", id)
+
+	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "group", GroupKey: "g"})
+	next := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "group", GroupKey: "g"})
+	runsSoon("enqueue", head)
+	runsSoon("group head promotion", next)
+
+	id = e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "snooze"})
+	runsSoon("first run", id)
+	runsSoon("snooze", id)
+
+	// A worker that stops gives its running task back.
+	started := make(chan struct{}, 1)
+	stop := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}, nil),
+		Queues:       map[string]taskmill.QueueOptions{"release": {}},
+		NoMaintainer: true,
+		DrainTimeout: 50 * time.Millisecond,
+	})
+	id = e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "release"})
+	recv(t, started, "the task to start")
+	runWorker(t, e, idle(handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+		ran <- task.ID
+		return nil
+	}, nil), map[string]taskmill.QueueOptions{"release": {}}))
+	waitFor(t, "three workers to listen", func() bool {
+		return e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE query = 'LISTEN ' || $1", e.schema) == 3
+	})
+	stop()
+	runsSoon("release", id)
 }
 
 // fetchCounter counts the fetches that a pool's connections send.

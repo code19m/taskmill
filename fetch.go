@@ -52,11 +52,11 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 }
 
 // pollWait returns how long an idle queue waits before it fetches again,
-// unless a notification or a freed slot wakes it first. While notifications
-// reach the worker, it polls every idlePoll, give or take a tenth so that
-// workers started together poll apart: the maintainer wakes every queue whose
-// tasks wait each interval, so this poll is only for when that fails too,
-// such as when no worker can be the maintainer. Otherwise
+// unless a notification or a freed slot wakes it first. While the
+// maintainer's heartbeats arrive, it polls every idlePoll, give or take a
+// tenth so that workers started together poll apart: the maintainer wakes
+// each queue whose tasks wait in the same statement that sends the
+// heartbeat, so this poll only bounds the harm of a fault in that. Otherwise
 // it polls every PollInterval, and so does a queue whose installation-wide
 // limit held tasks back: no notification says when another worker's task of
 // that queue ends.

@@ -25,8 +25,8 @@ func benchResources(ctx context.Context, pool *pgxpool.Pool, url string, d time.
 	steps := idleLoad(ctx, pool, url, d, queues)
 	fetches, beats := steps.count("fetch"), steps.count("worker heartbeat")
 	// Each queue fetches when Run starts, when its notification connection
-	// starts, and once more until the first probe shows that notifications
-	// arrive; then once a minute.
+	// starts, and once more until the maintainer's first heartbeat arrives;
+	// then once a minute.
 	polls := 3 + int(d/time.Minute)
 	others := 0
 	for _, step := range []string{"lease heartbeat", "settings", "activity", "other"} {
@@ -44,7 +44,7 @@ func benchResources(ctx context.Context, pool *pgxpool.Pool, url string, d time.
 	fmt.Printf("| E5 | Worker process memory, idle | %.1f MiB RSS | %s |\n", float64(idleRSS)/1024, verdict(idleRSS <= 30*1024))
 	fmt.Printf("| E5 | Worker process memory per running task, %s tasks | %.1f KiB | %s |\n",
 		commas(running), float64(perTask)/1024, verdict(perTask <= 8*1024))
-	fmt.Printf("| E6 | An idle worker serving %d queues for %s, notifications arriving | %d fetches (%.1f per queue), "+
+	fmt.Printf("| E6 | An idle worker serving %d queues for %s, the maintainer's heartbeats arriving | %d fetches (%.1f per queue), "+
 		"%d worker heartbeats, %d other statements | %s |\n", queues, d, fetches,
 		float64(fetches)/float64(queues), beats, others, verdict(fetches <= queues*polls))
 	fmt.Println()
@@ -178,9 +178,12 @@ func idleLoad(ctx context.Context, pool *pgxpool.Pool, url string, d time.Durati
 	if err != nil {
 		fail(err)
 	}
+	// The maintainer runs apart, on an untraced pool.
+	stopMaintainer := maintain(ctx, client(ctx, pool, false))
 	stop := run(ctx, w)
 	time.Sleep(d)
 	stop()
+	stopMaintainer()
 	return steps
 }
 
