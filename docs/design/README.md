@@ -51,5 +51,6 @@ to point at a busy database, even with pages refreshing every 5 seconds.
   middleware for enqueues and attempts: the `otel` module instruments
   taskmill with OpenTelemetry ([ADR 0005](../adr/0005-opentelemetry-in-a-module-of-its-own.md)).
 - **A public SQL interface.** The tables are internal, so that they can
-  change. A stable SQL function to enqueue from other languages or from
+  change; only the `migrations` table is public, for teams that apply
+  migrations with their own tools. A stable SQL function to enqueue from other languages or from
   triggers can be added once users need it.

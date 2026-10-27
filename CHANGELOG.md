@@ -9,6 +9,12 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Changed
 
+- The guide's [Upgrading](docs/guide.md#upgrading) section states the
+  compatibility promise from v1.0.0 on: breaking changes only in a new major
+  version, deprecated names kept until then, interfaces that never grow, and
+  names that never change, such as the `State` values and error classes. It
+  names the `migrations` table as the one public table, and what the promise
+  leaves out: log and error messages, and the `otel` module's names.
 - **Breaking:** `outbox.Outbox.AddRelay` takes `*outbox.RelayOptions`, whose
   `BatchSize` and `Timeout` set the most deliveries per `Publish` call and
   the time each call has, as `HandlerOptions` do for other batch handlers.
