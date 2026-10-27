@@ -62,6 +62,8 @@ All notable changes to taskmill are recorded here. The format follows
 - A bulk action whose context ended, or whose database call failed, while it
   read the newest task ID returned no `BulkResult.Next`, so going on started
   over from the first task. It now returns `Next` whenever it stops early.
+- The module no longer includes a 20 MB binary of the example shop, which
+  v0.2.0 shipped by mistake and every download of it carried.
 
 ## [0.2.0] - 2026-10-27
 

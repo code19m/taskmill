@@ -69,6 +69,10 @@ lint: $(GOLANGCI_LINT) $(ACTIONLINT) ## Run the Go and GitHub Actions linters.
 	@for m in $(MODULES); do (cd $$m && $(GOLANGCI_LINT) run --config $(CURDIR)/.golangci.yml) || exit 1; done
 	$(COMPAT) $(GOLANGCI_LINT) run --config $(CURDIR)/.golangci.yml
 	$(ACTIONLINT)
+	@# Every committed file ships in the module that users download, so no
+	@# build output: fail on any file over 1 MiB.
+	@big=$$(git ls-tree -r -l HEAD | awk '$$4 > 1048576 { sub(/^[^\t]*\t/, ""); print }'); \
+	if [ -n "$$big" ]; then echo "Files over 1 MiB do not belong in the repository:" >&2; echo "$$big" >&2; exit 1; fi
 
 .PHONY: test
 test: ## Run all tests with the race detector, in random order, and write each module's coverage.out (needs `make db`).
