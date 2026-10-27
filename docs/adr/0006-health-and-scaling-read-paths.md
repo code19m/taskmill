@@ -1,6 +1,6 @@
 # 0006. Health and scaling read paths
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-26
 
 ## Context
