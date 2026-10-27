@@ -143,7 +143,7 @@ attempt.
 ## Documentation
 
 - **[Guide](docs/guide.md):** how to use every feature, test your code, and
-  run in production.
+  run in production, also [on Kubernetes](docs/guide.md#running-on-kubernetes).
 - **[API reference](https://pkg.go.dev/github.com/code19m/taskmill)** on
   pkg.go.dev.
 - **[Design](docs/design):** the task lifecycle and its guarantees, and the

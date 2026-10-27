@@ -1,6 +1,7 @@
 package taskmill_test
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -63,6 +64,46 @@ func TestMigrateIsIdempotentAndConcurrencySafe(t *testing.T) {
 	partitions := e.count(t, "SELECT count(*) FROM pg_inherits WHERE inhparent = '{s}.task_history'::regclass")
 	if partitions != 7 {
 		t.Fatalf("history partitions: got %d, want 7", partitions)
+	}
+}
+
+func TestMigrateWithARoleThatOnlyOwnsItsSchema(t *testing.T) {
+	t.Parallel()
+	admin := testdb.Pool(t)
+	schema := testdb.Schema(t, admin)
+	role := schema + "_owner"
+	ctx := t.Context()
+	// The role may connect, but not create schemas: an administrator
+	// created its schema for it.
+	for _, sql := range []string{
+		"CREATE ROLE " + role + " LOGIN PASSWORD 'owner'",
+		"CREATE SCHEMA " + schema + " AUTHORIZATION " + role,
+	} {
+		if _, err := admin.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+role+"; DROP ROLE "+role)
+	})
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.User, cfg.ConnConfig.Password = role, "owner"
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	// The schema exists and its migrations are due, as on install and on
+	// every release with a new migration.
+	if err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		t.Fatalf("migrate as the schema's owner: %v", err)
+	}
+	if _, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: schema}); err != nil {
+		t.Fatalf("new client: %v", err)
 	}
 }
 

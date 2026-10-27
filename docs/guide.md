@@ -18,6 +18,7 @@ promises taskmill makes, see the [task lifecycle](design/task-lifecycle.md).
 - [Observability](#observability)
 - [Testing your code](#testing-your-code)
 - [Running in production](#running-in-production)
+- [Running on Kubernetes](#running-on-kubernetes)
 - [Upgrading](#upgrading)
 - [Defaults and limits](#defaults-and-limits)
 
@@ -1098,7 +1099,8 @@ with `hot_standby_feedback`, and stale replication slots.
 
 **Deploys.** Give the process's termination grace period, such as
 Kubernetes' `terminationGracePeriodSeconds`, at least `DrainTimeout` plus
-10 seconds. The defaults fit Kubernetes' 30 seconds. During a rolling deploy,
+10 seconds. The defaults fit Kubernetes' 30 seconds; see
+[Running on Kubernetes](#running-on-kubernetes). During a rolling deploy,
 a worker may fetch a task whose kind it has no handler for, such as a kind
 that only the new version knows. It snoozes the task for 1 minute at a time,
 without using an attempt, and records a note with the code `no_handler`. If
@@ -1131,6 +1133,290 @@ row.
 producer sets `RunAt` with its own clock, and workers create the daily
 history partitions by their own clocks. Keep every server's clock in sync
 with NTP.
+
+## Running on Kubernetes
+
+This section turns [Running in production](#running-in-production) into
+Kubernetes terms. Workers run in your application's image; the dashboard
+runs from its own.
+
+**Shutting down.** Kubernetes stops a pod with `SIGTERM`, and kills it when
+`terminationGracePeriodSeconds` runs out. Tie `Run`'s context to `SIGTERM`
+with `signal.NotifyContext`, as the [README](../README.md#quick-start) does.
+`Run` then waits up to `DrainTimeout` for running tasks, cancels the rest,
+and returns about 5 seconds later. So set the grace period to at least
+`DrainTimeout` plus 10 seconds: 30 with the defaults. A task still running
+when the drain ends starts over on another worker, so if handlers often run
+longer than `DrainTimeout`, raise both. Workers need no `preStop` hook: no
+Service sends them traffic.
+
+**Health.** `Worker.Health` returns nil while `Run` runs and its last
+heartbeat reached the database within `LeaseDuration`, and an error
+otherwise. It reads only memory, so a probe costs the database nothing.
+Serve it for a readiness probe:
+
+```go
+go func() {
+    mux := http.NewServeMux()
+    mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+        if err := worker.Health(); err != nil {
+            http.Error(w, err.Error(), http.StatusServiceUnavailable)
+            return
+        }
+        w.WriteHeader(http.StatusOK)
+    })
+    server := &http.Server{Addr: ":8081", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+    log.Print(server.ListenAndServe())
+}()
+```
+
+With the defaults and the probe below, a worker turns unready within about
+a minute of losing the database, and ready again within seconds of its
+return. A worker that is not ready holds up a rolling deploy, which is right
+while the database is out of reach. Do not restart workers on `Health`: it
+fails during a database outage, which a restart does not fix. If you want a
+liveness probe, point it at a path that does not call `Health`.
+
+**Workers.** A minimal Deployment, with the probe above and a pool sized for
+10 slots:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 2 # leave it out when an autoscaler sets the replicas
+  selector:
+    matchLabels: {app: worker}
+  template:
+    metadata:
+      labels: {app: worker}
+    spec:
+      terminationGracePeriodSeconds: 30 # DrainTimeout (20 s) plus 10 s
+      containers:
+        - name: worker
+          image: registry.example.com/myapp:1.4.0 # your application
+          args: [worker]
+          env:
+            - name: DATABASE_URL # ends in ?pool_max_conns=15: 10 slots plus 5
+              valueFrom: {secretKeyRef: {name: myapp-db, key: url}}
+          ports:
+            - {name: health, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 250m, memory: 128Mi}
+            limits: {memory: 256Mi}
+```
+
+**Connections.** A worker uses at most its pool's `MaxConns`, plus one
+connection for notifications; a client, such as `taskmill-ui` or a web
+server that only enqueues, uses its pool alone. Add them up against the
+database's `max_connections`, less what it reserves for administrators.
+During a rollout, new pods start while old ones still drain, so count each
+Deployment's most pods: its replicas, or the autoscaler's maximum, plus its
+`maxSurge` and `maxUnavailable`, 25% each by default:
+
+```text
+worker pods × (MaxConns + 1) + taskmill-ui pods × MaxConns + your other pools
+```
+
+Set every pool's size with `pool_max_conns` in its URL: pgx's default is
+the larger of 4 and the number of CPUs it sees, and in a container that is
+the node's CPU count, not the pod's limit. For example, 10 worker replicas
+with `pool_max_conns=15` run up to 15 pods in a default rollout, with up to
+240 connections. A `maxSurge` of 0 for the workers lowers that, and slows
+their rollouts.
+
+**PgBouncer** in transaction mode carries the pools, as
+[Connection poolers](#running-in-production) says, `Migrate`'s included.
+Point `WorkerConfig.ListenConfig` at the database itself: each worker
+replica then holds one direct connection.
+
+**Migrations.** `Migrate` is safe from many pods at once: one applies the
+migrations in a single transaction, while the others wait for its lock and
+then find nothing to do. Call it at the start of each process, as the
+README does, and there is nothing more to deploy. If your deploys apply
+schema changes first, run the same image as a Job instead, for example as a
+Helm `pre-upgrade` hook or an earlier Argo CD sync wave:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: myapp-migrate-1-4-0
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: registry.example.com/myapp:1.4.0
+          args: [migrate] # calls taskmill.Migrate and exits
+          env:
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: myapp-db, key: url}}
+```
+
+A migration stays compatible with the previous release, so old pods keep
+working while new ones roll out. `taskmill-ui` does not migrate: until the
+schema is migrated, it exits at start, and Kubernetes starts it again.
+
+**The dashboard** runs from the `ghcr.io/code19m/taskmill-ui` image, as a
+Deployment of its own. Set `TASKMILL_UI_ADDR`: the default listens on
+localhost only. The image holds the binary alone and runs as a non-root
+user. With a password set, every page asks for it, so the probe only checks
+the port. Put it behind your Ingress with TLS, or reach it with
+`kubectl port-forward service/taskmill-ui 8080:80`.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskmill-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: taskmill-ui}
+  template:
+    metadata:
+      labels: {app: taskmill-ui}
+    spec:
+      containers:
+        - name: taskmill-ui
+          image: ghcr.io/code19m/taskmill-ui:0.2.0 # the release you run
+          env:
+            - {name: TASKMILL_UI_ADDR, value: ":8080"}
+            - name: TASKMILL_DATABASE_URL # ends in ?pool_max_conns=4
+              valueFrom: {secretKeyRef: {name: myapp-db, key: ui-url}}
+            - name: TASKMILL_UI_PASSWORD
+              valueFrom: {secretKeyRef: {name: taskmill-ui, key: password}}
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            tcpSocket: {port: http}
+          securityContext: {readOnlyRootFilesystem: true, allowPrivilegeEscalation: false}
+          resources:
+            requests: {cpu: 50m, memory: 32Mi}
+            limits: {memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskmill-ui
+spec:
+  selector: {app: taskmill-ui}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+```
+
+**Autoscaling.** Scale workers on the tasks they have to run: the available
+ones, which wait, plus the running ones, which keep workers busy. Scaling on
+the available ones alone stops busy workers in the middle of a backlog. The
+[queue gauges](#observability) report both, and how long tasks wait; every
+process reports the same values for the whole installation, so read them
+with `max`. With Prometheus, they are `taskmill_queue_tasks`, labeled
+`messaging_destination_name` and `taskmill_task_state`, and
+`taskmill_queue_lag_seconds`. This KEDA `ScaledObject` runs a worker per 10
+of those tasks of the default queue, a worker's concurrency:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+spec:
+  scaleTargetRef: {name: worker}
+  minReplicaCount: 1 # see below
+  maxReplicaCount: 10
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc:9090
+        query: sum(max by (taskmill_task_state) (taskmill_queue_tasks{messaging_destination_name="default", taskmill_task_state=~"available|running"}))
+        threshold: "10"
+```
+
+- **Scaling down stops workers that may run tasks.** Each drains for
+  `DrainTimeout`, and a task still running then starts over on another
+  worker. Keep `DrainTimeout`, and with it the grace period, above your
+  tasks' usual length. A stabilization window in the `ScaledObject`'s
+  `advanced.horizontalPodAutoscalerConfig.behavior.scaleDown` also keeps a
+  short dip from stopping workers.
+
+- **Keep one worker.** The maintainer runs in workers. With none, due
+  retries and schedules are never promoted, and a queue that was empty at
+  its last count never shows a backlog, so nothing scales the workers up
+  again. To scale to zero, run a worker without handlers in a Deployment of
+  its own, as the maintainer, and set `NoMaintainer` on the scaled ones.
+  Then report the figures that KEDA reads from a process that stays up,
+  such as that maintainer or your web server.
+- **Lag** scales on the oldest task's wait instead: query
+  `max(taskmill_queue_lag_seconds{messaging_destination_name="default"})`,
+  set the trigger's `metricType: Value`, and a `threshold` in seconds.
+  Unlike the counts, which stop at 10,000, lag has no cap.
+- **Without OpenTelemetry,** KEDA's Metrics API scaler reads a number from
+  JSON. Serve it from `Client.Queues`, in a process that is always up, such
+  as your web server: a worker that KEDA stopped answers nothing, and at
+  zero workers nothing would scale them up again.
+
+  ```go
+  mux.HandleFunc("GET /queues", func(w http.ResponseWriter, r *http.Request) {
+      queues, err := client.Queues(r.Context())
+      if err != nil {
+          http.Error(w, "taskmill: list queues failed", http.StatusServiceUnavailable)
+          return
+      }
+      tasks := map[string]int64{} // per queue: available and running
+      for _, q := range queues {
+          tasks[q.Name] = q.Counts[taskmill.StateAvailable] + q.Counts[taskmill.StateRunning]
+      }
+      _ = json.NewEncoder(w).Encode(tasks)
+  })
+  ```
+
+  Give the `ScaledObject` this trigger instead:
+
+  ```yaml
+    triggers:
+      - type: metrics-api
+        metadata:
+          url: http://web.myapp.svc/queues # your web server's Service, in namespace myapp
+          valueLocation: default
+          targetValue: "10"
+  ```
+- Do not point KEDA's PostgreSQL scaler at taskmill's tables. They are
+  internal and change between releases; `Client.Queues` and the gauges are
+  the stable way to read them ([ADR 0006](adr/0006-health-and-scaling-read-paths.md)).
+
+**Managed PostgreSQL.** taskmill needs PostgreSQL 15 or newer and nothing
+more: no extension, and no superuser. So managed services, such as Amazon
+RDS and Aurora, Google Cloud SQL and AlloyDB, Azure Database for
+PostgreSQL, Neon, and Supabase, can run it. Mind these points:
+
+- **Privileges.** Give the application a role of its own that owns
+  taskmill's schema, as [Database privileges](#running-in-production) says.
+  To create the schema, `Migrate` needs the CREATE privilege on the
+  database. Without it, create the schema yourself, owned by that role:
+  `Migrate` then only fills it.
+- **The primary only.** taskmill writes on every fetch: use the writer
+  endpoint, such as Aurora's cluster endpoint, never a reader.
+- **Built-in poolers** run in transaction mode, so they follow the
+  PgBouncer rules above: RDS Proxy, Azure's PgBouncer on port 6432,
+  Supabase's transaction pooler on port 6543, and Neon's pooled endpoint.
+  Point `ListenConfig` at the direct endpoint. The Cloud SQL and AlloyDB
+  Auth Proxies are not poolers: notifications work through them.
+- **Failover.** The endpoint's address moves to the new primary, and open
+  connections break. Workers reconnect on their own, at each loop's next
+  try, and need no setting for it. A task running during a failover longer
+  than `LeaseDuration` may run again elsewhere. If that costs more
+  than a crashed worker's tasks waiting longer, raise `LeaseDuration` above
+  your provider's failover time.
+- **Neon's scale to zero** never happens while workers run, because they
+  poll every second: budget for a compute that stays on.
 
 ## Upgrading
 

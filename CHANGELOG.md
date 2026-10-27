@@ -39,6 +39,13 @@ All notable changes to taskmill are recorded here. The format follows
 - `taskmill-ui` logs its version when it starts.
 - The shop example, `examples/shop`: a small shop that uses most features,
   with the dashboard. Run it with `go run ./examples/shop`.
+- `Worker.Health`, for readiness probes: nil while `Run` runs and its last
+  heartbeat reached the database within `LeaseDuration`. It reads only
+  memory.
+- A guide section, [Running on Kubernetes](docs/guide.md#running-on-kubernetes):
+  shutdown and probes, Deployments for workers and `taskmill-ui`,
+  migrations, connection budgets, PgBouncer, autoscaling with KEDA, and
+  managed PostgreSQL.
 
 ### Changed
 
@@ -109,6 +116,10 @@ All notable changes to taskmill are recorded here. The format follows
   usable. A payload that PostgreSQL itself rejects, such as a string with an
   unpaired surrogate escape, returns `ErrInvalidArgument` too. All returned
   a database error.
+- `Migrate` works for a role that owns its schema but may not create schemas
+  in the database. It ran `CREATE SCHEMA IF NOT EXISTS` every time, and
+  PostgreSQL checks that privilege before it checks whether the schema
+  exists, so the role could not install or upgrade taskmill.
 - Through PgBouncer in transaction mode with `max_prepared_statements` set,
   `Migrate` failed on a new schema, and `NewClient` could fail right after it
   found a schema not migrated. PgBouncer keeps the name of a prepared
