@@ -219,6 +219,9 @@ func runWorker(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, cfg 
 		fail(err)
 	}
 	if err := w.Run(ctx); err != nil {
+		if ctx.Err() != nil {
+			return // stopped while registering
+		}
 		fail(err)
 	}
 }
