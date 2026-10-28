@@ -376,6 +376,14 @@ func TestMiddlewareThatSkipsNextIsRecordedAsAFailure(t *testing.T) {
 	wantAttrs(t, process, "error.type=middleware")
 }
 
+func TestObserveQueuesRefusesANilClient(t *testing.T) {
+	t.Parallel()
+	in := tmotel.New(&tmotel.Config{MeterProvider: sdkmetric.NewMeterProvider()})
+	if _, err := in.ObserveQueues(nil); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+
 func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 	t.Parallel()
 	e := setup(t)

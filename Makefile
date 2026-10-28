@@ -131,7 +131,7 @@ api: $(GORELEASE) ## Compare the API with the latest release, and suggest the ne
 	$(GORELEASE) -base=$(RELEASE)
 
 .PHONY: compat
-compat: ## Run the latest release's client and worker on the current schema (needs `make db`).
+compat: ## Run the latest release's client, worker, schedules, outbox, and dashboard on the current schema (needs `make db`).
 	$(COMPAT) TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -count=1 ./...
 
 .PHONY: bench

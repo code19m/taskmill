@@ -135,8 +135,8 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 // Cancel cancels a task. A waiting task is canceled at once; a running task's
 // context is canceled, and the task becomes canceled when its attempt ends,
 // unless the handler completed it. A task of a batch is canceled when its
-// batch ends. Cancel frees the task's dedupe key. It returns
-// [ErrInvalidState] if the task already finished.
+// batch ends. Cancel frees the task's dedupe key. It returns [ErrNotFound]
+// if no task has the ID, and [ErrInvalidState] if the task already finished.
 func (c *Client) Cancel(ctx context.Context, id int64) error {
 	return c.inTx(ctx, func(q querier) error { return c.cancel(ctx, q, id) })
 }
@@ -197,8 +197,10 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64) error {
 
 // Retry makes a dead or canceled task available again, with a fresh set of
 // attempts. Retrying the dead task that halts its FIFO group resumes the
-// group; another task of a group waits behind the group's unfinished tasks.
-// It returns [ErrInvalidState] for tasks in other states.
+// group; another task of a group waits until the group's current head
+// finishes, and then runs before the group's tasks that were enqueued after
+// it. It returns [ErrNotFound] if no task has the ID, and [ErrInvalidState]
+// for tasks in other states.
 func (c *Client) Retry(ctx context.Context, id int64) error {
 	return c.inTx(ctx, func(q querier) error { return c.retry(ctx, q, id) })
 }
@@ -262,8 +264,8 @@ func (c *Client) haltedBy(ctx context.Context, q querier, queue, group string, i
 
 // Delete deletes a task that is not running, including a completed task in
 // history, and frees its dedupe key. Deleting the dead task that halts its
-// FIFO group resumes the group. It returns [ErrInvalidState] for a running
-// task; cancel it first.
+// FIFO group resumes the group. It returns [ErrNotFound] if no task has the
+// ID, and [ErrInvalidState] for a running task; cancel it first.
 func (c *Client) Delete(ctx context.Context, id int64) error {
 	return c.inTx(ctx, func(q querier) error { return c.delete(ctx, q, id) })
 }

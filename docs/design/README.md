@@ -14,21 +14,24 @@ request.
 ## Product shape
 
 taskmill is one engine with focused packages on top of it, all in one Go
-module, as the [README](../../README.md#documentation) lists. The packages
+module except the `otel` integration, which has a module of its own, as the
+[README](../../README.md#documentation) lists. The packages
 use only the engine's public API, plus small internal helpers such as UUID
 generation. [ADR 0003](../adr/0003-outbox-on-the-shared-engine.md) explains
 why the outbox is a package and not a separate project.
 
 The web interface is server-rendered with `html/template`, `embed`, and
-`net/http`. One small script of our own, under a strict content security
-policy, keeps pages live, draws a chart, and adds dialogs; every page also
-works without it, and nothing needs a JavaScript build step or third-party
-code. Applications mount it on their own router behind their own
-authentication, or run it on its own with basic authentication through the
-`taskmill-ui` command. It reads only through the operations API and the
-statistics the maintainer keeps. The task list's queries stop after 5
-seconds, and the other pages read small tables or single rows, so it is safe
-to point at a busy database, even with pages refreshing every 5 seconds.
+`net/http`. Two small scripts of our own, under a strict content security
+policy, keep pages live, apply filters as they change, confirm actions in
+dialogs, and apply the chosen theme; every page also works without them. The
+charts are SVG drawn on the server, and nothing needs a JavaScript build step
+or third-party code. Applications mount it on their own router behind their
+own authentication, or run it on its own with basic authentication through
+the `taskmill-ui` command. It reads only through the operations API and the
+statistics the maintainer keeps. Its queries over tasks, groups, and
+activity stop after 5 seconds, and the other pages read small tables or
+single rows, so it is safe to point at a busy database, even with pages
+refreshing every 5 seconds.
 
 ## Out of scope
 

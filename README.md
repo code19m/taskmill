@@ -28,7 +28,7 @@ together with your data.
   actions on every task that matches a filter; structured logs through
   `log/slog`; and OpenTelemetry traces and metrics from an optional module.
 - **Small and fast.** One direct dependency, pgx. One worker drained a backlog
-  at over 35,000 tasks per second, and one relay published over 35,000 outbox
+  at over 31,000 tasks per second, and one relay published over 26,000 outbox
   messages per second. This was on an Apple M5 laptop with PostgreSQL 18 in
   Docker; see the [benchmarks](docs/benchmarks.md).
 
