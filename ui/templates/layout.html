@@ -20,7 +20,7 @@
     <nav class="nav" aria-label="Sections" data-live-part="nav">
       <a class="nav-item" href="{{path "/"}}"{{if eq .Nav "overview"}} aria-current="page"{{end}}>{{template "icon-overview"}}<span>Overview</span></a>
       <a class="nav-item" href="{{path "/tasks"}}"{{if eq .Nav "tasks"}} aria-current="page"{{end}}>{{template "icon-tasks"}}<span>Tasks</span></a>
-      <a class="nav-item" href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>{{template "icon-dead"}}<span>Dead</span><span class="count mono">{{if .Dead}}{{num .Dead}}{{end}}</span></a>
+      <a class="nav-item" href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>{{template "icon-dead"}}<span>Dead</span><span class="count mono">{{if .Dead.N}}{{count .Dead}}{{end}}</span></a>
       <a class="nav-item" href="{{path "/schedules"}}"{{if eq .Nav "schedules"}} aria-current="page"{{end}}>{{template "icon-schedules"}}<span>Schedules</span></a>
       <a class="nav-item" href="{{path "/workers"}}"{{if eq .Nav "workers"}} aria-current="page"{{end}}>{{template "icon-workers"}}<span>Workers</span></a>
     </nav>

@@ -335,6 +335,47 @@ func TestMetricsCountEnqueuesAndAttempts(t *testing.T) {
 	})
 }
 
+func TestMiddlewareThatSkipsNextIsRecordedAsAFailure(t *testing.T) {
+	t.Parallel()
+	e := setup(t)
+	skipEnqueue := func(context.Context, []*taskmill.EnqueueTask, func(context.Context) error) error { return nil }
+	skipping := taskmilltest.NewClient(t, e.pool, &taskmill.ClientConfig{
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{e.in.EnqueueMiddleware, skipEnqueue},
+	})
+	if _, err := skipping.Enqueue(t.Context(), sendEmail{}, &taskmill.EnqueueOptions{Queue: "skipped"}); err == nil {
+		t.Fatal("the enqueue succeeded")
+	}
+	send := e.one(t, "send skipped")
+	if s := send.Status(); s.Code != codes.Error {
+		t.Errorf("send span: got status %+v, want an error", s)
+	}
+	wantAttrs(t, send, "error.type=middleware")
+
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error { return nil }), nil)
+	skipAttempt := taskmill.Middleware(func(context.Context, *taskmill.TaskInfo, func(context.Context) error) error { return nil })
+	w, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{
+		Handlers:     &hs,
+		Middleware:   []taskmill.Middleware{e.in.Middleware, skipAttempt},
+		NoMaintainer: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.client.Enqueue(t.Context(), sendEmail{}, &taskmill.EnqueueOptions{Queue: "emails"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.RunTask(t.Context(), res.ID); err != nil {
+		t.Fatal(err)
+	}
+	process := e.one(t, "process emails")
+	if s := process.Status(); s.Code != codes.Error {
+		t.Errorf("process span: got status %+v, want an error", s)
+	}
+	wantAttrs(t, process, "error.type=middleware")
+}
+
 func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 	t.Parallel()
 	e := setup(t)
@@ -382,8 +423,11 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 		}
 	}
 
-	if capped := e.points(t, "taskmill.queue.capped"); !slices.Contains(capped, "messaging.destination.name=backlog: 0") {
-		t.Errorf("got capped %q, want 0 for the backlog", capped)
+	capped := e.points(t, "taskmill.queue.capped")
+	for _, s := range []string{"available", "scheduled", "pending", "running", "retryable", "dead", "canceled"} {
+		if want := "messaging.destination.name=backlog taskmill.task.state=" + s + ": 0"; !slices.Contains(capped, want) {
+			t.Errorf("got capped %q, want 0 for the backlog's %s tasks", capped, s)
+		}
 	}
 	if lag := e.value(t, "taskmill.queue.lag", "messaging.destination.name=backlog"); lag < 3600 || lag > 3660 {
 		t.Errorf("got lag %v seconds, want about an hour", lag)

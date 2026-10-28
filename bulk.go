@@ -50,12 +50,12 @@ func (f *TaskFilter) empty() bool {
 	return f == nil || len(f.Queues)+len(f.States)+len(f.Kinds)+len(f.GroupKeys) == 0
 }
 
-// TaskCount is a number of tasks, counted up to 10,000 per state.
+// TaskCount is a number of tasks, from a count that stops at a cap.
 type TaskCount struct {
 	N int64
 
-	// Capped reports that counting stopped at 10,000 tasks in a state, so
-	// that N is a lower bound.
+	// Capped reports that counting stopped at its cap, so that N is a lower
+	// bound.
 	Capped bool
 }
 
@@ -232,7 +232,7 @@ func (c *TaskCount) plus(other TaskCount) {
 // what it did before, with an error and [BulkResult.Next] to go on; each
 // batch commits whole or not at all.
 func (c *Client) RetryMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
-	m, err := c.bulk(ctx, params, retryStates)
+	m, err := checkBulk(params, retryStates)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -248,7 +248,7 @@ func (c *Client) RetryMatching(ctx context.Context, params *BulkParams) (BulkRes
 // become canceled when their attempts end. It skips running tasks already
 // asked to stop, and otherwise works like [Client.RetryMatching].
 func (c *Client) CancelMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
-	m, err := c.bulk(ctx, params, cancelStates)
+	m, err := checkBulk(params, cancelStates)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -263,7 +263,7 @@ func (c *Client) CancelMatching(ctx context.Context, params *BulkParams) (BulkRe
 // running ones, as [Client.Delete] deletes each one, completed tasks in
 // history included. It works like [Client.RetryMatching].
 func (c *Client) DeleteMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
-	m, err := c.bulk(ctx, params, deleteStates)
+	m, err := checkBulk(params, deleteStates)
 	if err != nil {
 		return BulkResult{}, err
 	}
@@ -274,9 +274,8 @@ func (c *Client) DeleteMatching(ctx context.Context, params *BulkParams) (BulkRe
 	return res, nil
 }
 
-// bulk checks the params of a bulk action that applies to states, and notes
-// the last task enqueued before the action starts.
-func (c *Client) bulk(ctx context.Context, params *BulkParams, states []State) (*matching, error) {
+// checkBulk checks the params of a bulk action that applies to states.
+func checkBulk(params *BulkParams, states []State) (*matching, error) {
 	if params == nil || params.Filter.empty() {
 		return nil, invalidArgument("the filter must not be empty")
 	}
@@ -288,9 +287,6 @@ func (c *Client) bulk(ctx context.Context, params *BulkParams, states []State) (
 		if m.after, err = decodeCursor(params.Cursor); err != nil || m.after < 0 {
 			return nil, invalidArgument("invalid cursor")
 		}
-	}
-	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
-		return nil, fmt.Errorf("taskmill: read the last task: %w", err)
 	}
 	return m, nil
 }
@@ -318,6 +314,10 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch func(q querie
 			res.Next = encodeCursor(firstSkipped - 1)
 		}
 		return res, err
+	}
+	// The action goes up to the last task enqueued before it starts.
+	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
+		return stop(err)
 	}
 	for m.after < m.last {
 		if err := ctx.Err(); err != nil {

@@ -3,6 +3,7 @@ package ui_test
 import (
 	"compress/gzip"
 	"context"
+	"errors"
 	"html"
 	"io"
 	"log/slog"
@@ -57,6 +58,17 @@ func setupDB(tb testing.TB) (*taskmill.Client, *pgxpool.Pool, string) {
 	return client, pool, schema
 }
 
+// handler returns the interface for client, and fails the test if cfg is
+// refused.
+func handler(tb testing.TB, client *taskmill.Client, cfg *ui.Config) http.Handler {
+	tb.Helper()
+	h, err := ui.New(client, cfg)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return h
+}
+
 func get(t *testing.T, h http.Handler, target string, headers ...string) (int, string, http.Header) {
 	t.Helper()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil)
@@ -90,10 +102,10 @@ func TestPagesRender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.UpdateQueue(ctx, "mail", &taskmill.QueueSettings{MaxRunning: 3}); err != nil {
+	if err := client.UpdateQueue(ctx, "mail", func(s *taskmill.QueueSettings) { s.MaxRunning = 3 }); err != nil {
 		t.Fatal(err)
 	}
-	h := ui.Handler(client, &ui.Config{Prefix: "/admin/tasks"})
+	h := handler(t, client, &ui.Config{Prefix: "/admin/tasks"})
 	id := strconv.FormatInt(res.ID, 10)
 
 	code, body, header := get(t, h, "/admin/tasks/")
@@ -138,9 +150,25 @@ func TestPagesRender(t *testing.T) {
 	}
 }
 
+func TestNavMarksACappedDeadCount(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	// The maintainer stopped counting the dead tasks at the cap.
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.queue_stats (queue, state, tasks, capped, refreshed_at)
+	    VALUES ('mail', 'dead', 10000, true, now())`); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+	for _, path := range []string{"/", "/tasks?state=dead", "/workers"} {
+		if _, body, _ := get(t, h, path); !strings.Contains(body, `<span>Dead</span><span class="count mono">10,000&#43;</span>`) {
+			t.Errorf("%s: want the nav's dead count marked as capped\n%s", path, body)
+		}
+	}
+}
+
 func TestOverviewPeriods(t *testing.T) {
 	t.Parallel()
-	h := ui.Handler(setup(t), nil)
+	h := handler(t, setup(t), nil)
 	// The charts' period is chosen in the address; an unknown one shows the
 	// last hour.
 	for query, want := range map[string]string{"?range=24h": "24h", "?range=7y": "1h"} {
@@ -163,7 +191,7 @@ func TestTaskFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := ui.Handler(client, &ui.Config{Prefix: "/admin/tasks"})
+	h := handler(t, client, &ui.Config{Prefix: "/admin/tasks"})
 	link := func(id int64) string { return `href="/admin/tasks/tasks/` + strconv.FormatInt(id, 10) + `"` }
 	for _, c := range []struct {
 		query      string
@@ -195,7 +223,7 @@ func TestTaskFilters(t *testing.T) {
 
 func TestLiveUpdateResponses(t *testing.T) {
 	t.Parallel()
-	h := ui.Handler(setup(t), nil)
+	h := handler(t, setup(t), nil)
 	// Live updates ask for a page they already show, and are told it did not
 	// change; a client that accepts it gets the page compressed.
 	_, plain, header := get(t, h, "/workers")
@@ -225,7 +253,7 @@ func TestActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := &actionLog{}
-	h := ui.Handler(client, &ui.Config{Logger: slog.New(logs)})
+	h := handler(t, client, &ui.Config{Logger: slog.New(logs)})
 	id := strconv.FormatInt(res.ID, 10)
 
 	if rec := post(t, h, "/tasks/"+id+"/cancel", "cross-site"); rec.Code != http.StatusForbidden {
@@ -278,7 +306,7 @@ func TestBulkActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	logs := &actionLog{}
-	h := ui.Handler(client, &ui.Config{Logger: slog.New(logs)})
+	h := handler(t, client, &ui.Config{Logger: slog.New(logs)})
 
 	// An action's page counts the tasks once, and confirms with or without
 	// the script.
@@ -324,7 +352,7 @@ func TestBulkActions(t *testing.T) {
 // without counting the tasks.
 func TestTaskListOffersBulkActions(t *testing.T) {
 	t.Parallel()
-	h := ui.Handler(setup(t), nil)
+	h := handler(t, setup(t), nil)
 	for path, want := range map[string][]string{
 		"/tasks":                            nil,
 		"/tasks?queue=mail":                 {"/tasks/bulk/retry?queue=mail", "/tasks/bulk/cancel?queue=mail", "/tasks/bulk/delete?queue=mail"},
@@ -358,7 +386,7 @@ func TestBulkActionStopsInTime(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h := ui.Handler(client, nil)
+	h := handler(t, client, nil)
 	form := regexp.MustCompile(`<form class="bulk-actions" method="post" action="([^"]*)">`)
 	target, total := "/tasks/bulk/cancel?queue=default", 0
 	for range 200 {
@@ -415,7 +443,7 @@ func TestBulkActionTellsWhatItLeft(t *testing.T) {
 	if _, err := tx.Exec(t.Context(), `SELECT FROM `+schema+`.tasks WHERE id = $1 FOR UPDATE`, ids[1]); err != nil {
 		t.Fatal(err)
 	}
-	h := ui.Handler(client, nil)
+	h := handler(t, client, nil)
 	rec := post(t, h, "/tasks/bulk/cancel?queue=default", "same-origin")
 	if loc := rec.Header().Get("Location"); loc != "/tasks/bulk/cancel?count=2&done=cancel-skipped&queue=default&skipped=1" {
 		t.Fatalf("bulk cancel with a held task: %d to %q", rec.Code, loc)
@@ -473,7 +501,7 @@ func TestReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := ui.Handler(client, &ui.Config{ReadOnly: true})
+	h := handler(t, client, &ui.Config{ReadOnly: true})
 	id := strconv.FormatInt(res.ID, 10)
 
 	_, body, _ := get(t, h, "/tasks/"+id)
@@ -499,10 +527,10 @@ func TestQueueActionsWorkForAnyName(t *testing.T) {
 	client := setup(t)
 	ctx := t.Context()
 	const name = "a/b?c#d%2Fe"
-	if err := client.UpdateQueue(ctx, name, nil); err != nil {
+	if err := client.UpdateQueue(ctx, name, func(*taskmill.QueueSettings) {}); err != nil {
 		t.Fatal(err)
 	}
-	h := ui.Handler(client, &ui.Config{Prefix: "/admin"})
+	h := handler(t, client, &ui.Config{Prefix: "/admin"})
 
 	_, body, _ := get(t, h, "/admin/")
 	m := regexp.MustCompile(`action="([^"]*/pause)"`).FindStringSubmatch(body)
@@ -558,7 +586,7 @@ func TestScheduleActionsWorkForAnyName(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := ui.Handler(client, &ui.Config{Prefix: "/admin"})
+	h := handler(t, client, &ui.Config{Prefix: "/admin"})
 	_, body, _ := get(t, h, "/admin/schedules")
 	form := func(action string) string {
 		m := regexp.MustCompile(`action="([^"]*/schedules/[^"]*/` + action + `)"`).FindStringSubmatch(body)
@@ -597,7 +625,7 @@ func TestScheduleActionsWorkForAnyName(t *testing.T) {
 func TestBasicAuth(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
-	h := ui.Handler(client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops", Password: "s3cret"}})
+	h := handler(t, client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops", Password: "s3cret"}})
 
 	for _, creds := range [][2]string{{}, {"ops", "wrong"}, {"other", "s3cret"}} {
 		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/static/style.css", nil)
@@ -623,37 +651,45 @@ func TestBasicAuth(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("logged in: got %d", rec.Code)
 	}
-
-	defer func() {
-		if recover() == nil {
-			t.Fatal("an empty password was accepted")
-		}
-	}()
-	ui.Handler(client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops"}})
 }
 
 func TestFrameAncestors(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
-	h := ui.Handler(client, &ui.Config{FrameAncestors: []string{"'self'", "https://admin.example.com"}})
+	h := handler(t, client, &ui.Config{FrameAncestors: []string{"'self'", "https://admin.example.com"}})
 	_, _, header := get(t, h, "/workers")
 	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "frame-ancestors 'self' https://admin.example.com") ||
 		header.Get("X-Frame-Options") != "" {
 		t.Fatalf("got %v", header)
 	}
+}
 
-	defer func() {
-		if recover() == nil {
-			t.Fatal("an entry that injects a directive was accepted")
+// New refuses a configuration that would serve the interface wrongly, with
+// an error rather than a panic.
+func TestNewChecksTheConfig(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	for name, c := range map[string]struct {
+		client *taskmill.Client
+		cfg    *ui.Config
+	}{
+		"no client":            {nil, nil},
+		"prefix not a path":    {client, &ui.Config{Prefix: "taskmill"}},
+		"no password":          {client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops"}}},
+		"no username":          {client, &ui.Config{BasicAuth: &ui.BasicAuth{Password: "s3cret"}}},
+		"injected directive":   {client, &ui.Config{FrameAncestors: []string{"https://a.example; script-src *"}}},
+		"empty frame ancestor": {client, &ui.Config{FrameAncestors: []string{""}}},
+	} {
+		if h, err := ui.New(c.client, c.cfg); h != nil || !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("%s: got %v, %v; want ErrInvalidArgument", name, h, err)
 		}
-	}()
-	ui.Handler(client, &ui.Config{FrameAncestors: []string{"https://a.example; script-src *"}})
+	}
 }
 
 func TestStaticFilesAreVersionedAndCached(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
-	h := ui.Handler(client, nil)
+	h := handler(t, client, nil)
 	_, body, _ := get(t, h, "/workers")
 	m := regexp.MustCompile(`href="(/static/style\.css\?v=[0-9a-f]+)"`).FindStringSubmatch(body)
 	if m == nil {
@@ -674,7 +710,7 @@ func TestStaticFilesAreVersionedAndCached(t *testing.T) {
 func TestActionNotices(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
-	h := ui.Handler(client, nil)
+	h := handler(t, client, nil)
 	rec := post(t, h, "/queues/default/pause", "same-origin")
 	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/?done=queue-pause" {
 		t.Fatalf("pause: %d to %q", rec.Code, rec.Header().Get("Location"))

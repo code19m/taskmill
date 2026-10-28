@@ -81,14 +81,6 @@ var defaultTiming = timing{
 	listen:          10 * time.Second,
 }
 
-// Causes of a canceled attempt context, which decide how its result is
-// recorded.
-var (
-	errShutdown        = classError("taskmill: worker shutting down", "shutdown")
-	errCancelRequested = classError("taskmill: task canceled", "canceled")
-	errAttemptTimeout  = classError("taskmill: attempt timed out", "timeout")
-)
-
 // errListenConfig reports a ListenConfig that pgx cannot connect with.
 var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with pgx.ParseConfig")
 
@@ -198,7 +190,10 @@ type QueueOptions struct {
 
 // Middleware wraps the execution of an attempt, for logging, metrics, or
 // tracing. It must call next at most once, and must not modify task.
-// Returning without calling next fails the attempt with the returned error.
+// Returning without calling next fails the attempt with the returned error,
+// or with an error that says so if it returns nil: the task is retried with
+// backoff, as after a handler's error, and the middleware outside sees that
+// error from its next.
 // A handler's panic reaches middleware as an error. For a batch handler,
 // middleware runs once per task, but the context it passes to next does not
 // reach the handler.
@@ -373,7 +368,7 @@ const (
 
 // run is the state of one call to [Worker.Run].
 type run struct {
-	attemptCtx context.Context // parent of every attempt; canceled with errShutdown once DrainTimeout passes
+	attemptCtx context.Context // parent of every attempt; canceled with ErrShutdown once DrainTimeout passes
 	inflight   sync.WaitGroup  // the running attempts and batches
 }
 
@@ -393,11 +388,13 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 
 // Run fetches and runs tasks until ctx is canceled. It then stops fetching,
 // waits up to DrainTimeout for running tasks, cancels and releases those
-// still running, and returns nil. It returns an error only if the worker
-// cannot start: it is already running, or cannot register in the database.
+// still running, and returns nil. If ctx ends before the worker registered,
+// it returns nil at once. It returns an error only if the worker cannot
+// start: it is already running, which is [ErrInvalidState], or it cannot
+// register in the database.
 func (w *Worker) Run(ctx context.Context) error {
 	if !w.running.CompareAndSwap(false, true) {
-		return errors.New("taskmill: worker is already running")
+		return fmt.Errorf("%w: the worker is already running", ErrInvalidState)
 	}
 	defer w.running.Store(false)
 	defer w.reached.Store(nil)
@@ -408,6 +405,9 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	names, err := w.register(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil // stopped before it started
+		}
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
 	now := time.Now()
@@ -503,7 +503,7 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 	case <-time.After(w.cfg.DrainTimeout):
 	}
 
-	stopAttempts(errShutdown)
+	stopAttempts(ErrShutdown)
 	select {
 	case <-done:
 		return
@@ -545,6 +545,9 @@ func (w *Worker) tracking() int {
 // ctx is canceled before the handler returns, the handler's context is
 // canceled too, and the task goes back to its queue without using an attempt.
 //
+// A task of a kind that the worker has no handler for is snoozed, with a
+// no_handler note in its errors, as Run does, and returned.
+//
 // It returns the task afterwards. It returns [ErrNotFound] if no task has the
 // ID, and [ErrInvalidState] if the task is running, waits behind its FIFO
 // group, or has finished.
@@ -565,7 +568,7 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	})
 
 	attemptCtx, stopAttempt := context.WithCancelCause(context.WithoutCancel(ctx))
-	stopAfter := context.AfterFunc(ctx, func() { stopAttempt(errShutdown) })
+	stopAfter := context.AfterFunc(ctx, func() { stopAttempt(ErrShutdown) })
 	if t.reg != nil && t.reg.runBatch != nil {
 		w.runBatch(attemptCtx, []*tracked{t})
 	} else {

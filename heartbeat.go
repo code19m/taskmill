@@ -164,7 +164,7 @@ func (w *Worker) loseLease(ctx context.Context, t *tracked) {
 // requested.
 func (t *tracked) requestCancel() {
 	if !t.cancelRequested.Swap(true) {
-		t.cancelAttempt(errCancelRequested)
+		t.cancelAttempt(ErrTaskCanceled)
 	}
 }
 

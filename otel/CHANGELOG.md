@@ -13,7 +13,17 @@ rename spans, attributes, or metrics to follow them, and says so here.
 ### Changed
 
 - Requires taskmill v0.3.0, whose `outbox.Outbox.AddRelay` takes relay
-  options; the examples pass nil. This module's API is unchanged.
+  options, and whose queue counts each say whether they stopped at their
+  cap; the examples pass nil relay options.
+- **Breaking:** `taskmill.queue.capped` has the attribute
+  `taskmill.task.state`, as `taskmill.queue.tasks` has: it is 1 when the
+  count of the queue's tasks in that state stopped at its cap, so each count
+  says whether it is a lower bound. Dashboards and alerts that read it per
+  queue take the maximum over the states.
+- With taskmill v0.3.0, an attempt or an enqueue that a middleware after
+  this module's skips, by returning nil without calling `next`, is recorded
+  as failed: its span has an error status, and its spans and metrics have
+  the `error.type` `middleware`.
 
 ## [0.1.0] - 2026-10-27
 

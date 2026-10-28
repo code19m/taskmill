@@ -11,7 +11,9 @@
 //
 // Mount it in an application, behind the application's own authentication:
 //
-//	mux.Handle("/taskmill/", auth(ui.Handler(client, &ui.Config{Prefix: "/taskmill"})))
+//	dashboard, err := ui.New(client, &ui.Config{Prefix: "/taskmill"})
+//	// ...
+//	mux.Handle("/taskmill/", auth(dashboard))
 //
 // Or protect it with [Config.BasicAuth], for example when the command
 // github.com/code19m/taskmill/cmd/taskmill-ui serves it as a dashboard of
@@ -68,7 +70,6 @@ const (
 	pageSize       = 50
 	groupPeek      = 100              // most waiting tasks of a group that a task page counts
 	staleHeartbeat = 30 * time.Second // a worker silent this long is shown as stale
-	statsCap       = 10_000           // the per-queue count cap of the statistics
 	requestTimeout = 10 * time.Second // bound on one request, so a slow database cannot hold it
 	maxChoices     = 100              // most values of one filter that a request may choose
 	gzipMin        = 1024             // smallest response worth compressing
@@ -118,12 +119,18 @@ type BasicAuth struct {
 	Password string
 }
 
-// Handler returns the web interface for client. cfg may be nil. Handler
-// panics if cfg.BasicAuth has an empty username or password, or if an entry
-// of cfg.FrameAncestors is empty or holds a space, comma, or semicolon.
-func Handler(client *taskmill.Client, cfg *Config) http.Handler {
+// New returns the web interface for client. cfg may be nil. It returns an
+// error that wraps [taskmill.ErrInvalidArgument] if client is nil, if
+// cfg.Prefix does not start with a slash, if cfg.BasicAuth has an empty
+// username or password, or if an entry of cfg.FrameAncestors is empty or
+// holds a space, comma, or semicolon.
+func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	if cfg == nil {
 		cfg = &Config{}
+	}
+	ancestors, err := checkConfig(client, cfg)
+	if err != nil {
+		return nil, err
 	}
 	s := &server{
 		client:   client,
@@ -158,7 +165,32 @@ func Handler(client *taskmill.Client, cfg *Config) http.Handler {
 	if cfg.BasicAuth != nil {
 		h = basicAuth(h, *cfg.BasicAuth)
 	}
-	return securityHeaders(h, frameAncestors(cfg.FrameAncestors))
+	return securityHeaders(h, ancestors), nil
+}
+
+// checkConfig checks the configuration of the interface, and returns the
+// frame-ancestors source list of its content security policy.
+func checkConfig(client *taskmill.Client, cfg *Config) (ancestors string, err error) {
+	invalid := func(format string, args ...any) error {
+		return fmt.Errorf("%w: ui: %s", taskmill.ErrInvalidArgument, fmt.Sprintf(format, args...))
+	}
+	switch {
+	case client == nil:
+		return "", invalid("client is nil")
+	case cfg.Prefix != "" && !strings.HasPrefix(cfg.Prefix, "/"):
+		return "", invalid("Prefix %q is not a path: start it with /", cfg.Prefix)
+	case cfg.BasicAuth != nil && (cfg.BasicAuth.Username == "" || cfg.BasicAuth.Password == ""):
+		return "", invalid("BasicAuth needs a username and a password")
+	}
+	for _, o := range cfg.FrameAncestors {
+		if o == "" || strings.ContainsAny(o, " \t\r\n,;") {
+			return "", invalid("FrameAncestors entry %q is empty or holds a space, comma, or semicolon", o)
+		}
+	}
+	if len(cfg.FrameAncestors) == 0 {
+		return "'none'", nil
+	}
+	return strings.Join(cfg.FrameAncestors, " "), nil
 }
 
 type server struct {
@@ -179,7 +211,7 @@ type page struct {
 	Static   bool   // the page does not update itself
 	ReadOnly bool
 	Notice   string
-	Dead     int64 // dead tasks, for the navigation; 0 if unknown
+	Dead     taskmill.TaskCount // dead tasks, for the navigation; zero if unknown
 	Data     any
 }
 
@@ -198,18 +230,26 @@ var queueStates = []taskmill.State{
 
 // totals sums the task counts of every queue.
 type totals struct {
-	Available, Running, Waiting, Dead int64
-	Capped                            bool
+	Available, Running, Waiting, Dead taskmill.TaskCount
+	Capped                            bool // some count stopped at its cap
 }
 
 func sumQueues(queues []taskmill.QueueInfo) totals {
 	var t totals
+	add := func(sum *taskmill.TaskCount, n taskmill.TaskCount) {
+		sum.N += n.N
+		sum.Capped = sum.Capped || n.Capped
+	}
 	for _, q := range queues {
-		t.Available += q.Counts[taskmill.StateAvailable]
-		t.Running += q.Counts[taskmill.StateRunning]
-		t.Waiting += q.Counts[taskmill.StateScheduled] + q.Counts[taskmill.StateRetryable] + q.Counts[taskmill.StatePending]
-		t.Dead += q.Counts[taskmill.StateDead]
-		t.Capped = t.Capped || q.Capped
+		add(&t.Available, q.Counts[taskmill.StateAvailable])
+		add(&t.Running, q.Counts[taskmill.StateRunning])
+		for _, st := range []taskmill.State{taskmill.StateScheduled, taskmill.StateRetryable, taskmill.StatePending} {
+			add(&t.Waiting, q.Counts[st])
+		}
+		add(&t.Dead, q.Counts[taskmill.StateDead])
+		for _, n := range q.Counts {
+			t.Capped = t.Capped || n.Capped
+		}
 	}
 	return t
 }
@@ -387,14 +427,10 @@ func queryNumber(q url.Values, key string) int64 {
 // tasks says how many tasks n is: "1 task", "1,234 tasks", or "10,000+
 // tasks" for a count that stopped at its cap.
 func tasks(n taskmill.TaskCount) string {
-	switch {
-	case n.Capped:
-		return number(n.N) + "+ tasks"
-	case n.N == 1:
+	if n == (taskmill.TaskCount{N: 1}) {
 		return "1 task"
-	default:
-		return number(n.N) + " tasks"
 	}
+	return count(n) + " tasks"
 }
 
 // bulkLinks lead to the pages of the bulk actions on the tasks that the
@@ -594,12 +630,13 @@ func (s *server) readChoices(r *http.Request) (c choices, complete bool) {
 	found, err := s.client.Groups(ctx, &taskmill.GroupParams{Limit: groupChoices})
 	if err != nil {
 		warn("groups", err)
+		found = &taskmill.GroupsResult{}
 	}
-	for _, g := range found {
+	for _, g := range found.Groups {
 		c.groups = append(c.groups, g.Key)
 	}
 	slices.Sort(c.groups)
-	c.groups, c.moreGroups = slices.Compact(c.groups), len(found) == groupChoices
+	c.groups, c.moreGroups = slices.Compact(c.groups), found.Next != ""
 	return c, complete
 }
 
@@ -618,8 +655,8 @@ func (s *server) groupChoicesJSON(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "taskmill: search failed", http.StatusServiceUnavailable)
 		return
 	}
-	keys := make([]string, 0, len(found))
-	for _, g := range found {
+	keys := make([]string, 0, len(found.Groups))
+	for _, g := range found.Groups {
 		keys = append(keys, g.Key)
 	}
 	slices.Sort(keys)
@@ -770,12 +807,12 @@ func (s *server) workers(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, http.StatusOK, "workers.html", page{Title: "Workers", Nav: "workers", Dead: s.deadCount(r), Data: workers})
 }
 
-// deadCount returns the dead tasks of every queue, or 0 if they cannot be
+// deadCount returns the dead tasks of every queue, or zero if they cannot be
 // read; it only feeds the navigation.
-func (s *server) deadCount(r *http.Request) int64 {
+func (s *server) deadCount(r *http.Request) taskmill.TaskCount {
 	queues, err := s.client.Queues(r.Context())
 	if err != nil {
-		return 0
+		return taskmill.TaskCount{}
 	}
 	return sumQueues(queues).Dead
 }
@@ -1198,9 +1235,6 @@ func (s *server) static() http.Handler {
 // credentials in constant time, so neither their content nor their length
 // leaks through timing.
 func basicAuth(next http.Handler, auth BasicAuth) http.Handler {
-	if auth.Username == "" || auth.Password == "" {
-		panic("ui: BasicAuth needs a username and a password")
-	}
 	wantUser, wantPass := sha256.Sum256([]byte(auth.Username)), sha256.Sum256([]byte(auth.Password))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
@@ -1215,20 +1249,6 @@ func basicAuth(next http.Handler, auth BasicAuth) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-// frameAncestors returns the frame-ancestors source list of the content
-// security policy.
-func frameAncestors(origins []string) string {
-	if len(origins) == 0 {
-		return "'none'"
-	}
-	for _, o := range origins {
-		if o == "" || strings.ContainsAny(o, " \t\r\n,;") {
-			panic(fmt.Sprintf("ui: invalid FrameAncestors entry %q", o))
-		}
-	}
-	return strings.Join(origins, " ")
 }
 
 // securityHeaders sets headers that keep the interface from being framed by
@@ -1292,13 +1312,12 @@ func number(n int64) string {
 	return s
 }
 
-// count formats a statistics count, marking one that may have stopped at
-// its cap.
-func count(n int64, capped bool) string {
-	if capped && n >= statsCap {
-		return number(n) + "+"
+// count formats a count of tasks, marking one that stopped at its cap.
+func count(n taskmill.TaskCount) string {
+	if n.Capped {
+		return number(n.N) + "+"
 	}
-	return number(n)
+	return number(n.N)
 }
 
 // shortID keeps the last part of a worker ID: its random suffix tells

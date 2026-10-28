@@ -7,6 +7,18 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ErrConflict`, of class `conflict`: `Client.UpdateQueue` and
+  `Client.UpdateSettings` return an error that wraps it when each of their
+  10 tries lost to a concurrent update of the same settings. Between tries
+  they pause a short random time, up to 50 ms, so that colliding updates
+  spread out and nearly all land.
+- `ErrTaskCanceled`, `ErrAttemptTimeout`, and `ErrShutdown`: with
+  `ErrLeaseLost`, the causes that `context.Cause` gives for a handler's
+  context that ended. The error classes that `ErrorType()` returns, such as
+  `invalid_argument`, are now part of the API.
+
 ### Changed
 
 - The guide's [Upgrading](docs/guide.md#upgrading) section states the
@@ -15,6 +27,72 @@ All notable changes to taskmill are recorded here. The format follows
   names that never change, such as the `State` values and error classes. It
   names the `migrations` table as the one public table, and what the promise
   leaves out: log and error messages, and the `otel` module's names.
+- **Breaking:** `Client.UpdateQueue` and `Client.UpdateSettings` take a
+  function that changes the current settings, instead of settings that
+  replace them all. A setting that your code leaves alone, or that a later
+  version adds, keeps its value. They hold no lock while the function runs:
+  they write the settings back only if no other update changed them
+  meanwhile, and otherwise run the function again on the new settings, up to
+  10 times before they fail with `ErrConflict`. So concurrent updates no
+  longer lose each other's changes, and the function must only change the
+  settings it gets, with no I/O. To migrate, set the fields you mean to:
+  `client.UpdateQueue(ctx, name, func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })`.
+  Calls that pass nil still compile, but now fail with `ErrInvalidArgument`.
+  Replace `UpdateQueue(ctx, name, nil)`, which removed the limit, with
+  `UpdateQueue(ctx, name, func(s *taskmill.QueueSettings) { s.MaxRunning = 0 })`,
+  and `UpdateSettings(ctx, nil)`, which reset retention to its defaults, with
+  `UpdateSettings(ctx, func(s *taskmill.Settings) { *s = taskmill.Settings{} })`.
+- **Breaking:** `Client.Groups` pages through every group, like `List`: it
+  returns a `*GroupsResult` with `Groups` and a `Next` cursor, which
+  `GroupParams.Cursor` takes, and `GroupParams.Halted` finds the halted
+  groups. Before, it returned at most 1,000 groups. To migrate, read
+  `res.Groups`, and follow `res.Next` for more. `GroupParams.Queues` takes at
+  most 100 names, since each named queue reads up to a page. Each page reads
+  only its own groups, also from a few queues or of halted groups only, with
+  migration 3's index on the halted groups, which `Migrate` adds. Its
+  documentation now says exactly what it lists: the groups with unfinished
+  tasks or a dead task that halts them, which `GroupInfo.Tasks` counts too.
+- **Breaking:** `QueueInfo.Counts` holds a `TaskCount` per state, as
+  `Client.Count` does, with its own `Capped` flag, and `QueueInfo.Capped` is
+  gone. Once the shared cap of 100,000 scheduled and retryable tasks is hit,
+  only those counts are capped, in every queue, even at zero. To migrate,
+  read `Counts[state].N`, and `Counts[state].Capped` for whether that count
+  stopped at its cap.
+- **Breaking:** `ui.New(client, cfg)` replaces `ui.Handler`, and returns an
+  error that wraps `taskmill.ErrInvalidArgument` instead of panicking on a
+  configuration it refuses: a nil client, a `Prefix` without a leading slash,
+  an empty `BasicAuth` username or password, or a bad `FrameAncestors` entry.
+  To migrate, check the error: `dashboard, err := ui.New(client, cfg)`.
+- **Breaking:** attempt middleware that returns nil without calling `next`
+  fails the attempt, which is retried with backoff. Before, the task was
+  completed although its handler never ran. Middleware that skips a task on
+  purpose returns an error, such as `taskmill.Snooze(d)` or
+  `taskmill.Permanent(err)`. Such a failure, and an enqueue middleware's that
+  returns nil without calling `next`, now reaches the middleware outside it
+  as an error from its `next`, of the class `middleware`, so tracing and
+  metrics record it.
+- **Breaking:** limits on one enqueue call, checked before any statement, so
+  that the caller's transaction stays usable: at most 64 KiB of encoded
+  metadata per task, after enqueue middleware, and at most 10,000 tasks and
+  64 MiB of payload and metadata per call. They apply to `EnqueueMany`,
+  `EnqueueManyTx`, and `outbox.Store`, and to the metadata of schedules,
+  which `NewWorker` checks. Calls beyond them fail with `ErrInvalidArgument`.
+  To migrate, split larger calls into chunks within both limits, and keep
+  each task's metadata within 64 KiB. Sizes now count `&`, `<`, and `>` as
+  one byte each, as stored, not as JSON escapes.
+- **Breaking:** `CodeLeaseExpired` is now `CodeLeaseLost`, with the value
+  `lease_lost`, like `ErrLeaseLost`. Error history entries recorded before
+  keep `lease_expired`: code that reads them checks for both.
+- **Breaking:** `NewWorker` rejects a `Schedule` whose `Options` set `RunAt`,
+  `DedupeKey`, or `DedupeWindow`, with `ErrInvalidArgument`, instead of
+  silently replacing them: the schedule sets them itself. Remove them from the
+  options.
+- `Worker.Run` on a running worker fails with `ErrInvalidState`, and
+  `NewClient` with a pool that does not use READ COMMITTED with
+  `ErrInvalidArgument`. Code that matched their messages can use `errors.Is`.
+- `Worker.Run` returns nil when its context ends before the worker
+  registered, as when a process is stopped while it starts, instead of a
+  "register worker" error.
 - **Breaking:** `outbox.Outbox.AddRelay` takes `*outbox.RelayOptions`, whose
   `BatchSize` and `Timeout` set the most deliveries per `Publish` call and
   the time each call has, as `HandlerOptions` do for other batch handlers.
@@ -44,8 +122,18 @@ All notable changes to taskmill are recorded here. The format follows
   another takes over and sends its heartbeat. One that crashes is still
   replaced within about 12 seconds.
 
+### Removed
+
+- **Breaking:** `ClientConfig.ContextMetadata`, deprecated in v0.2.0. Use
+  enqueue middleware, as the v0.2.0 entry below shows.
+
 ### Fixed
 
+- A bulk action whose context ended, or whose database call failed, while it
+  read the newest task ID returned no `BulkResult.Next`, so going on started
+  over from the first task. It now returns `Next` whenever it stops early.
+- The module no longer includes a 20 MB binary of the example shop, which
+  v0.2.0 shipped by mistake and every download of it carried.
 - A worker no longer listens through a proxy that pools transactions, such
   as PgBouncer in transaction mode when `ListenConfig` is not set. `LISTEN`
   stayed on a server connection that went back to the proxy's pool, so

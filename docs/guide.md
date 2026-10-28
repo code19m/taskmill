@@ -226,6 +226,13 @@ the task cannot proceed yet, such as while waiting for a rate limit. A snooze
 of zero or less makes the task available at once. Snoozes use no attempts, so
 a task that always snoozes never becomes dead.
 
+**Why the context ended.** A handler must return soon after its context is
+canceled. `context.Cause(ctx)` says why: `taskmill.ErrTaskCanceled`,
+`ErrLeaseLost`, `ErrAttemptTimeout`, or `ErrShutdown`. Each of taskmill's
+errors also names a stable class through an `ErrorType() string` method, such
+as `invalid_argument` or `timeout`, which OpenTelemetry reports as
+`error.type`.
+
 **Retries** wait 1 second, then double up to 1 hour, with ±10% random jitter
 so that failed tasks do not retry in waves. With the default 25 attempts, a
 failing task keeps retrying for about 13 hours before it becomes dead. A
@@ -363,11 +370,18 @@ one process. To limit a queue across all workers, for example to protect a
 rate-limited API, set `MaxRunning`:
 
 ```go
-err := client.UpdateQueue(ctx, "partner-api", &taskmill.QueueSettings{MaxRunning: 4})
+err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
 ```
 
-`UpdateQueue` replaces the queue's settings: a zero `MaxRunning`, or nil
-settings, removes the limit. Workers apply the change within 10 seconds.
+`UpdateQueue` passes a copy of the queue's current settings to your
+function, and saves what it changes, so the settings you leave alone, or that
+a later version adds, keep their values. It holds no lock while your function
+runs: if another update changed the settings meanwhile, it runs your function
+again on the new settings, after a short random pause, so the function must
+only change the settings it gets. After 10 tries that all lost to other
+updates, it returns an error that wraps `ErrConflict`; try again later. A
+zero `MaxRunning` removes the limit. Workers apply the change within
+10 seconds.
 
 ## Ordering and deduplication
 
@@ -391,9 +405,11 @@ _, err := client.Enqueue(ctx, PostLedgerEntry{...}, &taskmill.EnqueueOptions{Gro
   order you asked for. A canceled head does not halt its group.
 - Producers that enqueue into the same group wait for each other's
   transactions, so keep those transactions short.
-- `TaskFilter.GroupKeys`, in `ListParams.Filter`, lists the tasks of chosen groups, and
-  `Client.Groups` finds the groups that have unfinished tasks and those that
-  are halted. The web interface links each task to its group.
+- `TaskFilter.GroupKeys`, in `ListParams.Filter`, lists the tasks of chosen
+  groups. `Client.Groups` pages through the groups that have a row, those
+  with unfinished tasks or halted by a dead task, ordered by queue and key;
+  `GroupParams.Halted` finds the halted ones. The web interface links each
+  task to its group.
 
 **Deduplication.** A `DedupeKey` admits at most one task: while its window
 lasts, enqueueing the same kind with the same key in the same queue creates
@@ -533,10 +549,15 @@ often. Use it in one of three ways:
 - **In your application,** behind your own authentication:
 
   ```go
-  mux.Handle("/taskmill/", requireAdmin(ui.Handler(client, &ui.Config{Prefix: "/taskmill"})))
+  dashboard, err := ui.New(client, &ui.Config{Prefix: "/taskmill"})
+  // ...
+  mux.Handle("/taskmill/", requireAdmin(dashboard))
   ```
 
   The handler strips `Prefix` itself; do not wrap it in `http.StripPrefix`.
+  `ui.New` returns an error that wraps `taskmill.ErrInvalidArgument` for a
+  configuration that would serve the dashboard wrongly, such as a `Prefix`
+  that does not start with a slash.
 - **On its own,** with the `taskmill-ui` command. It reads its settings from
   the environment, and asks for a password when `TASKMILL_UI_PASSWORD` is
   set:
@@ -595,15 +616,15 @@ own code and tools:
 | `Get` | Returns a task, unfinished, finished, or from history |
 | `List` | Pages through tasks by queues, states, kinds, and FIFO groups, newest first |
 | `Count` | How many tasks match a `TaskFilter`, the filter of `List`: in each state, and how many each bulk action would change; each count stops at 10,000 tasks a state, and says so |
-| `Groups` | The FIFO groups that have unfinished tasks, which of them are halted, and by which task |
+| `Groups` | Pages through the FIFO groups: those with unfinished tasks or a dead task that halts them, and by which task |
 | `Cancel`, `CancelTx` | Cancels a waiting task, or asks a running task's worker to stop it |
 | `Retry` | Runs a dead or canceled task again, with fresh attempts |
 | `Delete` | Deletes a task that is not running |
 | `CancelMatching`, `RetryMatching`, `DeleteMatching` | The same for every task that matches a `TaskFilter`, in batches; they say how many tasks they changed and skipped |
 | `Queues` | Every queue with its settings, workers, and task counts per state |
-| `UpdateQueue`, `PauseQueue`, `ResumeQueue` | Change a queue's installation-wide settings |
+| `UpdateQueue`, `PauseQueue`, `ResumeQueue` | Change a queue's installation-wide settings: `UpdateQueue` changes the current settings with your function |
 | `Schedules`, `PauseSchedule`, `ResumeSchedule`, `RunSchedule` | List schedules, pause and resume them, and run one now |
-| `Settings`, `UpdateSettings` | Retention of history, and of dead and canceled tasks |
+| `Settings`, `UpdateSettings` | Retention of history, and of dead and canceled tasks: `UpdateSettings` changes the current settings with your function |
 | `Workers` | The running workers, the queues and kinds they serve, and which one is the maintainer |
 | `Activity` | Task counts and ended attempts per minute, for the last day |
 
@@ -650,14 +671,16 @@ the task before it notices the cancellation, the task stays completed.
 
 **Error history.** `TaskInfo.Errors` keeps a task's 20 most recent errors.
 `AttemptError.Code` is empty for an error that a handler returned. For
-failures that taskmill detects itself, it is `CodeLeaseExpired`, `CodeTimeout`,
+failures that taskmill detects itself, it is `CodeLeaseLost`, `CodeTimeout`,
 `CodePanic`, `CodeInvalidPayload`, or `CodeUnknownKind`. `CodeNoHandler`
-marks a note, not a failure.
+marks a note, not a failure. Entries recorded before v0.3.0 name a lost lease
+`lease_expired`.
 
 **Running one task now.** `Worker.RunTask(ctx, id)` runs one task at once,
 in the calling goroutine, and returns the task afterwards. It ignores the
 task's run time, queue pauses, and concurrency limits, but not FIFO order. It
-needs no running worker.
+needs no running worker. A task of a kind that the worker has no handler for
+is snoozed with a `no_handler` note, as a running worker does.
 
 **Retention.** Completed tasks move to a history table and stay there for
 7 days. Dead and canceled tasks stay for 30 days. Both are installation-wide
@@ -693,7 +716,9 @@ forwards a path per service to it, behind its own login:
 
 ```go
 // In the orders service:
-mux.Handle("/admin/jobs/orders/", ui.Handler(client, &ui.Config{Prefix: "/admin/jobs/orders"}))
+dashboard, err := ui.New(client, &ui.Config{Prefix: "/admin/jobs/orders"})
+// ...
+mux.Handle("/admin/jobs/orders/", dashboard)
 
 // In the admin application:
 orders := httputil.NewSingleHostReverseProxy(ordersURL) // such as http://orders.internal:9090
@@ -716,8 +741,10 @@ mux.Handle("/admin/jobs/orders/", requireAdmin(orders))
 people act and others only look, mount both and pick one per request:
 
 ```go
-operate := ui.Handler(client, &ui.Config{Prefix: "/admin/jobs"})
-view := ui.Handler(client, &ui.Config{Prefix: "/admin/jobs", ReadOnly: true})
+operate, err := ui.New(client, &ui.Config{Prefix: "/admin/jobs"})
+// ...
+view, err := ui.New(client, &ui.Config{Prefix: "/admin/jobs", ReadOnly: true})
+// ...
 mux.Handle("/admin/jobs/", requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
     if canOperate(r) {
         operate.ServeHTTP(w, r)
@@ -746,7 +773,7 @@ func (h withUser) Handle(ctx context.Context, r slog.Record) error {
     return h.Handler.Handle(ctx, r)
 }
 
-handler := ui.Handler(client, &ui.Config{Logger: slog.New(withUser{logger.Handler()})})
+handler, err := ui.New(client, &ui.Config{Logger: slog.New(withUser{logger.Handler()})})
 ```
 
 When the admin application forwards, every action passes through it as a
@@ -801,7 +828,7 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
 | Histogram | `messaging.client.operation.duration` | How long enqueue calls take. |
 | Histogram | `messaging.process.duration` | How long attempts take. |
 | Gauge | `taskmill.queue.tasks` | Tasks per queue and state, up to the caps below. |
-| Gauge | `taskmill.queue.capped` | 1 when a count of the queue stopped at its cap. |
+| Gauge | `taskmill.queue.capped` | 1 when the count of the queue's tasks in a state stopped at its cap. |
 | Gauge | `taskmill.queue.lag` | How long each queue's oldest due task has waited. Alert on it for backlogs. |
 | Gauge | `taskmill.stats.age` | How long ago the maintainer last counted. Alert when it passes a minute: no maintainer runs. |
 
@@ -831,8 +858,7 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
 and timestamps; `ClientConfig.EnqueueMiddleware` wraps every enqueue, and may
 add metadata, such as a trace context, to the tasks it enqueues. This one
 copies values from the context into the metadata, keeping what the enqueue
-set, as the deprecated `ClientConfig.ContextMetadata` does until v0.3.0
-removes it:
+set:
 
 ```go
 func FromContext(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
@@ -855,9 +881,13 @@ func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Con
 }
 ```
 
-Middleware must call `next` at most once. A handler's panic reaches attempt
-middleware as an error. For a batch handler, middleware runs once per task,
-but the context it passes to `next` does not reach the handler. Enqueue
+Middleware must call `next` at most once. Attempt middleware that returns nil
+without calling `next` fails the attempt, which is retried with backoff, as
+after a handler's error. Enqueue middleware that does so fails the call, and
+nothing is stored. Either way, the middleware outside it sees the error, of
+the class `middleware`. A handler's panic reaches attempt middleware as an
+error. For a batch handler, middleware runs once per task, but the context it
+passes to `next` does not reach the handler. Enqueue
 middleware that fails after `next` stored the tasks fails an enqueue in your
 transaction, so that you can roll back; any other enqueue has committed, so
 it succeeds, and the error is logged.
@@ -865,14 +895,16 @@ it succeeds, and the error is logged.
 **Queue depth** comes from `Client.Queues`, whose counts the maintainer
 refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
 backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
-and retryable tasks across all queues. `QueueInfo.Capped` means a count hit
-its cap and is a lower bound. `QueueInfo.Lag` is how long the queue's oldest
-due task has waited since its run time: an available task, or a scheduled or
-retryable one whose time has come. The maintainer finds that task when it
-counts, and `Client.Queues` measures its age by the database's clock, so lag
-has no cap, suits backlog alerts, and keeps growing when no maintainer runs.
-It may read high for up to one refresh, about 10 seconds. FIFO tasks waiting
-behind their group do not count.
+and retryable tasks across all queues. Each count in `QueueInfo.Counts` says
+whether it hit its cap, `TaskCount.Capped`, and so is a lower bound. Once the
+shared cap is hit, every queue's scheduled and retryable counts are capped,
+even at zero. `QueueInfo.Lag` is how long the queue's oldest due task has
+waited since its run time: an available task, or a scheduled or retryable one
+whose time has come. The maintainer finds that task when it counts, and
+`Client.Queues` measures its age by the database's clock, so lag has no cap,
+suits backlog alerts, and keeps growing when no maintainer runs. It may read
+high for up to one refresh, about 10 seconds. FIFO tasks waiting behind their
+group do not count.
 
 **History** comes from `Client.Activity`: for each minute of the last 24
 hours, the most tasks counted in each state, and the attempts that completed
@@ -1481,7 +1513,9 @@ this is its compatibility promise:
   - the `ErrorCode` values in a task's error history, such as `timeout`;
   - the error classes that `ErrorType()` reports for OpenTelemetry's
     `error.type`: `not_found`, `lease_lost`, `invalid_state`,
-    `invalid_argument`, `schema_outdated`, and the error codes;
+    `invalid_argument`, `schema_outdated`, `conflict`, the causes
+    `canceled`, `timeout`, and `shutdown`, `middleware` for middleware that
+    returned nil without calling `next`, and the error codes;
   - the outbox's queue, `outbox.Queue` (`outbox`), and its task kind,
     `taskmill.outbox.message`.
 
@@ -1519,6 +1553,8 @@ read those entries for every release you skip.
 | Queue, kind, and schedule names | — | 1 to 128 characters |
 | Group key | — | 1 to 256 characters |
 | Payload | — | 1 MiB of JSON |
+| Metadata | — | 64 KiB of JSON per task, after enqueue middleware |
+| One enqueue call (`EnqueueMany`, `outbox.Store`) | — | 10,000 tasks; 64 MiB of payload and metadata |
 | `MaxAttempts` | 25 | 1 to 10,000 |
 | Retry backoff | 1 s, doubling to 1 h, ±10% jitter; about 13 h for 25 attempts | — |
 | Retry and run time accuracy | About 1 second | — |
@@ -1535,6 +1571,8 @@ read those entries for every release you skip.
 | Dead and canceled retention | 30 days | At least 1 hour |
 | Error history | 20 most recent errors per task | 4 KiB per message |
 | `List` page | 100 tasks | 1,000 tasks; 5 seconds per query |
+| `Groups` page | 100 groups | 1,000 groups and 100 named queues; 5 seconds per query |
+| `UpdateQueue` and `UpdateSettings` | 10 tries, with random pauses of up to 50 ms between them | Then `ErrConflict` |
 | Queue statistics | Refreshed every 10 seconds | 10,000 per queue and state; 100,000 scheduled and retryable in all |
 | Removed schedules | Deleted after 24 hours without a run or change | — |
 | `RelayOptions.BatchSize` | 100 deliveries per `Publish` | 1,000 |

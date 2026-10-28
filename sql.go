@@ -106,14 +106,17 @@ type statements struct {
 	pauseSchedule   string
 	runSchedule     string
 
-	updateQueue      string
+	readQueue        string
+	swapQueue        string
 	pauseQueue       string
 	listQueues       string
 	queueStats       string
-	updateSettings   string
+	readSettings     string
+	swapSettings     string
 	listWorkers      string
 	listTasks        string
 	listGroups       string
+	listQueueGroups  string
 	countStats       string
 	clearStats       string
 	storeStats       string
@@ -852,7 +855,7 @@ SET state = CASE
     finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
     lease_expires_at = NULL,
     errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', now(),
-                 'message', $3::text, 'code', 'lease_expired'))
+                 'message', $3::text, 'code', 'lease_lost'))
 FROM expired
 WHERE t.id = expired.id
 RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`),
@@ -921,9 +924,22 @@ WHERE name = $1 AND next_run_at = $3 AND paused_at IS NULL`),
 SELECT name, queue, kind, cron, timezone, next_run_at, last_run_at, paused_at IS NOT NULL
 FROM {s}.schedules ORDER BY name`),
 
-		updateQueue: q(`
-INSERT INTO {s}.queues AS q (name, max_running) VALUES ($1, $2)
-ON CONFLICT (name) DO UPDATE SET max_running = EXCLUDED.max_running, updated_at = now()`),
+		// readQueue reads queue $1's settings, which are NULL when it has no
+		// row.
+		readQueue: q(`SELECT (SELECT max_running FROM {s}.queues WHERE name = $1)`),
+
+		// swapQueue writes queue $1's settings $3 only if they are still $2,
+		// as readQueue read them, creating its row if it has none, and tells
+		// the workers on channel $4 with payload $5. It returns 1 if it
+		// wrote, 0 if the settings changed meanwhile.
+		swapQueue: q(`
+WITH swapped AS (
+    INSERT INTO {s}.queues AS q (name, max_running) VALUES ($1, $3)
+    ON CONFLICT (name) DO UPDATE SET max_running = $3, updated_at = now()
+    WHERE q.max_running IS NOT DISTINCT FROM $2
+    RETURNING 1
+)
+SELECT count(pg_notify($4, $5)) FROM swapped`),
 
 		pauseQueue: q(`
 INSERT INTO {s}.queues AS q (name, paused_at) VALUES ($1, CASE WHEN $2 THEN now() END)
@@ -952,10 +968,21 @@ SELECT queue, state::text, tasks, capped, refreshed_at,
        greatest(0, (extract(epoch FROM now() - oldest_due_at) * 1000000)::bigint)
 FROM {s}.queue_stats`),
 
-		updateSettings: q(`
+		// readSettings reads the retention periods in microseconds, which
+		// swapSettings compares and writes.
+		readSettings: q(`
+SELECT (extract(epoch FROM history_retention) * 1000000)::bigint, (extract(epoch FROM dead_retention) * 1000000)::bigint
+FROM {s}.settings`),
+
+		// swapSettings writes the retention periods $3 and $4 only if they
+		// are still $1 and $2, as readSettings read them. It changes no row
+		// if they changed meanwhile.
+		swapSettings: q(`
 UPDATE {s}.settings
-SET history_retention = $1 * interval '1 microsecond', dead_retention = $2 * interval '1 microsecond',
-    updated_at = now()`),
+SET history_retention = $3 * interval '1 microsecond', dead_retention = $4 * interval '1 microsecond',
+    updated_at = now()
+WHERE (extract(epoch FROM history_retention) * 1000000)::bigint = $1
+  AND (extract(epoch FROM dead_retention) * 1000000)::bigint = $2`),
 
 		listWorkers: q(`
 SELECT w.id, w.hostname, w.version, w.queues, w.kinds, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL
@@ -986,14 +1013,38 @@ SELECT ` + taskColumns + ` FROM (
        created_at, run_at, attempted_at, finalized_at)
 ORDER BY id DESC LIMIT $5`),
 
-		// listGroups reads FIFO groups in the order of the primary key, so a
-		// page with no search reads only that many rows of it.
+		// listGroups reads a page of FIFO groups in the order of the primary
+		// key, after group ($4, $5) where the last page ended, so a page with
+		// no search reads only its own rows. Halted groups only ($3) read the
+		// index of halted groups, in the same order.
 		listGroups: q(`
 SELECT queue, group_key, tasks, coalesce(halted_task_id, 0) FROM {s}.groups
-WHERE tasks > 0 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
-  AND ($2 = '' OR strpos(lower(group_key), lower($2)) > 0)
+WHERE tasks > 0
+  AND ($1 = '' OR strpos(lower(group_key), lower($1)) > 0)
+  AND (NOT $3 OR halted_task_id IS NOT NULL)
+  AND (queue, group_key) > ($4, $5)
 ORDER BY queue, group_key
-LIMIT $3`),
+LIMIT $2`),
+
+		// listQueueGroups reads a page of listGroups in queues $6 only. Each
+		// queue from the cursor's on reads its own groups in key order, up to
+		// a page, from where the last page ended, so a page reads no group
+		// of an earlier one.
+		listQueueGroups: q(`
+SELECT g.queue, g.group_key, g.tasks, coalesce(g.halted_task_id, 0)
+FROM (SELECT DISTINCT unnest($6::text[])) AS u(q),
+LATERAL (
+    SELECT g.queue, g.group_key, g.tasks, g.halted_task_id FROM {s}.groups g
+    WHERE g.queue = u.q AND g.group_key > CASE WHEN u.q = $4 THEN $5 ELSE '' END
+      AND g.tasks > 0
+      AND ($1 = '' OR strpos(lower(g.group_key), lower($1)) > 0)
+      AND (NOT $3 OR g.halted_task_id IS NOT NULL)
+    ORDER BY g.group_key
+    LIMIT $2
+) g
+WHERE u.q >= $4
+ORDER BY g.queue, g.group_key
+LIMIT $2`),
 
 		// countStats counts each queue's tasks per state, except completed
 		// ones, with the run time of the oldest due task of each count. The
@@ -1053,18 +1104,26 @@ SELECT state::text, queue, count(*), min(run_at) FILTER (WHERE run_at <= now()) 
 ) due GROUP BY state, queue`),
 
 		clearStats: q(`DELETE FROM {s}.queue_stats`),
-		// storeStats stores the counts, and a zero count for every other known
-		// queue, so that each one shows when it was counted, even an empty
-		// installation. $6 marks those zeros as capped once the shared cap
-		// was hit.
+		// storeStats stores the counts, and a zero available count for every
+		// other known queue, so that each one shows when it was counted, even
+		// an empty installation. Once the shared cap was hit ($6), any queue
+		// may have scheduled and retryable tasks that were not counted, so
+		// each one missing those counts gets them as capped zeros.
 		storeStats: q(`
+WITH u AS (
+    SELECT q, s, n, c, o FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[]) AS u(q, s, n, c, o)
+), k AS (
+    SELECT name FROM {s}.queues UNION SELECT unnest(queues) FROM {s}.workers UNION SELECT q FROM u
+)
 INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at, oldest_due_at)
-SELECT q, s::{s}.task_state, n, c, now(), o
-FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[]) AS u(q, s, n, c, o)
+SELECT q, s::{s}.task_state, n, c, now(), o FROM u
 UNION ALL
-SELECT k.name, 'available', 0, $6, now(), NULL
-FROM (SELECT name FROM {s}.queues UNION SELECT unnest(queues) FROM {s}.workers) AS k(name)
-WHERE NOT k.name = ANY($1::text[])`),
+SELECT k.name, 'available', 0, false, now(), NULL
+FROM k WHERE NOT EXISTS (SELECT FROM u WHERE u.q = k.name)
+UNION ALL
+SELECT k.name, d.s::{s}.task_state, 0, true, now(), NULL
+FROM k, unnest('{scheduled,retryable}'::text[]) AS d(s)
+WHERE $6 AND NOT EXISTS (SELECT FROM u WHERE u.q = k.name AND u.s = d.s)`),
 
 		// storeActivity copies the counts just stored in queue_stats into the
 		// current minute's activity, with zeros for every other known queue,
