@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/code19m/taskmill"
-	"github.com/code19m/taskmill/ui"
 )
 
 // FuzzPages requests any path and query string, as a GET or as a POST:
@@ -38,7 +37,7 @@ func FuzzPages(f *testing.F) {
 		&taskmill.EnqueueOptions{Queue: "mail", GroupKey: "topic\x1fkey"}); err != nil {
 		f.Fatal(err)
 	}
-	h := ui.Handler(client, nil)
+	h := handler(f, client, nil)
 
 	f.Fuzz(func(t *testing.T, target string, post bool) {
 		u, err := url.ParseRequestURI(target)

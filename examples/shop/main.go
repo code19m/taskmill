@@ -213,8 +213,12 @@ func runShop(ctx context.Context, pool *pgxpool.Pool, schema string, ln net.List
 
 	// The dashboard, mounted under a path of the shop's own server. It can
 	// retry, delete, and pause, so only operators may reach it.
+	dashboard, err := ui.New(s.client, &ui.Config{Prefix: "/taskmill", Logger: logger})
+	if err != nil {
+		return err
+	}
 	mux := http.NewServeMux()
-	mux.Handle("/taskmill/", requireAdmin(ui.Handler(s.client, &ui.Config{Prefix: "/taskmill", Logger: logger})))
+	mux.Handle("/taskmill/", requireAdmin(dashboard))
 	mux.Handle("GET /{$}", http.RedirectHandler("/taskmill/", http.StatusFound))
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
@@ -292,7 +296,7 @@ func openShop(ctx context.Context, pool *pgxpool.Pool, schema string, logger *sl
 		return nil, err
 	}
 	// A limit across all workers: at most two partner calls run at once.
-	if err := client.UpdateQueue(ctx, "partner-api", &taskmill.QueueSettings{MaxRunning: 2}); err != nil {
+	if err := client.UpdateQueue(ctx, "partner-api", func(q *taskmill.QueueSettings) { q.MaxRunning = 2 }); err != nil {
 		return nil, err
 	}
 	s.client, s.outbox = client, outbox.New(client)

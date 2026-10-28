@@ -8,19 +8,19 @@
 <section class="stats" aria-label="Totals">
   <a class="card stat" href="{{path "/tasks?state=available"}}">
     <span class="stat-label">{{template "state-icon" "available"}}Available</span>
-    <span class="stat-value">{{count $d.Totals.Available $d.Totals.Capped}}</span>
+    <span class="stat-value">{{count $d.Totals.Available}}</span>
   </a>
   <a class="card stat" href="{{path "/tasks?state=running"}}">
     <span class="stat-label">{{template "state-icon" "running"}}Running</span>
-    <span class="stat-value">{{count $d.Totals.Running $d.Totals.Capped}}</span>
+    <span class="stat-value">{{count $d.Totals.Running}}</span>
   </a>
   <a class="card stat" href="{{path "/tasks?state=scheduled"}}">
     <span class="stat-label">{{template "state-icon" "scheduled"}}Waiting</span>
-    <span class="stat-value">{{count $d.Totals.Waiting $d.Totals.Capped}}</span>
+    <span class="stat-value">{{count $d.Totals.Waiting}}</span>
   </a>
-  <a class="card stat{{if $d.Totals.Dead}} failed{{end}}" href="{{path "/tasks?state=dead"}}">
+  <a class="card stat{{if $d.Totals.Dead.N}} failed{{end}}" href="{{path "/tasks?state=dead"}}">
     <span class="stat-label">{{template "state-icon" "dead"}}Dead</span>
-    <span class="stat-value">{{count $d.Totals.Dead $d.Totals.Capped}}</span>
+    <span class="stat-value">{{count $d.Totals.Dead}}</span>
   </a>
   <a class="card stat" href="{{path "/workers"}}">
     <span class="stat-label">{{template "icon-workers"}}Workers</span>
@@ -64,7 +64,7 @@
           {{with $q.Settings.MaxRunning}}<span class="chip" title="At most {{.}} running across all workers">max {{.}}</span>{{end}}
         </td>
         {{range $s := $d.States}}{{$n := index $q.Counts $s}}
-        <td class="num"><a class="{{if not $n}}zero{{else}}count-{{$s}}{{end}}" href="{{path "/tasks"}}{{query "queue" $q.Name "state" (print $s)}}">{{count $n $q.Capped}}</a></td>
+        <td class="num"><a class="{{if not $n.N}}zero{{else}}count-{{$s}}{{end}}" href="{{path "/tasks"}}{{query "queue" $q.Name "state" (print $s)}}">{{count $n}}</a></td>
         {{end}}
         <td class="num{{if not $q.Workers}} zero{{end}}">{{$q.Workers}}</td>
         {{if not $ro}}<td class="actions-col">

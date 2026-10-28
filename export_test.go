@@ -131,20 +131,43 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	if states == nil {
 		states = deleteStates
 	}
-	m, err := c.bulk(ctx, &BulkParams{Filter: *filter}, states)
+	m, err := checkBulk(&BulkParams{Filter: *filter}, states)
 	if err != nil {
+		return 0, err
+	}
+	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
 		return 0, err
 	}
 	args := []any{m.queues, m.kinds, m.groups, m.states, after, m.last, m.left.queues, m.left.groups}
 	if action == "history" {
 		args = []any{m.queues, m.kinds, m.groups, after, m.last}
 	}
+	return rowsRead(ctx, c, bulkSettings, sql, args, func(rel string) bool {
+		return rel == "tasks" || strings.HasPrefix(rel, "task_history")
+	})
+}
+
+// GroupRowsRead runs the read of a page of groups on params, as Groups runs
+// it, under EXPLAIN ANALYZE, and returns how many rows its scans of groups
+// read.
+func GroupRowsRead(ctx context.Context, c *Client, params *GroupParams) (int64, error) {
+	sql, args, err := c.groupsQuery(params)
+	if err != nil {
+		return 0, err
+	}
+	return rowsRead(ctx, c, groupsSettings, sql, args, func(rel string) bool { return rel == "groups" })
+}
+
+// rowsRead runs sql after settings under EXPLAIN ANALYZE, in a transaction
+// that it rolls back, and returns how many rows the scans of the relations
+// that match read.
+func rowsRead(ctx context.Context, c *Client, settings, sql string, args []any, match func(rel string) bool) (int64, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, bulkSettings); err != nil {
+	if _, err := tx.Exec(ctx, settings); err != nil {
 		return 0, err
 	}
 	var plan []map[string]any
@@ -154,7 +177,7 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	var read func(node map[string]any) int64
 	read = func(node map[string]any) int64 {
 		var n int64
-		if rel, _ := node["Relation Name"].(string); rel == "tasks" || strings.HasPrefix(rel, "task_history") {
+		if rel, _ := node["Relation Name"].(string); match(rel) {
 			for _, key := range []string{"Actual Rows", "Rows Removed by Filter", "Rows Removed by Index Recheck"} {
 				v, _ := node[key].(float64)
 				loops, _ := node["Actual Loops"].(float64)

@@ -39,6 +39,10 @@ var (
 	// this version of taskmill. Run [Migrate].
 	ErrSchemaOutdated = classError("taskmill: database schema is missing or outdated", "schema_outdated")
 
+	// ErrConflict means an update lost to concurrent updates of the same
+	// settings every time it tried. Try again.
+	ErrConflict = classError("taskmill: conflict", "conflict")
+
 	// ErrTaskCanceled is the cause of a handler's context when the task was
 	// canceled while it ran. The task becomes canceled when the attempt ends.
 	ErrTaskCanceled = classError("taskmill: task canceled", "canceled")

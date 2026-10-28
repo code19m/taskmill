@@ -423,8 +423,11 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 		}
 	}
 
-	if capped := e.points(t, "taskmill.queue.capped"); !slices.Contains(capped, "messaging.destination.name=backlog: 0") {
-		t.Errorf("got capped %q, want 0 for the backlog", capped)
+	capped := e.points(t, "taskmill.queue.capped")
+	for _, s := range []string{"available", "scheduled", "pending", "running", "retryable", "dead", "canceled"} {
+		if want := "messaging.destination.name=backlog taskmill.task.state=" + s + ": 0"; !slices.Contains(capped, want) {
+			t.Errorf("got capped %q, want 0 for the backlog's %s tasks", capped, s)
+		}
 	}
 	if lag := e.value(t, "taskmill.queue.lag", "messaging.destination.name=backlog"); lag < 3600 || lag > 3660 {
 		t.Errorf("got lag %v seconds, want about an hour", lag)

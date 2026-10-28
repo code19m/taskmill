@@ -159,3 +159,51 @@ func FuzzBulkCursor(f *testing.F) {
 		e.checkGroups(t)
 	})
 }
+
+// FuzzGroups lists FIFO groups with any search, page size, and cursor, as a
+// service passes them on from its own users: Groups returns a page or
+// ErrInvalidArgument, and each page's cursor leads to the next one, in order.
+func FuzzGroups(f *testing.F) {
+	f.Add("", 0, false, "")
+	f.Add("g", 1, true, "")
+	f.Add("", 2, false, "%%%")
+	f.Add("", 1, false, "ZGVmYXVsdABn") // "default\x00g"
+	f.Add("\x00", -1, false, "AA")
+	e := newEnv(f)
+	for _, key := range []string{"g", "G2", "g\x1fkey", "h"} {
+		if _, err := e.client.Enqueue(f.Context(), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: key}); err != nil {
+			f.Fatal(err)
+		}
+	}
+	f.Fuzz(func(t *testing.T, search string, limit int, halted bool, cursor string) {
+		p := &taskmill.GroupParams{Search: search, Limit: limit, Halted: halted, Cursor: cursor}
+		if _, err := e.client.Groups(t.Context(), p); errors.Is(err, taskmill.ErrInvalidArgument) {
+			return
+		}
+		groupPages(t, e.client, p)
+	})
+}
+
+// groupPages lists up to 10 pages of groups from p, and fails t unless each
+// page's cursor leads on without repeating a group.
+func groupPages(t *testing.T, client *taskmill.Client, p *taskmill.GroupParams) {
+	t.Helper()
+	seen := map[[2]string]bool{}
+	for range 10 {
+		page, err := client.Groups(t.Context(), p)
+		if err != nil {
+			t.Fatalf("Groups(%+v): %v", p, err)
+		}
+		for _, g := range page.Groups {
+			if key := [2]string{g.Queue, g.Key}; seen[key] {
+				t.Fatalf("Groups(%+v): group %q comes twice", p, key)
+			} else {
+				seen[key] = true
+			}
+		}
+		if page.Next == "" {
+			return
+		}
+		p.Cursor = page.Next
+	}
+}

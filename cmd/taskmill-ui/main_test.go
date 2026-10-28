@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -42,14 +43,8 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatalf("frame ancestors: got %q, want %q", c.frameAncestors, want)
 	}
 
-	for name, value := range map[string]string{
-		"TASKMILL_UI_READ_ONLY":       "maybe",
-		"TASKMILL_UI_PREFIX":          "admin/jobs",
-		"TASKMILL_UI_FRAME_ANCESTORS": "https://admin.example.com;script-src *",
-	} {
-		if _, err := loadConfig(env(map[string]string{"TASKMILL_DATABASE_URL": "postgres://db", name: value})); err == nil {
-			t.Errorf("%s=%q was accepted", name, value)
-		}
+	if _, err := loadConfig(env(map[string]string{"TASKMILL_DATABASE_URL": "postgres://db", "TASKMILL_UI_READ_ONLY": "maybe"})); err == nil {
+		t.Error("TASKMILL_UI_READ_ONLY=maybe was accepted")
 	}
 }
 
@@ -72,7 +67,10 @@ func TestHandlerServesItsSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := handler(client, cfg, slog.New(slog.DiscardHandler))
+	h, err := handler(client, cfg, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// A proxy forwards the path unchanged; the page's links keep the prefix.
 	rec := httptest.NewRecorder()
@@ -89,5 +87,19 @@ func TestHandlerServesItsSettings(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/tasks", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("a path outside the prefix: got %d, want 404", rec.Code)
+	}
+
+	// The dashboard refuses settings that would serve it wrongly.
+	for name, value := range map[string]string{
+		"TASKMILL_UI_PREFIX":          "admin/jobs",
+		"TASKMILL_UI_FRAME_ANCESTORS": "https://admin.example.com;script-src *",
+	} {
+		cfg, err := loadConfig(env(map[string]string{"TASKMILL_DATABASE_URL": "postgres://db", name: value}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handler(client, cfg, slog.New(slog.DiscardHandler)); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("%s=%q: got %v, want ErrInvalidArgument", name, value, err)
+		}
 	}
 }

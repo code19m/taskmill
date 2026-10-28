@@ -327,11 +327,11 @@ func recv[T any](t *testing.T, ch <-chan T, what string) T {
 	}
 }
 
-// setDefaultQueue changes the default queue's settings, and fails the test
-// on error.
-func (e *env) setDefaultQueue(t *testing.T, settings *taskmill.QueueSettings) {
+// limitDefaultQueue sets the default queue's limit of running tasks, and
+// fails the test on error.
+func (e *env) limitDefaultQueue(t *testing.T, maxRunning int) {
 	t.Helper()
-	if err := e.client.UpdateQueue(t.Context(), taskmill.DefaultQueue, settings); err != nil {
+	if err := e.client.UpdateQueue(t.Context(), taskmill.DefaultQueue, func(s *taskmill.QueueSettings) { s.MaxRunning = maxRunning }); err != nil {
 		t.Fatalf("update the default queue: %v", err)
 	}
 }
