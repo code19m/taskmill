@@ -72,6 +72,10 @@ func benchTiming(ctx context.Context, pool *pgxpool.Pool, wantSkew time.Duration
 		fail(err)
 	}
 	time.Sleep(timingRun)
+	var stopping time.Time
+	if err := pool.QueryRow(ctx, "SELECT now()").Scan(&stopping); err != nil {
+		fail(err)
+	}
 	for _, stop := range stops {
 		stop()
 	}
@@ -83,7 +87,11 @@ func benchTiming(ctx context.Context, pool *pgxpool.Pool, wantSkew time.Duration
 	// A run time that this machine's clock puts in the database's future
 	// waits, however soon this machine thinks it is.
 	waiting := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks WHERE state = 'scheduled' AND run_at > now()")
-	unfinished := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks") - waiting
+	// A schedule run that came due while the workers stopped waits for the
+	// next worker: the maintainer leads until its worker's tasks end, and
+	// enqueues it, but the worker no longer fetches.
+	dueAtStop := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks WHERE (payload->>'n')::int = -1 AND created_at >= $1", stopping)
+	unfinished := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks") - waiting - dueAtStop
 	completed := scalar(ctx, pool, "SELECT count(*) FROM {s}.task_history WHERE (payload->>'n')::int >= 0")
 	lost := scalar(ctx, pool, `
 SELECT (SELECT count(*) FROM {s}.task_history WHERE errors @> '[{"code": "lease_lost"}]')
@@ -105,8 +113,8 @@ SELECT (SELECT count(*) FROM {s}.task_history WHERE errors @> '[{"code": "lease_
 	fmt.Printf("| L4 | Start after the run time, %s starts | %s | %s |\n",
 		commas(int64(len(lates))), late, verdict(pct(lates, 99) <= 1500*time.Millisecond))
 	fmt.Printf("| L4 | Every task completed once, or waits for a run time still ahead; each schedule run enqueued once | "+
-		"%s of 2,100 completed, %s waiting, %d left; %d schedule runs at %d times | %s |\n",
-		commas(completed), commas(waiting), unfinished, runs, scheduled,
+		"%s of 2,100 completed, %s waiting, %d left; %d schedule runs at %d times, and %d due while the workers stopped | %s |\n",
+		commas(completed), commas(waiting), unfinished, runs, scheduled, dueAtStop,
 		verdict(completed+waiting == 2100 && unfinished == 0 && runs > 0 && runs == scheduled))
 	switch {
 	case wantSkew != 0 && (skew-wantSkew).Abs() > 30*time.Second:

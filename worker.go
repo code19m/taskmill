@@ -45,6 +45,7 @@ const (
 // tests shorten them.
 type timing struct {
 	maintainer      time.Duration // how often the maintainer works, at most
+	heartbeat       time.Duration // how often the maintainer sends its heartbeat
 	election        time.Duration // how often workers that do not lead try to take over
 	leaderLease     time.Duration // how long a maintainer leads without renewing
 	retention       time.Duration // how often retention runs
@@ -57,10 +58,13 @@ type timing struct {
 	reconnectMin    time.Duration // first wait before reconnecting the listener
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
 	failureReport   time.Duration // how often an operation that keeps failing logs, at most
+	idlePoll        time.Duration // how often idle queues poll while the maintainer's heartbeats arrive
+	listen          time.Duration // bound on opening the notification connection, and on its answer when heartbeats stop
 }
 
 var defaultTiming = timing{
 	maintainer:      time.Second,
+	heartbeat:       5 * time.Second,
 	election:        2 * time.Second,
 	leaderLease:     10 * time.Second,
 	retention:       time.Minute,
@@ -73,6 +77,8 @@ var defaultTiming = timing{
 	reconnectMin:    time.Second,
 	reconnectMax:    30 * time.Second,
 	failureReport:   time.Minute,
+	idlePoll:        time.Minute,
+	listen:          10 * time.Second,
 }
 
 // errListenConfig reports a ListenConfig that pgx cannot connect with.
@@ -98,6 +104,9 @@ type Worker struct {
 	running   atomic.Bool
 	reached   atomic.Pointer[time.Time] // when Run last reached the database; nil while it does not run
 	released  atomic.Int64              // tasks given back during the current Run's shutdown
+	notifying atomic.Bool               // the maintainer's heartbeats arrive, so notifications reach the worker
+	resigned  chan struct{}             // the maintainer resigned: this worker's maintainer tries to take over now
+	silent    atomic.Bool               // the worker logged that heartbeats do not arrive, and none has since
 	tally     tally                     // ended attempts not yet added to the activity
 	recording sync.WaitGroup            // Run's attempts whose results are being recorded
 
@@ -134,8 +143,17 @@ type WorkerConfig struct {
 	// milliseconds. Default: 30 seconds.
 	LeaseDuration time.Duration
 
-	// PollInterval is how often idle queues are checked when no notification
-	// arrives. Default: 1 second.
+	// PollInterval is how often idle queues are checked while the
+	// maintainer's heartbeats do not reach the worker: until the first one,
+	// within 5 seconds of the start, once none came for 15 seconds, and
+	// while no maintainer of this version or later runs. While they arrive,
+	// every 5 seconds, notifications wake the worker, and the maintainer
+	// wakes each queue whose next task waited more than a second, so idle
+	// queues are checked only once a minute. So a task whose notification
+	// came too early or was lost starts within about 2 seconds while
+	// heartbeats arrive, within about 16 seconds if the maintainer or the
+	// notification connection fails without a word, and within PollInterval
+	// while no maintainer of this version runs. Default: 1 second.
 	PollInterval time.Duration
 
 	// DrainTimeout is how long Run waits for running tasks after its context
@@ -156,8 +174,9 @@ type WorkerConfig struct {
 
 	// ListenConfig is the connection that receives notifications. Set it to
 	// a direct connection when the pool goes through a transaction-pooling
-	// proxy, which cannot deliver them. Create it with [pgx.ParseConfig].
-	// Default: the pool's configuration.
+	// proxy, which cannot deliver them: without it, the worker finds that
+	// out when it starts, logs an error, and polls every PollInterval.
+	// Create it with [pgx.ParseConfig]. Default: the pool's configuration.
 	ListenConfig *pgx.ConnConfig
 }
 
@@ -211,6 +230,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		listen:      c.ListenConfig,
 		version:     moduleVersion(),
 		attempts:    make(map[int64]*tracked),
+		resigned:    make(chan struct{}, 1),
 		completions: make(chan *tracked, completionBatch),
 	}
 	if c.Handlers != nil {

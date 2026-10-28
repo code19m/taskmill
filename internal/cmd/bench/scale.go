@@ -162,9 +162,10 @@ func bulk(ctx context.Context, c *taskmill.Client, n int, task func(i int) taskm
 // S3: one maintainer for 100 queues that 50 worker processes serve, while
 // tasks arrive in all of them, some of them delayed, and a worker process is
 // killed every 10 seconds, leaving leases to rescue. The benchmark is the
-// maintainer, and times each of its statements.
+// maintainer, and times each of its statements. First, the processes idle
+// for a while, and the database's load is measured.
 func benchQueues(ctx context.Context, pool *pgxpool.Pool, url string, d time.Duration) {
-	const queues, procs, perSecond = 100, 50, 100
+	const queues, procs, perSecond = 100, 50, 1000
 	d = max(d, time.Minute)
 	c := fresh(ctx, pool)
 	steps := &stepTracer{}
@@ -177,6 +178,10 @@ func benchQueues(ctx context.Context, pool *pgxpool.Pool, url string, d time.Dur
 	for i := range workers {
 		workers[i] = spawn(ctx, url, spec)
 	}
+	time.Sleep(idleStart)
+	idle := max(d, 3*time.Minute)
+	idleAvg, idlePeak := transactionRate(ctx, pool, idle)
+
 	produced := background(func() {
 		paced(ctx, d, perSecond/10, func() {
 			batch := make([]taskmill.EnqueueParams, 10)
@@ -208,15 +213,45 @@ func benchQueues(ctx context.Context, pool *pgxpool.Pool, url string, d time.Dur
 	slowest := steps.slowest()
 	fmt.Println("## Many queues")
 	fmt.Println()
-	fmt.Printf("%d queues served by %d worker processes, each with concurrency 1 per queue; %s tasks a second "+
-		"enqueued into random queues, a fifth of them delayed 1 to 4 s; a worker process killed every 10 s "+
-		"(%d kills), with 5 s leases. One maintainer ran for %s. Its slowest statements: %s.\n\n",
-		queues, procs, commas(perSecond), kills, d, steps.summary(false))
+	fmt.Printf("%d queues served by %d worker processes, each with concurrency 1 per queue. Idle, with one maintainer, "+
+		"%s after their start, the database ran %.0f transactions a second on average over %s, and %.0f in the "+
+		"busiest 10 seconds. Then %s tasks a second were enqueued into random queues, a fifth of them delayed 1 to 4 s, "+
+		"and a worker process was killed every 10 s (%d kills), with 5 s leases, for %s. "+
+		"Its slowest statements: %s.\n\n",
+		queues, procs, idleStart, idleAvg, idle, idlePeak, commas(perSecond), kills, d, steps.summary(false))
 	fmt.Println("| ID | Measure | Result | |")
 	fmt.Println("|---|---|---|---|")
 	fmt.Printf("| S3 | Maintainer cycle: the slowest iteration of each of its loops | %s | %s |\n",
 		steps.summary(true), verdict(slowest < time.Second))
 	fmt.Println()
+}
+
+// idleStart is how long S3 lets its worker processes start before it
+// measures their idle load.
+const idleStart = 30 * time.Second
+
+// transactionRate returns the database's transactions a second over d: on
+// average, and in the busiest 10 seconds.
+func transactionRate(ctx context.Context, pool *pgxpool.Pool, d time.Duration) (avg, peak float64) {
+	const window = 10 * time.Second
+	xacts := func() int64 {
+		var n int64
+		err := pool.QueryRow(ctx, "SELECT xact_commit + xact_rollback FROM pg_stat_database WHERE datname = current_database()").Scan(&n)
+		if err != nil {
+			fail(err)
+		}
+		return n
+	}
+	start := time.Now()
+	first := xacts()
+	last := first
+	for time.Since(start) < d {
+		time.Sleep(window)
+		n := xacts()
+		peak = max(peak, float64(n-last)/window.Seconds())
+		last = n
+	}
+	return float64(last-first) / time.Since(start).Seconds(), peak
 }
 
 // stepTracer times a pool's statements by the step of the worker or the
@@ -236,6 +271,7 @@ var maintainerLoops = []struct {
 	steps []string
 }{
 	{"main loop", []string{"election", "rescue"}},
+	{"wake loop", []string{"wake"}},
 	{"promotion loop", []string{"promotion", "next due"}},
 	{"statistics loop", []string{"statistics", "storing statistics", "storing activity"}},
 }
@@ -251,6 +287,7 @@ var stepTexts = []struct{ step, text string }{
 	{"rescue", "'lease_lost'"},
 	{"promotion", "WITH due AS"},
 	{"next due", "min(run_at) - now()"},
+	{"wake", "woken AS"}, // before statistics, whose text it shares
 	{"statistics", "WITH RECURSIVE available"},
 	{"storing activity", q("INSERT INTO {s}.activity AS a (minute, queue, scheduled")},
 	{"storing statistics", q("{s}.queue_stats")},

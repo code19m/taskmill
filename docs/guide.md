@@ -336,7 +336,24 @@ takes part in maintenance.
 `Run` blocks until its context is canceled. It returns an error only if the
 worker cannot start. A worker fetches from each queue up to its free slots,
 in priority, run time, and enqueue order. PostgreSQL notifications wake it as
-soon as tasks are enqueued, and it polls every second as a fallback.
+soon as tasks are enqueued. Every second, the maintainer also notifies each
+queue whose next task has waited longer than a second, for notifications
+that came before their transaction committed or never came, and every 5
+seconds it sends a heartbeat notification with it. While a worker hears
+these heartbeats, an idle queue polls only once a minute. A worker that
+hears none for 15 seconds polls every `PollInterval`, one second by default,
+starting at once, and replaces its notification connection if that does not
+answer, since a connection can die without a word. A worker polls every
+`PollInterval` too until its first heartbeat, within 5 seconds of its start,
+while no maintainer runs, and while the maintainer runs an older version
+during an upgrade. So a task whose notification came too early or was lost
+starts within about 2 seconds while heartbeats arrive, within about 16
+seconds if the maintainer or the notification connection fails without a
+word, and within `PollInterval` while no maintainer of this version runs. A
+queue whose installation-wide concurrency limit held tasks back polls every
+`PollInterval` too, since no notification says when another worker's task of
+it ends. So idle workers cost the database little, however many queues and
+replicas there are.
 
 **Shutting down.** When the context is canceled, `Run` stops fetching and
 waits up to `DrainTimeout` (20 seconds) for running tasks. Then it cancels
@@ -356,8 +373,9 @@ finished tasks run again.
 it makes due tasks available, rescues tasks whose leases expired, runs
 schedules, refreshes statistics, and deletes old tasks. Every worker takes
 part in the election unless `NoMaintainer` is set; at least one must take
-part. If the maintainer stops, another worker takes over within about
-12 seconds. `WorkerInfo.Maintainer` shows which worker leads.
+part. If the maintainer stops, another worker takes over at once; if it
+crashes or loses the database, within about 12 seconds.
+`WorkerInfo.Maintainer` shows which worker leads.
 
 **Installation-wide concurrency limits.** `QueueOptions.Concurrency` limits
 one process. To limit a queue across all workers, for example to protect a
@@ -706,6 +724,12 @@ setups:
 - **One database, a schema per service.** Each service migrates and works in
   its own schema. A service enqueues a task for another with a `Client` for
   that service's schema, in the same transaction as its own writes.
+  PostgreSQL wakes every connection that listens in a database for each
+  notification, whatever its schema, so installations that share a database
+  pay a little for each other's. Each maintainer sends a heartbeat every 5
+  seconds: with 100 installations and 500 workers in all, the heartbeats
+  cost the database about a quarter of a CPU (E7 in
+  [Benchmarks](benchmarks.md#resource-use)).
 - **A database per service.** A service hands work to another through a
   broker: it stores a message with [the outbox](#the-outbox-and-the-inbox),
   and the other service's inbox enqueues the task.
@@ -965,16 +989,17 @@ attribute names it:
 | `record results` | Records attempts that ended | After each attempt |
 | `load queue settings` | Reads pauses and concurrency limits | Every 10 seconds |
 | `record activity` | Writes the counts for the charts | Every 10 seconds |
-| `listen for notifications` | Keeps the notification connection; the worker polls meanwhile | Backoff, 1 to 30 seconds |
+| `listen for notifications` | Keeps the notification connection, and replaces it if it does not answer when heartbeats stop; idle queues poll every `PollInterval` meanwhile | Backoff, 1 to 30 seconds |
 | `elect maintainer` | Takes or keeps the maintainer role | Every 1 to 2 seconds |
 | `promote due tasks` | Makes scheduled and retryable tasks available | As they come due |
+| `wake queues` | Notifies the queues whose tasks wait, and every 5 seconds sends the heartbeat | Every second |
 | `rescue expired leases` | Fails attempts whose workers lost their leases | Every second |
 | `run schedules` | Enqueues due schedule runs | Every second |
 | `refresh statistics` | Counts tasks for `Client.Queues` | Every 10 seconds |
 | `apply retention` | Drops expired history and old rows | Every minute |
 | `delete removed schedules` | Deletes stored schedules that the maintainer does not define, after a day without a run or change | Every minute |
 
-The last six run only on the maintainer.
+The last seven run only on the maintainer.
 
 **Messages.**
 
@@ -1005,7 +1030,9 @@ The last six run only on the maintainer.
 | `record attempt failed; the task is rescued when its lease expires` | Warn | The attempt's result could not be written in time; the task is retried later. |
 | `complete tasks failed; they are rescued when their leases expire` | Warn | `tasks` successful attempts could not be recorded; they run again. |
 | `task history has no partition for today; completed tasks skip history` | Error | The role that runs workers must own the taskmill tables; see [Database privileges](#running-in-production). |
-| `notifications disabled; polling only` | Error | `ListenConfig` was not created with `pgx.ParseConfig`. Fix it; until then the worker polls. |
+| `notifications disabled; polling only` | Error | `ListenConfig` was not created with `pgx.ParseConfig`, or the notification connection goes through a proxy that pools transactions, such as PgBouncer in transaction mode, so it cannot listen. Point `ListenConfig` at a direct connection, created with `pgx.ParseConfig`; until then the worker polls every `PollInterval`. |
+| `maintainer heartbeats arrive; idle queues poll once a minute` | Info | The maintainer's heartbeats reach the worker, at start or after they did not. |
+| `maintainer heartbeats do not arrive; idle queues poll every PollInterval` | Warn | None came for 15 seconds. No maintainer runs: every worker has `NoMaintainer`, or the maintainer crashed and its lease has not run out yet. Or the maintainer runs an older version, during an upgrade. Or notifications do not reach the worker: point `ListenConfig` at the primary of the same database. The worker also replaces its notification connection if that does not answer. It logs this again only after heartbeats arrived again. |
 | `notification failed` | Warn | A wake-up for `queue` was not sent; its workers find the tasks at their next poll. |
 | `enqueue middleware failed after the tasks were enqueued` | Warn | An enqueue middleware returned `error` after the `tasks` committed, so the enqueue succeeded, and the middleware's work, such as a span, may be missing. Fix the middleware. |
 | `fifo group missing` | Error | A task's FIFO group has no row, which should not happen. Please report it. |
@@ -1129,8 +1156,10 @@ mode except notifications, which need a session. pgx caches prepared
 statements, so use PgBouncer 1.21 or newer with `max_prepared_statements`
 set, or set pgx's `DefaultQueryExecMode` to `QueryExecModeExec`. Point
 `WorkerConfig.ListenConfig` at a direct connection, created with
-`pgx.ParseConfig`. Without it, workers fall back to polling. A nightly CI run
-passes every test through PgBouncer this way (target F8 in
+`pgx.ParseConfig`. Without it, the worker finds when it starts that its
+notification connection pools transactions, logs `notifications disabled;
+polling only`, and polls every `PollInterval`. CI runs every test through
+PgBouncer this way on every pull request (target F8 in
 [Benchmarks](benchmarks.md#reliability-under-faults)).
 
 ```go
@@ -1482,8 +1511,9 @@ PostgreSQL, Neon, and Supabase, can run it. Mind these points:
   than `LeaseDuration` may run again elsewhere. If that costs more
   than a crashed worker's tasks waiting longer, raise `LeaseDuration` above
   your provider's failover time.
-- **Neon's scale to zero** never happens while workers run, because they
-  poll every second: budget for a compute that stays on.
+- **Neon's scale to zero** never happens while workers run, because their
+  heartbeats reach the database every 10 seconds: budget for a compute that
+  stays on.
 
 ## Upgrading
 
@@ -1568,10 +1598,10 @@ read those entries for every release you skip.
 | `HandlerOptions.BatchSize` | 100 | 1,000 |
 | `QueueOptions.Concurrency` | 10 slots per queue and worker | — |
 | `LeaseDuration` | 30 seconds; heartbeats every 10 seconds | At least 100 ms |
-| `PollInterval` | 1 second | — |
+| `PollInterval` | 1 second, while the maintainer's heartbeats do not arrive; once a minute while they do | — |
 | `DrainTimeout` | 20 seconds, then 5 seconds for handlers to return | — |
 | Unknown kind | Snoozed 1 minute at a time; dead after 1 hour | — |
-| Maintainer takeover | Within about 12 seconds | — |
+| Maintainer takeover | At once when it stops; within about 12 seconds when it crashes | — |
 | History retention | 7 days | At least 1 hour |
 | Dead and canceled retention | 30 days | At least 1 hour |
 | Error history | 20 most recent errors per task | 4 KiB per message |

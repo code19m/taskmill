@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -10,23 +11,25 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 )
 
-// E4 to E6: the connections, memory, and statements that clients and workers
-// use.
-func benchResources(ctx context.Context, pool *pgxpool.Pool, url string, d time.Duration) {
+// E4 to E7: the connections, memory, and statements that clients and workers
+// use, and the database's work for heartbeats.
+func benchResources(ctx context.Context, pool *pgxpool.Pool, url, container string, d time.Duration) {
 	const conns, queues, running = 8, 10, 10_000
 	clientConns, workerConns, listeners := connections(ctx, pool, url, d, conns)
 	idleRSS, busyRSS := memory(ctx, pool, url, running)
 	perTask := (busyRSS - idleRSS) * 1024 / running
 	steps := idleLoad(ctx, pool, url, d, queues)
 	fetches, beats := steps.count("fetch"), steps.count("worker heartbeat")
-	// Each poll fetches from each queue, and so does the start of Run and of
-	// the notification connection.
-	polls := int(d/time.Second) + 2
+	// Each queue fetches when Run starts, when its notification connection
+	// starts, and every second until the maintainer's first heartbeat
+	// arrives, within 5 seconds; then once a minute.
+	polls := 7 + int(d/time.Minute)
 	others := 0
 	for _, step := range []string{"lease heartbeat", "settings", "activity", "other"} {
 		others += steps.count(step)
@@ -43,10 +46,95 @@ func benchResources(ctx context.Context, pool *pgxpool.Pool, url string, d time.
 	fmt.Printf("| E5 | Worker process memory, idle | %.1f MiB RSS | %s |\n", float64(idleRSS)/1024, verdict(idleRSS <= 30*1024))
 	fmt.Printf("| E5 | Worker process memory per running task, %s tasks | %.1f KiB | %s |\n",
 		commas(running), float64(perTask)/1024, verdict(perTask <= 8*1024))
-	fmt.Printf("| E6 | An idle worker serving %d queues for %s, polling every second | %d fetches (%.2f per queue per poll), "+
+	fmt.Printf("| E6 | An idle worker serving %d queues for %s, the maintainer's heartbeats arriving | %d fetches (%.1f per queue), "+
 		"%d worker heartbeats, %d other statements | %s |\n", queues, d, fetches,
-		float64(fetches)/float64(queues*int(d/time.Second)), beats, others, verdict(fetches <= queues*polls))
+		float64(fetches)/float64(queues), beats, others, verdict(fetches <= queues*polls))
+	const measure = "| E7 | The database's CPU for heartbeats, when installations share a database: %d connections listen"
+	if container == "" {
+		fmt.Printf(measure+" | Not run: set -container to the database's Docker container | |\n", fanOutListeners)
+	} else {
+		cpus := heartbeatCost(ctx, pool, url, container, []int{0, 20, 100})
+		perBeat := time.Duration((cpus[1] - cpus[0]) / (20 * fanOutListeners) * float64(time.Second))
+		fmt.Printf(measure+" | %.2f CPUs without heartbeats; %.2f more at 20 a second, which 100 installations send, "+
+			"and %.2f more at 100 a second: about %s per heartbeat per listening connection | |\n",
+			fanOutListeners, cpus[0], cpus[1]-cpus[0], cpus[2]-cpus[0], perBeat.Round(100*time.Nanosecond))
+	}
 	fmt.Println()
+}
+
+// fanOutListeners is how many connections listen in E7.
+const fanOutListeners = 500
+
+// heartbeatCost measures E7. PostgreSQL wakes every connection that listens in
+// a database for each notification, whatever its channel, so installations
+// that share a database wake each other's listeners with their heartbeats.
+// It keeps fanOutListeners connections listening, each on a channel of its
+// own, sends heartbeats on another at each rate per second for 30 seconds,
+// and returns the CPUs that the database's container used at each rate.
+func heartbeatCost(ctx context.Context, pool *pgxpool.Pool, url, container string, rates []int) []float64 {
+	const window = 30 * time.Second
+	defer listenIdle(ctx, url, fanOutListeners)()
+	cpus := make([]float64, len(rates))
+	for i, rate := range rates {
+		before, began := containerCPU(ctx, container), time.Now()
+		if rate == 0 {
+			time.Sleep(window)
+		} else {
+			paced(ctx, window, rate, func() {
+				if _, err := pool.Exec(ctx, "SELECT pg_notify('other_installation', 'h|')"); err != nil {
+					fail(err)
+				}
+			})
+		}
+		cpus[i] = float64(containerCPU(ctx, container)-before) / float64(time.Since(began))
+	}
+	return cpus
+}
+
+// listenIdle opens n connections that each listen on a channel of their own,
+// and returns a function that closes them.
+func listenIdle(ctx context.Context, url string, n int) (stop func()) {
+	lctx, cancel := context.WithCancel(ctx)
+	var listeners sync.WaitGroup
+	for i := range n {
+		conn, err := pgx.Connect(ctx, url)
+		if err != nil {
+			fail(err)
+		}
+		if _, err := conn.Exec(ctx, "LISTEN installation_"+strconv.Itoa(i)); err != nil {
+			fail(err)
+		}
+		listeners.Go(func() {
+			defer func() { _ = conn.Close(context.WithoutCancel(ctx)) }()
+			for lctx.Err() == nil {
+				_, _ = conn.WaitForNotification(lctx)
+			}
+		})
+	}
+	return func() {
+		cancel()
+		listeners.Wait()
+	}
+}
+
+// containerCPU returns the CPU time that a Docker container used so far, from
+// its cgroup.
+func containerCPU(ctx context.Context, container string) time.Duration {
+	out, err := exec.CommandContext(ctx, "docker", "exec", container, "cat", "/sys/fs/cgroup/cpu.stat").Output() //nolint:gosec // the operator's container
+	if err != nil {
+		fail(fmt.Errorf("read the database's CPU use: %w", err))
+	}
+	for line := range strings.Lines(string(out)) {
+		if v, ok := strings.CutPrefix(line, "usage_usec "); ok {
+			us, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			if err != nil {
+				fail(err)
+			}
+			return time.Duration(us) * time.Microsecond
+		}
+	}
+	fail(errors.New("the database's container shows no usage_usec in cpu.stat"))
+	return 0
 }
 
 // connections returns the most connections that a client, and then a client
@@ -177,9 +265,12 @@ func idleLoad(ctx context.Context, pool *pgxpool.Pool, url string, d time.Durati
 	if err != nil {
 		fail(err)
 	}
+	// The maintainer runs apart, on an untraced pool.
+	stopMaintainer := maintain(ctx, client(ctx, pool, false))
 	stop := run(ctx, w)
 	time.Sleep(d)
 	stop()
+	stopMaintainer()
 	return steps
 }
 

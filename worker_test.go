@@ -26,11 +26,14 @@ var fastRetry = taskmill.ExponentialBackoff{Base: 10 * time.Millisecond, Max: 10
 // maintenance and elections.
 var testTiming = taskmill.Timing{
 	Maintainer:    100 * time.Millisecond,
+	Heartbeat:     200 * time.Millisecond,
 	Election:      100 * time.Millisecond,
 	LeaderLease:   2 * time.Second,
 	Stats:         200 * time.Millisecond,
 	ShutdownGrace: 200 * time.Millisecond,
 	Reconnect:     100 * time.Millisecond,
+	IdlePoll:      time.Hour,
+	Listen:        2 * time.Second,
 }
 
 // newWorker returns a worker with test timing that polls every 50 ms unless

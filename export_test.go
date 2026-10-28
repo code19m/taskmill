@@ -10,6 +10,7 @@ import (
 // their defaults.
 type Timing struct {
 	Maintainer    time.Duration
+	Heartbeat     time.Duration
 	Election      time.Duration
 	LeaderLease   time.Duration
 	Stats         time.Duration
@@ -17,6 +18,8 @@ type Timing struct {
 	Reconnect     time.Duration
 	NoHandlerWait time.Duration
 	FailureReport time.Duration
+	IdlePoll      time.Duration
+	Listen        time.Duration
 }
 
 // SetTiming applies t to w before it runs.
@@ -27,6 +30,7 @@ func SetTiming(w *Worker, t Timing) {
 		}
 	}
 	set(&w.timing.maintainer, t.Maintainer)
+	set(&w.timing.heartbeat, t.Heartbeat)
 	set(&w.timing.election, t.Election)
 	set(&w.timing.leaderLease, t.LeaderLease)
 	set(&w.timing.stats, t.Stats)
@@ -35,12 +39,25 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.reconnectMax, t.Reconnect)
 	set(&w.timing.noHandlerWait, t.NoHandlerWait)
 	set(&w.timing.failureReport, t.FailureReport)
+	set(&w.timing.idlePoll, t.IdlePoll)
+	set(&w.timing.listen, t.Listen)
+}
+
+// Notifying reports whether the maintainer's heartbeats reach w.
+func Notifying(w *Worker) bool {
+	return w.notifying.Load()
 }
 
 // RunSchedules runs one pass over w's schedules, as its maintainer does each
 // cycle.
 func RunSchedules(ctx context.Context, w *Worker) {
 	newMaintainer(w).runSchedules(ctx)
+}
+
+// WakeQueues notifies the queues whose tasks wait, and sends the heartbeat,
+// as w's maintainer does.
+func WakeQueues(ctx context.Context, w *Worker) {
+	newMaintainer(w).wake(ctx, true)
 }
 
 // PruneSchedules deletes the stored schedules that w does not define, as its

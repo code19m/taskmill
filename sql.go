@@ -92,6 +92,7 @@ type statements struct {
 	resignLeader  string
 	promoteDue    string
 	nextDue       string
+	wakeQueues    string
 	rescue        string
 
 	pendingDetach   string
@@ -163,6 +164,8 @@ func newStatements(schema string) *statements {
 		// {available} and {cancel} start the payloads of notifications.
 		"{available}", notifyAvailable+"|",
 		"{cancel}", notifyCancel+"|",
+		"{heartbeat}", notifyHeartbeat+"|",
+		"{resigned}", notifyResigned+"|",
 		// {trimmed} is a task's errors without the oldest entry once it holds
 		// keptErrors, so that appending one keeps at most keptErrors.
 		"{trimmed}", "(CASE WHEN jsonb_array_length(errors) >= "+strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
@@ -766,7 +769,13 @@ SET worker_id = EXCLUDED.worker_id,
     expires_at = EXCLUDED.expires_at
 WHERE l.worker_id = EXCLUDED.worker_id OR l.expires_at < now()
 RETURNING worker_id`),
-		resignLeader: q(`DELETE FROM {s}.leader WHERE name = 'maintainer' AND worker_id = $1`),
+		// resignLeader gives up $1's lease, and tells the workers on channel
+		// $2, so that another takes over at once.
+		resignLeader: q(`
+WITH resigned AS (
+    DELETE FROM {s}.leader WHERE name = 'maintainer' AND worker_id = $1 RETURNING 1
+)
+SELECT pg_notify($2, '{resigned}') FROM resigned`),
 
 		// promoteDue makes a batch of due scheduled and retryable tasks
 		// available, notifies their queues on channel $1, and returns how
@@ -796,6 +805,27 @@ SELECT (SELECT count(*) FROM promoted) FROM notified`),
 
 		nextDue: q(`
 SELECT extract(epoch FROM min(run_at) - now()) FROM {s}.tasks WHERE state IN ('scheduled', 'retryable')`),
+
+		// wakeQueues notifies, on channel $1, every queue that is not paused
+		// and whose next task waited longer than $2 microseconds, then, if $3,
+		// sends the maintainer's heartbeat, which shows workers that this ran
+		// and that notifications reach them. Its queues and their next tasks
+		// are found with one index probe each. It reads the woken CTE, so that
+		// it runs.
+		wakeQueues: q(`
+WITH RECURSIVE available AS (
+    (SELECT queue FROM {s}.tasks WHERE state = 'available' ORDER BY queue LIMIT 1)
+    UNION ALL
+    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state = 'available' AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
+    FROM available x WHERE x.queue IS NOT NULL
+), woken AS (
+    SELECT count(pg_notify($1, '{available}' || x.queue)) FROM available x
+    WHERE x.queue IS NOT NULL
+      AND (SELECT t.run_at FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue
+           ORDER BY t.priority DESC, t.run_at, t.id LIMIT 1) < now() - $2 * interval '1 microsecond'
+      AND NOT EXISTS (SELECT FROM {s}.queues q WHERE q.name = x.queue AND q.paused_at IS NOT NULL)
+)
+SELECT CASE WHEN $3 THEN pg_notify($1, '{heartbeat}') END FROM woken`),
 
 		// rescue fails the attempts whose leases expired: their workers
 		// crashed or lost the database. $1 and $2 are the default backoff's

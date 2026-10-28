@@ -62,7 +62,7 @@ func main() {
 		duration  = flag.Duration("duration", 10*time.Second, "duration of timed scenarios")
 		tasks     = flag.Int("tasks", 200_000, "tasks for the throughput scenarios")
 		soak      = flag.Duration("soak", time.Hour, "duration of the soak scenario")
-		container = flag.String("container", "", "Docker container of the database, for the restart scenario")
+		container = flag.String("container", "", "Docker container of the database, for the restart scenario and E7")
 		skew      = flag.Duration("skew", 0, "how far the database's clock is expected to be ahead, for F9; it fails if off by over 30s")
 		short     = flag.Bool("short", false, "run the fault scenarios at a tenth of their size, as CI does")
 		spec      = flag.String("child", "", "internal: run as a child process with this JSON configuration")
@@ -106,7 +106,7 @@ func main() {
 		case "queues":
 			benchQueues(ctx, pool, *url, *duration)
 		case "resources":
-			benchResources(ctx, pool, *url, *duration)
+			benchResources(ctx, pool, *url, *container, *duration)
 		case "soak":
 			benchSoak(ctx, pool, *soak)
 		case "chaos":

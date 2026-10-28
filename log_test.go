@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,11 +296,13 @@ func (b *syncBuffer) String() string {
 }
 
 // proxy forwards connections to a database, and can cut them all, as
-// a database that goes away does.
+// a database that goes away does, or freeze them, dropping every byte while
+// they stay open, as a network that loses packets does.
 type proxy struct {
 	host   string
 	port   uint16
 	target string
+	frozen atomic.Bool
 
 	mu    sync.Mutex
 	down  bool
@@ -378,15 +380,33 @@ func (p *proxy) forward(client net.Conn) {
 
 	done := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(server, client)
+		p.pipe(server, client)
 		_ = server.Close()
 		close(done)
 	}()
-	_, _ = io.Copy(client, server)
+	p.pipe(client, server)
 	_ = client.Close()
 	<-done
 	p.mu.Lock()
 	delete(p.conns, client)
 	delete(p.conns, server)
 	p.mu.Unlock()
+}
+
+// pipe copies src to dst until either fails, dropping what it reads while
+// the proxy is frozen.
+func (p *proxy) pipe(dst, src net.Conn) {
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := src.Read(buf)
+		if err != nil {
+			return
+		}
+		if p.frozen.Load() {
+			continue
+		}
+		if _, err := dst.Write(buf[:n]); err != nil {
+			return
+		}
+	}
 }
