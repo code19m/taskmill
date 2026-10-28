@@ -1129,8 +1129,8 @@ set, or set pgx's `DefaultQueryExecMode` to `QueryExecModeExec`. Point
 `WorkerConfig.ListenConfig` at a direct connection, created with
 `pgx.ParseConfig`. Without it, the worker finds when it starts that its
 notification connection pools transactions, logs `notifications disabled;
-polling only`, and polls every `PollInterval`. A nightly CI run
-passes every test through PgBouncer this way (target F8 in
+polling only`, and polls every `PollInterval`. CI runs every test through
+PgBouncer this way on every pull request (target F8 in
 [Benchmarks](benchmarks.md#reliability-under-faults)).
 
 ```go
