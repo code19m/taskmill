@@ -111,7 +111,7 @@ the first targets left out:
 |---|---|---|
 | S1 | T3 with 10 million scheduled and 1 million available tasks waiting: within 20% of T3 | Two runs: 14,869 tasks/s against 17,164 without them, 87%; and 16,257 against 18,539, 88%: pass |
 | S2 | T3 with 100,000 FIFO groups holding pending tasks in another queue: within 10% of T3 | Two runs: 12,522 tasks/s against 17,164, 73%; and 16,671 against 18,539, 89.9%: just below target here |
-| S3 | 100 queues served by 50 worker processes: maintainer cycle under 1 s | At 1,000 tasks/s, three runs: slowest loop 0.85 s once; promotion loop 1.28 s and 1.43 s in the others, with the wake loop at most 0.59 s and the main loop at most 0.24 s: fails, see below. Idle first: 154 transactions/s on average, 391 to 404 in the busiest 10 seconds |
+| S3 | 100 queues served by 50 worker processes: maintainer cycle under 1 s | At 1,000 tasks/s, five runs on a busy laptop, alternating this code and the previous version: slowest loop 1.23 to 2.12 s in three runs of this code, 1.44 and 1.75 s in two of the previous one: fails, see below. Idle first: 153 transactions/s on average, 456 to 464 in the busiest 10 seconds |
 
 S1 and S2 compare T3 end to end with and without the waiting tasks, which
 were vacuumed, analyzed, and written to disk before the run, as tasks that
@@ -138,21 +138,25 @@ at the edge of its target, needs a run on the reference hardware.
 
 **S3** runs one maintainer while 50 worker processes serve 100 queues each,
 with concurrency 1. They idle first, and for 3 minutes after a 30-second
-start the database ran 154 transactions a second on average in each of
-three runs, and 391 to 404 in the busiest 10 seconds: the queues of
-processes started together poll near the same moments of each minute.
+start the database ran 153 transactions a second on average in each run,
+and 456 to 464 in the busiest 10 seconds: the queues of processes started
+together poll near the same moments of each minute, the more so as
+processes started within the same 5 seconds hear the same first heartbeat.
 Before 2026-10-27, every worker polled every queue once a second even while
 notifications worked, and the same idle processes sent 5,600 transactions a
 second, 1.2 of this database's 4 CPUs. Then 1,000 tasks a second arrive in
 random queues, a fifth of them delayed, and a worker process is killed every
 10 seconds. Each loop's iteration is the time of its statements in order;
 the maintainer's wake, which sends its heartbeat too, runs in a loop of its
-own. **At 1,000 tasks a second it fails in two runs of three, and the cause
-is a design cost:** a notification wakes every worker that serves its
-queue, so about 1,000 notifications a second each wake 50 processes, which
-fetch, and all but one find nothing. That saturates this database's 4 CPUs,
-and promotion, the slowest loop, takes up to 1.4 seconds. Before
-2026-10-27, S3 ran at 100 tasks a second, and passed.
+own. **At 1,000 tasks a second it fails, and the cause is a design cost:**
+a notification wakes every worker that serves its queue, so about 1,000
+notifications a second each wake 50 processes, which fetch, and all but one
+find nothing. That saturates this database's 4 CPUs, and the slowest loop,
+promotion or statistics, takes 1.2 to 2.1 seconds. These runs shared the
+laptop with other work, whose load average reached 83, and alternated with
+runs of the version before the 5-second heartbeat, which failed the same
+way; on a quieter day, that version passed in one run of three, at 0.85
+seconds. Before 2026-10-27, S3 ran at 100 tasks a second, and passed.
 
 ### Resource use
 
@@ -163,7 +167,8 @@ and promotion, the slowest loop, takes up to 1.4 seconds. Before
 | E3 | `tasks` heap and index size during a 4-hour run at half of T3: within 2× of their size after the first hour | 36 million tasks in 1 hour at 10,000 tasks/s, none left waiting: heap 167 MiB throughout, indexes 88 to 116 MiB; at most 283 MiB, 1.06× its size after 15 minutes: pass |
 | E4 | Database connections: a client uses its pool only; a worker, its pool plus one `LISTEN` connection | A client with a pool of 8 used at most 8; a worker with a pool of 8 and 64 slots, at most 9, one of them listening: pass |
 | E5 | Worker memory: idle ≤ 30 MiB RSS; ≤ 8 KiB per running task | 17.3 MiB idle; 7.9 KiB per running task, with 10,000 running: pass |
-| E6 | An idle worker's load, revised on 2026-10-27: while the maintainer's heartbeats arrive, about one fetch per queue per minute, plus heartbeats; while they do not, one per queue per poll interval | Heartbeats arriving, 10 queues for 3 minutes: 55 fetches, 5.5 per queue, of which 3 or 4 at start; 17 worker heartbeats; 22 other statements: pass |
+| E6 | An idle worker's load, revised on 2026-10-27: while the maintainer's heartbeats arrive, about one fetch per queue per minute, plus heartbeats; while they do not, one per queue per poll interval | Heartbeats arriving, 10 queues for 3 minutes: 90 fetches, 9.0 per queue, of which up to 7 before the first heartbeat; 17 worker heartbeats; 29 other statements: pass |
+| E7 | The database's CPU for heartbeats when installations share a database, measured since 2026-10-28, with no target | 500 connections listening: 0.24 CPUs at 20 heartbeats a second, what 100 installations send, and 1.11 CPUs at 100 a second; about 24 µs per heartbeat per listening connection |
 
 **E1 counts every statement,** including the `BEGIN`, settings, and `COMMIT`
 that a fetch sends with it in one round trip (see
@@ -189,11 +194,23 @@ alone. macOS counts resident memory a little differently from Linux.
 **E6** counts the statements of a worker that serves 10 idle queues and stays
 out of the maintainer election, while a maintainer runs in another worker.
 Each queue fetches when `Run` starts, when the notification connection
-starts, and every second until the maintainer's first heartbeat arrives;
-then once a minute, give or take 6 seconds. Before 2026-10-27, an idle queue
+starts, and every second until the maintainer's first heartbeat arrives,
+within 5 seconds; then once a minute, give or take 6 seconds. Before 2026-10-27, an idle queue
 polled every second: 316 fetches in 30 seconds here. Its target was revised
 with the design: the poll interval now applies only while heartbeats do not
 arrive. S3 measures the same at scale.
+
+**E7** keeps 500 connections listening, each on a channel of its own, as
+the workers of other installations do, and sends heartbeats on another
+channel: PostgreSQL wakes every connection that listens in a database for
+each notification, whatever its channel. It reads the CPU time of the
+database's container from its cgroup, so it runs only with `-container`.
+Without heartbeats, the listeners cost nothing measurable. 100
+installations, each sending a heartbeat every 5 seconds, send 20 a second,
+which cost 0.24 CPUs; with one every second, as the first version of the
+idle polling sent, they would send 100 a second, 1.11 CPUs. So the cost
+grows with installations × listening connections, about 24 µs each, and
+the 5-second heartbeat keeps it small.
 
 ### Reliability under faults
 

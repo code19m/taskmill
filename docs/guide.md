@@ -727,7 +727,7 @@ setups:
   notification, whatever its schema, so installations that share a database
   pay a little for each other's. Each maintainer sends a heartbeat every 5
   seconds: with 100 installations and 500 workers in all, the heartbeats
-  cost the database about E7CPU of a CPU (E7 in
+  cost the database about a quarter of a CPU (E7 in
   [Benchmarks](benchmarks.md#resource-use)).
 - **A database per service.** A service hands work to another through a
   broker: it stores a message with [the outbox](#the-outbox-and-the-inbox),

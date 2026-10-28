@@ -118,8 +118,8 @@ All notable changes to taskmill are recorded here. The format follows
   `PollInterval` while no maintainer of this version runs. A queue whose
   installation-wide concurrency limit holds tasks back still polls every
   `PollInterval`. 50 idle worker processes serving 100 queues sent the
-  database about 5,600 transactions a second, and now send about IDLEAVG on
-  average, and IDLEPEAK in the busiest 10 seconds. A worker logs when
+  database about 5,600 transactions a second, and now send about 150 on
+  average, and 460 in the busiest 10 seconds. A worker logs when
   heartbeats start or stop arriving, and gives up opening its notification
   connection after 10 seconds, to try again.
 - A maintainer that stops hands over at once: it tells the workers, and
