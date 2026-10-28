@@ -1381,7 +1381,7 @@ spec:
     spec:
       containers:
         - name: taskmill-ui
-          image: ghcr.io/code19m/taskmill-ui:0.2.0 # the release you run
+          image: ghcr.io/code19m/taskmill-ui:1.0.0 # the release you run
           env:
             - {name: TASKMILL_UI_ADDR, value: ":8080"}
             - name: TASKMILL_DATABASE_URL # ends in ?pool_max_conns=4

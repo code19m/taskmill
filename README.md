@@ -39,10 +39,9 @@ together with your data.
 
 The dashboard, here showing the [shop example](examples/shop).
 
-> **Status:** taskmill is new, with no known production users yet. Before
-> v1.0.0, minor releases may change the API, and the
-> [changelog](CHANGELOG.md) says how to migrate. See
-> [Upgrading](docs/guide.md#upgrading).
+> **Status:** stable. From v1.0.0 on, taskmill keeps its API compatible
+> within a major version; see [Upgrading](docs/guide.md#upgrading). The
+> [changelog](CHANGELOG.md) says how to migrate from earlier releases.
 
 ## Why taskmill?
 
