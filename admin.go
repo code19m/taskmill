@@ -4,9 +4,9 @@ import (
 	"cmp"
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +18,7 @@ import (
 const (
 	defaultListLimit = 100
 	maxListLimit     = 1000
+	maxGroupQueues   = 100     // most queues named in one Groups call, each read up to a page
 	listTimeout      = "5s"    // bound on one page's query, so inspection never loads the database
 	statsQueueCap    = 10_000  // most tasks counted per queue and state
 	statsDueCap      = 100_000 // most scheduled and retryable tasks counted in all
@@ -110,12 +111,38 @@ type ListResult struct {
 	Next string
 }
 
-// updateAttempts bounds how often [Client.UpdateQueue] and
-// [Client.UpdateSettings] read the settings, update them, and find that they
-// changed meanwhile, before they give up with errKeptChanging.
-const updateAttempts = 5
+// An update of settings that loses to a concurrent update tries again, up
+// to updateAttempts times. Before each new try it pauses a random time below
+// a cap that doubles from minUpdatePause to maxUpdatePause, so that updates
+// that collided spread out; the pauses add up to at most 0.26 seconds.
+const (
+	updateAttempts = 10
+	minUpdatePause = 2 * time.Millisecond
+	maxUpdatePause = 50 * time.Millisecond
+)
 
-var errKeptChanging = errors.New("the settings kept changing during the update; try again")
+// retryConflicts runs try until it saves the settings or fails, and returns
+// an error that wraps [ErrConflict] if every try lost to a concurrent update.
+// op names the update in errors.
+func retryConflicts(ctx context.Context, op string, try func() (saved bool, err error)) error {
+	pause := minUpdatePause
+	for i := range updateAttempts {
+		if i > 0 {
+			wait := time.NewTimer(rand.N(pause)) //nolint:gosec // jitter needs no cryptographic randomness
+			select {
+			case <-ctx.Done():
+				wait.Stop()
+				return fmt.Errorf("taskmill: %s: %w", op, ctx.Err())
+			case <-wait.C:
+			}
+			pause = min(2*pause, maxUpdatePause)
+		}
+		if saved, err := try(); saved || err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: %s: the settings changed during each of %d tries", ErrConflict, op, updateAttempts)
+}
 
 // UpdateQueue changes a queue's installation-wide settings for every worker,
 // and creates the queue if needed. update gets a copy of the current
@@ -124,11 +151,12 @@ var errKeptChanging = errors.New("the settings kept changing during the update; 
 //
 // No lock is held while update runs. The settings are written back only if
 // they did not change meanwhile; if they did, update runs again on the new
-// settings, up to 5 times before UpdateQueue gives up with an error. So
-// concurrent updates never lose each other's changes, and update may run
-// more than once: it must only change the settings it gets, with no I/O and
-// no calls to the Client. Workers apply the change within 10 seconds, and at
-// once if they receive notifications.
+// settings, after a short random pause, up to 10 times before UpdateQueue
+// gives up with an error that wraps [ErrConflict]. So concurrent updates
+// never lose each other's changes, and update may run more than once: it
+// must only change the settings it gets, with no I/O and no calls to the
+// Client. Workers apply the change within 10 seconds, and at once if they
+// receive notifications.
 //
 //	err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
 func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*QueueSettings)) error {
@@ -138,10 +166,11 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 	if update == nil {
 		return invalidArgument("update is nil")
 	}
-	for range updateAttempts {
+	op := fmt.Sprintf("update queue %q", name)
+	return retryConflicts(ctx, op, func() (bool, error) {
 		var limit *int
 		if err := c.pool.QueryRow(ctx, c.sql.readQueue, name).Scan(&limit); err != nil {
-			return fmt.Errorf("taskmill: update queue %q: %w", name, err)
+			return false, fmt.Errorf("taskmill: %s: %w", op, err)
 		}
 		var s QueueSettings
 		if limit != nil {
@@ -151,20 +180,16 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 		var next *int
 		switch {
 		case s.MaxRunning < 0:
-			return invalidArgument("MaxRunning must not be negative")
+			return false, invalidArgument("MaxRunning must not be negative")
 		case s.MaxRunning > 0:
 			next = &s.MaxRunning
 		}
 		var swapped int
-		err := c.pool.QueryRow(ctx, c.sql.swapQueue, name, limit, next, c.schema, notifyQueue+"|"+name).Scan(&swapped)
-		if err != nil {
-			return fmt.Errorf("taskmill: update queue %q: %w", name, err)
+		if err := c.pool.QueryRow(ctx, c.sql.swapQueue, name, limit, next, c.schema, notifyQueue+"|"+name).Scan(&swapped); err != nil {
+			return false, fmt.Errorf("taskmill: %s: %w", op, err)
 		}
-		if swapped == 1 {
-			return nil
-		}
-	}
-	return fmt.Errorf("taskmill: update queue %q: %w", name, errKeptChanging)
+		return swapped == 1, nil
+	})
 }
 
 // PauseQueue stops workers from fetching the queue's tasks. Tasks already
@@ -265,18 +290,18 @@ func (c *Client) Settings(ctx context.Context) (*Settings, error) {
 // it does not know of, such as those of a later version, keep their values.
 // A setting changed to zero goes back to its default. Like
 // [Client.UpdateQueue], it holds no lock while update runs, and runs update
-// again if the settings changed meanwhile, so update must only change the
-// settings it gets.
+// again if the settings changed meanwhile, up to 10 times before it fails
+// with [ErrConflict], so update must only change the settings it gets.
 //
 //	err := client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention = 48 * time.Hour })
 func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) error {
 	if update == nil {
 		return invalidArgument("update is nil")
 	}
-	for range updateAttempts {
+	return retryConflicts(ctx, "update settings", func() (bool, error) {
 		var history, dead int64
 		if err := c.pool.QueryRow(ctx, c.sql.readSettings).Scan(&history, &dead); err != nil {
-			return fmt.Errorf("taskmill: update settings: %w", err)
+			return false, fmt.Errorf("taskmill: update settings: %w", err)
 		}
 		s := Settings{
 			HistoryRetention: time.Duration(history) * time.Microsecond,
@@ -286,17 +311,14 @@ func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) err
 		s.HistoryRetention = cmp.Or(s.HistoryRetention, defaultHistoryRetention)
 		s.DeadRetention = cmp.Or(s.DeadRetention, defaultDeadRetention)
 		if s.HistoryRetention < minRetention || s.DeadRetention < minRetention {
-			return invalidArgument("retention periods must be at least %s", minRetention)
+			return false, invalidArgument("retention periods must be at least %s", minRetention)
 		}
 		tag, err := c.pool.Exec(ctx, c.sql.swapSettings, history, dead, s.HistoryRetention.Microseconds(), s.DeadRetention.Microseconds())
 		if err != nil {
-			return fmt.Errorf("taskmill: update settings: %w", err)
+			return false, fmt.Errorf("taskmill: update settings: %w", err)
 		}
-		if tag.RowsAffected() == 1 {
-			return nil
-		}
-	}
-	return fmt.Errorf("taskmill: update settings: %w", errKeptChanging)
+		return tag.RowsAffected() == 1, nil
+	})
 }
 
 // Workers returns the registered worker processes. A worker that stopped
@@ -390,7 +412,7 @@ func checkFilter(what string, values []string, maxLen int) ([]string, error) {
 // returns.
 type GroupParams struct {
 	// Queues limits the result to groups of these queues. Empty means all
-	// queues.
+	// queues. Maximum: 100 names.
 	Queues []string
 
 	// Search limits the result to groups whose keys contain it, ignoring
@@ -431,10 +453,11 @@ type GroupInfo struct {
 }
 
 // Groups returns the FIFO groups that have unfinished tasks or a dead task
-// that halts them, one page at a time, ordered by queue and key. Like
-// [Client.List], each page's query is canceled after 5 seconds; a search
-// that matches few of very many groups can reach that limit and return an
-// error.
+// that halts them, one page at a time, ordered by queue and key. Each queue
+// named in [GroupParams.Queues] reads up to a page, so it takes at most 100
+// names. Like [Client.List], each page's query is canceled after 5 seconds;
+// a search that matches few of very many groups can reach that limit and
+// return an error.
 func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult, error) {
 	p := GroupParams{}
 	if params != nil {
@@ -483,6 +506,9 @@ func (c *Client) groupsQuery(p *GroupParams) (sql string, args []any, err error)
 		p.Limit = defaultListLimit
 	case p.Limit < 0 || p.Limit > maxListLimit:
 		return "", nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
+	}
+	if len(p.Queues) > maxGroupQueues {
+		return "", nil, invalidArgument("at most %d queue names", maxGroupQueues)
 	}
 	queues, err := checkFilter("queue name", p.Queues, maxNameLength)
 	if err != nil {

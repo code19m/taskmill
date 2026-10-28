@@ -28,6 +28,10 @@ var (
 	// ErrSchemaOutdated means the database schema is missing or older than
 	// this version of taskmill. Run [Migrate].
 	ErrSchemaOutdated = classError("taskmill: database schema is missing or outdated", "schema_outdated")
+
+	// ErrConflict means an update lost to concurrent updates of the same
+	// settings every time it tried. Try again.
+	ErrConflict = classError("taskmill: conflict", "conflict")
 )
 
 // classified is an error that names its class. OpenTelemetry's

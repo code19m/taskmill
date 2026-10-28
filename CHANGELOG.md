@@ -7,6 +7,14 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ErrConflict`, of class `conflict`: `Client.UpdateQueue` and
+  `Client.UpdateSettings` return an error that wraps it when each of their
+  10 tries lost to a concurrent update of the same settings. Between tries
+  they pause a short random time, up to 50 ms, so that colliding updates
+  spread out and nearly all land.
+
 ### Changed
 
 - The guide's [Upgrading](docs/guide.md#upgrading) section states the
@@ -20,10 +28,10 @@ All notable changes to taskmill are recorded here. The format follows
   replace them all. A setting that your code leaves alone, or that a later
   version adds, keeps its value. They hold no lock while the function runs:
   they write the settings back only if no other update changed them
-  meanwhile, and otherwise run the function again on the new settings. So
-  concurrent updates no longer lose each other's changes, and the function
-  must only change the settings it gets, with no I/O. To migrate, set the
-  fields you mean to:
+  meanwhile, and otherwise run the function again on the new settings, up to
+  10 times before they fail with `ErrConflict`. So concurrent updates no
+  longer lose each other's changes, and the function must only change the
+  settings it gets, with no I/O. To migrate, set the fields you mean to:
   `client.UpdateQueue(ctx, name, func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })`.
   Calls that pass nil still compile, but now fail with `ErrInvalidArgument`.
   Replace `UpdateQueue(ctx, name, nil)`, which removed the limit, with
@@ -34,11 +42,12 @@ All notable changes to taskmill are recorded here. The format follows
   returns a `*GroupsResult` with `Groups` and a `Next` cursor, which
   `GroupParams.Cursor` takes, and `GroupParams.Halted` finds the halted
   groups. Before, it returned at most 1,000 groups. To migrate, read
-  `res.Groups`, and follow `res.Next` for more. Each page reads only its own
-  groups, also from a few queues or of halted groups only, with migration 3's
-  index on the halted groups, which `Migrate` adds. Its documentation now
-  says exactly what it lists: the groups with unfinished tasks or a dead task
-  that halts them, which `GroupInfo.Tasks` counts too.
+  `res.Groups`, and follow `res.Next` for more. `GroupParams.Queues` takes at
+  most 100 names, since each named queue reads up to a page. Each page reads
+  only its own groups, also from a few queues or of halted groups only, with
+  migration 3's index on the halted groups, which `Migrate` adds. Its
+  documentation now says exactly what it lists: the groups with unfinished
+  tasks or a dead task that halts them, which `GroupInfo.Tasks` counts too.
 - **Breaking:** `QueueInfo.Counts` holds a `TaskCount` per state, as
   `Client.Count` does, with its own `Capped` flag, and `QueueInfo.Capped` is
   gone. Once the shared cap of 100,000 scheduled and retryable tasks is hit,

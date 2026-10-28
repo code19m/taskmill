@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -213,6 +214,69 @@ func TestUpdateQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	want(0, true)
+}
+
+func TestManyConcurrentUpdatesLand(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	const updaters, calls = 16, 10
+	var landed, conflicts atomic.Int64
+	var wg sync.WaitGroup
+	for range updaters {
+		wg.Go(func() {
+			for range calls {
+				err := e.client.UpdateQueue(ctx, "busy", func(s *taskmill.QueueSettings) { s.MaxRunning++ })
+				switch {
+				case err == nil:
+					landed.Add(1)
+				case errors.Is(err, taskmill.ErrConflict):
+					conflicts.Add(1)
+				default:
+					t.Error(err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	queues, err := e.client.Queues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(queues, func(q taskmill.QueueInfo) bool { return q.Name == "busy" })
+	// Every update that landed counts once. The pauses between tries let
+	// nearly all land: about 40 of 160 conflict without them, and with them
+	// none or a few, under 15 even on a starved CPU.
+	if i < 0 || int64(queues[i].Settings.MaxRunning) != landed.Load() || conflicts.Load() > updaters*calls/8 {
+		t.Fatalf("queues: %+v; want busy with max %d (landed), and at most %d of %d updates to conflict, got %d",
+			queues, landed.Load(), updaters*calls/8, updaters*calls, conflicts.Load())
+	}
+}
+
+func TestEndlessConflictsGiveUp(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	// Each run of the outer update changes the queue behind its back.
+	runs := 0
+	err := e.client.UpdateQueue(ctx, "contended", func(s *taskmill.QueueSettings) {
+		runs++
+		if err := e.client.UpdateQueue(ctx, "contended", func(s *taskmill.QueueSettings) { s.MaxRunning++ }); err != nil {
+			t.Error(err)
+		}
+		s.MaxRunning = 100
+	})
+	if !errors.Is(err, taskmill.ErrConflict) || runs != 10 {
+		t.Fatalf("got %v after %d runs, want ErrConflict after 10", err, runs)
+	}
+	err = e.client.UpdateSettings(ctx, func(*taskmill.Settings) {
+		if err := e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention += time.Hour }); err != nil {
+			t.Error(err)
+		}
+	})
+	if !errors.Is(err, taskmill.ErrConflict) {
+		t.Fatalf("got %v, want ErrConflict", err)
+	}
 }
 
 // interleave runs first and, while first's update waits in wait, runs second
@@ -562,6 +626,17 @@ func TestGroups(t *testing.T) {
 		if _, err := e.client.Groups(t.Context(), &params); !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Fatalf("%+v: got %v, want ErrInvalidArgument", params, err)
 		}
+	}
+	// Each named queue reads up to a page, so a call names at most 100.
+	queues := make([]string, 101)
+	for i := range queues {
+		queues[i] = fmt.Sprintf("queue-%d", i)
+	}
+	if _, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Queues: queues[:100]}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Queues: queues}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("101 queues: got %v, want ErrInvalidArgument", err)
 	}
 }
 

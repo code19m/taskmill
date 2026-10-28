@@ -352,8 +352,10 @@ err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { 
 function, and saves what it changes, so the settings you leave alone, or that
 a later version adds, keep their values. It holds no lock while your function
 runs: if another update changed the settings meanwhile, it runs your function
-again on the new settings, so the function must only change the settings it
-gets. A zero `MaxRunning` removes the limit. Workers apply the change within
+again on the new settings, after a short random pause, so the function must
+only change the settings it gets. After 10 tries that all lost to other
+updates, it returns an error that wraps `ErrConflict`; try again later. A
+zero `MaxRunning` removes the limit. Workers apply the change within
 10 seconds.
 
 ## Ordering and deduplication
@@ -1469,7 +1471,7 @@ this is its compatibility promise:
   - the `ErrorCode` values in a task's error history, such as `timeout`;
   - the error classes that `ErrorType()` reports for OpenTelemetry's
     `error.type`: `not_found`, `lease_lost`, `invalid_state`,
-    `invalid_argument`, `schema_outdated`, and the error codes;
+    `invalid_argument`, `schema_outdated`, `conflict`, and the error codes;
   - the outbox's queue, `outbox.Queue` (`outbox`), and its task kind,
     `taskmill.outbox.message`.
 
@@ -1523,6 +1525,8 @@ read those entries for every release you skip.
 | Dead and canceled retention | 30 days | At least 1 hour |
 | Error history | 20 most recent errors per task | 4 KiB per message |
 | `List` page | 100 tasks | 1,000 tasks; 5 seconds per query |
+| `Groups` page | 100 groups | 1,000 groups and 100 named queues; 5 seconds per query |
+| `UpdateQueue` and `UpdateSettings` | 10 tries, with random pauses of up to 50 ms between them | Then `ErrConflict` |
 | Queue statistics | Refreshed every 10 seconds | 10,000 per queue and state; 100,000 scheduled and retryable in all |
 | Removed schedules | Deleted after 24 hours without a run or change | — |
 | `RelayOptions.BatchSize` | 100 deliveries per `Publish` | 1,000 |
