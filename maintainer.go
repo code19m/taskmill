@@ -31,13 +31,14 @@ const (
 // maintainer does the installation-wide work of one elected worker. Its main
 // loop elects the leader, then rescues expired leases and enqueues schedules
 // once per interval. Queues whose tasks wait are woken in a loop of their
-// own, which is the heartbeat that workers count on, due tasks are promoted
-// in another, as they come due, and statistics and retention in a third, so
-// that slow work in one never delays the others.
+// own, which also sends the heartbeat that workers count on, due tasks are
+// promoted in another, as they come due, and statistics and retention in a
+// third, so that slow work in one never delays the others.
 type maintainer struct {
 	w      *Worker
 	c      *Client
 	leader atomic.Bool
+	term   chan struct{} // a term began: the wake loop sends the heartbeat at once
 
 	lastElection time.Time // used by the main loop only
 
@@ -49,6 +50,7 @@ func newMaintainer(w *Worker) *maintainer {
 	return &maintainer{
 		w:         w,
 		c:         w.client,
+		term:      make(chan struct{}, 1),
 		election:  newFailures(w, "elect maintainer"),
 		promotion: newFailures(w, "promote due tasks"),
 		waking:    newFailures(w, "wake queues"),
@@ -75,6 +77,9 @@ func (m *maintainer) run(ctx context.Context) {
 		case <-ctx.Done():
 			m.resign(context.WithoutCancel(ctx))
 			return
+		case <-m.w.resigned:
+			m.lastElection = time.Time{} // the leader left: take over now
+			m.cycle(ctx)
 		case <-tick.C:
 			m.cycle(ctx)
 		}
@@ -95,19 +100,29 @@ func (m *maintainer) cycle(ctx context.Context) {
 	m.runSchedules(ctx)
 }
 
-// wakeLoop wakes the queues whose tasks wait, which sends the heartbeat, once
-// per interval while this worker leads.
+// wakeLoop wakes the queues whose tasks wait once per interval while this
+// worker leads, and sends the heartbeat with it at the start of each term and
+// every heartbeat interval.
 func (m *maintainer) wakeLoop(ctx context.Context) {
 	tick := time.NewTicker(m.w.timing.maintainer)
 	defer tick.Stop()
+	every := max(1, int(m.w.timing.heartbeat/m.w.timing.maintainer))
+	ticks := every // since the last heartbeat went out
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-m.term:
+			ticks = every
 		case <-tick.C:
+			ticks++
 		}
-		if m.leader.Load() {
-			m.wake(ctx)
+		if !m.leader.Load() {
+			continue
+		}
+		heartbeat := ticks >= every
+		if m.wake(ctx, heartbeat) && heartbeat {
+			ticks = 0
 		}
 	}
 }
@@ -178,6 +193,10 @@ func (m *maintainer) elect(ctx context.Context) bool {
 	switch {
 	case leader && !was:
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "elected maintainer")
+		select {
+		case m.term <- struct{}{}:
+		default:
+		}
 	case was && !leader:
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "no longer maintainer")
 	}
@@ -190,7 +209,7 @@ func (m *maintainer) resign(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
-	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignLeader, m.w.id); err != nil {
+	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignLeader, m.w.id, m.c.schema); err != nil {
 		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "resign maintainer failed; another worker leads when the lease expires",
 			slog.Any(logKeyError, err))
 	}
@@ -210,17 +229,18 @@ func (m *maintainer) promote(ctx context.Context) {
 }
 
 // wake notifies every queue that is not paused and whose next task waited
-// longer than a maintenance interval, and sends the heartbeat. A task can
-// become available without a notification that comes after it: the
-// throttle's trailing notification can come before the transactions that it
-// stands for commit, and a producer can crash before sending it. Idle queues
-// poll rarely while heartbeats arrive, so this finds such tasks within two
-// intervals, with one statement for the whole installation. A queue whose
-// workers are all busy is woken too, which changes nothing; a queue whose
-// tasks start at once is not.
-func (m *maintainer) wake(ctx context.Context) {
-	_, err := m.c.pool.Exec(ctx, m.c.sql.wakeQueues, m.c.schema, m.w.timing.maintainer.Microseconds())
+// longer than a maintenance interval, and sends the heartbeat if asked. It
+// reports whether it worked. A task can become available without a
+// notification that comes after it: the throttle's trailing notification can
+// come before the transactions that it stands for commit, and a producer can
+// crash before sending it. Idle queues poll rarely while heartbeats arrive,
+// so this finds such tasks within two intervals, with one statement for the
+// whole installation. A queue whose workers are all busy is woken too, which
+// changes nothing; a queue whose tasks start at once is not.
+func (m *maintainer) wake(ctx context.Context, heartbeat bool) bool {
+	_, err := m.c.pool.Exec(ctx, m.c.sql.wakeQueues, m.c.schema, m.w.timing.maintainer.Microseconds(), heartbeat)
 	m.waking.observe(ctx, err)
+	return err == nil
 }
 
 // leaseExpired is the error that a rescue records for the attempt it fails.

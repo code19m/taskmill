@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -180,8 +182,12 @@ func TestIdleWorkerReplacesAListenerThatFallsSilent(t *testing.T) {
 		t.Fatal(err)
 	}
 	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
+	logs := &logRecorder{}
+	e = e.withLogger(t, slog.New(logs))
 	w, started := startIdleWorker(t, e, &taskmill.WorkerConfig{ListenConfig: listen})
 	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
+
+	silent := e.listenerPID(t)
 
 	// The listener's connection stays open but carries nothing, as after a
 	// failover or a partition that drops packets: no error says so.
@@ -193,7 +199,143 @@ func TestIdleWorkerReplacesAListenerThatFallsSilent(t *testing.T) {
 	if d := time.Since(begin); d > time.Second {
 		t.Fatalf("pickup took %s", d)
 	}
-	waitFor(t, "the silent listener to close", func() bool { return e.listenerPID(t) == 0 })
+	waitFor(t, "the worker to give up on the listener", func() bool {
+		return logs.count("operation failed") == 1
+	})
+
+	// Once the network carries packets again, the worker listens on a new
+	// connection.
+	direct.frozen.Store(false)
+	waitFor(t, "heartbeats to arrive on a new listener", func() bool {
+		return taskmill.Notifying(w) && slices.ContainsFunc(e.listenerPIDs(t), func(pid int) bool { return pid != silent })
+	})
+}
+
+func TestIdleWorkerKeepsAListenerThatAnswers(t *testing.T) {
+	t.Parallel()
+	e, _ := newCountedEnv(t)
+	stopMaintainer := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: noopHandlers(), Queues: map[string]taskmill.QueueOptions{"m": {}},
+	})
+	logs := &logRecorder{}
+	e = e.withLogger(t, slog.New(logs))
+	w, started := startIdleWorker(t, e, &taskmill.WorkerConfig{NoMaintainer: true})
+	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
+
+	// The only maintainer stops, so heartbeats stop, but the listener
+	// still works: the worker polls, and keeps it.
+	stopMaintainer()
+	pid := e.listenerPID(t)
+	waitFor(t, "the worker to find that heartbeats do not arrive", func() bool {
+		return logs.count(heartbeatsMissing) == 1
+	})
+	if taskmill.Notifying(w) {
+		t.Fatal("the worker counts on notifications without heartbeats")
+	}
+	time.Sleep(2 * time.Second) // the worker checks the listener each 600 ms
+	if got := e.listenerPID(t); got != pid {
+		t.Fatalf("the worker replaced a listener that answers: pid %d, then %d", pid, got)
+	}
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "a"})
+	recv(t, started, "the task to start")
+}
+
+// TestMaintainerHandsOverWithoutAGap checks that when the maintainer stops,
+// another takes over at once, before workers miss its heartbeats, though
+// workers that do not lead try to take over only once an hour here.
+func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
+	t.Parallel()
+	e, _ := newCountedEnv(t)
+	logs := &logRecorder{}
+	eligible := func() (stop func()) {
+		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: map[string]taskmill.QueueOptions{"m": {}}})
+		taskmill.SetTiming(w, taskmill.Timing{Election: time.Hour})
+		return startWorker(t, w)
+	}
+	stopLeader := eligible()
+	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+	eligible()
+	logged := e.withLogger(t, slog.New(logs))
+	var idle []*taskmill.Worker
+	for range 3 {
+		w, _ := startIdleWorker(t, logged, &taskmill.WorkerConfig{NoMaintainer: true})
+		idle = append(idle, w)
+	}
+	notifying := func() bool {
+		for _, w := range idle {
+			if !taskmill.Notifying(w) {
+				return false
+			}
+		}
+		return true
+	}
+	waitFor(t, "heartbeats to arrive", notifying)
+	listeners := e.listenerPIDs(t)
+
+	var fellBack atomic.Bool
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+			if !notifying() {
+				fellBack.Store(true)
+			}
+		}
+	}()
+	leader := e.count(t, "SELECT count(*) FROM {s}.leader")
+	stopLeader()
+	<-watched
+	if fellBack.Load() || logs.count(heartbeatsMissing) > 0 {
+		t.Fatal("workers stopped counting on notifications while the maintainer changed")
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.leader"); n != leader {
+		t.Fatal("no worker took over")
+	}
+	for _, pid := range e.listenerPIDs(t) {
+		if !slices.Contains(listeners, pid) {
+			t.Fatal("a worker replaced its listener while the maintainer changed")
+		}
+	}
+}
+
+// TestWorkerDoesNotListenThroughTransactionPooling runs only through a
+// transaction-pooling proxy, as `make test-pgbouncer` does.
+func TestWorkerDoesNotListenThroughTransactionPooling(t *testing.T) {
+	t.Parallel()
+	if os.Getenv(testdb.EnvListenURL) == "" {
+		t.Skip("the test database is not behind a transaction-pooling proxy")
+	}
+	e := newEnv(t)
+	logs := &logRecorder{}
+	e = e.withLogger(t, slog.New(logs))
+	_, started := startIdleWorker(t, e, &taskmill.WorkerConfig{ListenConfig: e.pool.Config().ConnConfig.Copy()})
+	waitFor(t, "the worker to give up listening", func() bool {
+		return logs.count("notifications disabled; polling only") == 1
+	})
+	if n := e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE query = 'LISTEN ' || $1", e.schema); n != 0 {
+		t.Fatalf("%d server connections listen", n)
+	}
+	begin := time.Now()
+	e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the task to start")
+	if d := time.Since(begin); d > time.Second {
+		t.Fatalf("pickup took %s", d)
+	}
+}
+
+// listenerPIDs returns the server processes that listen for the env's
+// notifications.
+func (e *env) listenerPIDs(t *testing.T) []int {
+	t.Helper()
+	r, err := e.pool.Query(t.Context(), "SELECT pid FROM pg_stat_activity WHERE query = 'LISTEN ' || $1", e.schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pids, err := pgx.CollectRows(r, pgx.RowTo[int])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pids
 }
 
 func TestIdleWorkerFindsATaskWhoseNotificationWasLost(t *testing.T) {

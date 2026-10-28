@@ -31,7 +31,6 @@ const (
 	recordRetryFirst   = 100 * time.Millisecond // first wait before trying to record a result again
 	recordRetryMax     = 2 * time.Second        // longest wait between those tries
 	cleanupTimeout     = 5 * time.Second        // bound on best-effort cleanup, such as closing a connection
-	listenTimeout      = 10 * time.Second       // bound on opening the notification connection and listening
 	maxFetch           = 1000                   // most tasks one fetch leases
 	completionBatch    = 500                    // most completions recorded in one statement
 	completionLinger   = 2 * time.Millisecond   // wait for more completions to batch with
@@ -46,6 +45,7 @@ const (
 // tests shorten them.
 type timing struct {
 	maintainer      time.Duration // how often the maintainer works, at most
+	heartbeat       time.Duration // how often the maintainer sends its heartbeat
 	election        time.Duration // how often workers that do not lead try to take over
 	leaderLease     time.Duration // how long a maintainer leads without renewing
 	retention       time.Duration // how often retention runs
@@ -59,10 +59,12 @@ type timing struct {
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
 	failureReport   time.Duration // how often an operation that keeps failing logs, at most
 	idlePoll        time.Duration // how often idle queues poll while the maintainer's heartbeats arrive
+	listen          time.Duration // bound on opening the notification connection, and on its answer when heartbeats stop
 }
 
 var defaultTiming = timing{
 	maintainer:      time.Second,
+	heartbeat:       5 * time.Second,
 	election:        2 * time.Second,
 	leaderLease:     10 * time.Second,
 	retention:       time.Minute,
@@ -76,6 +78,7 @@ var defaultTiming = timing{
 	reconnectMax:    30 * time.Second,
 	failureReport:   time.Minute,
 	idlePoll:        time.Minute,
+	listen:          10 * time.Second,
 }
 
 // Causes of a canceled attempt context, which decide how its result is
@@ -110,6 +113,7 @@ type Worker struct {
 	reached   atomic.Pointer[time.Time] // when Run last reached the database; nil while it does not run
 	released  atomic.Int64              // tasks given back during the current Run's shutdown
 	notifying atomic.Bool               // the maintainer's heartbeats arrive, so notifications reach the worker
+	resigned  chan struct{}             // the maintainer resigned: this worker's maintainer tries to take over now
 	silent    atomic.Bool               // the worker logged that heartbeats do not arrive, and none has since
 	tally     tally                     // ended attempts not yet added to the activity
 	recording sync.WaitGroup            // Run's attempts whose results are being recorded
@@ -228,6 +232,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		listen:      c.ListenConfig,
 		version:     moduleVersion(),
 		attempts:    make(map[int64]*tracked),
+		resigned:    make(chan struct{}, 1),
 		completions: make(chan *tracked, completionBatch),
 	}
 	if c.Handlers != nil {
