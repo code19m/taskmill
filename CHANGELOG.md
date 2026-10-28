@@ -49,6 +49,9 @@ All notable changes to taskmill are recorded here. The format follows
 - `Worker.Run` on a running worker fails with `ErrInvalidState`, and
   `NewClient` with a pool that does not use READ COMMITTED with
   `ErrInvalidArgument`. Code that matched their messages can use `errors.Is`.
+- `Worker.Run` returns nil when its context ends before the worker
+  registered, as when a process is stopped while it starts, instead of a
+  "register worker" error.
 - **Breaking:** `outbox.Outbox.AddRelay` takes `*outbox.RelayOptions`, whose
   `BatchSize` and `Timeout` set the most deliveries per `Publish` call and
   the time each call has, as `HandlerOptions` do for other batch handlers.

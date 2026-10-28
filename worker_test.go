@@ -801,6 +801,20 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
+func TestRunStoppedBeforeItStartsReturnsNil(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // as a SIGTERM during startup does
+	if err := w.Run(ctx); err != nil {
+		t.Fatalf("got %v, want nil", err)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
+		t.Fatalf("%d workers registered", n)
+	}
+}
+
 func TestRunTwiceFails(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

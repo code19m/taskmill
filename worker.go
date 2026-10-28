@@ -368,9 +368,10 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 
 // Run fetches and runs tasks until ctx is canceled. It then stops fetching,
 // waits up to DrainTimeout for running tasks, cancels and releases those
-// still running, and returns nil. It returns an error only if the worker
-// cannot start: it is already running, which is [ErrInvalidState], or it
-// cannot register in the database.
+// still running, and returns nil. If ctx ends before the worker registered,
+// it returns nil at once. It returns an error only if the worker cannot
+// start: it is already running, which is [ErrInvalidState], or it cannot
+// register in the database.
 func (w *Worker) Run(ctx context.Context) error {
 	if !w.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: the worker is already running", ErrInvalidState)
@@ -384,6 +385,9 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	names, err := w.register(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil // stopped before it started
+		}
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
 	now := time.Now()
