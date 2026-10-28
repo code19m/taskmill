@@ -136,8 +136,9 @@ type AttemptError struct {
 	// Message is the error's text, truncated to 4 KiB.
 	Message string `json:"message"`
 
-	// Code classifies the entries that taskmill itself recorded. It is empty
-	// for an error returned by a handler.
+	// Code classifies the entries that taskmill itself recorded, and marks a
+	// handler's error returned after its attempt timed out as [CodeTimeout].
+	// It is empty for other errors returned by a handler.
 	Code ErrorCode `json:"code,omitempty"`
 }
 
@@ -202,7 +203,9 @@ type attempt struct {
 // After CompleteTx, the handler should commit and return nil. If the handler
 // returns an error after its transaction committed, the task stays completed
 // and the error is only logged; if the transaction rolled back, the error fails
-// the attempt as usual.
+// the attempt as usual. Returning nil after a rollback records nothing: once
+// the task's lease expires, the maintainer rescues it as a failed attempt,
+// with the code lease_lost.
 func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	if t.attempt == nil {
 		return invalidArgument("task was not created by a worker")

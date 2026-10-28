@@ -2,7 +2,7 @@ module github.com/code19m/taskmill/otel
 
 go 1.26.0
 
-toolchain go1.27.2
+toolchain go1.27.3
 
 require (
 	github.com/code19m/taskmill v0.3.0

@@ -120,8 +120,8 @@ Notes on specific transitions:
   retried at some point, not crash workers forever. A task whose
   cancellation was requested becomes `canceled` instead.
 - **14, 15, and 18.** Canceling or deleting a task releases its dedupe key,
-  so the same key can be enqueued again at once. A dead task keeps its key
-  until the key's window ends.
+  so the same key can be enqueued again at once. A completed or dead task
+  keeps its key until the key's window ends.
 - **15.** If the handler succeeds before it notices the cancellation, the
   task becomes `completed`, because the work was done. Canceling one task of
   a batch does not cancel the batch's context: the task becomes `canceled`

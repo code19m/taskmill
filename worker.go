@@ -130,7 +130,8 @@ type WorkerConfig struct {
 	Queues map[string]QueueOptions
 
 	// LeaseDuration is how long a fetched task stays owned without a
-	// heartbeat. Heartbeats are sent every third of it. Default: 30 seconds.
+	// heartbeat. Heartbeats are sent every third of it. Minimum: 100
+	// milliseconds. Default: 30 seconds.
 	LeaseDuration time.Duration
 
 	// PollInterval is how often idle queues are checked when no notification
@@ -181,7 +182,8 @@ type QueueOptions struct {
 type Middleware func(ctx context.Context, task *TaskInfo, next func(context.Context) error) error
 
 // NewWorker returns a worker that uses client to reach the database. It
-// reports invalid configuration and handler registration errors.
+// reports invalid configuration, schedules, and handler registrations, such
+// as a kind registered twice, as errors that wrap [ErrInvalidArgument].
 func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 	if client == nil {
 		return nil, invalidArgument("client is nil")

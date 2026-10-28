@@ -36,9 +36,10 @@
 //
 // The [Client] lists, cancels, retries, and deletes tasks, pauses queues,
 // and limits how many of a queue's tasks run at once. Package
-// github.com/code19m/taskmill/ui serves the same operations as a web
-// interface, and package github.com/code19m/taskmill/outbox publishes
-// messages to a broker with the transactional outbox pattern.
+// github.com/code19m/taskmill/ui serves these operations, except the
+// limits, as a web interface, and package
+// github.com/code19m/taskmill/outbox publishes messages to a broker with the
+// transactional outbox pattern.
 //
 // # Testing
 //
