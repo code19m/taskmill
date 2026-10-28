@@ -47,22 +47,15 @@ type ClientConfig struct {
 	// outermost. It can add metadata to tasks, for example to carry a trace
 	// context from the producer to the handler.
 	EnqueueMiddleware []EnqueueMiddleware
-
-	// ContextMetadata, if set, is called on every enqueue and its result is
-	// added to the tasks' metadata. Metadata set in [EnqueueOptions] wins. It
-	// runs as the outermost enqueue middleware.
-	//
-	// Deprecated: use EnqueueMiddleware, which can do the same. ContextMetadata
-	// will be removed in v0.3.0.
-	ContextMetadata func(ctx context.Context) map[string]string
 }
 
 // NewClient returns a client that uses pool for its own statements. cfg may
 // be nil. It fails with [ErrSchemaOutdated] if the schema was not migrated.
 //
 // taskmill's statements rely on the READ COMMITTED isolation level, so
-// NewClient fails if the pool's default_transaction_isolation is another
-// level; set it in the pool's ConnConfig.RuntimeParams. Transactions that
+// NewClient fails with [ErrInvalidArgument] if the pool's
+// default_transaction_isolation is another level; set it in the pool's
+// ConnConfig.RuntimeParams. Transactions that
 // callers pass to the Tx methods may use any level.
 func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Client, error) {
 	if pool == nil {
@@ -88,9 +81,6 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 		notifier:          newNotifier(pool, schema, logger),
 		enqueueMiddleware: slices.Clone(cfg.EnqueueMiddleware),
 	}
-	if cfg.ContextMetadata != nil {
-		c.enqueueMiddleware = slices.Insert(c.enqueueMiddleware, 0, contextMetadata(cfg.ContextMetadata))
-	}
 	if err := c.checkSchema(ctx); err != nil {
 		return nil, err
 	}
@@ -115,8 +105,8 @@ func (c *Client) checkSchema(ctx context.Context) error {
 		return fmt.Errorf("%w: schema %q is at version %d, need %d", ErrSchemaOutdated, c.schema, version, want)
 	}
 	if isolation != "read committed" {
-		return fmt.Errorf("taskmill: the pool's default_transaction_isolation is %q, but taskmill needs "+
-			"\"read committed\"; set it in the pool's ConnConfig.RuntimeParams", isolation)
+		return fmt.Errorf("%w: the pool's default_transaction_isolation is %q, but taskmill needs "+
+			"\"read committed\"; set it in the pool's ConnConfig.RuntimeParams", ErrInvalidArgument, isolation)
 	}
 	return nil
 }

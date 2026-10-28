@@ -39,7 +39,8 @@ type Schedule struct {
 
 	// Args and Options describe the task to enqueue; Options may be nil.
 	// The schedule sets the run time and the dedupe key itself, to enqueue
-	// each run once.
+	// each run once, so [NewWorker] rejects Options that set RunAt,
+	// DedupeKey, or DedupeWindow.
 	Args    Args
 	Options *EnqueueOptions
 }
@@ -74,33 +75,48 @@ func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 			return nil, invalidArgument("schedule %q defined twice", s.Name)
 		}
 		seen[s.Name] = true
-		if s.Args == nil {
-			return nil, invalidArgument("schedule %q has no args", s.Name)
-		}
-		if s.Location == nil {
-			s.Location = time.UTC
-		}
-		expr, err := cron.Parse(s.Cron)
-		if err == nil {
-			_, err = expr.Next(time.Now().In(s.Location)) // fails if it never matches
-		}
+		c, err := compileSchedule(s)
 		if err != nil {
-			return nil, invalidArgument("schedule %q: %v", s.Name, err)
+			return nil, err
 		}
-		var opts EnqueueOptions
-		if d, ok := s.Args.(ArgsWithDefaults); ok {
-			opts = d.EnqueueDefaults()
-		}
-		if s.Options != nil {
-			opts = mergeOptions(opts, *s.Options)
-		}
-		opts.Queue = cmp.Or(opts.Queue, DefaultQueue)
-		if err := checkScheduledTask(s.Args, opts); err != nil {
-			return nil, fmt.Errorf("%w (schedule %q)", err, s.Name)
-		}
-		out = append(out, compiledSchedule{Schedule: s, expr: expr, opts: opts})
+		out = append(out, c)
 	}
 	return out, nil
+}
+
+// compileSchedule validates one schedule, and resolves the options of its
+// task.
+func compileSchedule(s Schedule) (compiledSchedule, error) {
+	if s.Args == nil {
+		return compiledSchedule{}, invalidArgument("schedule %q has no args", s.Name)
+	}
+	if o := s.Options; o != nil && (!o.RunAt.IsZero() || o.DedupeKey != "" || o.DedupeWindow != 0) {
+		return compiledSchedule{}, invalidArgument(
+			"schedule %q: Options set RunAt, DedupeKey, or DedupeWindow, which the schedule sets itself", s.Name,
+		)
+	}
+	if s.Location == nil {
+		s.Location = time.UTC
+	}
+	expr, err := cron.Parse(s.Cron)
+	if err == nil {
+		_, err = expr.Next(time.Now().In(s.Location)) // fails if it never matches
+	}
+	if err != nil {
+		return compiledSchedule{}, invalidArgument("schedule %q: %v", s.Name, err)
+	}
+	var opts EnqueueOptions
+	if d, ok := s.Args.(ArgsWithDefaults); ok {
+		opts = d.EnqueueDefaults()
+	}
+	if s.Options != nil {
+		opts = mergeOptions(opts, *s.Options)
+	}
+	opts.Queue = cmp.Or(opts.Queue, DefaultQueue)
+	if err := checkScheduledTask(s.Args, opts); err != nil {
+		return compiledSchedule{}, fmt.Errorf("%w (schedule %q)", err, s.Name)
+	}
+	return compiledSchedule{Schedule: s, expr: expr, opts: opts}, nil
 }
 
 // checkScheduledTask validates the task that a schedule enqueues, so that a
@@ -118,6 +134,9 @@ func checkScheduledTask(args Args, opts EnqueueOptions) error {
 		maxAttempts: cmp.Or(opts.MaxAttempts, defaultMaxAttempts),
 	}
 	if err := t.validate(); err != nil {
+		return err
+	}
+	if _, err := encodeMetadata(opts.Metadata); err != nil {
 		return err
 	}
 	_, err := encodePayload(kind, args)

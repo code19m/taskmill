@@ -45,7 +45,7 @@ func TestMaintainerRescuesExpiredLeases(t *testing.T) {
 		t.Fatal("expired lease was not rescued")
 	}
 	info := e.waitState(t, id, taskmill.StateCompleted)
-	if len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseExpired {
+	if len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseLost {
 		t.Fatalf("got errors %+v", info.Errors)
 	}
 

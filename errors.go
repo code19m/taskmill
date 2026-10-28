@@ -5,15 +5,25 @@ import (
 	"time"
 )
 
-// Errors returned by taskmill. Test for them with [errors.Is]. Each names
-// its class for OpenTelemetry's error.type, such as "invalid_argument".
+// Errors returned by taskmill. Test for them with [errors.Is], and for the
+// cause of a handler's canceled context with [context.Cause].
+//
+// Each error names its class through an ErrorType() string method, which
+// OpenTelemetry's semconv.ErrorType reports as error.type. The classes are
+// part of the API and do not change: "not_found", "lease_lost",
+// "invalid_state", "invalid_argument", "schema_outdated", "canceled",
+// "timeout", and "shutdown", and for failures that taskmill classifies itself,
+// "panic", "invalid_payload", and "middleware", for middleware that returned
+// nil without calling its next.
 var (
 	// ErrNotFound means the task or schedule does not exist, or no longer
 	// exists.
 	ErrNotFound = classError("taskmill: not found", "not_found")
 
 	// ErrLeaseLost means the attempt no longer owns its task: its lease
-	// expired and the task was rescued, canceled, or fetched again.
+	// expired and the task was rescued, canceled, or fetched again. It is
+	// also the cause of the context of a handler whose attempt lost its
+	// lease.
 	ErrLeaseLost = classError("taskmill: lease lost", "lease_lost")
 
 	// ErrInvalidState means the operation does not apply to the task's
@@ -28,6 +38,20 @@ var (
 	// ErrSchemaOutdated means the database schema is missing or older than
 	// this version of taskmill. Run [Migrate].
 	ErrSchemaOutdated = classError("taskmill: database schema is missing or outdated", "schema_outdated")
+
+	// ErrTaskCanceled is the cause of a handler's context when the task was
+	// canceled while it ran. The task becomes canceled when the attempt ends.
+	ErrTaskCanceled = classError("taskmill: task canceled", "canceled")
+
+	// ErrAttemptTimeout is the cause of a handler's context when the attempt
+	// ran longer than [HandlerOptions.Timeout]. The attempt fails.
+	ErrAttemptTimeout = classError("taskmill: attempt timed out", "timeout")
+
+	// ErrShutdown is the cause of a handler's context when the worker is
+	// shutting down and the attempt outlived [WorkerConfig.DrainTimeout], or
+	// the context of [Worker.RunTask] ended. The task goes back to its queue
+	// without using an attempt.
+	ErrShutdown = classError("taskmill: worker shutting down", "shutdown")
 )
 
 // classified is an error that names its class. OpenTelemetry's
@@ -39,7 +63,10 @@ type classified struct {
 
 func classError(msg, class string) error { return &classified{msg: msg, class: class} }
 
-func (e *classified) Error() string     { return e.msg }
+// Error implements the error interface.
+func (e *classified) Error() string { return e.msg }
+
+// ErrorType returns the error's class, such as "invalid_argument".
 func (e *classified) ErrorType() string { return e.class }
 
 // invalidArgument returns an error that wraps [ErrInvalidArgument] with

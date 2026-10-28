@@ -226,6 +226,13 @@ the task cannot proceed yet, such as while waiting for a rate limit. A snooze
 of zero or less makes the task available at once. Snoozes use no attempts, so
 a task that always snoozes never becomes dead.
 
+**Why the context ended.** A handler must return soon after its context is
+canceled. `context.Cause(ctx)` says why: `taskmill.ErrTaskCanceled`,
+`ErrLeaseLost`, `ErrAttemptTimeout`, or `ErrShutdown`. Each of taskmill's
+errors also names a stable class through an `ErrorType() string` method, such
+as `invalid_argument` or `timeout`, which OpenTelemetry reports as
+`error.type`.
+
 **Retries** wait 1 second, then double up to 1 hour, with ±10% random jitter
 so that failed tasks do not retry in waves. With the default 25 attempts, a
 failing task keeps retrying for about 13 hours before it becomes dead. A
@@ -632,14 +639,16 @@ the task before it notices the cancellation, the task stays completed.
 
 **Error history.** `TaskInfo.Errors` keeps a task's 20 most recent errors.
 `AttemptError.Code` is empty for an error that a handler returned. For
-failures that taskmill detects itself, it is `CodeLeaseExpired`, `CodeTimeout`,
+failures that taskmill detects itself, it is `CodeLeaseLost`, `CodeTimeout`,
 `CodePanic`, `CodeInvalidPayload`, or `CodeUnknownKind`. `CodeNoHandler`
-marks a note, not a failure.
+marks a note, not a failure. Entries recorded before v0.3.0 name a lost lease
+`lease_expired`.
 
 **Running one task now.** `Worker.RunTask(ctx, id)` runs one task at once,
 in the calling goroutine, and returns the task afterwards. It ignores the
 task's run time, queue pauses, and concurrency limits, but not FIFO order. It
-needs no running worker.
+needs no running worker. A task of a kind that the worker has no handler for
+is snoozed with a `no_handler` note, as a running worker does.
 
 **Retention.** Completed tasks move to a history table and stay there for
 7 days. Dead and canceled tasks stay for 30 days. Both are installation-wide
@@ -807,8 +816,7 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
 and timestamps; `ClientConfig.EnqueueMiddleware` wraps every enqueue, and may
 add metadata, such as a trace context, to the tasks it enqueues. This one
 copies values from the context into the metadata, keeping what the enqueue
-set, as the deprecated `ClientConfig.ContextMetadata` does until v0.3.0
-removes it:
+set:
 
 ```go
 func FromContext(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
@@ -831,9 +839,13 @@ func Metrics(ctx context.Context, task *taskmill.TaskInfo, next func(context.Con
 }
 ```
 
-Middleware must call `next` at most once. A handler's panic reaches attempt
-middleware as an error. For a batch handler, middleware runs once per task,
-but the context it passes to `next` does not reach the handler. Enqueue
+Middleware must call `next` at most once. Attempt middleware that returns nil
+without calling `next` fails the attempt, which is retried with backoff, as
+after a handler's error. Enqueue middleware that does so fails the call, and
+nothing is stored. Either way, the middleware outside it sees the error, of
+the class `middleware`. A handler's panic reaches attempt middleware as an
+error. For a batch handler, middleware runs once per task, but the context it
+passes to `next` does not reach the handler. Enqueue
 middleware that fails after `next` stored the tasks fails an enqueue in your
 transaction, so that you can roll back; any other enqueue has committed, so
 it succeeds, and the error is logged.
@@ -1451,7 +1463,9 @@ this is its compatibility promise:
   - the `ErrorCode` values in a task's error history, such as `timeout`;
   - the error classes that `ErrorType()` reports for OpenTelemetry's
     `error.type`: `not_found`, `lease_lost`, `invalid_state`,
-    `invalid_argument`, `schema_outdated`, and the error codes;
+    `invalid_argument`, `schema_outdated`, the causes `canceled`, `timeout`,
+    and `shutdown`, `middleware` for middleware that returned nil without
+    calling `next`, and the error codes;
   - the outbox's queue, `outbox.Queue` (`outbox`), and its task kind,
     `taskmill.outbox.message`.
 
@@ -1489,6 +1503,8 @@ read those entries for every release you skip.
 | Queue, kind, and schedule names | — | 1 to 128 characters |
 | Group key | — | 1 to 256 characters |
 | Payload | — | 1 MiB of JSON |
+| Metadata | — | 64 KiB of JSON per task, after enqueue middleware |
+| One enqueue call (`EnqueueMany`, `outbox.Store`) | — | 10,000 tasks; 64 MiB of payload and metadata |
 | `MaxAttempts` | 25 | 1 to 10,000 |
 | Retry backoff | 1 s, doubling to 1 h, ±10% jitter; about 13 h for 25 attempts | — |
 | Retry and run time accuracy | About 1 second | — |

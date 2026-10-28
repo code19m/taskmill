@@ -14,6 +14,10 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 - Requires taskmill v0.3.0, whose `outbox.Outbox.AddRelay` takes relay
   options; the examples pass nil. This module's API is unchanged.
+- With taskmill v0.3.0, an attempt or an enqueue that a middleware after
+  this module's skips, by returning nil without calling `next`, is recorded
+  as failed: its span has an error status, and its spans and metrics have
+  the `error.type` `middleware`.
 
 ## [0.1.0] - 2026-10-27
 

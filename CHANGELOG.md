@@ -7,6 +7,13 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ErrTaskCanceled`, `ErrAttemptTimeout`, and `ErrShutdown`: with
+  `ErrLeaseLost`, the causes that `context.Cause` gives for a handler's
+  context that ended. The error classes that `ErrorType()` returns, such as
+  `invalid_argument`, are now part of the API.
+
 ### Changed
 
 - The guide's [Upgrading](docs/guide.md#upgrading) section states the
@@ -15,12 +22,47 @@ All notable changes to taskmill are recorded here. The format follows
   names that never change, such as the `State` values and error classes. It
   names the `migrations` table as the one public table, and what the promise
   leaves out: log and error messages, and the `otel` module's names.
+- **Breaking:** attempt middleware that returns nil without calling `next`
+  fails the attempt, which is retried with backoff. Before, the task was
+  completed although its handler never ran. Middleware that skips a task on
+  purpose returns an error, such as `taskmill.Snooze(d)` or
+  `taskmill.Permanent(err)`. Such a failure, and an enqueue middleware's that
+  returns nil without calling `next`, now reaches the middleware outside it
+  as an error from its `next`, of the class `middleware`, so tracing and
+  metrics record it.
+- **Breaking:** limits on one enqueue call, checked before any statement, so
+  that the caller's transaction stays usable: at most 64 KiB of encoded
+  metadata per task, after enqueue middleware, and at most 10,000 tasks and
+  64 MiB of payload and metadata per call. They apply to `EnqueueMany`,
+  `EnqueueManyTx`, and `outbox.Store`, and to the metadata of schedules,
+  which `NewWorker` checks. Calls beyond them fail with `ErrInvalidArgument`.
+  To migrate, split larger calls into chunks within both limits, and keep
+  each task's metadata within 64 KiB. Sizes now count `&`, `<`, and `>` as
+  one byte each, as stored, not as JSON escapes.
+- **Breaking:** `CodeLeaseExpired` is now `CodeLeaseLost`, with the value
+  `lease_lost`, like `ErrLeaseLost`. Error history entries recorded before
+  keep `lease_expired`: code that reads them checks for both.
+- **Breaking:** `NewWorker` rejects a `Schedule` whose `Options` set `RunAt`,
+  `DedupeKey`, or `DedupeWindow`, with `ErrInvalidArgument`, instead of
+  silently replacing them: the schedule sets them itself. Remove them from the
+  options.
+- `Worker.Run` on a running worker fails with `ErrInvalidState`, and
+  `NewClient` with a pool that does not use READ COMMITTED with
+  `ErrInvalidArgument`. Code that matched their messages can use `errors.Is`.
+- `Worker.Run` returns nil when its context ends before the worker
+  registered, as when a process is stopped while it starts, instead of a
+  "register worker" error.
 - **Breaking:** `outbox.Outbox.AddRelay` takes `*outbox.RelayOptions`, whose
   `BatchSize` and `Timeout` set the most deliveries per `Publish` call and
   the time each call has, as `HandlerOptions` do for other batch handlers.
   nil or zero values keep the defaults, 100 deliveries and 1 minute, and
   values out of range make `NewWorker` fail with `ErrInvalidArgument`. To
   migrate, pass nil: `ob.AddRelay(&handlers, publisher, nil)`.
+
+### Removed
+
+- **Breaking:** `ClientConfig.ContextMetadata`, deprecated in v0.2.0. Use
+  enqueue middleware, as the v0.2.0 entry below shows.
 
 ### Fixed
 
