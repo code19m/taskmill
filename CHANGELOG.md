@@ -54,10 +54,14 @@ All notable changes to taskmill are recorded here. The format follows
   tasks or a dead task that halts them, which `GroupInfo.Tasks` counts too.
 - **Breaking:** `QueueInfo.Counts` holds a `TaskCount` per state, as
   `Client.Count` does, with its own `Capped` flag, and `QueueInfo.Capped` is
-  gone. Once the shared cap of 100,000 scheduled and retryable tasks is hit,
-  only those counts are capped, in every queue, even at zero. To migrate,
-  read `Counts[state].N`, and `Counts[state].Capped` for whether that count
-  stopped at its cap.
+  gone. Every count stops at 10,000 per queue and state, scheduled and
+  retryable ones too, and is capped only when more tasks are left: a count
+  of exactly 10,000 is not. Once the shared cap of 100,000 scheduled and
+  retryable tasks is passed, only those counts are capped, in every queue,
+  even at zero. The dashboard marks only the counts that stopped at their
+  cap with "+"; before, every count of a queue with one capped count had
+  it. To migrate, read `Counts[state].N`, and `Counts[state].Capped` for
+  whether that count stopped at its cap.
 - **Breaking:** `ui.New(client, cfg)` replaces `ui.Handler`, and returns an
   error that wraps `taskmill.ErrInvalidArgument` instead of panicking on a
   configuration it refuses: a nil client, a `Prefix` without a leading slash,

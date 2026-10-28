@@ -20,11 +20,11 @@
 // Attributes are those of the conventions, with messaging.system "taskmill"
 // and the queue as messaging.destination.name, plus taskmill.task.kind and,
 // on spans, taskmill.task.attempt. Metrics carry no task IDs, so their
-// cardinality is bounded by the queues and kinds. error.type is the error's
-// type as semconv.ErrorType reports it: an error with an ErrorType() string
-// method names its own. taskmill's errors name theirs, such as
-// "invalid_argument", "panic", or "timeout" for an attempt that ran out of
-// time.
+// cardinality is bounded by the queues, kinds, states, outbox topics, and
+// error types. error.type is the error's type as semconv.ErrorType reports
+// it: an error with an ErrorType() string method names its own. taskmill's
+// errors name theirs, such as "invalid_argument", "panic", or "timeout" for
+// an attempt that ran out of time.
 package otel
 
 import (
