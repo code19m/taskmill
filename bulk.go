@@ -14,9 +14,11 @@ import (
 const (
 	countCap = 10_000 // most tasks that Client.Count counts in one state
 
-	// commitTimeout bounds the commit of a bulk action's batch, which goes on
-	// when ctx ends meanwhile, so that the count of changed tasks is exact.
-	commitTimeout = 5 * time.Second
+	// batchTimeout bounds a batch of a bulk action, which goes on when ctx
+	// ends meanwhile: a batch that began ends whole, so that the count of
+	// changed tasks is exact, and no batch is left behind, on a connection
+	// that ctx closed, to hold its rows after the action returns.
+	batchTimeout = 5 * time.Second
 )
 
 // bulkSettings start each batch of a bulk action. Custom plans see which
@@ -228,15 +230,16 @@ func (c *TaskCount) plus(other TaskCount) {
 // task once, so it retries a task at most once, even if the task fails again
 // meanwhile, and it ends however fast new tasks arrive. It skips the tasks,
 // the FIFO groups, and the dedupe keys that other transactions hold at that
-// moment, never waiting while it holds rows. If ctx ends first, it returns
-// what it did before, with an error and [BulkResult.Next] to go on; each
-// batch commits whole or not at all.
+// moment, never waiting while it holds rows. If ctx ends first, it finishes
+// the batch it is in, for at most 5 seconds, and returns what it did, with an
+// error and [BulkResult.Next] to go on; each batch commits whole or not at
+// all.
 func (c *Client) RetryMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
 	m, err := checkBulk(params, retryStates)
 	if err != nil {
 		return BulkResult{}, err
 	}
-	res, err := c.inBatches(ctx, m, func(q querier) (step, error) { return c.retryBatch(ctx, q, m) })
+	res, err := c.inBatches(ctx, m, c.retryBatch)
 	if err != nil {
 		return res, fmt.Errorf("taskmill: retry tasks: %w", err)
 	}
@@ -252,7 +255,7 @@ func (c *Client) CancelMatching(ctx context.Context, params *BulkParams) (BulkRe
 	if err != nil {
 		return BulkResult{}, err
 	}
-	res, err := c.inBatches(ctx, m, func(q querier) (step, error) { return c.cancelBatch(ctx, q, m) })
+	res, err := c.inBatches(ctx, m, c.cancelBatch)
 	if err != nil {
 		return res, fmt.Errorf("taskmill: cancel tasks: %w", err)
 	}
@@ -267,7 +270,7 @@ func (c *Client) DeleteMatching(ctx context.Context, params *BulkParams) (BulkRe
 	if err != nil {
 		return BulkResult{}, err
 	}
-	res, err := c.inBatches(ctx, m, func(q querier) (step, error) { return c.deleteBatch(ctx, q, m) })
+	res, err := c.inBatches(ctx, m, c.deleteBatch)
 	if err != nil {
 		return res, fmt.Errorf("taskmill: delete tasks: %w", err)
 	}
@@ -300,9 +303,9 @@ type step struct {
 }
 
 // inBatches runs batch, each time in a transaction of its own, until it goes
-// through the last task. A batch whose statements ran commits even if ctx
-// ends meanwhile, so that the result is exact.
-func (c *Client) inBatches(ctx context.Context, m *matching, batch func(q querier) (step, error)) (BulkResult, error) {
+// through the last task. A batch that began goes on if ctx ends meanwhile,
+// for at most batchTimeout, so that the result is exact.
+func (c *Client) inBatches(ctx context.Context, m *matching, batch func(context.Context, querier, *matching) (step, error)) (BulkResult, error) {
 	var res BulkResult
 	var firstSkipped int64
 	// stop returns what the action did when it stops early, with where to go
@@ -323,21 +326,7 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch func(q querie
 		if err := ctx.Err(); err != nil {
 			return stop(err)
 		}
-		tx, err := c.pool.Begin(ctx)
-		if err != nil {
-			return stop(err)
-		}
-		var s step
-		if _, err = tx.Exec(ctx, bulkSettings); err == nil {
-			s, err = batch(pgxQuerier{q: tx})
-		}
-		end, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitTimeout)
-		if err == nil {
-			err = tx.Commit(end)
-		} else {
-			_ = tx.Rollback(end) // err says what went wrong
-		}
-		cancel()
+		s, err := c.runBatch(ctx, m, batch)
 		if err != nil {
 			return stop(err)
 		}
@@ -350,6 +339,26 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch func(q querie
 		}
 	}
 	return res, nil
+}
+
+// runBatch runs batch in a transaction of its own. Once the transaction
+// began, the batch goes on if ctx ends meanwhile, for at most batchTimeout.
+func (c *Client) runBatch(ctx context.Context, m *matching, batch func(context.Context, querier, *matching) (step, error)) (step, error) {
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return step{}, err
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), batchTimeout)
+	defer cancel()
+	var s step
+	if _, err = tx.Exec(ctx, bulkSettings); err == nil {
+		s, err = batch(ctx, pgxQuerier{q: tx}, m)
+	}
+	if err != nil {
+		_ = tx.Rollback(ctx) // err says what went wrong
+		return step{}, err
+	}
+	return s, tx.Commit(ctx)
 }
 
 // bulkTask is a task that a bulk action read.

@@ -449,6 +449,58 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 	e.wantState(t, inB, taskmill.StateAvailable)
 }
 
+// A batch that began ends whole when the context ends meanwhile, so that it
+// holds no rows once the action returned, and the result counts what it did.
+func TestBulkBatchEndsWholeWhenTheContextEnds(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// As above: the retry of group b's task waits, for up to its lock
+	// timeout, for the transaction that creates the group's row.
+	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
+	inA := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
+	inB := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"})
+	e.cancel(t, inA)
+	e.cancel(t, inB)
+	tx := e.begin(t)
+	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"}); err != nil {
+		t.Fatal(err)
+	}
+	waiting := func(ctx context.Context) bool {
+		var waiting bool
+		_ = e.pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0)`,
+			e.schema+".groups").Scan(&waiting)
+		return waiting
+	}
+	// The context ends once the batch waits. A run whose wait ended before
+	// that was seen goes again: it waits again for group b.
+	var changed int64
+	for range 20 {
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() {
+			for ctx.Err() == nil {
+				if waiting(ctx) {
+					cancel()
+					return
+				}
+				time.Sleep(time.Millisecond)
+			}
+		}()
+		res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}))
+		ended := ctx.Err() != nil
+		cancel()
+		changed += res.Changed
+		if !ended {
+			continue
+		}
+		if err != nil || res.Skipped != 1 || changed != 1 || waiting(t.Context()) {
+			t.Fatalf("retried %+v, %v, and %d tasks in all; want the batch to end whole after the context ended: group a retried, group b left", res, err, changed)
+		}
+		wantStates(t, e, map[int64]taskmill.State{head: taskmill.StateAvailable, inA: taskmill.StatePending, inB: taskmill.StateCanceled})
+		return
+	}
+	t.Fatal("the context never ended while the batch waited")
+}
+
 // A run whose context ends before it starts can go on all the same.
 func TestBulkActionsGoOnFromAnyStop(t *testing.T) {
 	t.Parallel()
