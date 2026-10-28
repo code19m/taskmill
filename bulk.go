@@ -54,8 +54,8 @@ func (f *TaskFilter) empty() bool {
 type TaskCount struct {
 	N int64
 
-	// Capped reports that counting stopped at its cap, so that N is a lower
-	// bound.
+	// Capped reports that counting stopped at its cap with more tasks left,
+	// so that N is a lower bound.
 	Capped bool
 }
 

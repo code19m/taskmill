@@ -34,7 +34,7 @@ has its own go.mod. The first run installs the pinned development tools into
 | Target | What it does |
 |---|---|
 | `make db` | Start PostgreSQL in Docker for the tests (`make db-stop` removes it) |
-| `make check` | All CI checks but `make release-check` and `make api`: tidy, lint, test, test through PgBouncer, vulnerability scan, rolling deploy |
+| `make check` | All CI checks but `make release-check` and `make api`: tidy, lint, test, test through PgBouncer, vulnerability scan, otel release check, rolling deploy |
 | `make fmt` | Format the code with gofumpt and goimports |
 | `make lint` | Run golangci-lint and actionlint |
 | `make test` | Run the tests with the race detector, in random order, and write `coverage.out` |
@@ -43,7 +43,7 @@ has its own go.mod. The first run installs the pinned development tools into
 | `make cover-report` | Print the coverage of the last `make test` per package |
 | `make vuln` | Scan for known vulnerabilities with govulncheck |
 | `make api` | Compare the API of the last commit with the latest release |
-| `make compat` | Run the latest release's client and worker on the current schema |
+| `make compat` | Run the latest release's client, worker, schedules, outbox, and dashboard on the current schema |
 | `make fuzz` | Run each fuzz target for `FUZZTIME`, 10 seconds by default |
 | `make bench` | Run the benchmarks and the fault scenarios, printing a Markdown report |
 | `make faults` | Run the fault scenarios as the nightly CI run does, against databases of their own |
@@ -119,11 +119,12 @@ Makefile target, so you can run it locally:
 | GoReleaser | `make release-check` | An invalid `.goreleaser.yaml`. |
 | CodeQL | — | Code scanning reports new alerts on the pull request and in the Security tab. |
 
-Two more run on a schedule. **Fuzz** runs each fuzz target for 3 minutes
-every day (`make fuzz FUZZTIME=3m`); a failing input is kept as an artifact
-of the run, for the fix and its seed. **Scorecard** rates the project's
-security practices each week and on every push to `main`, for the badge in
-the README.
+Three more run on a schedule. **Faults** runs the fault scenarios every
+night, and on pull requests that change them (`make faults`). **Fuzz** runs
+each fuzz target for 3 minutes every day (`make fuzz FUZZTIME=3m`); a failing
+input is kept as an artifact of the run, for the fix and its seed.
+**Scorecard** rates the project's security practices each week and on every
+push to `main`, for the badge in the README.
 
 ## Commit messages
 
@@ -203,7 +204,8 @@ the steps before and after it are manual:
    and `[X.Y.Z]` points to the release. A pre-release, such as
    `v1.0.0-rc.1`, needs a section of its own: `## [1.0.0-rc.1] - YYYY-MM-DD`.
    `make release-notes TAG=vX.Y.Z` prints the section as the release will
-   show it, and fails if there is none.
+   show it, and fails if there is none. Also set the `taskmill-ui` image tag
+   in the guide's Kubernetes example to the new version.
 4. Check that `internal/migrations/released_test.go` pins the checksum of
    every migration in the release.
 5. Once that is merged, tag the release commit on `main` with an annotated
@@ -252,19 +254,17 @@ builds the same bytes. `make snapshot` runs the release's build without
 publishing anything, and loads the linux/amd64 image into Docker as
 `goreleaser.ko.local`. Run it after changing `.goreleaser.yaml`.
 
-A nested module, such as `otel`, is released by a tag of its own, such as
-`otel/vX.Y.Z`, and step 6 with its module path. The workflow ignores those
-tags: such a module ships no binaries, and pkg.go.dev shows its versions. So
-it gets no GitHub release, and the releases page stays about taskmill.
-
-The `otel` module is released the same way, from
-[otel/CHANGELOG.md](otel/CHANGELOG.md), with tags named `otel/vX.Y.Z`. Its
-go.mod requires the oldest core release it works with. If it uses core changes
-that are not released yet, release the core first. Before tagging, run
-`make otel-release-check RELEASING=1`: it builds and tests the module
-against the required core version, as users build it, and fails if that
-version is not released. The `replace` line stays: users of the module
-ignore it.
+A nested module, such as `otel`, is released by a tag of its own,
+`otel/vX.Y.Z`, from its own changelog,
+[otel/CHANGELOG.md](otel/CHANGELOG.md), and step 6 with its module path. The
+workflow ignores those tags: such a module ships no binaries, and pkg.go.dev
+shows its versions, so it gets no GitHub release, and the releases page
+stays about taskmill. Its go.mod requires the oldest core release it works
+with; if it uses core changes that are not released yet, release the core
+first. Before tagging, run `make otel-release-check RELEASING=1`: it builds
+and tests the module against the required core version, as users build it,
+and fails if that version is not released. The `replace` line stays: users
+of the module ignore it.
 
 Never move or delete a published tag: the Go checksum database keeps every
 version forever. Fix a bad release forward with a new patch release, and

@@ -11,10 +11,10 @@ import (
 // Each error names its class through an ErrorType() string method, which
 // OpenTelemetry's semconv.ErrorType reports as error.type. The classes are
 // part of the API and do not change: "not_found", "lease_lost",
-// "invalid_state", "invalid_argument", "schema_outdated", "canceled",
-// "timeout", and "shutdown", and for failures that taskmill classifies itself,
-// "panic", "invalid_payload", and "middleware", for middleware that returned
-// nil without calling its next.
+// "invalid_state", "invalid_argument", "schema_outdated", "conflict",
+// "canceled", "timeout", and "shutdown", and for failures that taskmill
+// classifies itself, "panic", "invalid_payload", and "middleware", for
+// middleware that returned nil without calling its next.
 var (
 	// ErrNotFound means the task or schedule does not exist, or no longer
 	// exists.
@@ -44,17 +44,21 @@ var (
 	ErrConflict = classError("taskmill: conflict", "conflict")
 
 	// ErrTaskCanceled is the cause of a handler's context when the task was
-	// canceled while it ran. The task becomes canceled when the attempt ends.
+	// canceled while it ran. The task becomes canceled when the attempt ends,
+	// unless the handler returns nil, which completes it.
 	ErrTaskCanceled = classError("taskmill: task canceled", "canceled")
 
 	// ErrAttemptTimeout is the cause of a handler's context when the attempt
-	// ran longer than [HandlerOptions.Timeout]. The attempt fails.
+	// ran longer than [HandlerOptions.Timeout]. A failure that the handler
+	// then returns is recorded with the code [CodeTimeout]; returning nil
+	// completes the task.
 	ErrAttemptTimeout = classError("taskmill: attempt timed out", "timeout")
 
 	// ErrShutdown is the cause of a handler's context when the worker is
 	// shutting down and the attempt outlived [WorkerConfig.DrainTimeout], or
 	// the context of [Worker.RunTask] ended. The task goes back to its queue
-	// without using an attempt.
+	// without using an attempt, unless the handler returns nil, which
+	// completes it.
 	ErrShutdown = classError("taskmill: worker shutting down", "shutdown")
 )
 

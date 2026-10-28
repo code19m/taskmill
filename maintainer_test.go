@@ -341,17 +341,38 @@ func TestRetentionSkipsRowsBeingChanged(t *testing.T) {
 func TestStatisticsCountEveryQueue(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
-	           SELECT 'big', 'email.send', 'available', now(), '{}', 1 FROM generate_series(1, 10001)`)
+	insert := func(queue, state, runAt string, n int) {
+		e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+		           SELECT $1, 'email.send', $2::{s}.task_state, now() + $3::interval, '{}', 1 FROM generate_series(1, $4)`,
+			queue, state, runAt, n)
+	}
+	// Each count stops at 10,000 per queue and state, and is capped only if
+	// more tasks are left, also for scheduled tasks, which are counted
+	// across all queues.
+	insert("big", "available", "0 s", 10_001)
+	insert("exact", "available", "0 s", 10_000)
+	insert("later", "scheduled", "1 hour", 15_000)
+	insert("later-exact", "scheduled", "1 hour", 10_000)
 	for range 5 {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small"})
 	}
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small", RunAt: time.Now().Add(time.Hour)})
 	runWorker(t, e, &taskmill.WorkerConfig{}) // the maintainer refreshes statistics
 
-	counted := countedQueues(t, e, "big", "small")
-	if got := counted["big"].Counts[taskmill.StateAvailable]; got != (taskmill.TaskCount{N: 10_000, Capped: true}) {
-		t.Errorf("big: got %+v available; want 10,000, capped", got)
+	counted := countedQueues(t, e, "big", "exact", "later", "later-exact", "small")
+	for _, c := range []struct {
+		queue string
+		state taskmill.State
+		want  taskmill.TaskCount
+	}{
+		{"big", taskmill.StateAvailable, taskmill.TaskCount{N: 10_000, Capped: true}},
+		{"exact", taskmill.StateAvailable, taskmill.TaskCount{N: 10_000}},
+		{"later", taskmill.StateScheduled, taskmill.TaskCount{N: 10_000, Capped: true}},
+		{"later-exact", taskmill.StateScheduled, taskmill.TaskCount{N: 10_000}},
+	} {
+		if got := counted[c.queue].Counts[c.state]; got != c.want {
+			t.Errorf("%s: got %+v %s; want %+v", c.queue, got, c.state, c.want)
+		}
 	}
 	want := map[taskmill.State]taskmill.TaskCount{
 		taskmill.StateAvailable: {N: 5},
@@ -366,7 +387,7 @@ func TestStatisticsCapTheDueCountsOfEveryQueue(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
-	           SELECT 'flood', 'email.send', 'scheduled', now() + interval '1 hour', '{}', 1 FROM generate_series(1, 100000)`)
+	           SELECT 'flood', 'email.send', 'scheduled', now() + interval '1 hour', '{}', 1 FROM generate_series(1, 100001)`)
 	for range 3 {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small"})
 	}
@@ -375,7 +396,7 @@ func TestStatisticsCapTheDueCountsOfEveryQueue(t *testing.T) {
 	e.exec(t, `INSERT INTO {s}.queues (name) VALUES ('idle')`)
 	runWorker(t, e, &taskmill.WorkerConfig{}) // the maintainer refreshes statistics
 
-	// The shared cap was hit by flood alone, so small may have scheduled and
+	// The shared cap was passed by flood alone, so small may have scheduled and
 	// retryable tasks that were not counted, but its other counts are exact.
 	counted := countedQueues(t, e, "flood", "small", "idle")
 	want := map[taskmill.State]taskmill.TaskCount{
@@ -389,7 +410,7 @@ func TestStatisticsCapTheDueCountsOfEveryQueue(t *testing.T) {
 		t.Errorf("small: got %+v; want %+v", got, want)
 	}
 	want = map[taskmill.State]taskmill.TaskCount{
-		taskmill.StateScheduled: {N: 100_000, Capped: true},
+		taskmill.StateScheduled: {N: 10_000, Capped: true},
 		taskmill.StateRetryable: {N: 0, Capped: true},
 	}
 	if got := counted["flood"].Counts; !maps.Equal(got, want) {

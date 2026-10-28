@@ -20,6 +20,11 @@ rename spans, attributes, or metrics to follow them, and says so here.
   count of the queue's tasks in that state stopped at its cap, so each count
   says whether it is a lower bound. Dashboards and alerts that read it per
   queue take the maximum over the states.
+- `ObserveQueues(nil)` returns an error that wraps
+  `taskmill.ErrInvalidArgument`, as the core and `ui.New` do.
+- With taskmill v0.3.0, `taskmill.queue.tasks` stops at 10,000 per queue and
+  state, scheduled and retryable tasks too, and `taskmill.queue.capped` is 1
+  only when more tasks are left than counted.
 - With taskmill v0.3.0, an attempt or an enqueue that a middleware after
   this module's skips, by returning nil without calling `next`, is recorded
   as failed: its span has an error status, and its spans and metrics have

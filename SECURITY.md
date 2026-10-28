@@ -2,8 +2,9 @@
 
 ## Supported versions
 
-Before v1.0.0, only the latest minor release gets fixes, including security
-fixes. See [Upgrading](docs/guide.md#upgrading) for the versioning policy.
+Only the latest minor release gets fixes, including security fixes, before
+and after v1.0.0. See [Upgrading](docs/guide.md#upgrading) for the
+versioning policy.
 
 ## Scope
 

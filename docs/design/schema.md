@@ -3,9 +3,9 @@
 This document maps the [task lifecycle](task-lifecycle.md) onto PostgreSQL:
 the tables, the indexes, and the statements that move tasks between states,
 with the reasoning behind each choice. The exact definitions are in
-[`internal/migrations/0001_initial.sql`](../../internal/migrations/0001_initial.sql),
-and the exact statements are in [`sql.go`](../../sql.go). The statements were
-measured on PostgreSQL 15 and 18 with 1.7 million tasks.
+[`internal/migrations`](../../internal/migrations), starting with
+`0001_initial.sql`, and the exact statements are in [`sql.go`](../../sql.go).
+The statements were measured on PostgreSQL 15 and 18 with 1.7 million tasks.
 
 All objects live in one schema, `taskmill` by default. The name is
 configurable, so several installations can share a database. It must match
@@ -46,7 +46,7 @@ configurable, so several installations can share a database. It must match
 | `queues` | Per-queue state: paused, and the concurrency limit | Cold |
 | `settings` | Installation-wide retention, in a single row | Cold |
 | `schedules` | Recurring schedules and their next run times | Cold |
-| `workers` | Running worker processes | Cold: a heartbeat per process every 10 s |
+| `workers` | Running worker processes | Cold: a heartbeat per process every third of `LeaseDuration`, 10 s by default |
 | `leader` | The elected maintainer | Cold |
 | `queue_stats` | Task counts per queue and state, with each count's oldest due task, refreshed by the maintainer | Cold |
 | `activity` | Task counts and ended attempts per minute and queue, for a day | Cold: a few rows every 10 s |
@@ -175,9 +175,9 @@ index-only scan).
 
 ## Key statements
 
-The statements send batches as arrays and use `unnest`, so a batch of any size
-is one round trip with fixed SQL text, which lets prepared statements be
-reused.
+The statements send batches as arrays and use `unnest`, so a batch, up to the
+10,000 tasks that one enqueue call takes, is one round trip with fixed SQL
+text, which lets prepared statements be reused.
 
 ### Enqueue
 
@@ -295,11 +295,13 @@ state, and 100,000 scheduled and retryable tasks in all. A recursive query
 finds the next queue name with one index probe each, a technique called a
 loose index scan, so finding the queues costs one probe per queue, not one
 row per task. Scheduled and retryable tasks are read from `tasks_due_idx`,
-which is ordered by run time, not by queue, so they are counted together. A
-count that reaches its cap is stored with `capped = true`: it is a lower
-bound. Once the shared cap is hit, every queue's scheduled and retryable
-counts are capped, stored as capped zeros where none were counted, while
-its other counts keep their own flags.
+which is ordered by run time, not by queue, so they are counted together,
+and then each queue's count stops at 10,000 too. Each cap is read one row
+past, so a count that stops at its cap with more tasks left is stored with
+`capped = true`: it is a lower bound. A count of exactly 10,000 is not
+capped. Once the shared cap is passed, every queue's scheduled and
+retryable counts are capped, stored as capped zeros where none were
+counted, while its other counts keep their own flags.
 
 **Lag comes with the counts.** Each row of `queue_stats` keeps, in
 `oldest_due_at`, the run time of the oldest due task it counted: for
@@ -508,11 +510,11 @@ succeed: the second waits on the first's key and then finds it taken. A
 duplicate wastes one sequence value, which is harmless.
 
 `Cancel` and `Delete` delete the task's key, through the index on `task_id`,
-so the same key can be enqueued again at once. A dead task keeps its key
-until the window ends: an inbox relies on that, so that a redelivered message
-does not run again after its task failed. Uniqueness among unfinished tasks
-only ("at most one queued refresh per product") can be added later as a new
-option, without a disruptive migration.
+so the same key can be enqueued again at once. A completed or dead task
+keeps its key until the window ends: an inbox relies on that, so that a
+redelivered message does not run again after its task failed. Uniqueness
+among unfinished tasks only ("at most one queued refresh per product") can be
+added later as a new option, without a disruptive migration.
 
 ## Notifications
 

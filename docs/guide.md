@@ -71,16 +71,21 @@ client, err := taskmill.NewClient(ctx, pool, nil)
 COMMITTED isolation level (see [Running in production](#running-in-production)).
 
 **Your own migration tool.** Teams that use goose, Atlas, or Flyway take the
-SQL from `taskmill.Migrations(schema)` instead. Apply the migrations in order.
-The first one, version 0, creates the schema and its `migrations` table.
-Record the version and name of every later one in that table.
+SQL from `taskmill.Migrations(schema)` instead. Apply the migrations in order,
+each in a transaction. The first one, version 0, creates the schema and its
+`migrations` table. Record the version and name of every later one in that
+table. The maintainer then creates the daily history partitions, which needs
+the workers' role to own the taskmill tables (see
+[Running in production](#running-in-production)).
 
 **Several installations can share a database.** Set `Schema` in
 `ClientConfig` and `MigrateConfig`, for example one schema per service or
 per module. A worker uses its client's schema. A service that only enqueues
 tasks for another service creates a `Client` for that service's schema and
-registers no handlers. For services with a database each, and for one admin
-application over several services, see [Several services](#several-services).
+registers no handlers. Its taskmill version must fit that schema: no newer,
+or `NewClient` fails with `ErrSchemaOutdated`, and at most one release older.
+For services with a database each, and for one admin application over
+several services, see [Several services](#several-services).
 
 ## Defining tasks
 
@@ -126,6 +131,9 @@ func (SendReceipt) EnqueueDefaults() taskmill.EnqueueOptions {
 }
 ```
 
+Return the same `Queue` for every value: a worker reads it from a zero value
+to know which queue to serve.
+
 ## Enqueueing
 
 ```go
@@ -144,7 +152,7 @@ taskmill's. Every zero value means "not set":
 | `GroupKey` | A FIFO group within the queue | None |
 | `DedupeKey` | Admits at most one task with this key within a window | None |
 | `DedupeWindow` | How long the dedupe key blocks duplicates | 24 hours |
-| `Metadata` | String tags passed to the handler | None |
+| `Metadata` | String tags passed to the handler, merged key by key with the kind's defaults: the call's keys win | None |
 
 ### In your own transaction
 
@@ -177,13 +185,15 @@ else returns `ErrInvalidArgument`.
 
 ### In batches
 
-`EnqueueMany` and `EnqueueManyTx` send any number of tasks in one round trip,
-and return results in the same order. In the
-[benchmarks](benchmarks.md), batches of 100 enqueue more than 20 times more
-tasks per second than single enqueues.
+`EnqueueMany` and `EnqueueManyTx` send up to 10,000 tasks, with at most
+64 MiB of payload and metadata in all, in one round trip, and return results
+in the same order. A larger call fails with `ErrInvalidArgument` before any
+statement runs, so split it into chunks. In the [benchmarks](benchmarks.md),
+batches of 100 enqueue more than 20 times more tasks per second than single
+enqueues.
 
 ```go
-params := make([]taskmill.EnqueueParams, len(users))
+params := make([]taskmill.EnqueueParams, len(users)) // up to 10,000 a call
 for i, u := range users {
     params[i] = taskmill.EnqueueParams{Args: Welcome{UserID: u.ID}}
 }
@@ -217,7 +227,7 @@ task's ID, attempt number, metadata, and the errors of earlier attempts.
 | `taskmill.Permanent(err)` | Becomes dead at once | Yes |
 | `taskmill.Snooze(d)` | Runs again after `d` | No |
 | A panic | Is recovered and counts as an error, with its stack trace recorded | Yes |
-| Too slow | Its context is canceled at the timeout, and the attempt fails | Yes |
+| Too slow | Its context is canceled at the timeout, with the cause `ErrAttemptTimeout`; the error it then returns fails the attempt, but returning nil completes the task | Yes |
 
 Return `Permanent` when retrying cannot help, such as for a payload that
 fails validation. `Permanent(nil)` returns nil, so
@@ -235,9 +245,9 @@ as `invalid_argument` or `timeout`, which OpenTelemetry reports as
 
 **Retries** wait 1 second, then double up to 1 hour, with ±10% random jitter
 so that failed tasks do not retry in waves. With the default 25 attempts, a
-failing task keeps retrying for about 13 hours before it becomes dead. A
-retry starts within about a second of its time, so shorter delays round up to
-about a second.
+failing task keeps retrying for about 13 hours before it becomes dead. The
+maintainer makes a retry available within about a second of its time, so a
+delay shorter than a second can take up to about a second.
 
 **Options per kind**, in `HandlerOptions`:
 
@@ -291,7 +301,9 @@ tasks of its kind at once and returns one error per task:
 
 ```go
 func (p *Publisher) HandleBatch(ctx context.Context, tasks []*taskmill.Task[Event]) []error {
-    // publish all of them in one call, and report each one's result
+    errs := make([]error, len(tasks))
+    // publish all of them in one call, and set each one's result in errs
+    return errs
 }
 
 taskmill.AddBatchHandler[Event](&handlers, p, &taskmill.HandlerOptions{BatchSize: 200})
@@ -427,7 +439,8 @@ if res.Duplicate {
 ```
 
 `Cancel` and `Delete` release the task's key, so the same key can be
-enqueued again at once. A dead task keeps its key until the window ends.
+enqueued again at once. A completed or dead task keeps its key until the
+window ends.
 
 ## Schedules
 
@@ -451,8 +464,9 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
   handler knows which period it runs for.
 - Runs missed while no maintainer runs, or while a schedule is paused,
   collapse into one run.
-- `NewWorker` rejects a schedule whose expression never matches, or whose
-  task options are invalid.
+- `NewWorker` rejects a schedule whose expression never matches, whose task
+  options are invalid, or whose `Options` set `RunAt`, `DedupeKey`, or
+  `DedupeWindow`, which the schedule sets itself.
 - Expressions are read on the wall clock of `Location` (UTC by default). A
   time skipped when clocks go forward runs right after the jump. A time
   repeated when clocks go back runs once.
@@ -511,7 +525,8 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hand
   stored base64-encoded, so the 1 MiB payload limit allows about 750 KiB.
 - Each `Publish` call has `RelayOptions.Timeout`, 1 minute by default; then
   its context is canceled. Deliveries without a nil result are retried
-  quickly at first, then every 5 minutes, up to 10,000 times: about a month.
+  quickly at first, then every 5 minutes, for up to 10,000 tries: about a
+  month.
   Return `taskmill.Permanent(err)` for a delivery that can never succeed. A
   message that becomes dead halts its key until an operator retries or
   deletes it.
@@ -535,10 +550,11 @@ _, err := client.Enqueue(ctx, HandleOrderEvent{...}, &taskmill.EnqueueOptions{
 **The web interface** is a dashboard of queues, tasks, schedules, and
 workers. It shows task counts live, charts of the last hour, 6 hours, or
 day, and each task's payload and error history. It filters tasks by several
-states and queues at once. It can pause and resume queues and schedules, run
-a schedule now, and retry, cancel, and delete tasks: one at a time, or every
-task that matches the task list's filters, after it shows how many. It has
-light and dark themes, works on phones, and works without JavaScript too.
+states, queues, kinds, and FIFO groups at once. It can pause and resume
+queues and schedules, run a schedule now, and retry, cancel, and delete
+tasks: one at a time, or every task that matches the task list's filters,
+after it shows how many. It has light and dark themes, works on phones, and
+works without JavaScript too.
 
 It is light on the database and the network. Each request takes at most 10
 seconds. A live update downloads a page only when it changed, compressed,
@@ -559,8 +575,10 @@ often. Use it in one of three ways:
   configuration that would serve the dashboard wrongly, such as a `Prefix`
   that does not start with a slash.
 - **On its own,** with the `taskmill-ui` command. It reads its settings from
-  the environment, and asks for a password when `TASKMILL_UI_PASSWORD` is
-  set:
+  the environment, and asks for a login when `TASKMILL_UI_PASSWORD` is set:
+  the user `admin`, or `TASKMILL_UI_USERNAME`, with that password. Set
+  `TASKMILL_SCHEMA` for an installation outside the `taskmill` schema, and
+  `TASKMILL_UI_READ_ONLY=true` to disable every action:
 
   ```sh
   go install github.com/code19m/taskmill/cmd/taskmill-ui@latest
@@ -626,13 +644,14 @@ own code and tools:
 | `Schedules`, `PauseSchedule`, `ResumeSchedule`, `RunSchedule` | List schedules, pause and resume them, and run one now |
 | `Settings`, `UpdateSettings` | Retention of history, and of dead and canceled tasks: `UpdateSettings` changes the current settings with your function |
 | `Workers` | The running workers, the queues and kinds they serve, and which one is the maintainer |
-| `Activity` | Task counts and ended attempts per minute, for the last day |
+| `Activity` | Task counts and ended attempts over time, a minute or more per point, for up to the last day |
 
 A task or schedule that does not exist returns `ErrNotFound`. An action that
 does not fit the task's state returns `ErrInvalidState`: for example,
-canceling or retrying a completed task. Each `List` page's query, and each
-`Count`, stops after 5 seconds. On a very large installation, a filter that
-matches few tasks can reach that bound and return an error.
+canceling or retrying a completed task. Each `List` and `Groups` page's
+query, each `Count`, and each `Activity` call stops after 5 seconds. On a
+very large installation, a filter that matches few tasks can reach that
+bound and return an error.
 `State.CanRetry`, `CanCancel`, and `CanDelete` say which actions a state
 allows.
 
@@ -669,8 +688,10 @@ A running task's cancellation takes effect when its attempt ends, however it
 ends: a failure, a snooze, or a release at shutdown. If the handler completes
 the task before it notices the cancellation, the task stays completed.
 
-**Error history.** `TaskInfo.Errors` keeps a task's 20 most recent errors.
-`AttemptError.Code` is empty for an error that a handler returned. For
+**Error history.** `TaskInfo.Errors` keeps a task's 20 most recent entries:
+errors, and notes such as `no_handler`. `AttemptError.Code` is empty for an
+error that a handler returned, except `CodeTimeout` for one returned after
+its attempt timed out. For
 failures that taskmill detects itself, it is `CodeLeaseLost`, `CodeTimeout`,
 `CodePanic`, `CodeInvalidPayload`, or `CodeUnknownKind`. `CodeNoHandler`
 marks a note, not a failure. Entries recorded before v0.3.0 name a lost lease
@@ -683,10 +704,12 @@ needs no running worker. A task of a kind that the worker has no handler for
 is snoozed with a `no_handler` note, as a running worker does.
 
 **Retention.** Completed tasks move to a history table and stay there for
-7 days. Dead and canceled tasks stay for 30 days. Both are installation-wide
-settings, of at least 1 hour. A dead task that halts its group is kept until
-an operator retries or deletes it. History grows with your completion rate,
-so for busy kinds whose completed tasks are not worth keeping, skip it:
+7 days. History is dropped a whole day at a time, so a completed task can
+stay up to a day longer. Dead and canceled tasks stay for 30 days. Both are
+installation-wide settings, of at least 1 hour. A dead task that halts its
+group is kept until an operator retries or deletes it. History grows with
+your completion rate, so for busy kinds whose completed tasks are not worth
+keeping, skip it:
 
 ```go
 taskmill.AddHandler(&handlers, &CacheWarmer{}, &taskmill.HandlerOptions{DiscardCompleted: true})
@@ -731,7 +754,8 @@ mux.Handle("/admin/jobs/orders/", requireAdmin(orders))
   taskmill version of its service.
 - An admin application in another language forwards the same way to
   `taskmill-ui`, run next to each service with `TASKMILL_UI_PREFIX` set to
-  the forwarded path.
+  the forwarded path, and `TASKMILL_SCHEMA` to the service's schema if it is
+  not `taskmill`.
 - With one database, the admin application can instead mount a handler per
   schema itself. Its taskmill version must then fit every schema: no newer
   than the oldest, since newer code fails with `ErrSchemaOutdated`, and at
@@ -787,9 +811,10 @@ admin application.
 ## Observability
 
 **Logs** go to the `*slog.Logger` in `ClientConfig.Logger`, which workers use
-too, and the web interface's to `ui.Config.Logger`. By default they are
-discarded. The [log catalog](#log-catalog) lists every message, its level,
-and what to do.
+too; `Migrate`'s go to `MigrateConfig.Logger`, and the web interface's to
+`ui.Config.Logger`. By default they are discarded. `taskmill-ui` writes its
+own to standard error. The [log catalog](#log-catalog) lists every message,
+its level, and what to do.
 
 **Traces and metrics** come from the `otel` module, which instruments
 taskmill with OpenTelemetry's conventions for messaging. It is a Go module
@@ -824,18 +849,20 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
 | Span | `send {queue}` | Each enqueue call, one span per batch. Its context is stored in the tasks' metadata. |
 | Span | `process {queue}` | Each attempt, as a child of the `send` span. The handler's context carries it. |
 | Span | `send {topic}` | Each outbox delivery to the broker. |
-| Counter | `messaging.client.sent.messages` | Tasks enqueued, and outbox messages published. |
+| Counter | `messaging.client.sent.messages` | Tasks enqueued, and outbox messages sent to the broker; failed ones carry `error.type`. |
 | Histogram | `messaging.client.operation.duration` | How long enqueue calls take. |
 | Histogram | `messaging.process.duration` | How long attempts take. |
 | Gauge | `taskmill.queue.tasks` | Tasks per queue and state, up to the caps below. |
-| Gauge | `taskmill.queue.capped` | 1 when the count of the queue's tasks in a state stopped at its cap. |
+| Gauge | `taskmill.queue.capped` | 1 when the count of the queue's tasks in a state stopped at its cap with more tasks left. |
 | Gauge | `taskmill.queue.lag` | How long each queue's oldest due task has waited. Alert on it for backlogs. |
 | Gauge | `taskmill.stats.age` | How long ago the maintainer last counted. Alert when it passes a minute: no maintainer runs. |
 
-- Metrics carry the queue as `messaging.destination.name`, the kind as
-  `taskmill.task.kind`, and on failure `error.type`, such as `panic`,
-  `timeout`, or `invalid_argument`. They never carry task IDs, so their
-  cardinality stays bounded.
+- The messaging metrics carry the queue as `messaging.destination.name`
+  (for outbox deliveries, the topic), the kind as `taskmill.task.kind`, and
+  on failure `error.type`, such as `panic`, `timeout`, or
+  `invalid_argument`. The queue gauges carry the queue and the state,
+  `taskmill.task.state`. They never carry task IDs, so their cardinality
+  stays bounded.
 - A task's attempts show in the trace of the request that enqueued it, even
   a retry hours later.
 - Inside your transaction, the `send` span ends before the commit: a
@@ -850,7 +877,7 @@ without one, no trace context reaches the tasks. `tmotel.New` also takes a
   headers, so consumers continue the trace:
 
   ```go
-  outbox.New(client).AddRelay(&handlers, tel.Publisher("kafka", publisher), nil)
+  ob.AddRelay(&handlers, tel.Publisher("kafka", publisher), nil)
   ```
 
 **By hand**, the same extension points serve other tools. Worker
@@ -896,9 +923,9 @@ it succeeds, and the error is logged.
 refreshes every 10 seconds. Counting is capped, so it stays cheap on a large
 backlog: up to 10,000 tasks per queue and state, and up to 100,000 scheduled
 and retryable tasks across all queues. Each count in `QueueInfo.Counts` says
-whether it hit its cap, `TaskCount.Capped`, and so is a lower bound. Once the
-shared cap is hit, every queue's scheduled and retryable counts are capped,
-even at zero. `QueueInfo.Lag` is how long the queue's oldest due task has
+in `TaskCount.Capped` whether it stopped at its cap with more tasks left, and
+so is a lower bound. Once the shared cap is passed, every queue's scheduled
+and retryable counts are capped, even at zero. `QueueInfo.Lag` is how long the queue's oldest due task has
 waited since its run time: an available task, or a scheduled or retryable one
 whose time has come. The maintainer finds that task when it counts, and
 `Client.Queues` measures its age by the database's clock, so lag has no cap,
@@ -934,9 +961,10 @@ points, err := client.Activity(ctx, &taskmill.ActivityParams{
 
 **Attributes** use the same keys for the same things: `task_id`, `kind`,
 `queue`, `attempt`, `worker_id` (on every line about a worker's own work),
-`error`, and `duration`. No line shows a task's payload, its metadata, or a connection
-string. A handler's error is logged as the handler returned it, so keep
-secrets out of errors.
+`error`, and `duration`. No line shows a task's payload or its metadata.
+Connection errors show what pgx reports, such as the host, user, and
+database, but not the password. A handler's error is logged as the handler
+returned it, so keep secrets out of errors.
 
 **Repeated failures.** A worker repeats some operations all the time, such
 as fetching tasks. While the database is down, they fail at every try, but
@@ -968,7 +996,7 @@ attribute names it:
 | `run schedules` | Enqueues due schedule runs | Every second |
 | `refresh statistics` | Counts tasks for `Client.Queues` | Every 10 seconds |
 | `apply retention` | Drops expired history and old rows | Every minute |
-| `delete removed schedules` | Deletes schedules no worker defines | Every minute |
+| `delete removed schedules` | Deletes stored schedules that the maintainer does not define, after a day without a run or change | Every minute |
 
 The last seven run only on the maintainer.
 
@@ -988,7 +1016,7 @@ The last seven run only on the maintainer.
 | `the pool has fewer connections than the worker's concurrency plus 5; ...` | Warn | Handlers can take every connection and starve heartbeats. Raise `MaxConns`; see [Connections](#running-in-production). |
 | `elected maintainer` | Info | This worker now does the installation-wide work. |
 | `no longer maintainer` | Info | Another worker took over, or the election failed. The maintainer's work stops here; its incidents end without `operation recovered`. |
-| `resign maintainer failed; another worker leads when the lease expires` | Warn | The next maintainer starts within 10 seconds. |
+| `resign maintainer failed; another worker leads when the lease expires` | Warn | The next maintainer starts within about 12 seconds, when the lease runs out. |
 | `rescued tasks whose workers lost their leases` | Warn | `tasks` attempts failed because their workers stopped renewing them: a worker crashed or could not reach the database. The tasks retry; those that used all their attempts die. |
 | `dropped expired history` | Info | Retention dropped the history `partition`. |
 | `attempt failed; retrying` | Debug | The handler failed; the task runs again in `retry_in`. |
@@ -1076,8 +1104,8 @@ if info.State != taskmill.StateCompleted || info.Attempt != 3 {
 }
 ```
 
-**database/sql.** The helpers take a `*pgxpool.Pool`. Code built on
-`database/sql` can use the same pool, through
+**database/sql.** `taskmilltest.NewClient` takes a `*pgxpool.Pool`. Code
+built on `database/sql` can use the same pool, through
 `stdlib.OpenDBFromPool(pool)` from `github.com/jackc/pgx/v5/stdlib`.
 
 **Leftover schemas.** A test binary that is killed cannot drop its schemas.
@@ -1134,7 +1162,7 @@ PgBouncer this way on every pull request (target F8 in
 [Benchmarks](benchmarks.md#reliability-under-faults)).
 
 ```go
-cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec // not needed with max_prepared_statements
+cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec // before pgxpool.NewWithConfig; not needed with max_prepared_statements
 listen, err := pgx.ParseConfig(os.Getenv("DIRECT_DATABASE_URL"))
 // ...
 worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers, ListenConfig: listen})
@@ -1234,11 +1262,12 @@ go func() {
 ```
 
 With the defaults and the probe below, a worker turns unready within about
-a minute of losing the database, and ready again within seconds of its
-return. A worker that is not ready holds up a rolling deploy, which is right
-while the database is out of reach. Do not restart workers on `Health`: it
-fails during a database outage, which a restart does not fix. If you want a
-liveness probe, point it at a path that does not call `Health`.
+a minute of losing the database, and ready again within about 20 seconds of
+its return. A worker that is not ready holds up a rolling deploy, which is
+right while the database is out of reach. Do not restart workers on
+`Health`: it fails during a database outage, which a restart does not fix.
+If you want a liveness probe, point it at a path that does not call
+`Health`.
 
 **Workers.** A minimal Deployment, with the probe above and a pool sized for
 10 slots:
@@ -1330,9 +1359,10 @@ schema is migrated, it exits at start, and Kubernetes starts it again.
 
 **The dashboard** runs from the `ghcr.io/code19m/taskmill-ui` image, as a
 Deployment of its own. Set `TASKMILL_UI_ADDR`: the default listens on
-localhost only. The image holds the binary alone and runs as a non-root
-user. With a password set, every page asks for it, so the probe only checks
-the port. Put it behind your Ingress with TLS, or reach it with
+localhost only. The image holds the binary, CA certificates, and time
+zones, and nothing else, and runs as a non-root user. With a password set,
+every page asks for it, so the probe only checks the port. Put it behind your
+Ingress with TLS, or reach it with
 `kubectl port-forward service/taskmill-ui 8080:80`.
 
 ```yaml
@@ -1413,8 +1443,10 @@ spec:
 - **Keep one worker.** The maintainer runs in workers. With none, due
   retries and schedules are never promoted, and a queue that was empty at
   its last count never shows a backlog, so nothing scales the workers up
-  again. To scale to zero, run a worker without handlers in a Deployment of
-  its own, as the maintainer, and set `NoMaintainer` on the scaled ones.
+  again. To scale to zero, run a worker without handlers, but with all your
+  `Schedules`, in a Deployment of its own, as the maintainer, and set
+  `NoMaintainer` on the scaled ones: the maintainer runs only the schedules
+  it defines.
   Then report the figures that KEDA reads from a process that stays up,
   such as that maintainer or your web server.
 - **Lag** scales on the oldest task's wait instead: query
@@ -1435,7 +1467,7 @@ spec:
       }
       tasks := map[string]int64{} // per queue: available and running
       for _, q := range queues {
-          tasks[q.Name] = q.Counts[taskmill.StateAvailable] + q.Counts[taskmill.StateRunning]
+          tasks[q.Name] = q.Counts[taskmill.StateAvailable].N + q.Counts[taskmill.StateRunning].N
       }
       _ = json.NewEncoder(w).Encode(tasks)
   })
@@ -1526,7 +1558,9 @@ this is its compatibility promise:
   Error messages may change too: test errors with `errors.Is`. The `otel`
   module stays below v1, and its span, attribute, and metric names follow
   OpenTelemetry's conventions as they settle, announced in its changelog
-  ([ADR 0005](adr/0005-opentelemetry-in-a-module-of-its-own.md)).
+  ([ADR 0005](adr/0005-opentelemetry-in-a-module-of-its-own.md)). A minor
+  release may also require a newer Go, or drop a PostgreSQL version that
+  reached its end of life ([ADR 0002](adr/0002-supported-versions.md)).
 - **Migrations only move forward.** There are no down migrations. Run
   `Migrate`, or apply `Migrations`, before you roll out a new version.
 - **Old code works on a newer schema.** Each release's schema works with the
@@ -1574,7 +1608,7 @@ read those entries for every release you skip.
 | `Groups` page | 100 groups | 1,000 groups and 100 named queues; 5 seconds per query |
 | `UpdateQueue` and `UpdateSettings` | 10 tries, with random pauses of up to 50 ms between them | Then `ErrConflict` |
 | Queue statistics | Refreshed every 10 seconds | 10,000 per queue and state; 100,000 scheduled and retryable in all |
-| Removed schedules | Deleted after 24 hours without a run or change | — |
+| Removed schedules | Deleted after 24 hours without a run or change, by a maintainer that defines schedules | — |
 | `RelayOptions.BatchSize` | 100 deliveries per `Publish` | 1,000 |
 | `RelayOptions.Timeout` | 1 minute per `Publish` | — |
 | Outbox messages | — | 10,000 tries, about a month; about 750 KiB of `Value` |

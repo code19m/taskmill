@@ -17,7 +17,8 @@
 //	                             (default: admin)
 //	TASKMILL_UI_PASSWORD         its password; without one, anyone who
 //	                             reaches the address can use the dashboard
-//	TASKMILL_UI_READ_ONLY        "true" to disable every action
+//	TASKMILL_UI_READ_ONLY        true to disable every action (any value
+//	                             that strconv.ParseBool accepts)
 //	TASKMILL_UI_PREFIX           the path the dashboard is served at, such as
 //	                             /admin/jobs, when a proxy forwards that path
 //	                             to it unchanged (default: the root)

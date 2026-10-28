@@ -2,7 +2,6 @@ package otel
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -33,7 +32,7 @@ var observedStates = []taskmill.State{
 //     tasks across all queues, so on a large backlog a count is a lower
 //     bound.
 //   - taskmill.queue.capped: per state, as taskmill.queue.tasks, 1 when
-//     that count stopped at its cap, else 0.
+//     that count stopped at its cap with more tasks left, else 0.
 //   - taskmill.queue.lag: in seconds, how long the queue's oldest due task
 //     has waited, as [taskmill.QueueInfo.Lag] says: it may read up to one
 //     refresh high. It stays right on a large backlog, and keeps growing
@@ -47,10 +46,11 @@ var observedStates = []taskmill.State{
 // The gauges describe the whole installation, read from one small table, so
 // every process that observes it reports the same values: aggregate them with
 // max, not sum. A read takes at most 5 seconds; one that fails is reported to
-// otel.Handle. Unregister the returned registration to stop observing.
+// otel.Handle. Unregister the returned registration to stop observing. It
+// returns an error that wraps [taskmill.ErrInvalidArgument] if client is nil.
 func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Registration, error) {
 	if client == nil {
-		return nil, errors.New("taskmill/otel: client is nil")
+		return nil, fmt.Errorf("%w: otel: client is nil", taskmill.ErrInvalidArgument)
 	}
 	tasks, err := in.meter.Int64ObservableGauge("taskmill.queue.tasks", metric.WithUnit("{task}"),
 		metric.WithDescription("Tasks per queue and state, counted up to 10,000 per queue and state "+

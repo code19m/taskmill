@@ -297,7 +297,7 @@ func ExampleClient_RetryMatching() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Other transactions held the skipped tasks, or their FIFO groups: run it
-	// again for them.
+	// Other transactions held the skipped tasks, their FIFO groups, or their
+	// dedupe keys: run it again for them.
 	log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
 }

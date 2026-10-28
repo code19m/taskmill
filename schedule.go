@@ -312,10 +312,10 @@ func (c *Client) ResumeSchedule(ctx context.Context, name string) error {
 }
 
 // RunSchedule runs a schedule once now, in addition to its timetable. The
-// maintainer enqueues the run within about a second, with the schedule's
-// options, and the task's RunAt is the time of the request. The next regular
-// run stays as it was. It returns [ErrNotFound] for an unknown schedule, and
-// [ErrInvalidState] for a paused one.
+// maintainer enqueues the run within about a second, if it defines the
+// schedule, with the schedule's options, and the task's RunAt is the time of
+// the request. The next regular run stays as it was. It returns [ErrNotFound]
+// for an unknown schedule, and [ErrInvalidState] for a paused one.
 func (c *Client) RunSchedule(ctx context.Context, name string) error {
 	if err := checkName("schedule name", name, maxNameLength); err != nil {
 		return err

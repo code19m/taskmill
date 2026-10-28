@@ -487,7 +487,9 @@ func (m *maintainer) countStats(ctx context.Context) error {
 	var capped []bool
 	var oldest []*time.Time // the run time of the oldest due task of each count
 	var dueTotal int64      // scheduled and retryable tasks counted, in all queues
-	r, err := m.c.pool.Query(ctx, m.c.sql.countStats, statsQueueCap, statsDueCap)
+	// Each cap is read one past, so that a count that ends exactly at its cap
+	// is not taken for one with more tasks left.
+	r, err := m.c.pool.Query(ctx, m.c.sql.countStats, statsQueueCap+1, statsDueCap+1)
 	if err != nil {
 		return fmt.Errorf("count tasks: %w", err)
 	}
@@ -502,16 +504,16 @@ func (m *maintainer) countStats(ctx context.Context) error {
 		if s := State(state); s == StateScheduled || s == StateRetryable {
 			dueTotal += n
 		}
-		queues, states, counts = append(queues, queue), append(states, state), append(counts, n)
-		capped, oldest = append(capped, n >= statsQueueCap), append(oldest, due)
+		queues, states, counts = append(queues, queue), append(states, state), append(counts, min(n, statsQueueCap))
+		capped, oldest = append(capped, n > statsQueueCap), append(oldest, due)
 	}
 	r.Close()
 	if err := r.Err(); err != nil {
 		return fmt.Errorf("count tasks: %w", err)
 	}
-	// The scheduled and retryable counts share one cap: once it is hit,
+	// The scheduled and retryable counts share one cap: once it is passed,
 	// any queue may have more of them than counted, even none counted.
-	dueCapped := dueTotal >= statsDueCap
+	dueCapped := dueTotal > statsDueCap
 	if dueCapped {
 		for i, s := range states {
 			if s := State(s); s == StateScheduled || s == StateRetryable {

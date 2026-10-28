@@ -42,13 +42,18 @@ type QueueInfo struct {
 	Name     string
 	Settings QueueSettings
 	Paused   bool
-	Workers  int // live workers that serve the queue
+
+	// Workers counts the workers registered to serve the queue. A worker
+	// that stopped without unregistering, such as after a crash, counts
+	// until it is removed, 5 minutes after its last heartbeat.
+	Workers int
 
 	// Counts holds the number of tasks per state, except completed tasks.
 	// Counting stops at 10,000 tasks per state, and at 100,000 scheduled
 	// and retryable tasks across all queues; a count's Capped reports that
-	// it stopped early and is a lower bound. Once the shared cap is hit,
-	// every queue's scheduled and retryable counts are capped, even at zero.
+	// it stopped with more tasks left, so it is a lower bound. Once the
+	// shared cap is passed, every queue's scheduled and retryable counts are
+	// capped, even at zero.
 	Counts map[State]TaskCount
 
 	// RefreshedAt is when the maintainer last counted the queue: zero until
@@ -70,12 +75,15 @@ type QueueInfo struct {
 // Settings are the installation-wide settings, stored in the database and
 // applied by the maintainer. Zero fields mean their defaults.
 type Settings struct {
-	// HistoryRetention is how long completed tasks stay in history.
-	// Minimum: 1 hour. Default: 7 days.
+	// HistoryRetention is how long completed tasks stay in history, at
+	// least: history is dropped a whole UTC day at a time, so a task stays
+	// up to a day longer. Minimum: 1 hour. Default: 7 days.
 	HistoryRetention time.Duration
 
 	// DeadRetention is how long dead and canceled tasks are kept for
-	// operators to inspect and retry. Minimum: 1 hour. Default: 30 days.
+	// operators to inspect and retry. A dead task that halts its FIFO group
+	// is kept until it is retried or deleted. Minimum: 1 hour. Default: 30
+	// days.
 	DeadRetention time.Duration
 }
 
