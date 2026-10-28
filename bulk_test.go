@@ -476,6 +476,13 @@ func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	// The first run's statement goes on in the database until its
+	// cancellation arrives, holding the rows it locked: wait for it, so that
+	// the rest skips none of them.
+	waitFor(t, "the canceled statement to end", func() bool {
+		return e.count(t, `SELECT count(*) FROM pg_stat_activity
+		                   WHERE pid <> pg_backend_pid() AND state <> 'idle' AND strpos(query, '{s}.tasks') > 0`) == 0
+	})
 	rest, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: all, Cursor: first.Next})
 	if err != nil || first.Changed+rest.Changed != 31501 || rest.Skipped != 0 || rest.Next != "" {
 		t.Fatalf("then %+v after %+v, %v; want every task retried", rest, first, err)
