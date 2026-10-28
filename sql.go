@@ -825,7 +825,7 @@ SET state = CASE
     finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
     lease_expires_at = NULL,
     errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', now(),
-                 'message', $3::text, 'code', 'lease_expired'))
+                 'message', $3::text, 'code', 'lease_lost'))
 FROM expired
 WHERE t.id = expired.id
 RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`),

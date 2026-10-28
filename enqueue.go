@@ -31,11 +31,16 @@ const (
 	maxGroupKeyLength   = 256
 	maxAttemptsLimit    = 10_000
 	maxPayloadBytes     = 1 << 20 // protects the database from oversized rows
+	maxMetadataBytes    = 64 << 10
+	maxEnqueueTasks     = 10_000   // most tasks of one enqueue call
+	maxEnqueueBytes     = 64 << 20 // most payload and metadata of one enqueue call
 )
 
 // EnqueueOptions control how a task is enqueued. Zero values mean "not set":
 // a field set in the call wins over the kind's defaults (see
-// [ArgsWithDefaults]), which win over taskmill's defaults.
+// [ArgsWithDefaults]), which win over taskmill's defaults. Metadata merges
+// key by key instead: the call's keys win over the same keys of the
+// defaults, and the other keys of both are kept.
 type EnqueueOptions struct {
 	// Queue is the queue to enqueue into, at most 128 characters.
 	// Default: [DefaultQueue].
@@ -67,7 +72,8 @@ type EnqueueOptions struct {
 	DedupeWindow time.Duration
 
 	// Metadata is stored with the task and passed to its handler, for
-	// example for tracing. Default: none.
+	// example for tracing. Encoded as JSON, it may take at most 64 KiB,
+	// including what [EnqueueMiddleware] adds. Default: none.
 	Metadata map[string]string
 }
 
@@ -97,28 +103,13 @@ type EnqueueResult struct {
 // transaction commits, and the tasks exist only if it does.
 //
 // Middleware must call next at most once, and return its error. Returning nil
-// without calling next fails the enqueue. If middleware fails after next
+// without calling next fails the call, stores nothing, and gives the
+// middleware outside an error from its next. If middleware fails after next
 // succeeded, an enqueue in the caller's transaction returns its error, so
 // that the caller can roll back; any other enqueue has committed, so it
 // returns the results and logs the error, and a retry does not duplicate the
 // tasks.
 type EnqueueMiddleware func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error
-
-// contextMetadata is the enqueue middleware of the deprecated
-// [ClientConfig.ContextMetadata]: it adds the metadata that fromCtx returns
-// to the tasks, unless the enqueue set the same key.
-func contextMetadata(fromCtx func(context.Context) map[string]string) EnqueueMiddleware {
-	return func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error {
-		for k, v := range fromCtx(ctx) {
-			for _, task := range tasks {
-				if _, set := task.Metadata[k]; !set {
-					task.Metadata[k] = v
-				}
-			}
-		}
-		return next(ctx)
-	}
-}
 
 // EnqueueTask is a task being enqueued, as [EnqueueMiddleware] sees it.
 // Changes to fields other than Metadata are ignored.
@@ -158,7 +149,8 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 }
 
 // EnqueueMany enqueues several tasks in one round trip and one transaction.
-// Results are in the same order as params.
+// Results are in the same order as params. One call takes at most 10,000
+// tasks, with at most 64 MiB of payload and metadata in all.
 func (c *Client) EnqueueMany(ctx context.Context, params []EnqueueParams) ([]EnqueueResult, error) {
 	return c.enqueue(ctx, pgxQuerier{q: c.pool}, params)
 }
@@ -203,11 +195,20 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 	if len(params) == 0 {
 		return nil, nil
 	}
+	if len(params) > maxEnqueueTasks {
+		return nil, invalidArgument("%d tasks in one call, more than the limit of %d", len(params), maxEnqueueTasks)
+	}
 	tasks := make([]*resolvedTask, len(params))
+	payloads := 0
 	for i, p := range params {
 		t, err := resolve(p)
 		if err != nil {
 			return nil, inBatch(err, i, len(params))
+		}
+		// Stop at the first task past the limit, before encoding the rest;
+		// store checks the limit again with the metadata.
+		if payloads += len(t.payload); payloads > maxEnqueueBytes {
+			return nil, tooLarge(len(params))
 		}
 		tasks[i] = t
 	}
@@ -244,14 +245,26 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 		results = res
 		return nil
 	}
+	// A middleware that returns nil without calling its next fails at once,
+	// so that the middleware outside it sees the failure too.
 	for _, m := range slices.Backward(c.enqueueMiddleware) {
 		inner := next
-		next = func(ctx context.Context) error { return m(ctx, views, inner) }
+		next = func(ctx context.Context) error {
+			var reached atomic.Bool
+			err := m(ctx, views, func(ctx context.Context) error {
+				reached.Store(true)
+				return inner(ctx)
+			})
+			if err == nil && !reached.Load() {
+				return errNotEnqueued
+			}
+			return err
+		}
 	}
 	err := next(ctx)
 	switch {
-	case results == nil && err == nil:
-		return nil, errors.New("taskmill: enqueue middleware returned nil without enqueueing the tasks")
+	case results == nil && err == nil: // a middleware hid the error of its next
+		return nil, errNotEnqueued
 	case results == nil || err == nil:
 		return results, err
 	case q.inTx():
@@ -262,6 +275,10 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 	return results, nil
 }
 
+// errNotEnqueued fails an enqueue whose middleware returned nil, although
+// the tasks were not stored.
+var errNotEnqueued = classError("taskmill: enqueue middleware returned nil without enqueueing the tasks", "middleware")
+
 // store writes resolved tasks with one statement.
 func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([]EnqueueResult, error) {
 	b := enqueueBatch{due: make(map[string]bool), plain: true}
@@ -269,11 +286,15 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 	repeat := make([]bool, len(tasks)) // tasks[i] repeats an earlier dedupe key of the batch
 	rowOf := make(map[string]int)      // the batch row of each dedupe key
 	now := time.Now()
+	size := 0 // the payload and metadata of the call
 
 	for i, t := range tasks {
 		meta, err := encodeMetadata(t.meta)
 		if err != nil {
 			return nil, inBatch(err, i, len(tasks))
+		}
+		if size += len(t.payload) + len(meta); size > maxEnqueueBytes {
+			return nil, tooLarge(len(tasks))
 		}
 		if t.dedupeKey != nil {
 			if row, ok := rowOf[string(t.dedupeKey)]; ok {
@@ -297,6 +318,13 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 		out[i].Duplicate = out[i].Duplicate || repeat[i]
 	}
 	return out, nil
+}
+
+// tooLarge fails a call of n tasks over the limit of its payload and
+// metadata.
+func tooLarge(n int) error {
+	return invalidArgument("%d tasks hold more than the limit of %d bytes of payload and metadata in one call",
+		n, maxEnqueueBytes)
 }
 
 // inBatch says which task of a batch of n an error is about.
@@ -469,9 +497,12 @@ func encodeMetadata(meta map[string]string) ([]byte, error) {
 	if len(meta) == 0 {
 		return []byte("{}"), nil
 	}
-	text, err := json.Marshal(meta)
+	text, err := encodeJSON(meta)
 	if err != nil {
 		return nil, invalidArgument("encode metadata: %v", err)
+	}
+	if len(text) > maxMetadataBytes {
+		return nil, invalidArgument("metadata is %d bytes, more than the limit of %d", len(text), maxMetadataBytes)
 	}
 	if hasNUL(text) {
 		return nil, invalidArgument("metadata contains a NUL character")
@@ -479,11 +510,24 @@ func encodeMetadata(meta map[string]string) ([]byte, error) {
 	return text, nil
 }
 
+// encodeJSON encodes v as JSON without escaping &, <, and >, which jsonb
+// stores as they are, so that the size limits count what is stored.
+// encoding/json still escapes U+2028 and U+2029.
+func encodeJSON(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
 // encodePayload encodes args as JSON, and checks that jsonb can store it
 // within the payload limit. The checks run before the query, so a payload
 // that fails them leaves the caller's transaction usable.
 func encodePayload(kind string, args Args) ([]byte, error) {
-	payload, err := json.Marshal(args)
+	payload, err := encodeJSON(args)
 	if err != nil {
 		return nil, invalidArgument("encode payload of kind %q: %v", kind, err)
 	}

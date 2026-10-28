@@ -406,7 +406,7 @@ func TestNewClientRequiresReadCommitted(t *testing.T) {
 	}
 	defer pool.Close()
 	_, err = taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema})
-	if err == nil || !strings.Contains(err.Error(), "read committed") {
-		t.Fatalf("got %v, want an error about the isolation level", err)
+	if !errors.Is(err, taskmill.ErrInvalidArgument) || !strings.Contains(err.Error(), "read committed") {
+		t.Fatalf("got %v, want ErrInvalidArgument about the isolation level", err)
 	}
 }

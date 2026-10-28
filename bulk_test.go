@@ -493,6 +493,13 @@ func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+	// The first run's statement goes on in the database until its
+	// cancellation arrives, holding the rows it locked: wait for it, so that
+	// the rest skips none of them.
+	waitFor(t, "the canceled statement to end", func() bool {
+		return e.count(t, `SELECT count(*) FROM pg_stat_activity
+		                   WHERE pid <> pg_backend_pid() AND state <> 'idle' AND strpos(query, '{s}.tasks') > 0`) == 0
+	})
 	rest, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: all, Cursor: first.Next})
 	if err != nil || first.Changed+rest.Changed != 31501 || rest.Skipped != 0 || rest.Next != "" {
 		t.Fatalf("then %+v after %+v, %v; want every task retried", rest, first, err)
@@ -559,11 +566,24 @@ func TestBulkActionsStopMidway(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	// The action's context ends once its first batch committed, as a
+	// request's does when it runs out of time.
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	go func() {
+		for ctx.Err() == nil {
+			var n int
+			_ = e.pool.QueryRow(ctx, replaceSchema("SELECT count(*) FROM {s}.tasks WHERE state = 'canceled'", e.schema)).Scan(&n)
+			if n > 0 {
+				cancel()
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
 	all := &taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
 	res, err := e.client.CancelMatching(ctx, bulk(all))
-	if !errors.Is(err, context.DeadlineExceeded) || res.Changed >= 30000 || res.Next == "" {
+	if !errors.Is(err, context.Canceled) || res.Changed >= 30000 || res.Next == "" {
 		t.Fatalf("canceled %+v, %v; want it to stop midway", res, err)
 	}
 	if canceled := e.states(t)["canceled"]; canceled != int(res.Changed) {

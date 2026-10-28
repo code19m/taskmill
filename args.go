@@ -14,8 +14,9 @@ type Args interface {
 
 // ArgsWithDefaults is implemented by Args that set default enqueue options
 // for their kind. Options passed to an enqueue call override these defaults
-// field by field. A worker reads the default queue from a zero value, to
-// serve it when [WorkerConfig.Queues] is empty.
+// field by field, and Metadata key by key. The default Queue must not depend
+// on the value's fields: a worker reads it from a zero value, to serve it
+// when [WorkerConfig.Queues] is empty.
 type ArgsWithDefaults interface {
 	Args
 

@@ -66,7 +66,7 @@ configurable, so several installations can share a database. It must match
   snoozes and releases, which give attempts back, are safe.
 - **`errors` is bounded.** Each failure appends an entry with the attempt
   number, the time, the message, and, for failures that taskmill detects
-  itself, a code such as `lease_expired`. Beyond 20 entries the oldest is
+  itself, a code such as `lease_lost`. Beyond 20 entries the oldest is
   dropped. The Go side cuts each message to 4 KiB before storing it.
 - **`fillfactor = 80`** leaves room in each page for updated row versions,
   so heartbeats can be HOT updates. Measured: renewing 5,000 leases on
