@@ -549,11 +549,24 @@ func TestBulkActionsStopMidway(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	// The action's context ends once its first batch committed, as a
+	// request's does when it runs out of time.
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	go func() {
+		for ctx.Err() == nil {
+			var n int
+			_ = e.pool.QueryRow(ctx, replaceSchema("SELECT count(*) FROM {s}.tasks WHERE state = 'canceled'", e.schema)).Scan(&n)
+			if n > 0 {
+				cancel()
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
 	all := &taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
 	res, err := e.client.CancelMatching(ctx, bulk(all))
-	if !errors.Is(err, context.DeadlineExceeded) || res.Changed >= 30000 || res.Next == "" {
+	if !errors.Is(err, context.Canceled) || res.Changed >= 30000 || res.Next == "" {
 		t.Fatalf("canceled %+v, %v; want it to stop midway", res, err)
 	}
 	if canceled := e.states(t)["canceled"]; canceled != int(res.Changed) {
