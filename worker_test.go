@@ -1739,27 +1739,41 @@ func TestMiddlewareThatSkipsTheHandlerFailsTheAttempt(t *testing.T) {
 		return nil
 	}), nil)
 	taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { runs.Add(1) }), nil)
-	var seen error // what the outer middleware got from its next
+	var failures atomic.Int32 // the failures that the outer middleware saw
 	outer := taskmill.Middleware(func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
-		seen = next(ctx)
-		return seen
+		err := next(ctx)
+		if err != nil {
+			failures.Add(1)
+		}
+		return err
+	})
+	swallow := taskmill.Middleware(func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+		_ = next(ctx)
+		return nil
 	})
 	skip := taskmill.Middleware(func(context.Context, *taskmill.TaskInfo, func(context.Context) error) error { return nil })
-	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Middleware: []taskmill.Middleware{outer, skip}})
 
-	for _, args := range []taskmill.Args{sendEmail{}, report{}} { // a single task, and a batch
-		seen = nil
-		info, err := w.RunTask(t.Context(), e.enqueue(t, args, nil))
-		if err != nil {
-			t.Fatal(err)
+	for _, c := range []struct {
+		name  string
+		chain []taskmill.Middleware
+	}{
+		{"seen by the middleware outside", []taskmill.Middleware{outer, skip}},
+		{"hidden by the middleware outside", []taskmill.Middleware{swallow, skip}},
+	} {
+		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Middleware: c.chain})
+		for _, args := range []taskmill.Args{sendEmail{}, report{}} { // a single task, and a batch
+			info, err := w.RunTask(t.Context(), e.enqueue(t, args, nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.State != taskmill.StateRetryable || len(info.Errors) != 1 ||
+				!strings.Contains(info.Errors[0].Message, "without running the handler") {
+				t.Fatalf("%s, %s: got task %s with errors %+v, want a retry", c.name, args.Kind(), info.State, info.Errors)
+			}
 		}
-		if info.State != taskmill.StateRetryable || len(info.Errors) != 1 ||
-			!strings.Contains(info.Errors[0].Message, "without running the handler") {
-			t.Fatalf("%s: got task %s with errors %+v, want a retry", args.Kind(), info.State, info.Errors)
-		}
-		if seen == nil {
-			t.Fatalf("%s: the outer middleware saw no failure", args.Kind())
-		}
+	}
+	if failures.Load() != 2 {
+		t.Fatalf("the outer middleware saw %d failures, want 2", failures.Load())
 	}
 	if runs.Load() != 0 {
 		t.Fatalf("the handlers ran %d times", runs.Load())

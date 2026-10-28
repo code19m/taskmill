@@ -345,9 +345,11 @@ func TestMiddlewareThatSkipsNextIsRecordedAsAFailure(t *testing.T) {
 	if _, err := skipping.Enqueue(t.Context(), sendEmail{}, &taskmill.EnqueueOptions{Queue: "skipped"}); err == nil {
 		t.Fatal("the enqueue succeeded")
 	}
-	if s := e.one(t, "send skipped").Status(); s.Code != codes.Error {
+	send := e.one(t, "send skipped")
+	if s := send.Status(); s.Code != codes.Error {
 		t.Errorf("send span: got status %+v, want an error", s)
 	}
+	wantAttrs(t, send, "error.type=middleware")
 
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error { return nil }), nil)
@@ -367,9 +369,11 @@ func TestMiddlewareThatSkipsNextIsRecordedAsAFailure(t *testing.T) {
 	if _, err := w.RunTask(t.Context(), res.ID); err != nil {
 		t.Fatal(err)
 	}
-	if s := e.one(t, "process emails").Status(); s.Code != codes.Error {
+	process := e.one(t, "process emails")
+	if s := process.Status(); s.Code != codes.Error {
 		t.Errorf("process span: got status %+v, want an error", s)
 	}
+	wantAttrs(t, process, "error.type=middleware")
 }
 
 func TestObserveQueuesReportsCountsAndLag(t *testing.T) {

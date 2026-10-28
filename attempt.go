@@ -149,13 +149,20 @@ func (w *Worker) invoke(ctx context.Context, t *tracked, call func(context.Conte
 				return inner(ctx)
 			})
 			if err == nil && !reached.Load() {
-				return errors.New("taskmill: middleware returned nil without running the handler")
+				return errSkippedHandler
 			}
 			return err
 		}
 	}
-	return next(ctx)
+	if err := next(ctx); err != nil || called.Load() {
+		return err
+	}
+	return errSkippedHandler // a middleware hid the error of its next
 }
+
+// errSkippedHandler fails an attempt whose middleware returned nil without
+// running the handler.
+var errSkippedHandler = classError("taskmill: middleware returned nil without running the handler", "middleware")
 
 func panicFailure(r any) *failure {
 	stack := debug.Stack()

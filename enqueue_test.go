@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -400,6 +401,38 @@ func TestEnqueueLimitsLeaveTheTransactionUsable(t *testing.T) {
 	amps := &taskmill.EnqueueOptions{Metadata: map[string]string{"k": strings.Repeat("&", 20_000)}}
 	if _, err := e.client.Enqueue(t.Context(), sendEmail{}, amps); err != nil {
 		t.Fatalf("20,000 ampersands: %v", err)
+	}
+}
+
+// countedArgs encodes to a payload just under its limit of 1 MiB, and counts
+// how often it is encoded.
+type countedArgs struct {
+	encoded *atomic.Int32
+}
+
+func (countedArgs) Kind() string { return "test.counted" }
+
+var nearlyMiB = []byte(`"` + strings.Repeat("x", 1<<20-64) + `"`)
+
+func (a countedArgs) MarshalJSON() ([]byte, error) {
+	a.encoded.Add(1)
+	return nearlyMiB, nil
+}
+
+func TestEnqueueStopsAtTheFirstTaskPastTheLimit(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var encoded atomic.Int32
+	params := make([]taskmill.EnqueueParams, 100)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: countedArgs{encoded: &encoded}}
+	}
+	if _, err := e.client.EnqueueMany(t.Context(), params); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+	// 64 such payloads fit in 64 MiB; the 65th is past it.
+	if n := encoded.Load(); n != 65 {
+		t.Fatalf("encoded %d payloads, want 65", n)
 	}
 }
 

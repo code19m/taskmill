@@ -277,7 +277,7 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 
 // errNotEnqueued fails an enqueue whose middleware returned nil, although
 // the tasks were not stored.
-var errNotEnqueued = errors.New("taskmill: enqueue middleware returned nil without enqueueing the tasks")
+var errNotEnqueued = classError("taskmill: enqueue middleware returned nil without enqueueing the tasks", "middleware")
 
 // store writes resolved tasks with one statement.
 func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([]EnqueueResult, error) {

@@ -28,7 +28,8 @@ All notable changes to taskmill are recorded here. The format follows
   purpose returns an error, such as `taskmill.Snooze(d)` or
   `taskmill.Permanent(err)`. Such a failure, and an enqueue middleware's that
   returns nil without calling `next`, now reaches the middleware outside it
-  as an error from its `next`, so tracing and metrics record it.
+  as an error from its `next`, of the class `middleware`, so tracing and
+  metrics record it.
 - **Breaking:** limits on one enqueue call, checked before any statement, so
   that the caller's transaction stays usable: at most 64 KiB of encoded
   metadata per task, after enqueue middleware, and at most 10,000 tasks and

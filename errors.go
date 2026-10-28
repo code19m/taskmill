@@ -13,7 +13,8 @@ import (
 // part of the API and do not change: "not_found", "lease_lost",
 // "invalid_state", "invalid_argument", "schema_outdated", "canceled",
 // "timeout", and "shutdown", and for failures that taskmill classifies itself,
-// "panic" and "invalid_payload".
+// "panic", "invalid_payload", and "middleware", for middleware that returned
+// nil without calling its next.
 var (
 	// ErrNotFound means the task or schedule does not exist, or no longer
 	// exists.
