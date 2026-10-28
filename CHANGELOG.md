@@ -111,6 +111,12 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Fixed
 
+- A bulk action whose context ended during a batch closed that batch's
+  connection, and so left the batch's transaction running on the server,
+  holding up to 1,000 tasks and their FIFO groups, until its statement
+  ended. A run that went on at once skipped those tasks as held by other
+  work. The batch now finishes, for at most 5 seconds, before the action
+  returns, and counts what it did.
 - A bulk action whose context ended, or whose database call failed, while it
   read the newest task ID returned no `BulkResult.Next`, so going on started
   over from the first task. It now returns `Next` whenever it stops early.

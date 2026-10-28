@@ -654,11 +654,12 @@ run retries the group in order. `BulkResult.Skipped` counts the tasks they
 skipped: run them again to act on those.
 
 They take a `BulkParams`, the filter and a cursor. If the context ends
-first, they return what they did before, with an error; each batch commits
-whole or not at all. `BulkResult.Next` then goes on, as `BulkParams.Cursor`:
-at the first task they skipped, if any, so that a group they left comes back
-in order, or else after the last task they went through. It is empty once
-they went through every task. A cursor only narrows an action to later
+first, they finish the batch they are in, for at most 5 seconds, and return
+what they did, with an error; each batch commits whole or not at all, and
+none goes on after they return. `BulkResult.Next` then goes on, as
+`BulkParams.Cursor`: at the first task they skipped, if any, so that a group
+they left comes back in order, or else after the last task they went
+through. It is empty once they went through every task. A cursor only narrows an action to later
 tasks; it never selects tasks that the filter does not.
 
 A filter by kind or FIFO group alone has no index of its own. A retry with
