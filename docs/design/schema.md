@@ -515,7 +515,8 @@ When enqueue or promotion makes tasks available, the client sends
 `a|<queue>`, so idle workers fetch at once instead of waiting for their next
 poll. The same channel carries `c|<id>`, which asks the worker running task
 `<id>` to cancel it, `q|<queue>`, which tells workers that the queue's
-settings changed, and `h|`, the maintainer's heartbeat.
+settings changed, `h|`, the maintainer's heartbeat, and `r|`, which tells
+workers that the maintainer resigned, so that one takes over at once.
 Notifications are delivered only when the transaction commits.
 
 Each notifying transaction takes a global lock at commit. At high commit
@@ -528,21 +529,32 @@ producer can crash before sending it. So once a second, the maintainer also
 notifies every queue that is not paused and whose next task has waited
 longer than a second, in one statement with one index probe per queue. A
 queue whose tasks start at once gets nothing, and one whose workers are all
-busy gets a notification that changes nothing. The same statement sends
-`h|`, the maintainer's heartbeat, which shows workers that the wake ran and
-that notifications reach them.
+busy gets a notification that changes nothing. Every 5 seconds, the same
+statement sends `h|`, the maintainer's heartbeat, which shows workers that
+the wake ran and that notifications reach them. A new maintainer sends one
+at once.
+
+PostgreSQL wakes every connection that listens in a database for each
+notification, on any channel, so installations that share a database pay
+for each other's: E7 in [Benchmarks](../benchmarks.md#resource-use)
+measures what heartbeats cost then. Hence a heartbeat every 5 seconds, not
+with every wake.
 
 **Polling.** Workers poll each queue as a fallback, and how often depends on
 the maintainer's heartbeats. While they arrive, notifications reach the
 worker and the maintainer wakes every queue whose task waits, so an idle
 queue polls only once a minute, which bounds the harm of a fault in either,
 and idle workers cost little however many queues and replicas there are. A
-worker that hears no heartbeat for 3 seconds, whatever the reason (no
-maintainer, an older one, a proxy in the way, or a connection that died
-without a word), polls every `PollInterval`, starting at once, and replaces
-its notification connection if heartbeats had arrived on it. So a task
-whose notification came too early or was lost starts within about 3
-seconds, or `PollInterval` if that is longer. A queue whose
+worker that hears no heartbeat for 15 seconds, three missed, whatever the
+reason (no maintainer, an older one, or a connection that died without a
+word), polls every `PollInterval`, starting at once, and checks that its
+notification connection answers, by listening again; it replaces one that
+does not. A maintainer that stops hands over without such a gap: it
+resigns with `r|`, another worker takes over and sends its heartbeat. So a
+task whose notification came too early or was lost starts within about 2
+seconds while heartbeats arrive, within about 16 seconds if the maintainer
+or the notification connection fails without a word, and within
+`PollInterval` while no maintainer of this version runs. A queue whose
 installation-wide concurrency limit held tasks back polls every
 `PollInterval` too, since finishing a task sends no notification. A new
 connection makes every queue fetch at once, since notifications may have
@@ -550,7 +562,13 @@ been missed meanwhile. `LISTEN` needs a session, so each
 worker holds one dedicated connection for it, made with the pool's settings
 unless `WorkerConfig.ListenConfig` says otherwise. Behind a
 transaction-pooling proxy, `ListenConfig` must point at the database
-directly. All other traffic works through such proxies.
+directly. A worker checks that when it starts: through a direct
+connection, or a proxy that keeps sessions, the connection always runs on
+one server process, which the pool never gets; through a proxy that pools
+transactions, either changes within a few statements. It then logs an
+error and polls instead of listening, since `LISTEN` would stay on a server
+connection that goes back to the proxy's pool. All other traffic works
+through such proxies.
 
 ## Operational notes
 

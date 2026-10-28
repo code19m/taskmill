@@ -25,18 +25,33 @@ All notable changes to taskmill are recorded here. The format follows
   the maintainer's heartbeats reach its worker. Every second, the maintainer
   notifies each queue whose next task has waited longer than a second, which
   finds tasks whose notification came before their transaction committed or
-  never came, and sends a heartbeat with it. A worker that hears none for 3
-  seconds polls every `PollInterval` again, starting at once, and replaces
-  its notification connection if heartbeats had arrived on it: no maintainer
-  may run, an older one may during an upgrade, notifications may not reach
-  the worker, or the connection may have died without a word. Either way,
-  such a task starts within about 3 seconds, or `PollInterval` if that is
-  longer. A queue whose installation-wide concurrency limit holds tasks back
-  still polls every `PollInterval`. 50 idle worker processes serving 100
-  queues sent the database about 5,600 transactions a second, and now send
-  about 150 on average, and 400 in the busiest 10 seconds. A worker logs
-  when heartbeats start or stop arriving, and gives up opening its
-  notification connection after 10 seconds, to try again.
+  never came, and every 5 seconds it sends a heartbeat with it. A worker
+  polls every `PollInterval` until its first heartbeat, and again once none
+  came for 15 seconds, starting at once: no maintainer may run, an older one
+  may during an upgrade, or notifications may not reach the worker. It then
+  replaces its notification connection if that does not answer, since a
+  connection can die without a word. So such a task starts within about 2
+  seconds while heartbeats arrive, within about 16 seconds if the maintainer
+  or the notification connection fails without a word, and within
+  `PollInterval` while no maintainer of this version runs. A queue whose
+  installation-wide concurrency limit holds tasks back still polls every
+  `PollInterval`. 50 idle worker processes serving 100 queues sent the
+  database about 5,600 transactions a second, and now send about IDLEAVG on
+  average, and IDLEPEAK in the busiest 10 seconds. A worker logs when
+  heartbeats start or stop arriving, and gives up opening its notification
+  connection after 10 seconds, to try again.
+- A maintainer that stops hands over at once: it tells the workers, and
+  another takes over and sends its heartbeat. One that crashes is still
+  replaced within about 12 seconds.
+
+### Fixed
+
+- A worker no longer listens through a proxy that pools transactions, such
+  as PgBouncer in transaction mode when `ListenConfig` is not set. `LISTEN`
+  stayed on a server connection that went back to the proxy's pool, so
+  notifications reached no worker, and PgBouncer logged a warning for each.
+  The worker now finds that out when it starts, logs `notifications
+  disabled; polling only` at Error, and polls every `PollInterval`.
 
 ## [0.2.0] - 2026-10-27
 

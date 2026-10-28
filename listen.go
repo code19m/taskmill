@@ -191,8 +191,8 @@ func (w *Worker) stopNotifying() {
 // pools transactions, such as PgBouncer in transaction mode: LISTEN would
 // stay on a server connection that goes back to the pool, whose
 // notifications reach no worker.
-var errTransactionPooling = errors.New("the notification connection pools transactions, " +
-	"so it cannot listen; set WorkerConfig.ListenConfig to a direct or session-pooled connection")
+var errTransactionPooling = errors.New("taskmill: the notification connection pools transactions, " +
+	"so it cannot listen; set WorkerConfig.ListenConfig to a direct connection")
 
 // sessionChecks is how many times checkSession compares server processes.
 // Each comparison can miss transaction pooling while other clients take the

@@ -151,15 +151,16 @@ type WorkerConfig struct {
 	LeaseDuration time.Duration
 
 	// PollInterval is how often idle queues are checked while the
-	// maintainer's heartbeats do not reach the worker: before the first one,
-	// once none came for 3 seconds, while no maintainer of this version or
-	// later runs, or through a transaction-pooling proxy without
-	// ListenConfig. While they arrive, every second, notifications wake the
-	// worker, and the maintainer wakes each queue whose next task waited more
-	// than a second, so idle queues are checked only once a minute. Either
-	// way, a task whose notification came too early or was lost starts
-	// within about 3 seconds, or PollInterval if that is longer. Default: 1
-	// second.
+	// maintainer's heartbeats do not reach the worker: until the first one,
+	// within 5 seconds of the start, once none came for 15 seconds, and
+	// while no maintainer of this version or later runs. While they arrive,
+	// every 5 seconds, notifications wake the worker, and the maintainer
+	// wakes each queue whose next task waited more than a second, so idle
+	// queues are checked only once a minute. So a task whose notification
+	// came too early or was lost starts within about 2 seconds while
+	// heartbeats arrive, within about 16 seconds if the maintainer or the
+	// notification connection fails without a word, and within PollInterval
+	// while no maintainer of this version runs. Default: 1 second.
 	PollInterval time.Duration
 
 	// DrainTimeout is how long Run waits for running tasks after its context
@@ -180,9 +181,9 @@ type WorkerConfig struct {
 
 	// ListenConfig is the connection that receives notifications. Set it to
 	// a direct connection when the pool goes through a transaction-pooling
-	// proxy, which cannot deliver them: the worker then polls every
-	// PollInterval. Create it with [pgx.ParseConfig]. Default: the pool's
-	// configuration.
+	// proxy, which cannot deliver them: without it, the worker finds that
+	// out when it starts, logs an error, and polls every PollInterval.
+	// Create it with [pgx.ParseConfig]. Default: the pool's configuration.
 	ListenConfig *pgx.ConnConfig
 }
 
