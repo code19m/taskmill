@@ -128,7 +128,7 @@ func (r *release) work(t *testing.T) {
 			r.published <- string(d.Value)
 		}
 		return make([]error, len(ds))
-	}))
+	}), nil)
 	worker, err := taskmill.NewWorker(r.client, &taskmill.WorkerConfig{
 		Handlers:     &handlers,
 		PollInterval: 50 * time.Millisecond,
@@ -240,7 +240,10 @@ func (r *release) checkDashboard(t *testing.T) {
 	}
 	// A page that cannot read part of its data, such as the overview's
 	// charts, still shows, and logs a warning instead.
-	h := ui.Handler(r.client, &ui.Config{Logger: slog.New(failOnWarn{t})})
+	h, err := ui.New(r.client, &ui.Config{Logger: slog.New(failOnWarn{t})})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, page := range []string{
 		"/", "/tasks", "/tasks?state=completed", fmt.Sprintf("/tasks/%d", retried.ID),
 		"/choices/groups?search=current", "/schedules", "/workers",
