@@ -365,15 +365,20 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 	           )
 	           INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
 	           SELECT 'halted', group_key, 1, id, now() FROM dead`)
-	// Attempts are read from the first 10,000 retryable tasks only, those
-	// that retry first: the task that failed most retries after them.
+	// As in an outage, more tasks wait to retry than the 10,000 whose
+	// failures are read. New failures retry first, and the task that failed
+	// most retries after them, though not last: tasks that failed a little
+	// less retry later, as they failed more recently. And a queue whose
+	// tasks all retry before the others' is read too.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt)
-	           SELECT 'retrying', 'email.send', 'retryable', now() + interval '1 minute' + i * interval '1 ms', '{}', 25,
-	                  CASE WHEN i <= 10000 THEN 2 ELSE 7 END
-	           FROM generate_series(1, 10001) i`)
+	           SELECT v.queue, 'email.send', 'retryable', now() + v.wait + i * interval '1 ms', '{}', 25, v.attempt
+	           FROM (VALUES ('retrying', 2, interval '1 minute', 10000), ('retrying', 12, interval '4 minutes', 1),
+	                        ('retrying', 9, interval '5 minutes', 5), ('early', 5, interval '30 seconds', 1))
+	                AS v(queue, attempt, wait, n),
+	                generate_series(1, v.n) AS i`)
 	runWorker(t, e, &taskmill.WorkerConfig{}) // the maintainer refreshes statistics
 
-	counted := countedQueues(t, e, "big", "exact", "later", "later-exact", "small", "halted", "retrying")
+	counted := countedQueues(t, e, "big", "exact", "later", "later-exact", "small", "halted", "retrying", "early")
 	for _, c := range []struct {
 		queue string
 		state taskmill.State
@@ -393,8 +398,10 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 	if got := counted["halted"].HaltedGroups; got != 10_000 {
 		t.Errorf("halted: got %d halted groups, want 10,000", got)
 	}
-	if got := counted["retrying"].FailedAttempts; got != 2 {
-		t.Errorf("retrying: got %d failed attempts, want 2 from the first 10,000 tasks", got)
+	for queue, want := range map[string]int{"retrying": 12, "early": 5} {
+		if got := counted[queue].MostFailures; got != want {
+			t.Errorf("%s: got %d most failures, want %d", queue, got, want)
+		}
 	}
 	want := map[taskmill.State]taskmill.TaskCount{
 		taskmill.StateAvailable: {N: 5},

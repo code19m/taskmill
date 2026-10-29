@@ -76,7 +76,7 @@ count in lag.
 
 ### Tasks keep failing, and lag stays low
 
-**You see:** `taskmill_queue_failed_attempts` rises, or the dashboard shows
+**You see:** `taskmill_queue_most_failures` rises, or the dashboard shows
 tasks in `retryable`, often with `pending` tasks behind them. Lag stays near
 zero, because each task waits for its next retry, not for a worker.
 

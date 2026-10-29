@@ -20,12 +20,11 @@ All notable changes to taskmill are recorded here. The format follows
   a second, and logs `taskmill-ui not ready` and `taskmill-ui ready again`
   when its answer changes.
 - `TASKMILL_UI_LOG_FORMAT=json` makes `taskmill-ui` log JSON lines.
-- `QueueInfo.HaltedGroups` and `QueueInfo.FailedAttempts` show work that is
+- `QueueInfo.HaltedGroups` and `QueueInfo.MostFailures` show work that is
   stuck while a queue's lag stays near zero. `HaltedGroups` counts the
-  queue's FIFO groups that a dead task halts, up to 10,000.
-  `FailedAttempts` is how many attempts the queue's most failed task has
-  failed, among those that wait to retry, such as outbox messages while the
-  broker is down. The maintainer counts both with the other statistics, in
+  queue's FIFO groups that a dead task halts, up to 10,000. `MostFailures`
+  is the most times in a row that one task of the queue, waiting to retry,
+  has failed, such as an outbox message while the broker is down. The maintainer counts both with the other statistics, in
   two new columns of `queue_stats` (migration `0004_stuck_work.sql`).
   [Monitoring](docs/production/monitoring.md) has an alert for each, and no
   longer asks you to poll `Client.Groups` for halted groups.

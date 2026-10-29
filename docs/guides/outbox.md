@@ -132,7 +132,7 @@ out within about 5 minutes, still in order per key.
 
 The queue's [lag](../concepts/glossary.md#lag) stays near zero during the
 outage, because each message waits for its next try, not for a worker. So
-alert on failed attempts instead: `taskmill_queue_failed_attempts` for the
+alert on failures in a row instead: `taskmill_queue_most_failures` for the
 `outbox` queue reaches 10 about 9 minutes into an outage. See
 [Monitoring](../production/monitoring.md).
 

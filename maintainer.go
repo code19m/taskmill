@@ -471,7 +471,7 @@ func (m *maintainer) untilNextDue(ctx context.Context) time.Duration {
 
 // refreshStats counts each queue's tasks per state, up to the caps, finds
 // each count's oldest due task, its queue's halted groups, and the most
-// attempts of its queue's retryable tasks, and stores them for
+// failures of its queue's retryable tasks, and stores them for
 // [Client.Queues] and the counts for the current minute's activity.
 func (m *maintainer) refreshStats(ctx context.Context) {
 	m.stats.observe(ctx, m.countStats(ctx))
@@ -484,7 +484,7 @@ func (m *maintainer) countStats(ctx context.Context) error {
 	var capped []bool
 	var oldest []*time.Time // the run time of the oldest due task of each count
 	var halted []*int64     // with each dead count, the queue's halted groups
-	var failed []*int32     // with each retryable count, the most attempts of its tasks
+	var failures []*int32   // with each retryable count, the most failures of its tasks
 	var dueTotal int64      // scheduled and retryable tasks counted, in all queues
 	// Each cap is read one past, so that a count that ends exactly at its cap
 	// is not taken for one with more tasks left.
@@ -507,7 +507,7 @@ func (m *maintainer) countStats(ctx context.Context) error {
 		}
 		queues, states, counts = append(queues, queue), append(states, state), append(counts, min(n, statsQueueCap))
 		capped, oldest = append(capped, n > statsQueueCap), append(oldest, due)
-		halted, failed = append(halted, h), append(failed, f)
+		halted, failures = append(halted, h), append(failures, f)
 	}
 	r.Close()
 	if err := r.Err(); err != nil {
@@ -528,7 +528,7 @@ func (m *maintainer) countStats(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, m.c.sql.clearStats); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped, oldest, dueCapped, halted, failed); err != nil {
+		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped, oldest, dueCapped, halted, failures); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, m.c.sql.storeActivity)

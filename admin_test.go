@@ -482,26 +482,26 @@ func TestQueuesShowWorkThatIsStuckWithoutLag(t *testing.T) {
 		for _, q := range queues {
 			byName[q.Name] = q
 		}
-		return byName["relay"].FailedAttempts == 3 && byName["orders"].HaltedGroups == 1
+		return byName["relay"].MostFailures == 3 && byName["orders"].HaltedGroups == 1
 	})
 	for name, want := range map[string]struct {
-		halted, failed int
-		counts         map[taskmill.State]taskmill.TaskCount
+		halted, failures int
+		counts           map[taskmill.State]taskmill.TaskCount
 	}{
 		"relay":  {0, 3, map[taskmill.State]taskmill.TaskCount{taskmill.StateRetryable: {N: 1}, taskmill.StatePending: {N: 2}}},
 		"orders": {1, 0, map[taskmill.State]taskmill.TaskCount{taskmill.StateDead: {N: 1}, taskmill.StateCanceled: {N: 0}, taskmill.StatePending: {N: 1}}},
 	} {
 		q := byName[name]
-		if q.HaltedGroups != want.halted || q.FailedAttempts != want.failed || q.Lag != 0 || !maps.Equal(q.Counts, want.counts) {
-			t.Errorf("%s: got %d halted groups, %d failed attempts, lag %s, counts %+v; want %d, %d, no lag, %+v",
-				name, q.HaltedGroups, q.FailedAttempts, q.Lag, q.Counts, want.halted, want.failed, want.counts)
+		if q.HaltedGroups != want.halted || q.MostFailures != want.failures || q.Lag != 0 || !maps.Equal(q.Counts, want.counts) {
+			t.Errorf("%s: got %d halted groups, %d most failures, lag %s, counts %+v; want %d, %d, no lag, %+v",
+				name, q.HaltedGroups, q.MostFailures, q.Lag, q.Counts, want.halted, want.failures, want.counts)
 		}
 	}
 }
 
 // retryUntil retries a failed attempt after a millisecond until the given
 // attempt has failed, and then after an hour, so that the task waits to
-// retry with that many failed attempts.
+// retry after failing that many times in a row.
 type retryUntil int
 
 func (n retryUntil) Backoff(attempt int) time.Duration {

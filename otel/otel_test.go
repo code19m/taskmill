@@ -487,10 +487,10 @@ func TestObserveQueuesReportsStuckWork(t *testing.T) {
 	const relay, orders, other = "messaging.destination.name=relay", "messaging.destination.name=orders",
 		"messaging.destination.name=other"
 	eventually(t, "the stuck work to be counted", func() bool {
-		return slices.Contains(e.points(t, "taskmill.queue.failed_attempts"), relay+": 3") &&
+		return slices.Contains(e.points(t, "taskmill.queue.most_failures"), relay+": 3") &&
 			slices.Contains(e.points(t, "taskmill.queue.halted_groups"), orders+": 1")
 	})
-	wantPoints(t, "taskmill.queue.failed_attempts", e.points(t, "taskmill.queue.failed_attempts"),
+	wantPoints(t, "taskmill.queue.most_failures", e.points(t, "taskmill.queue.most_failures"),
 		[]string{relay + ": 3", orders + ": 0", other + ": 0"})
 	wantPoints(t, "taskmill.queue.halted_groups", e.points(t, "taskmill.queue.halted_groups"),
 		[]string{relay + ": 0", orders + ": 1", other + ": 0"})
@@ -522,7 +522,7 @@ func run(t *testing.T, client *taskmill.Client, cfg *taskmill.WorkerConfig) (sto
 
 // retryUntil retries a failed attempt after a millisecond until the given
 // attempt has failed, and then after an hour, so that the task waits to
-// retry with that many failed attempts.
+// retry after failing that many times in a row.
 type retryUntil int
 
 func (n retryUntil) Backoff(attempt int) time.Duration {

@@ -41,9 +41,9 @@ var observedStates = []taskmill.State{
 //     halts, as [taskmill.QueueInfo.HaltedGroups] says, counted up to
 //     10,000. Their tasks wait for an operator, and do not count in the lag:
 //     alert when it is above 0.
-//   - taskmill.queue.failed_attempts: how many attempts the queue's most
-//     failed task has failed, among those that wait to retry, as
-//     [taskmill.QueueInfo.FailedAttempts] says. It grows while a task keeps
+//   - taskmill.queue.most_failures: the most times in a row that one task of
+//     the queue, waiting to retry, has failed, as
+//     [taskmill.QueueInfo.MostFailures] says. It grows while a task keeps
 //     failing, and the lag stays near zero. A task drops out of it while it
 //     runs its next attempt, so alert on its maximum over some minutes.
 //   - taskmill.stats.age: in seconds, by this process's clock, how long ago
@@ -82,8 +82,8 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 	if err != nil {
 		return nil, fmt.Errorf("taskmill/otel: %w", err)
 	}
-	failed, err := in.meter.Int64ObservableGauge("taskmill.queue.failed_attempts", metric.WithUnit("{attempt}"),
-		metric.WithDescription("How many attempts the queue's most failed task has failed, among those that wait to retry."))
+	failures, err := in.meter.Int64ObservableGauge("taskmill.queue.most_failures", metric.WithUnit("{failure}"),
+		metric.WithDescription("The most times in a row that one task of the queue, waiting to retry, has failed."))
 	if err != nil {
 		return nil, fmt.Errorf("taskmill/otel: %w", err)
 	}
@@ -112,13 +112,13 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 			}
 			o.ObserveFloat64(lag, q.Lag.Seconds(), queue)
 			o.ObserveInt64(halted, int64(q.HaltedGroups), queue)
-			o.ObserveInt64(failed, int64(q.FailedAttempts), queue)
+			o.ObserveInt64(failures, int64(q.MostFailures), queue)
 		}
 		if !counted.IsZero() {
 			o.ObserveFloat64(age, time.Since(counted).Seconds())
 		}
 		return nil
-	}, tasks, capped, lag, halted, failed, age)
+	}, tasks, capped, lag, halted, failures, age)
 }
 
 func boolInt(b bool) int64 {
