@@ -3,7 +3,7 @@
 This document defines the states a task moves through, what moves it from one
 state to another, and what taskmill guarantees along the way. It is the
 contract that the implementation and its tests are written against. The
-terms are defined in the guide's [Concepts](../guide.md#concepts). Two more
+terms are defined in the [glossary](../concepts/glossary.md). Two more
 are used here:
 
 - **Lease token:** a number that grows by one every time a task is fetched.
@@ -124,8 +124,9 @@ Notes on specific transitions:
   keeps its key until the key's window ends.
 - **15.** If the handler succeeds before it notices the cancellation, the
   task becomes `completed`, because the work was done. Canceling one task of
-  a batch does not cancel the batch's context: the task becomes `canceled`
-  when the batch ends.
+  a batch does not cancel the batch's context, so the batch cannot see it:
+  the task becomes `completed` if the batch returns nil for it, and
+  `canceled` otherwise.
 - **16.** Only `dead` and `canceled` tasks can be retried. To run completed
   work again, enqueue a new task, so that re-running work is always an
   explicit choice.

@@ -1,7 +1,7 @@
 name: Release
 
 # A maintainer pushes a tag vX.Y.Z, and this publishes the release: see
-# CONTRIBUTING.md#releasing. Tags of nested modules, such as otel/v0.1.0, do
+# docs/design/releasing.md. Tags of nested modules, such as otel/v0.1.0, do
 # not match, since those modules have no binaries.
 on:
   push:

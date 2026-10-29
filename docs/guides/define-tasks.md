@@ -1,0 +1,107 @@
+# Define tasks
+
+A task is a Go struct with a name. This page shows how to name it, what to
+put in it, and how to give it default options.
+
+## Quick example
+
+```go
+// SendReceipt emails the receipt of an order.
+type SendReceipt struct {
+    OrderID int64 `json:"order_id"`
+}
+
+func (SendReceipt) Kind() string { return "email.send_receipt" }
+```
+
+That is all a task needs. The struct implements the `Args` interface.
+
+## How it works
+
+- The struct is the task's [payload](../concepts/glossary.md#payload): its data.
+  taskmill stores it as JSON with `encoding/json`, so use `json` tags.
+- `Kind` returns the task's [kind](../concepts/glossary.md#kind). The kind picks
+  the handler that runs the task.
+- The kind is the contract between the code that enqueues and the code that
+  handles. Both use the same struct.
+- When the task runs, the worker decodes the JSON into your struct. Large
+  integers stay exact.
+
+## Name the kind
+
+- Return a constant string. `Kind` must not read the struct's fields:
+  taskmill also calls it on an empty struct.
+- Use a value receiver: `func (SendReceipt) Kind()`.
+- Start the kind with the module that owns it: `email.send_receipt`,
+  `billing.invoice.send`.
+- A kind has 1 to 128 characters.
+
+> [!WARNING]
+> Don't rename a kind while tasks of it wait. Those tasks find no handler,
+> and they become dead after an hour. Add a new kind instead, as
+> [Change a task safely](../recipes/change-a-task-safely.md) shows.
+
+## Keep the payload small
+
+Put IDs in the payload, not whole records. `SendReceipt` holds only the
+order's ID, and its handler loads the order when it runs. A copy of the
+order would be out of date if the order changed in the meantime.
+
+- A payload can be up to 1 MiB of JSON. Keep it far below that.
+- The JSON must be valid UTF-8, without the NUL character (`\u0000`).
+  Otherwise the enqueue fails with
+  [`ErrInvalidArgument`](https://pkg.go.dev/github.com/code19m/taskmill#ErrInvalidArgument).
+
+## Change a payload safely
+
+Tasks wait in the database, sometimes for hours. So a worker may decode a
+task that an older version of your code enqueued.
+
+| Change | Safe? | What happens |
+|---|---|---|
+| Add an optional field | Yes | Old tasks decode with the field's zero value |
+| Remove a field | Yes | The worker ignores the field in old tasks |
+| Rename a field, or its `json` tag | No | Old tasks decode, but the renamed field gets its zero value, silently |
+| Change a field's type, such as string to number | No | Old tasks don't decode: they become dead right away, with the code `invalid_payload` |
+
+For a change that is not safe, add a new kind. See
+[Change a task safely](../recipes/change-a-task-safely.md).
+
+## Set defaults per kind
+
+A kind can set its own default options. Implement `EnqueueDefaults`:
+
+```go
+func (SendReceipt) EnqueueDefaults() taskmill.EnqueueOptions {
+    return taskmill.EnqueueOptions{Queue: "emails", MaxAttempts: 5}
+}
+```
+
+Now every receipt goes to the `emails` queue and runs at most 5 times,
+unless the enqueue call sets other values.
+
+Return the same `Queue` for every value. A worker calls `EnqueueDefaults`
+on an empty struct to learn which queue to read.
+
+### Which should I use?
+
+| Situation | Use | Why |
+|---|---|---|
+| The queue, max attempts, or priority of every task of a kind | `EnqueueDefaults` | One place decides, so producers and workers can't disagree |
+| A value that changes per task: run time, group key, dedupe key, metadata | Options in the enqueue call | Only the caller knows it |
+| One kind that belongs in two queues, such as a bulk import next to live traffic | `Queue` in the enqueue call | Then list both queues in `WorkerConfig.Queues` |
+
+We recommend `EnqueueDefaults` for anything that is the same for every task
+of the kind. Options in the call win over the kind's defaults: see
+[Enqueue tasks](enqueue.md#options).
+
+## See also
+
+- [Enqueue tasks](enqueue.md): every option, and which value wins
+- [Change a task safely](../recipes/change-a-task-safely.md): new fields,
+  new kinds, and rolling deploys
+- [`Args`](https://pkg.go.dev/github.com/code19m/taskmill#Args) and
+  [`ArgsWithDefaults`](https://pkg.go.dev/github.com/code19m/taskmill#ArgsWithDefaults)
+  on pkg.go.dev
+
+**Next:** [Enqueue tasks](enqueue.md)

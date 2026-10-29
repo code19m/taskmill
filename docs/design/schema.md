@@ -544,7 +544,7 @@ at once.
 
 PostgreSQL wakes every connection that listens in a database for each
 notification, on any channel, so installations that share a database pay
-for each other's: E7 in [Benchmarks](../benchmarks.md#resource-use)
+for each other's: E7 in [Benchmarks](benchmarks.md#resource-use)
 measures what heartbeats cost then. Hence a heartbeat every 5 seconds, not
 with every wake.
 
@@ -583,7 +583,7 @@ through such proxies.
 - **Long transactions slow the queue down.** A snapshot that stays open,
   anywhere in the database, stops vacuum from removing dead row versions. The
   fetch index then fills with dead entries and fetches slow down. The
-  [guide](../guide.md#running-in-production) says what to set and what to
+  [database guide](../production/database.md) says what to set and what to
   alert on.
 - **History partitions are created ahead of time.** `Migrate` and the
   maintainer keep partitions for today and the next 6 days, by UTC day. Each

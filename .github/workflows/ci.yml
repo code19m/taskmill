@@ -120,7 +120,7 @@ jobs:
       - run: make compat
 
   # Every test through PgBouncer in transaction mode, target F8 of
-  # docs/benchmarks.md: the cloud-native setups taskmill serves use it.
+  # docs/design/benchmarks.md: the cloud-native setups taskmill serves use it.
   pgbouncer:
     name: Test through PgBouncer
     runs-on: ubuntu-latest

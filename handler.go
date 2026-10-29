@@ -46,8 +46,10 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 //
 // ctx is canceled when the batch times out or the worker shuts down, with
 // the cause [ErrAttemptTimeout] or [ErrShutdown], but not when one of its
-// tasks is canceled or loses its lease: the batch runs to the end, and then
-// that task becomes canceled, or its result is discarded.
+// tasks is canceled or loses its lease: the batch runs to the end. Then a
+// canceled task becomes completed if the batch returned nil for it, because
+// the work was done, and canceled otherwise; the result of a task that lost
+// its lease is discarded.
 type BatchHandler[A Args] interface {
 	HandleBatch(ctx context.Context, tasks []*Task[A]) []error
 }
