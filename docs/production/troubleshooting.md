@@ -163,8 +163,9 @@ setting. Fix what it names.
 
 - **Cause:** the role that runs your workers does not own taskmill's tables.
   Tasks still complete, but without history.
-- **Check:** `operation still failing` for `apply retention`, with
-  `the role that runs workers must own the taskmill tables` in its error.
+- **Check:** `operation still failing` for `apply retention`, or
+  `prepare history partitions failed` when a worker starts. Their error says
+  `the role that runs workers must own the taskmill tables`.
 - **Do:** [make that role the owner](database.md#run-workers-as-the-owner-of-taskmills-tables).
   The maintainer creates the missing partitions within a minute.
 

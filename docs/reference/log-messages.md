@@ -159,9 +159,9 @@ backticks.
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
-| `task history has no partition for today; completed tasks skip history` | Error | The maintainer could not create today's history partition. Tasks still complete, but without history. | Make the role that runs workers own the taskmill tables. See [Database](../production/database.md). |
+| `task history has no partition for today; completed tasks skip history` | Error | Neither the workers, when they started, nor the maintainer could create today's history partition. Tasks still complete, but without history. | Make the role that runs workers own the taskmill tables. See [Database](../production/database.md). |
 | `applied migration` | Info | `Migrate` applied migration `version` (`name`) in `duration`. | Nothing. |
-| `prepare history partitions failed` | Warn | `Migrate` found the schema up to date, but could not create history partitions. The maintainer tries again. | If `task history has no partition` follows, fix the table owner. |
+| `prepare history partitions failed` | Warn | `Migrate` found the schema up to date, or a worker started, but could not create the missing history partitions. `error` says why. The worker still starts, and the maintainer tries again. | If `task history has no partition` follows, fix the table owner. |
 
 ### Dashboard
 

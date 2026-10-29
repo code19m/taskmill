@@ -30,6 +30,12 @@ All notable changes to taskmill are recorded here. The format follows
 - The docs of `BatchHandler` and `Client.Cancel` said that a task canceled
   during its batch becomes canceled. It becomes completed if the batch
   returns nil for it, because the work was done, as for other handlers.
+- On a new schema applied with `Migrations` and your own migration tool,
+  the first completed tasks skipped the history, and the worker logged
+  `task history has no partition for today` at Error level. Now each worker
+  creates the missing history partitions when it starts, before it runs a
+  task, as `Migrate` does. If its role may not, it logs `prepare history
+  partitions failed` at Warn level and starts all the same.
 
 ## [0.3.0] - 2026-10-28
 

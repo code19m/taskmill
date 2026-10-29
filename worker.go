@@ -389,12 +389,27 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 	return names, err
 }
 
+// prepareHistory creates the history partitions that the next week lacks,
+// and logs a failure. Each worker does it when it starts, because a schema
+// applied with Migrations has none, and completions may come before the
+// maintainer's first pass, or from workers that never lead.
+func (w *Worker) prepareHistory(ctx context.Context) {
+	if err := ensureHistoryPartitions(ctx, w.client.pool, w.client.schema); err != nil && ctx.Err() == nil {
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "prepare history partitions failed", slog.Any(logKeyError, err))
+	}
+}
+
 // Run fetches and runs tasks until ctx is canceled. It then stops fetching,
 // waits up to DrainTimeout for running tasks, cancels and releases those
 // still running, and returns nil. If ctx ends before the worker registered,
 // it returns nil at once. It returns an error only if the worker cannot
 // start: it is already running, which is [ErrInvalidState], or it cannot
 // register in the database.
+//
+// Before it fetches, Run creates the history partitions that the next week
+// lacks, as [Migrate] does, so that a schema applied with [Migrations] keeps
+// the history of its first completed tasks. A failure is only logged: the
+// maintainer tries again.
 func (w *Worker) Run(ctx context.Context) error {
 	if !w.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: the worker is already running", ErrInvalidState)
@@ -420,6 +435,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.activityFailures = newFailures(w, "record activity")
 	w.listenFailures = newFailures(w, "listen for notifications")
 	w.refreshQueueSettings(ctx)
+	w.prepareHistory(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
 

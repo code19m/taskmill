@@ -20,7 +20,8 @@ replica.
 owner role.
 
 Why: taskmill keeps completed tasks in a history table with one partition per
-day. The [maintainer](../concepts/glossary.md#maintainer) creates each day's partition a
+day. Each worker creates the missing partitions of the next 7 days when it
+starts. The [maintainer](../concepts/glossary.md#maintainer) then creates each day's partition a
 week ahead, and drops old ones. PostgreSQL allows that only to the owner.
 
 If the role is wrong, tasks still complete, but you lose their history:
@@ -30,6 +31,11 @@ If the role is wrong, tasks still complete, but you lose their history:
 2. Up to 7 days later, a day starts without a partition. The log says
    `task history has no partition for today`, and completed tasks skip the
    history.
+
+If your own migration tool applied a new schema, it has no partitions yet.
+With the wrong role, each worker then logs `prepare history partitions
+failed` at Warn level when it starts, and completed tasks skip the history
+from the first one.
 
 To create the schema, `Migrate` needs the CREATE privilege on the database.
 If your role does not have it, create the schema yourself, owned by that
