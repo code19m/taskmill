@@ -3,6 +3,8 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -75,27 +77,7 @@ func TestMigrateWithARoleThatOnlyOwnsItsSchema(t *testing.T) {
 	ctx := t.Context()
 	// The role may connect, but not create schemas: an administrator
 	// created its schema for it.
-	for _, sql := range []string{
-		"CREATE ROLE " + role + " LOGIN PASSWORD 'owner'",
-		"CREATE SCHEMA " + schema + " AUTHORIZATION " + role,
-	} {
-		if _, err := admin.Exec(ctx, sql); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Cleanup(func() {
-		_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+role+"; DROP ROLE "+role)
-	})
-	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.User, cfg.ConnConfig.Password = role, "owner"
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
+	pool := newRole(t, admin, role, "CREATE SCHEMA "+schema+" AUTHORIZATION "+role)
 
 	// The schema exists and its migrations are due, as on install and on
 	// every release with a new migration.
@@ -170,25 +152,104 @@ func TestMigrationsApplyWithoutMigrate(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Pool(t)
 	schema := testdb.Schema(t, pool)
+	applyWithoutMigrate(t, pool, schema)
+	logs := &logRecorder{}
+	e := (&env{pool: pool, schema: schema}).withLogger(t, slog.New(logs))
 
+	// The schema has no history partitions yet, and no maintainer runs. The
+	// worker's first task still completes into the history, where Get finds
+	// it.
+	id := e.enqueue(t, sendEmail{}, nil)
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+	e.waitState(t, id, taskmill.StateCompleted)
+	for _, r := range logs.all() {
+		if r.Level >= slog.LevelError {
+			t.Errorf("logged %s %q", r.Level, r.Message)
+		}
+	}
+}
+
+func TestWorkerStartsWhenItsRoleMayNotCreatePartitions(t *testing.T) {
+	t.Parallel()
+	admin := testdb.Pool(t)
+	schema := testdb.Schema(t, admin)
+	applyWithoutMigrate(t, admin, schema)
+	// The role may use the tables, but does not own them.
+	role := schema + "_worker"
+	pool := newRole(t, admin, role,
+		"GRANT USAGE ON SCHEMA "+schema+" TO "+role,
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "+schema+" TO "+role,
+		"GRANT USAGE ON ALL SEQUENCES IN SCHEMA "+schema+" TO "+role)
+	logs := &logRecorder{}
+	e := (&env{pool: pool, schema: schema}).withLogger(t, slog.New(logs))
+
+	e.enqueue(t, sendEmail{}, nil)
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+	waitFor(t, "the task to complete without history", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks") == 0
+	})
+	var warnings []string
+	for _, r := range logs.all() {
+		if r.Message == "prepare history partitions failed" {
+			r.Attrs(func(a slog.Attr) bool {
+				if a.Key == "error" {
+					warnings = append(warnings, a.Value.String())
+				}
+				return true
+			})
+		}
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "the role that runs workers must own the taskmill tables") {
+		t.Fatalf("got warnings %q, want one that names the fix", warnings)
+	}
+}
+
+// applyWithoutMigrate applies the schema the way teams with their own
+// migration tools do: each migration from Migrations in a transaction, and
+// the record of its version.
+func applyWithoutMigrate(t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
 	ms, err := taskmill.Migrations(schema)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, m := range ms {
-		if _, err := pool.Exec(t.Context(), m.SQL); err != nil {
+		sql := m.SQL
+		if m.Version > 0 {
+			sql += fmt.Sprintf("\nINSERT INTO %s.migrations (version, name) VALUES (%d, '%s');", schema, m.Version, m.Name)
+		}
+		if _, err := pool.Exec(t.Context(), sql); err != nil {
 			t.Fatalf("apply migration %d: %v", m.Version, err)
 		}
-		if m.Version > 0 {
-			_, err := pool.Exec(t.Context(), "INSERT INTO "+schema+".migrations (version, name) VALUES ($1, $2)", m.Version, m.Name)
-			if err != nil {
-				t.Fatal(err)
-			}
+	}
+}
+
+// newRole creates a login role, runs setup as admin, and returns a pool that
+// connects as the role. The role is dropped when the test ends.
+func newRole(t *testing.T, admin *pgxpool.Pool, role string, setup ...string) *pgxpool.Pool {
+	t.Helper()
+	if _, err := admin.Exec(t.Context(), "CREATE ROLE "+role+" LOGIN PASSWORD 'role'"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+role+"; DROP ROLE "+role)
+	})
+	for _, sql := range setup {
+		if _, err := admin.Exec(t.Context(), sql); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if _, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema}); err != nil {
-		t.Fatalf("NewClient after external migrations: %v", err)
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
 	}
+	cfg.ConnConfig.User, cfg.ConnConfig.Password = role, "role"
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
 }
 
 func versions(ms []taskmill.Migration) []int {

@@ -79,10 +79,11 @@ step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
   maintainer adds and drops a partition of the history table, and
   PostgreSQL allows that only to the owner. Run your tool as that role, or
   change the owner afterwards.
-- **A new schema has no history partitions until a worker starts.** The
-  first completed tasks may skip history, with the Error log `task history
-  has no partition for today`. The maintainer creates the partitions within
-  seconds.
+- **Your tool creates no history partitions. Workers do.** Each worker
+  creates the partitions of the next 7 days when it starts, before it runs
+  a task. So the first completed tasks keep their history too. If the
+  worker's role may not create them, it logs `prepare history partitions
+  failed` at Warn level, and completed tasks skip history.
 
 ## See also
 

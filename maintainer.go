@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Maintenance limits.
@@ -355,10 +354,7 @@ func (m *maintainer) retain(ctx context.Context) {
 // steps that failed: one step's failure does not stop the others.
 func (m *maintainer) applyRetention(ctx context.Context) error {
 	var errs []error
-	if err := ensureHistoryPartitions(ctx, m.c.pool, m.c.schema, time.Now(), historyDaysAhead); err != nil {
-		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42501" { // insufficient_privilege
-			err = fmt.Errorf("%w; the role that runs workers must own the taskmill tables", err)
-		}
+	if err := ensureHistoryPartitions(ctx, m.c.pool, m.c.schema); err != nil {
 		errs = append(errs, err)
 	}
 
