@@ -86,7 +86,7 @@ var errSlow = errors.New("the database did not answer in time")
 // errBudget is why a bulk action stopped before it was done.
 var errBudget = errors.New("the bulk action used its time")
 
-// Config configures the web interface. The zero value is valid.
+// Config configures the dashboard. The zero value is valid.
 type Config struct {
 	// Prefix is the path the handler is mounted at, such as "/taskmill".
 	// The handler strips it from requests and adds it to links and
@@ -98,29 +98,29 @@ type Config struct {
 	ReadOnly bool
 
 	// BasicAuth, if set, requires every request to log in with HTTP basic
-	// authentication. Serve the interface over HTTPS when it is set: basic
+	// authentication. Serve the dashboard over HTTPS when it is set: basic
 	// authentication sends the password with every request. Default: none;
 	// the application in front of the handler authenticates.
 	BasicAuth *BasicAuth
 
 	// FrameAncestors lists the origins of the pages that may show the
-	// interface in a frame, such as "https://admin.example.com", or "'self'"
-	// for the application's own pages. Default: none; the interface cannot be
+	// dashboard in a frame, such as "https://admin.example.com", or "'self'"
+	// for the application's own pages. Default: none; the dashboard cannot be
 	// framed, which protects it from clickjacking.
 	FrameAncestors []string
 
-	// Logger receives every action taken, and the errors that the interface
+	// Logger receives every action taken, and the errors that the dashboard
 	// shows as a server error. Default: logs are discarded.
 	Logger *slog.Logger
 }
 
-// BasicAuth is the one user that may use the interface.
+// BasicAuth is the one user that may use the dashboard.
 type BasicAuth struct {
 	Username string
 	Password string
 }
 
-// New returns the web interface for client. cfg may be nil. It returns an
+// New returns the dashboard for client. cfg may be nil. It returns an
 // error that wraps [taskmill.ErrInvalidArgument] if client is nil, if
 // cfg.Prefix does not start with a slash, if cfg.BasicAuth has an empty
 // username or password, or if an entry of cfg.FrameAncestors is empty or
@@ -169,7 +169,7 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	return securityHeaders(h, ancestors), nil
 }
 
-// checkConfig checks the configuration of the interface, and returns the
+// checkConfig checks the configuration of the dashboard, and returns the
 // frame-ancestors source list of its content security policy.
 func checkConfig(client *taskmill.Client, cfg *Config) (ancestors string, err error) {
 	invalid := func(format string, args ...any) error {
@@ -820,7 +820,7 @@ func (s *server) deadCount(r *http.Request) taskmill.TaskCount {
 
 // notices are the messages shown after an action, by the code in the
 // redirect's "done" parameter. Only these fixed texts are shown, so a link
-// cannot make the interface display text of its choosing.
+// cannot make the dashboard display text of its choosing.
 var notices = map[string]string{
 	"retry":           "Task retried. It runs again with a fresh set of attempts.",
 	"cancel":          "Task canceled. A running task stops when its handler returns.",
@@ -929,7 +929,7 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 		s.actionFailed(w, r, err, target)
 		return
 	}
-	s.logger.LogAttrs(r.Context(), slog.LevelInfo, "web interface action",
+	s.logger.LogAttrs(r.Context(), slog.LevelInfo, "dashboard action",
 		slog.String(logKeyAction, action), slog.String(logKeyTarget, name))
 	http.Redirect(w, r, s.path(target+"?done="+notice), http.StatusSeeOther)
 }
@@ -971,7 +971,7 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	res, err := a.do(s.client, ctx, &taskmill.BulkParams{Filter: f, Cursor: r.URL.Query().Get("cursor")})
 	more := err != nil && errors.Is(context.Cause(ctx), errBudget)
 	if err == nil || more || res.Changed > 0 {
-		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "web interface action",
+		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "dashboard action",
 			slog.String(logKeyAction, name+" tasks"), slog.String(logKeyTarget, filterQuery(f).Encode()),
 			slog.Int64(logKeyTasks, res.Changed), slog.Int64(logKeySkip, res.Skipped))
 	}
@@ -1001,7 +1001,7 @@ func (s *server) refuseIfReadOnly(w http.ResponseWriter) bool {
 	if !s.readOnly {
 		return false
 	}
-	http.Error(w, "this interface is read-only", http.StatusForbidden)
+	http.Error(w, "this dashboard is read-only", http.StatusForbidden)
 	return true
 }
 
@@ -1017,11 +1017,11 @@ func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
 }
 
 // fail answers a request whose reads or action failed. A request whose
-// client went away gets no answer, and is not an error of the interface.
+// client went away gets no answer, and is not an error of the dashboard.
 func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	ctx := r.Context()
 	if errors.Is(context.Cause(ctx), errSlow) {
-		s.logger.LogAttrs(ctx, slog.LevelWarn, "web interface request timed out",
+		s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request timed out",
 			slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
 		again, label := r.URL.RequestURI(), "Try again"
 		if r.Method != http.MethodGet {
@@ -1036,7 +1036,7 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	if ctx.Err() != nil {
 		return
 	}
-	s.logger.LogAttrs(ctx, slog.LevelWarn, "web interface request failed",
+	s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request failed",
 		slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
 	s.render(w, r, http.StatusInternalServerError, "error.html", page{Title: "Something went wrong", Data: problem{
 		"The request failed; the server log has the details.", "/", "Back to the overview",
@@ -1118,7 +1118,7 @@ func acceptsGzip(r *http.Request) bool {
 }
 
 // deadline bounds every request, so that a slow database cannot hold the
-// interface's requests, and the connections they use, for long.
+// dashboard's requests, and the connections they use, for long.
 func deadline(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeoutCause(r.Context(), requestTimeout, errSlow)
@@ -1127,7 +1127,7 @@ func deadline(next http.Handler) http.Handler {
 	})
 }
 
-// path returns an absolute path inside the interface.
+// path returns an absolute path inside the dashboard.
 func (s *server) path(p string) string {
 	return s.prefix + p
 }
@@ -1252,7 +1252,7 @@ func basicAuth(next http.Handler, auth BasicAuth) http.Handler {
 	})
 }
 
-// securityHeaders sets headers that keep the interface from being framed by
+// securityHeaders sets headers that keep the dashboard from being framed by
 // pages not listed, sniffed, or made to load anything but its own assets.
 func securityHeaders(next http.Handler, ancestors string) http.Handler {
 	csp := "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'self'; " +

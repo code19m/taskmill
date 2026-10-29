@@ -140,7 +140,9 @@ The `taskmill-ui` command listens on `localhost:8080` by default: set
 set `TASKMILL_UI_USERNAME`. Its HTTP server waits up to 10 seconds for a
 request's headers, 30 seconds to write an answer, and keeps an idle
 connection for 2 minutes. At shutdown, it waits up to 10 seconds for open
-requests. The
+requests. Its `/readyz` asks the database at most once a second, and waits
+up to 2 seconds for the answer. It logs text unless you set
+`TASKMILL_UI_LOG_FORMAT=json`. The
 [command's godoc](https://pkg.go.dev/github.com/code19m/taskmill/cmd/taskmill-ui)
 lists every environment variable.
 

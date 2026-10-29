@@ -13,6 +13,13 @@ All notable changes to taskmill are recorded here. The format follows
 - The dashboard's Workers page shows the kinds that each worker has handlers
   for. A worker's row counts them; click the count to list them all, each
   with a link to its tasks.
+- `taskmill-ui` answers two paths for Kubernetes probes, with no login, at
+  the root even with `TASKMILL_UI_PREFIX`. `/readyz` fails while the
+  database does not answer, and `/livez` does not check the database, since
+  a restart does not bring it back. `/readyz` asks the database at most once
+  a second, and logs `taskmill-ui not ready` and `taskmill-ui ready again`
+  when its answer changes.
+- `TASKMILL_UI_LOG_FORMAT=json` makes `taskmill-ui` log JSON lines.
 
 ### Changed
 
@@ -30,6 +37,13 @@ All notable changes to taskmill are recorded here. The format follows
   `record check-in` instead of `record heartbeat`: if you match on it,
   change the match. The Workers page's column says "Checked in" instead of
   "Heartbeat", and a stale worker's tooltip says "No check-in for a while".
+- The dashboard's log messages say "dashboard": `web interface action` is
+  now `dashboard action`, `web interface request failed` is now
+  `dashboard request failed`, and `web interface request timed out` is now
+  `dashboard request timed out`. Update the log filters and alerts that
+  match them.
+- `taskmill-ui` logs `taskmill-ui listening` once it listens, not just
+  before, and its `addr` is the address it listens on, such as `[::]:8080`.
 
 ### Fixed
 

@@ -484,7 +484,7 @@ func number(n int) string {
 	return s
 }
 
-// actionLog records the actions that the web interface logs.
+// actionLog records the actions that the dashboard logs.
 type actionLog struct {
 	mu      sync.Mutex
 	actions []string
@@ -503,7 +503,7 @@ func (l *actionLog) Handle(_ context.Context, r slog.Record) error {
 		}
 		return true
 	})
-	if r.Message == "web interface action" {
+	if r.Message == "dashboard action" {
 		l.mu.Lock()
 		l.actions = append(l.actions, action+" "+target)
 		l.mu.Unlock()

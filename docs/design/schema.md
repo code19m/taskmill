@@ -322,7 +322,7 @@ ones, which set the largest lag, are always read.
 
 ### Listing
 
-`Client.List` and the web interface page through tasks by `id`, newest
+`Client.List` and the dashboard page through tasks by `id`, newest
 first, with keyset pagination: each page starts below the last `id` of the
 previous one. Unfinished tasks and history are read in two branches, each
 limited on its own, and merged. Each page runs with custom query plans
