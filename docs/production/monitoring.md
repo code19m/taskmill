@@ -13,7 +13,7 @@ PostgreSQL.
 | New dead tasks: the log line `attempt failed; the task is dead`, or a dead count that grew | Any | Read the task's errors, fix the cause, and retry: [Recover from an incident](../recipes/recover-from-an-incident.md) |
 | [Halted FIFO groups](../concepts/glossary.md#halted-group): `Client.Groups` with `Halted: true` | Any | [Tasks wait in `pending`](troubleshooting.md#tasks-wait-in-pending) |
 | Any Error line in taskmill's logs | Any | Each one needs a person: [Log messages](../reference/log-messages.md) |
-| The Warn line `rescued tasks whose workers lost their leases` | More often than now and then | [A task ran twice](troubleshooting.md#a-task-ran-twice) |
+| The Warn line `rescued tasks whose workers lost their leases` | When no crash, outage, or killed pod explains it | [A task ran twice](troubleshooting.md#a-task-ran-twice) |
 | Snapshot ages: the queries in [Database](database.md#keep-long-transactions-from-slowing-the-queue) | Growing for 10 minutes | End the long transaction, or drop the unused replication slot |
 | Worker pods not ready | For 5 minutes | [Kubernetes marks workers as not ready](troubleshooting.md#kubernetes-marks-workers-as-not-ready) |
 
@@ -47,9 +47,9 @@ groups:
 - **A paused queue's lag keeps growing.** Its tasks wait on purpose, but the
   lag alert fires. Silence it while you pause a queue.
 - **A "dead > 0" alert stays red for a month.** A dead task stays until
-  someone retries or deletes it. Otherwise, retention deletes it after 30
-  days by default. So alert on *new* dead tasks. The log line is the surest signal:
-  the dead count can also stop at 10,000.
+  someone retries or deletes it, or until retention deletes it after 30
+  days. So alert on *new* dead tasks. The log line is the surest signal: the
+  dead count also stops at 10,000.
 - **Tasks that wait behind their FIFO group don't count in lag.** No gauge
   shows a halted group, so check for them from code (below).
 - **Every process reports the same values** for the whole schema. Aggregate

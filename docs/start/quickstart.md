@@ -1,8 +1,9 @@
 # Quickstart
 
-In about 15 minutes, you build a tiny shop. When a customer places an order,
+In about 15 minutes, you run a tiny shop. When a customer places an order,
 the shop adds a task: "email the receipt". A worker runs the task, and you
-watch it all in the dashboard. You need Go 1.26 or newer, Docker, and `curl`.
+watch it all in the dashboard. You need Go 1.26 or newer, Git, Docker, and
+`curl`.
 
 ## Step 1. Start PostgreSQL
 
@@ -11,182 +12,101 @@ docker run --name taskmill-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d post
 ```
 
 Wait until `docker exec taskmill-pg pg_isready -h 127.0.0.1` prints
-`accepting connections`. If port 5432 is already in use, use
-`-p 5433:5432`, and port 5433 in step 4.
+`accepting connections`.
 
-## Step 2. Create the project
+## Step 2. Get the code
 
 ```sh
-mkdir shop && cd shop
-go mod init example.com/shop
-go get github.com/code19m/taskmill@latest
+git clone https://github.com/code19m/taskmill.git
+cd taskmill
 ```
 
-## Step 3. Write the code
+The shop is one short file,
+[examples/quickstart/main.go](../../examples/quickstart/main.go). The next
+step shows its key parts.
 
-Create `main.go`. Its comments say what each part does.
+## Step 3. Read the key parts
+
+A [task](../concepts/glossary.md#task) is a Go struct, saved as JSON. Its
+[kind](../concepts/glossary.md#kind) tells taskmill which handler runs it:
 
 ```go
-// Command shop is the taskmill quickstart.
-package main
-
-import (
-	"context"
-	"errors"
-	"fmt"
-	"log/slog"
-	"math/rand/v2"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/code19m/taskmill"
-	"github.com/code19m/taskmill/ui"
-)
-
-// SendReceipt is a task: a Go struct, saved as JSON, with a Kind method.
 type SendReceipt struct {
 	OrderID int64  `json:"order_id"`
 	Email   string `json:"email"`
 }
 
-// Kind names the task. It tells taskmill which handler runs it.
 func (SendReceipt) Kind() string { return "email.send_receipt" }
+```
 
-// sendReceipt is the handler: the code that runs one SendReceipt task.
-func sendReceipt(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
-	if t.Args.Email == "" {
-		// A retry cannot help, so give up now. The task becomes dead.
-		return taskmill.Permanent(errors.New("the order has no email address"))
-	}
-	if rand.IntN(3) == 0 {
-		// Pretend that the mail server failed. taskmill tries again soon.
-		slog.WarnContext(ctx, "mail server did not answer", "task_id", t.ID, "attempt", t.Attempt)
-		return errors.New("mail server did not answer")
-	}
-	slog.InfoContext(ctx, "receipt sent", "task_id", t.ID, "attempt", t.Attempt, "to", t.Args.Email)
-	return nil
-}
+A [handler](../concepts/glossary.md#handler) runs one task. It returns nil
+when the work is done, and an error to try again later. Here,
+`sendReceipt` returns the handler, so that the handler can log:
 
-func main() {
-	if err := run(); err != nil {
-		slog.Error("shop stopped", "error", err)
-		os.Exit(1)
-	}
-}
-
-func run() error {
-	// Stop on Ctrl-C, or when the system sends SIGTERM.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// 15 connections: 10 for the tasks that run at the same time, 5 for the worker.
-	cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
-	if err != nil {
-		return err
-	}
-	cfg.MaxConns = 15
-	pool, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer pool.Close()
-
-	// Create taskmill's tables, or update them. It is safe at every start.
-	if err := taskmill.Migrate(ctx, pool, nil); err != nil {
-		return err
-	}
-	_, err = pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS orders (
-		id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, email text NOT NULL)`)
-	if err != nil {
-		return err
-	}
-
-	// The client adds and manages tasks. Without a logger, taskmill logs nothing.
-	client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: slog.Default()})
-	if err != nil {
-		return err
-	}
-
-	// The worker takes tasks from the database and runs their handlers.
-	var handlers taskmill.Handlers
-	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[SendReceipt](sendReceipt), nil)
-	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers})
-	if err != nil {
-		return err
-	}
-
-	// The dashboard is an http.Handler. In a real app, put your login in front of it.
-	dashboard, err := ui.New(client, &ui.Config{Prefix: "/taskmill"})
-	if err != nil {
-		return err
-	}
-	mux := http.NewServeMux()
-	mux.Handle("/taskmill/", dashboard)
-	mux.Handle("POST /orders", placeOrder(pool, client))
-	server := &http.Server{Addr: "localhost:8080", Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("web server failed", "error", err)
-			stop()
+```go
+func sendReceipt(logger *slog.Logger) taskmill.HandlerFunc[SendReceipt] {
+	return func(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
+		if t.Args.Email == "" {
+			// A retry cannot help, so give up now: the task becomes dead.
+			return taskmill.Permanent(errors.New("the order has no email address"))
 		}
-	}()
-	slog.Info("open the dashboard at http://localhost:8080/taskmill/")
-
-	// Run the worker until Ctrl-C. Then it lets running tasks finish.
-	err = worker.Run(ctx)
-	_ = server.Shutdown(context.Background())
-	return err
-}
-
-// placeOrder saves an order and adds its receipt task in one transaction:
-// both are saved, or neither is.
-func placeOrder(pool *pgxpool.Pool, client *taskmill.Client) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		email := r.FormValue("email")
-		var res taskmill.EnqueueResult
-		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			var orderID int64
-			err := tx.QueryRow(ctx, "INSERT INTO orders (email) VALUES ($1) RETURNING id", email).Scan(&orderID)
-			if err != nil {
-				return err
-			}
-			res, err = client.EnqueueTx(ctx, taskmill.Pgx(tx), SendReceipt{OrderID: orderID, Email: email}, nil)
-			return err
-		})
-		if err != nil {
-			slog.ErrorContext(ctx, "placing the order failed", "error", err)
-			http.Error(w, "placing the order failed", http.StatusInternalServerError)
-			return
+		if rand.IntN(3) == 0 {
+			// Pretend that the mail server failed: taskmill tries again soon.
+			return errors.New("mail server did not answer")
 		}
-		fmt.Fprintf(w, "task %d: http://localhost:8080/taskmill/tasks/%d\n", res.ID, res.ID)
-	})
+		logger.LogAttrs(ctx, slog.LevelInfo, "receipt sent",
+			slog.Int64(logKeyTaskID, t.ID), slog.String(logKeyTo, t.Args.Email))
+		return nil
+	}
 }
 ```
 
+`placeOrder` saves an order and its task in one transaction. Both are
+saved, or neither is:
+
+```go
+err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+	var orderID int64
+	err := tx.QueryRow(ctx, "INSERT INTO orders (email) VALUES ($1) RETURNING id", email).Scan(&orderID)
+	if err != nil {
+		return err
+	}
+	res, err = client.EnqueueTx(ctx, taskmill.Pgx(tx), SendReceipt{OrderID: orderID, Email: email}, nil)
+	return err
+})
+```
+
+`run` puts it all together. It opens a pool of 15 connections, creates
+taskmill's tables with `Migrate`, and then starts the parts:
+
+```go
+client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logger})
+// …
+var handlers taskmill.Handlers
+taskmill.AddHandler(&handlers, sendReceipt(logger), nil)
+worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers})
+// …
+dashboard, err := ui.New(client, &ui.Config{Prefix: "/taskmill"}) // an http.Handler
+// …
+err = worker.Run(ctx) // until Ctrl-C
+```
+
 > [!TIP]
-> `placeOrder` uses `EnqueueTx`, so the order and its task commit together.
-> If saving the order fails, there is no task, and no receipt goes out. Use
+> Use `EnqueueTx` whenever a task belongs to data that you save. If saving
+> the order fails, there is no task, and no receipt goes out. Use
 > `client.Enqueue` only when you have no data to save.
 
 ## Step 4. Run it
 
 ```sh
-go mod tidy
-export DATABASE_URL='postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable'
-go run .
+go run ./examples/quickstart
 ```
 
-The log shows `worker started`, then `elected maintainer`: this worker also
-does shared work, such as retries ([maintainer](../concepts/glossary.md#maintainer)).
-If you see `connection refused` instead, PostgreSQL is not ready yet: wait,
-and run `go run .` again.
+The log shows `worker started`, then `elected maintainer`: this worker
+also does the shared work, such as retries
+([maintainer](../concepts/glossary.md#maintainer)). If you see
+`connection refused`, PostgreSQL is not ready yet: wait, and try again. To
+use another database, set `DATABASE_URL`.
 
 ## Step 5. Place orders
 
@@ -197,11 +117,12 @@ for i in $(seq 1 10); do curl -s -d "email=user$i@example.com" localhost:8080/or
 ```
 
 Each one prints a link to its task. About one attempt in three fails on
-purpose, so the log shows taskmill trying again, about a second later:
+purpose. taskmill logs each failure at Debug level, which the shop turns
+on, and runs the task again about a second later:
 
 ```text
-WARN mail server did not answer task_id=6 attempt=1
-INFO receipt sent task_id=6 attempt=2 to=user6@example.com
+time=… level=DEBUG msg="attempt failed; retrying" … task_id=7 kind=email.send_receipt attempt=1 error="mail server did not answer" … retry_in=932.733785ms
+time=… level=INFO msg="receipt sent" task_id=7 to=user7@example.com
 ```
 
 ## Step 6. Look at the dashboard
@@ -216,12 +137,13 @@ your worker, marked as the maintainer.
 Place an order without an email address:
 
 ```sh
-curl -d email= localhost:8080/orders
+curl -s -d email= localhost:8080/orders
 ```
 
 The handler returns `taskmill.Permanent`, so the task is dead right away.
-The log shows `ERROR attempt failed; the task is dead`, and the dashboard's
-menu shows **Dead 1**. Open the task: **Retry** runs it, **Delete** removes it.
+The log shows `attempt failed; the task is dead`. Within about 10 seconds,
+the dashboard's menu shows **Dead 1**. Open the task: **Retry** runs it
+again, and **Delete** removes it.
 
 ## Step 8. Stop
 
@@ -230,15 +152,18 @@ and exits. To remove the database too, run `docker rm -f taskmill-pg`.
 
 ## What you learned
 
-| You wrote | taskmill calls it |
+| In the code | taskmill calls it |
 |---|---|
 | `type SendReceipt` with `Kind()` | a [task](../concepts/glossary.md#task) and its [kind](../concepts/glossary.md#kind) |
-| `func sendReceipt(…)` | a [handler](../concepts/glossary.md#handler) |
+| the function that `sendReceipt` returns | a [handler](../concepts/glossary.md#handler) |
 | `client.EnqueueTx(…)` | an enqueue in your own transaction |
 | `return errors.New(…)` | a failed [attempt](../concepts/glossary.md#attempt), retried after a [backoff](../concepts/glossary.md#backoff) |
 | `return taskmill.Permanent(…)` | a [dead task](../concepts/glossary.md#dead-task) |
 | `cfg.MaxConns = 15` | a pool sized for the worker: its concurrency (10) plus 5 |
 | `worker.Run(ctx)`, then Ctrl-C | a [worker](../concepts/glossary.md#worker) that [drains](../concepts/glossary.md#drain), then stops |
+
+To start a project of your own, run `go get github.com/code19m/taskmill` in
+your module, and copy the parts you need from `main.go`.
 
 ## See also
 

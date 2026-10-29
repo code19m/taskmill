@@ -15,7 +15,7 @@ taskmill's promise: every task runs one or more times, until it finishes. So a t
 One run of a [handler](#handler) on a task. A task gets 25 attempts by default.
 
 ### Backoff
-The wait before a failed task runs again. It doubles after each failure, from 1 second up to 1 hour.
+The wait before a failed task runs again. By default, it doubles after each failure, from 1 second up to 1 hour.
 
 ### Batch handler
 A [handler](#handler) that gets many tasks of one [kind](#kind) in one call, for work that is cheaper in bulk.
@@ -39,7 +39,7 @@ A task that will not run again unless you retry it: it used all its attempts, re
 A key you choose, like `receipt-42`. For 24 hours after the enqueue (by default), a second task with the same key, kind, and queue is not added: you get the first task back.
 
 ### Drain
-What a worker does when it stops: it takes no new tasks, and waits for its running tasks to finish, 20 seconds by default.
+What a worker does when it stops: it takes no new tasks, and waits for its running tasks to finish, for up to 20 seconds by default.
 
 ### Enqueue
 Add a task. `Enqueue` adds it on its own; `EnqueueTx` adds it inside your own database transaction.
@@ -62,6 +62,8 @@ The first unfinished task of a [FIFO group](#fifo-group): the only task of the g
 ### Heartbeat
 The [maintainer](#maintainer)'s signal to all workers, every few seconds, that it is alive. While workers hear it, they check idle queues only rarely.
 
+The dashboard's **Heartbeat** column and the log text `record heartbeat` use the word for something else: a worker's own check-in. Every few seconds, each worker renews its [leases](#lease) and notes in the database that it is alive.
+
 ### Idempotent
 Safe to run twice: two runs have the same effect as one. Write handlers this way, because a task can run more than once.
 
@@ -75,7 +77,7 @@ The word that the API reference (godoc) uses for a [schema](#schema).
 The name of a type of task, like `email.send_receipt`. It tells taskmill which [handler](#handler) runs the task.
 
 ### Lag
-How long the oldest ready task of a [queue](#queue) has waited. It grows when workers fall behind.
+How long the oldest due task of a [queue](#queue) has waited since its run time. It grows when workers fall behind.
 
 ### Lease
 A worker's claim on a running task, for a limited time (30 seconds by default). The worker renews it while the handler runs. If the worker dies, the lease runs out, and another worker runs the task.

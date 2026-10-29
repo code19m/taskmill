@@ -1,25 +1,17 @@
 # Use your own migration tool
 
-This recipe shows how to apply taskmill's schema changes with goose, Atlas,
-or Flyway, instead of calling `Migrate` from your app.
+**Situation.** "Every schema change in our company goes through goose. Apps
+must not change the schema when they start."
 
-**Your situation:** "Every schema change in our company goes through goose.
-Apps must not change the schema when they start."
+If your apps may change their own schema, call `Migrate` at the start of
+every process instead ([Deploys](../production/deploys.md)).
 
-## Which should I use?
-
-| Your team | Use | Why |
-|---|---|---|
-| Lets each app change its own schema | `Migrate` at the start of every process ([Deploys](../production/deploys.md)) | Nothing more to deploy. This is our default |
-| Changes the schema in a step before each deploy | `Migrate` in a Job that runs your app's image ([Kubernetes](../production/kubernetes.md)) | The same code, run earlier |
-| Sends every schema change through one tool | `taskmill.Migrations`, applied by your tool (this page) | One tool and one history for all changes |
-
-## The preferred way
+## The recommended way
 
 Write taskmill's migrations as files for your tool, with a small program in
-your repository, such as `tools/taskmill-goose/main.go`. Run it after each
-taskmill upgrade, with `go run ./tools/taskmill-goose ./migrations`, and
-commit the files it writes. This one writes goose files:
+your repository, such as `tools/taskmill-goose/main.go`. After each taskmill
+upgrade, run it with `go run ./tools/taskmill-goose ./migrations`, and commit
+the files it writes. This one writes goose files:
 
 ```go
 const schema = "taskmill" // your taskmill schema
@@ -49,25 +41,7 @@ func main() {
 }
 ```
 
-Then apply the files with your tool, as you apply your own migrations.
-
-## Why
-
-- **`Migrations` returns every change, in order.** First version 0 creates the
-  schema and its `migrations` table. Each later version changes the tables.
-- **Each file records its version** in the schema's `migrations` table.
-  `NewClient` reads that table. It fails with `ErrSchemaOutdated` until the
-  schema has every version that the code needs.
-- **The program writes each migration once.** It skips the files it wrote
-  before, and gives each new file a version after your newest file. So your
-  tool applies them in order, after your own changes.
-- **Each file runs in its own transaction,** which some migrations need.
-  goose, Atlas, and Flyway all do this by default.
-
-## Use Atlas or Flyway
-
-Change two lines of the program: the file name, and the first line of each
-file.
+For Atlas or Flyway, change the file name and the first line:
 
 | Tool | File name | First line |
 |---|---|---|
@@ -75,36 +49,40 @@ file.
 | Atlas | `20261029120000_taskmill_0001_initial.sql`, then run `atlas migrate hash` | none |
 | Flyway | `V20261029120000__taskmill_0001_initial.sql` | none |
 
-## Upgrade taskmill
+Then apply the files with your tool, **before** you deploy the new taskmill
+version. Your old code keeps working on the newer schema. If you skip this
+step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
 
-1. Upgrade the Go module, run the program, and commit the new files.
-2. Apply them with your tool **before** the new version rolls out. Your old
-   code keeps working on the newer schema.
-3. Deploy the new version.
+## Why
 
-If you skip step 2, the new version's `NewClient` fails with
-`ErrSchemaOutdated`, and its processes don't start.
+- **`Migrations` returns every change, in order.** Version 0 creates the
+  schema and its `migrations` table. Each later file records its version
+  there, and `NewClient` checks it.
+- **The program writes each migration once,** and names new files after the
+  current time. So your tool applies them after the files you already have.
+- **Each file runs in its own transaction,** which some migrations need.
+  goose, Atlas, and Flyway do this by default.
 
 ## Other options
 
-| Option | Choose it when | The cost |
+| Option | When it fits | The cost |
 |---|---|---|
 | `Migrate` at the start of every process | Apps may change their own schema | None. It is safe from many processes at the same time |
+| `Migrate` in a Job before each deploy | The schema changes in a step before the rollout | One more step ([Kubernetes](../production/kubernetes.md)) |
 | Copy the SQL into your tool's files by hand | You upgrade taskmill rarely | It's easy to miss a version, or the `INSERT` that records it |
 
 ## Watch out
 
 - **Don't also call `Migrate`.** If it runs before your tool, it applies the
-  change itself, and your tool then fails on the same change: for example,
-  on a column that already exists.
-- **The role that runs workers must own taskmill's tables,** or be a member
-  of the owner role. Every day, the maintainer adds and drops a partition of
-  the history table, and PostgreSQL allows that only to the owner. So run
-  your tool as that role, or make that role the owner afterwards.
+  change itself. Your tool then fails on the same change.
+- **The role that runs workers must own taskmill's tables.** Every day, the
+  maintainer adds and drops a partition of the history table, and
+  PostgreSQL allows that only to the owner. Run your tool as that role, or
+  change the owner afterwards.
 - **A new schema has no history partitions until a worker starts.** The
-  first tasks that complete may skip history, and the worker logs `task
-  history has no partition for today` once. The maintainer creates the
-  partitions within seconds.
+  first completed tasks may skip history, with the Error log `task history
+  has no partition for today`. The maintainer creates the partitions within
+  seconds.
 
 ## See also
 

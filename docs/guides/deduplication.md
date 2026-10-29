@@ -2,7 +2,7 @@
 
 A dedupe key stops the same task from being enqueued twice. Use one when a
 client retries a request, a broker delivers a message again, or some work
-must happen only once per day.
+must happen only once a day.
 
 ## Quick example
 
@@ -18,64 +18,34 @@ if res.Duplicate {
 }
 ```
 
+A duplicate is **not** an error. `Duplicate` is true, no task is created,
+and `ID` is the task that already holds the key. So you can enqueue again
+without checking first: a retried request or a redelivered message does no
+harm.
+
 ## How it works
 
-- A [dedupe key](../concepts/glossary.md#dedupe-key) allows one task for as
-  long as its *window* lasts: 24 hours by default. Set `DedupeWindow` to
-  change it.
-- A key belongs to one queue and one kind. The same key in another queue, or
-  with another kind, is a different key.
+- A [dedupe key](../concepts/glossary.md#dedupe-key) allows one task while
+  its *window* lasts: 24 hours by default. Set `DedupeWindow` to change it.
+- A key belongs to one queue and one kind. The same key in another queue,
+  or with another kind, is a different key.
 - Name the work in the key, not the moment: `receipt-42`, a message ID, or
   `sales-report-2026-10-29`.
-- It works in every enqueue call: `Enqueue`, `EnqueueTx`, and the batch
-  calls. In one batch, a key that comes again is a duplicate of its first
-  use.
-
-A duplicate is **not** an error. You get back an `EnqueueResult`:
-
-| Field | A new task | A duplicate |
-|---|---|---|
-| `ID` | The new task's ID | The ID of the task that already holds the key |
-| `Duplicate` | `false` | `true` |
-| The error | `nil` | `nil` |
-
-So you can enqueue again without checking first. That makes a retried
-request or a redelivered message safe.
-
-## When two producers race
-
-Two producers can enqueue the same key at the same time. They still create
-one task, as the diagram shows.
-
-```mermaid
-sequenceDiagram
-    participant P1 as Producer 1
-    participant DB as PostgreSQL
-    participant P2 as Producer 2
-    P1->>DB: Enqueue with key invoice-7, the key is claimed
-    P2->>DB: Enqueue with key invoice-7
-    Note over DB,P2: Producer 2 waits for producer 1
-    alt Producer 1 commits
-        P1->>DB: COMMIT
-        DB-->>P2: Duplicate, with the ID of the task of producer 1
-    else Producer 1 rolls back
-        P1->>DB: ROLLBACK
-        DB-->>P2: A new task, producer 2 now holds the key
-    end
-```
-
-The second producer waits for the first one's transaction. So keep
-transactions that enqueue with a dedupe key short.
+- It works in every enqueue call, batches included. In one batch, a key
+  that comes again is a duplicate of its first use.
+- Two producers can enqueue the same key at the same time. The second waits
+  for the first one's transaction, so only one task is created. Keep these
+  transactions short.
 
 ## Set the window for a task that runs later
 
 The window starts when you **enqueue** the task, not at its `RunAt`.
 
 > [!WARNING]
-> For a task that runs later, the key can be free again before the task even
-> runs. Then a second enqueue creates a second task, and the work happens
-> twice. Set `DedupeWindow` to at least the delay, plus the time the task
-> may need to run and retry.
+> For a task that runs later, the key can be free again before the task
+> even runs. Then a second enqueue creates a second task, and the work
+> happens twice. Set `DedupeWindow` to at least the delay, plus the time the
+> task may need to run and retry.
 
 ```go
 _, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), RemindCustomer{OrderID: id}, &taskmill.EnqueueOptions{
@@ -89,23 +59,16 @@ _, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), RemindCustomer{OrderID: id}, &
 
 | The task that holds the key is… | The same key can be enqueued again… |
 |---|---|
-| Waiting or running | When the window ends |
-| Completed or dead | When the window ends |
-| Canceled | Right away |
-| Deleted | Right away |
-
-The window ends at the same time whatever the task's state. After that, the
-same key creates a new task, even if the first one has not run yet.
+| Waiting, running, completed, or dead | When the window ends, even if the task has not run yet |
+| Canceled or deleted | Right away |
 
 Do you want "at most one waiting task per product", such as for a cache
-refresh? taskmill has no option for that. Put a time bucket in the key, such
-as `refresh-product-7-2026-10-29T10`, with a window of one hour. Or use a
-[FIFO group](ordering.md) per product, and let the handler skip work that is
-already done.
+refresh? Put a time bucket in the key, such as
+`refresh-product-7-2026-10-29T10`, with a window of one hour.
 
 ## See also
 
-- [Consume from a broker](../recipes/consume-from-a-broker.md): a dedupe key per message, so a redelivery does no harm
+- [Consume from a broker](../recipes/consume-from-a-broker.md): a dedupe key per message
 - [Task order and FIFO groups](ordering.md): combine a dedupe key with a group
 - [`EnqueueOptions`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions) and [`EnqueueResult`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueResult) on pkg.go.dev
 

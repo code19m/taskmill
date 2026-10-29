@@ -19,7 +19,8 @@ That gives you three things:
   up. Your PostgreSQL backups and failover cover your tasks too.
 - **Everything in one module.** Retries, schedules, ordering, limits, an
   [outbox](../concepts/glossary.md#outbox), and a
-  [dashboard](../concepts/glossary.md#dashboard), with one dependency: pgx.
+  [dashboard](../concepts/glossary.md#dashboard), with one direct
+  dependency: pgx.
 
 ## Which should I use?
 
@@ -84,6 +85,7 @@ record.
 
 ## Is it stable?
 
+The API is final for v1.0.0. That release waits for more use in production.
 [Compatibility](../reference/compatibility.md) says what each release
 promises, and which Go and PostgreSQL versions we support.
 

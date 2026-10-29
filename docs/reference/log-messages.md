@@ -78,7 +78,7 @@ successes between them.
 |---|---|---|---|
 | `fetch tasks` | Takes tasks of the queue in `queue` | Every poll, and on each wake-up | The database |
 | `renew leases` | Renews the leases of running tasks | Every third of `LeaseDuration` | The database, and the pool size |
-| `record heartbeat` | Reports that the worker is alive | Every third of `LeaseDuration` | The database |
+| `record heartbeat` | Notes in the database that the worker is alive: its own check-in, not the maintainer's [heartbeat](../concepts/glossary.md#heartbeat) | Every third of `LeaseDuration` | The database |
 | `record results` | Saves the results of finished attempts | After each attempt | The database |
 | `load queue settings` | Reads pauses and limits of the queues | Every 10 seconds | The database |
 | `record activity` | Writes the counts for the charts | Every 10 seconds | The database |
@@ -114,7 +114,7 @@ backticks.
 |---|---|---|---|
 | `worker started` | Info | `Run` started, and serves `queues`. | Nothing. |
 | `the worker does not serve the default queue of these registered kinds` | Warn | The worker has handlers for `kinds`, but does not read their default queues. Their tasks wait for another worker. | Add the queues to `WorkerConfig.Queues`, or run a worker that reads them. |
-| `the pool has fewer connections than the worker's concurrency plus 5; handlers that use the same pool can starve the worker's heartbeats` | Warn | The pool's `max_conns` is below the worker's total `concurrency` plus 5. Handlers can take every connection, so leases are not renewed, and tasks run twice. | Raise the pool's `MaxConns`, for example with `pool_max_conns` in the URL. See [Database](../production/database.md). |
+| `the pool has fewer connections than the worker's concurrency plus 5; handlers that use the same pool can starve the worker's heartbeats` | Warn | The pool's `max_conns` is below the worker's total `concurrency` plus 5. Handlers can take every connection. Then the worker cannot renew its leases (the message calls them its heartbeats), and tasks run twice. | Raise the pool's `MaxConns`, for example with `pool_max_conns` in the URL. See [Database](../production/database.md). |
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended. It waits up to `timeout` for `tasks` running tasks. | Nothing. |
 | `handler ignored shutdown; releasing its task` | Warn | A handler did not return within 5 seconds after its context was canceled. Its task goes back to the queue and runs again. The handler may still be running. | Make the handler return when its context ends. |
 | `worker stopped` | Info | `Run` returned. `released` tasks went back to their queues. | Nothing. |

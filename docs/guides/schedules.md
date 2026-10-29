@@ -1,19 +1,16 @@
 # Run tasks on a schedule
 
-A schedule enqueues a task on a cron timetable, such as every night at 03:00.
-This page shows how to define one, and how time zones work. It also shows
-how to keep runs from overlapping, and what happens when no worker runs.
+A schedule enqueues a task on a cron timetable, such as every night at
+03:00. This page shows how to define one, how time zones work, and how to
+keep runs from overlapping.
 
 ## Which should I use?
 
-| Situation | Use | Why |
+| Situation | What to use | Why |
 |---|---|---|
-| A fixed timetable that you know when you deploy: a nightly report, an hourly cleanup | A `Schedule` | It runs once per time across all workers, survives restarts, and handles time zones. |
-| A time that depends on your data: a reminder 2 days after each order | A task with `RunAt`, and a [dedupe key](deduplication.md#set-the-window-for-a-task-that-runs-later) | Delayed tasks are rows: millions can wait cheaply. |
-| A repeating interval per customer, or more often than once a minute | A task that enqueues its own next run with `RunAt` | Schedules are the same for everyone, and run at most once a minute. |
-
-Use a schedule for the timetable of your app. Use delayed tasks for
-timetables that come from your data.
+| A fixed timetable that you know when you deploy: a nightly report, an hourly cleanup | A `Schedule` | It runs once per time across all workers, survives restarts, and handles time zones |
+| A time that depends on your data: a reminder 2 days after each order | A task with `RunAt`, and a [dedupe key](deduplication.md#set-the-window-for-a-task-that-runs-later) | Delayed tasks are rows: millions can wait cheaply |
+| A repeating interval per customer, or more often than once a minute | A task that enqueues its own next run with `RunAt` | Schedules are the same for everyone, and run at most once a minute |
 
 ## Quick example
 
@@ -34,70 +31,49 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 ```
 
 A scheduled run is an ordinary task of its kind, so it needs a handler like
-any other. Its `RunAt` is the time it was scheduled for. Use it to know which
-day or hour the run is for:
-
-```go
-func (b *ReportBuilder) Handle(ctx context.Context, t *taskmill.Task[BuildReport]) error {
-    day := t.RunAt.In(b.berlin).AddDate(0, 0, -1) // the report covers the day before the run
-    return b.build(ctx, day)
-}
-```
+any other. Its `RunAt` is the time it was scheduled for. In the handler,
+use `t.RunAt`, not the clock, to know which day or hour the run is for.
 
 ## Write the timetable
 
 `Cron` takes a standard five-field expression: minute, hour, day of month,
-month, and day of week. For example, `0 3 * * *` is every day at 03:00, and
-`*/15 * * * 1-5` is every 15 minutes on weekdays. It also takes the macros
-`@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`, `@midnight`, and
-`@hourly`. There are no seconds and no `@every`.
+month, and day of week. For example, `*/15 * * * 1-5` is every 15 minutes on
+weekdays. It also takes the macros `@yearly`, `@annually`, `@monthly`,
+`@weekly`, `@daily`, `@midnight`, and `@hourly`. There are no seconds, and
+no `@every`.
 
-`NewWorker` checks every schedule. It returns an error for an expression
-that never matches, and for `Options` that set `RunAt`, `DedupeKey`, or
-`DedupeWindow`: the schedule sets those itself.
+`NewWorker` returns an error for an expression that never matches, and for
+`Options` that set `RunAt`, `DedupeKey`, or `DedupeWindow`: the schedule
+sets those itself.
 
-## Time zones and daylight saving time
-
-The expression is read on the wall clock of `Location`, as classic cron does.
-
-| Situation | What happens |
-|---|---|
-| You set no `Location` | The time is UTC. |
-| Clocks go forward and skip the run time | The run happens right after the jump. |
-| Clocks go back and repeat the run time | The run happens once. |
+The expression is read on the wall clock of `Location`, as classic cron
+does. Without a `Location`, the time is UTC. When clocks go forward and skip
+the run time, the run happens right after the jump. When clocks go back and
+repeat it, the run happens once.
 
 ## How a run happens
 
-Only the [maintainer](../concepts/glossary.md#maintainer), one worker that
-taskmill picks, enqueues scheduled runs. It checks every second. Each run
-time is enqueued once, even when you run many workers. Then a worker runs
-the task like any other.
-
-The maintainer runs only the schedules that **it** defines. Any worker can
-become the maintainer, unless it sets `NoMaintainer`.
+Only the [maintainer](../concepts/glossary.md#maintainer) enqueues
+scheduled runs, so each run time is enqueued only once, even with many
+workers. Then a worker runs the task like any other.
 
 > [!WARNING]
-> Give every worker the same `Schedules` list, or set `NoMaintainer` on the
-> workers without it. If a worker without your schedules becomes the
-> maintainer, they stop running, and nothing tells you.
+> The maintainer runs only the schedules that **it** defines. Give every
+> worker the same `Schedules` list, or set `NoMaintainer` on the workers
+> without it. Otherwise your schedules stop while such a worker leads, and
+> nothing tells you.
 
-## What if no worker runs at that time?
-
-Then the run waits. When a maintainer that defines the schedule starts
-again, it enqueues **one** run for all the times it missed, not one per
-missed time. That run's `RunAt` is the first time it missed. A paused
-schedule works the same way: when you resume it, the runs it missed become
-one run.
+If no maintainer runs at the run time, the run waits. When a maintainer
+that defines the schedule starts again, it enqueues **one** run for all the
+times it missed. That run's `RunAt` is the first time it missed. A paused
+schedule works the same way when you resume it.
 
 ## Keep runs from overlapping
 
-Each run time enqueues its own task, whatever the last run is doing. So a
-slow run, or one that retries for hours, can still run when the next one
-starts.
-
-First, make the handler safe to overlap: work out its period from `t.RunAt`,
-not from the clock. For frequent schedules, also lower `MaxAttempts`, so a
-failing run gives up before the next ones pile up.
+Each run time enqueues its own task, whatever the last run is doing. A slow
+run, or one that retries for hours, can still run when the next one starts.
+Make the handler safe to overlap: each run works on the period of its own
+`t.RunAt`. For frequent schedules, also lower `MaxAttempts`.
 
 If two runs must **never** run at the same time, give the schedule a
 `GroupKey`. Its runs then form a [FIFO group](ordering.md), and run one
@@ -112,7 +88,7 @@ after the other:
 
 > [!WARNING]
 > With a `GroupKey`, a run that becomes dead stops all the runs after it,
-> until you retry or delete the dead run. See
+> until you retry or delete it. See
 > [Fix a halted group](ordering.md#fix-a-halted-group), and alert on halted
 > groups.
 
@@ -120,18 +96,15 @@ after the other:
 
 | You want to… | Do this |
 |---|---|
-| See every schedule, with its next and last run | `client.Schedules(ctx)`, or the dashboard's **Schedules** page |
-| Stop a schedule for a while | `client.PauseSchedule(ctx, name)`, then `ResumeSchedule` |
-| Run it once now, such as after a fix | `client.RunSchedule(ctx, name)`. The run comes within about a second. The regular timetable doesn't change. Resume a paused schedule first. |
-| Change its time, time zone, or task | Change the definition and deploy. The next run follows the new definition. |
-| Remove it | Remove it from the code. taskmill deletes it from the database after a day without a run or a change. |
-
-The name identifies a schedule. Renaming one creates a new schedule, and
-the old one is removed as above.
+| See every schedule, with its next and last run | `client.Schedules`, or the dashboard's **Schedules** page |
+| Stop a schedule for a while | `client.PauseSchedule`, then `ResumeSchedule` |
+| Run it once now, such as after a fix | `client.RunSchedule`. The run comes within about a second, and the timetable doesn't change. It fails for a paused schedule |
+| Change its time, time zone, or task | Change the definition and deploy |
+| Remove it, or rename it | Change the code. The old schedule no longer runs. A maintainer that defines other schedules deletes it from the database after a day |
 
 ## See also
 
-- [Workers and queues](workers-and-queues.md): the maintainer, and `NoMaintainer`
+- [Workers and queues](workers-and-queues.md#which-worker-does-the-shared-work): the maintainer, and `NoMaintainer`
 - [Autoscaling](../production/autoscaling.md): keep schedules running when workers scale to zero
 - [`Schedule`](https://pkg.go.dev/github.com/code19m/taskmill#Schedule) on pkg.go.dev
 

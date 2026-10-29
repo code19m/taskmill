@@ -19,25 +19,13 @@ flowchart TD
     F -->|the wait is over| A
 ```
 
-- After a failed attempt, the task is `retryable`. It waits, then runs
-  again.
-- The wait, or [backoff](../concepts/glossary.md#backoff), doubles after each
-  failure: 1 second, 2, 4, and so on, up to 1 hour. A small random change
-  of ±10% spreads the retries, so failed tasks don't all come back at the
-  same moment.
-- After the last attempt, 25 by default, the task becomes dead.
-- The [maintainer](../concepts/glossary.md#maintainer) moves waiting tasks back into
-  their queue when their time comes. Without a maintainer, retries wait.
-
-## How long does a failing task wait?
-
-With the defaults:
+The wait, or [backoff](../concepts/glossary.md#backoff), doubles after each
+failure. A random change of ±10% spreads the retries out, so failed tasks
+don't all come back at the same moment. With the defaults:
 
 | After failed attempt | Wait before the next attempt |
 |---|---|
-| 1 | 1 second |
-| 2 | 2 seconds |
-| 3 | 4 seconds |
+| 1, 2, 3 | 1, 2, and 4 seconds |
 | 4, 5, 6 | 8, 16, and 32 seconds |
 | 7, 8, 9 | About 1, 2, and 4 minutes |
 | 10, 11, 12 | About 9, 17, and 34 minutes |
@@ -45,18 +33,18 @@ With the defaults:
 | 25 | None: the task is dead |
 | **In total** | **About 13 hours** |
 
-Each wait varies by ±10%, and a retry can start up to about a second late.
+The [maintainer](../concepts/glossary.md#maintainer) puts each task back in
+its queue when the wait is over, up to about a second late.
 
 ## Which should I use?
 
-| Situation | Use | Why |
+| Situation | What to use | Why |
 |---|---|---|
-| The work must happen in the end: a receipt, a sync with a partner | The defaults: 25 attempts over about 13 hours | The task outlasts an outage of several hours |
+| The work must happen, even if late: a receipt, a sync with a partner | The defaults | The task keeps trying through an outage of several hours |
 | Late work is useless: a login code, a "your order shipped" email | A lower `MaxAttempts` for the kind, such as 3 or 5 | The task stops trying after seconds |
 | The work must never run again after a failure | `MaxAttempts: 1` | One try, then dead |
-| A retry can't help: bad input | `return taskmill.Permanent(err)` | Dead right away; no attempts wasted |
+| A retry can't help: bad input | `return taskmill.Permanent(err)` | Dead right away, with no attempts wasted |
 | What you call recovers on a known time scale | `ExponentialBackoff` with your own `Base` and `Max` | Retries match the recovery time |
-| A fixed wait, or a timetable of your own | Your own `RetryPolicy` | Full control |
 
 Most kinds need only the defaults.
 
@@ -70,11 +58,9 @@ func (SendLoginCode) EnqueueDefaults() taskmill.EnqueueOptions {
 }
 ```
 
-- `MaxAttempts` is saved with each task when it is enqueued. Set on the
-  kind, it is the same for every producer. One enqueue call can still
-  change it.
-- It can be 1 to 10,000.
-- When someone retries a dead task, it gets all its attempts again.
+`MaxAttempts` is saved with each task when it is enqueued, from 1 to 10,000.
+One enqueue call can still change it. A dead task that someone retries gets
+all its attempts again.
 
 ## Change the wait between retries
 
@@ -86,34 +72,26 @@ taskmill.AddHandler(&handlers, &PartnerSync{}, &taskmill.HandlerOptions{
 })
 ```
 
-For a wait of your own, implement `RetryPolicy`. `Backoff` gets the number
-of the attempt that failed, from 1:
-
-```go
-// EveryFiveMinutes waits 5 minutes before every retry.
-type EveryFiveMinutes struct{}
-
-func (EveryFiveMinutes) Backoff(attempt int) time.Duration { return 5 * time.Minute }
-```
+For a fixed wait, or a timetable of your own, implement
+[`RetryPolicy`](https://pkg.go.dev/github.com/code19m/taskmill#RetryPolicy).
+Its `Backoff` method gets the number of the attempt that failed, from 1.
 
 > [!NOTE]
-> If a task's worker crashes or loses its lease, the task always waits by
-> the default backoff, not by your policy. The maintainer retries such a
-> task, and the maintainer doesn't know your handler's options.
+> If a task's worker crashes or loses its lease, the task waits by the
+> default backoff, not by your policy. The maintainer retries such a task,
+> and it doesn't know your handler's options.
 
 ## What is a dead task?
 
-A [dead task](../concepts/glossary.md#dead-task) failed for good: its attempts ran
-out, its handler returned `Permanent`, or its payload does not decode.
-taskmill does not run it again unless someone retries it. Dead tasks are
-your dead-letter queue.
+A [dead task](../concepts/glossary.md#dead-task) failed for good: its
+attempts ran out, its handler returned `Permanent`, or its payload does not
+decode. It doesn't run again unless someone retries it. Dead tasks are your
+dead-letter queue.
 
+- taskmill logs `attempt failed; the task is dead` at the Error level.
 - A dead task is kept for 30 days by default, then deleted.
-- In a FIFO group, a dead task stops the tasks behind it until you retry
-  or delete it, and it is kept until then. See
-  [Task order and FIFO groups](ordering.md).
-- When a task becomes dead, taskmill logs
-  `attempt failed; the task is dead` at the Error level.
+- In a FIFO group, a dead task stops the tasks behind it, and is kept until
+  you retry or delete it. See [Task order and FIFO groups](ordering.md).
 
 What to do with a dead task:
 
@@ -133,25 +111,16 @@ For many dead tasks, follow
 ## Where do I see a task's errors?
 
 Open the task in the dashboard, or read it with `client.Get`.
-`TaskInfo.Errors` holds the 20 most recent entries, oldest first. Each
-entry has:
-
-- `Attempt` and `At`: which attempt failed, and when;
-- `Message`: the error's text, up to 4 KiB;
-- `Code`: empty for an error that your handler returned in time.
-  Otherwise it says what happened, such as `timeout`, `panic`, or
-  `lease_lost`.
-
-[Errors](../reference/errors.md) lists every code and what to do about it.
+`TaskInfo.Errors` holds the 20 most recent entries, oldest first. Each has
+the `Attempt`, the time (`At`), the error's `Message`, and a `Code`. The
+code is empty for an error that your handler returned in time. Otherwise it says
+what happened, such as `timeout`, `panic`, or `lease_lost`:
+[Errors](../reference/errors.md) lists every code.
 
 ## See also
 
-- [Handle tasks](handle-tasks.md): what a handler returns, and what each
-  result does
-- [Recover from an incident](../recipes/recover-from-an-incident.md): retry
-  thousands of dead tasks safely
-- [`RetryPolicy`](https://pkg.go.dev/github.com/code19m/taskmill#RetryPolicy)
-  and [`ExponentialBackoff`](https://pkg.go.dev/github.com/code19m/taskmill#ExponentialBackoff)
-  on pkg.go.dev
+- [Handle tasks](handle-tasks.md): what a handler returns, and what each result does
+- [Recover from an incident](../recipes/recover-from-an-incident.md): retry thousands of dead tasks safely
+- [`RetryPolicy`](https://pkg.go.dev/github.com/code19m/taskmill#RetryPolicy) and [`ExponentialBackoff`](https://pkg.go.dev/github.com/code19m/taskmill#ExponentialBackoff) on pkg.go.dev
 
 **Next:** [Handle tasks in batches](batch-handlers.md)

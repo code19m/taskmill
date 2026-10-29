@@ -14,8 +14,8 @@ run one less system, and each task commits or rolls back with your data.
   with pgx or `database/sql`. If the transaction rolls back, the task never
   existed.
 - **Never loses a task.** Every task runs at least once. When a worker
-  crashes, another worker runs its tasks. A task that keeps failing waits
-  for you as a dead task.
+  crashes, another worker runs its tasks. A task that keeps failing is kept
+  as a dead task, so that you can fix the cause and retry it.
 - **In order when you need it.** Tasks with the same key, such as one
   customer's, run one at a time, in order.
 - **Outbox included.** Publish events to Kafka, NATS, or RabbitMQ only if
@@ -26,8 +26,8 @@ run one less system, and each task commits or rolls back with your data.
 Also: delays, priorities, cron schedules, deduplication, limits across all
 workers, batch handlers, logs through `log/slog`, and OpenTelemetry. One
 worker runs about 30,000 tasks per second on a laptop
-([performance](docs/reference/performance.md)), and the only dependency is
-pgx.
+([performance](docs/reference/performance.md)), and the only direct
+dependency is pgx.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
@@ -76,7 +76,7 @@ func runWorker(ctx context.Context, client *taskmill.Client) error {
 }
 ```
 
-The [quickstart](docs/start/quickstart.md) turns this into a complete
+The [quickstart](docs/start/quickstart.md) runs this as a complete
 program, with the dashboard, in about 15 minutes.
 
 ## Install
@@ -106,9 +106,9 @@ You need Go 1.26 or newer, and PostgreSQL 15 or newer.
 
 ## Status
 
-The API is ready for v1.0.0, which waits for more use in production.
-[Compatibility](docs/reference/compatibility.md) says what each release
-promises.
+The API is final for v1.0.0, which is not tagged yet: it waits for more use
+in production. [Compatibility](docs/reference/compatibility.md) says what
+each release promises.
 
 ## Contributing
 

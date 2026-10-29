@@ -45,9 +45,16 @@ hair" → "just". Split a sentence with "whose" and two "that" clauses in two.
 | dashboard | "web interface", "web UI" | The package is `ui`; the command is `taskmill-ui`. |
 | task | "job" | Unless you compare taskmill with other tools. |
 | maintainer | | Only the worker chosen to do upkeep: wake queues, promote due tasks, take back the tasks of lost leases, and run schedules. For the people who run the project, write "the project team", and only in contributor docs. |
-| heartbeat | | Only the maintainer's signal to the workers, every few seconds. A worker keeping its tasks "renews its lease". |
-| schema | "installation" | One taskmill schema, with its own tasks, queues, and workers (`taskmill` by default). |
+| heartbeat | | Only the maintainer's signal to the workers, every few seconds. A worker keeping its tasks "renews its lease"; a worker updating its own row "reaches the database". |
+| schema | "installation" | One taskmill schema, with its own tasks, queues, and workers (`taskmill` by default). Godoc says "installation". |
 | "immediately", "right away", "in one go" | "at once" | "At once" can also mean "at the same time". |
+
+Text that the code prints, such as a log message, an error, or a label in
+the dashboard, stays exactly as the code writes it, even when it breaks this
+table. Explain it in plain words where you quote it. For example, the
+operation `record heartbeat` in the logs and the dashboard's "Heartbeat"
+column are about a worker's own row, not the maintainer's heartbeat; and
+the log message `web interface action` is about the dashboard.
 
 **5. Define a term where you first use it,** in a few words, and link it to
 the [glossary](../concepts/glossary.md) the first time on each page. Define
@@ -132,8 +139,13 @@ status lives in one place: [Compatibility](../reference/compatibility.md).
   its heading is unlikely to change. `go test ./internal/docs/` fails on a
   broken link or a missing anchor.
 - **End:** `## See also` with 2 to 4 links (related pages and pkg.go.dev),
-  then `**Next:** [Page title](page.md)`, which follows the order in the
-  section's `README.md`, or the learning path on its pages.
+  then, as the last line, `**Next:** [Page title](page.md)`:
+  - Within a section, follow the order of the section's `README.md`.
+  - On the learning path, follow the path instead.
+  - The last page of a section points to the next section's `README.md`.
+    The last page of the last section, and of `design/`, points to the
+    [documentation home](../README.md).
+  - A section's `README.md` needs no See also. Its Next is its first page.
 
 ## Where content lives
 
@@ -152,31 +164,33 @@ never copy godoc, and godoc links to pages, never to anchors, which move.
 
 ## Templates
 
-A guide page; leave out "Which should I use?" when there is no choice:
+A guide page. "Quick example" and "Which should I use?" come first, in
+either order; leave out the table when there is no choice:
 
 ```markdown
 # <Feature, in plain words>
 <One or two sentences: what this helps you do, and when you need it.>
-## Which should I use?
-| Situation | What to use | Why |
 ## Quick example
 <The smallest code that works, in a go block. Mark omitted parts with // ...>
-## How it works
-<3 to 6 short bullets, or a diagram with one sentence above it.>
-## Options
-<A table of the options that matter. Link godoc for the rest.>
+## Which should I use?
+| Situation | What to use | Why |
+## <A task or question, such as: Run a task later>
+<Short paragraphs, a table, or a diagram with one sentence above it.>
 ## See also
 <2 to 4 links: related pages, and the identifiers on pkg.go.dev.>
 **Next:** [<Next page>](<next-page>.md)
 ```
 
-A recipe page:
+A recipe page. Add "Which should I use?" after the situation when there is
+a choice:
 
 ```markdown
-# <The situation, as the reader would say it>
-**Situation.** <2 or 3 sentences.>
+# <The situation, in plain words>
+**Situation.** "<2 or 3 sentences, as the reader would say them.>"
 ## The recommended way
-<Code first, then 2 or 3 sentences on why.>
+<Code first, then the steps.>
+## Why
+<2 to 4 sentences, or a short list.>
 ## Other options
 | Option | When it fits | The cost |
 ## Watch out
@@ -186,13 +200,20 @@ A recipe page:
 **Next:** [<Next page>](<next-page>.md)
 ```
 
-A troubleshooting entry, and a section's `README.md`:
+A troubleshooting entry starts with what the reader sees. With several
+causes, use a table, most likely cause first. With one cause, use the
+bullets **Cause:**, **Check:**, and **Do:** instead of the table:
 
 ```markdown
 ### <The symptom, such as: Tasks wait in `pending`>
-**Cause.** <One or two sentences.> **Fix.** <The steps, in order.>
-More: [<Page>](<page>.md)
+**You see:** <the metric, log line, or page that shows it.>
+
+| Likely cause | Check | Do |
+|---|---|---|
+| <The most likely cause> | <Where to look> | <The fix, with a link> |
 ```
+
+A section's `README.md`:
 
 ```markdown
 # <Section name>

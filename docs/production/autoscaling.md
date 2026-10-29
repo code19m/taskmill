@@ -135,8 +135,7 @@ Then give the `ScaledObject` this trigger:
   nothing. Many small workers on one queue waste the database's CPU.
 - `Concurrency` sets how many tasks a worker runs at the same time. The pool
   follows it: `Concurrency` plus 5.
-- A worker itself needs little memory: about 20 MiB, plus a few KiB per
-  running task. Your handlers need the rest.
+- For memory, see [Run workers in their own Deployment](kubernetes.md#run-workers-in-their-own-deployment).
 
 ## See also
 

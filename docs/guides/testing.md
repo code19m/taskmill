@@ -5,11 +5,11 @@ that your handlers do the right work, retries included.
 
 ## Which should I use?
 
-| Situation | Use | Why |
+| Situation | What to use | Why |
 |---|---|---|
-| Code that enqueues or handles tasks | The `taskmilltest` package, with a real PostgreSQL | It shows what production does: a rolled-back transaction enqueues nothing, and a group keeps its order. A mock can't show that. |
-| Business logic that a handler calls | A plain unit test of that logic, without taskmill | It is fast and needs no database. |
-| A test suite that truly has no database | A small interface of your own around the `Client` | `Client` is a struct, so you write the interface yourself. |
+| Code that enqueues or handles tasks | The `taskmilltest` package, with a real PostgreSQL | It behaves as production does: a rolled-back transaction enqueues nothing, and a group keeps its order. A mock can't show that |
+| Business logic that a handler calls | A plain unit test of that logic, without taskmill | It is fast and needs no database |
+| A test suite that truly has no database | A small interface of your own around the `Client` | `Client` is a struct, so you write the interface yourself |
 
 Use `taskmilltest`. Each test gets its own schema, so tests can run in
 parallel, and leave nothing behind.
@@ -66,47 +66,29 @@ func testPool(t *testing.T) *pgxpool.Pool {
 
 | You want to test that… | Use | Good to know |
 |---|---|---|
-| Your code enqueued the right task, or none after a rollback | `taskmilltest.Enqueued` | It returns the committed tasks of one kind, oldest first, with their payloads decoded. |
-| Your handler does the right work, once | `taskmilltest.Run` | It holds a real lease, so `CompleteTx` works. It doesn't retry: a failed task stays `retryable` or `dead`. |
-| A task with special options works, or a task succeeds after it failed | `Worker.RunTask` | It runs the task right away, without waiting for a backoff. Call it in a loop to test retries. |
-| Everything your code enqueued gets done | `taskmilltest.Work(t, client, cfg)` | It stops when no task is available or running. Tasks that wait for later, such as retries, stay waiting. |
-| Several workers work together, with real timing | `Worker.Run`, started by your test | Set a short `PollInterval`. |
+| Your code enqueued the right task, or none after a rollback | `taskmilltest.Enqueued` | It returns the committed tasks of one kind, with their payloads decoded |
+| Your handler does the right work, once | `taskmilltest.Run` | It holds a real lease, so `CompleteTx` works. It doesn't retry: a failed task stays `retryable` or `dead` |
+| A task succeeds after it failed, or a task with special options works | `Worker.RunTask` | It runs the task right away, without waiting for its backoff |
+| Everything your code enqueued gets done | `taskmilltest.Work` | It stops when no task is available or running. Tasks that wait for later, such as retries, stay waiting |
+| Several workers work together, with real timing | `Worker.Run`, started by your test | Set a short `PollInterval` |
 
 `Work` fails the test if tasks are still there after a minute, for example
-in a queue that its worker doesn't read.
-
-## Test that a rollback enqueues nothing
-
-This is the test a mock can't give you:
-
-```go
-tx, err := pool.Begin(t.Context())
-if err != nil {
-    t.Fatal(err)
-}
-if err := placeOrder(t.Context(), client, tx, 42); err != nil {
-    t.Fatal(err)
-}
-if err := tx.Rollback(t.Context()); err != nil {
-    t.Fatal(err)
-}
-if tasks := taskmilltest.Enqueued[SendReceipt](t, client); len(tasks) != 0 {
-    t.Fatalf("a rolled-back order enqueued %d receipts", len(tasks))
-}
-```
+in a queue that its worker doesn't read. To test that a rollback enqueues
+nothing, roll back instead of commit, and check that `Enqueued` returns no
+task.
 
 ## Test retries
 
-To test that a handler succeeds after it failed, enqueue a task, and call
-`Worker.RunTask` in a loop. `RunTask` runs the task right away, without
-waiting for its backoff:
+Enqueue a task, and call `Worker.RunTask` in a loop. `RunTask` needs no
+running worker, and runs the task right away, without waiting for its
+backoff:
 
 ```go
 var handlers taskmill.Handlers
 taskmill.AddHandler(&handlers, &ReceiptSender{mailer: &flakyMailer{failures: 2}}, nil) // fails twice, then works
 worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers})
 // ...
-res, err := client.Enqueue(t.Context(), SendReceipt{OrderID: 42, Email: "ann@example.com"}, nil)
+res, err := client.Enqueue(t.Context(), SendReceipt{OrderID: 42}, nil)
 // ...
 info := &taskmill.TaskInfo{}
 for i := 0; i < 5 && !info.State.Finished(); i++ {
@@ -118,9 +100,6 @@ if info.State != taskmill.StateCompleted || info.Attempt != 3 {
     t.Fatalf("got %s after %d attempts", info.State, info.Attempt)
 }
 ```
-
-`RunTask` needs no running worker. It ignores the task's run time, paused
-queues, and limits, but it keeps the order of a FIFO group.
 
 ## Test code that uses `database/sql`
 

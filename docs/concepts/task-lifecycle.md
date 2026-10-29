@@ -93,23 +93,17 @@ taskmill cancels its handler's context, and `context.Cause(ctx)` returns
 | anything but nil, such as the context's error | `canceled` |
 | nil, because it finished the work first | `completed`, because the work was done |
 
-> [!NOTE]
-> A [batch handler](glossary.md#batch-handler) cannot see a cancel request
-> for one of its tasks: the batch's context is not canceled. That task gets
-> the result that the batch returns for it: `completed` if the batch returns
-> nil for it, and `canceled` if it returns an error.
+A [batch handler](glossary.md#batch-handler) does not see the request. The
+batch's result for that task decides: nil completes it, and an error
+cancels it ([Handle tasks in batches](../guides/batch-handlers.md)).
 
 ## How long finished tasks are kept
 
-taskmill deletes finished tasks after a while. This is its
-[retention](glossary.md#retention):
-
-- completed tasks after 7 days;
-- dead and canceled tasks after 30 days, so you have time to look at them.
-
-A dead task that halts its FIFO group stays until you retry or delete it.
-You can change both times with `Client.UpdateSettings`
-([Defaults and limits](../reference/defaults-and-limits.md)).
+By default, taskmill deletes completed tasks after 7 days, and dead and
+canceled tasks after 30 days, so you have time to look at them. A dead task
+that halts its FIFO group stays until you retry or delete it. To change this
+[retention](glossary.md#retention), see
+[Manage tasks from code](../guides/operations-api.md).
 
 ## See also
 

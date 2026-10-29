@@ -43,53 +43,36 @@ sequenceDiagram
     end
 ```
 
-- Workers can't see the task before your transaction commits.
-- The message that wakes the workers is sent at commit, too.
-- So a rolled-back order never gets a receipt.
+Workers can't see the task before your transaction commits, and the
+message that wakes them is sent at commit, too.
 
 ## Which should I use?
 
-Keep the database library your app already uses. Wrap its transaction like
-this:
+Keep the database library your app already uses, and wrap its transaction:
 
 | Your code uses | Pass | Why |
 |---|---|---|
 | pgx | `taskmill.Pgx(tx)` | taskmill is built on pgx |
-| `database/sql` with pgx's driver, `github.com/jackc/pgx/v5/stdlib` | `taskmill.SQL(tx)` | Works with any `*sql.Tx` on that driver |
+| `database/sql` with pgx's driver, `github.com/jackc/pgx/v5/stdlib` | `taskmill.SQL(tx)` | Any `*sql.Tx` on that driver works |
 | sqlx | `taskmill.SQL(tx)` | A `*sqlx.Tx` works as it is |
 | bun | `taskmill.SQL(tx.Tx)` | Pass the `*sql.Tx` inside: bun rewrites query placeholders itself |
 | lib/pq | Not supported | Switch to pgx's `database/sql` driver |
 
-With `database/sql`, the quick example's enqueue becomes:
-
-```go
-_, err := client.EnqueueTx(ctx, taskmill.SQL(tx), SendReceipt{OrderID: orderID}, nil)
-```
-
 [`ExampleSQL`](https://pkg.go.dev/github.com/code19m/taskmill#example-SQL)
-shows it with the whole transaction.
+shows a whole `database/sql` transaction. taskmill itself still needs a pgx
+pool ([Setup](setup.md#size-the-pool)). Open your `*sql.DB` on that same
+pool with `stdlib.OpenDBFromPool(pool)`, and one pool serves both.
 
-taskmill itself always needs a pgx pool for `Migrate`, `NewClient`, and its
-workers ([Setup](setup.md#size-the-pool)). A `database/sql` app can open its
-`*sql.DB` on that same pool with `stdlib.OpenDBFromPool(pool)`. Then one
-pool works for both.
-
-## Which calls need a transaction?
-
-| Call | Accepts |
-|---|---|
-| `EnqueueTx`, `EnqueueManyTx` | A transaction, a connection, or a pool |
-| `CancelTx`, `Task.CompleteTx` | A transaction only, because they run several statements that must commit together. Anything else fails with `ErrInvalidArgument` |
-
-A transaction is a `pgx.Tx`, a `*sql.Tx`, or a type with `Commit` and
-`Rollback` methods, such as `*sqlx.Tx`.
+The enqueue calls also accept a connection or a pool. `CancelTx` and
+`Task.CompleteTx` need a transaction, because they run several statements
+that must commit together. Anything else fails with `ErrInvalidArgument`.
 
 ## Complete a task in the same transaction
 
-Sometimes a handler's work is in the same database as taskmill. Then the
-handler can finish its task inside its own transaction. The work and the
-completion commit together, so the work happens exactly once, even if the
-task runs twice.
+When a handler's work is in the same database as taskmill, the handler can
+finish its task inside its own transaction. The work and the completion
+commit together, so the work happens exactly once, even if the task runs
+twice.
 
 ```go
 func (a *PaymentApplier) Handle(ctx context.Context, t *taskmill.Task[ApplyPayment]) error {
@@ -105,30 +88,13 @@ func (a *PaymentApplier) Handle(ctx context.Context, t *taskmill.Task[ApplyPayme
 ```
 
 `CompleteTx` checks that this attempt still holds the task's
-[lease](../concepts/glossary.md#lease):
-
-```mermaid
-sequenceDiagram
-    participant H as Your handler
-    participant DB as PostgreSQL
-    H->>DB: BEGIN
-    H->>DB: Add 100 to the balance
-    H->>DB: CompleteTx checks the lease
-    alt The attempt still holds the lease
-        H->>DB: COMMIT saves the update and the completion together
-    else Another attempt took the task over
-        DB-->>H: ErrLeaseLost
-        H->>DB: ROLLBACK undoes the update
-    end
-```
-
-The rules, which `pgx.BeginFunc` follows for you:
+[lease](../concepts/glossary.md#lease). `pgx.BeginFunc` follows these rules
+for you:
 
 - If `CompleteTx` returns `ErrLeaseLost`, another attempt took the task
   over. Return that error, so your transaction rolls back.
 - After `CompleteTx`, commit, then return nil.
-- If your transaction fails, return its error. The attempt then fails, and
-  the task is retried as usual.
+- If your transaction fails, return its error. The task is retried as usual.
 
 [Do work once](../recipes/do-work-once.md) compares `CompleteTx` with the
 other ways to make a task safe to run twice.
@@ -156,28 +122,21 @@ func (c *OrderConfirmer) Handle(ctx context.Context, t *taskmill.Task[ConfirmOrd
 `ShipOrder` exists only if `ConfirmOrder` completed. If `ConfirmOrder` runs
 twice, only one run can commit, so there is only one `ShipOrder`.
 
-## Keep these transactions short
+## Keep transactions short, at any isolation level
 
 - A task with a `GroupKey` or a `DedupeKey` makes other producers of the
   same group or key wait until your transaction ends.
 - Any long transaction slows down the queue for everyone: see
   [Database](../production/database.md).
-
-## Which isolation level may I use?
-
-- **Your transactions** may use any isolation level. At REPEATABLE READ or
+- Your transactions may use any isolation level. At REPEATABLE READ or
   SERIALIZABLE, PostgreSQL may stop a transaction with a serialization
-  failure. Retrying it is up to you.
-- **taskmill's pool** must use READ COMMITTED, PostgreSQL's default.
-  `NewClient` checks this: see [Setup](setup.md#why-does-newclient-fail).
+  failure: retrying it is up to you. Only taskmill's own pool must use READ
+  COMMITTED ([Setup](setup.md#why-does-newclient-fail)).
 
 ## See also
 
-- [Do work once](../recipes/do-work-once.md): `CompleteTx`, an idempotency
-  key, or a check before you act
+- [Do work once](../recipes/do-work-once.md): `CompleteTx`, an idempotency key, or a check before you act
 - [Guarantees](../concepts/guarantees.md): why a task can run twice
-- [`Executor`](https://pkg.go.dev/github.com/code19m/taskmill#Executor) and
-  [`Task.CompleteTx`](https://pkg.go.dev/github.com/code19m/taskmill#Task.CompleteTx)
-  on pkg.go.dev
+- [`Executor`](https://pkg.go.dev/github.com/code19m/taskmill#Executor) and [`Task.CompleteTx`](https://pkg.go.dev/github.com/code19m/taskmill#Task.CompleteTx) on pkg.go.dev
 
 **Next:** [Handle tasks](handle-tasks.md)

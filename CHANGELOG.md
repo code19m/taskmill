@@ -3,9 +3,27 @@
 All notable changes to taskmill are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and taskmill uses
 [Semantic Versioning](https://semver.org/) as described in
-[Upgrading](docs/reference/compatibility.md).
+[Compatibility](docs/reference/compatibility.md).
 
 ## [Unreleased]
+
+### Added
+
+- `examples/quickstart`, the program that the new quickstart runs.
+
+### Changed
+
+- The docs are rebuilt as short pages, by what you want to do: get started,
+  concepts, guides, recipes ("How do I…?"), production, and reference. They
+  draw flows as diagrams, and recommend one way wherever there is a choice.
+  Start at [docs/README.md](docs/README.md). The old `docs/guide.md` keeps
+  its headings, each linking to its new page.
+
+### Fixed
+
+- The docs of `BatchHandler` and `Client.Cancel` said that a task canceled
+  during its batch becomes canceled. It becomes completed if the batch
+  returns nil for it, because the work was done, as for other handlers.
 
 ## [0.3.0] - 2026-10-28
 

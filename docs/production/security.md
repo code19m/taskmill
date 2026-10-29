@@ -1,7 +1,7 @@
 # Security
 
-This page shows how to protect the dashboard, which data taskmill shows and
-logs, how to check a download, and how to report a vulnerability.
+This page shows how to protect the dashboard and the data in your tasks, how
+to check a download, and how to report a vulnerability.
 
 ## Which should I use?
 
@@ -16,29 +16,23 @@ logs, how to check a download, and how to report a vulnerability.
 The dashboard can retry, cancel, and delete every task, and it shows every
 payload. `ui.New` has **no login** of its own.
 
-- Mount it behind your login:
-  `mux.Handle("/taskmill/", requireAdmin(dashboard))`.
+- Put it behind your login, such as
+  `mux.Handle("/taskmill/", requireAdmin(dashboard))`, and serve it over HTTPS.
 - Give people who only look a read-only dashboard: `ui.Config.ReadOnly`, or
-  `TASKMILL_UI_READ_ONLY=true`. To give some people actions and others only a
-  view, see [One dashboard for many services](../recipes/one-dashboard-for-many-services.md).
-- Pass a `ui.Config.Logger` that adds the signed-in user. Every action is
-  logged as `web interface action`, so you see who did what.
-- Serve it over HTTPS.
+  `TASKMILL_UI_READ_ONLY=true`.
+- Pass a `ui.Config.Logger` that adds the signed-in user. Each action is
+  logged with the message `web interface action`, so you see who did what.
+- Basic authentication (`TASKMILL_UI_PASSWORD`) has one user for everyone,
+  and no lockout or rate limit. Use a long, random password.
 
-The dashboard protects its forms against cross-site request forgery. Other
-sites cannot show it in a frame, unless you list them in `FrameAncestors`.
-
-**Basic authentication** (`ui.Config.BasicAuth`, or `TASKMILL_UI_PASSWORD`)
-has limits:
-
-- There is one user for everyone, so the logs cannot say who did what.
-- There is no lockout and no rate limit. Use a long, random password.
-- The browser sends the password with every request. Use HTTPS only.
+The dashboard already protects its forms against cross-site request forgery,
+and other sites cannot show it in a frame.
+[Protect it](../guides/dashboard.md#protect-it) lists every setting.
 
 ## Give the dashboard a read-only role
 
-A read-only dashboard only reads. So it can use a database role that may only
-read taskmill's tables:
+A read-only dashboard can use a database role that may only read taskmill's
+tables:
 
 ```sql
 CREATE ROLE taskmill_viewer LOGIN PASSWORD '...';
@@ -61,8 +55,8 @@ buttons, and each action fails.
 | Connection errors | The logs show the host, user, and database, but never the password |
 | Metrics | Queues, kinds, states, and error classes, but no task IDs or payloads |
 
-So keep secrets out of payloads: store an ID, and look the secret up in the
-handler. And keep secrets out of the errors your handlers return.
+So keep secrets out of payloads and out of your handlers' errors. Store an
+ID in the payload, and look the secret up in the handler.
 
 ## Verify a download
 
@@ -81,11 +75,8 @@ For an archive, pass its file name instead of the `oci://` address.
 
 Report it privately, through
 [GitHub private vulnerability reporting](https://github.com/code19m/taskmill/security/advisories/new),
-never in a public issue. Fixes ship as patch releases, with an advisory and a
-CVE, so `govulncheck` reports them.
-
-Only the latest minor release gets fixes, so stay on it:
-see [Upgrading](upgrading.md).
+never in a public issue. [SECURITY.md](../../SECURITY.md) says what happens
+next, and which releases get fixes.
 
 ## See also
 

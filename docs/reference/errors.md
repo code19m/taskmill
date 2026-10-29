@@ -58,10 +58,9 @@ soon in every case.
 | [`ErrAttemptTimeout`](https://pkg.go.dev/github.com/code19m/taskmill#ErrAttemptTimeout) | `timeout` | The attempt ran longer than `HandlerOptions.Timeout`. | An error fails the attempt, with the code `timeout`. Nil completes the task. |
 | [`ErrShutdown`](https://pkg.go.dev/github.com/code19m/taskmill#ErrShutdown) | `shutdown` | The worker is stopping and `DrainTimeout` passed, or the context of `Worker.RunTask` ended. | It goes back to its queue without using an attempt. Nil completes it. |
 
-A batch handler's context ends only for a timeout or a shutdown. It can't
-see a cancel request for one of its tasks: that task becomes completed if
-the batch returns nil for it, and canceled if the batch returns an error for
-it.
+A batch handler's context ends only for a timeout or a shutdown, never for
+a cancel request or a lost lease of one of its tasks
+([Handle tasks in batches](../guides/batch-handlers.md)).
 
 ## Error classes
 

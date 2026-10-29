@@ -111,7 +111,8 @@ nobody reads.
 - Run long reports on a replica without `hot_standby_feedback`.
 - Set `autovacuum_naptime` to 10 seconds or less, and keep autovacuum on.
   taskmill's migrations already tune autovacuum for the `tasks` table.
-- Alert when one of these ages keeps growing:
+- Watch these ages. When one keeps growing, an old snapshot is open
+  ([Monitoring](monitoring.md) has the alert):
 
   ```sql
   SELECT max(age(backend_xmin)) FROM pg_stat_activity;    -- open transactions
@@ -123,7 +124,7 @@ nobody reads.
 
 | What happens | What taskmill does | What you do |
 |---|---|---|
-| A failover or outage of a few seconds | Workers reconnect at their next try. Running tasks go on, and their results are saved. Nothing runs twice. | Nothing |
+| A failover or outage of a few seconds | Workers reconnect at their next try. Running tasks continue, and their results are saved. Nothing runs twice. | Nothing |
 | A failover or outage of more than about 20 seconds | Workers cannot renew their leases, so they cancel their running tasks. The tasks run again once the database is back. | Make handlers safe to run twice. Or raise `LeaseDuration`: see the note below |
 | The database is down when a process starts | `Migrate` and `NewClient` return an error, so your process exits. Kubernetes restarts it until the database is back. | Fix the database. The pods recover by themselves |
 | A failover with asynchronous replication | The last commits can be lost, and with them tasks enqueued in them, like any other row | Use synchronous replication if that matters |

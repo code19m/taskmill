@@ -105,8 +105,9 @@ Every test also checks the FIFO group invariants when it ends.
 
 ## Checks
 
-A pull request merges only when CI passes. Every check except CodeQL is a
-Makefile target, so you can run it on your machine:
+A pull request merges only when CI passes. Each check runs a Makefile
+target, so you can run it on your machine. The only exceptions are CodeQL
+and the [title check](#commit-messages).
 
 | Check | Target | It fails when… |
 |---|---|---|
@@ -117,7 +118,7 @@ Makefile target, so you can run it on your machine:
 | API compatibility | `make api` | The API breaks the compatibility rules (see below). |
 | Rolling deploy | `make compat` | The latest release's client, worker, or dashboard fails on a schema that the current code migrated. See [Schema migrations](#schema-migrations). |
 | Otel on its required core | `make otel-release-check` | The `otel` module does not build, or its tests fail, against the core version it requires, once that version is released. |
-| Release config | `make release-check` | `.goreleaser.yaml` is not valid. |
+| Release config | `make release-check` | `.goreleaser.yaml` is not valid, or `make release-notes` can no longer read CHANGELOG.md. |
 | CodeQL | none | Code scanning finds new alerts. It reports them on the pull request and in the Security tab. |
 
 **How the API check works.**

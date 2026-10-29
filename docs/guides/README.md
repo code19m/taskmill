@@ -1,11 +1,12 @@
 # Guides
 
-The guides show how to build with taskmill, one feature per page. Pick the
-one you need below. New to taskmill? Follow the
-[learning path](../README.md#learning-path) instead: it takes you through the
-main guides in order.
+The guides show how to build with taskmill, one feature per page. New to
+taskmill? Follow the [learning path](../README.md#learning-path) first: it
+takes you through the main guides in order.
 
 ## Which guide do I need?
+
+The guides are in reading order.
 
 | I want to… | Read |
 |---|---|
@@ -25,27 +26,6 @@ main guides in order.
 | Retry, cancel, or delete thousands of tasks from code | [Manage tasks from code](operations-api.md) |
 | Get logs, traces, metrics, and queue depth | [Logs, traces, and metrics](observability.md) |
 | Test code that enqueues and handles tasks | [Test your code](testing.md) |
-
-## All guides, in order
-
-| Guide | Read this when… |
-|---|---|
-| [Set up the database and client](setup.md) | You add taskmill to an app. |
-| [Define tasks](define-tasks.md) | You write your first task type. |
-| [Enqueue tasks](enqueue.md) | You start background work. |
-| [Use your own transactions](transactions.md) | A task must exist only if your data was saved. |
-| [Handle tasks](handle-tasks.md) | You write a handler. |
-| [Retries and errors](retries-and-errors.md) | Tasks fail, or you want to change how they retry. |
-| [Handle tasks in batches](batch-handlers.md) | One call for many tasks is much cheaper than many calls. |
-| [Workers and queues](workers-and-queues.md) | You run workers, or choose your queues. |
-| [Task order and FIFO groups](ordering.md) | Order matters, or some tasks are urgent. |
-| [Avoid duplicate tasks](deduplication.md) | The same task can be enqueued twice. |
-| [Run tasks on a schedule](schedules.md) | Work must happen on a timetable. |
-| [Publish events with the outbox](outbox.md) | Other systems must learn what happened. |
-| [The dashboard](dashboard.md) | You want to see and fix tasks in a browser. |
-| [Manage tasks from code](operations-api.md) | Your code or tools must act on tasks. |
-| [Logs, traces, and metrics](observability.md) | You connect taskmill to your monitoring. |
-| [Test your code](testing.md) | You write tests. |
 
 ## See also
 

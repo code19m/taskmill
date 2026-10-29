@@ -7,12 +7,12 @@ it.
 
 ## Which should I use?
 
-| Situation | Use | Why |
+| Situation | What to use | Why |
 |---|---|---|
-| Your own service does the work: send an email, call an API | A task | It is the simplest. |
-| Other systems must receive an event through a broker | The outbox | It keeps the order per key, gives each message an ID for consumers, and retries for about a month. |
-| Messages arrive from a broker, and the work must not happen twice | The inbox: one task per message, with the message ID as its dedupe key | See [Consume from a broker](../recipes/consume-from-a-broker.md). |
-| Another service in the same database must do some work | `EnqueueTx` with a `Client` for that service's schema | See [Split across services](../recipes/split-across-services.md). |
+| Your own service does the work: send an email, call an API | A task | It is the simplest |
+| Other systems must receive an event through a broker | The outbox | It keeps the order per key, gives each message an ID for consumers, and retries for about a month |
+| Messages arrive from a broker, and the work must not happen twice | The inbox: one task per message, with the message ID as its dedupe key | See [Consume from a broker](../recipes/consume-from-a-broker.md) |
+| Another service in the same database must do some work | `EnqueueTx` with a `Client` for that service's schema | See [Split across services](../recipes/split-across-services.md) |
 
 Use the outbox whenever an event leaves your service. A task that publishes
 by itself gives you none of the above.
@@ -27,7 +27,7 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant R as Relay in a worker
     participant B as Message broker
-    App->>DB: Save your data and Store the message, in one transaction
+    App->>DB: Save your data and store the message, in one transaction
     App->>DB: COMMIT
     R->>DB: Fetch a batch, at most one message per topic and key
     R->>B: Publish the batch
@@ -36,8 +36,8 @@ sequenceDiagram
     Note over R,DB: The next message of each key can go now
 ```
 
-A message exists only if your data committed. If your transaction rolls
-back, nothing is published.
+If your transaction rolls back, the message never existed, and nothing is
+published.
 
 ## Store messages in your transaction
 
@@ -59,8 +59,9 @@ err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 })
 ```
 
-`Store` needs no broker. Your transactions keep working while the broker is
-down.
+`Store` only writes to PostgreSQL, so your app keeps working while the
+broker is down. A `Value` can be up to about 750 KiB:
+see [Defaults and limits](../reference/defaults-and-limits.md#outbox).
 
 ## Relay messages to your broker
 
@@ -79,33 +80,29 @@ ob.AddRelay(&handlers, outbox.PublisherFunc(func(ctx context.Context, ds []outbo
 worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers})
 ```
 
-Stored messages wait in the queue `outbox` (`outbox.Queue`). A worker with no
-`Queues` set reads it. If you set `Queues`, add `outbox.Queue` to them.
+Stored messages wait in the queue `outbox` (`outbox.Queue`). A worker with
+no `Queues` set reads it. If you set `Queues`, add `outbox.Queue`.
 
-For each delivery, your publisher returns one result:
-
-| Result | What happens |
+| Your publisher returns for a delivery | What happens |
 |---|---|
-| `nil` | The message is published. taskmill deletes it, and keeps no history of it. |
-| An error | The message is retried later. |
-| `taskmill.Permanent(err)` | The message is dead right away. Use it for a message that can never succeed. |
-| No result, because the slice is too short | The message is retried later. |
+| `nil` | The message is published. taskmill deletes it, and keeps no history of it |
+| An error, or no result | The message is retried later |
+| `taskmill.Permanent(err)` | The message is dead right away. Use it for a message that can never succeed |
 
 `RelayOptions` sets how many deliveries one call gets (`BatchSize`, 100 by
-default) and how long one call may take (`Timeout`, 1 minute by default).
+default), and how long one call may take (`Timeout`, 1 minute by default).
 When the time is up, the call's context is canceled, and every message
-without a `nil` result is retried later.
+without a `nil` result is retried.
 
 ## In which order are messages published?
 
 - Messages with the same topic and key are published **one at a time, in
-  the order you stored them**. A batch never holds two of them.
-- Messages with different keys go in any order, at the same time.
-- Messages without a key go in any order.
+  the order you stored them**, even with the relay on many workers.
+- Messages with different keys, or without a key, go in any order, at the
+  same time.
 
 So choose the key by what must stay in order: the order ID, or the account
-ID. You can run the relay on many workers at the same time. The order per
-key still holds.
+ID.
 
 ## Let consumers drop duplicates
 
@@ -120,8 +117,7 @@ the inbox: see [Consume from a broker](../recipes/consume-from-a-broker.md).
 
 ## What if the broker is down?
 
-Your app keeps working: `Store` only writes to PostgreSQL. The relay
-retries each message that fails:
+The relay retries each message that fails:
 
 | Time after the first failure | What the relay does |
 |---|---|
@@ -129,18 +125,15 @@ retries each message that fails:
 | After about 10 minutes | Tries again every 5 minutes |
 | After about a month (10,000 tries) | Gives up: the message becomes dead |
 
-Meanwhile, messages wait in the database. The dashboard shows them in the
-`outbox` queue as `retryable`, and as `pending` when they wait behind an
-earlier message with the same key. When the broker is back, the next tries
-succeed, at most about 5 minutes later, still in order per key.
+While the broker is down, messages wait in the database. The dashboard shows them in the
+`outbox` queue as `retryable`, or as `pending` when they wait behind an
+earlier message with the same key. When the broker is back, the messages go
+out within about 5 minutes, still in order per key.
 
 > [!WARNING]
-> A dead message stops its key. Later messages with the same topic and key
-> wait, so they never overtake it. Retry the dead message once the cause is
-> fixed, or delete it. See [Fix a halted group](ordering.md#fix-a-halted-group).
-
-A message's `Value` can be up to about 750 KiB, and one `Store` call takes
-up to 10,000 messages. See [Defaults and limits](../reference/defaults-and-limits.md#outbox).
+> A dead message stops its key: later messages with the same topic and key
+> wait, so they are never published before it. Fix the cause, then retry the dead
+> message, or delete it. See [Fix a halted group](ordering.md#fix-a-halted-group).
 
 ## See also
 

@@ -47,7 +47,7 @@ kind's `EnqueueDefaults` are used, and then the defaults above.
 | `WorkerConfig.Queues` | The default queue of each registered kind | — |
 | `QueueOptions.Concurrency` | 10 tasks per queue, per worker; a batch counts as one | Not negative |
 | `WorkerConfig.LeaseDuration` | 30 seconds | At least 100 ms |
-| Lease renewal, and the worker's report that it is alive | Every third of `LeaseDuration`: 10 seconds | Fixed ratio |
+| Lease renewal, and the worker's report that it is alive (`record heartbeat` in logs) | Every third of `LeaseDuration`: 10 seconds | Fixed ratio |
 | `WorkerConfig.PollInterval` | 1 second | Used only while the maintainer's heartbeats don't arrive |
 | Idle poll while the heartbeats arrive | Once a minute per queue | Fixed |
 | `WorkerConfig.DrainTimeout` | 20 seconds | Then 5 more seconds for handlers to return; fixed |

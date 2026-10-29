@@ -85,8 +85,8 @@ sequenceDiagram
     Note over B: Runs it again
 ```
 
-- The task runs again about 30 seconds after the crash: the lease, plus a
-  second or two.
+- The task runs again within about 30 seconds of the crash: the lease,
+  plus a second or two.
 - The crash counts as a failed [attempt](glossary.md#attempt). So a task that
   crashes its worker every time becomes dead in the end. It cannot crash your
   workers forever.

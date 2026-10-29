@@ -7,11 +7,11 @@ traces and metrics through OpenTelemetry, and queue numbers from the
 
 ## Which should I use?
 
-| Situation | Use | Why |
+| Situation | What to use | Why |
 |---|---|---|
-| Every app | Your `*slog.Logger`, passed to taskmill | By default, taskmill writes no logs at all. |
-| You use OpenTelemetry | The `otel` module | You get one trace from the request through every attempt, and standard metrics, in a few lines. |
-| You use another tracing or metrics system | Your own middleware, and `Client.Queues` | They are the same hooks that the `otel` module uses. |
+| Every app | Your `*slog.Logger`, passed to taskmill | By default, taskmill writes no logs at all |
+| You use OpenTelemetry | The `otel` module | You get one trace from the request through every attempt, and standard metrics, in a few lines |
+| You use another tracing or metrics system | Your own middleware, and `Client.Queues` | They are the same hooks that the `otel` module uses |
 
 ## Send taskmill's logs to your logger
 
@@ -27,16 +27,14 @@ client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logg
 dashboard, err := ui.New(client, &ui.Config{Logger: logger})
 ```
 
-The `taskmill-ui` command writes its own logs to standard error.
-
 Each level means one thing:
 
 | Level | What it means | What to do |
 |---|---|---|
-| **Error** | A person must act: a task is dead, an operation has failed for a minute, or a privilege is missing. | Alert a person. |
-| **Warn** | Something failed or looks wrong, but taskmill recovers by itself. | Look if it repeats or lasts. |
-| **Info** | A normal event: a worker starts or stops, the maintainer changes, migrations run, someone acts in the dashboard. | Nothing. |
-| **Debug** | Routine events of single tasks, such as a retry. | Turn it on to follow one kind's retries. |
+| **Error** | A person must act: a task is dead, an operation has failed for a minute, or a privilege is missing | Alert a person |
+| **Warn** | Something failed or looks wrong, but taskmill recovers by itself | Look if it repeats or lasts |
+| **Info** | A normal event: a worker starts or stops, the maintainer changes, migrations run, someone acts in the dashboard | Nothing |
+| **Debug** | Routine events of single tasks, such as a retry | Turn it on to follow one kind's retries |
 
 Run at Info. Watch Warn lines that repeat, such as
 `rescued tasks whose workers lost their leases`.
@@ -51,13 +49,8 @@ out of your errors.
 ## Add traces and metrics with OpenTelemetry
 
 The `otel` module is a Go module of its own, so apps without OpenTelemetry
-download none of it:
-
-```sh
-go get github.com/code19m/taskmill/otel
-```
-
-Add its middleware to the client and to the worker:
+download none of it: `go get github.com/code19m/taskmill/otel`. Add its
+middleware to the client and to the worker:
 
 ```go
 import (
@@ -68,7 +61,7 @@ import (
 )
 
 otel.SetTextMapPropagator(propagation.TraceContext{}) // without it, tasks don't join the request's trace
-tel := tmotel.New(nil)                                // OpenTelemetry's global providers
+tel := tmotel.New(nil)                                // nil: OpenTelemetry's global providers
 
 client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{
     Logger:            logger,
@@ -84,21 +77,19 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 _, err = tel.ObserveQueues(client) // the queue gauges
 ```
 
-`tmotel.New` uses OpenTelemetry's global providers. Pass a `tmotel.Config`
-to use others.
-
 What you get:
 
 | Signal | What it shows |
 |---|---|
-| Span `send {queue}` | Each enqueue call. It stores its trace context in the tasks' metadata. |
-| Span `process {queue}` | Each attempt, as a child of the `send` span. So a task's work shows in the trace of the request that enqueued it, even a retry hours later. |
-| Span `send {topic}` | Each outbox message sent to the broker. The message's headers carry the trace on to the consumers. |
-| Counters and histograms | Tasks enqueued, and how long enqueues and attempts take, per queue and kind. Failures carry an `error.type`, such as `timeout`. |
-| Queue gauges | Tasks per queue and state, the queue's lag, and how old the counts are. See [below](#watch-queue-depth-and-lag). |
+| Span `send {queue}` | Each enqueue call. It stores its trace context in the tasks' metadata |
+| Span `process {queue}` | Each attempt, as a child of the `send` span. So a task's work shows in the trace of the request that enqueued it, even a retry hours later |
+| Span `send {topic}` | Each outbox message sent to the broker. The message's headers carry the trace on to the consumers |
+| Counters and histograms | Tasks enqueued, and how long enqueues and attempts take, per queue and kind. Failures carry an `error.type`, such as `timeout` |
+| Queue gauges | Tasks per queue and state, the queue's lag, and how old the counts are. See [below](#watch-queue-depth-and-lag) |
 
 The metrics never carry task IDs, so they make few series.
-[Metrics and traces](../reference/metrics.md) lists every name and attribute.
+[Metrics and traces](../reference/metrics.md) lists every name and
+attribute.
 
 > [!NOTE]
 > Inside your transaction, the `send` span ends before you commit. So a
@@ -108,14 +99,9 @@ The metrics never carry task IDs, so they make few series.
 
 For another tracing or metrics system, use the same two
 [middleware](../concepts/glossary.md#middleware) hooks that the `otel`
-module uses:
-
-| Hook | What it wraps | Where you set it |
-|---|---|---|
-| `Middleware` | Every attempt | `WorkerConfig.Middleware` |
-| `EnqueueMiddleware` | Every enqueue, the schedules' runs included | `ClientConfig.EnqueueMiddleware` |
-
-The first middleware in the list is the outermost. Here is one of each:
+module uses. `Middleware`, in `WorkerConfig`, wraps every attempt.
+`EnqueueMiddleware`, in `ClientConfig`, wraps every enqueue, the schedules'
+runs included. The first middleware in a list is the outermost.
 
 ```go
 // Metrics records each attempt: whether it worked, how long it ran, and how
@@ -141,12 +127,13 @@ func TagRequests(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(c
 
 Follow these rules:
 
-| Rule | Why |
-|---|---|
-| Call `next` once, and return its error. | Middleware that returns `nil` without calling `next` fails the attempt, which is then retried with backoff. Enqueue middleware that does so fails the call, and nothing is stored. |
-| To skip a task on purpose, return `taskmill.Snooze(d)` or `taskmill.Permanent(err)`. | Never return `nil` without calling `next`. |
-| Don't change the `TaskInfo` that attempt middleware gets. | It is taskmill's own record of the attempt. |
-| In enqueue middleware, change only `Metadata`. | taskmill ignores changes to the other fields. |
+- **Call `next` once, and return its error.** Middleware that returns `nil`
+  without calling `next` fails the attempt, and the task is retried.
+  Enqueue middleware that does so fails the call, and stores nothing.
+- **To skip a task on purpose,** return `taskmill.Snooze(d)` or
+  `taskmill.Permanent(err)` without calling `next`.
+- **Don't change the `TaskInfo`** that attempt middleware gets. In enqueue
+  middleware, change only `Metadata`: taskmill ignores the other fields.
 
 A handler's panic reaches the middleware as an error. For a batch kind, the
 middleware runs once per task, but the context it passes to `next` doesn't
@@ -169,9 +156,9 @@ for _, q := range queues {
 
 | Field | What it means | Good to know |
 |---|---|---|
-| `Counts` | Tasks per state, except completed ones | Counting stops at 10,000 per queue and state, so a big backlog shows as 10,000. `Capped` says so. |
-| `Lag` | How long the queue's oldest due task has waited | It has no cap, so it suits backlog alerts. Tasks that wait behind their FIFO group don't count. |
-| `RefreshedAt` | When the maintainer last counted | It stops moving when no maintainer runs. |
+| `Counts` | Tasks per state, except completed ones | Counting stops at 10,000 per queue and state, so a big backlog shows as 10,000. `Capped` says so |
+| `Lag` | How long the queue's oldest due task has waited | It has no cap, so it suits backlog alerts. Tasks that wait behind their FIFO group don't count |
+| `RefreshedAt` | When the maintainer last counted | It stops moving when no maintainer runs |
 
 With the `otel` module, `ObserveQueues` reports the same numbers as gauges.
 Every process reports the same values, so aggregate them with `max`, not

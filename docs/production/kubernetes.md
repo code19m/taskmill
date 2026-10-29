@@ -49,37 +49,32 @@ spec:
 - `args: [worker]` assumes that your binary picks its role from its first
   argument, such as `shop worker` or `shop migrate`.
 - Workers get no traffic, so they need no Service and no `preStop` hook.
-- A worker itself uses about 20 MiB of memory, plus a few KiB per running
-  task. Size the limits for what your handlers use
-  ([performance](../reference/performance.md)).
+- A worker itself needs about 20 MiB of memory, plus about 8 KiB per running
+  task ([Performance](../reference/performance.md)). Size the limits for
+  your handlers.
 
 ## Tell Kubernetes when a worker is ready
 
 Serve `Worker.Health` on the port of the readiness probe:
 
 ```go
-go func() {
-    mux := http.NewServeMux()
-    mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-        if err := worker.Health(); err != nil {
-            http.Error(w, err.Error(), http.StatusServiceUnavailable)
-            return
-        }
-        w.WriteHeader(http.StatusOK)
-    })
-    server := &http.Server{Addr: ":8081", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-    log.Print(server.ListenAndServe())
-}()
+mux := http.NewServeMux()
+mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+    if err := worker.Health(); err != nil {
+        http.Error(w, err.Error(), http.StatusServiceUnavailable)
+    }
+})
+server := &http.Server{Addr: ":8081", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+go func() { log.Print(server.ListenAndServe()) }()
 ```
 
 `Health` fails while `Run` does not run, and when the worker has not reached
 the database for longer than `LeaseDuration` (30 s). It reads only memory, so
 the probe costs the database nothing. It does not see a stuck handler.
 
-With the probe above, a worker turns unready within about a minute of losing
-the database, and ready again within about 20 seconds of its return. An
-unready worker pauses a rolling deploy, which is right while the database is
-out of reach.
+With this probe, a worker turns unready within about a minute of losing the
+database, and ready again about 20 seconds after it returns. An unready
+worker pauses a rolling deploy, which is right while the database is down.
 
 > [!WARNING]
 > Don't base a liveness probe on `Health`. It fails while the database is
@@ -89,13 +84,11 @@ out of reach.
 
 ## Give workers time to drain
 
-Set `terminationGracePeriodSeconds` to at least `DrainTimeout` plus 10
-seconds, because Kubernetes kills the pod when the grace period ends. The
-defaults fit: a `DrainTimeout` of 20 seconds, and Kubernetes' 30 seconds. If
-you raise `DrainTimeout` to 2 minutes, set 130.
-
-Why 10 more seconds: after `DrainTimeout`, the worker cancels the tasks still
-running, waits up to 5 seconds for them, and then gives them back. See
+Kubernetes kills the pod when the grace period ends. So set
+`terminationGracePeriodSeconds` to at least `DrainTimeout` plus 10 seconds:
+after `DrainTimeout`, the worker cancels the tasks that still run, and waits
+up to 5 seconds before it gives them back. The defaults fit: 20 seconds, and Kubernetes' 30.
+For a `DrainTimeout` of 2 minutes, set 130. See
 [Stop workers without losing work](deploys.md#stop-workers-without-losing-work).
 
 ## Count the database connections
@@ -111,10 +104,9 @@ one connection for notifications:
 ```
 
 Count the pods at their peak. During a rollout, old pods keep their
-connections while they drain, and new pods already open theirs. In the worst
-case, a Deployment then has twice its replicas, or twice the autoscaler's
-maximum. With short tasks, old pods stop within seconds, and the peak is
-closer to the replicas plus `maxSurge`.
+connections while they drain, and new pods open theirs. At worst, a
+Deployment then has twice its replicas, or twice the autoscaler's maximum.
+With short tasks, the peak is closer to the replicas plus `maxSurge`.
 
 | Pods | Normal | Rollout peak |
 |---|---|---|
@@ -128,9 +120,9 @@ So this app needs `max_connections` of about 200, or a pooler in front: see
 
 ## Run the dashboard
 
-The preferred way is to mount the dashboard in your app with `ui.New`,
-behind your own login ([Dashboard](../guides/dashboard.md)). If you have no
-Go HTTP server, run the `taskmill-ui` image in a Deployment of its own:
+We recommend that you mount the dashboard in your app with `ui.New`
+([Dashboard](../guides/dashboard.md)). Without a Go HTTP server, run the
+`taskmill-ui` image in a Deployment of its own:
 
 ```yaml
 apiVersion: apps/v1
@@ -180,22 +172,18 @@ spec:
 - **Pin the tag** to the taskmill version your apps run: a newer dashboard
   exits on an older schema.
 - **`TASKMILL_UI_ADDR=:8080`** listens on every address. The default,
-  `localhost:8080`, is out of reach from outside the container.
-- **The probe only checks the port**: with a password, every path asks for
-  it, and `taskmill-ui` has no health path.
+  `localhost:8080`, cannot be reached from outside the container.
+- **The probe only checks the port**: `taskmill-ui` has no health path, and
+  with a password, every path asks for it.
 - **Reach it** through your Ingress with TLS, or with
   `kubectl port-forward service/taskmill-ui 8080:80`.
-
-The image holds only the binary, CA certificates, and time zones, and runs as
-a non-root user. For `TASKMILL_SCHEMA`, `TASKMILL_UI_READ_ONLY`, and the other
-settings, see the
-[`taskmill-ui` docs](https://pkg.go.dev/github.com/code19m/taskmill/cmd/taskmill-ui).
+- **The other settings**, such as `TASKMILL_UI_READ_ONLY`, are in
+  [Dashboard](../guides/dashboard.md).
 
 ## Migrate in a Job
 
-You need this only when your deploys apply schema changes before new code
-starts. Otherwise, `Migrate` at the start of each process is enough
-([Run migrations](deploys.md#run-migrations)).
+You need this only when your deploys change the schema before new code
+starts ([Run migrations](deploys.md#run-migrations)).
 
 ```yaml
 apiVersion: batch/v1

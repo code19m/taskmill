@@ -1,15 +1,12 @@
 # Recover from an incident
 
-This recipe shows how to run the tasks that a bug or an outage killed again,
-at a time you choose, without hurting the work that comes in meanwhile.
+**Situation.** "A bug in last night's release made 5,000 receipt tasks fail
+until they were dead. We have deployed a fix. Now we want to run them again,
+without hurting the new work."
 
-**Your situation:** "A bug in last night's release made 5,000 receipt tasks
-fail until they were dead. We have deployed a fix. Now we want to run them
-again."
+## The recommended way
 
-## The preferred way
-
-Fix the cause, pause the queue, retry the dead tasks, and resume the queue:
+Fix the cause, pause the queue, retry its dead tasks, and resume the queue:
 
 ```mermaid
 flowchart LR
@@ -23,12 +20,12 @@ flowchart LR
 **In the dashboard:**
 
 1. Find the cause in a dead task's errors. Deploy the fix to every worker.
-2. On the overview, choose *Pause* for the queue. Running tasks finish, and
-   no new ones start.
+2. On the overview, choose **Pause** for the queue. Running tasks finish,
+   and no new ones start.
 3. Open the task list. Filter by the queue and the state *dead*, and by the
-   kind if other kinds died for other reasons. Choose *Retry all*. If the
+   kind if other kinds died for other reasons. Choose **Retry all**. If the
    page says that other work held some tasks, try again for those.
-4. Choose *Resume* for the queue when you are ready for the load.
+4. Choose **Resume** for the queue when you are ready for the load.
 
 **From code,** for example in an admin command:
 
@@ -40,9 +37,9 @@ func retryDead(ctx context.Context, client *taskmill.Client, queue string) error
     }
     params := &taskmill.BulkParams{Filter: taskmill.TaskFilter{
         Queues: []string{queue},
-        States: []taskmill.State{taskmill.StateDead}, // not canceled ones
+        States: []taskmill.State{taskmill.StateDead}, // not the canceled ones
     }}
-    for range 5 { // 2. retry; run again for tasks that other work held
+    for range 5 { // 2. retry; run again for the tasks that other work held
         res, err := client.RetryMatching(ctx, params)
         if err != nil {
             return err
@@ -61,24 +58,21 @@ func retryDead(ctx context.Context, client *taskmill.Client, queue string) error
 - **A retried task is ready to run right away,** with a fresh set of
   attempts. Thousands of them would compete with new work. The pause lets
   you choose when they run.
-- **While the queue is paused, a retried task can't fail again.** So you can
-  safely run `RetryMatching` again for the tasks it skipped: it never retries
-  one task twice.
-- **A filter by queue and state is fast.** A filter by kind alone has no
-  index, and reads more.
+- **While the queue is paused, a retried task can't die again.** So running
+  `RetryMatching` again for the skipped tasks never retries a task twice.
 - **FIFO groups stay in order.** Retrying the dead task that halts a
-  [group](../concepts/glossary.md#halted-group) lets the group go on, and a
-  bulk retry keeps each group's order.
-- **Each task keeps its ID.** So an idempotency key built from the task ID
-  still protects the work that a task did before it died
+  [group](../concepts/glossary.md#halted-group) lets the group continue, and
+  a bulk retry keeps each group's order.
+- **Each task keeps its ID.** So an idempotency key made from the task ID
+  still protects what the task did before it died
   ([Do work once](do-work-once.md)).
 
 ## Other options
 
-| Option | Choose it when | The cost |
+| Option | When it fits | The cost |
 |---|---|---|
 | Retry without a pause | There are few tasks, or the queue is quiet | The retried tasks compete with new ones |
-| A low `MaxRunning` with `UpdateQueue` instead of the pause; remove it later | New work must keep running during the recovery | Everything in the queue runs slower meanwhile |
+| A low `MaxRunning` instead of the pause, removed later | New work must keep running during the recovery | Everything in the queue runs slower meanwhile |
 | `DeleteMatching` | The dead tasks' work is no longer needed | No record is kept, and you can't undo it |
 | Leave the dead tasks | The work is no longer useful | They stay until the dead-task retention ends: 30 days by default |
 
@@ -89,8 +83,8 @@ func retryDead(ctx context.Context, client *taskmill.Client, queue string) error
   purpose.
 - **A pause stops new work in the queue too.** Its lag grows, and lag alerts
   can fire. Keep the pause short.
-- **Make sure the fix works first.** Retry one task, and check that it
-  completes. Tasks that fail for the same reason use a fresh set of
+- **Check that the fix works first.** Retry one task, and check that it
+  completes. Tasks that fail again for the same reason get a fresh set of
   attempts: by default, about 13 more hours of retries.
 
 ## See also

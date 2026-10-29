@@ -97,4 +97,6 @@ Moved to [Compatibility](reference/compatibility.md) and
 
 ## Defaults and limits
 
-Moved to [Defaults and limits](reference/defaults-and-limits.md). 
+Moved to [Defaults and limits](reference/defaults-and-limits.md).
+
+**Next:** [Documentation home](README.md)

@@ -15,16 +15,14 @@ defer stop()
 return worker.Run(ctx) // on SIGTERM, it stops cleanly, then returns
 ```
 
-## How it works
-
-- A [worker](../concepts/glossary.md#worker) takes tasks from its queues and runs
-  their handlers.
+- A [worker](../concepts/glossary.md#worker) takes tasks from its queues and
+  runs their handlers. Run one `Worker` per process. It can read many queues.
 - `Run` blocks until its context ends. It returns an error only if the
   worker can't start.
-- Run one `Worker` per process. One worker can read many queues.
-- Any worker can also become the [maintainer](../concepts/glossary.md#maintainer):
-  the one worker per schema that does shared work, such as retries,
-  delayed tasks, and schedules.
+- Any worker can also become the
+  [maintainer](../concepts/glossary.md#maintainer): the one worker per
+  schema that does shared work, such as retries, delayed tasks, and
+  schedules.
 
 > [!TIP]
 > In production, run workers as their own deployment, from the same image
@@ -35,23 +33,21 @@ return worker.Run(ctx) // on SIGTERM, it stops cleanly, then returns
 
 To control how many tasks run:
 
-| Situation | Use | Why |
+| Situation | What to use | Why |
 |---|---|---|
 | Fit the work to one machine's CPU, memory, and connections | `Concurrency` per queue, in `WorkerConfig.Queues` | It limits one process |
 | Protect a partner API or another shared resource | `MaxRunning`, set with `UpdateQueue` | It limits all workers together |
 | Stop a queue for a while, such as during an incident | `PauseQueue` | Tasks wait, and nothing is lost |
 
 Most apps need only `Concurrency`. Add `MaxRunning` when something outside
-taskmill has a limit. To choose between a new queue and a priority, see
-[How many queues do I need?](#how-many-queues-do-i-need)
+taskmill has a limit.
 
 ## Choose the queues a worker reads
 
-By default, a worker reads the queue of each kind it has a handler for:
-the queue from the kind's `EnqueueDefaults`, or else `default`. It runs up
-to 10 tasks from each queue at the same time.
-
-To choose the queues and their concurrency, set `Queues`:
+By default, a worker reads the queue of each kind it has a handler for: the
+queue from the kind's `EnqueueDefaults`, or else `default`. It runs up to 10
+tasks from each queue at the same time. To choose the queues and their
+concurrency, set `Queues`:
 
 ```go
 worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
@@ -66,11 +62,9 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 
 - With `Queues`, the worker reads only those queues. If it leaves out the
   queue of a kind it handles, `Run` logs a warning.
-- A batch counts as one toward `Concurrency`.
-- A worker with no handlers and no queues runs no tasks. It only takes part
-  in the shared work of the maintainer.
-- Size the pool for the sum of all `Concurrency` values, plus 5:
-  see [Setup](setup.md#size-the-pool).
+- A batch counts as one task toward `Concurrency`.
+- Size the pool for the sum of all `Concurrency` values, plus 5: see
+  [Setup](setup.md#size-the-pool).
 
 > [!WARNING]
 > A worker takes every task from its queues, whatever its kind. If it has
@@ -80,28 +74,15 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 
 ## How many queues do I need?
 
-Start with one queue: `default`. Many kinds can share it. A queue is the
-unit of control: its concurrency, limit, pause, lag alert, and autoscaling
-apply to all its tasks. Add a queue only for work that needs its own.
+Start with one queue: `default`. Many kinds can share it. A queue's
+concurrency, limit, pause, lag alert, and autoscaling apply to all its
+tasks. So add a queue only for work that needs its own, such as each
+partner API with a rate limit, or slow bulk work.
 
-```mermaid
-flowchart TD
-    A{"Does this work need its own<br/>concurrency, limit, pause, or scaling?"} -->|no| B{"Is some of it more urgent?"}
-    A -->|yes| Q["A queue of its own"]
-    B -->|yes| P["Same queue, higher Priority"]
-    B -->|no| S["The default queue"]
-    Q --> L{"Must it stay under a limit<br/>across all workers?"}
-    L -->|yes| M["MaxRunning, set with UpdateQueue"]
-    L -->|no| C["Concurrency per worker"]
-```
-
-- Typical extra queues: one for each partner API with a rate limit, and
-  one for slow bulk work.
-- Each queue costs a little in every worker that reads it. So don't give
-  every kind a queue of its own without a reason.
-- Priority only changes which waiting task starts next: slow tasks can
-  still fill every place. For work that must never wait behind other work,
-  a queue of its own keeps places free.
+Is some work only more urgent? Give it a higher `Priority` in the same
+queue. But a priority only changes which waiting task starts next: slow
+tasks can still fill every place. For work that must never wait, use a
+queue of its own.
 
 ## Limit how many tasks run
 
@@ -114,21 +95,16 @@ err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) {
 })
 ```
 
-- The limit is saved in the database, so calling this again at every start
-  is fine. Zero removes the limit.
-- `MaxRunning` counts tasks, not batches. It also limits how full a batch
-  gets: see [Batch handlers](batch-handlers.md).
+- The limit is saved in the database, so setting it again at every start is
+  fine. Zero removes the limit.
 - Workers apply a change right away when notifications reach them, and
   within 10 seconds otherwise.
-- Your function may run more than once, so only set fields in it: no other
-  work. If other updates keep winning, `UpdateQueue` returns `ErrConflict`
-  after 10 tries.
-- A limit costs a little. Workers' fetches from that queue take turns,
-  and workers check the queue every `PollInterval` (1 second by default)
-  while the limit holds tasks back.
+- Your function may run more than once, so only set fields in it.
+- `MaxRunning` counts tasks, not batches, so it also limits how full a
+  batch gets. A limit costs a little: workers take turns to fetch from
+  that queue.
 
-For a partner API, combine a small `MaxRunning` with `Snooze` when the
-partner says "slow down": see
+For a partner API, combine a small `MaxRunning` with `Snooze`: see
 [Call a rate-limited API](../recipes/call-a-rate-limited-api.md).
 
 ## Pause a queue
@@ -141,12 +117,10 @@ if err := client.PauseQueue(ctx, "emails"); err != nil { // workers stop taking 
 return client.ResumeQueue(ctx, "emails")
 ```
 
-- Running tasks finish normally. Waiting tasks stay, and you can still
-  enqueue new ones.
-- Workers apply a pause the same way as a limit: right away, or within 10
-  seconds.
-- While the queue is paused, its lag keeps growing, so lag alerts fire.
-- The dashboard can pause and resume queues, too.
+Running tasks finish normally. Waiting tasks stay, and you can still enqueue
+new ones. Workers apply a pause as fast as a limit. While the queue is
+paused, its lag grows, so lag alerts fire. The dashboard can pause and
+resume queues, too.
 
 ## Stop a worker cleanly
 
@@ -175,54 +149,41 @@ sequenceDiagram
 ```
 
 - `DrainTimeout` is 20 seconds by default.
-- A task given back uses no attempt. Another worker runs it again from
-  the start.
-- Tasks that the worker fetched but did not start go back too.
+- A task given back uses no attempt. Another worker runs it again from the
+  start. Tasks that the worker fetched but did not start go back too.
 - Give the process a grace period of at least `DrainTimeout` plus 10
-  seconds: 30 seconds with the defaults, which fits Kubernetes' default.
-  See [Kubernetes](../production/kubernetes.md).
+  seconds: 30 seconds with the defaults, which is Kubernetes' default. See
+  [Kubernetes](../production/kubernetes.md).
 - For tasks that run longer than `DrainTimeout`, see
   [Run long tasks](../recipes/run-long-tasks.md).
 
 ## Run one task now
 
-```go
-info, err := worker.RunTask(ctx, taskID)
-```
-
-`RunTask` runs one task right away, in your goroutine, and returns the
-task when it is done. It ignores the task's run time, paused queues, and
-limits, but it keeps FIFO order. `Run` doesn't need to be running. It is
-useful in tests ([Testing](testing.md)) and in admin tools.
+`worker.RunTask(ctx, id)` runs one task right away, in your goroutine, and
+returns the task when it is done. It ignores the task's run time, paused
+queues, and limits, but it keeps FIFO order. `Run` doesn't need to be
+running. Use it in [tests](testing.md) and in admin tools.
 
 ## Which worker does the shared work?
 
-One worker per schema is chosen as the maintainer. Every worker takes part
-in the choice, unless it sets `NoMaintainer`. If the maintainer stops,
-another worker takes over right after its drain. If it crashes, another
-takes over within about 12 seconds.
+Every worker takes part in choosing the maintainer, unless it sets
+`NoMaintainer`. If the maintainer stops, another worker takes over right
+after its drain. If it crashes, another takes over within about 12 seconds.
+`client.Workers` and the dashboard show which worker is the maintainer.
 
-`client.Workers` lists the workers. `WorkerInfo.Maintainer` shows which one
-is the maintainer, and the dashboard shows it too.
-
-Leave `NoMaintainer` off. Set it only in these cases:
+Leave `NoMaintainer` off, except in these cases:
 
 - A worker that doesn't define your `Schedules`. The maintainer runs only
-  the schedules it defines, so such a worker would stop them while it
-  leads.
+  the schedules it defines, so your schedules would stop while it leads.
 - Workers that scale down to zero. Keep one worker always on, with every
   schedule and no handlers, and set `NoMaintainer` on the others.
 
-Without any maintainer, retries, delayed tasks, and schedules stop. See
-[How it works](../concepts/how-it-works.md).
+Without any maintainer, retries, delayed tasks, and schedules stop.
 
 ## See also
 
 - [Deploys](../production/deploys.md): stop workers without losing work
-- [Call a rate-limited API](../recipes/call-a-rate-limited-api.md): a
-  queue with `MaxRunning`
-- [`WorkerConfig`](https://pkg.go.dev/github.com/code19m/taskmill#WorkerConfig)
-  and [`Client.UpdateQueue`](https://pkg.go.dev/github.com/code19m/taskmill#Client.UpdateQueue)
-  on pkg.go.dev
+- [Call a rate-limited API](../recipes/call-a-rate-limited-api.md): a queue with `MaxRunning`
+- [`WorkerConfig`](https://pkg.go.dev/github.com/code19m/taskmill#WorkerConfig) and [`Client.UpdateQueue`](https://pkg.go.dev/github.com/code19m/taskmill#Client.UpdateQueue) on pkg.go.dev
 
 **Next:** [Test your code](testing.md)

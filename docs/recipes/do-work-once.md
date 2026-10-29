@@ -1,15 +1,12 @@
 # Do work once
 
-A task can run twice. This recipe shows how to make its effects happen once
-anyway: a payment, a row in your database, or the next task.
-
-**Your situation:** "My task charges a card and marks the order paid. A
-worker can crash right after the charge, and then the task runs again. The
-customer must pay only once."
+**Situation.** "My task charges a card and marks the order paid. A worker
+can crash right after the charge, and then the task runs again. The customer
+must pay only once."
 
 ## Which should I use?
 
-Ask these questions for each effect of your task.
+A task can run twice. Ask these questions for each effect of your task:
 
 ```mermaid
 flowchart TD
@@ -21,36 +18,27 @@ flowchart TD
     D -->|no| E["Check before you act"]
 ```
 
-A task often has several effects. Then use one answer for each, as the
-handler below does.
+Most tasks have several effects. Use one answer for each, as the handler
+below does.
 
-## The preferred way
+## The recommended way
 
-This handler charges the card with an idempotency key. Then, in one
-transaction, it marks the order paid, enqueues the receipt, and completes
-the task.
+Charge the card with an idempotency key made from the task ID. Then, in one
+transaction, mark the order paid, enqueue the receipt, and complete the task:
 
 ```go
-type Charger struct {
-    pool     *pgxpool.Pool
-    client   *taskmill.Client
-    payments Payments // your payment provider's API
-}
-
 func (c *Charger) Handle(ctx context.Context, t *taskmill.Task[ChargeOrder]) error {
-    // 1. Outside effect: the provider charges each key once.
-    //    The task ID stays the same on every attempt.
+    // 1. The outside effect: the provider charges each key only once.
     key := "shop/taskmill/" + strconv.FormatInt(t.ID, 10)
     if err := c.payments.Charge(ctx, t.Args.OrderID, key); err != nil {
         return err // retried with backoff
     }
 
-    // 2. Database effects: they commit together with the task's completion.
+    // 2. The database effects: they commit together with the completion.
     return pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
         if _, err := tx.Exec(ctx, "UPDATE orders SET paid_at = now() WHERE id = $1", t.Args.OrderID); err != nil {
             return err
         }
-        // The next step exists only if this one completes.
         if _, err := c.client.EnqueueTx(ctx, taskmill.Pgx(tx), SendReceipt{OrderID: t.Args.OrderID}, nil); err != nil {
             return err
         }
@@ -61,31 +49,26 @@ func (c *Charger) Handle(ctx context.Context, t *taskmill.Task[ChargeOrder]) err
 
 ## Why
 
-- taskmill runs every task [at least once](../concepts/glossary.md#at-least-once).
-  A worker can crash after the work but before it records the result. Then
-  another worker runs the task again.
-  [Guarantees](../concepts/guarantees.md) lists every case.
-- The task ID is the same on every attempt. So the provider sees the same
-  key each time, and charges only once.
-- A task ID is unique only inside one taskmill schema, and the provider has
-  other clients. So the key also names your service and your schema:
-  `shop/taskmill/42`.
-- `CompleteTx` completes the task inside your transaction. The update, the
-  receipt task, and the completion commit together, or not at all. If
-  another attempt took the task over, `CompleteTx` returns `ErrLeaseLost`,
-  and the whole transaction rolls back. So there is one receipt task, never two.
+- A task runs [at least once](../concepts/glossary.md#at-least-once). A
+  worker can crash after the work, before it saves the result. Then the task
+  runs again. [Guarantees](../concepts/guarantees.md) lists every case.
+- The task ID is the same on every attempt, so the provider sees the same
+  key and charges only once. A task ID is unique only inside one taskmill
+  schema, so the key also names your service and schema.
+- `CompleteTx` commits the update, the receipt task, and the completion
+  together, or not at all. If another attempt took the task over, it returns
+  `ErrLeaseLost`, and everything rolls back. So there is never a second
+  receipt task.
 
 ## Other options
 
-| Option | Choose it when | The cost |
+| Option | When it fits | The cost |
 |---|---|---|
-| Nothing extra | Doing it twice is harmless: an upsert, setting a value, a cache refresh | None |
-| `CompleteTx` alone | Every effect is a write to the same database | None: the writes happen exactly once |
-| A key from your own data, such as `charge-order-42` | The action must happen once per order, even if two tasks for one order exist | You can't charge the same order a second time on purpose |
-| Check before you act | The other side has no idempotency key, and a rare repeat is fine, as for an email | A crash between the act and its record still repeats the act |
+| Nothing extra | Doing it twice is harmless: an upsert, a cache refresh | None |
+| A key from your own data, such as `charge-order-42` | The action must happen once per order, even if two tasks exist for one order | You can't charge the same order again on purpose |
+| Check before you act | The other side has no idempotency key, and a rare repeat is fine, as for an email | A crash between the action and its record still repeats the action |
 
-To check before you act, record what you did, and look at that record
-first:
+To check before you act, save what you did, and read it first:
 
 ```go
 func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
@@ -105,13 +88,12 @@ func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 ## Watch out
 
 - **Call the outside service before the transaction, not inside it.** A
-  rollback can't undo a charge. And a transaction that stays open while you
-  wait for the network slows down the whole queue
-  ([Database](../production/database.md)).
-- **Providers keep keys for a limited time,** often a day. A task that runs
-  again later, such as a dead task that someone retries a week later, may
-  charge again. Check what old dead tasks already did before you retry them.
-- **`CompleteTx` needs a transaction.** Pass a `pgx.Tx` or a `*sql.Tx`, not a
+  rollback can't undo a charge. And a transaction that waits for the network
+  slows down the whole queue ([Database](../production/database.md)).
+- **Providers keep keys for a limited time,** often a day. If someone
+  retries a dead task a week later, it may charge again. Check what a dead
+  task already did before you retry it.
+- **`CompleteTx` needs a transaction:** a `pgx.Tx` or a `*sql.Tx`, not a
   pool. Return its error, so that your transaction rolls back.
 
 ## See also

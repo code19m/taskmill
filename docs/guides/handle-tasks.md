@@ -22,12 +22,12 @@ it: `taskmill.HandlerFunc[SendReceipt](sendReceipt)`.
 
 ## How it works
 
-- A handler runs the tasks of one kind. Register one handler per kind.
-- The worker decodes the payload into `t.Args`.
+- Register one handler per kind. The worker decodes the payload into
+  `t.Args`.
 - `t` also holds the task's `ID`, its `Attempt` number (from 1),
   `MaxAttempts`, `Metadata`, and the `Errors` of earlier attempts.
-- One run of a handler is one [attempt](../concepts/glossary.md#attempt). Each
-  attempt has a time limit: 1 minute by default.
+- One run of a handler is one [attempt](../concepts/glossary.md#attempt).
+  Each attempt has a time limit: 1 minute by default.
 
 > [!WARNING]
 > A task can run more than once. For example, a worker can crash after the
@@ -36,28 +36,14 @@ it: `taskmill.HandlerFunc[SendReceipt](sendReceipt)`.
 
 ## What should my handler return?
 
-Follow the questions from the top:
-
-```mermaid
-flowchart TD
-    A{"Is the work still needed?"} -->|no| N["return nil"]
-    A -->|yes| B{"Did it work?"}
-    B -->|yes| N
-    B -->|no| C{"Can a retry help?"}
-    C -->|no| P["return taskmill.Permanent(err)"]
-    C -->|yes| D{"Failed, or just not yet?"}
-    D -->|failed| E["return err"]
-    D -->|not yet| S["return taskmill.Snooze(d)"]
-```
-
 | Situation | Return | What happens |
 |---|---|---|
 | It worked | `nil` | The task is completed |
-| The work is no longer needed, such as for a refunded order | `nil` | The task is completed. Log it if you like |
+| The work is no longer needed, such as for a refunded order | `nil` | The task is completed |
 | It failed, and a retry may help | The error | The task is retried later. It becomes dead when its attempts run out |
 | It failed, and a retry can't help, such as for bad input | `taskmill.Permanent(err)` | The task becomes dead right away, for a person to look at |
-| It can't run yet: a rate limit, or data that isn't ready | `taskmill.Snooze(d)` | The task runs again after `d`. The snooze uses no attempt |
-| Its context ended | The context's error | taskmill decides, by the reason: see [below](#why-did-my-context-end) |
+| It can't run yet: a rate limit, or data that isn't ready | `taskmill.Snooze(d)` | The task runs again after `d`, without using an attempt |
+| Its context ended | The context's error | It depends on the reason: see [below](#why-did-my-context-end) |
 
 The same rules in code:
 
@@ -80,13 +66,12 @@ func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 }
 ```
 
-- A [dead task](../concepts/glossary.md#dead-task) waits for a person. Return
-  `Permanent` only when a person must look.
+- A [dead task](../concepts/glossary.md#dead-task) waits for a person.
+  Return `Permanent` only when a person must look.
 - `Permanent(nil)` returns nil, so
   `return taskmill.Permanent(validate(t.Args))` is safe.
-- Snoozes never use attempts, so a task that always snoozes never becomes
-  dead. Set a limit yourself: for example, return `Permanent` once
-  `time.Since(t.CreatedAt)` passes a day.
+- A task that always snoozes never becomes dead. Set a limit yourself: for
+  example, return `Permanent` once `time.Since(t.CreatedAt)` passes a day.
 
 [Retries and errors](retries-and-errors.md) shows how long retries wait.
 
@@ -95,7 +80,7 @@ func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 | The handler | What happens |
 |---|---|
 | Panics | Like an error: the task is retried. The stack trace is saved in its error history |
-| Runs longer than its `Timeout` | Its context is canceled. If it then returns an error, the attempt fails and the task is retried. If it returns nil, the task is completed |
+| Runs longer than its `Timeout` | Its context is canceled. An error then fails the attempt, and nil completes the task |
 | Never runs, because the payload does not decode | The task becomes dead right away, with the code `invalid_payload` |
 
 ## Why did my context end?
@@ -106,16 +91,14 @@ handler then returns:
 | `context.Cause(ctx)` | Why | You return an error | You return nil |
 |---|---|---|---|
 | `ErrTaskCanceled` | Someone canceled the task | It becomes canceled | It is completed |
-| `ErrAttemptTimeout` | The attempt ran longer than `Timeout` | The attempt fails; retried later | It is completed |
-| `ErrShutdown` | The worker is stopping, and its drain time passed | It goes back to its queue, and the attempt is not counted | It is completed |
-| `ErrLeaseLost` | The worker lost the task's lease, for example because it lost the database | Ignored: taskmill counts a failed attempt, with the code `lease_lost` | Ignored, the same way |
+| `ErrAttemptTimeout` | The attempt ran longer than `Timeout` | The attempt fails, and the task is retried | It is completed |
+| `ErrShutdown` | The worker is stopping, and its drain time passed | It goes back to its queue, without using an attempt | It is completed |
+| `ErrLeaseLost` | The worker lost the task's [lease](../concepts/glossary.md#lease), for example because it lost the database | Ignored: taskmill counts a failed attempt, with the code `lease_lost` | Ignored, the same way |
 
 Return soon after the context ends. taskmill can't stop your code: a
-handler that ignores its context keeps running, and keeps one of its
-queue's `Concurrency` places. At shutdown, the worker gives such a task
-back to the queue 5 seconds after it cancels the context.
-[Stop a worker cleanly](workers-and-queues.md#stop-a-worker-cleanly) shows
-the whole shutdown.
+handler that ignores its context keeps running, and keeps its place in the
+queue's `Concurrency`. [Stop a worker cleanly](workers-and-queues.md#stop-a-worker-cleanly)
+shows what happens to it at shutdown.
 
 ## Options per kind
 
@@ -130,26 +113,22 @@ taskmill.AddHandler(&handlers, &ReportBuilder{}, &taskmill.HandlerOptions{
 |---|---|---|
 | `Timeout` | The time limit of each attempt, or each batch. You can't turn it off | 1 minute |
 | `Retry` | The wait before each retry: see [Retries and errors](retries-and-errors.md) | `ExponentialBackoff{}` |
-| `BatchSize` | The most tasks per call of a batch handler: see [Batch handlers](batch-handlers.md) | 100, at most 1,000 |
+| `BatchSize` | The most tasks per call of a batch handler: see [Batch handlers](batch-handlers.md) | 100 |
 | `DiscardCompleted` | Deletes completed tasks right away, instead of keeping them in history | `false` |
 
 - **`Timeout`:** set it a little above the slowest normal run. For tasks
   that take minutes or hours, see [Run long tasks](../recipes/run-long-tasks.md).
-- **`DiscardCompleted`:** use it for busy kinds when nobody looks at
-  their finished tasks. It saves one history row per task.
-- **Max attempts** is not a handler option. It is saved with each task when
-  it is enqueued: set it per kind, as
+- **`DiscardCompleted`:** use it for busy kinds when nobody looks at their
+  finished tasks. It saves one history row per task.
+- **Max attempts** is not a handler option: it is saved with each task when
+  it is enqueued. Set it per kind, as
   [Retries and errors](retries-and-errors.md#set-the-number-of-attempts-per-kind)
   shows.
 
 ## See also
 
-- [Guarantees](../concepts/guarantees.md): what taskmill promises, and what
-  your handler must do
-- [Use your own transactions](transactions.md): complete a task in the
-  transaction that does its work
-- [`Handler`](https://pkg.go.dev/github.com/code19m/taskmill#Handler) and
-  [`HandlerOptions`](https://pkg.go.dev/github.com/code19m/taskmill#HandlerOptions)
-  on pkg.go.dev
+- [Guarantees](../concepts/guarantees.md): what taskmill promises, and what your handler must do
+- [Use your own transactions](transactions.md): complete a task in the transaction that does its work
+- [`Handler`](https://pkg.go.dev/github.com/code19m/taskmill#Handler) and [`HandlerOptions`](https://pkg.go.dev/github.com/code19m/taskmill#HandlerOptions) on pkg.go.dev
 
 **Next:** [Workers and queues](workers-and-queues.md)

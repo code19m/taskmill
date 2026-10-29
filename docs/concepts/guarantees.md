@@ -16,14 +16,14 @@ your handlers must follow.
 |---|---|
 | **A task commits with your data.** | A task added with `EnqueueTx` exists only if your transaction commits. No worker sees it before the commit. |
 | **No task is lost.** | A committed task runs until it is completed or dead, unless you cancel or delete it. Dead tasks stay, so you can see them. |
-| **A crashed worker loses nothing.** | Its tasks run again on another worker, about 30 seconds after the crash. |
+| **A crashed worker loses nothing.** | Its tasks run again on another worker, within about 30 seconds of the crash. |
 | **One result per task.** | If two attempts overlap, only the one that holds the [lease](glossary.md#lease) can save its result. A late result is refused. |
 | **Database writes can happen exactly once.** | Write your data and complete the task in one transaction, with `CompleteTx`. |
 | **Retries stop.** | A failing task waits longer after each failure, then becomes [dead](glossary.md#dead-task) when its attempts run out. It keeps its last 20 errors. |
 | **Tasks start in order.** | In a queue, a higher [priority](glossary.md#priority) starts first, then an earlier run time, then the order you added them. Tasks may finish in any order. |
 | **FIFO groups keep their order.** | The tasks of a [FIFO group](glossary.md#fifo-group) run one at a time, in order. A dead task is never skipped: the group waits for you. |
 | **A dedupe key gives one task.** | Within its window, a [dedupe key](glossary.md#dedupe-key) makes one task, even when two producers race. The window starts at the enqueue. |
-| **Delayed tasks start on time.** | They start within about a second of their run time, while a [maintainer](glossary.md#maintainer) runs. This is not real time. |
+| **Delayed tasks start on time.** | They start within about a second of their run time, while a [maintainer](glossary.md#maintainer) runs. Don't count on more exact timing. |
 | **Payloads arrive as you sent them.** | The JSON is decoded straight into your struct, so large integers stay exact. |
 
 ## What taskmill does not promise

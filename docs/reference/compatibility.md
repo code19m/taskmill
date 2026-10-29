@@ -106,8 +106,8 @@ schema, so code that is two releases older starts, but nothing promises that
 it works.
 
 So upgrade one minor release at a time. If you skip a release, stop every
-process of the old version before the new ones start. For the same reason, rolling back one release is safe: the
-old code runs on the new schema.
+process of the old version before the new ones start. For the same reason,
+rolling back one release is safe: the old code runs on the new schema.
 
 ## See also
 

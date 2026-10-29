@@ -72,14 +72,14 @@ hour, from "what is this?" to "ready for production".
 
 ### How do I…?
 
-- [Do work exactly once](recipes/do-work-once.md)
+- [Do work once](recipes/do-work-once.md)
 - [Call a rate-limited API](recipes/call-a-rate-limited-api.md)
 - [Keep order per key](recipes/keep-order-per-key.md)
 - [Consume from a broker](recipes/consume-from-a-broker.md)
 - [Change a task safely](recipes/change-a-task-safely.md)
 - [Run long tasks](recipes/run-long-tasks.md)
 - [Recover from an incident](recipes/recover-from-an-incident.md)
-- [Split taskmill across services](recipes/split-across-services.md)
+- [Split work across services](recipes/split-across-services.md)
 - [One dashboard for many services](recipes/one-dashboard-for-many-services.md)
 - [Use your own migration tool](recipes/use-your-migration-tool.md)
 
@@ -101,7 +101,7 @@ hour, from "what is this?" to "ready for production".
 - [Defaults and limits](reference/defaults-and-limits.md)
 - [Errors](reference/errors.md)
 - [Log messages](reference/log-messages.md)
-- [Metrics](reference/metrics.md)
+- [Metrics and traces](reference/metrics.md)
 - [Compatibility](reference/compatibility.md)
 - [Packages](reference/packages.md)
 - [Performance](reference/performance.md)

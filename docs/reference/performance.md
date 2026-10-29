@@ -83,14 +83,15 @@ Every fault test passed, and each has zero tolerance:
   run on server hardware.
 - **Many small workers on one queue cost more.** With 50 worker processes
   that each serve the same 100 queues, at 1,000 tasks a second, the
-  maintainer's work took 1.2 to 2.1 seconds a round, against a target of 1. Each
-  new task wakes every worker of its queue, and all but one find nothing.
+  maintainer's work took 1.2 to 2.1 seconds a round, against a target of 1.
+  Each new task wakes every worker of its queue, and all but one find
+  nothing.
 
 ## What this means for you
 
 | You want to… | Do this | Why |
 |---|---|---|
-| Enqueue thousands of tasks | `EnqueueMany`, in batches of 100 or more | More than 20 times faster than one task per call |
+| Enqueue thousands of tasks | `EnqueueMany`, in batches of 100 or more | About 20 times faster than one task per call |
 | Run more tasks of a busy queue | Raise `Concurrency` on fewer workers, before you add many small ones | Every new task wakes every worker of its queue |
 | Keep fetches fast over hours | Keep long transactions away from the database | They stop vacuum, and fetches slow down. See [Database](../production/database.md) |
 
