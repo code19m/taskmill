@@ -296,9 +296,11 @@ transaction that also updates the group if the task finished.
 **Statistics read indexes, and every count is capped,** so the cost
 stays bounded however large the backlog: up to 10,000 tasks per queue and
 state, and 100,000 scheduled and retryable tasks in all. The one exception,
-below, reads up to 10,000 retryable tasks, and one more per queue. A
-recursive query
-finds the next queue name with one index probe each, a technique called a
+below, reads up to 10,000 retryable tasks, and one more per queue. The count
+runs in the transaction that stores it, with JIT off: its many subqueries
+make the planner think it costly, and compiling it would take longer than
+running it. A recursive query finds the next queue name with one index
+probe each, a technique called a
 loose index scan, so finding the queues costs one probe per queue, not one
 row per task. Scheduled and retryable tasks are read from `tasks_due_idx`,
 which is ordered by run time, not by queue, so they are counted together,

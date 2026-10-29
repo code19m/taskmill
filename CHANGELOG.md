@@ -57,6 +57,10 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Fixed
 
+- The maintainer no longer compiles its statistics count with JIT at every
+  refresh, every 10 seconds. Where JIT is on, as it is by default when
+  PostgreSQL has LLVM, the compile took about 200 ms on a large table, many
+  times the count itself.
 - The worker no longer warns at every start that its pool has fewer
   connections than its concurrency plus 5. That check could not see which
   pool the handlers use, so it also warned when they had a pool of their
