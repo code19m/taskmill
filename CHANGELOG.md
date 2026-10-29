@@ -10,6 +10,9 @@ All notable changes to taskmill are recorded here. The format follows
 ### Added
 
 - `examples/quickstart`, the program that the new quickstart runs.
+- The dashboard's Workers page shows the kinds that each worker has handlers
+  for. A worker's row counts them; click the count to list them all, each
+  with a link to its tasks.
 
 ### Changed
 

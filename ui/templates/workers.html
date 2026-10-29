@@ -8,17 +8,21 @@
   {{if .Data}}
   <div class="table-scroll">
   <table class="table table-workers">
-    <colgroup><col><col class="c-host"><col class="c-version"><col><col class="c-time"><col class="c-time"></colgroup>
-    <thead><tr><th>Worker</th><th>Host</th><th>Version</th><th>Queues</th><th>Started</th><th>Heartbeat</th></tr></thead>
+    <colgroup><col><col class="c-host"><col class="c-version"><col><col class="c-kinds"><col class="c-time"><col class="c-time"></colgroup>
+    <thead><tr><th>Worker</th><th>Host</th><th>Version</th><th>Queues</th><th>Kinds</th><th>Started</th><th>Heartbeat</th></tr></thead>
     <tbody>{{range .Data}}
       <tr data-key="{{.ID}}">
         <td title="{{.ID}}"><span class="health{{if stale .HeartbeatAt}} stale{{end}}" title="{{if stale .HeartbeatAt}}No heartbeat for a while{{else}}Healthy{{end}}"></span><span class="mono">{{.ID}}</span>{{if .Maintainer}} <span class="chip">maintainer</span>{{end}}</td>
         <td title="{{.Hostname}}">{{.Hostname}}</td>
         <td class="mono tone-faint">{{.Version}}</td>
         <td class="wrap"><div class="chips">{{range .Queues}}<a class="chip" href="{{path "/tasks"}}{{query "queue" .}}">{{.}}</a>{{else}}<span class="tone-ghost">maintenance only</span>{{end}}</div></td>
+        <td>{{if .Kinds}}<details class="kinds"><summary aria-controls="kinds-{{.ID}}">{{len .Kinds}} {{if eq (len .Kinds) 1}}kind{{else}}kinds{{end}}{{template "icon-chevron"}}</summary></details>{{else}}<span class="tone-ghost">none</span>{{end}}</td>
         <td class="tone-faint" title="{{timestamp .StartedAt}}">{{ago .StartedAt}}</td>
         <td class="{{if stale .HeartbeatAt}}tone-warn{{else}}tone-faint{{end}}" title="{{timestamp .HeartbeatAt}}">{{ago .HeartbeatAt}}</td>
       </tr>
+      {{- if .Kinds}}
+      <tr class="kinds-row" id="kinds-{{.ID}}"><td colspan="7"><div class="chips">{{range .Kinds}}<a class="chip" href="{{path "/tasks"}}{{query "kind" .}}">{{.}}</a>{{end}}</div></td></tr>
+      {{- end}}
     {{end}}</tbody>
   </table>
   </div>
