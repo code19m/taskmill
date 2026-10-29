@@ -32,10 +32,10 @@ If the role is wrong, tasks still complete, but you lose their history:
    `task history has no partition for today`, and completed tasks skip the
    history.
 
-On a new schema that your own migration tool applied, there are no
-partitions yet. Then each worker logs `prepare history partitions failed`
-at Warn level when it starts, and the first completed tasks skip the
-history.
+If your own migration tool applied a new schema, it has no partitions yet.
+With the wrong role, each worker then logs `prepare history partitions
+failed` at Warn level when it starts, and completed tasks skip the history
+from the first one.
 
 To create the schema, `Migrate` needs the CREATE privilege on the database.
 If your role does not have it, create the schema yourself, owned by that
