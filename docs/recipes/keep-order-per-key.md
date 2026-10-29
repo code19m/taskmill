@@ -65,8 +65,8 @@ on purpose.
 ## Watch out
 
 - **Alert on halted groups.** A halted group waits for a person, and its
-  waiting tasks don't count in the queue's lag. Check `Client.Groups` with
-  `Halted: true` every minute or so
+  waiting tasks don't count in the queue's lag. Alert when
+  `taskmill_queue_halted_groups` is above 0
   ([Monitoring](../production/monitoring.md)).
 - **Keep the transactions that enqueue into a group short.** Producers of
   one group wait for each other's transactions to commit.

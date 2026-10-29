@@ -10,6 +10,19 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+### Added
+
+- `taskmill.queue.halted_groups` and `taskmill.queue.failed_attempts`:
+  gauges of each queue's FIFO groups that a dead task halts, and of how many
+  attempts its most failed task has failed, among those that wait to retry.
+  Both show work that is stuck while `taskmill.queue.lag` stays near zero,
+  such as a halted group, or outbox messages while the broker is down.
+
+### Changed
+
+- Requires taskmill v0.4.0, whose `QueueInfo` has `HaltedGroups` and
+  `FailedAttempts`.
+
 ## [0.2.0] - 2026-10-28
 
 ### Changed

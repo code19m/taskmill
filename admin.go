@@ -20,8 +20,9 @@ const (
 	maxListLimit     = 1000
 	maxGroupQueues   = 100     // most queues named in one Groups call, each read up to a page
 	listTimeout      = "5s"    // bound on one page's query, so inspection never loads the database
-	statsQueueCap    = 10_000  // most tasks counted per queue and state
+	statsQueueCap    = 10_000  // most tasks counted per queue and state, and halted groups per queue
 	statsDueCap      = 100_000 // most scheduled and retryable tasks counted in all
+	statsRetryCap    = 10_000  // most retryable tasks whose attempts are read in all
 
 	defaultHistoryRetention = 7 * 24 * time.Hour
 	defaultDeadRetention    = 30 * 24 * time.Hour
@@ -68,8 +69,25 @@ type QueueInfo struct {
 	// behind their FIFO group wait by design and do not count. Zero when no
 	// task was due at the last count. The maintainer finds the oldest task
 	// when it counts, so for up to one refresh, about 10 seconds, Lag may
-	// read high: a task that finished since still counts.
+	// read high: a task that finished since still counts. Work can be stuck
+	// while Lag stays near zero: HaltedGroups and FailedAttempts show it.
 	Lag time.Duration
+
+	// HaltedGroups counts the queue's FIFO groups that a dead task halts.
+	// Their later tasks wait as pending until an operator retries or
+	// deletes the dead task, so they do not count in Lag. Counting stops at
+	// 10,000.
+	HaltedGroups int
+
+	// FailedAttempts is how many attempts the queue's most failed task has
+	// failed, among the tasks that wait to retry. It grows while a task
+	// keeps failing, such as while a service that its handler calls is
+	// down, even though Lag stays near zero: the task waits for its next
+	// attempt, not for a worker. Zero when no task waits to retry. A task
+	// leaves it when it completes, dies, or is canceled, and for as long as
+	// it runs its next attempt. The maintainer reads the attempts of up to
+	// 10,000 retryable tasks in all, those that retry first.
+	FailedAttempts int
 }
 
 // Settings are the installation-wide settings, stored in the database and
@@ -265,7 +283,8 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 		var capped bool
 		var at time.Time
 		var lag int64
-		if err := r.Scan(&name, &state, &n, &capped, &at, &lag); err != nil {
+		var halted, failed int // each stored with one state only, and 0 with the others
+		if err := r.Scan(&name, &state, &n, &capped, &at, &lag, &halted, &failed); err != nil {
 			return nil, fmt.Errorf("taskmill: list queues: %w", err)
 		}
 		if i, ok := index[name]; ok {
@@ -273,6 +292,8 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 			q.Counts[State(state)] = TaskCount{N: n, Capped: capped}
 			q.RefreshedAt = at
 			q.Lag = max(q.Lag, time.Duration(lag)*time.Microsecond)
+			q.HaltedGroups = max(q.HaltedGroups, halted)
+			q.FailedAttempts = max(q.FailedAttempts, failed)
 		}
 	}
 	if err := r.Err(); err != nil {

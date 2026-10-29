@@ -71,8 +71,19 @@ count in lag.
 
 | Likely cause | Check | Do |
 |---|---|---|
-| The group's first task is dead, so the group is [halted](../concepts/glossary.md#halted-group) | Open a pending task in the dashboard: it shows the task it waits behind. Or call `Client.Groups` with `Halted: true` | Fix the cause, then retry the dead task: the group continues in order. Delete it only to skip that step for good |
-| The group's first task still runs, waits for a retry, or is snoozed | The same page shows that task's state | Wait, or fix why it fails |
+| The group's first task is dead, so the group is [halted](../concepts/glossary.md#halted-group) | `taskmill_queue_halted_groups` is above 0. Open a pending task in the dashboard: it shows the task it waits behind. Or call `Client.Groups` with `Halted: true` | Fix the cause, then retry the dead task: the group continues in order. Delete it only to skip that step for good |
+| The group's first task still runs, waits for a retry, or is snoozed | The same page shows that task's state | Wait, or fix why it fails: see [the next entry](#tasks-keep-failing-and-lag-stays-low) |
+
+### Tasks keep failing, and lag stays low
+
+**You see:** `taskmill_queue_failed_attempts` rises, or the dashboard shows
+tasks in `retryable`, often with `pending` tasks behind them. Lag stays near
+zero, because each task waits for its next retry, not for a worker.
+
+| Likely cause | Check | Do |
+|---|---|---|
+| A service that the handler calls is down, such as the outbox's broker | The task's errors, on its page in the dashboard or with `Client.Get` | Fix the service. The tasks run at their next retry: within about an hour with the default policy, or about 5 minutes for the outbox |
+| A bug or bad data makes some tasks fail every time | The same errors, on some tasks only | Deploy a fix: the tasks succeed at their next retry. Cancel a task that must not run |
 
 ## Tasks run twice or die
 

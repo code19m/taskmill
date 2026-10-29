@@ -37,6 +37,15 @@ var observedStates = []taskmill.State{
 //     has waited, as [taskmill.QueueInfo.Lag] says: it may read up to one
 //     refresh high. It stays right on a large backlog, and keeps growing
 //     when no maintainer runs: alert on it, not on the counts.
+//   - taskmill.queue.halted_groups: the queue's FIFO groups that a dead task
+//     halts, as [taskmill.QueueInfo.HaltedGroups] says, counted up to
+//     10,000. Their tasks wait for an operator, and do not count in the lag:
+//     alert when it is above 0.
+//   - taskmill.queue.failed_attempts: how many attempts the queue's most
+//     failed task has failed, among those that wait to retry, as
+//     [taskmill.QueueInfo.FailedAttempts] says. It grows while a task keeps
+//     failing, and the lag stays near zero. A task drops out of it while it
+//     runs its next attempt, so alert on its maximum over some minutes.
 //   - taskmill.stats.age: in seconds, by this process's clock, how long ago
 //     the maintainer last counted the queues. Alert when it passes a minute:
 //     no maintainer runs, or it cannot count, and a queue that was empty at
@@ -68,6 +77,16 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 	if err != nil {
 		return nil, fmt.Errorf("taskmill/otel: %w", err)
 	}
+	halted, err := in.meter.Int64ObservableGauge("taskmill.queue.halted_groups", metric.WithUnit("{group}"),
+		metric.WithDescription("FIFO groups of the queue that a dead task halts, counted up to 10,000."))
+	if err != nil {
+		return nil, fmt.Errorf("taskmill/otel: %w", err)
+	}
+	failed, err := in.meter.Int64ObservableGauge("taskmill.queue.failed_attempts", metric.WithUnit("{attempt}"),
+		metric.WithDescription("How many attempts the queue's most failed task has failed, among those that wait to retry."))
+	if err != nil {
+		return nil, fmt.Errorf("taskmill/otel: %w", err)
+	}
 	age, err := in.meter.Float64ObservableGauge("taskmill.stats.age", metric.WithUnit("s"),
 		metric.WithDescription("How long ago the maintainer last counted the queues; it grows when no maintainer runs."))
 	if err != nil {
@@ -92,12 +111,14 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 				o.ObserveInt64(capped, boolInt(q.Counts[s].Capped), state)
 			}
 			o.ObserveFloat64(lag, q.Lag.Seconds(), queue)
+			o.ObserveInt64(halted, int64(q.HaltedGroups), queue)
+			o.ObserveInt64(failed, int64(q.FailedAttempts), queue)
 		}
 		if !counted.IsZero() {
 			o.ObserveFloat64(age, time.Since(counted).Seconds())
 		}
 		return nil
-	}, tasks, capped, lag, age)
+	}, tasks, capped, lag, halted, failed, age)
 }
 
 func boolInt(b bool) int64 {

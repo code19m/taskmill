@@ -962,10 +962,13 @@ ORDER BY n.name`),
 
 		// queueStats reads the statistics, with the lag of each count in
 		// microseconds by the database's clock now: 0 for a count without a
-		// due task.
+		// due task. Halted groups and failed attempts read 0 where not
+		// stored: with the other states, and from a maintainer that does
+		// not count them.
 		queueStats: q(`
 SELECT queue, state::text, tasks, capped, refreshed_at,
-       greatest(0, (extract(epoch FROM now() - oldest_due_at) * 1000000)::bigint)
+       greatest(0, (extract(epoch FROM now() - oldest_due_at) * 1000000)::bigint),
+       coalesce(halted_groups, 0), coalesce(failed_attempts, 0)
 FROM {s}.queue_stats`),
 
 		// readSettings reads the retention periods in microseconds, which
@@ -1053,7 +1056,15 @@ LIMIT $2`),
 		// queue, and the oldest available task with one more per priority.
 		// Scheduled and retryable tasks are counted across all queues, oldest
 		// first, up to $2 in all, so the due ones come first. Every branch
-		// reads only an index.
+		// reads only an index, except for the attempts of up to $3 retryable
+		// tasks, found with one index probe each.
+		//
+		// The dead count comes with the queue's halted groups, up to the cap
+		// itself ($1 - 1), as they have no capped flag, and the retryable
+		// count with the most attempts of the queue's retryable tasks among
+		// the first $3 counted. Those are found by reading the same index
+		// again, up to the last retryable task counted, so that no task past
+		// the counted ones, and no scheduled task after them, is read.
 		countStats: q(`
 WITH RECURSIVE available AS (
     (SELECT queue FROM {s}.tasks WHERE state = 'available' ORDER BY queue LIMIT 1)
@@ -1075,53 +1086,72 @@ WITH RECURSIVE available AS (
     UNION ALL
     SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state IN ('dead', 'canceled') AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
     FROM finished x WHERE x.queue IS NOT NULL
+), due AS (
+    SELECT state, queue, count(*) AS tasks, min(run_at) FILTER (WHERE run_at <= now()) AS oldest, max(run_at) AS last
+    FROM (
+        SELECT state, queue, run_at FROM {s}.tasks WHERE state IN ('scheduled', 'retryable') ORDER BY run_at LIMIT $2
+    ) d GROUP BY state, queue
+), attempts AS (
+    SELECT r.queue, max(a.attempt) AS attempt FROM (
+        SELECT queue, run_at FROM {s}.tasks
+        WHERE state = 'retryable' AND run_at <= (SELECT max(last) FROM due WHERE state = 'retryable')
+        ORDER BY run_at LIMIT $3
+    ) r, LATERAL (
+        SELECT t.attempt FROM {s}.tasks t
+        WHERE t.state = 'retryable' AND t.run_at = r.run_at AND t.queue = r.queue LIMIT 1
+    ) a GROUP BY r.queue
 )
 SELECT 'available', x.queue,
        (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue LIMIT $1) c),
        (SELECT min(o.run_at) FROM unnest('{1,2,3,4}'::smallint[]) AS p, -- every priority
         LATERAL (SELECT t.run_at FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue AND t.priority = p
-                 ORDER BY t.run_at LIMIT 1) o)
+                 ORDER BY t.run_at LIMIT 1) o),
+       NULL::bigint, NULL::integer
 FROM available x WHERE x.queue IS NOT NULL
 UNION ALL
 SELECT 'running', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'running' AND t.queue = x.queue LIMIT $1) c), NULL
+       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'running' AND t.queue = x.queue LIMIT $1) c), NULL, NULL::bigint, NULL::integer
 FROM running x WHERE x.queue IS NOT NULL
 UNION ALL
 SELECT 'pending', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'pending' AND t.queue = x.queue LIMIT $1) c), NULL
+       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'pending' AND t.queue = x.queue LIMIT $1) c), NULL, NULL::bigint, NULL::integer
 FROM pending x WHERE x.queue IS NOT NULL
 UNION ALL
 SELECT 'dead', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'dead' AND t.queue = x.queue LIMIT $1) c), NULL
+       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'dead' AND t.queue = x.queue LIMIT $1) c), NULL,
+       (SELECT count(*) FROM (SELECT FROM {s}.groups g WHERE g.halted_task_id IS NOT NULL AND g.queue = x.queue LIMIT $1 - 1) c),
+       NULL
 FROM finished x WHERE x.queue IS NOT NULL
 UNION ALL
 SELECT 'canceled', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'canceled' AND t.queue = x.queue LIMIT $1) c), NULL
+       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'canceled' AND t.queue = x.queue LIMIT $1) c), NULL, NULL::bigint, NULL::integer
 FROM finished x WHERE x.queue IS NOT NULL
 UNION ALL
-SELECT state::text, queue, count(*), min(run_at) FILTER (WHERE run_at <= now()) FROM (
-    SELECT state, queue, run_at FROM {s}.tasks WHERE state IN ('scheduled', 'retryable') ORDER BY run_at LIMIT $2
-) due GROUP BY state, queue`),
+SELECT d.state::text, d.queue, d.tasks, d.oldest, NULL, a.attempt
+FROM due d LEFT JOIN attempts a ON d.state = 'retryable' AND a.queue = d.queue`),
 
 		clearStats: q(`DELETE FROM {s}.queue_stats`),
-		// storeStats stores the counts, and a zero available count for every
-		// other known queue, so that each one shows when it was counted, even
-		// an empty installation. Once the shared cap was hit ($6), any queue
+		// storeStats stores the counts, with their halted groups ($7) and
+		// failed attempts ($8), and a zero available count for every other
+		// known queue, so that each one shows when it was counted, even an
+		// empty installation. Once the shared cap was hit ($6), any queue
 		// may have scheduled and retryable tasks that were not counted, so
 		// each one missing those counts gets them as capped zeros.
 		storeStats: q(`
 WITH u AS (
-    SELECT q, s, n, c, o FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[]) AS u(q, s, n, c, o)
+    SELECT q, s, n, c, o, h, f
+    FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[], $7::bigint[], $8::integer[])
+         AS u(q, s, n, c, o, h, f)
 ), k AS (
     SELECT name FROM {s}.queues UNION SELECT unnest(queues) FROM {s}.workers UNION SELECT q FROM u
 )
-INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at, oldest_due_at)
-SELECT q, s::{s}.task_state, n, c, now(), o FROM u
+INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at, oldest_due_at, halted_groups, failed_attempts)
+SELECT q, s::{s}.task_state, n, c, now(), o, h, f FROM u
 UNION ALL
-SELECT k.name, 'available', 0, false, now(), NULL
+SELECT k.name, 'available', 0, false, now(), NULL, NULL::bigint, NULL::integer
 FROM k WHERE NOT EXISTS (SELECT FROM u WHERE u.q = k.name)
 UNION ALL
-SELECT k.name, d.s::{s}.task_state, 0, true, now(), NULL
+SELECT k.name, d.s::{s}.task_state, 0, true, now(), NULL, NULL::bigint, NULL::integer
 FROM k, unnest('{scheduled,retryable}'::text[]) AS d(s)
 WHERE $6 AND NOT EXISTS (SELECT FROM u WHERE u.q = k.name AND u.s = d.s)`),
 

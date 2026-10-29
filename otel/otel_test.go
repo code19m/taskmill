@@ -404,20 +404,7 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 	// A worker that serves another queue leads, and counts the backlog.
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error { return nil }), nil)
-	w, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{Handlers: &hs, Queues: map[string]taskmill.QueueOptions{"other": {}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
-	stop := sync.OnceFunc(func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Error(err)
-		}
-	})
-	t.Cleanup(stop)
+	stop := run(t, e.client, &taskmill.WorkerConfig{Handlers: &hs, Queues: map[string]taskmill.QueueOptions{"other": {}}})
 
 	const available = "messaging.destination.name=backlog taskmill.task.state=available: 3"
 	var counts []string
@@ -450,6 +437,99 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 	eventually(t, "the statistics to age", func() bool {
 		return e.value(t, "taskmill.stats.age", "") > age+0.5
 	})
+}
+
+func TestObserveQueuesReportsStuckWork(t *testing.T) {
+	t.Parallel()
+	e := setup(t)
+	reg, err := e.in.ObserveQueues(e.client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reg.Unregister() })
+	// The first message of a key keeps failing, as in an outbox while its
+	// broker is down; the first task of another group dies and halts it.
+	var ids []int64
+	for _, opts := range []*taskmill.EnqueueOptions{
+		{Queue: "relay", GroupKey: "order-1"},
+		{Queue: "orders", GroupKey: "order-2", MaxAttempts: 1},
+		{Queue: "relay", GroupKey: "order-1"},
+		{Queue: "orders", GroupKey: "order-2", MaxAttempts: 1},
+	} {
+		res, err := e.client.Enqueue(t.Context(), sendEmail{}, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, res.ID)
+	}
+	var failing taskmill.Handlers
+	taskmill.AddHandler(&failing, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error {
+		return errors.New("broker unreachable")
+	}), &taskmill.HandlerOptions{Retry: retryUntil(3)})
+	stop := run(t, e.client, &taskmill.WorkerConfig{
+		Handlers: &failing, Queues: map[string]taskmill.QueueOptions{"relay": {}, "orders": {}},
+	})
+	eventually(t, "the first tasks to fail", func() bool {
+		relay, err := e.client.Get(t.Context(), ids[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		orders, err := e.client.Get(t.Context(), ids[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return relay.Attempt == 3 && relay.State == taskmill.StateRetryable && orders.State == taskmill.StateDead
+	})
+	// A new maintainer counts at once, rather than at the next refresh.
+	stop()
+	run(t, e.client, &taskmill.WorkerConfig{Handlers: &failing, Queues: map[string]taskmill.QueueOptions{"other": {}}})
+
+	const relay, orders, other = "messaging.destination.name=relay", "messaging.destination.name=orders",
+		"messaging.destination.name=other"
+	eventually(t, "the stuck work to be counted", func() bool {
+		return slices.Contains(e.points(t, "taskmill.queue.failed_attempts"), relay+": 3") &&
+			slices.Contains(e.points(t, "taskmill.queue.halted_groups"), orders+": 1")
+	})
+	wantPoints(t, "taskmill.queue.failed_attempts", e.points(t, "taskmill.queue.failed_attempts"),
+		[]string{relay + ": 3", orders + ": 0", other + ": 0"})
+	wantPoints(t, "taskmill.queue.halted_groups", e.points(t, "taskmill.queue.halted_groups"),
+		[]string{relay + ": 0", orders + ": 1", other + ": 0"})
+	// Neither shows in the lag.
+	wantPoints(t, "taskmill.queue.lag", e.points(t, "taskmill.queue.lag"),
+		[]string{relay + ": 0", orders + ": 0", other + ": 0"})
+}
+
+// run runs a worker of client with cfg until the test ends, or until the
+// returned function stops it.
+func run(t *testing.T, client *taskmill.Client, cfg *taskmill.WorkerConfig) (stop func()) {
+	t.Helper()
+	w, err := taskmill.NewWorker(client, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	stop = sync.OnceFunc(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+	t.Cleanup(stop)
+	return stop
+}
+
+// retryUntil retries a failed attempt after a millisecond until the given
+// attempt has failed, and then after an hour, so that the task waits to
+// retry with that many failed attempts.
+type retryUntil int
+
+func (n retryUntil) Backoff(attempt int) time.Duration {
+	if attempt < int(n) {
+		return time.Millisecond
+	}
+	return time.Hour
 }
 
 // value returns the value of the point of a gauge whose attributes render as

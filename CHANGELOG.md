@@ -10,6 +10,17 @@ All notable changes to taskmill are recorded here. The format follows
 ### Added
 
 - `examples/quickstart`, the program that the new quickstart runs.
+- `QueueInfo.HaltedGroups` and `QueueInfo.FailedAttempts` show work that is
+  stuck while a queue's lag stays near zero. `HaltedGroups` counts the
+  queue's FIFO groups that a dead task halts, up to 10,000.
+  `FailedAttempts` is how many attempts the queue's most failed task has
+  failed, among those that wait to retry, such as outbox messages while the
+  broker is down. The maintainer counts both with the other statistics, in
+  two new columns of `queue_stats` (migration `0004_stuck_work.sql`).
+  [Monitoring](docs/production/monitoring.md) has an alert for each, and no
+  longer asks you to poll `Client.Groups` for halted groups.
+  [ADR 0007](docs/adr/0007-count-stuck-work-with-the-queue-statistics.md)
+  explains the choice.
 
 ### Changed
 

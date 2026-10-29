@@ -474,8 +474,9 @@ func (m *maintainer) untilNextDue(ctx context.Context) time.Duration {
 }
 
 // refreshStats counts each queue's tasks per state, up to the caps, finds
-// each count's oldest due task, and stores both for [Client.Queues] and the
-// counts for the current minute's activity.
+// each count's oldest due task, its queue's halted groups, and the most
+// attempts of its queue's retryable tasks, and stores them for
+// [Client.Queues] and the counts for the current minute's activity.
 func (m *maintainer) refreshStats(ctx context.Context) {
 	m.stats.observe(ctx, m.countStats(ctx))
 }
@@ -486,10 +487,12 @@ func (m *maintainer) countStats(ctx context.Context) error {
 	var counts []int64
 	var capped []bool
 	var oldest []*time.Time // the run time of the oldest due task of each count
+	var halted []*int64     // with each dead count, the queue's halted groups
+	var failed []*int32     // with each retryable count, the most attempts of its tasks
 	var dueTotal int64      // scheduled and retryable tasks counted, in all queues
 	// Each cap is read one past, so that a count that ends exactly at its cap
 	// is not taken for one with more tasks left.
-	r, err := m.c.pool.Query(ctx, m.c.sql.countStats, statsQueueCap+1, statsDueCap+1)
+	r, err := m.c.pool.Query(ctx, m.c.sql.countStats, statsQueueCap+1, statsDueCap+1, statsRetryCap)
 	if err != nil {
 		return fmt.Errorf("count tasks: %w", err)
 	}
@@ -497,7 +500,9 @@ func (m *maintainer) countStats(ctx context.Context) error {
 		var state, queue string
 		var n int64
 		var due *time.Time
-		if err := r.Scan(&state, &queue, &n, &due); err != nil {
+		var h *int64
+		var f *int32
+		if err := r.Scan(&state, &queue, &n, &due, &h, &f); err != nil {
 			r.Close()
 			return fmt.Errorf("count tasks: %w", err)
 		}
@@ -506,6 +511,7 @@ func (m *maintainer) countStats(ctx context.Context) error {
 		}
 		queues, states, counts = append(queues, queue), append(states, state), append(counts, min(n, statsQueueCap))
 		capped, oldest = append(capped, n > statsQueueCap), append(oldest, due)
+		halted, failed = append(halted, h), append(failed, f)
 	}
 	r.Close()
 	if err := r.Err(); err != nil {
@@ -526,7 +532,7 @@ func (m *maintainer) countStats(ctx context.Context) error {
 		if _, err := tx.Exec(ctx, m.c.sql.clearStats); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped, oldest, dueCapped); err != nil {
+		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped, oldest, dueCapped, halted, failed); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, m.c.sql.storeActivity)

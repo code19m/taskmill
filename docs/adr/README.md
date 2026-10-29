@@ -12,6 +12,7 @@ the way it does.
 | [0004](0004-pgx-as-the-postgresql-driver.md) | Use pgx as the PostgreSQL driver | Accepted |
 | [0005](0005-opentelemetry-in-a-module-of-its-own.md) | OpenTelemetry in a module of its own | Accepted |
 | [0006](0006-health-and-scaling-read-paths.md) | Health and scaling read paths | Accepted |
+| [0007](0007-count-stuck-work-with-the-queue-statistics.md) | Count stuck work with the queue statistics | Proposed |
 
 ## Writing an ADR
 

@@ -36,6 +36,12 @@ don't all come back at the same moment. With the defaults:
 The [maintainer](../concepts/glossary.md#maintainer) puts each task back in
 its queue when the wait is over, up to about a second late.
 
+A task that waits to retry doesn't count in the queue's
+[lag](../concepts/glossary.md#lag). To learn that a task keeps failing,
+alert on `taskmill_queue_failed_attempts`: with the defaults, it reaches 10
+about 9 minutes after the first failure. See
+[Monitoring](../production/monitoring.md).
+
 ## Which should I use?
 
 | Situation | What to use | Why |
