@@ -227,15 +227,14 @@ func TestIdleWorkerKeepsAListenerThatAnswers(t *testing.T) {
 	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
 
 	// The only maintainer stops, so heartbeats stop, but the listener
-	// still works: the worker polls, and keeps it.
+	// still works: the worker polls, and keeps it. On a busy machine, the
+	// worker may have warned already, while the maintainer started.
+	missing := logs.count(heartbeatsMissing)
 	stopMaintainer()
 	pid := e.listenerPID(t)
 	waitFor(t, "the worker to find that heartbeats do not arrive", func() bool {
-		return logs.count(heartbeatsMissing) == 1
+		return logs.count(heartbeatsMissing) == missing+1 && !taskmill.Notifying(w)
 	})
-	if taskmill.Notifying(w) {
-		t.Fatal("the worker counts on notifications without heartbeats")
-	}
 	time.Sleep(2 * time.Second) // the worker checks the listener each 600 ms
 	if got := e.listenerPID(t); got != pid {
 		t.Fatalf("the worker replaced a listener that answers: pid %d, then %d", pid, got)
