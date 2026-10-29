@@ -107,11 +107,15 @@ func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 		t.Fatal("the worker counts on notifications that do not arrive")
 	}
 
+	// It keeps fetching, though no task waits; counting on notifications, it
+	// would not fetch again for an hour. The test counts fetches rather than
+	// timing them: on a busy machine, each fetch can take far longer than
+	// the 20 ms poll interval.
 	before := fetches.n.Load()
-	time.Sleep(500 * time.Millisecond)
-	if n := fetches.n.Load() - before; n < 20 {
-		t.Fatalf("the worker fetched %d times in 500 ms; polling every 20 ms, 4 queues would be about 100", n)
-	}
+	waitFor(t, "the worker to keep polling", func() bool { return fetches.n.Load()-before >= 20 })
+	// A task whose notification does not arrive starts by the next poll. A
+	// second is 50 poll intervals: room for slow fetches, and far less than
+	// the hour of idle polling.
 	begin := time.Now()
 	e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "the task to start")
@@ -223,15 +227,14 @@ func TestIdleWorkerKeepsAListenerThatAnswers(t *testing.T) {
 	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
 
 	// The only maintainer stops, so heartbeats stop, but the listener
-	// still works: the worker polls, and keeps it.
+	// still works: the worker polls, and keeps it. On a busy machine, the
+	// worker may have warned already, while the maintainer started.
+	missing := logs.count(heartbeatsMissing)
 	stopMaintainer()
 	pid := e.listenerPID(t)
 	waitFor(t, "the worker to find that heartbeats do not arrive", func() bool {
-		return logs.count(heartbeatsMissing) == 1
+		return logs.count(heartbeatsMissing) == missing+1 && !taskmill.Notifying(w)
 	})
-	if taskmill.Notifying(w) {
-		t.Fatal("the worker counts on notifications without heartbeats")
-	}
 	time.Sleep(2 * time.Second) // the worker checks the listener each 600 ms
 	if got := e.listenerPID(t); got != pid {
 		t.Fatalf("the worker replaced a listener that answers: pid %d, then %d", pid, got)
@@ -276,7 +279,14 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 		return true
 	}
 	waitFor(t, "heartbeats to arrive", notifying)
-	listeners := e.listenerPIDs(t)
+	// Every worker listens before the handover. On a busy machine, the
+	// eligible worker's listener can still be starting when the idle workers
+	// hear heartbeats, and would then look like a replacement.
+	var listeners []int
+	waitFor(t, "every worker to listen", func() bool {
+		listeners = e.listenerPIDs(t)
+		return len(listeners) == 5
+	})
 
 	var fellBack atomic.Bool
 	watched := make(chan struct{})
