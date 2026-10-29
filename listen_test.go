@@ -280,7 +280,14 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 		return true
 	}
 	waitFor(t, "heartbeats to arrive", notifying)
-	listeners := e.listenerPIDs(t)
+	// Every worker listens before the handover. On a busy machine, the
+	// eligible worker's listener can still be starting when the idle workers
+	// hear heartbeats, and would then look like a replacement.
+	var listeners []int
+	waitFor(t, "every worker to listen", func() bool {
+		listeners = e.listenerPIDs(t)
+		return len(listeners) == 5
+	})
 
 	var fellBack atomic.Bool
 	watched := make(chan struct{})
