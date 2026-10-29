@@ -107,11 +107,15 @@ func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 		t.Fatal("the worker counts on notifications that do not arrive")
 	}
 
+	// It keeps fetching, though no task waits; counting on notifications, it
+	// would not fetch again for an hour. The test counts fetches rather than
+	// timing them: on a busy machine, each fetch can take far longer than
+	// the 20 ms poll interval.
 	before := fetches.n.Load()
-	time.Sleep(500 * time.Millisecond)
-	if n := fetches.n.Load() - before; n < 20 {
-		t.Fatalf("the worker fetched %d times in 500 ms; polling every 20 ms, 4 queues would be about 100", n)
-	}
+	waitFor(t, "the worker to keep polling", func() bool { return fetches.n.Load()-before >= 20 })
+	// A task whose notification does not arrive starts by the next poll. A
+	// second is 50 poll intervals: room for slow fetches, and far less than
+	// the hour of idle polling.
 	begin := time.Now()
 	e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "the task to start")
