@@ -142,6 +142,7 @@ spec:
           image: ghcr.io/code19m/taskmill-ui:0.3.0 # the taskmill version your apps run
           env:
             - {name: TASKMILL_UI_ADDR, value: ":8080"}
+            - {name: TASKMILL_UI_LOG_FORMAT, value: json}
             - name: TASKMILL_DATABASE_URL # ends in ?pool_max_conns=4
               valueFrom: {secretKeyRef: {name: shop-db, key: ui-url}}
             - name: TASKMILL_UI_PASSWORD
@@ -149,7 +150,10 @@ spec:
           ports:
             - {name: http, containerPort: 8080}
           readinessProbe:
-            tcpSocket: {port: http}
+            httpGet: {path: /readyz, port: http}
+            timeoutSeconds: 3 # /readyz waits up to 2 s for the database
+          livenessProbe:
+            httpGet: {path: /livez, port: http}
           securityContext:
             runAsNonRoot: true
             readOnlyRootFilesystem: true
@@ -173,8 +177,13 @@ spec:
   exits on an older schema.
 - **`TASKMILL_UI_ADDR=:8080`** listens on every address. The default,
   `localhost:8080`, cannot be reached from outside the container.
-- **The probe only checks the port**: `taskmill-ui` has no health path, and
-  with a password, every path asks for it.
+- **The probes** need no login, and their paths stay at the root, even with
+  `TASKMILL_UI_PREFIX`. `/readyz` fails while the database does not answer,
+  so Kubernetes stops sending people to the pod. `/livez` does not check the
+  database, so the pod is not restarted: a restart does not bring the
+  database back.
+- **`TASKMILL_UI_LOG_FORMAT=json`** writes JSON lines, for your log
+  collector.
 - **Reach it** through your Ingress with TLS, or with
   `kubectl port-forward service/taskmill-ui 8080:80`.
 - **The other settings**, such as `TASKMILL_UI_READ_ONLY`, are in

@@ -12,7 +12,7 @@ taskmill logs through `log/slog`. Without a logger, it logs nothing.
 | A client, and the workers built on it | `ClientConfig.Logger` | Nothing is logged |
 | `Migrate` | `MigrateConfig.Logger` | Nothing is logged |
 | The dashboard, from the `ui` package | `ui.Config.Logger` | Nothing is logged |
-| The `taskmill-ui` command | Text lines on standard error, at Info and above | — |
+| The `taskmill-ui` command | Text lines on standard error, at Info and above. JSON lines with `TASKMILL_UI_LOG_FORMAT=json` | — |
 
 > [!TIP]
 > Pass your application's logger to all three configs, and run at Info. Send
@@ -167,9 +167,9 @@ backticks.
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
-| `web interface action` | Info | Someone did `action` on `target` in the dashboard. A bulk action also has `tasks`, how many tasks it changed, and `skipped`, how many other work held. | Nothing. To log who did it, see [One dashboard for many services](../recipes/one-dashboard-for-many-services.md). |
-| `web interface request failed` | Warn | A page or an action at `path` failed, often because the database is out of reach. | Check the database, if it repeats. |
-| `web interface request timed out` | Warn | The database did not answer within 10 seconds. The page says "Taking too long". | Check the database's load. |
+| `dashboard action` | Info | Someone did `action` on `target` in the dashboard. A bulk action also has `tasks`, how many tasks it changed, and `skipped`, how many other work held. | Nothing. To log who did it, see [One dashboard for many services](../recipes/one-dashboard-for-many-services.md). |
+| `dashboard request failed` | Warn | A page or an action at `path` failed, often because the database is out of reach. | Check the database, if it repeats. |
+| `dashboard request timed out` | Warn | The database did not answer within 10 seconds. The page says "Taking too long". | Check the database's load. |
 | `read activity failed` | Warn | The overview's charts could not read their history, and show none. | Check the database, if it repeats. |
 | `read filter choices failed` | Warn | The task list could not read the choices of a filter, named by `target`. | Check the database, if it repeats. |
 | `search groups failed` | Warn | The search for FIFO groups in a filter failed. | Check the database, if it repeats. |
@@ -181,6 +181,8 @@ backticks.
 |---|---|---|---|
 | `taskmill-ui listening` | Info | The command serves the dashboard on `addr`, with its `version`, `prefix`, and `read_only` setting. | Nothing. |
 | `the dashboard has no password: set TASKMILL_UI_PASSWORD, unless something in front of it authenticates` | Warn | Anyone who reaches the address can use the dashboard. | Set `TASKMILL_UI_PASSWORD`, unless a proxy in front of it asks for a login. |
+| `taskmill-ui not ready` | Warn | `/readyz` asked the database, which did not answer. `error` says why. Until the database answers, `/readyz` fails, and Kubernetes sends no one to the pod. Only a request to `/readyz`, such as a probe, asks. | Check the database. The pod recovers by itself. |
+| `taskmill-ui ready again` | Info | The database answers `/readyz` again, after `taskmill-ui not ready`. | Nothing. |
 | `taskmill-ui stopped` | Error | The command could not start or serve, and exited. `error` says why: for example, the schema is not migrated yet, or a setting is wrong. | Fix what `error` names. If the schema is not migrated yet, let your application run `Migrate`, then start the command again. |
 
 ## See also
