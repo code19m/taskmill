@@ -585,9 +585,12 @@ through such proxies.
   fetch index then fills with dead entries and fetches slow down. The
   [database guide](../production/database.md) says what to set and what to
   alert on.
-- **History partitions are created ahead of time.** `Migrate` and the
-  maintainer keep partitions for today and the next 6 days, by UTC day. Each
-  one is created with `CREATE TABLE ... (LIKE ...)` and then attached with
+- **History partitions are created ahead of time.** `Migrate`, each worker
+  when it starts, and the maintainer keep partitions for today and the next
+  6 days, by UTC day. The worker does it because a schema applied with
+  `Migrations` has none, and its first tasks may complete before the
+  maintainer's first pass.
+  Each one is created with `CREATE TABLE ... (LIKE ...)` and then attached with
   `ALTER TABLE ... ATTACH PARTITION` under a 5-second lock timeout, because
   `CREATE TABLE ... PARTITION OF` locks the whole history table and blocks
   completions. Measured: with a completion's transaction open,
