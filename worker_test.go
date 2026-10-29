@@ -1608,7 +1608,12 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	t.Parallel()
 	// A small pool, as pgxpool's default is on a small machine.
 	e := newEnvWith(t, testdb.PoolSize(t, 4), nil)
-	const lease = 300 * time.Millisecond
+	// A check-in has a third of the lease to renew it, and shares this pool
+	// of 4 with the maintainer, which the test timing makes busy. On a busy
+	// machine, the wait for a connection and the statement can each take
+	// hundreds of milliseconds, so shorter leases ran out even with no group
+	// held.
+	const lease = 2 * time.Second
 	started := make(chan struct{}, 8)
 	release := make(chan struct{})
 	runWorker(t, e, &taskmill.WorkerConfig{
@@ -1628,7 +1633,7 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 		recv(t, started, "a handler to start")
 	}
 
-	// Another application's transaction holds every group's row, for several
+	// Another application's transaction holds every group's row, for two
 	// lease durations, while the six tasks finish.
 	tx, err := testdb.Pool(t).Begin(t.Context())
 	if err != nil {
@@ -1641,7 +1646,11 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	close(release)
 	plain := e.enqueue(t, sendEmail{}, nil)
 	e.waitState(t, plain, taskmill.StateCompleted)
-	time.Sleep(4 * lease) // the held tasks' leases must survive, which needs free connections
+	time.Sleep(2 * lease) // the held tasks' leases must survive, which needs free connections
+	if n := e.count(t, `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0`,
+		e.schema+".groups"); n != 0 {
+		t.Fatalf("%d statements wait for the held groups, each on a connection of the pool", n)
+	}
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
