@@ -48,6 +48,7 @@ steps before and after the tag are manual.
      version, as in [Kubernetes](../production/kubernetes.md) and
      [The dashboard](../guides/dashboard.md).
      `grep -rn 'taskmill-ui:[0-9]' README.md docs` finds them all.
+   - Set the latest release in [Compatibility](../reference/compatibility.md#status).
 
 4. **Check the migration checksums.** `internal/migrations/released_test.go`
    must pin the checksum of every migration in the release.

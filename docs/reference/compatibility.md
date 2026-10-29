@@ -6,7 +6,7 @@ upgrade, see [Upgrading](../production/upgrading.md).
 
 ## Status
 
-- The latest release is **v0.3.0**.
+- The latest release is **v0.4.0**.
 - **The API is final for v1.0.0.** v1.0.0 is not tagged yet: it waits for
   more use in production.
 - taskmill follows [Semantic Versioning](https://semver.org/). Before v1.0.0,

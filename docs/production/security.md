@@ -64,7 +64,7 @@ The release workflow builds each release's archives and the `taskmill-ui`
 image, and signs an attestation for them. Check one with GitHub's CLI:
 
 ```sh
-gh attestation verify oci://ghcr.io/code19m/taskmill-ui:0.3.0 \
+gh attestation verify oci://ghcr.io/code19m/taskmill-ui:0.4.0 \
   --repo code19m/taskmill \
   --signer-workflow code19m/taskmill/.github/workflows/release.yml
 ```

@@ -139,7 +139,7 @@ spec:
     spec:
       containers:
         - name: taskmill-ui
-          image: ghcr.io/code19m/taskmill-ui:0.3.0 # the taskmill version your apps run
+          image: ghcr.io/code19m/taskmill-ui:0.4.0 # the taskmill version your apps run
           env:
             - {name: TASKMILL_UI_ADDR, value: ":8080"}
             - {name: TASKMILL_UI_LOG_FORMAT, value: json}
