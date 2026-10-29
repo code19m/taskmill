@@ -1981,8 +1981,11 @@ func TestWorkerRemovedAsStaleRegistersAgain(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	logs := &logRecorder{}
+	// The check-in that finds the row gone registers again within its third
+	// of the lease. If that runs out, the next check-in says so again: a
+	// third of 300 ms was too short on a busy machine.
 	runWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{
-		Handlers: noopHandlers(), NoMaintainer: true, LeaseDuration: 300 * time.Millisecond,
+		Handlers: noopHandlers(), NoMaintainer: true, LeaseDuration: time.Second,
 	})
 	e.waitListening(t)
 	// What the maintainer does to a worker that has not checked in for 5
