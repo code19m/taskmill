@@ -21,7 +21,7 @@ payload. `ui.New` has **no login** of its own.
 - Give people who only look a read-only dashboard: `ui.Config.ReadOnly`, or
   `TASKMILL_UI_READ_ONLY=true`.
 - Pass a `ui.Config.Logger` that adds the signed-in user. Each action is
-  logged with the message `web interface action`, so you see who did what.
+  logged with the message `dashboard action`, so you see who did what.
 - Basic authentication (`TASKMILL_UI_PASSWORD`) has one user for everyone,
   and no lockout or rate limit. Use a long, random password.
 

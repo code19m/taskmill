@@ -51,10 +51,7 @@ hair" → "just". Split a sentence with "whose" and two "that" clauses in two.
 
 Text that the code prints, such as a log message, an error, or a label in
 the dashboard, stays exactly as the code writes it, even when it breaks this
-table. Explain it in plain words where you quote it. For example, the
-operation `record heartbeat` in the logs and the dashboard's "Heartbeat"
-column are about a worker's own row, not the maintainer's heartbeat; and
-the log message `web interface action` is about the dashboard.
+table. Explain it in plain words where you quote it.
 
 **5. Define a term where you first use it,** in a few words, and link it to
 the [glossary](../concepts/glossary.md) the first time on each page. Define
