@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-29
+
 ### Added
 
 - `examples/quickstart`, the program that the new quickstart runs.
@@ -24,8 +26,9 @@ All notable changes to taskmill are recorded here. The format follows
   stuck while a queue's lag stays near zero. `HaltedGroups` counts the
   queue's FIFO groups that a dead task halts, up to 10,000. `MostFailures`
   is the most times in a row that one task of the queue, waiting to retry,
-  has failed, such as an outbox message while the broker is down. The maintainer counts both with the other statistics, in
-  two new columns of `queue_stats` (migration `0004_stuck_work.sql`).
+  has failed, such as an outbox message while the broker is down. The
+  maintainer counts both with the other statistics, in two new columns of
+  `queue_stats` (migration `0004_stuck_work.sql`).
   [Monitoring](docs/production/monitoring.md) has an alert for each, and no
   longer asks you to poll `Client.Groups` for halted groups.
   [ADR 0007](docs/adr/0007-count-stuck-work-with-the-queue-statistics.md)
@@ -33,11 +36,6 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Changed
 
-- The docs are rebuilt as short pages, by what you want to do: get started,
-  concepts, guides, recipes ("How do I…?"), production, and reference. They
-  draw flows as diagrams, and recommend one way wherever there is a choice.
-  Start at [docs/README.md](docs/README.md). The old `docs/guide.md` is
-  gone.
 - **Breaking:** `WorkerInfo.HeartbeatAt` is now `WorkerInfo.CheckedInAt`.
   "Heartbeat" now means only the maintainer's signal to the workers. A
   worker's own report to the database, which renews its leases, is its
@@ -54,6 +52,11 @@ All notable changes to taskmill are recorded here. The format follows
   match them.
 - `taskmill-ui` logs `taskmill-ui listening` once it listens, not just
   before, and its `addr` is the address it listens on, such as `[::]:8080`.
+- The docs are rebuilt as short pages, by what you want to do: get started,
+  concepts, guides, recipes ("How do I…?"), production, and reference. They
+  draw flows as diagrams, and recommend one way wherever there is a choice.
+  Start at [docs/README.md](docs/README.md). The old `docs/guide.md` is
+  gone.
 
 ### Fixed
 
@@ -394,7 +397,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/code19m/taskmill/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/code19m/taskmill/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/code19m/taskmill/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/code19m/taskmill/releases/tag/v0.1.0

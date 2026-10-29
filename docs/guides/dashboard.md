@@ -49,7 +49,7 @@ docker run -p 8080:8080 \
   -e TASKMILL_UI_ADDR=:8080 \
   -e TASKMILL_DATABASE_URL=postgres://... \
   -e TASKMILL_UI_PASSWORD=... \
-  ghcr.io/code19m/taskmill-ui:0.3.0
+  ghcr.io/code19m/taskmill-ui:0.4.0
 ```
 
 Or install it with Go: `go install github.com/code19m/taskmill/cmd/taskmill-ui@latest`.
