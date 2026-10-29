@@ -37,7 +37,7 @@ changes.
 ## Consequences
 
 - There is one engine to make correct. Services that need both background tasks
-  and an outbox run one system, with one schema and one dashboard.
+  and an outbox run one system, with one schema and one web interface.
 - The outbox tests the engine's API. If the outbox cannot be built cleanly on
   the public API, the API is wrong.
 - The engine must provide what the outbox needs: FIFO groups, batch handlers,
