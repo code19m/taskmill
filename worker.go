@@ -38,7 +38,6 @@ const (
 	heldRetryMax       = time.Second            // longest wait before retrying them
 	emptyFetchCooldown = 20 * time.Millisecond  // pause after a notification that found nothing
 	errorMessageLimit  = 4096                   // bytes of an error message that are kept
-	poolReserve        = 5                      // pool connections the worker needs besides its handlers'
 )
 
 // timing holds a worker's fixed intervals. They are not configurable, but
@@ -115,6 +114,8 @@ type Worker struct {
 
 	completions   chan *tracked // successful attempts of Run, for the completer
 	completerDone chan struct{} // closed when the current Run's completer returns
+
+	poolWarned atomic.Int64 // when renewing leases last warned that the pool was full, in Unix nanoseconds
 
 	// The failures of operations that the worker repeats, which it logs
 	// only now and then. Leases and results are renewed and recorded by
@@ -437,7 +438,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.prepareHistory(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
-	w.checkPoolSize(ctx)
 
 	w.released.Store(0)
 	w.completerDone = make(chan struct{})
@@ -481,22 +481,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	w.logger.LogAttrs(stopCtx, slog.LevelInfo, "worker stopped", slog.Int64(logKeyReleased, w.released.Load()))
 	return nil
-}
-
-// checkPoolSize warns if handlers that use the client's pool could take all
-// its connections: the worker's heartbeats would then wait, and attempts
-// would lose their leases and run twice.
-func (w *Worker) checkPoolSize(ctx context.Context) {
-	concurrency := 0
-	for _, q := range w.queues {
-		concurrency += cap(q.slots)
-	}
-	if conns := int(w.client.pool.Config().MaxConns); concurrency > 0 && conns < concurrency+poolReserve {
-		w.logger.LogAttrs(ctx, slog.LevelWarn,
-			"the pool has fewer connections than the worker's concurrency plus 5; "+
-				"handlers that use the same pool can starve the worker's heartbeats",
-			slog.Int(logKeyMaxConns, conns), slog.Int(logKeyConcurrency, concurrency))
-	}
 }
 
 // drain waits for running attempts, then cancels them and releases the tasks

@@ -21,6 +21,12 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Fixed
 
+- The worker no longer warns at every start that its pool has fewer
+  connections than its concurrency plus 5. That check could not see which
+  pool the handlers use, so it also warned when they had a pool of their
+  own, as the docs advise. Now the worker warns when the pool was full and
+  renewing leases had to wait for a connection, at most once a minute:
+  `the pool was full, so renewing leases waited; …`.
 - The docs of `BatchHandler` and `Client.Cancel` said that a task canceled
   during its batch becomes canceled. It becomes completed if the batch
   returns nil for it, because the work was done, as for other handlers.
