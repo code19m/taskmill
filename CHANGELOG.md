@@ -78,6 +78,11 @@ All notable changes to taskmill are recorded here. The format follows
   partitions failed` at Warn level and starts all the same.
 - In the dashboard, table cells now show their faint and warning colors: a
   stale worker's check-in time turns to the warning color, as its dot does.
+- A maintainer that stopped while it renewed its lease did not resign. The
+  next maintainer then took over only once that lease expired, up to about
+  12 seconds later, and meanwhile delayed tasks, retries, and schedules
+  waited. Now it resigns, and another worker takes over at once, as the
+  docs say.
 
 ## [0.3.0] - 2026-10-28
 

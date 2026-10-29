@@ -175,6 +175,11 @@ func (m *maintainer) housekeep(ctx context.Context) {
 func (m *maintainer) elect(ctx context.Context) bool {
 	var id string
 	err := m.c.pool.QueryRow(ctx, m.c.sql.electLeader, m.w.id, m.w.timing.leaderLease.Microseconds()).Scan(&id)
+	if err != nil && ctx.Err() != nil {
+		// The worker stops. A leader stays one, so that it resigns, and
+		// another worker takes over at once, not once the lease expires.
+		return false
+	}
 	leader := err == nil
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = nil // another worker leads

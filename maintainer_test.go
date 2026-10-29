@@ -138,6 +138,47 @@ func TestOneMaintainerLeadsAndAnotherTakesOver(t *testing.T) {
 	waitFor(t, "another worker to take over", func() bool { id, _ := leader(); return id != "" && id != first })
 }
 
+// TestMaintainerStoppedWhileRenewingResigns checks that a maintainer that
+// stops while it renews its lease still resigns, so that another worker
+// takes over at once, not once the lease expires.
+func TestMaintainerStoppedWhileRenewingResigns(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	stop := runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+
+	// The test holds the lease's row, so the next renewal waits, as it does
+	// on a slow database or for a full pool, and the worker stops meanwhile.
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.leader FOR UPDATE")
+	e.waitBlocked(t, "INSERT INTO {s}.leader")
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+
+	// A worker that resigns waits for the row too, until the transaction
+	// ends; one that does not stops at once.
+	waitFor(t, "the worker to resign or stop", func() bool {
+		select {
+		case <-stopped:
+			return true
+		default:
+			return e.count(t, `SELECT count(*) FROM pg_stat_activity
+			                   WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0`,
+				replaceSchema("DELETE FROM {s}.leader", e.schema)) > 0
+		}
+	})
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	<-stopped
+	if n := e.count(t, "SELECT count(*) FROM {s}.leader"); n != 0 {
+		t.Fatal("the maintainer stopped without resigning; another worker waits for its lease to expire")
+	}
+}
+
 func TestRescueCapsTheBackoffOfManyAttempts(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
