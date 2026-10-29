@@ -255,10 +255,16 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 	stopLeader := eligible()
 	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
 	eligible()
+	// The other workers wait three heartbeat intervals, three seconds here,
+	// for the next heartbeat: far longer than a handover takes, even on a
+	// busy machine, and far shorter than the hour that the eligible worker
+	// waits to take over unless the maintainer resigns.
 	logged := e.withLogger(t, slog.New(logs))
 	var idle []*taskmill.Worker
 	for range 3 {
-		w, _ := startIdleWorker(t, logged, &taskmill.WorkerConfig{NoMaintainer: true})
+		w := newWorker(t, logged, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: idleQueues, NoMaintainer: true})
+		taskmill.SetTiming(w, taskmill.Timing{Heartbeat: time.Second})
+		startWorker(t, w)
 		idle = append(idle, w)
 	}
 	notifying := func() bool {
@@ -276,7 +282,8 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 	watched := make(chan struct{})
 	go func() {
 		defer close(watched)
-		for end := time.Now().Add(2 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
+		// Longer than the workers wait for a heartbeat.
+		for end := time.Now().Add(4 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
 			if !notifying() {
 				fellBack.Store(true)
 			}
