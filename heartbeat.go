@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // heartbeatLoop renews the leases of every tracked attempt, and cancels the
@@ -127,7 +129,12 @@ type beat struct {
 // renew extends the leases of the given attempts and returns those that still
 // own their tasks.
 func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[int64]beat, error) {
-	r, err := w.client.pool.Query(ctx, w.client.sql.heartbeat, ids, tokens, w.cfg.LeaseDuration.Microseconds())
+	conn, err := w.acquireForRenewal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Release()
+	r, err := conn.Query(ctx, w.client.sql.heartbeat, ids, tokens, w.cfg.LeaseDuration.Microseconds())
 	if err != nil {
 		return nil, err
 	}
@@ -144,6 +151,31 @@ func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[in
 		beats[id] = beat{renewed: prev.renewed || b.renewed, cancelRequested: prev.cancelRequested || b.cancelRequested}
 	}
 	return beats, r.Err()
+}
+
+// acquireForRenewal takes a connection of the pool to renew leases. If every
+// connection was in use, and the renewal waited for one for at least a tenth
+// of its time, it warns, at most once per failureReport: handlers that share
+// the pool may hold all its connections, and if renewals keep waiting, leases
+// run out and tasks run twice. It judges by what happened, not by the pool's
+// size, because it cannot see which pool the handlers use. A wait for a new
+// connection to open, or a short wait, is normal.
+func (w *Worker) acquireForRenewal(ctx context.Context) (*pgxpool.Conn, error) {
+	s := w.client.pool.Stat()
+	full := s.IdleConns() == 0 && s.TotalConns() >= s.MaxConns()
+	start := time.Now()
+	conn, err := w.client.pool.Acquire(ctx)
+	waited := time.Since(start)
+	if !full || waited < w.cfg.LeaseDuration/30 { // a renewal has a third of the lease
+		return conn, err
+	}
+	now, last := time.Now().UnixNano(), w.poolWarned.Load()
+	if now-last >= int64(w.timing.failureReport) && w.poolWarned.CompareAndSwap(last, now) {
+		w.logger.LogAttrs(ctx, slog.LevelWarn,
+			"the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own",
+			slog.Duration(logKeyDuration, waited), slog.Int(logKeyMaxConns, int(s.MaxConns())))
+	}
+	return conn, err
 }
 
 func (w *Worker) loseLease(ctx context.Context, t *tracked) {

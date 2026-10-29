@@ -52,7 +52,7 @@ kind's `EnqueueDefaults` are used, and then the defaults above.
 | Idle poll while the heartbeats arrive | Once a minute per queue | Fixed |
 | `WorkerConfig.DrainTimeout` | 20 seconds | Then 5 more seconds for handlers to return; fixed |
 | `WorkerConfig.NoMaintainer` | `false`: the worker can become the maintainer | At least one worker must take part |
-| Database connections | The pool, plus 1 for notifications | The worker warns if the pool's `MaxConns` is below its total `Concurrency` plus 5 |
+| Database connections | The pool, plus 1 for notifications | The worker warns when the pool is full and renewing leases waits `LeaseDuration` / 30 or longer (1 second by default) for a connection; at most once a minute |
 | `Worker.Health` | Fails while `Run` is not running, or when the worker has not reached the database for longer than `LeaseDuration` | — |
 
 ## The maintainer
