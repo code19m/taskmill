@@ -177,7 +177,7 @@ returns 503, with `the worker has not reached the database for …` or
 
 | Likely cause | Check | Do |
 |---|---|---|
-| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record heartbeat` (the worker updates its own row) or `renew leases` | Fix the database or the network. Pods are ready again about 20 s after it is back |
+| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases` | Fix the database or the network. Pods are ready again about 20 s after it is back |
 | Handlers hold every connection of the pool | The warning `the pool was full, so renewing leases waited` | Raise `pool_max_conns`, or give handlers their own pool |
 | `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix the start-up error |
 

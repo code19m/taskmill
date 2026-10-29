@@ -21,6 +21,15 @@ All notable changes to taskmill are recorded here. The format follows
   draw flows as diagrams, and recommend one way wherever there is a choice.
   Start at [docs/README.md](docs/README.md). The old `docs/guide.md` is
   gone.
+- **Breaking:** `WorkerInfo.HeartbeatAt` is now `WorkerInfo.CheckedInAt`.
+  "Heartbeat" now means only the maintainer's signal to the workers. A
+  worker's own report to the database, which renews its leases, is its
+  check-in. To migrate, rename the field where you read it.
+- A worker's check-in has the new name in logs and in the dashboard too. The
+  `operation` attribute of the failing-operation lines says
+  `record check-in` instead of `record heartbeat`: if you match on it,
+  change the match. The Workers page's column says "Checked in" instead of
+  "Heartbeat", and a stale worker's tooltip says "No check-in for a while".
 
 ### Fixed
 

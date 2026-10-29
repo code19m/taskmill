@@ -84,7 +84,7 @@ statements in one transaction (see [FIFO groups](schema.md#fifo-groups)).
 | 4 | `scheduled`, `retryable` | `available` | The run time is reached. | Maintainer |
 | 5 | `pending` | `available` or `scheduled` | The task ahead of it in its group finished. It becomes `scheduled` if its run time is still in the future. | Whoever finished that task |
 | 6 | `available`; also `scheduled` or `retryable` through `Worker.RunTask` | `running` | Fetched, or run at once by `Worker.RunTask`, which ignores the run time. Uses one attempt, issues a new lease token, and starts a lease. | Worker |
-| 7 | `running` | `running` | A heartbeat extends the lease. | Worker |
+| 7 | `running` | `running` | The worker renews the lease, every third of it. | Worker |
 | 8 | `running` | `completed` | The handler returned no error. | Worker |
 | 9 | `running` | `retryable` | The handler failed and attempts remain. The run time becomes now plus a backoff. | Worker |
 | 10 | `running` | `dead` | The handler failed with no attempts left, or returned a permanent error; the payload did not decode; or no worker with a handler for the kind appeared within 1 hour. | Worker |
@@ -176,7 +176,8 @@ Each guarantee names the mechanism that provides it.
    *Mechanism: transition 13.*
 4. **A stale attempt cannot change a task.** An attempt that lost its lease
    cannot complete, fail, or snooze the task, and its result is discarded. The
-   worker learns this at its next heartbeat and cancels the attempt's context.
+   worker learns this at its next lease renewal, and cancels the attempt's
+   context.
    *Mechanism: every worker update requires the current lease token.*
 5. **Database writes can be exactly-once.** A handler that writes only to the
    same PostgreSQL database can complete the task inside its own transaction.

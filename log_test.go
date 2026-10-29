@@ -46,7 +46,7 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
 
 	// Two tasks run across the outage: one succeeds and one fails, while the
-	// database is gone. Their next attempts take long enough for a heartbeat.
+	// database is gone. Their next attempts take long enough for a check-in.
 	started, release := make(chan struct{}, 2), make(chan struct{})
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
@@ -91,7 +91,7 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	var ops map[string][]slog.Record
 	waitFor(t, "the worker's operations to recover", func() bool {
 		ops = operationLines(logs.all())
-		return recovered(ops, "fetch tasks", "listen for notifications", "record heartbeat", "elect maintainer",
+		return recovered(ops, "fetch tasks", "listen for notifications", "record check-in", "elect maintainer",
 			"renew leases", "record results")
 	})
 	// The results that could not be recorded say so, once each.

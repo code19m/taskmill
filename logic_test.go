@@ -149,7 +149,7 @@ func TestWhileLeased(t *testing.T) {
 	t.Parallel()
 	w := &Worker{cfg: WorkerConfig{LeaseDuration: 400 * time.Millisecond}, logger: slog.New(slog.DiscardHandler)}
 	w.resultFailures = newFailures(w, "record results")
-	ts := []*tracked{{lastBeat: time.Now()}}
+	ts := []*tracked{{renewedAt: time.Now()}}
 
 	calls := 0
 	err := w.whileLeased(t.Context(), ts, func(context.Context) error {
@@ -162,14 +162,14 @@ func TestWhileLeased(t *testing.T) {
 		t.Fatalf("got %v after %d tries, want success on the third", err, calls)
 	}
 
-	// Heartbeats keep renewing the lease while the tries go on; an error
+	// Renewals keep extending the lease while the tries go on; an error
 	// that persists still ends them.
 	start, calls := time.Now(), 0
-	ts = []*tracked{{lastBeat: start}}
+	ts = []*tracked{{renewedAt: start}}
 	err = w.whileLeased(t.Context(), ts, func(context.Context) error {
 		calls++
 		ts[0].mu.Lock()
-		ts[0].lastBeat = time.Now()
+		ts[0].renewedAt = time.Now()
 		ts[0].mu.Unlock()
 		return errors.New("connection refused")
 	})

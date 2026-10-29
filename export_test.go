@@ -77,7 +77,7 @@ func ExplainPromote(ctx context.Context, c *Client) (string, error) {
 }
 
 // ExplainLeased returns the plans of the statements that find tasks by their
-// attempts: the completion, the heartbeat, and the lock of a grouped
+// attempts: the completion, the lease renewal, and the lock of a grouped
 // completion.
 func ExplainLeased(ctx context.Context, c *Client) (string, error) {
 	ids, tokens := []int64{1, 2, 3}, []int32{1, 1, 1}
@@ -87,7 +87,7 @@ func ExplainLeased(ctx context.Context, c *Client) (string, error) {
 		args []any
 	}{
 		{c.sql.complete, []any{ids, tokens, []int64{}}},
-		{c.sql.heartbeat, []any{ids, tokens, int64(1)}},
+		{c.sql.renewLeases, []any{ids, tokens, int64(1)}},
 		{c.sql.lockLeased, []any{ids, tokens}},
 		{c.sql.fail, []any{int64(1), int32(1), "retryable", int64(1), `{"message": "m"}`}},
 		{c.sql.snooze, []any{int64(1), int32(1), int64(1), nil}},

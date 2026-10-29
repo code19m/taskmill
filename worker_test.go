@@ -429,7 +429,7 @@ func TestWorkerReleasesTasksThatOutliveTheDrain(t *testing.T) {
 	}
 }
 
-func TestHeartbeatsKeepLongTasksLeased(t *testing.T) {
+func TestCheckInsKeepLongTasksLeased(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	var runs atomic.Int32
@@ -440,8 +440,8 @@ func TestHeartbeatsKeepLongTasksLeased(t *testing.T) {
 			return nil
 		}, nil),
 		Queues: defaultQueue(2),
-		// Without heartbeats, the task is rescued and runs again. The lease is
-		// long enough that a loaded machine does not miss heartbeats for all of
+		// Without check-ins, the task is rescued and runs again. The lease is
+		// long enough that a loaded machine does not miss check-ins for all of
 		// it.
 		LeaseDuration: time.Second,
 	})
@@ -449,7 +449,7 @@ func TestHeartbeatsKeepLongTasksLeased(t *testing.T) {
 	id := e.enqueue(t, sendEmail{}, nil)
 	info := e.waitState(t, id, taskmill.StateCompleted)
 	if runs.Load() != 1 || info.Attempt != 1 {
-		t.Fatalf("task ran %d times over %d attempts; heartbeats did not hold the lease", runs.Load(), info.Attempt)
+		t.Fatalf("task ran %d times over %d attempts; check-ins did not hold the lease", runs.Load(), info.Attempt)
 	}
 }
 
@@ -853,7 +853,7 @@ func storeMax(v *atomic.Int32, n int32) {
 	}
 }
 
-func TestHeartbeatSkipsLockedTasks(t *testing.T) {
+func TestLeaseRenewalSkipsLockedTasks(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	const lease = 1500 * time.Millisecond
@@ -1410,7 +1410,7 @@ func TestHealthFollowsTheDatabase(t *testing.T) {
 	waitFor(t, "the worker to be healthy", func() bool { return w.Health() == nil })
 
 	// Without the database, it turns unhealthy once it could have lost its
-	// leases, and healthy again at its first heartbeat once it is back.
+	// leases, and healthy again at its first check-in once it is back.
 	cut := time.Now()
 	db.cut(true)
 	waitFor(t, "the worker to be unhealthy", func() bool { return w.Health() != nil })
@@ -1670,7 +1670,7 @@ func runTaskWorker(t *testing.T, e *env) (*taskmill.Worker, *atomic.Int32) {
 	}), nil)
 	var batches atomic.Int32
 	taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { batches.Add(1) }), nil)
-	// A lease long enough that a loaded machine does not miss heartbeats for
+	// A lease long enough that a loaded machine does not miss renewals for
 	// all of it.
 	return newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, LeaseDuration: time.Second}), &batches
 }
@@ -1700,7 +1700,7 @@ func TestRunTask(t *testing.T) {
 		t.Parallel()
 		id := e.enqueue(t, sendEmail{To: "slow"}, nil)
 		if info := run(t, t.Context(), id, taskmill.StateCompleted); info.Attempt != 1 {
-			t.Fatalf("completed on attempt %d; heartbeats did not hold the lease", info.Attempt)
+			t.Fatalf("completed on attempt %d; renewals did not hold the lease", info.Attempt)
 		}
 	})
 	t.Run("canceled context", func(t *testing.T) {
@@ -1976,7 +1976,7 @@ func TestWorkerRemovedAsStaleRegistersAgain(t *testing.T) {
 		Handlers: noopHandlers(), NoMaintainer: true, LeaseDuration: 300 * time.Millisecond,
 	})
 	e.waitListening(t)
-	// What the maintainer does to a worker that missed its heartbeats for 5
+	// What the maintainer does to a worker that has not checked in for 5
 	// minutes, such as one on a machine that slept, while it kept working.
 	e.exec(t, "DELETE FROM {s}.workers")
 	const logged = "worker was removed as stale; registering again"

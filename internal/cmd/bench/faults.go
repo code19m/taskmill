@@ -323,7 +323,7 @@ SELECT count(*) FROM {s}.task_history h WHERE h.kind = 'bench.hold' AND NOT EXIS
 	fmt.Println()
 	fmt.Printf("A worker with %d running tasks and a %s lease was cut off from the database by a proxy that held "+
 		"all traffic. Another worker took the tasks over %s after the cut. The cut lasted until then; "+
-		"%s bytes that the cut worker sent during it, its results and heartbeats, reached the database after it.\n\n",
+		"%s bytes that the cut worker sent during it, its results and check-ins, reached the database after it.\n\n",
 		holds, lease, takeover.Round(100*time.Millisecond), commas(p.late.Load()))
 	fmt.Println("| ID | Check | Result | |")
 	fmt.Println("|---|---|---|---|")

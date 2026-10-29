@@ -25,13 +25,13 @@ func benchResources(ctx context.Context, pool *pgxpool.Pool, url, container stri
 	idleRSS, busyRSS := memory(ctx, pool, url, running)
 	perTask := (busyRSS - idleRSS) * 1024 / running
 	steps := idleLoad(ctx, pool, url, d, queues)
-	fetches, beats := steps.count("fetch"), steps.count("worker heartbeat")
+	fetches, checkIns := steps.count("fetch"), steps.count("worker check-in")
 	// Each queue fetches when Run starts, when its notification connection
 	// starts, and every second until the maintainer's first heartbeat
 	// arrives, within 5 seconds; then once a minute.
 	polls := 7 + int(d/time.Minute)
 	others := 0
-	for _, step := range []string{"lease heartbeat", "settings", "activity", "other"} {
+	for _, step := range []string{"lease renewal", "settings", "activity", "other"} {
 		others += steps.count(step)
 	}
 
@@ -47,8 +47,8 @@ func benchResources(ctx context.Context, pool *pgxpool.Pool, url, container stri
 	fmt.Printf("| E5 | Worker process memory per running task, %s tasks | %.1f KiB | %s |\n",
 		commas(running), float64(perTask)/1024, verdict(perTask <= 8*1024))
 	fmt.Printf("| E6 | An idle worker serving %d queues for %s, the maintainer's heartbeats arriving | %d fetches (%.1f per queue), "+
-		"%d worker heartbeats, %d other statements | %s |\n", queues, d, fetches,
-		float64(fetches)/float64(queues), beats, others, verdict(fetches <= queues*polls))
+		"%d worker check-ins, %d other statements | %s |\n", queues, d, fetches,
+		float64(fetches)/float64(queues), checkIns, others, verdict(fetches <= queues*polls))
 	const measure = "| E7 | The database's CPU for heartbeats, when installations share a database: %d connections listen"
 	if container == "" {
 		fmt.Printf(measure+" | Not run: set -container to the database's Docker container | |\n", fanOutListeners)
@@ -243,7 +243,7 @@ func memory(ctx context.Context, pool *pgxpool.Pool, url string, n int) (idle, b
 	waitFor(ctx, time.Minute, "every task to start", func() bool {
 		return scalar(ctx, pool, "SELECT count(*) FROM {s}.holds") == int64(n)
 	})
-	time.Sleep(10 * time.Second) // heartbeats renew the leases
+	time.Sleep(10 * time.Second) // check-ins renew the leases
 	return idle, rss()
 }
 
