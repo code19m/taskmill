@@ -157,7 +157,9 @@ for _, q := range queues {
 | Field | What it means | Good to know |
 |---|---|---|
 | `Counts` | Tasks per state, except completed ones | Counting stops at 10,000 per queue and state, so a big backlog shows as 10,000. `Capped` says so |
-| `Lag` | How long the queue's oldest due task has waited | It has no cap, so it suits backlog alerts. Tasks that wait behind their FIFO group don't count |
+| `Lag` | How long the queue's oldest due task has waited | It has no cap, so it suits backlog alerts. Tasks that wait behind their FIFO group, or for their next retry, don't count |
+| `HaltedGroups` | The queue's FIFO groups that a dead task halts | Their tasks wait for a person. Counting stops at 10,000 |
+| `MostFailures` | The most times in a row that one task of the queue, waiting to retry, has failed | It grows while a task keeps failing, even when lag stays near zero |
 | `RefreshedAt` | When the maintainer last counted | It stops moving when no maintainer runs |
 
 With the `otel` module, `ObserveQueues` reports the same numbers as gauges.

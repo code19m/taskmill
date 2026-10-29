@@ -357,9 +357,28 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small"})
 	}
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small", RunAt: time.Now().Add(time.Hour)})
+	// Halted groups stop at 10,000 per queue too.
+	e.exec(t, `WITH dead AS (
+	               INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, group_key, finalized_at)
+	               SELECT 'halted', 'email.send', 'dead', now(), '{}', 1, 1, 'order-' || i, now() FROM generate_series(1, 10001) i
+	               RETURNING id, group_key
+	           )
+	           INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
+	           SELECT 'halted', group_key, 1, id, now() FROM dead`)
+	// As in an outage, more tasks wait to retry than the 10,000 whose
+	// failures are read. New failures retry first, and the task that failed
+	// most retries after them, though not last: tasks that failed a little
+	// less retry later, as they failed more recently. And a queue whose
+	// tasks all retry before the others' is read too.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt)
+	           SELECT v.queue, 'email.send', 'retryable', now() + v.wait + i * interval '1 ms', '{}', 25, v.attempt
+	           FROM (VALUES ('retrying', 2, interval '1 minute', 10000), ('retrying', 12, interval '4 minutes', 1),
+	                        ('retrying', 9, interval '5 minutes', 5), ('early', 5, interval '30 seconds', 1))
+	                AS v(queue, attempt, wait, n),
+	                generate_series(1, v.n) AS i`)
 	runWorker(t, e, &taskmill.WorkerConfig{}) // the maintainer refreshes statistics
 
-	counted := countedQueues(t, e, "big", "exact", "later", "later-exact", "small")
+	counted := countedQueues(t, e, "big", "exact", "later", "later-exact", "small", "halted", "retrying", "early")
 	for _, c := range []struct {
 		queue string
 		state taskmill.State
@@ -369,9 +388,19 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 		{"exact", taskmill.StateAvailable, taskmill.TaskCount{N: 10_000}},
 		{"later", taskmill.StateScheduled, taskmill.TaskCount{N: 10_000, Capped: true}},
 		{"later-exact", taskmill.StateScheduled, taskmill.TaskCount{N: 10_000}},
+		{"halted", taskmill.StateDead, taskmill.TaskCount{N: 10_000, Capped: true}},
+		{"retrying", taskmill.StateRetryable, taskmill.TaskCount{N: 10_000, Capped: true}},
 	} {
 		if got := counted[c.queue].Counts[c.state]; got != c.want {
 			t.Errorf("%s: got %+v %s; want %+v", c.queue, got, c.state, c.want)
+		}
+	}
+	if got := counted["halted"].HaltedGroups; got != 10_000 {
+		t.Errorf("halted: got %d halted groups, want 10,000", got)
+	}
+	for queue, want := range map[string]int{"retrying": 12, "early": 5} {
+		if got := counted[queue].MostFailures; got != want {
+			t.Errorf("%s: got %d most failures, want %d", queue, got, want)
 		}
 	}
 	want := map[taskmill.State]taskmill.TaskCount{

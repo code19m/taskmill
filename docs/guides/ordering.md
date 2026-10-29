@@ -78,9 +78,12 @@ A group whose head is dead is a
 [halted group](../concepts/glossary.md#halted-group). The dead task stays
 until you act, for as long as it takes. To fix it:
 
-1. **Find it.** In the [dashboard](dashboard.md), the dead task's page says
-   "This task halts its FIFO group", with a **View group** button. From
-   code, list the halted groups:
+1. **Find it.** To learn of it, alert when the gauge
+   `taskmill_queue_halted_groups` is above 0
+   ([Monitoring](../production/monitoring.md)). In the
+   [dashboard](dashboard.md), the dead task's page says "This task halts its
+   FIFO group", with a **View group** button. From code, list the halted
+   groups:
 
    ```go
    page, err := client.Groups(ctx, &taskmill.GroupParams{Halted: true})

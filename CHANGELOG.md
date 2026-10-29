@@ -20,6 +20,16 @@ All notable changes to taskmill are recorded here. The format follows
   a second, and logs `taskmill-ui not ready` and `taskmill-ui ready again`
   when its answer changes.
 - `TASKMILL_UI_LOG_FORMAT=json` makes `taskmill-ui` log JSON lines.
+- `QueueInfo.HaltedGroups` and `QueueInfo.MostFailures` show work that is
+  stuck while a queue's lag stays near zero. `HaltedGroups` counts the
+  queue's FIFO groups that a dead task halts, up to 10,000. `MostFailures`
+  is the most times in a row that one task of the queue, waiting to retry,
+  has failed, such as an outbox message while the broker is down. The maintainer counts both with the other statistics, in
+  two new columns of `queue_stats` (migration `0004_stuck_work.sql`).
+  [Monitoring](docs/production/monitoring.md) has an alert for each, and no
+  longer asks you to poll `Client.Groups` for halted groups.
+  [ADR 0007](docs/adr/0007-count-stuck-work-with-the-queue-statistics.md)
+  explains the choice.
 
 ### Changed
 
@@ -47,6 +57,10 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Fixed
 
+- The maintainer no longer compiles its statistics count with JIT at every
+  refresh, every 10 seconds. Where JIT is on, as it is by default when
+  PostgreSQL has LLVM, the compile took about 200 ms on a large table, many
+  times the count itself.
 - The worker no longer warns at every start that its pool has fewer
   connections than its concurrency plus 5. That check could not see which
   pool the handlers use, so it also warned when they had a pool of their

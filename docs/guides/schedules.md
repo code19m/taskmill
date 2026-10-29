@@ -89,8 +89,8 @@ after the other:
 > [!WARNING]
 > With a `GroupKey`, a run that becomes dead stops all the runs after it,
 > until you retry or delete it. See
-> [Fix a halted group](ordering.md#fix-a-halted-group), and alert on halted
-> groups.
+> [Fix a halted group](ordering.md#fix-a-halted-group), and
+> [alert on halted groups](../production/monitoring.md).
 
 ## Pause, run now, or remove a schedule
 

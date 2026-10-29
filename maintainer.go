@@ -470,66 +470,104 @@ func (m *maintainer) untilNextDue(ctx context.Context) time.Duration {
 }
 
 // refreshStats counts each queue's tasks per state, up to the caps, finds
-// each count's oldest due task, and stores both for [Client.Queues] and the
-// counts for the current minute's activity.
+// each count's oldest due task, its queue's halted groups, and the most
+// failures of its queue's retryable tasks, and stores them for
+// [Client.Queues] and the counts for the current minute's activity.
 func (m *maintainer) refreshStats(ctx context.Context) {
 	m.stats.observe(ctx, m.countStats(ctx))
 }
 
-// countStats does the work of refreshStats.
+// statsSettings start the transaction of a statistics refresh. The count's
+// many subqueries make the planner think it costly, so PostgreSQL would
+// compile it with JIT at every refresh: about 200 ms on a large table, many
+// times the count itself.
+const statsSettings = `SELECT set_config('jit', 'off', true)`
+
+// countStats does the work of refreshStats, in one transaction with JIT off.
+// The count only reads, so the transaction takes its locks at the end, when
+// it stores the counts.
 func (m *maintainer) countStats(ctx context.Context) error {
-	var queues, states []string
-	var counts []int64
-	var capped []bool
-	var oldest []*time.Time // the run time of the oldest due task of each count
-	var dueTotal int64      // scheduled and retryable tasks counted, in all queues
+	return pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, statsSettings); err != nil {
+			return fmt.Errorf("count tasks: %w", err)
+		}
+		c, err := readStats(ctx, tx, m.c.sql.countStats)
+		if err != nil {
+			return fmt.Errorf("count tasks: %w", err)
+		}
+		if err := c.store(ctx, tx, m.c.sql); err != nil {
+			return fmt.Errorf("store counts: %w", err)
+		}
+		return nil
+	})
+}
+
+// counted holds one refresh's statistics as storeStats takes them, with one
+// entry per queue and state.
+type counted struct {
+	queues, states []string
+	counts         []int64
+	capped         []bool
+	oldest         []*time.Time // the run time of the oldest due task of each count
+	halted         []*int64     // with each dead count, the queue's halted groups
+	failures       []*int32     // with each retryable count, the most failures of its tasks
+	dueCapped      bool         // the scheduled and retryable tasks passed their shared cap
+}
+
+// readStats runs the statement sql that counts the tasks, and caps the
+// counts.
+func readStats(ctx context.Context, tx pgx.Tx, sql string) (*counted, error) {
+	var c counted
+	var dueTotal int64 // scheduled and retryable tasks counted, in all queues
 	// Each cap is read one past, so that a count that ends exactly at its cap
 	// is not taken for one with more tasks left.
-	r, err := m.c.pool.Query(ctx, m.c.sql.countStats, statsQueueCap+1, statsDueCap+1)
+	r, err := tx.Query(ctx, sql, statsQueueCap+1, statsDueCap+1, statsRetryCap)
 	if err != nil {
-		return fmt.Errorf("count tasks: %w", err)
+		return nil, err
 	}
+	defer r.Close()
 	for r.Next() {
 		var state, queue string
 		var n int64
 		var due *time.Time
-		if err := r.Scan(&state, &queue, &n, &due); err != nil {
-			r.Close()
-			return fmt.Errorf("count tasks: %w", err)
+		var h *int64
+		var f *int32
+		if err := r.Scan(&state, &queue, &n, &due, &h, &f); err != nil {
+			return nil, err
 		}
 		if s := State(state); s == StateScheduled || s == StateRetryable {
 			dueTotal += n
 		}
-		queues, states, counts = append(queues, queue), append(states, state), append(counts, min(n, statsQueueCap))
-		capped, oldest = append(capped, n > statsQueueCap), append(oldest, due)
+		c.queues, c.states, c.counts = append(c.queues, queue), append(c.states, state), append(c.counts, min(n, statsQueueCap))
+		c.capped, c.oldest = append(c.capped, n > statsQueueCap), append(c.oldest, due)
+		c.halted, c.failures = append(c.halted, h), append(c.failures, f)
 	}
-	r.Close()
 	if err := r.Err(); err != nil {
-		return fmt.Errorf("count tasks: %w", err)
+		return nil, err
 	}
 	// The scheduled and retryable counts share one cap: once it is passed,
 	// any queue may have more of them than counted, even none counted.
-	dueCapped := dueTotal > statsDueCap
-	if dueCapped {
-		for i, s := range states {
+	c.dueCapped = dueTotal > statsDueCap
+	if c.dueCapped {
+		for i, s := range c.states {
 			if s := State(s); s == StateScheduled || s == StateRetryable {
-				capped[i] = true
+				c.capped[i] = true
 			}
 		}
 	}
+	return &c, nil
+}
 
-	err = pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, m.c.sql.clearStats); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, m.c.sql.storeStats, queues, states, counts, capped, oldest, dueCapped); err != nil {
-			return err
-		}
-		_, err := tx.Exec(ctx, m.c.sql.storeActivity)
+// store replaces the stored statistics with c, and copies its counts into
+// the current minute's activity.
+func (c *counted) store(ctx context.Context, tx pgx.Tx, sql *statements) error {
+	if _, err := tx.Exec(ctx, sql.clearStats); err != nil {
 		return err
-	})
-	if err != nil {
-		return fmt.Errorf("store counts: %w", err)
 	}
-	return nil
+	_, err := tx.Exec(ctx, sql.storeStats, c.queues, c.states, c.counts, c.capped, c.oldest, c.dueCapped, c.halted, c.failures)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, sql.storeActivity)
+	return err
 }

@@ -57,7 +57,7 @@ that shows how: a recipe in this section, or another page of the docs.
 | See every service in one admin app | A dashboard in each service. The admin app forwards a path to each | [One dashboard for many services](one-dashboard-for-many-services.md) |
 | Scale workers with the load | KEDA, on the queue's available plus running tasks | [Autoscaling](../production/autoscaling.md) |
 | Probe workers in Kubernetes | `Worker.Health`, for readiness only | [Kubernetes](../production/kubernetes.md) |
-| Know when something goes wrong | One list of alerts: lag, no maintainer, new dead tasks, halted groups, Error logs | [Monitoring](../production/monitoring.md) |
+| Know when something goes wrong | One list of alerts: lag, no maintainer, new dead tasks, halted groups, tasks that keep failing, Error logs | [Monitoring](../production/monitoring.md) |
 | Test that my code enqueues the right task | `taskmilltest`, with a real PostgreSQL | [Test your code](../guides/testing.md) |
 | Follow a task from the HTTP request that made it | The `otel` module | [Logs, traces, and metrics](../guides/observability.md) |
 

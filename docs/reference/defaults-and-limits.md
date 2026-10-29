@@ -104,6 +104,8 @@ back to its default.
 | `Count` | — | Stops at 10,000 tasks per state |
 | Queue statistics (`Client.Queues`) | Refreshed every 10 seconds | Count stops at 10,000 tasks per queue and state, and at 100,000 scheduled and retryable tasks in all |
 | `QueueInfo.Lag` | — | No cap; may read high for up to 10 seconds |
+| `QueueInfo.HaltedGroups` | — | Count stops at 10,000 groups per queue |
+| `QueueInfo.MostFailures` | — | Reads the failures of the 10,000 retryable tasks in all that retry last, and of each queue's last |
 | `ActivityParams.Since` | An hour ago | Activity is kept 24 hours |
 | `ActivityParams.Step` | 1 minute | Whole minutes, up to 1 day |
 | Bulk actions (`RetryMatching`, `CancelMatching`, `DeleteMatching`) | Batches of 1,000 tasks | When the context ends, the current batch finishes within 5 seconds |

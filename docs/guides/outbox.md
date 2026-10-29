@@ -130,10 +130,17 @@ While the broker is down, messages wait in the database. The dashboard shows the
 earlier message with the same key. When the broker is back, the messages go
 out within about 5 minutes, still in order per key.
 
+The queue's [lag](../concepts/glossary.md#lag) stays near zero during the
+outage, because each message waits for its next try, not for a worker. So
+alert on failures in a row instead: `taskmill_queue_most_failures` for the
+`outbox` queue reaches 10 about 9 minutes into an outage. See
+[Monitoring](../production/monitoring.md).
+
 > [!WARNING]
 > A dead message stops its key: later messages with the same topic and key
-> wait, so they are never published before it. Fix the cause, then retry the dead
-> message, or delete it. See [Fix a halted group](ordering.md#fix-a-halted-group).
+> wait, so they are never published before it. `taskmill_queue_halted_groups`
+> counts the keys it stops. Fix the cause, then retry the dead message, or
+> delete it. See [Fix a halted group](ordering.md#fix-a-halted-group).
 
 ## See also
 

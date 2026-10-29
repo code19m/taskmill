@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -452,6 +453,62 @@ func TestQueuesMeasureLag(t *testing.T) {
 		}
 		return false
 	})
+}
+
+func TestQueuesShowWorkThatIsStuckWithoutLag(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// As in an outbox while its broker is down: the first message of a key
+	// keeps failing, and the messages behind it wait as pending.
+	for range 3 {
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "relay", GroupKey: "order-1"})
+	}
+	// A group whose first task dies is halted, and its other tasks wait.
+	for range 2 {
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "orders", GroupKey: "order-2", MaxAttempts: 1})
+	}
+	fail := func(context.Context, *taskmill.Task[sendEmail]) error { return errors.New("broker unreachable") }
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(fail, &taskmill.HandlerOptions{Retry: retryUntil(3)}),
+		Queues:   map[string]taskmill.QueueOptions{"relay": {}, "orders": {}},
+	})
+
+	byName := map[string]taskmill.QueueInfo{}
+	waitFor(t, "statistics to show both queues stuck", func() bool {
+		queues, err := e.client.Queues(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range queues {
+			byName[q.Name] = q
+		}
+		return byName["relay"].MostFailures == 3 && byName["orders"].HaltedGroups == 1
+	})
+	for name, want := range map[string]struct {
+		halted, failures int
+		counts           map[taskmill.State]taskmill.TaskCount
+	}{
+		"relay":  {0, 3, map[taskmill.State]taskmill.TaskCount{taskmill.StateRetryable: {N: 1}, taskmill.StatePending: {N: 2}}},
+		"orders": {1, 0, map[taskmill.State]taskmill.TaskCount{taskmill.StateDead: {N: 1}, taskmill.StateCanceled: {N: 0}, taskmill.StatePending: {N: 1}}},
+	} {
+		q := byName[name]
+		if q.HaltedGroups != want.halted || q.MostFailures != want.failures || q.Lag != 0 || !maps.Equal(q.Counts, want.counts) {
+			t.Errorf("%s: got %d halted groups, %d most failures, lag %s, counts %+v; want %d, %d, no lag, %+v",
+				name, q.HaltedGroups, q.MostFailures, q.Lag, q.Counts, want.halted, want.failures, want.counts)
+		}
+	}
+}
+
+// retryUntil retries a failed attempt after a millisecond until the given
+// attempt has failed, and then after an hour, so that the task waits to
+// retry after failing that many times in a row.
+type retryUntil int
+
+func (n retryUntil) Backoff(attempt int) time.Duration {
+	if attempt < int(n) {
+		return time.Millisecond
+	}
+	return time.Hour
 }
 
 func TestListPagesNewestFirst(t *testing.T) {

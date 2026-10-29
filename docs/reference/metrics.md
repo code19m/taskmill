@@ -65,16 +65,22 @@ queues every 10 seconds, and the gauges read its latest count.
 | `taskmill.queue.tasks` | `{task}` | `messaging.destination.name`, `taskmill.task.state` | Tasks per queue and state, except completed. Counting stops at 10,000 per queue and state, and at 100,000 scheduled and retryable tasks in all | `taskmill_queue_tasks` |
 | `taskmill.queue.capped` | — | `messaging.destination.name`, `taskmill.task.state` | 1 when that count stopped at its cap with more tasks left, else 0 | `taskmill_queue_capped` |
 | `taskmill.queue.lag` | `s` | `messaging.destination.name` | How long the queue's oldest due task has waited since its run time. No cap. May read high for up to 10 seconds | `taskmill_queue_lag_seconds` |
+| `taskmill.queue.halted_groups` | `{group}` | `messaging.destination.name` | FIFO groups of the queue that a dead task halts. Counting stops at 10,000 | `taskmill_queue_halted_groups` |
+| `taskmill.queue.most_failures` | `{failure}` | `messaging.destination.name` | The most times in a row that one task of the queue, waiting to retry, has failed. A task drops out while it runs its next attempt | `taskmill_queue_most_failures` |
 | `taskmill.stats.age` | `s` | — | How long ago the maintainer last counted. Absent until the first count | `taskmill_stats_age_seconds` |
 
 The states are `scheduled`, `pending`, `available`, `running`, `retryable`,
 `dead`, and `canceled`. Tasks that wait behind their FIFO group are not in
-the lag.
+the lag, and neither are tasks that wait for their next retry. Halted groups
+and most failures show that work instead: it is stuck while the lag stays
+near zero.
 
 Alert on `taskmill.queue.lag` for a backlog: it has no cap, and it keeps
 growing when workers stop. Alert on `taskmill.stats.age` over a minute: then
 no maintainer runs, and a queue that was empty at the last count shows no
-lag. [Monitoring](../production/monitoring.md) has the full list of alerts.
+lag. Alert on `taskmill.queue.halted_groups` above 0, and on
+`taskmill.queue.most_failures` reaching 10 within 15 minutes.
+[Monitoring](../production/monitoring.md) has the full list of alerts.
 
 At each collection, every process that calls `ObserveQueues` runs two small
 queries, and stops after 5 seconds. A read that fails goes to

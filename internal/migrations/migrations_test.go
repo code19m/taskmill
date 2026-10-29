@@ -24,6 +24,22 @@ func TestAllRendersEveryMigrationInOrder(t *testing.T) {
 	}
 }
 
+// Every migration after the first changes tables that may be busy. A lock
+// timeout makes one that waits for a lock fail, instead of blocking the
+// statements that queue up behind it (CONTRIBUTING.md).
+func TestMigrationsAfterTheFirstSetALockTimeout(t *testing.T) {
+	t.Parallel()
+	all, err := All("billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range all[1:] {
+		if !strings.Contains(m.SQL, "SET LOCAL lock_timeout") {
+			t.Errorf("migration %04d_%s sets no lock timeout", m.Version, m.Name)
+		}
+	}
+}
+
 func TestParseName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -48,7 +48,7 @@ configurable, so several installations can share a database. It must match
 | `schedules` | Recurring schedules and their next run times | Cold |
 | `workers` | Running worker processes | Cold: a check-in per process every third of `LeaseDuration`, 10 s by default |
 | `leader` | The elected maintainer | Cold |
-| `queue_stats` | Task counts per queue and state, with each count's oldest due task, refreshed by the maintainer | Cold |
+| `queue_stats` | Task counts per queue and state, with each count's oldest due task, and each queue's halted groups and most failures in a row, refreshed by the maintainer | Cold |
 | `activity` | Task counts and ended attempts per minute and queue, for a day | Cold: a few rows every 10 s |
 | `migrations` | Applied schema migrations | Cold |
 
@@ -103,7 +103,8 @@ counts 1. `halted_task_id` names that dead head. Two partial indexes cover
 the halted groups only, so they stay small: one on `halted_task_id` lets
 retention skip the dead heads that keep their groups halted, without
 scanning every group, and one on `(queue, group_key)` lets `Client.Groups`
-page through the halted groups in its order.
+page through the halted groups in its order, and the maintainer count them
+per queue.
 
 ### `dedupe_keys`
 
@@ -289,13 +290,17 @@ transaction that also updates the group if the task finished.
 | Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
 | Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that have not checked in for 5 minutes, and schedules that the maintainer does not define and that did not run or change for a day. |
 | History | Keeps partitions for today and the next 6 days, and drops a partition once its whole day is older than the retention period (see [Operational notes](#operational-notes)). |
-| Statistics | Every 10 seconds, counts each queue's tasks per state, finds each count's oldest due task, and stores both in `queue_stats` and the counts in the current minute of `activity`. |
+| Statistics | Every 10 seconds, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
 
-**Statistics read indexes only, and every count is capped,** so the cost
+**Statistics read indexes, and every count is capped,** so the cost
 stays bounded however large the backlog: up to 10,000 tasks per queue and
-state, and 100,000 scheduled and retryable tasks in all. A recursive query
-finds the next queue name with one index probe each, a technique called a
+state, and 100,000 scheduled and retryable tasks in all. The one exception,
+below, reads up to 10,000 retryable tasks, and one more per queue. The count
+runs in the transaction that stores it, with JIT off: its many subqueries
+make the planner think it costly, and compiling it would take longer than
+running it. A recursive query finds the next queue name with one index
+probe each, a technique called a
 loose index scan, so finding the queues costs one probe per queue, not one
 row per task. Scheduled and retryable tasks are read from `tasks_due_idx`,
 which is ordered by run time, not by queue, so they are counted together,
@@ -319,6 +324,30 @@ count for each known queue without tasks, so every queue shows when it was
 last counted. Only if more than 100,000 scheduled and retryable
 tasks are overdue can a queue's overdue tasks fall past the cap; the oldest
 ones, which set the largest lag, are always read.
+
+**Stuck work that lag leaves out comes with the counts too**
+([ADR 0007](../adr/0007-count-stuck-work-with-the-queue-statistics.md)):
+
+- **Halted groups.** Each queue's `dead` row keeps, in `halted_groups`, how
+  many of its groups a dead head halts, counted through one of the indexes
+  of halted groups up to 10,000, one more probe per queue with dead or
+  canceled tasks. The tasks behind them are `pending`, which lag leaves
+  out.
+- **Most failures.** Each queue's `retryable` row keeps, in
+  `most_failures`, the highest `attempt` of its retryable tasks: the most
+  times in a row that one of them has failed. Such a task waits for its next
+  retry, so lag leaves it out until the retry is due. `attempt` is not in
+  `tasks_due_idx`, so the count reads it with one probe by run time per
+  task, for the 10,000 counted retryable tasks that retry last, and for each
+  queue's task that retries last. Backoff grows with failures, so the tasks
+  that failed most retry last; the new failures of an outage retry first.
+  The count finds them by reading `tasks_due_idx` backward from the last
+  retryable task it counted, so the scheduled tasks after it cost nothing.
+  Measured on PostgreSQL 18 with JIT off and 1.7 million tasks, 150,000 of
+  them retryable: the count took about 15 ms longer.
+
+A maintainer of an older release leaves both columns `NULL`, which
+`Client.Queues` reads as 0.
 
 ### Listing
 
