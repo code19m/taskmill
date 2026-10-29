@@ -11,7 +11,7 @@ import (
 
 func requireAdmin(next http.Handler) http.Handler { return next } // your authentication
 
-// This example mounts the web interface under /taskmill, behind the
+// This example mounts the dashboard under /taskmill, behind the
 // application's own authentication.
 func ExampleNew() {
 	var client *taskmill.Client // from taskmill.NewClient
@@ -25,8 +25,8 @@ func ExampleNew() {
 	log.Fatal(server.ListenAndServe())
 }
 
-// This example serves the web interface as a dashboard of its own, with a
-// password, and lets the company's admin panel show it in a frame.
+// This example serves the dashboard on its own, with a password, and lets the
+// company's admin panel show it in a frame.
 func ExampleNew_dashboard() {
 	var client *taskmill.Client // from taskmill.NewClient
 	handler, err := ui.New(client, &ui.Config{

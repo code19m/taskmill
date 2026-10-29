@@ -95,7 +95,7 @@ Some repeats are expected: [Guarantees](../concepts/guarantees.md).
 
 | Likely cause | Check | Do |
 |---|---|---|
-| Handlers use up the pool's connections | The start-up warning `the pool has fewer connections than the worker's concurrency plus 5` | [Size the pool](database.md#size-the-connection-pool) |
+| Handlers use up the pool's connections | The warning `the pool was full, so renewing leases waited` | [Size the pool](database.md#size-the-connection-pool) |
 | A pod was killed before it drained | `terminationGracePeriodSeconds` below `DrainTimeout` plus 10, or pods killed for their memory | Raise the grace period, or the memory limit |
 | A handler ignores its context | The log `handler ignored shutdown; releasing its task` | Make the handler return when `ctx` ends |
 | A failover or network cut of more than about 20 s | `operation still failing` during the incident | Expected: [When the database fails](database.md#when-the-database-fails) |
@@ -174,8 +174,9 @@ setting. Fix what it names.
 
 - **Cause:** the role that runs your workers does not own taskmill's tables.
   Tasks still complete, but without history.
-- **Check:** `operation still failing` for `apply retention`, with
-  `the role that runs workers must own the taskmill tables` in its error.
+- **Check:** `operation still failing` for `apply retention`, or
+  `prepare history partitions failed` when a worker starts. Their error says
+  `the role that runs workers must own the taskmill tables`.
 - **Do:** [make that role the owner](database.md#run-workers-as-the-owner-of-taskmills-tables).
   The maintainer creates the missing partitions within a minute.
 
@@ -187,8 +188,8 @@ returns 503, with `the worker has not reached the database for …` or
 
 | Likely cause | Check | Do |
 |---|---|---|
-| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record heartbeat` (the worker updates its own row) or `renew leases` | Fix the database or the network. Pods are ready again about 20 s after it is back |
-| Handlers hold every connection of the pool | The start-up pool warning | Raise `pool_max_conns`, or give handlers their own pool |
+| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases` | Fix the database or the network. Pods are ready again about 20 s after it is back |
+| Handlers hold every connection of the pool | The warning `the pool was full, so renewing leases waited` | Raise `pool_max_conns`, or give handlers their own pool |
 | `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix the start-up error |
 
 Don't restart the workers: that does not fix a database outage

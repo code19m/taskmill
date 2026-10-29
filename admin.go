@@ -46,7 +46,7 @@ type QueueInfo struct {
 
 	// Workers counts the workers registered to serve the queue. A worker
 	// that stopped without unregistering, such as after a crash, counts
-	// until it is removed, 5 minutes after its last heartbeat.
+	// until it is removed, 5 minutes after its last check-in.
 	Workers int
 
 	// Counts holds the number of tasks per state, except completed tasks.
@@ -113,8 +113,8 @@ type WorkerInfo struct {
 	Queues      []string
 	Kinds       []string // the kinds it has handlers for
 	StartedAt   time.Time
-	HeartbeatAt time.Time
-	Maintainer  bool // the worker is the elected maintainer
+	CheckedInAt time.Time // its last check-in, which it makes every third of its LeaseDuration
+	Maintainer  bool      // the worker is the elected maintainer
 }
 
 // ListParams filters and pages [Client.List].
@@ -351,7 +351,7 @@ func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) err
 }
 
 // Workers returns the registered worker processes. A worker that stopped
-// without unregistering disappears after 5 minutes without heartbeats.
+// without unregistering disappears 5 minutes after its last check-in.
 func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	r, err := c.pool.Query(ctx, c.sql.listWorkers)
 	if err != nil {
@@ -361,7 +361,7 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	var out []WorkerInfo
 	for r.Next() {
 		var w WorkerInfo
-		if err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.StartedAt, &w.HeartbeatAt, &w.Maintainer); err != nil {
+		if err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.StartedAt, &w.CheckedInAt, &w.Maintainer); err != nil {
 			return nil, fmt.Errorf("taskmill: list workers: %w", err)
 		}
 		out = append(out, w)

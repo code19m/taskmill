@@ -67,8 +67,8 @@ default concurrency of 10 needs 15:
 DATABASE_URL=postgres://app@db/shop?pool_max_conns=15
 ```
 
-pgx's default pool is often too small. If it is, the worker logs a warning
-when it starts.
+pgx's default pool is often too small. If handlers then take every
+connection, the worker logs a warning.
 
 ## Why does NewClient fail?
 

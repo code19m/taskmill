@@ -10,6 +10,16 @@ All notable changes to taskmill are recorded here. The format follows
 ### Added
 
 - `examples/quickstart`, the program that the new quickstart runs.
+- The dashboard's Workers page shows the kinds that each worker has handlers
+  for. A worker's row counts them; click the count to list them all, each
+  with a link to its tasks.
+- `taskmill-ui` answers two paths for Kubernetes probes, with no login, at
+  the root even with `TASKMILL_UI_PREFIX`. `/readyz` fails while the
+  database does not answer, and `/livez` does not check the database, since
+  a restart does not bring it back. `/readyz` asks the database at most once
+  a second, and logs `taskmill-ui not ready` and `taskmill-ui ready again`
+  when its answer changes.
+- `TASKMILL_UI_LOG_FORMAT=json` makes `taskmill-ui` log JSON lines.
 - `QueueInfo.HaltedGroups` and `QueueInfo.FailedAttempts` show work that is
   stuck while a queue's lag stays near zero. `HaltedGroups` counts the
   queue's FIFO groups that a dead task halts, up to 10,000.
@@ -29,12 +39,42 @@ All notable changes to taskmill are recorded here. The format follows
   draw flows as diagrams, and recommend one way wherever there is a choice.
   Start at [docs/README.md](docs/README.md). The old `docs/guide.md` is
   gone.
+- **Breaking:** `WorkerInfo.HeartbeatAt` is now `WorkerInfo.CheckedInAt`.
+  "Heartbeat" now means only the maintainer's signal to the workers. A
+  worker's own report to the database, which renews its leases, is its
+  check-in. To migrate, rename the field where you read it.
+- A worker's check-in has the new name in logs and in the dashboard too. The
+  `operation` attribute of the failing-operation lines says
+  `record check-in` instead of `record heartbeat`: if you match on it,
+  change the match. The Workers page's column says "Checked in" instead of
+  "Heartbeat", and a stale worker's tooltip says "No check-in for a while".
+- The dashboard's log messages say "dashboard": `web interface action` is
+  now `dashboard action`, `web interface request failed` is now
+  `dashboard request failed`, and `web interface request timed out` is now
+  `dashboard request timed out`. Update the log filters and alerts that
+  match them.
+- `taskmill-ui` logs `taskmill-ui listening` once it listens, not just
+  before, and its `addr` is the address it listens on, such as `[::]:8080`.
 
 ### Fixed
 
+- The worker no longer warns at every start that its pool has fewer
+  connections than its concurrency plus 5. That check could not see which
+  pool the handlers use, so it also warned when they had a pool of their
+  own, as the docs advise. Now the worker warns when the pool was full and
+  renewing leases had to wait for a connection, at most once a minute:
+  `the pool was full, so renewing leases waited; …`.
 - The docs of `BatchHandler` and `Client.Cancel` said that a task canceled
   during its batch becomes canceled. It becomes completed if the batch
   returns nil for it, because the work was done, as for other handlers.
+- On a new schema applied with `Migrations` and your own migration tool,
+  the first completed tasks skipped the history, and the worker logged
+  `task history has no partition for today` at Error level. Now each worker
+  creates the missing history partitions when it starts, before it runs a
+  task, as `Migrate` does. If its role may not, it logs `prepare history
+  partitions failed` at Warn level and starts all the same.
+- In the dashboard, table cells now show their faint and warning colors: a
+  stale worker's check-in time turns to the warning color, as its dot does.
 
 ## [0.3.0] - 2026-10-28
 

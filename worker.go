@@ -38,7 +38,6 @@ const (
 	heldRetryMax       = time.Second            // longest wait before retrying them
 	emptyFetchCooldown = 20 * time.Millisecond  // pause after a notification that found nothing
 	errorMessageLimit  = 4096                   // bytes of an error message that are kept
-	poolReserve        = 5                      // pool connections the worker needs besides its handlers'
 )
 
 // timing holds a worker's fixed intervals. They are not configurable, but
@@ -116,12 +115,14 @@ type Worker struct {
 	completions   chan *tracked // successful attempts of Run, for the completer
 	completerDone chan struct{} // closed when the current Run's completer returns
 
+	poolWarned atomic.Int64 // when renewing leases last warned that the pool was full, in Unix nanoseconds
+
 	// The failures of operations that the worker repeats, which it logs
 	// only now and then. Leases and results are renewed and recorded by
 	// RunTask too; Run's loops get theirs anew for each run, and each
 	// queue's fetches and the maintainer's work have their own.
-	leaseFailures, resultFailures                                    *failures
-	beatFailures, settingsFailures, activityFailures, listenFailures *failures
+	leaseFailures, resultFailures                                       *failures
+	checkInFailures, settingsFailures, activityFailures, listenFailures *failures
 }
 
 // WorkerConfig configures a [Worker]. The zero value is valid: a worker
@@ -139,8 +140,9 @@ type WorkerConfig struct {
 	Queues map[string]QueueOptions
 
 	// LeaseDuration is how long a fetched task stays owned without a
-	// heartbeat. Heartbeats are sent every third of it. Minimum: 100
-	// milliseconds. Default: 30 seconds.
+	// renewal. The worker checks in every third of it, and renews the
+	// leases of its running tasks then. Minimum: 100 milliseconds. Default:
+	// 30 seconds.
 	LeaseDuration time.Duration
 
 	// PollInterval is how often idle queues are checked while the
@@ -351,10 +353,10 @@ type tracked struct {
 	// completedDirectly is set once RunTask recorded the completion.
 	completedDirectly bool
 
-	mu       sync.Mutex
-	cancel   context.CancelCauseFunc // set once a single attempt starts
-	state    trackedState
-	lastBeat time.Time // last confirmation that the lease is held
+	mu        sync.Mutex
+	cancel    context.CancelCauseFunc // set once a single attempt starts
+	state     trackedState
+	renewedAt time.Time // last confirmation that the lease is held
 
 	lost            atomic.Bool // the lease is gone: the result must be discarded
 	cancelRequested atomic.Bool
@@ -388,12 +390,27 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 	return names, err
 }
 
+// prepareHistory creates the history partitions that the next week lacks,
+// and logs a failure. Each worker does it when it starts, because a schema
+// applied with Migrations has none, and completions may come before the
+// maintainer's first pass, or from workers that never lead.
+func (w *Worker) prepareHistory(ctx context.Context) {
+	if err := ensureHistoryPartitions(ctx, w.client.pool, w.client.schema); err != nil && ctx.Err() == nil {
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "prepare history partitions failed", slog.Any(logKeyError, err))
+	}
+}
+
 // Run fetches and runs tasks until ctx is canceled. It then stops fetching,
 // waits up to DrainTimeout for running tasks, cancels and releases those
 // still running, and returns nil. If ctx ends before the worker registered,
 // it returns nil at once. It returns an error only if the worker cannot
 // start: it is already running, which is [ErrInvalidState], or it cannot
 // register in the database.
+//
+// Before it fetches, Run creates the history partitions that the next week
+// lacks, as [Migrate] does, so that a schema applied with [Migrations] keeps
+// the history of its first completed tasks. A failure is only logged: the
+// maintainer tries again.
 func (w *Worker) Run(ctx context.Context) error {
 	if !w.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: the worker is already running", ErrInvalidState)
@@ -414,14 +431,14 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	now := time.Now()
 	w.reached.Store(&now)
-	w.beatFailures = newFailures(w, "record heartbeat")
+	w.checkInFailures = newFailures(w, "record check-in")
 	w.settingsFailures = newFailures(w, "load queue settings")
 	w.activityFailures = newFailures(w, "record activity")
 	w.listenFailures = newFailures(w, "listen for notifications")
 	w.refreshQueueSettings(ctx)
+	w.prepareHistory(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
-	w.checkPoolSize(ctx)
 
 	w.released.Store(0)
 	w.completerDone = make(chan struct{})
@@ -431,7 +448,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	loopsCtx, stopLoops := context.WithCancel(base)
 	var loops sync.WaitGroup
 	loops.Go(func() { w.listenLoop(loopsCtx) })
-	loops.Go(func() { w.heartbeatLoop(loopsCtx) })
+	loops.Go(func() { w.checkInLoop(loopsCtx) })
 	loops.Go(func() { w.activityLoop(loopsCtx) })
 	loops.Go(func() { w.settingsLoop(loopsCtx) })
 	if !w.cfg.NoMaintainer {
@@ -465,22 +482,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	w.logger.LogAttrs(stopCtx, slog.LevelInfo, "worker stopped", slog.Int64(logKeyReleased, w.released.Load()))
 	return nil
-}
-
-// checkPoolSize warns if handlers that use the client's pool could take all
-// its connections: the worker's heartbeats would then wait, and attempts
-// would lose their leases and run twice.
-func (w *Worker) checkPoolSize(ctx context.Context) {
-	concurrency := 0
-	for _, q := range w.queues {
-		concurrency += cap(q.slots)
-	}
-	if conns := int(w.client.pool.Config().MaxConns); concurrency > 0 && conns < concurrency+poolReserve {
-		w.logger.LogAttrs(ctx, slog.LevelWarn,
-			"the pool has fewer connections than the worker's concurrency plus 5; "+
-				"handlers that use the same pool can starve the worker's heartbeats",
-			slog.Int(logKeyMaxConns, conns), slog.Int(logKeyConcurrency, concurrency))
-	}
 }
 
 // drain waits for running attempts, then cancels them and releases the tasks
@@ -561,12 +562,12 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	t.direct = true
 	w.track(t)
 
-	// Heartbeats renew the lease while the handler runs, and while its
-	// result is recorded.
-	beatCtx, stopBeats := context.WithCancel(context.WithoutCancel(ctx))
-	var beats sync.WaitGroup
-	beats.Go(func() {
-		w.everyBeat(beatCtx, func(ctx context.Context) { w.renewLeases(ctx, []*tracked{t}) })
+	// The lease is renewed every third of it while the handler runs, and
+	// while its result is recorded.
+	renewCtx, stopRenewing := context.WithCancel(context.WithoutCancel(ctx))
+	var renewing sync.WaitGroup
+	renewing.Go(func() {
+		w.everyThirdOfLease(renewCtx, func(ctx context.Context) { w.renewLeases(ctx, []*tracked{t}) })
 	})
 
 	attemptCtx, stopAttempt := context.WithCancelCause(context.WithoutCancel(ctx))
@@ -578,8 +579,8 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	}
 	stopAfter()
 	stopAttempt(nil)
-	stopBeats()
-	beats.Wait()
+	stopRenewing()
+	renewing.Wait()
 
 	info, err := w.client.Get(context.WithoutCancel(ctx), id)
 	if errors.Is(err, ErrNotFound) && t.completedDirectly {

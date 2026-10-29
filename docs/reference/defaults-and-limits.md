@@ -47,12 +47,12 @@ kind's `EnqueueDefaults` are used, and then the defaults above.
 | `WorkerConfig.Queues` | The default queue of each registered kind | — |
 | `QueueOptions.Concurrency` | 10 tasks per queue, per worker; a batch counts as one | Not negative |
 | `WorkerConfig.LeaseDuration` | 30 seconds | At least 100 ms |
-| Lease renewal, and the worker's report that it is alive (`record heartbeat` in logs) | Every third of `LeaseDuration`: 10 seconds | Fixed ratio |
+| The worker's [check-in](../concepts/glossary.md#check-in): it renews its leases and reports that it is alive | Every third of `LeaseDuration`: 10 seconds | Fixed ratio |
 | `WorkerConfig.PollInterval` | 1 second | Used only while the maintainer's heartbeats don't arrive |
 | Idle poll while the heartbeats arrive | Once a minute per queue | Fixed |
 | `WorkerConfig.DrainTimeout` | 20 seconds | Then 5 more seconds for handlers to return; fixed |
 | `WorkerConfig.NoMaintainer` | `false`: the worker can become the maintainer | At least one worker must take part |
-| Database connections | The pool, plus 1 for notifications | The worker warns if the pool's `MaxConns` is below its total `Concurrency` plus 5 |
+| Database connections | The pool, plus 1 for notifications | The worker warns when the pool is full and renewing leases waits `LeaseDuration` / 30 or longer (1 second by default) for a connection; at most once a minute |
 | `Worker.Health` | Fails while `Run` is not running, or when the worker has not reached the database for longer than `LeaseDuration` | — |
 
 ## The maintainer
@@ -142,7 +142,9 @@ The `taskmill-ui` command listens on `localhost:8080` by default: set
 set `TASKMILL_UI_USERNAME`. Its HTTP server waits up to 10 seconds for a
 request's headers, 30 seconds to write an answer, and keeps an idle
 connection for 2 minutes. At shutdown, it waits up to 10 seconds for open
-requests. The
+requests. Its `/readyz` asks the database at most once a second, and waits
+up to 2 seconds for the answer. It logs text unless you set
+`TASKMILL_UI_LOG_FORMAT=json`. The
 [command's godoc](https://pkg.go.dev/github.com/code19m/taskmill/cmd/taskmill-ui)
 lists every environment variable.
 

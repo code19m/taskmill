@@ -45,16 +45,14 @@ hair" → "just". Split a sentence with "whose" and two "that" clauses in two.
 | dashboard | "web interface", "web UI" | The package is `ui`; the command is `taskmill-ui`. |
 | task | "job" | Unless you compare taskmill with other tools. |
 | maintainer | | Only the worker chosen to do upkeep: wake queues, promote due tasks, take back the tasks of lost leases, and run schedules. For the people who run the project, write "the project team", and only in contributor docs. |
-| heartbeat | | Only the maintainer's signal to the workers, every few seconds. A worker keeping its tasks "renews its lease"; a worker updating its own row "reaches the database". |
+| heartbeat | | Only the maintainer's signal to the workers, every few seconds. |
+| check-in | "heartbeat" | Only a worker's own report to the database, every third of the lease: it renews its leases and notes that it is alive. For one task, the worker "renews its lease". |
 | schema | "installation" | One taskmill schema, with its own tasks, queues, and workers (`taskmill` by default). Godoc says "installation". |
 | "immediately", "right away", "in one go" | "at once" | "At once" can also mean "at the same time". |
 
 Text that the code prints, such as a log message, an error, or a label in
 the dashboard, stays exactly as the code writes it, even when it breaks this
-table. Explain it in plain words where you quote it. For example, the
-operation `record heartbeat` in the logs and the dashboard's "Heartbeat"
-column are about a worker's own row, not the maintainer's heartbeat; and
-the log message `web interface action` is about the dashboard.
+table. Explain it in plain words where you quote it.
 
 **5. Define a term where you first use it,** in a few words, and link it to
 the [glossary](../concepts/glossary.md) the first time on each page. Define

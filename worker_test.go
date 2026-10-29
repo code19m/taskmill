@@ -429,7 +429,7 @@ func TestWorkerReleasesTasksThatOutliveTheDrain(t *testing.T) {
 	}
 }
 
-func TestHeartbeatsKeepLongTasksLeased(t *testing.T) {
+func TestCheckInsKeepLongTasksLeased(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	var runs atomic.Int32
@@ -440,8 +440,8 @@ func TestHeartbeatsKeepLongTasksLeased(t *testing.T) {
 			return nil
 		}, nil),
 		Queues: defaultQueue(2),
-		// Without heartbeats, the task is rescued and runs again. The lease is
-		// long enough that a loaded machine does not miss heartbeats for all of
+		// Without check-ins, the task is rescued and runs again. The lease is
+		// long enough that a loaded machine does not miss check-ins for all of
 		// it.
 		LeaseDuration: time.Second,
 	})
@@ -449,7 +449,7 @@ func TestHeartbeatsKeepLongTasksLeased(t *testing.T) {
 	id := e.enqueue(t, sendEmail{}, nil)
 	info := e.waitState(t, id, taskmill.StateCompleted)
 	if runs.Load() != 1 || info.Attempt != 1 {
-		t.Fatalf("task ran %d times over %d attempts; heartbeats did not hold the lease", runs.Load(), info.Attempt)
+		t.Fatalf("task ran %d times over %d attempts; check-ins did not hold the lease", runs.Load(), info.Attempt)
 	}
 }
 
@@ -853,7 +853,7 @@ func storeMax(v *atomic.Int32, n int32) {
 	}
 }
 
-func TestHeartbeatSkipsLockedTasks(t *testing.T) {
+func TestLeaseRenewalSkipsLockedTasks(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	const lease = 1500 * time.Millisecond
@@ -896,6 +896,105 @@ func TestHeartbeatSkipsLockedTasks(t *testing.T) {
 	close(release)
 	if info := e.waitState(t, other, taskmill.StateCompleted); info.Attempt != 1 {
 		t.Fatalf("task ran %d times; it lost its lease", info.Attempt)
+	}
+}
+
+// poolWaitWarning is what a worker logs when renewing leases waited for a
+// connection of its client's pool.
+const poolWaitWarning = "the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own"
+
+// connHolders returns handlers that each take a connection from pool, and
+// hold it until release is closed or their context ends. Each says so on
+// started while it has room: a retried task never blocks there.
+func connHolders(pool *pgxpool.Pool, started chan<- struct{}, release <-chan struct{}) *taskmill.Handlers {
+	return handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+		conn, err := pool.Acquire(ctx)
+		if err != nil {
+			return err
+		}
+		defer conn.Release()
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return context.Cause(ctx)
+		}
+	}, nil)
+}
+
+func TestWorkerWarnsWhenHandlersHoldEveryPoolConnection(t *testing.T) {
+	t.Parallel()
+	pool := testdb.PoolSize(t, 2)
+	logs := &logRecorder{}
+	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
+	started, release := make(chan struct{}, 2), make(chan struct{})
+	defer close(release)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers:      connHolders(pool, started, release),
+		Queues:        defaultQueue(2),
+		LeaseDuration: 600 * time.Millisecond,
+	})
+	e.enqueue(t, sendEmail{UserID: 1}, nil)
+	e.enqueue(t, sendEmail{UserID: 2}, nil)
+	recv(t, started, "a handler to take a connection")
+	recv(t, started, "a handler to take a connection")
+
+	// The worker warns before the leases run out, and once a minute at most,
+	// however many renewals wait.
+	waitFor(t, "the pool warning", func() bool { return logs.count(poolWaitWarning) > 0 })
+	waitFor(t, "a lease to be lost", func() bool { return logs.count("attempt lost its lease; canceling it") > 0 })
+	if n := logs.count(poolWaitWarning); n != 1 {
+		t.Errorf("the pool warning was logged %d times, want once", n)
+	}
+	for _, r := range logs.all() {
+		if r.Message == poolWaitWarning && (r.Level != slog.LevelWarn || attr(r, "max_conns") != "2") {
+			t.Errorf("got %s, want a warning with max_conns=2", recordText(r))
+		}
+	}
+}
+
+func TestWorkerDoesNotWarnWhenHandlersHaveTheirOwnPool(t *testing.T) {
+	t.Parallel()
+	// taskmill's pool has fewer connections than the worker's concurrency
+	// plus 5, and the handlers hold every connection of their own pool.
+	logs := &logRecorder{}
+	e := newEnvWith(t, testdb.PoolSize(t, 16), &taskmill.ClientConfig{Logger: slog.New(logs)})
+	own := testdb.PoolSize(t, 4)
+	const lease = 600 * time.Millisecond
+	started, release := make(chan struct{}, 4), make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers:      connHolders(own, started, release),
+		Queues:        defaultQueue(20),
+		LeaseDuration: lease,
+	})
+	ids := make([]int64, 4)
+	for i := range ids {
+		ids[i] = e.enqueue(t, sendEmail{UserID: int64(i)}, nil)
+	}
+	for range ids {
+		recv(t, started, "a handler to take a connection")
+	}
+
+	var now time.Time
+	if err := e.pool.QueryRow(t.Context(), "SELECT clock_timestamp()").Scan(&now); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the leases to be renewed for a while", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = ANY($1) AND lease_expires_at > $2",
+			ids, now.Add(2*lease)) == len(ids)
+	})
+	close(release)
+	for _, id := range ids {
+		e.waitState(t, id, taskmill.StateCompleted)
+	}
+	for _, r := range logs.all() {
+		if r.Level >= slog.LevelWarn && strings.Contains(r.Message, "pool") {
+			t.Errorf("got %s, want no warning about the pool", recordText(r))
+		}
 	}
 }
 
@@ -1311,7 +1410,7 @@ func TestHealthFollowsTheDatabase(t *testing.T) {
 	waitFor(t, "the worker to be healthy", func() bool { return w.Health() == nil })
 
 	// Without the database, it turns unhealthy once it could have lost its
-	// leases, and healthy again at its first heartbeat once it is back.
+	// leases, and healthy again at its first check-in once it is back.
 	cut := time.Now()
 	db.cut(true)
 	waitFor(t, "the worker to be unhealthy", func() bool { return w.Health() != nil })
@@ -1571,7 +1670,7 @@ func runTaskWorker(t *testing.T, e *env) (*taskmill.Worker, *atomic.Int32) {
 	}), nil)
 	var batches atomic.Int32
 	taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { batches.Add(1) }), nil)
-	// A lease long enough that a loaded machine does not miss heartbeats for
+	// A lease long enough that a loaded machine does not miss renewals for
 	// all of it.
 	return newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, LeaseDuration: time.Second}), &batches
 }
@@ -1601,7 +1700,7 @@ func TestRunTask(t *testing.T) {
 		t.Parallel()
 		id := e.enqueue(t, sendEmail{To: "slow"}, nil)
 		if info := run(t, t.Context(), id, taskmill.StateCompleted); info.Attempt != 1 {
-			t.Fatalf("completed on attempt %d; heartbeats did not hold the lease", info.Attempt)
+			t.Fatalf("completed on attempt %d; renewals did not hold the lease", info.Attempt)
 		}
 	})
 	t.Run("canceled context", func(t *testing.T) {
@@ -1877,7 +1976,7 @@ func TestWorkerRemovedAsStaleRegistersAgain(t *testing.T) {
 		Handlers: noopHandlers(), NoMaintainer: true, LeaseDuration: 300 * time.Millisecond,
 	})
 	e.waitListening(t)
-	// What the maintainer does to a worker that missed its heartbeats for 5
+	// What the maintainer does to a worker that has not checked in for 5
 	// minutes, such as one on a machine that slept, while it kept working.
 	e.exec(t, "DELETE FROM {s}.workers")
 	const logged = "worker was removed as stale; registering again"

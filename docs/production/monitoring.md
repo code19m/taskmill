@@ -98,8 +98,10 @@ down, taskmill does not log every try. It logs `operation failed` (Warn) when
 the problem starts, `operation still failing` (Error) at most once a minute
 while it lasts, and `operation recovered` (Info) when it ends.
 
-`taskmill-ui` logs text lines to standard error, at Info level. You cannot
-change the format or the level.
+`taskmill-ui` logs text lines to standard error, at Info level. Set
+`TASKMILL_UI_LOG_FORMAT=json` for JSON lines. You cannot change the level.
+It exports no metrics: the queue gauges come from your apps
+([Dashboard](../guides/dashboard.md)).
 
 ## See also
 

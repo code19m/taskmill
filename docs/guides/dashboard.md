@@ -61,6 +61,7 @@ It reads its settings from environment variables:
 | `TASKMILL_SCHEMA` | The taskmill [schema](../concepts/glossary.md#schema) | `taskmill` |
 | `TASKMILL_UI_ADDR` | The address to listen on | `localhost:8080`. In a container, set `:8080` |
 | `TASKMILL_UI_PASSWORD` | The login password | None: anyone who reaches it can use it |
+| `TASKMILL_UI_LOG_FORMAT` | The format of the logs on standard error: `text` or `json` | `text` |
 
 The next section lists the rest.
 
@@ -68,7 +69,11 @@ The next section lists the rest.
   dashboard refuses to start on an older schema, with `ErrSchemaOutdated`.
   So upgrade the dashboard after your apps have migrated.
 - It never changes the schema. Your apps create and migrate it.
-- It writes text logs to standard error.
+- For probes, it answers `/livez` and `/readyz` with no login. See
+  [Kubernetes](../production/kubernetes.md) for what each one checks.
+- It exports no metrics. Export the queue gauges from your apps, with the
+  `otel` module ([Observability](observability.md)). A metrics library in
+  `taskmill-ui` would become a dependency of every app that uses taskmill.
 - To check that a download is genuine, see [Security](../production/security.md).
 
 ## Protect it
@@ -124,7 +129,7 @@ To match your app's theme, add `?theme=light`, `?theme=dark`, or
 | **Tasks** | Tasks filtered by state, queue, kind, and FIFO group | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its next and last run | Pause, resume, or run it now |
-| **Workers** | Each worker, with its host, version, and queues, and which one is the maintainer. The **Heartbeat** column says when the worker last reported to the database | Nothing: this page is for looking |
+| **Workers** | Each worker, with its host, version, and queues, and which one is the maintainer. The **Kinds** column counts the kinds that the worker has handlers for; click the count to list them. The **Checked in** column says when the worker last reported to the database, at its [check-in](../concepts/glossary.md#check-in) | Nothing: this page is for looking |
 
 Before an action on many tasks, the dashboard shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,

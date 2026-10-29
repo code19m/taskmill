@@ -13,14 +13,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Maintenance limits.
 const (
 	maintenanceBatch   = 1000                  // most tasks one maintenance statement changes
 	minMaintainerSleep = 50 * time.Millisecond // shortest wait for the next due task: at most 20 promotions a second
-	staleWorkerAge     = 5 * time.Minute       // a worker without heartbeats this long is removed
+	staleWorkerAge     = 5 * time.Minute       // a worker that has not checked in this long is removed
 	detachTimeout      = 30 * time.Second      // bound on detaching one history partition
 
 	// maintenanceLockTimeout bounds the wait for a row that an application
@@ -355,10 +354,7 @@ func (m *maintainer) retain(ctx context.Context) {
 // steps that failed: one step's failure does not stop the others.
 func (m *maintainer) applyRetention(ctx context.Context) error {
 	var errs []error
-	if err := ensureHistoryPartitions(ctx, m.c.pool, m.c.schema, time.Now(), historyDaysAhead); err != nil {
-		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42501" { // insufficient_privilege
-			err = fmt.Errorf("%w; the role that runs workers must own the taskmill tables", err)
-		}
+	if err := ensureHistoryPartitions(ctx, m.c.pool, m.c.schema); err != nil {
 		errs = append(errs, err)
 	}
 

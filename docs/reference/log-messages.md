@@ -12,7 +12,7 @@ taskmill logs through `log/slog`. Without a logger, it logs nothing.
 | A client, and the workers built on it | `ClientConfig.Logger` | Nothing is logged |
 | `Migrate` | `MigrateConfig.Logger` | Nothing is logged |
 | The dashboard, from the `ui` package | `ui.Config.Logger` | Nothing is logged |
-| The `taskmill-ui` command | Text lines on standard error, at Info and above | — |
+| The `taskmill-ui` command | Text lines on standard error, at Info and above. JSON lines with `TASKMILL_UI_LOG_FORMAT=json` | — |
 
 > [!TIP]
 > Pass your application's logger to all three configs, and run at Info. Send
@@ -44,7 +44,7 @@ The same key always means the same thing.
 | `retry_in` | The wait before the next attempt |
 | `released` | Tasks given back to their queue at shutdown |
 | `queues`, `kinds`, `group`, `partition` | Names of queues, kinds, a FIFO group, a history partition |
-| `max_conns`, `concurrency`, `timeout` | Settings named by the line |
+| `max_conns`, `timeout` | Settings named by the line |
 | `version`, `name` | A migration, or the version of `taskmill-ui` |
 | `action`, `target`, `skipped`, `path`, `page` | The dashboard's actions and requests |
 | `addr`, `prefix`, `read_only` | The settings of `taskmill-ui` |
@@ -78,7 +78,7 @@ successes between them.
 |---|---|---|---|
 | `fetch tasks` | Takes tasks of the queue in `queue` | Every poll, and on each wake-up | The database |
 | `renew leases` | Renews the leases of running tasks | Every third of `LeaseDuration` | The database, and the pool size |
-| `record heartbeat` | Notes in the database that the worker is alive: its own check-in, not the maintainer's [heartbeat](../concepts/glossary.md#heartbeat) | Every third of `LeaseDuration` | The database |
+| `record check-in` | Notes in the database that the worker is alive, at its [check-in](../concepts/glossary.md#check-in) | Every third of `LeaseDuration` | The database |
 | `record results` | Saves the results of finished attempts | After each attempt | The database |
 | `load queue settings` | Reads pauses and limits of the queues | Every 10 seconds | The database |
 | `record activity` | Writes the counts for the charts | Every 10 seconds | The database |
@@ -114,7 +114,6 @@ backticks.
 |---|---|---|---|
 | `worker started` | Info | `Run` started, and serves `queues`. | Nothing. |
 | `the worker does not serve the default queue of these registered kinds` | Warn | The worker has handlers for `kinds`, but does not read their default queues. Their tasks wait for another worker. | Add the queues to `WorkerConfig.Queues`, or run a worker that reads them. |
-| `the pool has fewer connections than the worker's concurrency plus 5; handlers that use the same pool can starve the worker's heartbeats` | Warn | The pool's `max_conns` is below the worker's total `concurrency` plus 5. Handlers can take every connection. Then the worker cannot renew its leases (the message calls them its heartbeats), and tasks run twice. | Raise the pool's `MaxConns`, for example with `pool_max_conns` in the URL. See [Database](../production/database.md). |
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended. It waits up to `timeout` for `tasks` running tasks. | Nothing. |
 | `handler ignored shutdown; releasing its task` | Warn | A handler did not return within 5 seconds after its context was canceled. Its task goes back to the queue and runs again. The handler may still be running. | Make the handler return when its context ends. |
 | `worker stopped` | Info | `Run` returned. `released` tasks went back to their queues. | Nothing. |
@@ -128,6 +127,7 @@ backticks.
 | `attempt failed; retrying` | Debug | The handler failed. The task runs again in `retry_in`. Also has `attempt`, `error`, and `duration`. | Nothing. |
 | `attempt failed; the task is dead` | Error | The task failed for good: no attempts left, `Permanent`, a payload that did not decode, or no handler for an hour. Also logged when the last attempt's worker lost its lease. | Fix the cause. Then retry the task, or delete it. A dead task halts its FIFO group. |
 | `no handler for task kind; snoozing` | Warn | This worker has no handler for `kind`. The task waits up to an hour for a worker that has one, without using attempts. Later snoozes of the same task log at Debug. | Normal during a rolling deploy. Otherwise, give every worker of the queue the same handlers. |
+| `the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own` | Warn | All `max_conns` connections of the pool were in use, so renewing leases waited `duration` for one. Usually handlers that share the pool hold them. If renewals keep waiting, leases run out and tasks run twice. Logged at most once a minute. | Raise the pool's `MaxConns`, for example with `pool_max_conns` in the URL. Or give handlers a pool of their own. See [Database](../production/database.md#size-the-connection-pool). |
 | `attempt lost its lease; canceling it` | Warn | The worker could not renew the lease in time. The task may already run on another worker. | Check the database and the pool size. |
 | `result discarded: the attempt lost its lease` | Debug | An attempt ended after it lost its lease. Its result does not count. | Nothing. |
 | `record attempt failed; the task is rescued when its lease expires` | Warn | The result of the attempt could not be saved in time. Once the lease runs out, the maintainer rescues the task. | Check the database. |
@@ -159,17 +159,17 @@ backticks.
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
-| `task history has no partition for today; completed tasks skip history` | Error | The maintainer could not create today's history partition. Tasks still complete, but without history. | Make the role that runs workers own the taskmill tables. See [Database](../production/database.md). |
+| `task history has no partition for today; completed tasks skip history` | Error | Neither the workers, when they started, nor the maintainer could create today's history partition. Tasks still complete, but without history. | Make the role that runs workers own the taskmill tables. See [Database](../production/database.md). |
 | `applied migration` | Info | `Migrate` applied migration `version` (`name`) in `duration`. | Nothing. |
-| `prepare history partitions failed` | Warn | `Migrate` found the schema up to date, but could not create history partitions. The maintainer tries again. | If `task history has no partition` follows, fix the table owner. |
+| `prepare history partitions failed` | Warn | `Migrate` found the schema up to date, or a worker started, but could not create the missing history partitions. `error` says why. The worker still starts, and the maintainer tries again. | If `task history has no partition` follows, fix the table owner. |
 
 ### Dashboard
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
-| `web interface action` | Info | Someone did `action` on `target` in the dashboard. A bulk action also has `tasks`, how many tasks it changed, and `skipped`, how many other work held. | Nothing. To log who did it, see [One dashboard for many services](../recipes/one-dashboard-for-many-services.md). |
-| `web interface request failed` | Warn | A page or an action at `path` failed, often because the database is out of reach. | Check the database, if it repeats. |
-| `web interface request timed out` | Warn | The database did not answer within 10 seconds. The page says "Taking too long". | Check the database's load. |
+| `dashboard action` | Info | Someone did `action` on `target` in the dashboard. A bulk action also has `tasks`, how many tasks it changed, and `skipped`, how many other work held. | Nothing. To log who did it, see [One dashboard for many services](../recipes/one-dashboard-for-many-services.md). |
+| `dashboard request failed` | Warn | A page or an action at `path` failed, often because the database is out of reach. | Check the database, if it repeats. |
+| `dashboard request timed out` | Warn | The database did not answer within 10 seconds. The page says "Taking too long". | Check the database's load. |
 | `read activity failed` | Warn | The overview's charts could not read their history, and show none. | Check the database, if it repeats. |
 | `read filter choices failed` | Warn | The task list could not read the choices of a filter, named by `target`. | Check the database, if it repeats. |
 | `search groups failed` | Warn | The search for FIFO groups in a filter failed. | Check the database, if it repeats. |
@@ -181,6 +181,8 @@ backticks.
 |---|---|---|---|
 | `taskmill-ui listening` | Info | The command serves the dashboard on `addr`, with its `version`, `prefix`, and `read_only` setting. | Nothing. |
 | `the dashboard has no password: set TASKMILL_UI_PASSWORD, unless something in front of it authenticates` | Warn | Anyone who reaches the address can use the dashboard. | Set `TASKMILL_UI_PASSWORD`, unless a proxy in front of it asks for a login. |
+| `taskmill-ui not ready` | Warn | `/readyz` asked the database, which did not answer. `error` says why. Until the database answers, `/readyz` fails, and Kubernetes sends no one to the pod. Only a request to `/readyz`, such as a probe, asks. | Check the database. The pod recovers by itself. |
+| `taskmill-ui ready again` | Info | The database answers `/readyz` again, after `taskmill-ui not ready`. | Nothing. |
 | `taskmill-ui stopped` | Error | The command could not start or serve, and exited. `error` says why: for example, the schema is not migrated yet, or a setting is wrong. | Fix what `error` names. If the schema is not migrated yet, let your application run `Migrate`, then start the command again. |
 
 ## See also

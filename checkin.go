@@ -6,17 +6,18 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// heartbeatLoop renews the leases of every tracked attempt, and cancels the
-// attempts that lost theirs or whose tasks were canceled.
-func (w *Worker) heartbeatLoop(ctx context.Context) {
-	w.everyBeat(ctx, w.heartbeat)
+// checkInLoop checks the worker in every third of the lease, until ctx ends.
+func (w *Worker) checkInLoop(ctx context.Context) {
+	w.everyThirdOfLease(ctx, w.checkIn)
 }
 
-// everyBeat calls beat every third of the lease, each time with that third
-// as its timeout, until ctx ends.
-func (w *Worker) everyBeat(ctx context.Context, beat func(context.Context)) {
+// everyThirdOfLease calls fn every third of the lease, each time with that
+// third as its timeout, until ctx ends.
+func (w *Worker) everyThirdOfLease(ctx context.Context, fn func(context.Context)) {
 	interval := w.cfg.LeaseDuration / 3
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -25,14 +26,17 @@ func (w *Worker) everyBeat(ctx context.Context, beat func(context.Context)) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			beatCtx, cancel := context.WithTimeout(ctx, interval)
-			beat(beatCtx)
+			fnCtx, cancel := context.WithTimeout(ctx, interval)
+			fn(fnCtx)
 			cancel()
 		}
 	}
 }
 
-func (w *Worker) heartbeat(ctx context.Context) {
+// checkIn is the worker's periodic check-in: it renews the leases of every
+// tracked attempt, cancels the attempts that lost theirs or whose tasks were
+// canceled, and records in the worker's row that it is alive.
+func (w *Worker) checkIn(ctx context.Context) {
 	w.mu.Lock()
 	ts := make([]*tracked, 0, len(w.attempts))
 	for _, t := range w.attempts {
@@ -40,17 +44,17 @@ func (w *Worker) heartbeat(ctx context.Context) {
 	}
 	w.mu.Unlock()
 
-	// Leases first: on a slow database they need the beat's time more than
-	// the worker's own row, which only shows that it is alive.
+	// Leases first: on a slow database they need the check-in's time more
+	// than the worker's own row, which only shows that it is alive.
 	w.renewLeases(ctx, ts)
-	tag, err := w.client.pool.Exec(ctx, w.client.sql.beatWorker, w.id)
+	tag, err := w.client.pool.Exec(ctx, w.client.sql.checkInWorker, w.id)
 	if err == nil && tag.RowsAffected() == 0 {
 		// The maintainer removed this worker as stale, after a pause such as
 		// the machine's sleep, while it kept working: it registers again.
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "worker was removed as stale; registering again")
 		_, err = w.register(ctx)
 	}
-	w.beatFailures.observe(ctx, err)
+	w.checkInFailures.observe(ctx, err)
 	if err == nil {
 		now := time.Now()
 		w.reached.Store(&now)
@@ -58,7 +62,7 @@ func (w *Worker) heartbeat(ctx context.Context) {
 }
 
 // Health reports whether the worker runs and is in touch with the database:
-// nil while Run runs and its last heartbeat succeeded within LeaseDuration,
+// nil while Run runs and its last check-in succeeded within LeaseDuration,
 // and otherwise an error that says why. A worker out of touch for that long
 // can no longer keep its tasks' leases. Health reads only memory, so a
 // readiness probe may call it often. It fails while the database is out of
@@ -87,63 +91,94 @@ func (w *Worker) renewLeases(ctx context.Context, ts []*tracked) {
 		ids[i], tokens[i] = t.att.id, t.att.token
 	}
 	sent := time.Now()
-	beats, err := w.renew(ctx, ids, tokens)
+	renewals, err := w.renew(ctx, ids, tokens)
 	w.leaseFailures.observe(ctx, err)
 
 	for _, t := range ts {
-		b, owned := beats[t.att.id]
+		r, owned := renewals[t.att.id]
 		switch {
 		case err == nil && !owned:
 			w.loseLease(ctx, t)
 			continue
-		case b.renewed:
+		case r.renewed:
 			t.mu.Lock()
-			t.lastBeat = sent
+			t.renewedAt = sent
 			t.mu.Unlock()
 		default:
-			// The heartbeat failed, or the task's row was locked: without a
-			// renewal, the attempt cannot know that it still owns its task
-			// once its lease could have expired.
+			// The renewal failed, or the task's row was locked: until a
+			// renewal succeeds, the attempt cannot know that it still owns
+			// its task once its lease could have expired.
 			t.mu.Lock()
-			expired := time.Since(t.lastBeat) >= w.cfg.LeaseDuration
+			expired := time.Since(t.renewedAt) >= w.cfg.LeaseDuration
 			t.mu.Unlock()
 			if expired {
 				w.loseLease(ctx, t)
 				continue
 			}
 		}
-		if b.cancelRequested {
+		if r.cancelRequested {
 			t.requestCancel()
 		}
 	}
 }
 
-// beat is what a heartbeat learned about an attempt that owns its task.
-type beat struct {
+// renewal is what renewing a lease learned about an attempt that owns its
+// task.
+type renewal struct {
 	renewed         bool // false if another transaction locked the task's row
 	cancelRequested bool
 }
 
 // renew extends the leases of the given attempts and returns those that still
 // own their tasks.
-func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[int64]beat, error) {
-	r, err := w.client.pool.Query(ctx, w.client.sql.heartbeat, ids, tokens, w.cfg.LeaseDuration.Microseconds())
+func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[int64]renewal, error) {
+	conn, err := w.acquireForRenewal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Release()
+	r, err := conn.Query(ctx, w.client.sql.renewLeases, ids, tokens, w.cfg.LeaseDuration.Microseconds())
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	beats := make(map[int64]beat, len(ids))
+	renewals := make(map[int64]renewal, len(ids))
 	for r.Next() {
 		var id int64
-		var b beat
-		if err := r.Scan(&id, &b.renewed, &b.cancelRequested); err != nil {
+		var got renewal
+		if err := r.Scan(&id, &got.renewed, &got.cancelRequested); err != nil {
 			return nil, err
 		}
 		// A renewed task appears twice: renewed, and owned.
-		prev := beats[id]
-		beats[id] = beat{renewed: prev.renewed || b.renewed, cancelRequested: prev.cancelRequested || b.cancelRequested}
+		prev := renewals[id]
+		renewals[id] = renewal{renewed: prev.renewed || got.renewed, cancelRequested: prev.cancelRequested || got.cancelRequested}
 	}
-	return beats, r.Err()
+	return renewals, r.Err()
+}
+
+// acquireForRenewal takes a connection of the pool to renew leases. If every
+// connection was in use, and the renewal waited for one for at least a tenth
+// of its time, it warns, at most once per failureReport: handlers that share
+// the pool may hold all its connections, and if renewals keep waiting, leases
+// run out and tasks run twice. It judges by what happened, not by the pool's
+// size, because it cannot see which pool the handlers use. A wait for a new
+// connection to open, or a short wait, is normal.
+func (w *Worker) acquireForRenewal(ctx context.Context) (*pgxpool.Conn, error) {
+	s := w.client.pool.Stat()
+	full := s.IdleConns() == 0 && s.TotalConns() >= s.MaxConns()
+	start := time.Now()
+	conn, err := w.client.pool.Acquire(ctx)
+	waited := time.Since(start)
+	if !full || waited < w.cfg.LeaseDuration/30 { // a renewal has a third of the lease
+		return conn, err
+	}
+	now, last := time.Now().UnixNano(), w.poolWarned.Load()
+	if now-last >= int64(w.timing.failureReport) && w.poolWarned.CompareAndSwap(last, now) {
+		w.logger.LogAttrs(ctx, slog.LevelWarn,
+			"the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own",
+			slog.Duration(logKeyDuration, waited), slog.Int(logKeyMaxConns, int(s.MaxConns())))
+	}
+	return conn, err
 }
 
 func (w *Worker) loseLease(ctx context.Context, t *tracked) {

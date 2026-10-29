@@ -166,6 +166,27 @@ func TestNavMarksACappedDeadCount(t *testing.T) {
 	}
 }
 
+func TestWorkersShowTheirKinds(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, kinds, hostname, version)
+	    VALUES ('mailer', '{mail}', '{email.send,"orders&refunds"}', 'h', 'v'), ('single', '{mail}', '{email.send}', 'h', 'v')`); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := get(t, handler(t, client, nil), "/workers")
+	// Each worker shows how many kinds it has handlers for, and lists them,
+	// each linked to its tasks.
+	for _, want := range []string{
+		">2 kinds<", ">1 kind<",
+		`href="/tasks?kind=email.send">email.send<`,
+		`href="/tasks?kind=orders%26refunds">orders&amp;refunds<`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("want %s in\n%s", want, body)
+		}
+	}
+}
+
 func TestOverviewPeriods(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
@@ -463,7 +484,7 @@ func number(n int) string {
 	return s
 }
 
-// actionLog records the actions that the web interface logs.
+// actionLog records the actions that the dashboard logs.
 type actionLog struct {
 	mu      sync.Mutex
 	actions []string
@@ -482,7 +503,7 @@ func (l *actionLog) Handle(_ context.Context, r slog.Record) error {
 		}
 		return true
 	})
-	if r.Message == "web interface action" {
+	if r.Message == "dashboard action" {
 		l.mu.Lock()
 		l.actions = append(l.actions, action+" "+target)
 		l.mu.Unlock()

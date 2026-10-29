@@ -79,14 +79,14 @@ type statements struct {
 	leaseTask     string
 	lockQueue     string
 	countRunning  string
-	heartbeat     string
+	renewLeases   string
 	fail          string
 	snooze        string
 	release       string
 	cancelRunning string
 	queueSettings string
 	upsertWorker  string
-	beatWorker    string
+	checkInWorker string
 	deleteWorker  string
 	electLeader   string
 	resignLeader  string
@@ -671,13 +671,13 @@ RETURNING ` + leasedColumns),
 		lockQueue:    q(`SELECT max_running FROM {s}.queues WHERE name = $1 FOR UPDATE`),
 		countRunning: q(`SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND state = 'running'`),
 
-		// heartbeat renews the leases of attempts that still own their tasks.
-		// It skips rows that other transactions lock, so that one locked task
-		// cannot hold up the renewal of all the others. It returns each
-		// renewed task with true, and each task the attempts still own with
-		// false, both with whether its cancellation was requested; a task it
-		// does not return lost its lease.
-		heartbeat: q(`
+		// renewLeases renews the leases of attempts that still own their
+		// tasks. It skips rows that other transactions lock, so that one
+		// locked task cannot hold up the renewal of all the others. It returns
+		// each renewed task with true, and each task the attempts still own
+		// with false, both with whether its cancellation was requested; a task
+		// it does not return lost its lease.
+		renewLeases: q(`
 WITH attempts AS (
     SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t)
 ), locked AS (
@@ -755,8 +755,11 @@ INSERT INTO {s}.workers (id, queues, kinds, hostname, version) VALUES ($1, $2, $
 ON CONFLICT (id) DO UPDATE
 SET queues = EXCLUDED.queues, kinds = EXCLUDED.kinds, hostname = EXCLUDED.hostname, version = EXCLUDED.version,
     started_at = now(), heartbeat_at = now()`),
-		beatWorker:   q(`UPDATE {s}.workers SET heartbeat_at = now() WHERE id = $1`),
-		deleteWorker: q(`DELETE FROM {s}.workers WHERE id = $1`),
+		// The column heartbeat_at holds the worker's last check-in. It keeps
+		// its name: renaming it needs a migration, and the workers of an older
+		// release would fail on the renamed column during a rolling deploy.
+		checkInWorker: q(`UPDATE {s}.workers SET heartbeat_at = now() WHERE id = $1`),
+		deleteWorker:  q(`DELETE FROM {s}.workers WHERE id = $1`),
 
 		// electLeader takes or renews the maintainer's lease for $2
 		// microseconds. It returns a row only if $1 is the leader.

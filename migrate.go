@@ -67,7 +67,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 	if current >= len(all) {
 		// The maintainer keeps the partitions ready too, so a role that may not
 		// create them still starts.
-		if err := ensureHistoryPartitions(ctx, pool, schema, time.Now(), historyDaysAhead); err != nil {
+		if err := ensureHistoryPartitions(ctx, pool, schema); err != nil {
 			logger.LogAttrs(ctx, slog.LevelWarn, "prepare history partitions failed", slog.Any(logKeyError, err))
 		}
 		return nil
@@ -77,7 +77,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 	}); err != nil {
 		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
 	}
-	if err := ensureHistoryPartitions(ctx, pool, schema, time.Now(), historyDaysAhead); err != nil {
+	if err := ensureHistoryPartitions(ctx, pool, schema); err != nil {
 		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
 	}
 	return nil
@@ -180,9 +180,10 @@ type Migration struct {
 }
 
 // Migrations returns every migration for schema, in order. Teams that use
-// their own migration tools apply these instead of calling [Migrate]. The
-// maintainer then creates the daily history partitions when workers start,
-// which needs the workers' role to own the taskmill tables.
+// their own migration tools apply these instead of calling [Migrate]. They
+// create no history partitions: each worker creates them when it starts, and
+// the maintainer keeps them ready, which needs the workers' role to own the
+// taskmill tables.
 func Migrations(schema string) ([]Migration, error) {
 	schema, err := validateSchema(schema)
 	if err != nil {
@@ -201,12 +202,13 @@ func Migrations(schema string) ([]Migration, error) {
 	return out, nil
 }
 
-// ensureHistoryPartitions creates the daily history partitions from day for
-// the given number of days, skipping those that exist. Each partition is
-// created detached and then attached, which does not block completions the
-// way CREATE TABLE ... PARTITION OF would. An advisory lock keeps processes
-// that do this at the same time from colliding.
-func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema string, day time.Time, days int) error {
+// ensureHistoryPartitions creates the daily history partitions of the next
+// historyDaysAhead days, today's first, skipping those that exist. Each
+// partition is created detached and then attached, which does not block
+// completions the way CREATE TABLE ... PARTITION OF would. An advisory lock
+// keeps processes that do this at the same time from colliding. An error for
+// a missing privilege names the fix.
+func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema string) error {
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "taskmill.partitions."+schema); err != nil {
 			return err
@@ -220,8 +222,8 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 			return err
 		}
 
-		start := day.UTC().Truncate(24 * time.Hour)
-		for i := range days {
+		start := time.Now().UTC().Truncate(24 * time.Hour)
+		for i := range historyDaysAhead {
 			from := start.AddDate(0, 0, i)
 			name := historyPartition(from)
 			if existing[name] {
@@ -240,6 +242,9 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 		}
 		return nil
 	})
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42501" { // insufficient_privilege
+		return fmt.Errorf("prepare history partitions: %w; the role that runs workers must own the taskmill tables", err)
+	}
 	if err != nil {
 		return fmt.Errorf("prepare history partitions: %w", err)
 	}

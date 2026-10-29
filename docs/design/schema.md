@@ -28,7 +28,7 @@ configurable, so several installations can share a database. It must match
    transaction-pooling proxies such as PgBouncer.
 4. **The database enforces the lifecycle's invariants** with `CHECK`
    constraints, as a second line of defense behind the code.
-5. **Frequent updates touch no indexed column.** Heartbeats change only
+5. **Frequent updates touch no indexed column.** Lease renewals change only
    `lease_expires_at`, which no index contains, so PostgreSQL can update the
    row in place (a HOT update) without writing to any index.
 6. **Every timestamp that taskmill sets comes from the database clock**
@@ -39,14 +39,14 @@ configurable, so several installations can share a database. It must match
 
 | Table | Purpose | Write rate |
 |---|---|---|
-| `tasks` | Unfinished, dead, and canceled tasks | Hot: every enqueue, fetch, heartbeat, and result |
+| `tasks` | Unfinished, dead, and canceled tasks | Hot: every enqueue, fetch, lease renewal, and result |
 | `task_history` | Completed tasks, one partition per day | Hot: one insert per completion; append-only |
 | `groups` | One row per FIFO group with unfinished tasks or a dead task that halts it | Warm: grouped enqueues and completions only |
 | `dedupe_keys` | Dedupe keys and their windows | Warm: deduplicated enqueues only |
 | `queues` | Per-queue state: paused, and the concurrency limit | Cold |
 | `settings` | Installation-wide retention, in a single row | Cold |
 | `schedules` | Recurring schedules and their next run times | Cold |
-| `workers` | Running worker processes | Cold: a heartbeat per process every third of `LeaseDuration`, 10 s by default |
+| `workers` | Running worker processes | Cold: a check-in per process every third of `LeaseDuration`, 10 s by default |
 | `leader` | The elected maintainer | Cold |
 | `queue_stats` | Task counts per queue and state, with each count's oldest due task, and each queue's halted groups and most failed attempts, refreshed by the maintainer | Cold |
 | `activity` | Task counts and ended attempts per minute and queue, for a day | Cold: a few rows every 10 s |
@@ -69,7 +69,7 @@ configurable, so several installations can share a database. It must match
   itself, a code such as `lease_lost`. Beyond 20 entries the oldest is
   dropped. The Go side cuts each message to 4 KiB before storing it.
 - **`fillfactor = 80`** leaves room in each page for updated row versions,
-  so heartbeats can be HOT updates. Measured: renewing 5,000 leases on
+  so lease renewals can be HOT updates. Measured: renewing 5,000 leases on
   densely packed pages was 25% HOT in the first round, limited by the free
   space, and 97% HOT after PostgreSQL pruned old row versions.
 - **Autovacuum is aggressive on `tasks`:** a scale factor of 1%, a threshold
@@ -122,8 +122,10 @@ or deleted. The index on `expires_at` serves retention, and the index on
   worker that becomes the maintainer applies the same retention.
 - `schedules` holds each schedule's definition, next run time, and pause
   state. A partial index on `next_run_at` finds the due ones.
-- `workers` gets a heartbeat from every worker process; `fillfactor = 50`
-  keeps those updates HOT.
+- `workers` gets a check-in from every worker process; `fillfactor = 50`
+  keeps those updates HOT. A check-in sets the column `heartbeat_at`. The
+  column keeps that name: renaming it needs a migration, and the workers of
+  an older release would fail on it during a rolling deploy.
 - `leader` elects the maintainer with a lease row rather than an advisory
   lock. Session advisory locks need a dedicated connection and do not work
   behind transaction-pooling proxies; a lease row works everywhere.
@@ -140,7 +142,7 @@ columns:
   as a gap rather than as an empty queue.
 - **Each worker** counts the attempts it ends, completed and failed, in
   memory, and adds them to their minutes every 10 seconds, in a loop of its
-  own so that a slow write never delays a lease's heartbeat. Counting in the
+  own so that a slow write never delays a check-in. Counting in the
   statements that record attempts would make every worker update the same
   row with every result; adding them every 10 seconds costs one small upsert
   per worker. A worker that crashes loses the counts of its last few
@@ -155,7 +157,7 @@ period and deleting old rows.
 
 | Index | Key | Rows it holds | Used by |
 |---|---|---|---|
-| `tasks_pkey` | `id` | All | Every update by ID; heartbeats; completions; listing all tasks |
+| `tasks_pkey` | `id` | All | Every update by ID; lease renewals; completions; listing all tasks |
 | `tasks_fetch_idx` | `queue, priority DESC, run_at, id` | `available` | Fetch; filling batches; counting available tasks |
 | `tasks_due_idx` | `run_at`, including `queue` and `state` | `scheduled`, `retryable` | Making due tasks available; the next wake-up time; counting scheduled and retryable tasks |
 | `tasks_running_idx` | `queue` | `running` | Lease rescue; concurrency limits; counting running tasks |
@@ -168,8 +170,8 @@ sort, however long the backlog. Measured: fetching 10 tasks from a queue with
 300,000 due and 1,000,000 future tasks took under 1 ms.
 
 `tasks_running_idx` deliberately does not contain `lease_expires_at`: if it
-did, every heartbeat would write an index entry. `INCLUDE` adds columns to an
-index's entries without making them part of its key. With `queue` and
+did, every lease renewal would write an index entry. `INCLUDE` adds columns
+to an index's entries without making them part of its key. With `queue` and
 `state` in `tasks_due_idx`, and `state` in `tasks_finished_idx`, statistics
 count those tasks from the index alone, without reading the table (an
 index-only scan).
@@ -240,17 +242,18 @@ size. It is the same fetch, limited to one kind, and it looks at no more than
 the first 1,000 available tasks of the queue, so it stays cheap in a queue of
 many kinds. A batch takes one slot, so every fetched task starts at once.
 
-### Heartbeat
+### Renew leases
 
-One statement renews every lease a worker holds. It returns each task that
-the worker's attempts still own, and marks the ones it renewed. A task
-missing from the result lost its lease, and the worker cancels that attempt's
-context. A task with a cancellation request is canceled the same way.
+At each check-in, one statement renews every lease a worker holds. It
+returns each task that the worker's attempts still own, and marks the ones it
+renewed. A task missing from the result lost its lease, and the worker
+cancels that attempt's context. A task with a cancellation request is
+canceled the same way.
 
 The statement locks with `SKIP LOCKED`, so one locked row, such as a task that
 an application transaction is canceling, cannot hold up the renewal of all
 the others. A skipped task is still owned: the worker keeps its attempt
-running and renews it at the next heartbeat. An attempt that completed its
+running and renews it at the next check-in. An attempt that completed its
 task with `CompleteTx` is never canceled as lost: its own transaction holds
 the row until it commits.
 
@@ -285,7 +288,7 @@ transaction that also updates the group if the task finished.
 |---|---|
 | Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
 | Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
-| Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers without a heartbeat for 5 minutes, and schedules that the maintainer does not define and that did not run or change for a day. |
+| Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that have not checked in for 5 minutes, and schedules that the maintainer does not define and that did not run or change for a day. |
 | History | Keeps partitions for today and the next 6 days, and drops a partition once its whole day is older than the retention period (see [Operational notes](#operational-notes)). |
 | Statistics | Every 10 seconds, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most attempts of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
@@ -343,7 +346,7 @@ A maintainer of an older release leaves both columns `NULL`, which
 
 ### Listing
 
-`Client.List` and the web interface page through tasks by `id`, newest
+`Client.List` and the dashboard page through tasks by `id`, newest
 first, with keyset pagination: each page starts below the last `id` of the
 previous one. Unfinished tasks and history are read in two branches, each
 limited on its own, and merged. Each page runs with custom query plans
@@ -609,9 +612,12 @@ through such proxies.
   fetch index then fills with dead entries and fetches slow down. The
   [database guide](../production/database.md) says what to set and what to
   alert on.
-- **History partitions are created ahead of time.** `Migrate` and the
-  maintainer keep partitions for today and the next 6 days, by UTC day. Each
-  one is created with `CREATE TABLE ... (LIKE ...)` and then attached with
+- **History partitions are created ahead of time.** `Migrate`, each worker
+  when it starts, and the maintainer keep partitions for today and the next
+  6 days, by UTC day. The worker does it because a schema applied with
+  `Migrations` has none, and its first tasks may complete before the
+  maintainer's first pass.
+  Each one is created with `CREATE TABLE ... (LIKE ...)` and then attached with
   `ALTER TABLE ... ATTACH PARTITION` under a 5-second lock timeout, because
   `CREATE TABLE ... PARTITION OF` locks the whole history table and blocks
   completions. Measured: with a completion's transaction open,

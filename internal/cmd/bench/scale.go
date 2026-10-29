@@ -294,8 +294,8 @@ var stepTexts = []struct{ step, text string }{
 	{"fetch", "WITH picked AS"},
 	{"completion", "WITH done AS"},
 	{"transaction", "set_config('enable_sort'"}, // sent with each fetch, in its round trip
-	{"lease heartbeat", "WITH attempts AS"},
-	{"worker heartbeat", "SET heartbeat_at = now()"},
+	{"lease renewal", "WITH attempts AS"},
+	{"worker check-in", "SET heartbeat_at = now()"},
 	{"settings", q("FROM {s}.queues WHERE name = ANY")},
 	{"activity", q("INSERT INTO {s}.activity AS a (minute, queue, completed")},
 }

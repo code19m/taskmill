@@ -251,8 +251,8 @@ func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedT
 // A database outage or failover shorter than a lease thus loses no results,
 // while an error that persists ends the tries. Each try gets its own timeout.
 func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context.Context) error) error {
-	// The deadline is fixed now: heartbeats keep renewing the leases while
-	// the tries go on, which would otherwise never let them end.
+	// The deadline is fixed now: the leases are still renewed while the
+	// tries go on, which would otherwise never let them end.
 	deadline := w.leaseEnd(ts)
 	delay := recordRetryFirst
 	for {
@@ -278,7 +278,7 @@ func (w *Worker) leaseEnd(ts []*tracked) time.Time {
 	var end time.Time
 	for i, t := range ts {
 		t.mu.Lock()
-		e := t.lastBeat.Add(w.cfg.LeaseDuration)
+		e := t.renewedAt.Add(w.cfg.LeaseDuration)
 		t.mu.Unlock()
 		if i == 0 || e.Before(end) {
 			end = e
@@ -296,7 +296,7 @@ func completionsOf(ts []*tracked) []completion {
 	return cs
 }
 
-// track starts tracking t, so that heartbeats renew its lease.
+// track starts tracking t, so that check-ins renew its lease.
 func (w *Worker) track(t *tracked) {
 	w.mu.Lock()
 	w.attempts[t.att.id] = t

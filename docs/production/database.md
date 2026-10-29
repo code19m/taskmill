@@ -20,7 +20,8 @@ replica.
 owner role.
 
 Why: taskmill keeps completed tasks in a history table with one partition per
-day. The [maintainer](../concepts/glossary.md#maintainer) creates each day's partition a
+day. Each worker creates the missing partitions of the next 7 days when it
+starts. The [maintainer](../concepts/glossary.md#maintainer) then creates each day's partition a
 week ahead, and drops old ones. PostgreSQL allows that only to the owner.
 
 If the role is wrong, tasks still complete, but you lose their history:
@@ -30,6 +31,11 @@ If the role is wrong, tasks still complete, but you lose their history:
 2. Up to 7 days later, a day starts without a partition. The log says
    `task history has no partition for today`, and completed tasks skip the
    history.
+
+If your own migration tool applied a new schema, it has no partitions yet.
+With the wrong role, each worker then logs `prepare history partitions
+failed` at Warn level when it starts, and completed tasks skip the history
+from the first one.
 
 To create the schema, `Migrate` needs the CREATE privilege on the database.
 If your role does not have it, create the schema yourself, owned by that
@@ -72,8 +78,8 @@ postgres://shop@db.internal:5432/shop?pool_max_conns=15
 Why: a running task holds no connection of its own. But if your handlers use
 the same pool, they can take every connection. Then the worker cannot renew
 its tasks' [leases](../concepts/glossary.md#lease) in time, and tasks run twice.
-The 5 extra connections are for the worker's own work. The worker logs a
-warning at start when the pool is smaller.
+The 5 extra connections are for the worker's own work. If the pool is full
+and renewing leases has to wait, the worker logs a warning.
 
 | Process | `pool_max_conns` | Connections it opens, at most |
 |---|---|---|
@@ -93,7 +99,7 @@ To add up the connections of all your pods, see
 | Situation | What to use | Why |
 |---|---|---|
 | Handlers use the database for short queries | **One pool** for taskmill and your handlers, sized as above | Simple, and the warning watches it for you |
-| Handlers hold connections for a long time | A pool of their own for the handlers | taskmill's work never waits for them. If taskmill's own pool is then smaller than `Concurrency` plus 5, ignore the start-up warning |
+| Handlers hold connections for a long time | A pool of their own for the handlers | taskmill's work never waits for them. taskmill's pool can then be smaller than `Concurrency` plus 5, and the warning tells you if it is too small |
 
 ## Keep long transactions from slowing the queue
 
