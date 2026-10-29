@@ -121,8 +121,8 @@ type Worker struct {
 	// only now and then. Leases and results are renewed and recorded by
 	// RunTask too; Run's loops get theirs anew for each run, and each
 	// queue's fetches and the maintainer's work have their own.
-	leaseFailures, resultFailures                                    *failures
-	beatFailures, settingsFailures, activityFailures, listenFailures *failures
+	leaseFailures, resultFailures                                       *failures
+	checkInFailures, settingsFailures, activityFailures, listenFailures *failures
 }
 
 // WorkerConfig configures a [Worker]. The zero value is valid: a worker
@@ -140,8 +140,9 @@ type WorkerConfig struct {
 	Queues map[string]QueueOptions
 
 	// LeaseDuration is how long a fetched task stays owned without a
-	// heartbeat. Heartbeats are sent every third of it. Minimum: 100
-	// milliseconds. Default: 30 seconds.
+	// renewal. The worker checks in every third of it, and renews the
+	// leases of its running tasks then. Minimum: 100 milliseconds. Default:
+	// 30 seconds.
 	LeaseDuration time.Duration
 
 	// PollInterval is how often idle queues are checked while the
@@ -352,10 +353,10 @@ type tracked struct {
 	// completedDirectly is set once RunTask recorded the completion.
 	completedDirectly bool
 
-	mu       sync.Mutex
-	cancel   context.CancelCauseFunc // set once a single attempt starts
-	state    trackedState
-	lastBeat time.Time // last confirmation that the lease is held
+	mu        sync.Mutex
+	cancel    context.CancelCauseFunc // set once a single attempt starts
+	state     trackedState
+	renewedAt time.Time // last confirmation that the lease is held
 
 	lost            atomic.Bool // the lease is gone: the result must be discarded
 	cancelRequested atomic.Bool
@@ -430,7 +431,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	now := time.Now()
 	w.reached.Store(&now)
-	w.beatFailures = newFailures(w, "record heartbeat")
+	w.checkInFailures = newFailures(w, "record check-in")
 	w.settingsFailures = newFailures(w, "load queue settings")
 	w.activityFailures = newFailures(w, "record activity")
 	w.listenFailures = newFailures(w, "listen for notifications")
@@ -447,7 +448,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	loopsCtx, stopLoops := context.WithCancel(base)
 	var loops sync.WaitGroup
 	loops.Go(func() { w.listenLoop(loopsCtx) })
-	loops.Go(func() { w.heartbeatLoop(loopsCtx) })
+	loops.Go(func() { w.checkInLoop(loopsCtx) })
 	loops.Go(func() { w.activityLoop(loopsCtx) })
 	loops.Go(func() { w.settingsLoop(loopsCtx) })
 	if !w.cfg.NoMaintainer {
@@ -561,12 +562,12 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	t.direct = true
 	w.track(t)
 
-	// Heartbeats renew the lease while the handler runs, and while its
-	// result is recorded.
-	beatCtx, stopBeats := context.WithCancel(context.WithoutCancel(ctx))
-	var beats sync.WaitGroup
-	beats.Go(func() {
-		w.everyBeat(beatCtx, func(ctx context.Context) { w.renewLeases(ctx, []*tracked{t}) })
+	// The lease is renewed every third of it while the handler runs, and
+	// while its result is recorded.
+	renewCtx, stopRenewing := context.WithCancel(context.WithoutCancel(ctx))
+	var renewing sync.WaitGroup
+	renewing.Go(func() {
+		w.everyThirdOfLease(renewCtx, func(ctx context.Context) { w.renewLeases(ctx, []*tracked{t}) })
 	})
 
 	attemptCtx, stopAttempt := context.WithCancelCause(context.WithoutCancel(ctx))
@@ -578,8 +579,8 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	}
 	stopAfter()
 	stopAttempt(nil)
-	stopBeats()
-	beats.Wait()
+	stopRenewing()
+	renewing.Wait()
 
 	info, err := w.client.Get(context.WithoutCancel(ctx), id)
 	if errors.Is(err, ErrNotFound) && t.completedDirectly {

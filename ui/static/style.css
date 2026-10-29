@@ -508,17 +508,19 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table col.c-cron { width: 200px; }
 .table col.c-host { width: 22%; }
 .table col.c-version { width: 110px; }
+.table col.c-kinds { width: 110px; }
 .table col.c-act-1 { width: 128px; }
 .table col.c-act-2 { width: 220px; }
 .table-tasks { min-width: 1100px; }
 .table-queues { min-width: 980px; }
 .table-schedules { min-width: 1080px; }
-.table-workers { min-width: 940px; }
+.table-workers { min-width: 1050px; }
 .table th {
   padding: 10px 16px; text-align: left; white-space: nowrap;
   font-size: var(--text-sm); font-weight: 400; color: var(--ink-muted); background: var(--glass-1); border-bottom: 1px solid var(--line);
 }
-.table td { padding: 13px 16px; border-bottom: 1px solid var(--line-soft); color: var(--ink-soft); vertical-align: middle; }
+.table td { padding: 13px 16px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+:where(.table) td { color: var(--ink-soft); } /* weak, so that a cell's tone-* class wins */
 .table tbody tr:last-child td { border-bottom: 0; }
 .table tbody tr { transition: background 0.12s; }
 .table tbody tr:hover { background: var(--fill-hover); }
@@ -624,6 +626,23 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 
 .health { display: inline-block; width: 7px; height: 7px; margin-right: 9px; border-radius: 50%; background: var(--ok); vertical-align: middle; }
 .health.stale { background: var(--warn); }
+/* A worker can handle dozens of kinds. Its row shows how many; opening the
+   count shows them all in the row below, across the table. On a narrow
+   screen the list stays in view while the table scrolls sideways. */
+.kinds > summary {
+  display: inline-flex; align-items: center; gap: 6px; list-style: none;
+  color: var(--ink-soft); cursor: pointer; user-select: none; -webkit-user-select: none;
+}
+.kinds > summary::-webkit-details-marker { display: none; }
+.kinds > summary .chev { color: var(--ink-faint); transition: transform var(--motion-fast) var(--ease-out); }
+.kinds[open] > summary .chev { transform: rotate(180deg); }
+.table-scroll:has(> .table-workers) { container-type: inline-size; }
+.table .kinds-row { display: none; }
+.table tr:has(.kinds[open]) > td { border-bottom: 0; }
+.table tr:has(.kinds[open]) + .kinds-row { display: table-row; }
+.kinds-row > td { padding-top: 0; overflow: visible; } /* a clipping cell would hold the list still */
+.kinds-row .chips { position: sticky; left: 16px; max-width: calc(100cqw - 32px); }
+.kinds-row .chip { font-family: var(--font-mono); white-space: normal; overflow-wrap: anywhere; }
 
 /* ---------- modal and toast ---------- */
 

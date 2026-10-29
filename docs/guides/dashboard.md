@@ -129,7 +129,7 @@ To match your app's theme, add `?theme=light`, `?theme=dark`, or
 | **Tasks** | Tasks filtered by state, queue, kind, and FIFO group | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its next and last run | Pause, resume, or run it now |
-| **Workers** | Each worker, with its host, version, and queues, and which one is the maintainer. The **Heartbeat** column says when the worker last reported to the database | Nothing: this page is for looking |
+| **Workers** | Each worker, with its host, version, and queues, and which one is the maintainer. The **Kinds** column counts the kinds that the worker has handlers for; click the count to list them. The **Checked in** column says when the worker last reported to the database, at its [check-in](../concepts/glossary.md#check-in) | Nothing: this page is for looking |
 
 Before an action on many tasks, the dashboard shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,

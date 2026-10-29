@@ -176,7 +176,7 @@ tidy-check: ## Fail if go.mod or go.sum is not tidy, in any module or in interna
 	$(COMPAT) go mod tidy -diff
 
 # The test database is thrown away, so a commit does not wait for the disk:
-# a slow disk on a CI machine would stall heartbeats past the tests' short
+# a slow disk on a CI machine would stall lease renewals past the tests' short
 # leases.
 .PHONY: db
 db: ## Start a PostgreSQL container for the tests (TEST_POSTGRES picks the image).

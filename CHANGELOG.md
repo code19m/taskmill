@@ -10,6 +10,9 @@ All notable changes to taskmill are recorded here. The format follows
 ### Added
 
 - `examples/quickstart`, the program that the new quickstart runs.
+- The dashboard's Workers page shows the kinds that each worker has handlers
+  for. A worker's row counts them; click the count to list them all, each
+  with a link to its tasks.
 - `taskmill-ui` answers two paths for Kubernetes probes, with no login, at
   the root even with `TASKMILL_UI_PREFIX`. `/readyz` fails while the
   database does not answer, and `/livez` does not check the database, since
@@ -25,6 +28,15 @@ All notable changes to taskmill are recorded here. The format follows
   draw flows as diagrams, and recommend one way wherever there is a choice.
   Start at [docs/README.md](docs/README.md). The old `docs/guide.md` is
   gone.
+- **Breaking:** `WorkerInfo.HeartbeatAt` is now `WorkerInfo.CheckedInAt`.
+  "Heartbeat" now means only the maintainer's signal to the workers. A
+  worker's own report to the database, which renews its leases, is its
+  check-in. To migrate, rename the field where you read it.
+- A worker's check-in has the new name in logs and in the dashboard too. The
+  `operation` attribute of the failing-operation lines says
+  `record check-in` instead of `record heartbeat`: if you match on it,
+  change the match. The Workers page's column says "Checked in" instead of
+  "Heartbeat", and a stale worker's tooltip says "No check-in for a while".
 - The dashboard's log messages say "dashboard": `web interface action` is
   now `dashboard action`, `web interface request failed` is now
   `dashboard request failed`, and `web interface request timed out` is now
@@ -50,6 +62,8 @@ All notable changes to taskmill are recorded here. The format follows
   creates the missing history partitions when it starts, before it runs a
   task, as `Migrate` does. If its role may not, it logs `prepare history
   partitions failed` at Warn level and starts all the same.
+- In the dashboard, table cells now show their faint and warning colors: a
+  stale worker's check-in time turns to the warning color, as its dot does.
 
 ## [0.3.0] - 2026-10-28
 

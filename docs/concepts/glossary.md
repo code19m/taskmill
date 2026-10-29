@@ -23,6 +23,9 @@ A [handler](#handler) that gets many tasks of one [kind](#kind) in one call, for
 ### Cancel
 Stop a task for good, but keep it as `canceled`, so you can still see it and [retry](#retry) it. A running task is asked to stop through its context.
 
+### Check-in
+A worker's report to the database, every 10 seconds by default: it renews the [leases](#lease) of its running tasks, and notes that it is alive. The dashboard's **Checked in** column shows the last one. Not the same as the maintainer's [heartbeat](#heartbeat).
+
 ### Client
 The object your code uses to [enqueue](#enqueue) tasks, and to find, retry, cancel, or delete them: `taskmill.Client`.
 
@@ -60,9 +63,7 @@ Your code that runs one [kind](#kind) of task. It returns nil when the work is d
 The first unfinished task of a [FIFO group](#fifo-group): the only task of the group that can run.
 
 ### Heartbeat
-The [maintainer](#maintainer)'s signal to all workers, every few seconds, that it is alive. While workers hear it, they check idle queues only rarely.
-
-The dashboard's **Heartbeat** column and the log text `record heartbeat` use the word for something else: a worker's own check-in. Every few seconds, each worker renews its [leases](#lease) and notes in the database that it is alive.
+The [maintainer](#maintainer)'s signal to all workers, every few seconds, that it is alive. While workers hear it, they check idle queues only rarely. A worker's own report to the database is its [check-in](#check-in).
 
 ### Idempotent
 Safe to run twice: two runs have the same effect as one. Write handlers this way, because a task can run more than once.

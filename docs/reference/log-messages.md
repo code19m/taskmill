@@ -78,7 +78,7 @@ successes between them.
 |---|---|---|---|
 | `fetch tasks` | Takes tasks of the queue in `queue` | Every poll, and on each wake-up | The database |
 | `renew leases` | Renews the leases of running tasks | Every third of `LeaseDuration` | The database, and the pool size |
-| `record heartbeat` | Notes in the database that the worker is alive: its own check-in, not the maintainer's [heartbeat](../concepts/glossary.md#heartbeat) | Every third of `LeaseDuration` | The database |
+| `record check-in` | Notes in the database that the worker is alive, at its [check-in](../concepts/glossary.md#check-in) | Every third of `LeaseDuration` | The database |
 | `record results` | Saves the results of finished attempts | After each attempt | The database |
 | `load queue settings` | Reads pauses and limits of the queues | Every 10 seconds | The database |
 | `record activity` | Writes the counts for the charts | Every 10 seconds | The database |

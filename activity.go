@@ -211,7 +211,7 @@ func (w *Worker) countCompleted(done []completedTask) {
 }
 
 // activityLoop writes the attempts the worker counted, on a schedule of its
-// own: a slow write never delays the heartbeats that keep leases.
+// own: a slow write never delays the check-ins that keep leases.
 func (w *Worker) activityLoop(ctx context.Context) {
 	tick := time.NewTicker(w.timing.activity)
 	defer tick.Stop()
