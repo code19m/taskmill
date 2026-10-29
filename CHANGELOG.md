@@ -16,8 +16,8 @@ All notable changes to taskmill are recorded here. The format follows
 - The docs are rebuilt as short pages, by what you want to do: get started,
   concepts, guides, recipes ("How do I…?"), production, and reference. They
   draw flows as diagrams, and recommend one way wherever there is a choice.
-  Start at [docs/README.md](docs/README.md). The old `docs/guide.md` keeps
-  its headings, each linking to its new page.
+  Start at [docs/README.md](docs/README.md). The old `docs/guide.md` is
+  gone.
 
 ### Fixed
 
