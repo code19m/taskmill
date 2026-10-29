@@ -1,59 +1,99 @@
-# Design
+# How taskmill is built
 
-These documents describe how taskmill works and what it promises. A change
-that alters a documented behavior updates the document in the same pull
-request.
+This section is for contributors. It explains how taskmill works inside, what
+it promises, and why it is built this way.
 
-| Document | Covers |
-|---|---|
-| [Task lifecycle and guarantees](task-lifecycle.md) | Task states, transitions, and the promises taskmill makes: the contract |
-| [Storage schema](schema.md) | Tables, indexes, and the reasoning behind the SQL |
-| [Benchmarks](../benchmarks.md) | Performance targets, reference hardware, and measured results |
-| [Decisions](../adr) | Why taskmill is built the way it is |
+New to taskmill? Read [How it works](../concepts/how-it-works.md) and
+[Guarantees](../concepts/guarantees.md) first, then
+[CONTRIBUTING.md](../../CONTRIBUTING.md) before your first pull request.
 
-## Product shape
+## What to read first
 
-taskmill is one engine with focused packages on top of it, all in one Go
-module except the `otel` integration, which has a module of its own, as the
-[README](../../README.md#documentation) lists. The packages
-use only the engine's public API, plus small internal helpers such as UUID
-generation. [ADR 0003](../adr/0003-outbox-on-the-shared-engine.md) explains
-why the outbox is a package and not a separate project.
+| Order | Page | Read it to learn |
+|---|---|---|
+| 1 | [Task lifecycle and guarantees](task-lifecycle.md) | The contract: every state change, the invariants, and how each guarantee is kept |
+| 2 | [Storage schema](schema.md) | The tables and indexes, the key statements, FIFO groups, deduplication, and notifications |
+| 3 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
+| 4 | [Releasing](releasing.md) | How the project team publishes a version |
+| 5 | [Writing docs](writing-docs.md) | The style guide and the page templates |
 
-The web interface is server-rendered with `html/template`, `embed`, and
-`net/http`. Two small scripts of our own, under a strict content security
-policy, keep pages live, apply filters as they change, confirm actions in
-dialogs, and apply the chosen theme; every page also works without them. The
-charts are SVG drawn on the server, and nothing needs a JavaScript build step
-or third-party code. Applications mount it on their own router behind their
-own authentication, or run it on its own with basic authentication through
-the `taskmill-ui` command. It reads only through the operations API and the
-statistics the maintainer keeps. Its queries over tasks, groups, and
-activity stop after 5 seconds, and the other pages read small tables or
-single rows, so it is safe to point at a busy database, even with pages
-refreshing every 5 seconds.
+The [Architecture Decision Records](../adr/README.md) (ADRs) explain the big
+choices: the dependency policy, the supported Go and PostgreSQL versions, the
+outbox on the shared engine, pgx as the driver, OpenTelemetry in its own
+module, and the health and scaling read paths. Their index also says how to
+write a new one.
+
+## Change the docs with the code
+
+A change to documented behavior updates the docs in the same pull request:
+the user docs in `docs/`, the godoc, these design pages, and CHANGELOG.md. If
+the change goes against an ADR, write a new ADR that replaces it. Teams run
+taskmill in production from these docs, so they must match the code.
+
+## The product shape
+
+taskmill is one engine, the `taskmill` package, with focused packages on top
+of it. The packages use only the engine's public API, plus small internal
+helpers such as UUID generation.
+
+In this diagram, each arrow points to a package that the other one uses:
+
+```mermaid
+flowchart BT
+    E["taskmill: the engine"]
+    O["outbox"] --> E
+    U["ui: the dashboard"] --> E
+    T["taskmilltest"] --> E
+    C["cmd/taskmill-ui"] --> U
+    M["otel: a module of its own"] --> E
+    M --> O
+```
+
+- **One Go module, except `otel`.** Everything is in one module, except the
+  OpenTelemetry integration, which has a module of its own
+  ([ADR 0005](../adr/0005-opentelemetry-in-a-module-of-its-own.md)).
+  Integrations that need third-party modules, such as broker clients, live
+  in separate modules too, never in the core
+  ([ADR 0001](../adr/0001-dependency-policy.md)). They build on the core's
+  middleware for enqueues and attempts.
+- **The outbox is a package, not a project.**
+  [ADR 0003](../adr/0003-outbox-on-the-shared-engine.md) explains why.
+- **The tables are internal,** so that they can change. Only the
+  `migrations` table is public, for teams that apply migrations with their
+  own tools. A stable SQL function to enqueue from other languages or from
+  triggers can come once users need it.
+
+### How the dashboard is built
+
+- **Server-rendered** with `html/template`, `embed`, and `net/http`. The
+  charts are SVG, drawn on the server.
+- **Two small scripts of our own,** `app.js` and `theme.js`, under a strict
+  content security policy. They keep pages live, apply filters as they
+  change, confirm actions in dialogs, and apply the chosen theme. Every page
+  also works without them. Nothing needs a JavaScript build step or
+  third-party code.
+- **Two ways to run it:** mounted on an application's own router, behind
+  the application's own authentication, or on its own with basic
+  authentication, through the `taskmill-ui` command.
+- **Safe on a busy database.** It reads only through the operations API and
+  the statistics that the maintainer keeps. Its queries over tasks, groups,
+  and activity stop after 5 seconds. The other pages read small tables or
+  single rows. So it is safe to point at a busy database, even with pages
+  that refresh every 5 seconds.
 
 ## Out of scope
 
-- **Workflows:** dependencies between tasks, or graphs of tasks.
-- **Being a message broker.** The outbox hands messages to a broker; taskmill
-  does not deliver messages between services itself.
-- **Exactly-once delivery across systems.** Through a broker, delivery is at
-  least once, and consumers deduplicate by message ID.
-- **Users and roles in the web interface.** It offers one optional user,
-  through basic authentication; applications that need more put their own
-  authentication in front of it.
-- **Databases other than PostgreSQL.**
-- **A command-line tool for operations.** Migrations run through `Migrate`,
-  or through your own tool with the SQL from `Migrations`, and operators use
-  the web interface or the operations API. The `taskmill-ui` command only
-  serves the web interface.
-- **Integrations that need third-party modules,** such as OpenTelemetry or
-  broker clients, inside the core module. They are separate Go modules
-  ([ADR 0001](../adr/0001-dependency-policy.md)), built on the core's
-  middleware for enqueues and attempts: the `otel` module instruments
-  taskmill with OpenTelemetry ([ADR 0005](../adr/0005-opentelemetry-in-a-module-of-its-own.md)).
-- **A public SQL interface.** The tables are internal, so that they can
-  change; only the `migrations` table is public, for teams that apply
-  migrations with their own tools. A stable SQL function to enqueue from other languages or from
-  triggers can be added once users need it.
+Some features are out of scope on purpose: workflows, being a message
+broker, exactly-once delivery across systems, users and roles in the
+dashboard, databases other than PostgreSQL, and a command-line tool for
+operations. [Why taskmill](../start/why-taskmill.md) lists them. Read it
+before you propose a large feature.
+
+## See also
+
+- [CONTRIBUTING.md](../../CONTRIBUTING.md): set up, test, and send a change
+- [How it works](../concepts/how-it-works.md): the user's view of the same
+  design
+- [Package docs on pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill)
+
+**Next:** [Task lifecycle and guarantees](task-lifecycle.md)

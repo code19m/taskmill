@@ -5,8 +5,9 @@
 // Every task runs at least once: handlers must be idempotent, so that running
 // a task twice has the same effect as running it once.
 //
-// The guide at https://github.com/code19m/taskmill/blob/main/docs/guide.md
-// covers every feature, testing, and running in production.
+// The docs at https://github.com/code19m/taskmill/blob/main/docs/README.md
+// cover every feature, testing, and running in production. Start with the
+// quickstart: https://github.com/code19m/taskmill/blob/main/docs/start/quickstart.md.
 //
 // # Defining tasks
 //
@@ -28,18 +29,17 @@
 // or [AddBatchHandler], and run them with a [Worker]. Returning nil completes
 // a task. An error retries it with backoff, 25 attempts by default, after
 // which it is dead: kept for an operator to inspect and [Client.Retry].
-// [Permanent] makes it dead at once, and [Snooze] runs it again later without
-// using an attempt. [Task.CompleteTx] completes a task in the handler's own
-// transaction, so its effects apply exactly once.
+// [Permanent] makes it dead right away, and [Snooze] runs it again later
+// without using an attempt. [Task.CompleteTx] completes a task in the
+// handler's own transaction, so its effects apply exactly once.
 //
 // # Operating
 //
 // The [Client] lists, cancels, retries, and deletes tasks, pauses queues,
-// and limits how many of a queue's tasks run at once. Package
-// github.com/code19m/taskmill/ui serves these operations, except the
-// limits, as a web interface, and package
-// github.com/code19m/taskmill/outbox publishes messages to a broker with the
-// transactional outbox pattern.
+// and limits how many of a queue's tasks run at the same time. Package
+// github.com/code19m/taskmill/ui serves the same, except the limits, as a
+// dashboard. Package github.com/code19m/taskmill/outbox publishes messages
+// to a broker with the transactional outbox pattern.
 //
 // # Testing
 //

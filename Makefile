@@ -31,7 +31,8 @@ PGBOUNCER_URL := postgres://postgres:postgres@localhost:54328/taskmill?sslmode=d
 
 # The latest release: the version of taskmill that internal/compat requires.
 # `make api` compares the API with it, and `make compat` runs its client and
-# worker on the current schema. Each release updates it; see CONTRIBUTING.md.
+# worker on the current schema. Each release updates it; see
+# docs/design/releasing.md.
 RELEASE := $(shell awk '$$1 == "github.com/code19m/taskmill" { print $$2 }' internal/compat/go.mod)
 
 # internal/compat must build against the release it requires, never against

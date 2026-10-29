@@ -601,7 +601,7 @@ func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
 		if at.Before(runAt) {
 			t.Fatalf("task started %s before its run time", runAt.Sub(at))
 		}
-		// The target is 1.5 s (docs/benchmarks.md); the bound here
+		// The target is 1.5 s (docs/design/benchmarks.md); the bound here
 		// leaves room for a loaded test machine.
 		if late := at.Sub(runAt); late > 5*time.Second {
 			t.Fatalf("task started %s late", late)

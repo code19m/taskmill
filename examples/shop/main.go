@@ -161,7 +161,7 @@ func run(logger *slog.Logger) error {
 	// The workers and the ledger handler, which writes through it, share
 	// this pool. So that handlers cannot starve the workers' heartbeats, it
 	// has a connection for every task that may run at once, plus 5 per
-	// worker: see Connections in docs/guide.md.
+	// worker: see docs/production/database.md.
 	cfg.MaxConns = 6*10 + 4 + 2 + 2*5 // the main worker's 6 queues of 10, the other's 4 and 2
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

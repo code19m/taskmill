@@ -1,13 +1,14 @@
-// Package ui serves taskmill's web interface: a dashboard of queues, tasks,
-// schedules, and workers, with actions to pause and resume queues and
-// schedules, run a schedule now, and retry, cancel, and delete tasks, one at
-// a time or all that match the task list's filters.
+// Package ui serves taskmill's dashboard of queues, tasks, schedules, and
+// workers, with actions to pause and resume queues and schedules, run a
+// schedule now, and retry, cancel, and delete tasks, one at a time or all
+// that match the task list's filters.
 //
-// The interface is rendered on the server with the standard library. A small
-// script, served with it, keeps pages live and adds dialogs; every
-// page also works without it, and nothing needs a JavaScript build step. It
-// reads only through the bounded queries of [taskmill.Client], so it is safe
-// to point at a busy production database.
+// The dashboard is rendered on the server with the standard library. Two
+// small scripts, served with it, keep pages live, apply filters as they
+// change, confirm actions in dialogs, and apply the chosen theme. Every page
+// also works without them, and nothing needs a JavaScript build step. The
+// dashboard reads only through the bounded queries of [taskmill.Client], so
+// it is safe to point at a busy production database.
 //
 // Mount it in an application, behind the application's own authentication:
 //

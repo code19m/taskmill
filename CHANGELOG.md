@@ -3,9 +3,27 @@
 All notable changes to taskmill are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and taskmill uses
 [Semantic Versioning](https://semver.org/) as described in
-[Upgrading](docs/guide.md#upgrading).
+[Compatibility](docs/reference/compatibility.md).
 
 ## [Unreleased]
+
+### Added
+
+- `examples/quickstart`, the program that the new quickstart runs.
+
+### Changed
+
+- The docs are rebuilt as short pages, by what you want to do: get started,
+  concepts, guides, recipes ("How do I…?"), production, and reference. They
+  draw flows as diagrams, and recommend one way wherever there is a choice.
+  Start at [docs/README.md](docs/README.md). The old `docs/guide.md` keeps
+  its headings, each linking to its new page.
+
+### Fixed
+
+- The docs of `BatchHandler` and `Client.Cancel` said that a task canceled
+  during its batch becomes canceled. It becomes completed if the batch
+  returns nil for it, because the work was done, as for other handlers.
 
 ## [0.3.0] - 2026-10-28
 
@@ -23,7 +41,7 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Changed
 
-- The guide's [Upgrading](docs/guide.md#upgrading) section states the
+- The guide's [Upgrading](docs/reference/compatibility.md) section states the
   compatibility promise from v1.0.0 on: breaking changes only in a new major
   version, deprecated names kept until then, interfaces that never grow, and
   names that never change, such as the `State` values and error classes. It
@@ -190,7 +208,7 @@ All notable changes to taskmill are recorded here. The format follows
 - `Worker.Health`, for readiness probes: nil while `Run` runs and its last
   heartbeat reached the database within `LeaseDuration`. It reads only
   memory.
-- A guide section, [Running on Kubernetes](docs/guide.md#running-on-kubernetes):
+- A guide section, [Running on Kubernetes](docs/production/kubernetes.md):
   shutdown and probes, Deployments for workers and `taskmill-ui`,
   migrations, connection budgets, PgBouncer, autoscaling with KEDA, and
   managed PostgreSQL.
@@ -205,7 +223,7 @@ All notable changes to taskmill are recorded here. The format follows
 - Logs follow one level policy: Error when a person must act, Warn when
   taskmill recovers on its own, Info for lifecycle, Debug for routine events
   of single tasks. A dead task now logs at Error, a retry at Debug, and a
-  failed dashboard request at Warn. The [log catalog](docs/guide.md#log-catalog)
+  failed dashboard request at Warn. The [log catalog](docs/reference/log-messages.md)
   lists every message.
 - An operation that a worker repeats, such as a fetch or a heartbeat, no
   longer logs at every failed try while the database is down. It logs

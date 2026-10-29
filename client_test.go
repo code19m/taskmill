@@ -1,6 +1,7 @@
 package taskmill_test
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
@@ -57,6 +58,54 @@ func TestCancelRunningTaskFlagsIt(t *testing.T) {
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND cancel_requested_at IS NOT NULL", id); n != 1 {
 		t.Fatal("running task was not flagged for cancellation")
 	}
+}
+
+// cancelBatch is a batch handler that waits until released, and then fails
+// the tasks of user 1.
+type cancelBatch struct {
+	started chan int
+	release chan struct{}
+}
+
+func (b *cancelBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+	b.started <- len(tasks)
+	<-b.release
+	errs := make([]error, len(tasks))
+	for i, t := range tasks {
+		if t.Args.UserID == 1 {
+			errs[i] = errors.New("smtp refused")
+		}
+	}
+	return errs
+}
+
+// Canceling a task of a batch does not stop the batch, which cannot see the
+// request: the task ends as the batch reports it, completed if the batch did
+// its work, and canceled if not.
+func TestCancelingATaskOfABatch(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	b := &cancelBatch{started: make(chan int, 1), release: make(chan struct{})}
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler[sendEmail](&hs, b, &taskmill.HandlerOptions{Retry: fastRetry})
+	res, err := e.client.EnqueueMany(t.Context(), []taskmill.EnqueueParams{{Args: sendEmail{UserID: 0}}, {Args: sendEmail{UserID: 1}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// With two free slots, the first fetch takes both tasks into one batch.
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(2)})
+	if n := recv(t, b.started, "the batch to start"); n != 2 {
+		t.Fatalf("the batch has %d tasks, want 2", n)
+	}
+	for _, r := range res {
+		if err := e.client.Cancel(t.Context(), r.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(b.release)
+
+	e.waitState(t, res[0].ID, taskmill.StateCompleted)
+	e.waitState(t, res[1].ID, taskmill.StateCanceled)
 }
 
 func TestCancelTxNeedsATransaction(t *testing.T) {

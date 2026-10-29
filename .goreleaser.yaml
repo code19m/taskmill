@@ -1,7 +1,7 @@
 # GoReleaser builds taskmill-ui's release: the binaries and their archives,
 # checksums, SBOMs, and the container image. The release workflow runs
 # `make release` for a pushed tag, and `make snapshot` builds the same into
-# ./dist without publishing anything. See CONTRIBUTING.md#releasing.
+# ./dist without publishing anything. See docs/design/releasing.md.
 version: 2
 
 project_name: taskmill-ui
@@ -42,7 +42,7 @@ kos:
   - repositories: [ghcr.io/code19m/taskmill-ui]
     bare: true
     # Static, with CA certificates and time zones, and nothing else.
-    # Dependabot does not update the digest: see CONTRIBUTING.md#releasing.
+    # Dependabot does not update the digest: see docs/design/releasing.md.
     base_image: gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
     user: "65532:65532"
     platforms: [linux/amd64, linux/arm64]

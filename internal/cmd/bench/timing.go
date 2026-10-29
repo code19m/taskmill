@@ -32,10 +32,10 @@ const timingRun = 75 * time.Second
 // L4 and F9: tasks start on time by the database's clock: delayed tasks,
 // retries, snoozes, and schedule runs. Leases last 3 seconds, and some tasks
 // run for longer, renewing theirs. Against a database whose clock is off from
-// this machine's by minutes, as docs/benchmarks.md shows how to start, the
-// same checks are F9: application servers' clocks out of sync. wantSkew is
-// the offset the run expects, if any: a database whose clock is not off by
-// it fails F9 rather than skipping it.
+// this machine's by minutes, as docs/design/benchmarks.md shows how to
+// start, the same checks are F9: application servers' clocks out of sync.
+// wantSkew is the offset the run expects, if any: a database whose clock is
+// not off by it fails F9 rather than skipping it.
 func benchTiming(ctx context.Context, pool *pgxpool.Pool, wantSkew time.Duration) {
 	c := fresh(ctx, pool)
 	mustExec(ctx, pool, `CREATE TABLE {s}.starts (n integer NOT NULL, attempt integer NOT NULL,

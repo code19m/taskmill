@@ -1,5 +1,5 @@
-// Command bench measures taskmill against the targets in docs/benchmarks.md,
-// and checks its reliability under faults.
+// Command bench measures taskmill against the targets in
+// docs/design/benchmarks.md, and checks its reliability under faults.
 //
 // It runs against the database in TASKMILL_TEST_DATABASE_URL, in a schema of
 // its own that it recreates, and prints a Markdown report:
