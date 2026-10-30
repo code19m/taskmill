@@ -9,7 +9,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -222,19 +221,29 @@ func TestManyConcurrentUpdatesLand(t *testing.T) {
 	e := newEnv(t)
 	ctx := t.Context()
 	const updaters, calls = 16, 10
-	var landed, conflicts atomic.Int64
+	// A try loses only to an update of another updater that landed during
+	// the try. One updater's tries do not overlap, so each loses to a
+	// different update, and an update conflicts once 10 of its tries lost.
+	// So an updater conflicts at most once for each 10 of the other
+	// updaters' updates. How often they conflict depends on the machine's
+	// speed: never while this test runs alone, and a few dozen times in all
+	// while other tests load the database too.
+	const maxConflicts = (updaters - 1) * calls / 10
+	increment := func(s *taskmill.QueueSettings) { s.MaxRunning++ }
 	var wg sync.WaitGroup
 	for range updaters {
 		wg.Go(func() {
+			conflicts := 0
 			for range calls {
-				err := e.client.UpdateQueue(ctx, "busy", func(s *taskmill.QueueSettings) { s.MaxRunning++ })
-				switch {
-				case err == nil:
-					landed.Add(1)
-				case errors.Is(err, taskmill.ErrConflict):
-					conflicts.Add(1)
-				default:
-					t.Error(err)
+				// Try again after a conflict, as ErrConflict says.
+				err := e.client.UpdateQueue(ctx, "busy", increment)
+				for errors.Is(err, taskmill.ErrConflict) && conflicts < maxConflicts {
+					conflicts++
+					err = e.client.UpdateQueue(ctx, "busy", increment)
+				}
+				if err != nil {
+					t.Errorf("%v, after %d conflicts of at most %d", err, conflicts, maxConflicts)
+					return
 				}
 			}
 		})
@@ -245,12 +254,10 @@ func TestManyConcurrentUpdatesLand(t *testing.T) {
 		t.Fatal(err)
 	}
 	i := slices.IndexFunc(queues, func(q taskmill.QueueInfo) bool { return q.Name == "busy" })
-	// Every update that landed counts once. The pauses between tries let
-	// nearly all land: about 40 of 160 conflict without them, and with them
-	// none or a few, under 15 even on a starved CPU.
-	if i < 0 || int64(queues[i].Settings.MaxRunning) != landed.Load() || conflicts.Load() > updaters*calls/8 {
-		t.Fatalf("queues: %+v; want busy with max %d (landed), and at most %d of %d updates to conflict, got %d",
-			queues, landed.Load(), updaters*calls/8, updaters*calls, conflicts.Load())
+	// Every update landed once: none was lost, and none that conflicted
+	// landed too.
+	if i < 0 || queues[i].Settings.MaxRunning != updaters*calls {
+		t.Fatalf("queues: %+v; want busy with max %d", queues, updaters*calls)
 	}
 }
 
