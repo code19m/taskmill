@@ -267,8 +267,9 @@ func classify(t *tracked, err, cause error) outcome {
 // is over: a worker with a handler ran the task, or the wait ended in death,
 // recorded as unknown_kind, and an operator retried the task. A worker with
 // a handler that records no error, because it snoozes the task or gives it
-// back, removes the note instead. After any of these, the next worker
-// without a handler starts a new wait.
+// back, removes the note instead, and so does a retry of a task that was
+// canceled while it waited. After any of these, the next worker without a
+// handler starts a new wait.
 func (w *Worker) unknownKind(ctx context.Context, t *tracked) outcome {
 	limit := w.timing.noHandlerWait
 	var since time.Time

@@ -358,68 +358,87 @@ func TestWorkerSnoozesUnknownKinds(t *testing.T) {
 }
 
 // The wait for a handler ends when a worker that has one takes the task,
-// however its attempt ends. A worker without a handler that meets the task
-// later, after a rollback for example, starts a new wait: the note of the
-// old wait must not make the task dead at once.
-func TestWaitForAHandlerStartsAgainAfterAHandlerHadTheTask(t *testing.T) {
+// however its attempt ends, and when an operator retries the task. A worker
+// without a handler that meets the task later, after a rollback for example,
+// starts a new wait: the note of the old wait must not make the task dead at
+// once.
+func TestWaitForAHandlerStartsAgain(t *testing.T) {
 	t.Parallel()
-	tests := map[string]struct {
-		result error          // what the handler returns; nil means it runs until RunTask's context ends
-		want   taskmill.State // where that leaves the task
-	}{
-		"the attempt failed":  {errors.New("the partner is down"), taskmill.StateRetryable},
-		"the handler snoozed": {taskmill.Snooze(time.Hour), taskmill.StateScheduled},
-		"the task went back":  {nil, taskmill.StateAvailable},
+	// Each case is what happens to the task after it began to wait.
+	tests := map[string]func(t *testing.T, e *env, id int64){
+		"a handler's attempt failed":      handledBy(errors.New("the partner is down"), taskmill.StateRetryable),
+		"a handler snoozed the task":      handledBy(taskmill.Snooze(time.Hour), taskmill.StateScheduled),
+		"a handler's worker gave it back": handledBy(nil, taskmill.StateAvailable),
+		"an operator canceled and retried it": func(t *testing.T, e *env, id int64) {
+			t.Helper()
+			if err := errors.Join(e.client.Cancel(t.Context(), id), e.client.Retry(t.Context(), id)); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"an operator canceled it and retried its kind": func(t *testing.T, e *env, id int64) {
+			t.Helper()
+			if err := e.client.Cancel(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+			res, err := e.client.RetryMatching(t.Context(), bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}}))
+			if err != nil || res.Changed != 1 {
+				t.Fatalf("retried %d tasks: %v", res.Changed, err)
+			}
+		},
 	}
-	for name, tt := range tests {
+	for name, since := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t)
 			var other taskmill.Handlers
 			taskmill.AddHandler(&other, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
 			without := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &other})
-			runCtx, stopRun := context.WithCancel(t.Context())
-			defer stopRun()
-			with := newWorker(t, e, &taskmill.WorkerConfig{
-				Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
-					if tt.result != nil {
-						return tt.result
-					}
-					stopRun()
-					<-ctx.Done()
-					return ctx.Err()
-				}, nil),
-			})
 			id := e.enqueue(t, sendEmail{}, nil)
-			run := func(ctx context.Context, w *taskmill.Worker) *taskmill.TaskInfo {
-				t.Helper()
-				info, err := w.RunTask(ctx, id)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return info
-			}
 
 			// A rolling deploy: a worker of the old release meets the task, which
 			// begins to wait for a handler. That was two hours ago.
-			if info := run(t.Context(), without); info.State != taskmill.StateScheduled || info.Errors[0].Code != taskmill.CodeNoHandler {
-				t.Fatalf("got %s with errors %+v, want a snooze with a note", info.State, info.Errors)
+			info, err := without.RunTask(t.Context(), id)
+			if err != nil || info.State != taskmill.StateScheduled || info.Errors[0].Code != taskmill.CodeNoHandler {
+				t.Fatalf("got %+v, %v, want a snooze with a note", info, err)
 			}
 			e.exec(t, `UPDATE {s}.tasks SET errors = jsonb_set(errors, '{0,at}', to_jsonb(now() - interval '2 hours'))
 			           WHERE id = $1`, id)
 
-			// A worker of the new release had the task since.
-			if info := run(runCtx, with); info.State != tt.want {
-				t.Fatalf("the worker with the handler left the task %s, want %s", info.State, tt.want)
-			}
+			since(t, e, id)
 
 			// A rollback: a worker without the handler meets the task again.
-			info := run(t.Context(), without)
+			if info, err = without.RunTask(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
 			last := info.Errors[len(info.Errors)-1]
 			if info.State != taskmill.StateScheduled || last.Code != taskmill.CodeNoHandler || time.Since(last.At) > time.Hour {
 				t.Fatalf("the task is %s with errors %+v, want it to wait for a handler again, with a new note", info.State, info.Errors)
 			}
 		})
+	}
+}
+
+// handledBy returns a step of TestWaitForAHandlerStartsAgain: a worker with a
+// handler runs the task, which leaves it in the state want. The handler
+// returns result, or, if result is nil, runs until RunTask's context ends.
+func handledBy(result error, want taskmill.State) func(t *testing.T, e *env, id int64) {
+	return func(t *testing.T, e *env, id int64) {
+		t.Helper()
+		runCtx, stopRun := context.WithCancel(t.Context())
+		defer stopRun()
+		with := newWorker(t, e, &taskmill.WorkerConfig{
+			Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+				if result != nil {
+					return result
+				}
+				stopRun()
+				<-ctx.Done()
+				return ctx.Err()
+			}, nil),
+		})
+		if info, err := with.RunTask(runCtx, id); err != nil || info.State != want {
+			t.Fatalf("the worker with the handler left the task as %+v, %v, want %s", info, err, want)
+		}
 	}
 }
 

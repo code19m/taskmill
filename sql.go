@@ -170,10 +170,11 @@ func newStatements(schema string) *statements {
 		// {trimmed} is a task's errors without the oldest entry once it holds
 		// keptErrors, so that appending one keeps at most keptErrors.
 		"{trimmed}", "(CASE WHEN jsonb_array_length(errors) >= "+strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
-		// {met} is a task's errors once a worker with a handler for its kind
-		// met it: without a no_handler note at their end, which says that the
-		// task waits for such a worker.
-		"{met}", "(CASE WHEN (errors -> -1) ->> 'code' = '"+string(CodeNoHandler)+"' THEN errors - (-1) ELSE errors END)",
+		// {unnoted} is a task's errors without a no_handler note at their
+		// end. The note says that the task waits for a worker with a handler
+		// for its kind: the wait is over once such a worker has the task, or
+		// an operator retries it.
+		"{unnoted}", "(CASE WHEN (errors -> -1) ->> 'code' = '"+string(CodeNoHandler)+"' THEN errors - (-1) ELSE errors END)",
 		// {leased} checks that a task is leased. The statements that find
 		// tasks by their attempts look each one up by ID, and compare the
 		// state as text, so that the planner cannot read tasks_running_idx
@@ -347,7 +348,7 @@ UPDATE {s}.tasks SET state = 'canceled', finalized_at = now(), cancel_requested_
 		retry: q(`
 UPDATE {s}.tasks
 SET state = CASE WHEN $2 THEN 'pending' ELSE 'available' END::{s}.task_state,
-    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL
+    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted}
 WHERE id = $1 AND state IN ('dead', 'canceled')
 RETURNING queue`),
 
@@ -549,7 +550,7 @@ RETURNING queue, group_key`),
 WITH retried AS (
     UPDATE {s}.tasks
     SET state = CASE WHEN id = ANY($2::bigint[]) THEN 'pending' ELSE 'available' END::{s}.task_state,
-        attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL
+        attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted}
     WHERE id = ANY($1::bigint[])
 ), notified AS (
     SELECT count(pg_notify($3, '{available}' || q)) AS n FROM unnest($4::text[]) AS q
@@ -757,7 +758,7 @@ SET state = CASE
     lease_expires_at = NULL,
     errors = CASE WHEN $4::jsonb IS NOT NULL
                   THEN {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt - 1, 'at', now()) || $4::jsonb)
-                  WHEN $5 THEN {met}
+                  WHEN $5 THEN {unnoted}
                   ELSE errors
              END
 WHERE id = $1 AND lease_token = $2 AND {leased}
@@ -773,7 +774,7 @@ SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'cancele
     attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
     finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
     lease_expires_at = NULL,
-    errors = CASE WHEN $3 THEN {met} ELSE errors END
+    errors = CASE WHEN $3 THEN {unnoted} ELSE errors END
 WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
 
