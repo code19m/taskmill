@@ -125,6 +125,17 @@ All notable changes to taskmill are recorded here. The format follows
   ended such a task, the rescue failed for every queue. The count now stops
   at zero, and only that group can lose its order.
 
+### Fixed
+
+- A queue with `MaxRunning` ran fewer tasks than its limit. When a task
+  ended, its worker fetched right away, before the task's completion was
+  recorded. The queue still looked full, so the worker waited for its next
+  poll: `PollInterval`, 1 second by default. With a limit of 4, tasks of 1
+  second ran 2.8 at the same time on average, and tasks of 0.3 seconds
+  only 1.3. A worker now fetches again when the completion is recorded,
+  and both ran 3.9 at the same time. Room that another worker's task
+  leaves is still found by the poll.
+
 ## [0.6.0] - 2026-11-13
 
 ### Added

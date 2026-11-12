@@ -231,17 +231,37 @@ func lockedRows[K comparable](ctx context.Context, q querier, sql string, scan f
 }
 
 // completed stops tracking completed attempts, counts the tasks that their
-// committed completion finished, and logs a failure to record them.
+// committed completion finished, wakes the fetches that those tasks kept
+// waiting, and logs a failure to record them.
 func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedTask, err error) {
 	for _, t := range ts {
 		w.untrack(t)
 	}
 	if err == nil {
 		w.countCompleted(done)
+		w.madeRoom(done)
 	}
 	if err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "complete tasks failed; they are rescued when their leases expire",
 			slog.Int(logKeyTasks, len(ts)), slog.Any(logKeyError, err))
+	}
+}
+
+// madeRoom wakes the fetch loops of the queues in which the completions
+// done, now committed, let a task start: a queue with a MaxRunning limit
+// runs fewer tasks than before. The fetch that follows a freed slot cannot
+// see that. A slot is free as soon as its handler returns, before the
+// completer records the result, so that fetch still counts the task as
+// running. A batch of completions wakes each queue once, for one fetch.
+func (w *Worker) madeRoom(done []completedTask) {
+	woken := map[*queueState]bool{}
+	for _, t := range done {
+		q := w.queues[t.queue] // nil for a task of RunTask in a queue that Run does not serve
+		if q == nil || woken[q] || q.maxRunning.Load() == 0 {
+			continue
+		}
+		woken[q] = true
+		signal(q.freed)
 	}
 }
 

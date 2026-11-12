@@ -205,8 +205,14 @@ heartbeats:
 |---|---|---|
 | Heartbeats arrive | Once a minute | About 2 seconds: the maintainer wakes its queue |
 | No heartbeat came for 15 seconds, three missed | Every `PollInterval`, starting right away | About 16 seconds after the last heartbeat. From then on, `PollInterval` |
-| A `MaxRunning` limit blocked the queue's last fetch | Every `PollInterval` | `PollInterval`: finishing a task sends no notification |
+| A `MaxRunning` limit blocked the queue's last fetch | Every `PollInterval` | `PollInterval`, when another worker's task made the room: finishing a task sends no notification |
 
+- **A worker's own completions wake its fetch.** A slot is free as soon as
+  its handler returns, but the completer records the result a few
+  milliseconds later, in a batch. A fetch in between still counts the task
+  as running, so a queue at its `MaxRunning` limit looks full. So each
+  committed batch wakes the fetch of such a queue once more, and the queue
+  runs at its limit without a poll.
 - **While heartbeats arrive,** notifications reach the worker, and the
   maintainer wakes every queue whose task waits. The poll once a minute only
   bounds the harm of a fault in either. So idle workers cost little, however

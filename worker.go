@@ -198,7 +198,8 @@ type WorkerConfig struct {
 	// A queue that its [QueueSettings.MaxRunning] limit keeps from fetching
 	// more tasks is checked every PollInterval too, whether heartbeats
 	// arrive or not: no notification says when another worker's task of the
-	// queue ends.
+	// queue ends. When one of its own tasks ends, the worker fetches right
+	// away.
 	PollInterval time.Duration
 
 	// DrainTimeout is how long Run waits for running tasks after its context
@@ -388,7 +389,7 @@ type queueState struct {
 	name       string
 	slots      chan struct{} // one per running attempt or batch
 	wake       chan struct{} // nudges the fetch loop: tasks may be available
-	freed      chan struct{} // nudges the fetch loop: a slot was freed
+	freed      chan struct{} // nudges the fetch loop: a slot was freed, or a recorded completion made room
 	paused     atomic.Bool
 	maxRunning atomic.Int32 // installation-wide limit; 0 means none
 }

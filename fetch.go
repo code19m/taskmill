@@ -63,7 +63,8 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 // heartbeat, so this poll only bounds the harm of a fault in that. Otherwise
 // it polls every PollInterval, and so does a queue whose installation-wide
 // limit held tasks back: no notification says when another worker's task of
-// that queue ends.
+// that queue ends. The end of this worker's own task wakes the queue (see
+// madeRoom).
 func (w *Worker) pollWait(held bool) time.Duration {
 	if held || !w.notifying.Load() {
 		return w.cfg.PollInterval

@@ -1100,6 +1100,56 @@ func TestFetchDoesNotLockAQueueAtItsLimit(t *testing.T) {
 	e.wantState(t, waiting, taskmill.StateRunning)
 }
 
+// A task that ends in a queue at its limit makes room for one more. Its
+// worker fetches when the result is recorded, not only when the slot is
+// free: a fetch that comes before the result still counts the task as
+// running, finds no room, and leaves the queue below its limit until the
+// next poll. Here no poll comes, and each start counts the running tasks.
+func TestLimitedQueueStartsATaskWhenOneEnds(t *testing.T) {
+	t.Parallel()
+	const limit, tasks = 2, 8
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	e.limitDefaultQueue(t, limit)
+	for range tasks {
+		e.enqueue(t, sendEmail{}, nil)
+	}
+	running := replaceSchema("SELECT count(*) FILTER (WHERE state = 'running') FROM {s}.tasks", e.schema)
+	started, release := make(chan int, tasks), make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			var n int
+			if err := e.pool.QueryRow(ctx, running).Scan(&n); err != nil {
+				return err
+			}
+			started <- n
+			<-release
+			return nil
+		}, nil),
+		Queues:       defaultQueue(2 * limit),
+		PollInterval: time.Hour,
+		NoMaintainer: true, // nothing wakes the queue either
+	})
+	t.Cleanup(func() { close(release) })
+	// The listener's start wakes every queue once: that must not stand in
+	// for the fetch that the test waits for.
+	e.waitListening(t)
+
+	for i := range tasks {
+		if i >= limit {
+			release <- struct{}{}
+		}
+		if n := recv(t, started, "a task to start in the room that the last one left"); n != limit {
+			t.Fatalf("task %d started with %d tasks running, want the limit of %d", i+1, n, limit)
+		}
+	}
+	// A fetch that leases locks the queue's row once. More locks than
+	// tasks would mean fetches that found no room.
+	if n := sent.count(queueLock); n > tasks {
+		t.Errorf("the worker locked the queue's row %d times to start %d tasks", n, tasks)
+	}
+}
+
 func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
