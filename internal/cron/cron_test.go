@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"encoding/binary"
 	"slices"
 	"strconv"
 	"testing"
@@ -181,6 +182,65 @@ func firstDifference(got, want []time.Time) string {
 		}
 	}
 	return "no difference"
+}
+
+// newYearJump returns a made-up location whose clocks go from 02:00 to 03:00
+// on every January 1, for ever, and back on day 200 of the year: no real
+// zone skips the same hour of the same date every year.
+func newYearJump(t *testing.T) *time.Location {
+	t.Helper()
+	// A time zone file of version 2 with no transitions: one zone, and a
+	// rule for all times in the footer.
+	header := func(zones, chars uint32) []byte {
+		h := append([]byte("TZif2"), make([]byte, 15)...)
+		for _, n := range []uint32{0, 0, 0, 0, zones, chars} {
+			h = binary.BigEndian.AppendUint32(h, n)
+		}
+		return h
+	}
+	data := header(0, 0)                  // the 32-bit part, which is empty
+	data = append(data, header(1, 4)...)  // the 64-bit part
+	data = append(data, 0, 0, 0, 0, 0, 0) // the zone: UTC, not summer time, named by the first name
+	data = append(data, "STD\x00"...)
+	data = append(data, "\nSTD0DST,J1/2,J200/2\n"...)
+	loc, err := time.LoadLocationFromTZData("made-up", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loc
+}
+
+// A schedule whose every time is skipped still has a next run: the first
+// skipped time, after its jump. Next must not look on for a time that the
+// clock shows, which never comes.
+func TestNextEndsWhenTheClockSkipsEveryMatch(t *testing.T) {
+	t.Parallel()
+	loc := newYearJump(t)
+	if at := time.Date(2027, 1, 1, 2, 30, 0, 0, time.UTC); civil(at.In(loc)).Equal(at) {
+		t.Fatalf("the made-up clock shows %s, which it should skip", at)
+	}
+	s, err := Parse("30 2 1 1 *")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type result struct {
+		next time.Time
+		err  error
+	}
+	found := make(chan result, 1)
+	go func() {
+		next, err := s.Next(time.Date(2026, 6, 1, 12, 0, 0, 0, loc))
+		found <- result{next, err}
+	}()
+	select {
+	case got := <-found:
+		// 02:30 runs as far after the jump as it is into the skipped hour.
+		if want := time.Date(2027, 1, 1, 3, 30, 0, 0, loc); got.err != nil || !got.next.Equal(want) {
+			t.Fatalf("Next = %s, %v; want %s", got.next, got.err, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Next did not return")
+	}
 }
 
 func TestNextRunsTheRepeatedHourOnce(t *testing.T) {

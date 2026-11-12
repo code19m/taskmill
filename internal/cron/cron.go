@@ -191,6 +191,13 @@ func (s *Schedule) Next(t time.Time) (time.Time, error) {
 			}
 			return moved, nil
 		}
+		// The search ends at moved. A time that is later on the wall clock
+		// runs later, whether the clock shows it or skips it too. Without
+		// this end, the search would go on for ever in a location that skips
+		// every time that the schedule matches.
+		if !moved.IsZero() && match.After(civil(moved)) {
+			return moved, nil
+		}
 		at, skipped := instant(match, loc)
 		switch {
 		case skipped && moved.IsZero():
