@@ -111,7 +111,8 @@ taskmill.AddHandler(&handlers, &StockSync{}, &taskmill.HandlerOptions{Retry: Fix
 ```
 
 `ExponentialBackoff` spreads retries out by ±10%. Your own policy does not,
-unless you add that yourself.
+unless you add that yourself. If your `Backoff` panics, the attempt fails
+with the code `panic`, and the task waits by the default backoff.
 
 > [!NOTE]
 > If a task's worker crashes or loses its

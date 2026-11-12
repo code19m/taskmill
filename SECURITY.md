@@ -32,8 +32,10 @@ send notifications on taskmill's channel. taskmill treats them as hints, and
 reads the truth from its tables before it acts.
 
 So a forged notification only changes when workers query the database,
-which costs extra queries. That load is not a vulnerability in taskmill. A
-notification that makes taskmill run, change, or cancel a task is one.
+which costs extra queries. Their rate has a limit: a worker reads the cancel
+requests, the queue settings, and each of its idle queues at most about 50
+times a second. That load is not a vulnerability in taskmill. A notification
+that makes taskmill run, change, or cancel a task is one.
 
 ## Reporting a vulnerability
 

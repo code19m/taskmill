@@ -75,7 +75,7 @@ taskmill never leaves the database fully idle:
 | Who | What it runs while nothing happens |
 |---|---|
 | The maintainer | A few small statements every second: it keeps its role, wakes queues, and looks for due tasks, lost leases, and due schedules |
-| Each worker | A few small statements every 10 seconds, and one fetch per queue per minute |
+| Each worker | A few small statements every 10 seconds, one fetch per queue per minute, and a statement every 2 to 3 seconds that asks for the maintainer's role, unless the worker sets `NoMaintainer`. It writes nothing while another worker has the role |
 
 So a serverless database that stops when it is idle, such as Neon, never
 stops while a worker runs. Plan for a compute that stays on.

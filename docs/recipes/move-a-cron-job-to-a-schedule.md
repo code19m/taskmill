@@ -85,8 +85,11 @@ no seconds, and no `L` or `?`: `NewWorker` returns an error for them.
 ## Watch out
 
 - **The handler can run twice,** and it can run late: after a retry, or
-  after an outage. So don't take the day of the report from the clock.
-  Find the days that are missing in your own data, and build those.
+  after an outage. So don't take the day of the report from the clock, or
+  from `t.RunAt`, which a retry moves. `t.ScheduledFor()` returns the time
+  that the run is for, on every attempt. After an outage, one run stands for
+  all the times that were missed: find the days that are missing in your
+  own data, and build those.
 - **Give every worker the same `Schedules`.** Only the maintainer runs
   schedules, and only the ones that it defines
   ([Run tasks on a schedule](../guides/schedules.md)).

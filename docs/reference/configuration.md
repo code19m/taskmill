@@ -48,12 +48,12 @@ then the default below. `Metadata` merges key by key instead.
 |---|---|---|---|---|
 | `Queue` | `string` | `"default"` | 1 to 128 characters | Names the queue that the task goes to |
 | `Priority` | `Priority` | `PriorityNormal` | `PriorityLow` to `PriorityCritical` | Orders tasks within the queue: higher priorities start first |
-| `RunAt` | `time.Time` | Now | — | Sets the earliest time the task may start |
+| `RunAt` | `time.Time` | Now | A time that PostgreSQL stores: 4713 BC to 294276 AD | Sets the earliest time the task may start |
 | `MaxAttempts` | `int` | 25 | 1 to 10,000 | Sets how many times the task may run before it is dead |
 | `GroupKey` | `string` | None | Up to 256 characters | Puts the task in a [FIFO group](../concepts/glossary.md#fifo-group): tasks with the same key in the same queue run one at a time, in enqueue order |
 | `DedupeKey` | `string` | None | Any length | Makes the enqueue create no new task while the same queue, kind, and [key](../concepts/glossary.md#dedupe-key) are in their window |
 | `DedupeWindow` | `time.Duration` | 24 hours | Not negative | Sets how long `DedupeKey` blocks duplicates, counted from the enqueue |
-| `Metadata` | `map[string]string` | None | 64 KiB as JSON, with what enqueue middleware adds; no NUL character | Is stored with the task and passed to its handler, for example for tracing |
+| `Metadata` | `map[string]string` | None | 64 KiB as JSON, with what enqueue middleware adds; no NUL character. Keys that start with `taskmill.` belong to taskmill | Is stored with the task and passed to its handler, for example for tracing |
 
 ## Handlers
 
@@ -115,7 +115,7 @@ The entries of `WorkerConfig.Schedules`. [Godoc](https://pkg.go.dev/github.com/c
 | `Name` | `string` | Required | 1 to 128 characters | Identifies the schedule in the database. A new name is a new schedule |
 | `Cron` | `string` | Required | Five fields, or a macro such as `@daily`. Must match a time in the next five years | Says when the schedule runs. The godoc has the full syntax |
 | `Location` | `*time.Location` | UTC | — | Sets the time zone that `Cron` is read in |
-| `Args` | `Args` | Required | The limits of any payload | Is the task to enqueue |
+| `Args` | `Args` | Required | The limits of any payload | Is the task to enqueue. taskmill adds two metadata keys to each run's task: `taskmill.schedule`, the schedule's `Name`, and `taskmill.scheduled_for`, the time the run is for. A handler reads that time with `t.ScheduledFor()`: the task's `RunAt` is that time on the first attempt only |
 | `Options` | `*EnqueueOptions` | None | Must not set `RunAt`, `DedupeKey`, or `DedupeWindow` | Sets the options of that task |
 
 ## Settings stored in the database
@@ -135,7 +135,7 @@ default. [Godoc](https://pkg.go.dev/github.com/code19m/taskmill#Settings)
 
 | Field | Type | Default | Limits | What it does |
 |---|---|---|---|---|
-| `HistoryRetention` | `time.Duration` | 7 days | At least 1 hour | Sets how long completed tasks stay in history. History is dropped a whole UTC day at a time, so a task can stay up to a day longer |
+| `HistoryRetention` | `time.Duration` | 7 days | At least 1 hour. The longest duration, about 292 years, is safe | Sets how long completed tasks stay in history. History is dropped a whole UTC day at a time, so a task can stay up to a day longer |
 | `DeadRetention` | `time.Duration` | 30 days | At least 1 hour | Sets how long dead and canceled tasks are kept. A dead task that halts its FIFO group is kept until you retry or delete it |
 
 ## Operations API parameters

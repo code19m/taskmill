@@ -16,6 +16,9 @@ All numbers below come from one run on a laptop, not on server hardware:
   disks do, so numbers bound by commits are higher than on a server.
 - **Runs:** shorter than the targets ask: 60 seconds end to end instead of
   10 minutes, and a 1-hour soak instead of 4 hours. Handlers do nothing.
+- **Age:** the run is older than the latest changes to the statements that
+  fetch tasks, complete them, and renew leases. No number below was
+  measured again after those changes.
 
 Read them as rough sizes, not as a promise for your hardware.
 

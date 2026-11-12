@@ -59,8 +59,8 @@ has the SQL for the last two rows.
 ## Keep the isolation level at READ COMMITTED
 
 taskmill's own statements need READ COMMITTED, PostgreSQL's default. If your
-database or role sets another default, `NewClient` fails. Set the level back
-for taskmill's pool:
+database or role sets another default, `Migrate` still works, but
+`NewClient` fails. Set the level back for taskmill's pool:
 
 ```go
 cfg, err := pgxpool.ParseConfig(os.Getenv("DATABASE_URL"))
@@ -78,7 +78,8 @@ pool, err := pgxpool.NewWithConfig(ctx, cfg)
 | The pool goes through PgBouncer, which by default rejects this connection parameter | `ALTER ROLE shop SET default_transaction_isolation = 'read committed'`. It applies to the role's new connections |
 
 Your own transactions, which you pass to the `...Tx` methods, may use any
-level.
+level. At REPEATABLE READ and SERIALIZABLE, `CompleteTx` has one rule:
+[Use REPEATABLE READ or SERIALIZABLE](../guides/transactions.md#use-repeatable-read-or-serializable).
 
 ## Size the connection pool
 
@@ -190,10 +191,13 @@ server's clock in sync with NTP, because these use the app's clock:
 
 - A [producer](../concepts/glossary.md#producer), the code that enqueues,
   sets `RunAt`.
-- Workers name the daily history partitions.
 - `taskmill_stats_age_seconds` compares the app's clock with the time that
   the database stored. A clock that is a minute ahead fires its alert for no
   reason.
+
+The daily history partitions follow the database's clock, in UTC: the
+database says which days need a partition, and which partitions have
+expired. So a worker whose clock is wrong cannot drop history too early.
 
 ## See also
 

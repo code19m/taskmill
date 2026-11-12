@@ -63,7 +63,10 @@ for {
   matches when it matches every field you set. An empty field matches all.
 - Each page's query stops after 5 seconds, so listing never overloads the
   database. On a very large table, a filter that matches few tasks can hit
-  that limit and return an error. Add a queue or a state to the filter.
+  that limit and return an error. Add a queue and a state to the filter:
+  such a list reads about the tasks it shows. A list of one state across all
+  queues, such as every dead task, reads the newer tasks of other states
+  first.
 - `Get` returns one task by ID. `Count` counts the matching tasks per
   state, up to 10,000 per state.
 
@@ -93,6 +96,10 @@ case err != nil:
   [Handle tasks in batches](batch-handlers.md#cancel-a-task-that-runs-in-a-batch).
 - **`CancelTx` cancels inside your own transaction:** see
   [Use your own transactions](transactions.md#cancel-a-task-in-the-same-transaction).
+- **`Cancel`, `Delete`, and `Retry` run again by themselves,** up to 5 times
+  in all, when another transaction changes the same task or its FIFO group
+  at the same moment, and PostgreSQL ends theirs with `deadlock detected`.
+  `CancelTx` cannot do that in your transaction: run it again yourself.
 - **In a [FIFO group](ordering.md),** a retry of the dead task that halts
   the group resumes the group. Any other retried task of a group waits as
   `pending` until the group's current head is done.
@@ -120,6 +127,9 @@ log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
 - **They work in small steps:** batches of 1,000 tasks, each in a short
   transaction, so they never hold locks for long. A retry keeps each FIFO
   group in order.
+- **They get past any number of tasks that don't match.** If a batch can't
+  reach its tasks within a second, the action continues in batches that
+  read at most 100,000 tasks each.
 - **`Skipped` counts the tasks that were busy** in another transaction at
   that moment. Run the action again to act on them.
 - **If your context ends,** they stop after the current batch. They return

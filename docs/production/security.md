@@ -45,7 +45,12 @@ each role may do.
 - **taskmill treats a notification as a hint.** Before a worker acts on one,
   it reads the truth from taskmill's tables. So a forged notification cannot
   run, change, or cancel a task. It only changes when workers query the
-  database, which costs extra queries.
+  database, which costs extra queries. That cost has a limit: however many
+  notifications arrive, a worker reads the cancel requests, the queue
+  settings, and each idle queue at most about 50 times a second.
+- **taskmill waits only for locks on its own tables.** A role needs rights
+  on a table to lock it. taskmill takes no advisory locks, which PostgreSQL
+  lets every role of a database take and hold.
 - **Let only code that you trust connect to the database.** Services that
   must not affect each other's load belong in separate databases:
   notifications never leave their database.

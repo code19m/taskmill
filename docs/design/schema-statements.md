@@ -35,7 +35,7 @@ UPDATE taskmill.tasks t
 SET state            = 'running',
     attempt          = t.attempt + 1,
     lease_token      = t.lease_token + 1,
-    lease_expires_at = now() + $3 * interval '1 microsecond',
+    lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at     = now(),
     attempted_by     = $4
 WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
@@ -61,16 +61,29 @@ the index order.
   join with `picked` lets a generic plan, which cannot know how few rows
   `LIMIT $2` returns, hash-join against the whole table.
 
-For a queue with a `MaxRunning` limit, the fetch runs in a transaction that
-first locks the queue's row in `queues`, then counts its running tasks
-through `tasks_running_idx`, and fetches at most the remaining capacity. This
-serializes fetches for limited queues only.
+**A lease counts from the moment the task is taken:** `clock_timestamp()`,
+not `now()`, which is the start of the transaction. A fetch can wait for a
+row first, and that wait must not shorten the lease. `Worker.RunTask` locks
+its task's row before it updates it, for the same reason.
+
+**A queue with a `MaxRunning` limit** first asks, in one statement without a
+lock, whether it already runs as many tasks as its limit allows. A limited
+queue with a backlog is at its limit most of the time, and the fetch then
+ends there, with one read. Otherwise a transaction locks the queue's row in
+`queues`, counts the running tasks again through `tasks_running_idx`, and
+fetches at most the remaining capacity. This serializes fetches for limited
+queues only. The transaction waits at most 1 second for the queue's row.
+Then the fetch gives up, with only a Debug line, and the worker fetches
+again when the queue is next woken or polled: the queue's fetches take the
+row in turn, and with many workers the turns alone can take a second.
 
 A worker fetches one task per free slot. If the fetched tasks include kinds
 that have a batch handler, a second statement fills each batch up to its
-size. It is the same fetch, limited to one kind, and it looks at no more than
-the first 1,000 available tasks of the queue, so it stays cheap in a queue of
-many kinds. A batch takes one slot, so every fetched task starts right away.
+size. It is the same fetch, limited to one kind. It reads the queue's
+available tasks in fetch order, the first 1,000 at most, locks those of its
+kind one by one, and stops when the batch is full. So it never sorts, and
+stays cheap in a queue of many kinds. A batch takes one slot, so every
+fetched task starts right away.
 
 ## Renew leases
 
@@ -78,7 +91,15 @@ At each check-in, one statement renews every lease a worker holds. It
 returns each task that the worker's attempts still own, and marks the ones it
 renewed. A task missing from the result lost its lease, and the worker
 cancels that attempt's context. A task with a cancellation request is
-canceled the same way.
+canceled the same way. The statement joins from the attempts to the tasks,
+with one lookup by ID per attempt, so its time grows with the number of
+leases, not with their square.
+
+A worker can also fetch a task while its own older attempt of that task
+still runs: it was out of touch for longer than the lease, and the task was
+rescued and fetched again before a check-in found out. The new lease proves
+that the older attempt lost its own. So the worker cancels the older
+attempt's context right away, with `ErrLeaseLost`, and ignores its result.
 
 The statement locks with `SKIP LOCKED`, so one locked row, such as a task that
 an application transaction is canceling, cannot block the renewal of all
@@ -95,12 +116,18 @@ that discard completed tasks. A task missing from the result had lost its
 lease, and its result is discarded. The same statement, run inside the
 handler's transaction, is transactional completion.
 
+The statement first locks its tasks in ID order, and then deletes the tasks
+it holds. A delete alone takes the rows as its plan meets them, which is not
+always the order of their IDs: a renewed lease can move an older task's row
+behind a newer one's. Locked in ID order, a completion that waits for a task
+holds only tasks with lower IDs. So it cannot deadlock with a transaction
+that takes tasks in that order too, such as one that cancels several.
+
 Ungrouped tasks complete with this one statement, without a transaction of
 its own. Grouped tasks complete in one transaction per batch, which also
 updates their groups (see [FIFO groups](schema-groups.md#fifo-groups)). If
-the database is
-unreachable, the worker retries a completion with backoff until the
-attempt's lease would expire.
+the database is unreachable, the worker retries a completion with backoff
+until the attempt's lease would expire.
 
 ## Fail, snooze, and release
 
@@ -108,20 +135,38 @@ A failure is one `UPDATE` that checks the lease token, sets the state that
 the kind's retry policy chose (`retryable` with a new run time, or `dead`),
 and appends the error, dropping the oldest once there are 20. A snooze and a
 release are similar updates that also give the attempt back
-(`attempt = attempt - 1`). All three cancel the task instead if its
-cancellation was requested, so a request whose notification was missed still
-takes effect when the attempt ends. For a grouped task, the update runs in a
-transaction that also updates the group if the task finished.
+(`attempt = attempt - 1`). From a worker that has a handler for the task,
+they also remove the note of a wait for one. All three cancel the task
+instead if its row has a cancellation request, and only then: a request
+whose notification was missed still takes effect when the attempt ends, and
+a notification alone cancels nothing. For a grouped task, the update runs in
+a transaction that also updates the group if the task finished.
 
 ## Listing
 
 `Client.List` and the dashboard page through tasks by `id`, newest
 first, with keyset pagination: each page starts below the last `id` of the
 previous one. Unfinished tasks and history are read in two branches, each
-limited on its own, and merged. Each page runs with custom query plans
-(`plan_cache_mode = force_custom_plan`), so the planner sees which filters are
-set and uses the partial index that matches them, and with a 5-second
-statement timeout.
+limited on its own, and merged. Each page runs with a 5-second statement
+timeout, and with custom query plans (`plan_cache_mode = force_custom_plan`),
+so the planner sees which filters are set. Two more things let it pick the
+index that gives a page in ID order:
+
+- **A single queue, kind, or group is compared with `=`,** not with a list
+  of one value. Only then does the planner see that an index which leads
+  with that column gives its rows in the order of the next column: the
+  history's `(queue, id)` for one queue's completed tasks, and
+  `tasks_pending_idx` for the waiting tasks of one queue's group.
+- **Each selected state is tested as a literal,** so the planner sees which
+  states are left, and which partial indexes hold them.
+
+A list of one state across all queues, such as every dead task, has no
+index in ID order: it still reads the newer tasks of other states first.
+
+`Client.Count` has one branch per state, and custom plans leave out the
+branches of the states not counted. Sequential and bitmap scans are off for
+it, so each branch reads the index of its state and stops at its cap. A
+count by kind or FIFO group alone still reads every task of each state.
 
 ## Operator actions
 
@@ -141,10 +186,18 @@ statement timeout.
     through the primary key or a state's partial index, and the work grows
     with the tasks the action reads, not with their square. On 2 million
     tasks, canceling 500,000 of one queue kept a steady pace of about 40,000
-    per second.
+    per second, measured before the windows below existed.
     It also reads each task once, so a retry never retries a task twice, and
     it ends however fast tasks arrive. And a retry larger than a batch keeps
     a group in order: the group's oldest task becomes its head.
+  - **Windows, when the matching tasks lie far apart.** A batch first reads
+    without a window. With a filter that an index serves, it reads only the
+    tasks that match. Without one, it reads every task before the next 1,000
+    that match, so the database ends a statement of such a batch after 1
+    second. The action then reads in windows, starting with that batch: a
+    batch reads at most the next 100,000 tasks of each table, whether they
+    match or not, and moves to the window's end once it finds less than a
+    full batch before it. It still reads each task once, in ID order.
   - **No waiting while holding rows.** The batch's one statement that picks
     tasks reads the next 1,000 without locks, then locks those it can, the
     rows of their groups, and the rows of their dedupe keys, all with
@@ -185,8 +238,8 @@ statement timeout.
     one position covers both.
   - **The remaining limit.** A filter by kind or FIFO group alone has no
     index. A retry with one reads the dead and canceled entries of
-    `tasks_finished_idx` after its position in each batch: with 20,000 of
-    1 million dead tasks matching, about 135 ms a batch.
+    `tasks_finished_idx` after its position in each batch, and where a
+    batch needs more than the second, a window bounds what it reads.
 
 ## See also
 

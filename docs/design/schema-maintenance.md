@@ -15,6 +15,18 @@ queues, and how notifications and polling wake the workers.
 | Statistics | Every 10 seconds, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
 
+- **Retention stays on its index.** It finds the queues that have dead or
+  canceled tasks with one probe each, and reads each queue's old tasks as a
+  range of `tasks_finished_idx`: a few pages when no task is old enough. It
+  looks up each old task's halt by its group's key.
+- **The database's clock decides the history's days:** which days need a
+  partition, and which partitions have expired, in UTC.
+- **A failed election try writes nothing.** The upsert proposes its row only
+  if no other worker's lease lasts. A conflict would lock the leader's row,
+  and make every try of every other worker a write.
+- **A worker that stops deletes its lease,** also when it does not know that
+  it holds one, as after a renewal whose answer was lost.
+
 ### Statistics
 
 **Statistics read indexes, and every count is capped,** so the cost stays
@@ -90,10 +102,30 @@ only when the transaction commits. The channel carries five payloads:
 | Payload | Meaning |
 |---|---|
 | `a\|<queue>` | Tasks became available in the queue |
-| `c\|<id>` | Asks the worker that runs task `<id>` to cancel it |
+| `c\|<id>` | The cancellation of the running task `<id>` was requested |
 | `q\|<queue>` | The queue's settings changed |
 | `h\|` | The maintainer's heartbeat |
 | `r\|` | The maintainer resigned, so that another worker takes over right away |
+
+**A notification is only a hint.** PostgreSQL lets every role of a database
+send one, as often as it likes, also a role with no rights on taskmill's
+tables. So a worker changes nothing because of a notification alone, and
+never reads the database where it receives them:
+
+- **`a|` only wakes a fetch,** which reads the tables. A worker whose fetch
+  found nothing pauses 20 ms before it acts on the next one.
+- **`c|` and `q|` only mark what they name.** One loop for each then reads
+  the truth: the cancel requests in the rows of the marked tasks, by ID and
+  lease token, in one statement for all of them, and the queues' settings.
+  Each loop pauses 20 ms after a read. So a flood of notifications costs a
+  worker about 50 reads of each kind a second, and `Cancel` still stops a
+  running task within that time.
+- **Only an ID in its canonical form counts.** PostgreSQL delivers equal
+  notifications of one transaction once, and other ways to write the same
+  number, such as `+7` or `007`, would get around that.
+- **The task's row decides a cancellation.** The statements that record an
+  attempt cancel the task only if its row has the request. If the read after
+  a `c|` fails, the next check-in reads the requests.
 
 **At most one notification per queue per 50 ms.** Each notifying transaction
 takes a global lock at commit. At high commit rates this lock becomes a

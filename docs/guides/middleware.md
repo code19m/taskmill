@@ -77,7 +77,10 @@ client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{
 - With `TagTenant` on the client and `WithTenant` on the worker, the tenant
   travels from the request to the handler.
 - The middleware also runs for the tasks that
-  [schedules](schedules.md) enqueue.
+  [schedules](schedules.md) enqueue. Their metadata holds taskmill's own
+  keys, `taskmill.schedule` and `taskmill.scheduled_for`. Middleware can
+  read them, but not change or remove them: taskmill sets them again after
+  it.
 - After `next` returns nil, each task's `Result` holds its ID, and
   `Duplicate`.
 - Inside your own transaction, `next` returns before you commit. The tasks

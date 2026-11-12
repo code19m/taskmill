@@ -37,6 +37,10 @@ _, err := client.Enqueue(ctx, RemindCustomer{OrderID: 42}, &taskmill.EnqueueOpti
 - The task waits as `scheduled` until `RunAt`, its
   [run time](../concepts/glossary.md#run-time). It can start up to about a
   second late. A `RunAt` in the past means "now".
+- There is no time that means "never". `RunAt` must be a time that
+  PostgreSQL can store, from 4713 BC to 294276 AD. For a time outside, such
+  as `time.Unix(math.MaxInt64, 0)`, the enqueue returns
+  `ErrInvalidArgument`, and your transaction stays usable.
 - Use `RunAt` for times that depend on your data, such as two days after
   each order. For a fixed timetable, such as every night at 03:00, use a
   [schedule](schedules.md).
@@ -84,6 +88,10 @@ func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 - To add the same tag to every task, use enqueue middleware: see
   [Add middleware](middleware.md).
 - All tags of one task can take up to 64 KiB.
+- Don't start your own keys with `taskmill.`: those keys belong to taskmill.
+  It sets `taskmill.schedule` and `taskmill.scheduled_for` on every task
+  that a [schedule](schedules.md) enqueues, and a later release may add
+  more.
 
 ## Options
 

@@ -89,10 +89,14 @@ weekdays.
 `Options` that set `RunAt`, `DedupeKey`, or `DedupeWindow`: the schedule
 sets those itself.
 
-The expression is read on the wall clock of `Location`, as classic cron
-does. Without a `Location`, the time is UTC. When clocks go forward and skip
-the run time, the run happens right after the jump. When clocks go back and
-repeat it, the run happens once.
+The expression is read on the wall clock of `Location`. Without a
+`Location`, the time is UTC. Each time that the expression names on that
+clock runs once, also when the clocks change:
+
+| When the clocks… | What happens | Example, in Berlin |
+|---|---|---|
+| Go forward, and skip an hour | Each skipped time runs once, as long after the jump as the time is into the skipped hour | `0,30 2 * * *` runs at 03:00 and at 03:30 |
+| Go back, and repeat an hour | A time in the repeated hour runs the first time the clock shows it, and not the second | `30 2 * * *` runs once. `*/15 * * * *` makes no run during the second pass of that hour, where classic cron keeps running |
 
 ## How a run happens
 
@@ -108,8 +112,9 @@ workers. Then a worker runs the task like any other.
 
 If no maintainer runs at the run time, the run waits. When a maintainer
 that defines the schedule starts again, it enqueues **one** run for all the
-times it missed. That run's `RunAt` is the first time it missed. A paused
-schedule works the same way when you resume it.
+times it missed. That run is for the first time it missed: its
+`ScheduledFor()` returns that time. A paused schedule works the same way
+when you resume it.
 
 ## Keep runs from overlapping
 
@@ -145,6 +150,11 @@ after the other:
 | Run it once now, such as after a fix | `client.RunSchedule`. The run comes within about a second, and the timetable doesn't change. It fails for a paused schedule |
 | Change its time, time zone, or task | Change the definition and deploy |
 | Remove it, or rename it | Change the code. The old schedule no longer runs. A maintainer that defines other schedules deletes it from the database after a day |
+
+A run that you ask for with `RunSchedule` is for the time of your request:
+its `ScheduledFor()` returns that time. Close to a regular run, you get both
+runs. While a run of the schedule is already due, a request adds none: that
+run starts within about a second anyway.
 
 ## See also
 

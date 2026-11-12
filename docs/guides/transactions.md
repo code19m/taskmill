@@ -171,6 +171,14 @@ Often you need no cancel at all: let the handler check the order, and
 return nil when the reminder is no longer needed
 ([Handle tasks](handle-tasks.md#what-should-my-handler-return)).
 
+> [!NOTE]
+> PostgreSQL may end your transaction with `deadlock detected` (SQLSTATE
+> `40P01`) when another transaction changes the same task, or its
+> [FIFO group](ordering.md), at the same moment as `CancelTx`: for example,
+> a retry of the task, or the end of the task ahead of it in its group.
+> Nothing was saved, so run your transaction again. `Cancel` does that by
+> itself, because the transaction is its own.
+
 ## Keep transactions short
 
 - A task with a `GroupKey` or a `DedupeKey` makes other

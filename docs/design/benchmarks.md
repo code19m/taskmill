@@ -31,7 +31,8 @@ says otherwise.
 
 No run on the reference hardware exists yet. These results come from a
 smaller laptop run in October 2026: they show the shape of the results, not
-the numbers of the reference hardware.
+the numbers of the reference hardware. No number was measured again after
+the latest changes to the fetch, completion, renewal, and election statements.
 
 - **Machine:** Apple M5, 10 cores, 16 GiB, shared with builds, tests, and an
   example application. Throughput moved by up to half between runs.
@@ -70,9 +71,9 @@ queue.
   while 20,000 tasks waited, beside 2 workers with concurrency 64. 4 workers
   with concurrency 16 batch less: 15,536 tasks/s, 0.58 statements per task.
 - **A backlog drains slower as it goes,** and taskmill, not the laptop,
-  causes it. Each fetch
-  reads the queue's entries in `tasks_fetch_idx` from the front, where
-  fetched tasks' entries stay, marked dead, until autovacuum removes them.
+  causes it. Each fetch reads the queue's entries in `tasks_fetch_idx` from
+  the front, where fetched tasks' entries stay, marked dead, until
+  autovacuum removes them.
 
 ### Latency
 

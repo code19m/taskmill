@@ -22,8 +22,8 @@ changes it.
 |---|---|
 | Wait after the nth failed attempt, with the default `Retry` | 2^(n−1) seconds: 1, 2, 4, and so on, up to 1 hour from the 13th failure on. Each wait varies at random by ±10% |
 | Time from the first failure to dead, with the default `MaxAttempts` and `Retry` | About 13 hours (25 attempts) |
-| Retry wait after a lost [lease](../concepts/glossary.md#lease) | The default [backoff](../concepts/glossary.md#backoff), whatever the kind's `Retry` says |
-| A task whose kind has no handler on the worker that fetched it | Snoozed 1 minute at a time, without using an attempt. Dead with `unknown_kind` after 1 hour |
+| Retry wait after a lost [lease](../concepts/glossary.md#lease), or after a panic in `RetryPolicy.Backoff` or in a method of the handler's error | The default [backoff](../concepts/glossary.md#backoff), whatever the kind's `Retry` says |
+| A task whose kind has no handler on the worker that fetched it | Snoozed 1 minute at a time, without using an attempt. Dead with `unknown_kind` if no worker with a handler takes it within 1 hour. A worker with a handler ends the wait, and so does a retry |
 | Error history (`TaskInfo.Errors`) | The 20 most recent entries, with at most 4 KiB per message |
 
 ## Workers
@@ -31,6 +31,9 @@ changes it.
 | What | Value |
 |---|---|
 | The worker's [check-in](../concepts/glossary.md#check-in): it renews its leases and notes that it is alive | Every third of `LeaseDuration`: 10 seconds by default |
+| A lease starts | When the task is taken, by the database's clock: not when the fetch began |
+| A fetch from a queue with `MaxRunning` waits for the queue's row | At most 1 second. Then the worker fetches again when the queue is next woken or polled |
+| Reads that notifications ask for: cancel requests, and queue settings | At most one of each kind per 20 ms |
 | Poll of an idle queue while the [heartbeats](../concepts/glossary.md#heartbeat) of the [maintainer](../concepts/glossary.md#maintainer) arrive | Once a minute, ±10%. Every `PollInterval`, if that is longer |
 | A task whose [notification](../concepts/glossary.md#notification) was lost starts | Within about 2 seconds while heartbeats arrive. Within about 16 seconds if the maintainer or the notification connection fails silently |
 | Handlers that still run when `DrainTimeout` ends | Their contexts are canceled. 5 seconds later, their tasks go back to their queues |
@@ -57,13 +60,13 @@ work.
 | [Promote](../concepts/glossary.md#promote) due tasks: delayed tasks, retries, and snoozed tasks | As they come due, at most 20 times a second |
 | [Rescue](../concepts/glossary.md#rescue) tasks whose leases ran out | Every second |
 | Enqueue due schedule runs | Every second |
-| `Client.RunSchedule` | The run is enqueued within about 1 second, if the maintainer defines the schedule |
+| `Client.RunSchedule` | The run is enqueued within about 1 second, if the maintainer defines the schedule. A request adds no run while a run of the schedule is already due |
 | Dedupe window of a schedule run | 24 hours, or twice the time to the schedule's next run if that is longer |
 | Refresh queue statistics | Every 10 seconds |
 | Apply retention | Every minute |
-| Prepare history partitions | 7 days ahead: today and the next 6 days, by UTC day |
+| Prepare history partitions | 7 days ahead: today and the next 6 days, by UTC day on the database's clock |
 | Drop an old history partition | Waits up to 30 seconds for transactions that use the history. Tried again every minute |
-| Other workers try to take over | Every 2 seconds |
+| Other workers try to take over | Every 2 to 3 seconds, with a statement that writes nothing while the maintainer's lease lasts |
 | A new maintainer after a crash | Within about 12 seconds (the maintainer's lease is 10 seconds) |
 | A new maintainer after a clean stop | Right away, when the old one starts to stop. It gives the role up before it waits for its running tasks |
 | Remove a worker that stopped checking in | After 5 minutes without a check-in. A worker with a `LeaseDuration` above 15 minutes checks in less often, so it is removed, and registers again |
@@ -89,6 +92,8 @@ work.
 | `QueueInfo.HaltedGroups` | Stops at 10,000 groups per queue |
 | `QueueInfo.MostFailures` | The maintainer looks at 10,000 retryable tasks across all queues: the ones whose next retry is furthest away. It also looks at one such task per queue. With more retryable tasks than that, the number can be too low |
 | Bulk actions (`RetryMatching`, `CancelMatching`, `DeleteMatching`) | Batches of 1,000 tasks. When the context ends, the current batch finishes within 5 seconds |
+| A bulk action whose matching tasks lie far apart | The database ends a statement of a batch after 1 second. From then on, each batch reads at most 100,000 tasks, whether they match or not |
+| `Cancel`, `Delete`, and `Retry` | Run again by themselves, up to 5 times in all, when the task changes under their lock, or PostgreSQL ends their transaction with `deadlock detected` |
 | `UpdateQueue`, `UpdateSettings` | Up to 10 tries, with random pauses of up to 50 ms. Then `ErrConflict` |
 | A change of a queue's settings reaches the workers | Right away, by notification. Within 10 seconds without notifications |
 

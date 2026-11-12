@@ -83,7 +83,7 @@ successes between them.
 | `load queue settings` | Reads pauses and limits of the queues | Every 10 seconds | The database |
 | `record activity` | Writes the counts for the charts | Every 10 seconds | The database |
 | `listen for notifications` | Keeps the connection that receives notifications. Idle queues poll every `PollInterval` meanwhile | On failure, again after 1 to 30 seconds | `ListenConfig`, and any proxy in between |
-| `elect maintainer` | Takes or keeps the maintainer role | Every 1 to 2 seconds | The database |
+| `elect maintainer` | Takes or keeps the maintainer role | Every second on the maintainer, and every 2 to 3 seconds on the other workers | The database |
 | `promote due tasks` | [Promotes](../concepts/glossary.md#promote) delayed tasks and retries | As they come due | The database |
 | `wake queues` | Notifies queues whose tasks wait, and sends the [heartbeat](../concepts/glossary.md#heartbeat) | Every second | The database |
 | `rescue expired leases` | [Rescues](../concepts/glossary.md#rescue) the tasks of workers that lost their leases | Every second | The database |
@@ -128,7 +128,8 @@ backticks.
 | `attempt failed; the task is dead` | Error | The task failed permanently: no attempts left, `Permanent`, a payload that did not decode, or no handler for an hour. Also logged when the last attempt's worker lost its lease. | Fix the cause. Then retry the task, or delete it. A dead task [halts its FIFO group](../concepts/glossary.md#halted-group). |
 | `no handler for task kind; snoozing` | Warn | This worker has no handler for `kind`. The task waits up to an hour for a worker that has one, without using attempts. Later snoozes of the same task log at Debug. | Normal during a rolling deploy. Otherwise, give every worker of the queue the same handlers. |
 | `the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own` | Warn | All `max_conns` connections of the pool were in use, so renewing leases waited `duration` for one. Usually handlers that share the pool hold them. If renewals keep waiting, leases run out and tasks run twice. | Raise the pool's `MaxConns`, for example with `pool_max_conns` in the URL. Or give handlers a pool of their own. See [Database](../production/database.md#size-the-connection-pool). |
-| `attempt lost its lease; canceling it` | Warn | The worker could not renew the lease in time. The task may already run on another worker. | Check the database and the pool size. |
+| `attempt lost its lease; canceling it` | Warn | The worker could not renew the lease in time. The task may already run on another worker. The worker also logs it when it fetches a task again while its own older attempt still runs: the task was rescued meanwhile, and the older attempt is canceled. | Check the database and the pool size. |
+| `fetch gave up waiting for the queue's row` | Debug | A fetch from `queue`, which has a `MaxRunning` limit, waited 1 second for the queue's row, and gave up. The worker fetches again when the queue is next woken or polled. This is not a failed operation: the queue's fetches take the row in turn, and with many workers the turns alone can take that long. | Nothing. |
 | `result discarded: the attempt lost its lease` | Debug | An attempt ended after it lost its lease. Its result does not count. | Nothing. |
 | `record attempt failed; the task is rescued when its lease expires` | Warn | The result of the attempt could not be saved in time. Once the lease runs out, the maintainer rescues the task. | Check the database. |
 | `complete tasks failed; they are rescued when their leases expire` | Warn | `tasks` successful attempts could not be saved. Those tasks run again. | Check the database. |

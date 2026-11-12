@@ -72,9 +72,9 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 > [!WARNING]
 > A worker takes every task from its queues, whatever its kind. If it has
 > no handler for the kind, it [snoozes](../concepts/glossary.md#snooze) the
-> task for a minute at a time. After an hour, the task becomes dead with the
-> code `unknown_kind`. So every worker that reads a queue needs the handlers
-> for all kinds in it.
+> task for a minute at a time. If no worker with a handler takes it for an
+> hour, the task becomes dead with the code `unknown_kind`. So every worker
+> that reads a queue needs the handlers for all kinds in it.
 
 ## How many queues do I need?
 

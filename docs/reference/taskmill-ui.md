@@ -65,7 +65,7 @@ database back.
 
 | What | Value |
 |---|---|
-| Wait for a request's headers | Up to 10 seconds |
+| Time for a whole request to arrive: its headers and its body | Up to 10 seconds. Then the connection is closed |
 | Time to write an answer | Up to 30 seconds |
 | An idle connection is kept | 2 minutes |
 | Wait for open requests at shutdown | Up to 10 seconds |
@@ -108,10 +108,11 @@ queue `emails`.
 |---|---|
 | 303 | An action worked. The redirect leads to a page that says so |
 | 304 | The page did not change since the browser's copy |
+| 307 | With a prefix: the prefix without its last slash, such as `/admin/tasks`, or a path that is not clean, such as one with a double slash. The redirect leads to the clean path under the prefix |
 | 400 | A filter value is not valid, such as an unknown state. Or the page of a bulk action got no filter |
 | 401 | The login is missing or wrong, when basic authentication is on |
 | 403 | An action in read-only mode, or a `POST` from another site |
-| 404 | No such page, task, or schedule |
+| 404 | No such page, task, or schedule. With a prefix, also a path that only starts like it, such as `/admin/tasksx` |
 | 405 | The path exists, but not with this method |
 | 409 | The action does not fit, such as a retry of a running task |
 | 500 | A read or an action failed. The log has `dashboard request failed` |

@@ -39,8 +39,10 @@ configurable, so several schemas can share a database. It must match
 5. **Frequent updates touch no indexed column.** Lease renewals change only
    `lease_expires_at`, which no index contains, so PostgreSQL can update the
    row in place (a HOT update) without writing to any index.
-6. **Every timestamp that taskmill sets comes from the database clock**
-   (`now()`). Only a run time that the application passes in comes from the
+6. **Every timestamp that taskmill sets comes from the database clock:**
+   `now()`, or `clock_timestamp()` for a lease, which counts from the moment
+   the task is taken. The days of the history partitions come from it too.
+   Only a run time that the application passes in comes from the
    application's clock.
 
 ## Tables
@@ -111,8 +113,9 @@ counts 1. `halted_task_id` names that dead head.
 
 Two partial indexes cover the halted groups only, so they stay small:
 
-- One on `halted_task_id` lets retention skip the dead heads that keep
-  their groups halted, without scanning every group.
+- One on `halted_task_id` lets a bulk action find the groups that the tasks
+  of a batch halt, without scanning every group. Retention does not use it:
+  it looks up each old task's halt by the group's key.
 - One on `(queue, group_key)` lets `Client.Groups` page through the halted
   groups in its order, and lets the maintainer count them per queue.
 
@@ -200,13 +203,23 @@ index-only scan).
   6 days, by UTC day. The worker does it because a schema applied with
   `Migrations` has none, and its first tasks may complete before the
   maintainer's first pass.
+- **The database's clock names the days.** One statement asks the database
+  which of those days have no partition, and another which partitions have
+  expired. So a machine whose clock is wrong can neither create partitions
+  for the wrong days nor drop history too early. The database applies the
+  retention period too, so the longest `HistoryRetention` cannot overflow.
 - **A partition is created apart, then attached.** It is created with
   `CREATE TABLE ... (LIKE ...)` and then attached with
-  `ALTER TABLE ... ATTACH PARTITION` under a 5-second lock timeout, because
+  `ALTER TABLE ... ATTACH PARTITION`, because
   `CREATE TABLE ... PARTITION OF` locks the whole history table and blocks
   completions. Measured: with a completion's transaction open,
   `PARTITION OF` timed out on its lock, while `LIKE` with `ATTACH` finished
   in 0.07 seconds.
+- **Creating partitions locks the history table only when one is missing.**
+  A call that finds every partition ready takes no lock. Otherwise it locks
+  `task_history` alone, not its partitions, in `SHARE UPDATE EXCLUSIVE` mode,
+  which attaching takes anyway, and waits for it at most 5 seconds. So
+  processes that create partitions at the same time wait for each other.
 - **Old partitions are detached, then dropped.** The detach is
   `DETACH PARTITION ... CONCURRENTLY`, bounded by 30 seconds. An interrupted
   detach is finished next time with `DETACH PARTITION ... FINALIZE`. These
@@ -215,11 +228,18 @@ index-only scan).
   scan and lock it. If a day's partition is missing, completions skip history
   and the worker logs an error, so the gap shows up in alerts.
 - **Schema changes are versioned.** Each migration is recorded in
-  `migrations`. `Migrate` applies all pending migrations in one transaction,
-  under a transaction-scoped advisory lock, so only one process migrates at a
-  time. A migration therefore cannot use `CREATE INDEX CONCURRENTLY`; a
-  future migration that indexes a large existing table will need a step of
-  its own outside the transaction.
+  `migrations`. `Migrate` first creates the schema and that table, in a
+  transaction of their own. Then it applies all pending migrations in one
+  transaction, which locks `migrations` in `SHARE ROW EXCLUSIVE` mode, so
+  only one process migrates at a time. The others wait for that lock, with
+  no limit but their context, and then find nothing left to do. A migration
+  therefore cannot use `CREATE INDEX CONCURRENTLY`; a future migration that
+  indexes a large existing table will need a step of its own outside the
+  transaction.
+- **Only table locks, never advisory locks.** PostgreSQL lets every role of
+  a database take an advisory lock, also a role with no rights on taskmill's
+  schema, which could then keep `Migrate` and workers from starting. A lock
+  on a table needs rights on that table.
 
 ## See also
 

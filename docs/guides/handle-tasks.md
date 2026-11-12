@@ -79,7 +79,8 @@ func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 
 | The handler | What happens |
 |---|---|
-| Panics | Like an error: the task is retried. The stack trace is saved in its error history |
+| Panics | Like an error: the task is retried, and the worker keeps running. The stack trace is saved in its error history, with the code `panic` |
+| Returns an error whose `Error` method panics, such as a nil pointer in an `error` value | The same. The task is retried after the default backoff |
 | Runs longer than its `Timeout` | Its context is canceled. An error then fails the attempt, and nil completes the task |
 | Never runs, because the payload does not decode | The task becomes dead right away, with the code `invalid_payload` |
 

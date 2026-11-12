@@ -78,7 +78,7 @@ What you get:
 |---|---|
 | Span `send {queue}` | Each enqueue call. It stores its trace context in the tasks' metadata |
 | Span `process {queue}` | Each attempt, as a child of the `send` span. So a task's work shows in the trace of the request that enqueued it, even a retry hours later |
-| Span `send {topic}` | Each outbox message sent to the broker. The message's headers carry the trace on to the consumers |
+| Span `send {topic}` | Each outbox message sent to the broker. The message's headers carry the trace on to the consumers. If your publisher panics, the spans of its messages end with the error type `panic` |
 | Counters and histograms | Tasks enqueued, and how long enqueues and attempts take, per queue and kind. Failures carry an `error.type`, such as `timeout` |
 | Queue gauges | Tasks per queue and state, the queue's [lag](../concepts/glossary.md#lag), and how old the counts are. See [below](#watch-queue-depth-and-lag) |
 

@@ -3,18 +3,16 @@
 This document defines the states a task moves through, what moves it from one
 state to another, and what taskmill guarantees along the way. It is the
 contract that the implementation and its tests are written against. The
-terms are defined in the [glossary](../concepts/glossary.md). Two more
-are used here:
-
-- **Lease token:** a number that grows by one every time a task is fetched.
-  Every change a worker makes to a task must present the current token.
-- **Run time:** the earliest time a task may start (`RunAt`).
+terms are defined in the [glossary](../concepts/glossary.md). One more is
+used here: a **lease token** is a number that grows by one every time a task
+is fetched. Every change a worker makes to a task must present the current
+token.
 
 ## States
 
 | State | Meaning | Finished |
 |---|---|---|
-| `scheduled` | Waiting for its run time. | |
+| `scheduled` | Waiting for its [run time](../concepts/glossary.md#run-time). | |
 | `pending` | Waiting behind its FIFO group's head. | |
 | `available` | Ready, waiting for a worker. | |
 | `running` | Leased by an attempt. | |
@@ -114,10 +112,12 @@ Notes on specific transitions:
   deletes the task right away.
 - **11.** A worker that has no handler for a task's kind snoozes it for
   1 minute at a time, without using an attempt. The first snooze records a
-  note with the code `no_handler`. If no worker runs the task within 1 hour of
-  that note, the task becomes dead with the code `unknown_kind`. A retry
-  starts a new wait. This keeps tasks safe during rolling deploys, when some
-  workers do not know a new kind yet.
+  note with the code `no_handler`, and a wait of 1 hour starts. It lasts
+  while that note is the task's last error. A worker with a handler ends it:
+  its failure follows the note, and its snooze or release removes the note,
+  as a retry does. If the hour passes first, the next worker without a
+  handler makes the task dead with the code `unknown_kind`. This keeps tasks
+  safe during rolling deploys, when some workers do not know a new kind yet.
 - **13.** A lease that expires counts as a failed attempt on purpose. A task
   that crashes its worker every time (a "poison" task) must stop being
   retried at some point, not crash workers forever. A task whose
@@ -150,10 +150,11 @@ them, and every test checks the FIFO group invariants when it ends.
    state has none. A task's lease token only grows, so it never repeats.
 4. Attempts used never exceed the maximum attempts, and the maximum is at
    least 1.
-5. Every time taskmill sets itself, such as an attempt's start or a retry's
-   run time, comes from the database clock (`now()`), never from an
-   application server's clock. A run time that the application passes in
-   comes from its own clock.
+5. Every time taskmill sets itself, such as an attempt's start, a lease's
+   end, or a retry's run time, comes from the database clock, never from an
+   application server's clock. A lease counts from the moment its task is
+   taken (`clock_timestamp()`), not from the start of the fetch. A run time
+   that the application passes in comes from its own clock.
 6. In a FIFO group, at most one task is neither `pending` nor finished: the
    group's head.
 
@@ -179,8 +180,8 @@ Each guarantee names the mechanism that provides it.
    *Mechanism: transition 13.*
 4. **A stale attempt cannot change a task.** An attempt that lost its lease
    cannot complete, fail, or snooze the task, and its result is discarded. The
-   worker learns this at its next lease renewal, and cancels the attempt's
-   context.
+   worker learns this at its next lease renewal, or when it fetches the same
+   task again, and cancels the attempt's context.
    *Mechanism: every worker update requires the current lease token.*
 5. **Database writes can be exactly-once.** A handler that writes only to the
    same PostgreSQL database can complete the task inside its own transaction.
@@ -204,8 +205,9 @@ Each guarantee names the mechanism that provides it.
    *Mechanism: the key is claimed in the enqueue statement.*
 10. **Delayed tasks start on time, within limits.** While a maintainer runs, a
     task becomes available within about one second after its run time, and
-    starts as soon as a worker has a free slot. A scheduled task's run time is
-    the time it was scheduled for. This is not a real-time guarantee.
+    starts as soon as a worker has a free slot. A schedule's run starts with
+    the time it is for as its run time, and keeps that time in its metadata
+    (`TaskInfo.ScheduledFor`). This is not a real-time guarantee.
 11. **Payloads arrive exactly as they were sent.** The payload is stored as
     JSON and decoded directly into the handler's type. Values such as large
     integers are never converted to floating point on the way.

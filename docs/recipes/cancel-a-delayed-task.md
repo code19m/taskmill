@@ -123,6 +123,11 @@ inside your transaction.
   at its old time. And if a newer task took its dedupe key, both run.
 - **Keep the transaction short.** `CancelTx` locks the task's row until you
   commit ([Use your own transactions](../guides/transactions.md)).
+- **Run the transaction again after a deadlock.** When another transaction
+  changes the same task, or its FIFO group, at the same moment, PostgreSQL
+  may end yours with `deadlock detected` (SQLSTATE `40P01`). Nothing was
+  saved. `Cancel` runs again by itself, but `CancelTx` is in your
+  transaction, so only your code can.
 
 ## See also
 

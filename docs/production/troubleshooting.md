@@ -127,8 +127,8 @@ leases`. The same tasks come back, with the code `lease_lost` in their errors.
 ### Tasks die with `unknown_kind`, or wait with a `no_handler` note
 
 **You see:** after a deploy, tasks have `no_handler` notes, and the log says
-`no handler for task kind; snoozing`. An hour later, they are dead with the
-code `unknown_kind`.
+`no handler for task kind; snoozing`. If no worker with a handler takes them
+for an hour, they are dead with the code `unknown_kind`.
 
 | Likely cause | Check | Do |
 |---|---|---|
@@ -166,18 +166,20 @@ need 3`. `taskmill-ui` exits with the same error.
 
 ### `Migrate` fails, or never returns
 
-A failed `Migrate` changes nothing: the schema is as it was before.
+A `Migrate` that fails applies none of its migrations: they run in one
+transaction. Only a first `Migrate` leaves something behind, the schema and
+its empty `migrations` table, which it creates first. Run it again.
 
 | You see | Cause | Do |
 |---|---|---|
 | `canceling statement due to lock timeout` | A long transaction held a lock on a taskmill table for more than 5 seconds. A `pg_dump` backup does that until it ends | Let a pod restart or the Job's next try run it again. If it keeps failing, find the long transaction in `pg_stat_activity` |
-| The process hangs when it starts. In `pg_stat_activity`, its session has `wait_event = 'advisory'` | Another session holds taskmill's migration lock. Its migration is slow, or its client is gone and its transaction stays open | Find that session with the query below. If it is stuck, end it with `pg_terminate_backend`: its migration rolls back, and a waiting process migrates. Pass `Migrate` a context with a deadline, so that the wait ends with an error |
+| The process hangs when it starts. In `pg_stat_activity`, its session has `wait_event_type = 'Lock'`, and its query starts with `LOCK TABLE taskmill.migrations` | Another process migrates, and holds the lock on the `migrations` table. This wait has no time limit. That migration is slow, or its client is gone and its transaction stays open | Find that session with the query below. If it is stuck, end it with `pg_terminate_backend`: its migration rolls back, and a waiting process migrates. Pass `Migrate` a context with a deadline, so that the wait ends with an error |
 
 ```sql
--- The sessions that hold an advisory lock, such as taskmill's migration lock
-SELECT a.pid, a.usename, a.state, now() - a.xact_start AS open_for, left(a.query, 60) AS query
-FROM pg_locks l JOIN pg_stat_activity a USING (pid)
-WHERE l.locktype = 'advisory' AND l.granted;
+-- The sessions that a waiting Migrate waits for
+SELECT h.pid, h.usename, h.state, now() - h.xact_start AS open_for, left(h.query, 60) AS query
+FROM pg_stat_activity w JOIN pg_stat_activity h ON h.pid = ANY(pg_blocking_pids(w.pid))
+WHERE w.query LIKE 'LOCK TABLE %.migrations %';
 ```
 
 ### Enqueue calls fail

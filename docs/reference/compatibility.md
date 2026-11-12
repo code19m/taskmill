@@ -44,7 +44,10 @@ From v1.0.0 on, this is the promise:
   - the error classes that `ErrorType()` returns
     ([list](errors.md#error-classes));
   - the outbox's queue, `outbox`, and its task kind,
-    `taskmill.outbox.message`.
+    `taskmill.outbox.message`;
+  - the metadata keys of a scheduled run, `taskmill.schedule` and
+    `taskmill.scheduled_for`, and the format of the second: RFC 3339 with
+    the schedule's offset from UTC, to the microsecond.
 - **One table is public: `migrations`.** If you apply migrations with your
   own tool, you record each one in `<schema>.migrations`. It keeps its name
   and its columns: `version` (`integer`, the primary key), `name` (`text`),
@@ -55,6 +58,7 @@ From v1.0.0 on, this is the promise:
 | What | What to do |
 |---|---|
 | A new error code or error class | Treat one you don't know like any other failure. |
+| A new metadata key that starts with `taskmill.` | The prefix belongs to taskmill: don't start your own keys with it. taskmill does not reject such a key, but a later release may set it. |
 | Log messages and their attributes | Match on the [current list](log-messages.md), and check it when you upgrade. |
 | Error messages | Test errors with `errors.Is`, never by their text. |
 | Span, attribute, and metric names of the `otel` module | The module stays below v1 while OpenTelemetry's messaging conventions settle. Its [changelog](../../otel/CHANGELOG.md) announces each rename. |

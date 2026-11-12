@@ -100,14 +100,17 @@ client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logg
 ```
 
 - Migrations only go forward. There are no down migrations.
-- All pending migrations run in one transaction. If `Migrate` fails, the
-  schema is as it was before: fix the cause, and run it again.
+- All pending migrations run in one transaction. If `Migrate` fails, none
+  of them is applied: fix the cause, and run it again. Only a first
+  `Migrate` leaves something behind: the schema and its empty `migrations`
+  table, which it creates before that transaction.
 - A migration waits at most 5 seconds for a lock on a busy taskmill table,
   so it never blocks your workers for long. If it gives up, a pod restart or
   the Job's next try runs it again.
-- While one process migrates, the others wait for it, as long as their
-  context allows. Pass `Migrate` a context with a deadline, such as one
-  minute. A stuck migration then fails, and you see it:
+- While one process migrates, the others wait for its lock on the
+  `migrations` table, as long as their context allows: the 5 seconds do not
+  apply here. Pass `Migrate` a context with a deadline, such as one minute.
+  A stuck migration then fails, and you see it:
   [`Migrate` fails, or never returns](troubleshooting.md#migrate-fails-or-never-returns).
 - To read the schema's version, run
   `SELECT max(version) FROM taskmill.migrations`. When it is lower than

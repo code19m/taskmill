@@ -15,7 +15,7 @@ instrumentation scope is `github.com/code19m/taskmill/otel`.
 |---|---|---|---|
 | `send {queue}` | Producer | `Instrumentation.EnqueueMiddleware` | Enqueue call. A batch has one span. Its context goes into each task's metadata. |
 | `process {queue}` | Consumer | `Instrumentation.Middleware` | Attempt. Its parent is the `send` span, so a task's attempts show in the trace of the request that enqueued it, even a retry hours later. |
-| `send {topic}` | Producer | `Instrumentation.Publisher` | Outbox delivery to the broker. Its parent is the span that stored the message. Its context goes into the message's headers, so consumers continue the trace. |
+| `send {topic}` | Producer | `Instrumentation.Publisher` | Outbox delivery to the broker. Its parent is the span that stored the message. Its context goes into the message's headers, so consumers continue the trace. If the publisher panics, the spans of its deliveries end with the panic as their error, and the `error.type` `panic`. |
 
 A span's name leaves out the queue when a batch holds tasks of several
 queues: it is then `send`.
