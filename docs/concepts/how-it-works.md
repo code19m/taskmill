@@ -51,13 +51,13 @@ flowchart LR
 ## How soon does a task start?
 
 Usually right away. Workers also [poll](glossary.md#polling) the database as
-a backup, so a lost wake-up message delays a task, but never loses it.
+a backup, so a lost notification delays a task, but never loses it.
 
 | Situation | The task starts within |
 |---|---|
 | A worker has a free slot | a few milliseconds |
-| A delayed task or a retry reaches its time | about 1 second |
-| The wake-up message was lost | about 2 seconds |
+| A delayed task or a retry reaches its [run time](glossary.md#run-time) | about 1 second |
+| The notification was lost | about 2 seconds |
 | The maintainer, or a worker's connection for notifications, failed silently | about 16 seconds |
 | All slots are busy | when a running task ends |
 
@@ -85,11 +85,12 @@ sequenceDiagram
     Note over B: Runs it again
 ```
 
-- The task runs again within about 30 seconds of the crash: the lease,
-  plus a second or two.
+- The task runs again once its lease runs out, which takes up to 30
+  seconds, and its [backoff](glossary.md#backoff) has passed. The backoff is
+  about a second after a first attempt, and longer after later ones.
 - The crash counts as a failed [attempt](glossary.md#attempt). So a task that
-  crashes its worker every time becomes dead in the end. It cannot crash your
-  workers forever.
+  crashes its worker every time waits longer each time, and becomes dead in
+  the end. It cannot crash your workers forever.
 - A worker that loses the database stops its tasks once it cannot renew
   their leases. If it saves a result late, taskmill refuses it: only the
   attempt that holds the lease can save a result.
@@ -104,16 +105,24 @@ worker takes part, unless you set `NoMaintainer` on it. The maintainer does
 the shared work:
 
 - it wakes queues whose tasks wait, and sends a
-  [heartbeat](glossary.md#heartbeat) every few seconds, so workers know it is
+  [heartbeat](glossary.md#heartbeat) every 5 seconds, so workers know it is
   alive;
-- it makes delayed tasks and retries ready when their time comes;
-- it gives the tasks of crashed workers back to their queues;
-- it enqueues [schedules](glossary.md#schedule), once for each time;
+- it [promotes](glossary.md#promote) delayed tasks and retries when their
+  run time comes;
+- it [rescues](glossary.md#rescue) the tasks of crashed workers, so that
+  they run again;
+- it enqueues each run of a [schedule](glossary.md#schedule), once;
 - it counts tasks for the dashboard and metrics, and deletes old tasks.
 
-If the maintainer stops cleanly, another worker takes over right away. If it
-crashes, another one takes over within about 12 seconds. While no maintainer
-runs, delayed tasks, retries, and schedules wait.
+| What happens to the maintainer | Another worker takes over |
+|---|---|
+| Its worker stops cleanly | right away, while the first one finishes its tasks |
+| Its worker crashes | within about 12 seconds |
+
+While no maintainer runs, delayed tasks, retries, and schedules wait, and
+the tasks of crashed workers are not rescued. Tasks that are ready still
+run. [Workers and queues](../guides/workers-and-queues.md#which-worker-does-the-shared-work)
+shows how to keep a maintainer running.
 
 > [!NOTE]
 > The maintainer runs only the schedules defined in its own process. So give
@@ -126,4 +135,4 @@ runs, delayed tasks, retries, and schedules wait.
 - [Design: task lifecycle](../design/task-lifecycle.md): the exact rules, for contributors
 - [`Worker`](https://pkg.go.dev/github.com/code19m/taskmill#Worker) on pkg.go.dev
 
-**Next:** [Guarantees](guarantees.md)
+**Next:** [Task lifecycle](task-lifecycle.md)

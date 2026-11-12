@@ -4,6 +4,17 @@ This page shows in which order tasks start, and how to make urgent tasks
 start first. It also shows how to run the tasks of one account one at a
 time, in order.
 
+## Quick example
+
+Tasks with the same `GroupKey` run one at a time, in the order you enqueued
+them:
+
+```go
+_, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), entry, &taskmill.EnqueueOptions{
+    GroupKey: "account-" + strconv.FormatInt(entry.AccountID, 10),
+})
+```
+
 ## Which should I use?
 
 | Situation | What to use | Why |
@@ -18,8 +29,10 @@ time, in order.
 Within one [queue](../concepts/glossary.md#queue), a worker takes the
 waiting tasks in this order:
 
-1. Higher `Priority` first ([Enqueue tasks](enqueue.md#options)).
-2. Then the task that has waited longest since its run time.
+1. Higher `Priority` first
+   ([Enqueue tasks](enqueue.md#run-a-task-before-others)).
+2. Then the task that has waited longest since its
+   [run time](../concepts/glossary.md#run-time).
 3. Then the task that was enqueued first.
 
 This is only the order in which tasks **start**. A worker runs many tasks at
@@ -33,21 +46,18 @@ matters, use a FIFO group.
 
 ## Run tasks one at a time per key
 
-Give tasks the same `GroupKey` to put them in a
-[FIFO group](../concepts/glossary.md#fifo-group) ("first in, first out"):
-
-```go
-_, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), entry, &taskmill.EnqueueOptions{
-    GroupKey: "account-" + strconv.FormatInt(entry.AccountID, 10),
-})
-```
+Tasks with the same `GroupKey` form a
+[FIFO group](../concepts/glossary.md#fifo-group) ("first in, first out"),
+as in the quick example.
 
 - A group is all the tasks with the same `GroupKey` **in the same queue**.
-  Groups need no setup, and millions of keys work fine.
+  Groups need no setup. taskmill is tested with 100,000 groups in a queue:
+  see [Performance](../reference/performance.md).
 - Only the group's first unfinished task, its
   [head](../concepts/glossary.md#head), can run. The tasks behind it wait in
   the `pending` state. Priority doesn't change the order inside a group.
-- A head that fails with attempts left, or snoozes, stays the head.
+- A head that fails with attempts left, or
+  [snoozes](../concepts/glossary.md#snooze), stays the head.
 
 The diagram shows a group of three tasks, and what happens to the head:
 
@@ -62,9 +72,10 @@ flowchart TD
     E -->|you delete task 1| D
 ```
 
-A group costs one or two more row writes per task. Producers that enqueue
-into the same group also wait for each other's transactions, so keep those
-transactions short.
+A group costs one or two more row writes per task.
+[Producers](../concepts/glossary.md#producer) that enqueue into the same
+group also wait for each other's transactions, so keep those transactions
+short.
 
 > [!WARNING]
 > When the head of a group becomes **dead**, the whole group stops. taskmill
@@ -99,7 +110,7 @@ until you act, for as long as it takes. To fix it:
 | Action | What happens | When to choose it |
 |---|---|---|
 | `client.Retry(ctx, id)` | The dead task runs again as the head. Then the rest of the group runs, in order | Usually: every step still happens, in order |
-| `client.Delete(ctx, id)` | The next task becomes the head. The dead task's work never happens | Only when that step must be skipped for good |
+| `client.Delete(ctx, id)` | The next task becomes the head. The dead task's work never happens | Only when that step must never run |
 
 Did one bug halt many groups? Fix it, then retry them all with
 `RetryMatching`, which keeps each group in order. See

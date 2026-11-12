@@ -8,13 +8,13 @@ you can do to a task in each state.
 
 | State | The task is… | Finished? |
 |---|---|---|
-| `scheduled` | waiting for its run time | |
+| `scheduled` | waiting for its [run time](glossary.md#run-time) | |
 | `pending` | waiting for its turn in a [FIFO group](glossary.md#fifo-group) | |
 | `available` | ready, waiting for a free worker | |
 | `running` | running on a worker, which holds its [lease](glossary.md#lease) | |
 | `retryable` | waiting to run again after a failed attempt | |
 | `completed` | done: its handler returned nil | Yes |
-| `dead` | stopped for good, and waiting for you ([dead task](glossary.md#dead-task)) | Yes |
+| `dead` | failed permanently, and waiting for you ([dead task](glossary.md#dead-task)) | Yes |
 | `canceled` | stopped on request | Yes |
 
 A [finished](glossary.md#finished) task does not run again, unless you retry
@@ -44,7 +44,7 @@ From `running`, a task can also take one of these paths:
 stateDiagram-v2
     running --> retryable: failed with attempts left
     retryable --> available: backoff passed
-    running --> dead: failed for good
+    running --> dead: failed permanently
     running --> scheduled: snoozed
     running --> available: given back at shutdown
     running --> canceled: canceled while running
@@ -52,17 +52,19 @@ stateDiagram-v2
 
 - **Failed with attempts left.** The handler returned an error. The task
   waits for its [backoff](glossary.md#backoff), then runs again.
-- **Failed for good.** No attempts are left, the handler returned a
+- **Failed permanently.** No attempts are left, the handler returned a
   [permanent error](glossary.md#permanent-error), the payload does not
   decode, or no worker had a handler for the task's kind for an hour.
-- **Snoozed.** The handler returned `taskmill.Snooze(d)`. The task runs
-  again after `d`, and gets its attempt back.
+- **Snoozed.** The handler returned `taskmill.Snooze(d)`
+  ([snooze](glossary.md#snooze)). The task runs again after `d`, and gets
+  its attempt back.
 - **Given back at shutdown.** The worker stopped before the handler
   finished. The task gets its attempt back, and another worker runs it
   ([release](glossary.md#release)).
 - **Crashed.** A crash counts as a failed attempt. Once the lease runs out,
-  the [maintainer](glossary.md#maintainer) moves the task to `retryable`, or
-  to `dead` if no attempts are left.
+  the [maintainer](glossary.md#maintainer) [rescues](glossary.md#rescue) the
+  task: it moves it to `retryable`, or to `dead` if no attempts are left.
+  The diagram leaves this path out.
 
 ## What you can do in each state
 
@@ -78,9 +80,15 @@ Do this in the [dashboard](glossary.md#dashboard), or from code with
 that matches a filter, use `CancelMatching`, `RetryMatching`, or
 `DeleteMatching` ([Manage tasks from code](../guides/operations-api.md)).
 
-In a FIFO group, a retried task waits as `pending` while its group has other
-unfinished tasks. If a dead task [halts its group](glossary.md#halted-group),
-retry or delete it, and the group goes on.
+- **A retry starts the task again from attempt 1.** It keeps its error
+  history.
+- **In a FIFO group,** a retried task waits as `pending` while its group has
+  other unfinished tasks. If a dead task
+  [halts its group](glossary.md#halted-group), retry or delete it, and the
+  group continues.
+- **A cancel or a delete frees the task's dedupe key.** Read
+  [When is a key free again?](../guides/deduplication.md#when-is-a-key-free-again)
+  before you retry a canceled task that has one.
 
 ## Cancel a running task
 

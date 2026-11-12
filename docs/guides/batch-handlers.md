@@ -25,9 +25,39 @@ taskmill.AddBatchHandler[IndexProduct](&handlers, &ProductIndexer{search: search
     &taskmill.HandlerOptions{BatchSize: 200})
 ```
 
-Return one result per task, in the same order as `tasks`. Each result works
-like a normal handler's: nil completes that task, an error retries it, and
-`Permanent` and `Snooze` work too.
+Return one result per task, in the same order as `tasks`. Here, every task
+gets the result of the one request.
+
+## Return a result per task
+
+Each result works like a normal handler's: nil completes that task, an
+error retries it, and `Permanent` and `Snooze` work too. So when the other
+system answers per item, pass each answer on:
+
+```go
+func (p *ProductIndexer) HandleBatch(ctx context.Context, tasks []*taskmill.Task[IndexProduct]) []error {
+    ids := make([]int64, len(tasks))
+    for i, t := range tasks {
+        ids[i] = t.Args.ProductID
+    }
+    errs := make([]error, len(tasks))
+    results, err := p.search.IndexEach(ctx, ids) // one result per product, in the same order
+    for i := range errs {
+        switch {
+        case err != nil:
+            errs[i] = err // the whole request failed: retry every task
+        case results[i].NotFound:
+            errs[i] = taskmill.Permanent(errors.New("the product does not exist")) // dead right away
+        default:
+            errs[i] = results[i].Err // nil completes this task, and an error retries it
+        }
+    }
+    return errs
+}
+```
+
+Each task counts its own attempts and keeps its own errors, as with a
+normal handler.
 
 ## Which should I use?
 
@@ -42,13 +72,17 @@ like a normal handler's: nil completes that task, an error retries it, and
 - When a worker fetches a task of a batch kind, it adds other waiting tasks
   of that kind, up to `BatchSize`: 100 by default. It doesn't wait for more
   to arrive, so when tasks are few, batches are small.
-- A batch takes one place in its queue's `Concurrency`. `Timeout` limits the
-  whole batch.
+- A batch takes one [slot](../concepts/glossary.md#slot) in its queue's
+  `Concurrency`. `Timeout` limits the whole batch.
 - A task without a result fails. If the handler panics, every task fails.
   If a task's payload does not decode, that task becomes dead, and the
   rest run.
 - `MaxRunning` counts tasks, not batches. So it also limits how full a batch
   gets: with `MaxRunning: 4`, a batch holds at most 4 tasks.
+- If a task loses its [lease](../concepts/glossary.md#lease) while the batch
+  runs, the batch continues, and taskmill ignores its result for that task.
+- [Middleware](middleware.md#middleware-and-batch-handlers) runs once per
+  task, not once per batch.
 
 ## Cancel a task that runs in a batch
 
@@ -67,6 +101,6 @@ If a cancel must stop the work, use `AddHandler`.
 
 - [Handle tasks](handle-tasks.md): what each result does
 - [Workers and queues](workers-and-queues.md): `Concurrency` and `MaxRunning`
-- [`BatchHandler`](https://pkg.go.dev/github.com/code19m/taskmill#BatchHandler) and [`Middleware`](https://pkg.go.dev/github.com/code19m/taskmill#Middleware) on pkg.go.dev: lost leases and middleware in a batch
+- [`BatchHandler`](https://pkg.go.dev/github.com/code19m/taskmill#BatchHandler) and [`AddBatchHandler`](https://pkg.go.dev/github.com/code19m/taskmill#AddBatchHandler) on pkg.go.dev
 
-**Next:** [Workers and queues](workers-and-queues.md)
+**Next:** [Add middleware](middleware.md)

@@ -38,7 +38,7 @@ if err != nil {
 |---|---|---|
 | Most apps | `Migrate` before `NewClient`, in every process | A deploy needs no extra step |
 | Your deploys change the schema before the new code starts | `Migrate` in a Job | See [Deploys](../production/deploys.md) |
-| You manage all schema changes with goose, Atlas, or Flyway | `Migrations` | See [Use your migration tool](../recipes/use-your-migration-tool.md) |
+| You manage all schema changes with goose, Atlas, or Flyway | `Migrations` | See [Use your own migration tool](../recipes/use-your-migration-tool.md) |
 
 Run your workers as the database role that owns taskmill's tables. Every
 day, taskmill adds a partition to its history table, and PostgreSQL allows
@@ -47,12 +47,23 @@ that only to the owner. See [Database](../production/database.md).
 ## Choose the schema name
 
 To use another name, set the same `Schema` in `MigrateConfig` and in
-`ClientConfig`, such as `billing_tasks`. Use lowercase letters, digits, and
-`_`, up to 63 characters.
+`ClientConfig`:
+
+```go
+err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Schema: "billing_tasks"})
+// ...
+client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{
+    Schema: "billing_tasks",
+    Logger: logger,
+})
+```
+
+A name has lowercase letters, digits, and `_`, up to 63 characters. It
+starts with a letter or `_`. Any other name fails with `ErrInvalidArgument`.
 
 Tasks in different schemas never see each other. Give each service its own
 schema, and let the web servers and workers of one app share it. See
-[Split across services](../recipes/split-across-services.md).
+[Split work across services](../recipes/split-across-services.md).
 
 ## Size the pool
 

@@ -12,10 +12,37 @@ it.
 | Your own service does the work: send an email, call an API | A task | It is the simplest |
 | Other systems must receive an event through a broker | The outbox | It keeps the order per key, gives each message an ID for consumers, and retries for about a month |
 | Messages arrive from a broker, and the work must not happen twice | The inbox: one task per message, with the message ID as its dedupe key | See [Consume from a broker](../recipes/consume-from-a-broker.md) |
-| Another service in the same database must do some work | `EnqueueTx` with a `Client` for that service's schema | See [Split across services](../recipes/split-across-services.md) |
+| Another service in the same database must do some work | `EnqueueTx` with a `Client` for that service's schema | See [Split work across services](../recipes/split-across-services.md) |
 
 Use the outbox whenever an event leaves your service. A task that publishes
-by itself gives you none of the above.
+by itself gives you no order per key, no message ID, and fewer retries.
+
+## Quick example
+
+Create one `Outbox` and share it. Call `Store` in the same transaction as
+the change that the event is about:
+
+```go
+ob := outbox.New(client) // once, at start
+
+err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+    if err := markPaid(ctx, tx, orderID); err != nil {
+        return err
+    }
+    return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{
+        Topic: "orders",
+        Key:   []byte(strconv.FormatInt(orderID, 10)), // messages with the same key stay in order
+        Value: event,
+    })
+})
+```
+
+- `Store` only writes to PostgreSQL, so your app keeps working while the
+  broker is down.
+- A `Value` can be up to about 750 KiB: see
+  [Defaults and limits](../reference/defaults-and-limits.md#outbox).
+- A [relay](#relay-messages-to-your-broker) on your workers then publishes
+  the message.
 
 ## How it works
 
@@ -38,30 +65,6 @@ sequenceDiagram
 
 If your transaction rolls back, the message never existed, and nothing is
 published.
-
-## Store messages in your transaction
-
-Create one `Outbox` and share it. Call `Store` in the same transaction as
-the change that the event is about:
-
-```go
-ob := outbox.New(client) // once, at start
-
-err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-    if err := markPaid(ctx, tx, orderID); err != nil {
-        return err
-    }
-    return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{
-        Topic: "orders",
-        Key:   []byte(strconv.FormatInt(orderID, 10)), // messages with the same key stay in order
-        Value: event,
-    })
-})
-```
-
-`Store` only writes to PostgreSQL, so your app keeps working while the
-broker is down. A `Value` can be up to about 750 KiB:
-see [Defaults and limits](../reference/defaults-and-limits.md#outbox).
 
 ## Relay messages to your broker
 
@@ -94,6 +97,9 @@ default), and how long one call may take (`Timeout`, 1 minute by default).
 When the time is up, the call's context is canceled, and every message
 without a `nil` result is retried.
 
+To test your publisher, run the relay with a fake broker: see
+[Test your code](testing.md#test-that-everything-gets-done).
+
 ## In which order are messages published?
 
 - Messages with the same topic and key are published **one at a time, in
@@ -125,10 +131,10 @@ The relay retries each message that fails:
 | After about 10 minutes | Tries again every 5 minutes |
 | After about a month (10,000 tries) | Gives up: the message becomes dead |
 
-While the broker is down, messages wait in the database. The dashboard shows them in the
-`outbox` queue as `retryable`, or as `pending` when they wait behind an
-earlier message with the same key. When the broker is back, the messages go
-out within about 5 minutes, still in order per key.
+While the broker is down, messages wait in the database. The dashboard
+shows them in the `outbox` queue as `retryable`, or as `pending` when they
+wait behind an earlier message with the same key. When the broker is back,
+the messages go out within about 5 minutes, still in order per key.
 
 The queue's [lag](../concepts/glossary.md#lag) stays near zero during the
 outage, because each message waits for its next try, not for a worker. So

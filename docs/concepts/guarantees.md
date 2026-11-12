@@ -16,15 +16,15 @@ your handlers must follow.
 |---|---|
 | **A task commits with your data.** | A task added with `EnqueueTx` exists only if your transaction commits. No worker sees it before the commit. |
 | **No task is lost.** | A committed task runs until it is completed or dead, unless you cancel or delete it. Dead tasks stay, so you can see them. |
-| **A crashed worker loses nothing.** | Its tasks run again on another worker, within about 30 seconds of the crash. |
+| **A crashed worker loses nothing.** | Its tasks run again on another worker, once their leases run out: up to 30 seconds, plus the [backoff](glossary.md#backoff). [How it works](how-it-works.md#what-if-a-worker-crashes) shows it. |
 | **One result per task.** | If two attempts overlap, only the one that holds the [lease](glossary.md#lease) can save its result. A late result is refused. |
 | **Database writes can happen exactly once.** | Write your data and complete the task in one transaction, with `CompleteTx`. |
 | **Retries stop.** | A failing task waits longer after each failure, then becomes [dead](glossary.md#dead-task) when its attempts run out. It keeps its last 20 errors. |
-| **Tasks start in order.** | In a queue, a higher [priority](glossary.md#priority) starts first, then an earlier run time, then the order you added them. Tasks may finish in any order. |
+| **Tasks start in order.** | In a queue, a higher [priority](glossary.md#priority) starts first, then an earlier [run time](glossary.md#run-time), then the order you added them. Tasks may finish in any order. |
 | **FIFO groups keep their order.** | The tasks of a [FIFO group](glossary.md#fifo-group) run one at a time, in order. A dead task is never skipped: the group waits for you. |
-| **A dedupe key gives one task.** | Within its window, a [dedupe key](glossary.md#dedupe-key) makes one task, even when two producers race. The window starts at the enqueue. |
+| **A dedupe key gives one task.** | Within its window, a [dedupe key](glossary.md#dedupe-key) makes one task, even when two processes enqueue the same key at the same moment. The window starts at the enqueue. A cancel or a delete of the task ends it early ([Avoid duplicate tasks](../guides/deduplication.md#when-is-a-key-free-again)). |
 | **Delayed tasks start on time.** | They start within about a second of their run time, while a [maintainer](glossary.md#maintainer) runs. Don't count on more exact timing. |
-| **Payloads arrive as you sent them.** | The JSON is decoded straight into your struct, so large integers stay exact. |
+| **Payload values arrive exact.** | The JSON is decoded straight into your struct, so large integers are safe. The JSON text itself is not kept: [Define tasks](../guides/define-tasks.md#keep-the-payload-small) says what changes. |
 
 ## What taskmill does not promise
 
@@ -47,10 +47,10 @@ your handlers must follow.
 | What happens | Why the task runs again | How to make it rare |
 |---|---|---|
 | A worker crashes after the work, before it saves the result | The lease runs out, and another worker runs the task | You cannot prevent it: make the handler safe to run twice |
-| A worker loses the database for longer than its lease | Another worker takes the task over | If your database's failover takes longer than 30 seconds, raise `LeaseDuration` ([Database](../production/database.md)) |
+| A worker loses the database for more than about 20 seconds | The worker cannot renew its leases, so it stops its tasks, and they run again | If your database's failover takes longer than that, [Database](../production/database.md#when-the-database-fails) shows what to change, and what it costs |
 | Handlers use every connection of the pool | The worker cannot renew its leases in time | Give the pool your total concurrency plus 5 connections, or give handlers a pool of their own |
-| A handler ignores the end of its context at shutdown | The worker gives the task back, and it starts again elsewhere | Return quickly when `ctx` ends |
-| The platform kills the worker before it drains | The same as a crash | Give the process at least `DrainTimeout` plus 10 seconds to stop ([Deploys](../production/deploys.md)) |
+| A handler ignores the end of its context at shutdown | The worker gives the task back ([release](glossary.md#release)), and it starts again on another worker | Return quickly when `ctx` ends |
+| The platform kills the worker before it [drains](glossary.md#drain) | The same as a crash | Give the process at least `DrainTimeout` plus 10 seconds to stop ([Deploys](../production/deploys.md)) |
 
 ## Make your handler safe to run twice
 
@@ -62,30 +62,18 @@ your handlers must follow.
 | The handler calls another service, such as a payment API or a mailer | An idempotency key, sent with the call | The other service drops the second call |
 | A second run does no harm, such as an upsert or a cache refresh | Nothing | The handler is already idempotent |
 
-With `CompleteTx`, the update and the completion commit together, or not at
-all:
+**With `CompleteTx`,** the handler's writes and the completion of its task
+commit together, or not at all. If another attempt took the task over,
+`CompleteTx` returns `taskmill.ErrLeaseLost`, and the transaction rolls
+back. [Use your own transactions](../guides/transactions.md#complete-a-task-in-the-same-transaction)
+has the code.
 
-```go
-func (h *PaymentHandler) Handle(ctx context.Context, t *taskmill.Task[MarkPaid]) error {
-	return pgx.BeginFunc(ctx, h.pool, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, "UPDATE orders SET paid = true WHERE id = $1", t.Args.OrderID)
-		if err != nil {
-			return err
-		}
-		// Complete the task in the same transaction: both commit, or neither.
-		return t.CompleteTx(ctx, taskmill.Pgx(tx))
-	})
-}
-```
-
-If another attempt took the task over, `CompleteTx` returns
-`taskmill.ErrLeaseLost`. The transaction then rolls back, so the update is
-undone.
-
-For an idempotency key, use your service's name, the taskmill schema, and
-the task ID, like `shop/taskmill/42`. The task ID alone is not enough: two
-schemas can have the same task ID. [Do work once](../recipes/do-work-once.md)
-shows both ways in full.
+**For an idempotency key,** use your service's name, the taskmill schema,
+and the task ID, like `shop/taskmill/42`. The task ID alone is not enough:
+two schemas can have the same task ID. Within one schema, an ID is never
+used twice, unless you restore the database from a backup: then new tasks
+can get IDs that older tasks used ([Database](../production/database.md)).
+[Do work once](../recipes/do-work-once.md) shows both ways in full.
 
 ## Follow the handler rules
 
@@ -107,4 +95,4 @@ taskmill's promises hold only if your handlers follow these rules:
 - [Design: task lifecycle](../design/task-lifecycle.md): how taskmill keeps each promise
 - [`Task.CompleteTx`](https://pkg.go.dev/github.com/code19m/taskmill#Task.CompleteTx) on pkg.go.dev
 
-**Next:** [Define tasks](../guides/define-tasks.md)
+**Next:** [Glossary](glossary.md)

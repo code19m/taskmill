@@ -23,6 +23,9 @@ return worker.Run(ctx) // on SIGTERM, it stops cleanly, then returns
   [maintainer](../concepts/glossary.md#maintainer): the one worker per
   schema that does shared work, such as retries, delayed tasks, and
   schedules.
+- `WorkerConfig` has more fields, such as `LeaseDuration`, `PollInterval`,
+  and `ListenConfig`. [Configuration](../reference/configuration.md) lists
+  them all.
 
 > [!TIP]
 > In production, run workers as their own deployment, from the same image
@@ -64,25 +67,27 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
   queue of a kind it handles, `Run` logs a warning.
 - A batch counts as one task toward `Concurrency`.
 - Size the pool for the sum of all `Concurrency` values, plus 5: see
-  [Setup](setup.md#size-the-pool).
+  [Set up the database and client](setup.md#size-the-pool).
 
 > [!WARNING]
 > A worker takes every task from its queues, whatever its kind. If it has
-> no handler for the kind, it snoozes the task for a minute at a time.
-> After an hour, the task becomes dead with the code `unknown_kind`. So
-> every worker that reads a queue needs the handlers for all kinds in it.
+> no handler for the kind, it [snoozes](../concepts/glossary.md#snooze) the
+> task for a minute at a time. After an hour, the task becomes dead with the
+> code `unknown_kind`. So every worker that reads a queue needs the handlers
+> for all kinds in it.
 
 ## How many queues do I need?
 
 Start with one queue: `default`. Many kinds can share it. A queue's
-concurrency, limit, pause, lag alert, and autoscaling apply to all its
-tasks. So add a queue only for work that needs its own, such as each
-partner API with a rate limit, or slow bulk work.
+concurrency, limit, pause, [lag](../concepts/glossary.md#lag) alert, and
+autoscaling apply to all its tasks. So add a queue only for work that needs
+its own settings, such as each partner API with a rate limit, or slow bulk
+work.
 
 Is some work only more urgent? Give it a higher `Priority` in the same
 queue. But a priority only changes which waiting task starts next: slow
-tasks can still fill every place. For work that must never wait, use a
-queue of its own.
+tasks can still fill every [slot](../concepts/glossary.md#slot). For work
+that must never wait, use a queue of its own.
 
 ## Limit how many tasks run
 
@@ -97,7 +102,8 @@ err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) {
 
 - The limit is saved in the database, so setting it again at every start is
   fine. Zero removes the limit.
-- Workers apply a change right away when notifications reach them, and
+- Workers apply a change right away when
+  [notifications](../concepts/glossary.md#notification) reach them, and
   within 10 seconds otherwise.
 - Your function may run more than once, so only set fields in it.
 - `MaxRunning` counts tasks, not batches, so it also limits how full a
@@ -117,10 +123,12 @@ if err := client.PauseQueue(ctx, "emails"); err != nil { // workers stop taking 
 return client.ResumeQueue(ctx, "emails")
 ```
 
-Running tasks finish normally. Waiting tasks stay, and you can still enqueue
-new ones. Workers apply a pause as fast as a limit. While the queue is
-paused, its lag grows, so lag alerts fire. The dashboard can pause and
-resume queues, too.
+- Running tasks finish normally. Waiting tasks stay, and you can still
+  enqueue new ones.
+- Workers apply a pause as fast as a limit: right away, or within 10
+  seconds.
+- While the queue is paused, its lag grows, so lag alerts fire.
+- The [dashboard](dashboard.md) can pause and resume queues, too.
 
 ## Stop a worker cleanly
 
@@ -163,26 +171,31 @@ sequenceDiagram
 ## Run one task now
 
 `worker.RunTask(ctx, id)` runs one task right away, in your goroutine, and
-returns the task when it is done. It ignores the task's run time, paused
-queues, and limits, but it keeps FIFO order. `Run` doesn't need to be
-running. Use it in [tests](testing.md) and in admin tools.
+returns the task when it is done. It ignores the task's
+[run time](../concepts/glossary.md#run-time), paused queues, and limits, but
+it keeps FIFO order. `Run` doesn't need to be running. Use it in
+[tests](testing.md) and in admin tools.
 
 ## Which worker does the shared work?
 
-Every worker takes part in choosing the maintainer, unless it sets
-`NoMaintainer`. If the maintainer stops, another worker takes over at once,
-while the first finishes its tasks. If it crashes, another takes over within
-about 12 seconds.
-`client.Workers` and the dashboard show which worker is the maintainer.
+taskmill chooses one worker per schema as the maintainer, and replaces it
+when it stops or crashes: see
+[How it works](../concepts/how-it-works.md#the-maintainer). `client.Workers`
+and the dashboard show which worker it is.
 
+Every worker can become the maintainer, unless it sets `NoMaintainer`.
 Leave `NoMaintainer` off, except in these cases:
 
-- A worker that doesn't define your `Schedules`. The maintainer runs only
-  the schedules it defines, so your schedules would stop while it leads.
-- Workers that scale down to zero. Keep one worker always on, with every
-  schedule and no handlers, and set `NoMaintainer` on the others.
+- **A worker that doesn't define your `Schedules`.** The maintainer runs
+  only the schedules it defines, so your schedules would stop while this
+  worker is the maintainer.
+- **Workers that scale down to zero.** Keep a worker always on, with every
+  schedule and no handlers, and set `NoMaintainer` on the workers that
+  scale: see [Autoscaling](../production/autoscaling.md).
 
-Without any maintainer, retries, delayed tasks, and schedules stop.
+> [!WARNING]
+> Without any maintainer, retries, delayed tasks, and schedules stop, and
+> the tasks of crashed workers don't run again.
 
 ## See also
 
@@ -190,4 +203,4 @@ Without any maintainer, retries, delayed tasks, and schedules stop.
 - [Call a rate-limited API](../recipes/call-a-rate-limited-api.md): a queue with `MaxRunning`
 - [`WorkerConfig`](https://pkg.go.dev/github.com/code19m/taskmill#WorkerConfig) and [`Client.UpdateQueue`](https://pkg.go.dev/github.com/code19m/taskmill#Client.UpdateQueue) on pkg.go.dev
 
-**Next:** [Test your code](testing.md)
+**Next:** [Task order and FIFO groups](ordering.md)

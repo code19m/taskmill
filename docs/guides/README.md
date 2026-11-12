@@ -1,8 +1,8 @@
 # Guides
 
 The guides show how to build with taskmill, one feature per page. New to
-taskmill? Follow the [learning path](../README.md#learning-path) first: it
-takes you through the main guides in order.
+taskmill? Do the [tutorial](../tutorial/README.md) first: it builds one app
+in small steps. Then come back here when you need a feature.
 
 ## Which guide do I need?
 
@@ -17,6 +17,7 @@ The guides are in reading order.
 | Write the code that does the work | [Handle tasks](handle-tasks.md) |
 | Know how often a failing task is retried, and what a dead task is | [Retries and errors](retries-and-errors.md) |
 | Do work that is cheaper in bulk, such as a bulk insert | [Handle tasks in batches](batch-handlers.md) |
+| Run your own code around every task: metrics, a log line, a tenant | [Add middleware](middleware.md) |
 | Run workers, limit how many tasks run, or pause a queue | [Workers and queues](workers-and-queues.md) |
 | Run one account's tasks one at a time, in order | [Task order and FIFO groups](ordering.md) |
 | Never enqueue the same task twice | [Avoid duplicate tasks](deduplication.md) |
