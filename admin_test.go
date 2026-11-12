@@ -1256,11 +1256,14 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 		got = append(got, recv(t, calls, "an attempt"))
 	}
 	id := int64(e.count(t, "SELECT id FROM {s}.tasks"))
-	// The worker of the third attempt is lost: the maintainer rescues the
-	// task. A lease that the worker renews meanwhile is expired again.
+	// The worker of the third call is lost: the maintainer rescues the task,
+	// and records why. The rescue stays on record, while the state that it
+	// leaves lasts only until the next attempt. A lease that the worker
+	// renews meanwhile is expired again, but only the third call's, which
+	// is the task's second attempt.
 	waitFor(t, "the rescue", func() bool {
-		e.exec(t, "UPDATE {s}.tasks SET lease_expires_at = now() - interval '1 second' WHERE state = 'running'")
-		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE state = 'retryable'") == 1
+		e.exec(t, "UPDATE {s}.tasks SET lease_expires_at = now() - interval '1 second' WHERE state = 'running' AND attempt = 2")
+		return slices.ContainsFunc(e.get(t, id).Errors, func(a taskmill.AttemptError) bool { return a.Code == taskmill.CodeLeaseLost })
 	})
 	close(leaseLost)
 	got = append(got, recv(t, calls, "the attempt after the rescue"))
