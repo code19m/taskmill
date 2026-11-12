@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -574,7 +575,7 @@ func TestTxMethodsWithDatabaseSQL(t *testing.T) {
 	inTx(func(tx *sql.Tx) error { return e.client.CancelTx(ctx, taskmill.SQL(tx), next) })
 	e.wantState(t, head, taskmill.StateAvailable)
 
-	// A pending task's group is locked before the task, under a savepoint.
+	// A pending task's group is locked before the task.
 	last := e.enqueue(t, sendEmail{To: "3"}, group)
 	inTx(func(tx *sql.Tx) error { return e.client.CancelTx(ctx, taskmill.SQL(tx), last) })
 	e.wantState(t, last, taskmill.StateCanceled)
@@ -608,58 +609,59 @@ func TestTxMethodsAcceptWrappedSQLTransactions(t *testing.T) {
 	e.wantState(t, id, taskmill.StateCanceled)
 }
 
-// A transaction cancels a task of a FIFO group under a savepoint of its own,
-// and rolls back to it. That frees the rows of the task and of its group, so
-// whoever waits for them must go on then, not when the transaction ends: the
-// transaction may need those rows again, and would wait for the waiter.
-func TestCancelTxRolledBackToASavepointLetsWaitersGoOn(t *testing.T) {
+// spyTx is a transaction that notes the statements that run on it.
+type spyTx struct {
+	pgx.Tx
+	statements *[]string
+}
+
+func (s spyTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	*s.statements = append(*s.statements, sql)
+	return s.Tx.Exec(ctx, sql, args...)
+}
+
+func (s spyTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) { //nolint:ireturn // pgx's rows type is an interface
+	*s.statements = append(*s.statements, sql)
+	return s.Tx.Query(ctx, sql, args...)
+}
+
+func (s spyTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row { //nolint:ireturn // pgx's row type is an interface
+	*s.statements = append(*s.statements, sql)
+	return s.Tx.QueryRow(ctx, sql, args...)
+}
+
+// CancelTx runs in the caller's transaction, where it must set no savepoint.
+// Each savepoint that writes is a subtransaction, and a transaction with many
+// of them slows every session of the database down while it stays open.
+func TestCancelTxSetsNoSavepoint(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
 	group := &taskmill.EnqueueOptions{GroupKey: "g"}
-	e.enqueue(t, sendEmail{To: "head"}, group)
-	id := e.enqueue(t, sendEmail{To: "next"}, &taskmill.EnqueueOptions{GroupKey: "g", DedupeKey: "k"})
+	head := e.enqueue(t, sendEmail{To: "head"}, group)
+	next := e.enqueue(t, sendEmail{To: "next"}, group)
 
-	// The cancel has locked the rows of the group and of the task, and
-	// stops at the task's dedupe key.
-	keyTx := e.begin(t)
-	e.txExec(t, keyTx, "SELECT FROM {s}.dedupe_keys FOR UPDATE")
+	// A pending task and a head take their locks in different orders.
+	var statements []string
 	tx := e.begin(t)
-	savepoint, err := tx.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
+	for _, id := range []int64{next, head} {
+		if err := e.client.CancelTx(ctx, taskmill.Pgx(spyTx{Tx: tx, statements: &statements}), id); err != nil {
+			t.Fatal(err)
+		}
 	}
-	canceled := make(chan error, 1)
-	go func() { canceled <- e.client.CancelTx(ctx, taskmill.Pgx(savepoint), id) }()
-	e.waitBlocked(t, "DELETE FROM {s}.dedupe_keys")
-	// An enqueue into the group starts to wait for the group's row.
-	enqueued := make(chan error, 1)
-	go func() {
-		_, err := e.client.Enqueue(ctx, sendEmail{To: "last"}, group)
-		enqueued <- err
-	}()
-	e.waitBlockedCount(t, 2)
-	if err := keyTx.Commit(ctx); err != nil {
-		t.Fatal(err)
+	if len(statements) == 0 {
+		t.Fatal("CancelTx ran no statement on the caller's transaction")
 	}
-	if err := recv(t, canceled, "the cancel"); err != nil {
-		t.Fatal(err)
-	}
-	if err := savepoint.Rollback(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := recv(t, enqueued, "the enqueue, once the savepoint is rolled back"); err != nil {
-		t.Fatal(err)
-	}
-
-	// The transaction goes on, and cancels the task after all.
-	if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), id); err != nil {
-		t.Fatal(err)
+	for _, statement := range statements {
+		if strings.Contains(strings.ToUpper(statement), "SAVEPOINT") {
+			t.Errorf("CancelTx ran %q in the caller's transaction", statement)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
-	e.wantState(t, id, taskmill.StateCanceled)
+	e.wantState(t, head, taskmill.StateCanceled)
+	e.wantState(t, next, taskmill.StateCanceled)
 }
 
 func TestCancelWhileTheWorkerRecordsAResult(t *testing.T) {

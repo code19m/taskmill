@@ -236,17 +236,17 @@ All notable changes to taskmill are recorded here. The format follows
   pass. Now each time that the clock skips runs once, as long after the jump
   as the time is into the skipped hour, and each time that the clock shows
   twice runs the first time only.
-- `Cancel`, `CancelTx`, and `Delete` could fail with PostgreSQL's
-  `deadlock detected` (SQLSTATE 40P01) after a second, and a bulk action
-  with a lock timeout, when another `Cancel`, a `Retry`, a worker, or the
-  commit of the task's enqueue changed the same task of a FIFO group at the
-  same moment. They decided which row to lock first, the task's or its
-  group's, from a state that could change before they held the lock. Now
-  they check the state again under the lock, and lock in the other order if
-  it changed. For a task of a FIFO group, and for one whose enqueue they do
-  not see yet, they use a savepoint for this, named `taskmill_take_task`.
-  `CancelTx` sets it in your transaction and leaves it there until the
-  transaction ends, or until you roll back to a savepoint of your own.
+- `Cancel` and `Delete` could fail with PostgreSQL's `deadlock detected`
+  (SQLSTATE 40P01) after a second, and a bulk action with a lock timeout,
+  when another `Cancel`, a `Retry`, a worker, or the commit of the task's
+  enqueue changed the same task of a FIFO group at the same moment. They
+  decided which row to lock first, the task's or its group's, from a state
+  that could change before they held the lock. Now they check the state
+  again under the lock. If it changed, they roll their transaction back and
+  start again, which locks in the other order. `CancelTx` cannot do that in
+  your transaction, so it works as before: when it meets a `Retry` of the
+  same task, it may still end with that error, and you may run your
+  transaction again.
 - When two producers enqueued the same dedupe key just after its window
   ended, one created the task, as it should, but the other's
   `EnqueueResult.ID` named the old task that held the key before. Now it

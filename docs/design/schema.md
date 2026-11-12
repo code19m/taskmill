@@ -401,10 +401,11 @@ statement timeout.
     too, but cost a transaction per group when every group is new, as after
     canceling a whole queue. The promotion of a group's next task waits for
     that task's row, under the same lock timeout. The batch holds the
-    group's row, so only a `Cancel` or a `Delete` that is about to release
-    the task's row can hold it (see [Lock order](#fifo-groups)): the wait is
-    short. If it does time out, the batch rolls back, and the action stops
-    with a cursor to go on.
+    group's row, so only two callers can hold the task's row (see
+    [Lock order](#fifo-groups)): a `Cancel` or a `Delete` that is about to
+    start again, which makes the wait short, and a `CancelTx` that met a
+    `Retry` of the task. If the wait times out, the batch rolls back, and
+    the action stops with a cursor to go on.
   - **Exact counts, and going on.** A batch whose statements ran commits
     even if the caller's context ends meanwhile, so the number of changed
     tasks is exact. An action that stops early returns a cursor to go on: at
@@ -504,22 +505,24 @@ is not pending.
 `Cancel` and `Delete` cannot know which order applies before they hold a
 lock: a `Retry`, a promotion, or the task's own enqueue may commit between
 the read of the task's state and the lock. So they check again under the
-lock. With the group's
-row, which every change into and out of `pending` takes, they lock the task
-only if it is still pending. With the task's row alone, they read the state
-that the lock protects. If the task changed sides, they release what they
-hold, by rolling back to a savepoint, and lock again in the other order.
-After five tries they go on with the locks they hold, and PostgreSQL's
-deadlock detection is the last resort. A task that they see needs no
-savepoint if it has no group, or is completed. A task that they do not see
-does: its enqueue may commit before their next statement.
+lock. With the group's row, which every change into and out of `pending`
+takes, they lock the task only if it is still pending. With the task's row
+alone, they read the state that the lock protects. If the task changed
+sides, they roll their transaction back, which releases what they hold, and
+start again: the new read locks in the other order. After five tries they
+go on with the locks they hold, and PostgreSQL's deadlock detection is the
+last resort.
 
-The savepoint is never released: it stays until the transaction ends. Once
-a savepoint is released, PostgreSQL makes whoever waits for a row that it
-locked wait for the whole transaction. A caller of `CancelTx` may roll back
-to a savepoint of its own, which frees the rows, and go on. The waiters
-would then wait for nothing, and the caller's transaction would wait for
-them, in a deadlock, when it comes for the same row again.
+`CancelTx` cannot do this. It runs in the caller's transaction, which it
+may not roll back, and a savepoint there costs more than it saves. Each
+savepoint that writes is a subtransaction, and past 64 of them in one
+transaction, every session's visibility checks slow down until that
+transaction ends. A released savepoint also makes whoever waits for a row
+that it locked wait for the caller's whole transaction. So `CancelTx` goes
+on with the locks as it took them, which may be the wrong order. When it
+meets a `Retry` of the same task, PostgreSQL may then end one of the
+transactions involved with a deadlock error, and the caller may run its
+transaction again.
 
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the
