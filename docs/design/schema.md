@@ -403,9 +403,9 @@ statement timeout.
     that task's row, under the same lock timeout. The batch holds the
     group's row, so only two callers can hold the task's row (see
     [Lock order](#fifo-groups)): a `Cancel` or a `Delete` that is about to
-    start again, which makes the wait short, and a `CancelTx` that met a
-    `Retry` of the task. If the wait times out, the batch rolls back, and
-    the action stops with a cursor to go on.
+    start again, which makes the wait short, and a `CancelTx` that locked
+    the task after another transaction made it pending. If the wait times
+    out, the batch rolls back, and the action stops with a cursor to go on.
   - **Exact counts, and going on.** A batch whose statements ran commits
     even if the caller's context ends meanwhile, so the number of changed
     tasks is exact. An action that stops early returns a cursor to go on: at
@@ -519,10 +519,15 @@ savepoint that writes is a subtransaction, and past 64 of them in one
 transaction, every session's visibility checks slow down until that
 transaction ends. A released savepoint also makes whoever waits for a row
 that it locked wait for the caller's whole transaction. So `CancelTx` goes
-on with the locks as it took them, which may be the wrong order. When it
-meets a `Retry` of the same task, PostgreSQL may then end one of the
-transactions involved with a deadlock error, and the caller may run its
-transaction again.
+on with the locks as it took them, which may be the wrong order. Then it
+can deadlock with another transaction that changes the same task or its
+group at the same moment: a retry of the task, the end of the group's head,
+which promotes the task while a cancel or a delete of it comes in, or an
+enqueue that commits between the two statements of `CancelTx`. PostgreSQL
+ends one of the transactions with a deadlock error (SQLSTATE 40P01), which
+may hit the other one. `Cancel`, `Delete`, and `Retry` run again when it
+hits them, within their five tries. Any other transaction that got the
+error can be run again by its caller.
 
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the

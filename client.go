@@ -145,12 +145,13 @@ func (c *Client) Cancel(ctx context.Context, id int64) error {
 // CancelTx is [Client.Cancel] in the caller's transaction.
 //
 // Unlike Cancel, it cannot take its locks again in another order: that
-// would take a rollback, and the transaction is the caller's. So when it
-// meets a [Client.Retry] of the same task of a FIFO group at the same moment,
-// PostgreSQL may end one of the two transactions with a deadlock error
-// (SQLSTATE 40P01) after a second, or a third one that waits for the same
-// group, such as an enqueue into it. A caller that gets this error may run
-// its transaction again.
+// would take a rollback, and the transaction is the caller's. So when
+// another transaction changes the same task or its FIFO group at the same
+// moment, the two may wait for each other: a retry of the task, the end of
+// the group's head, which makes the task the next head, or the commit of the
+// task's enqueue. PostgreSQL then ends one of them after a second with a
+// deadlock error (SQLSTATE 40P01), which may hit the other transaction. The
+// transaction that got the error can be run again.
 func (c *Client) CancelTx(ctx context.Context, tx Executor, id int64) error {
 	q, err := txQuerier(tx)
 	if err != nil {

@@ -244,9 +244,10 @@ All notable changes to taskmill are recorded here. The format follows
   that could change before they held the lock. Now they check the state
   again under the lock. If it changed, they roll their transaction back and
   start again, which locks in the other order. `CancelTx` cannot do that in
-  your transaction, so it works as before: when it meets a `Retry` of the
-  same task, it may still end with that error, and you may run your
-  transaction again.
+  your transaction, so it works as before. When another transaction changes
+  the same task or its FIFO group at the same moment, PostgreSQL may still
+  end one of the two with that error, which may hit the other transaction.
+  The transaction that got it can be run again.
 - `Cancel`, `Delete`, and `Retry` run again, up to 5 times in all, when
   PostgreSQL ends their transaction with `deadlock detected` (SQLSTATE
   40P01). PostgreSQL ends any one of the transactions that wait for each
