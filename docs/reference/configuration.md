@@ -39,10 +39,10 @@ For `Migrate`. It may be nil. [Godoc](https://pkg.go.dev/github.com/code19m/task
 
 ### `EnqueueOptions`
 
-For the enqueue calls and for `Schedule.Options`. It may be nil. A field
-set in the call is used first, then the kind's `EnqueueDefaults`, then the
-default below. `Metadata` merges key by key instead.
-[Godoc](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions)
+For the enqueue calls and for `Schedule.Options`. It may be nil. [Godoc](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions)
+
+A field set in the call is used first, then the kind's `EnqueueDefaults`,
+then the default below. `Metadata` merges key by key instead.
 
 | Field | Type | Default | Limits | What it does |
 |---|---|---|---|---|

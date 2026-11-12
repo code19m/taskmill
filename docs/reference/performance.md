@@ -77,15 +77,16 @@ Every fault test passed. Each one fails on a single lost or repeated task:
 
 - **No server run yet.** The targets are set for an 8-CPU database server.
   These numbers come from a shared laptop.
-- **The laptop run does not reach four targets.** Three need a run on
-  server hardware: enqueueing one task per transaction, end-to-end
-  throughput, and throughput while 100,000 FIFO groups wait in another queue
-  (73% to 90% of normal, against a target of 90%).
-- **The fourth is a real cost: many small workers on one queue.** With 50
-  worker processes that each read the same 100 queues, at 1,000 tasks a
-  second, the maintainer's work took 1.2 to 2.1 seconds a round, against a
-  target of 1. Each new task wakes every worker of its queue, and all but
-  one find nothing.
+- **The laptop run does not reach four targets.** Three of them need a run
+  on server hardware. They are enqueueing one task per transaction,
+  end-to-end throughput, and throughput while 100,000 FIFO groups wait in
+  another queue. The last one reached 73% to 90% of normal, against a
+  target of 90%.
+- **The fourth is a real cost: many small workers on one queue.** The test
+  ran 50 worker processes that each read the same 100 queues, at 1,000
+  tasks a second. The maintainer's work then took 1.2 to 2.1 seconds a
+  round, against a target of 1. Each new task wakes every worker of its
+  queue, and all but one find nothing.
 
 ## What this means for you
 
