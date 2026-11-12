@@ -1025,6 +1025,141 @@ func TestRunScheduleNow(t *testing.T) {
 	}
 }
 
+// scheduleDueAt stores at as the time the env's schedule is due next.
+// RunSchedule stores the time of the request there, so this also stands for
+// a request made at that time.
+func (e *env) scheduleDueAt(t *testing.T, at time.Time) {
+	t.Helper()
+	e.exec(t, "UPDATE {s}.schedules SET next_run_at = $1", at)
+}
+
+// runTimes returns the run times of the env's tasks, oldest task first.
+func (e *env) runTimes(t *testing.T) []time.Time {
+	t.Helper()
+	page, err := e.client.List(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var at []time.Time
+	for _, task := range slices.Backward(page.Tasks) {
+		at = append(at, task.RunAt)
+	}
+	return at
+}
+
+// sameTimes reports whether got holds the times in want, in order.
+func sameTimes(got []time.Time, want ...time.Time) bool {
+	return slices.EqualFunc(got, want, time.Time.Equal)
+}
+
+// newDailySchedule stores a schedule that runs every day at the database's
+// current minute. It returns a worker that defines the schedule, and that
+// minute of today: the time of a regular run, which has passed. No other
+// regular run comes due while the test runs.
+func newDailySchedule(t *testing.T, e *env) (*taskmill.Worker, time.Time) {
+	t.Helper()
+	var slot time.Time
+	if err := e.pool.QueryRow(t.Context(), "SELECT date_trunc('minute', now())").Scan(&slot); err != nil {
+		t.Fatal(err)
+	}
+	slot = slot.UTC()
+	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+		{Name: "digest", Cron: fmt.Sprintf("%d %d * * *", slot.Minute(), slot.Hour()), Args: sendEmail{To: "digest"}},
+	}})
+	taskmill.RunSchedules(t.Context(), w)
+	return w, slot
+}
+
+func TestRunScheduleJustAfterARegularRunAddsARun(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w, slot := newDailySchedule(t, e)
+	ctx := t.Context()
+
+	// The maintainer enqueues today's regular run.
+	e.scheduleDueAt(t, slot)
+	taskmill.RunSchedules(ctx, w)
+	// An operator asks for a run in the same second.
+	request := slot.Add(time.Microsecond)
+	e.scheduleDueAt(t, request)
+	taskmill.RunSchedules(ctx, w)
+	if got := e.runTimes(t); !sameTimes(got, slot, request) {
+		t.Fatalf("got runs at %s, want the regular run at %s and the requested run at %s", got, slot, request)
+	}
+}
+
+func TestRunScheduleJustBeforeARegularRunKeepsThatRun(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w, slot := newDailySchedule(t, e)
+	ctx := t.Context()
+
+	// An operator asked for a run a moment before today's regular run, and
+	// the maintainer passes by a moment after it.
+	request := slot.Add(-300 * time.Millisecond)
+	e.scheduleDueAt(t, request)
+	taskmill.RunSchedules(ctx, w)
+	taskmill.RunSchedules(ctx, w)
+	if got := e.runTimes(t); !sameTimes(got, request, slot) {
+		t.Fatalf("got runs at %s, want the requested run at %s and the regular run at %s", got, request, slot)
+	}
+	// The timetable goes on from there: the next regular run is tomorrow's.
+	ss, err := e.client.Schedules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := slot.AddDate(0, 0, 1); !ss[0].NextRunAt.Equal(want) {
+		t.Fatalf("the next run is at %s, want %s", ss[0].NextRunAt, want)
+	}
+}
+
+func TestScheduleCollapsesTheRegularRunsItMissed(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+		{Name: "digest", Cron: "* * * * *", Args: sendEmail{To: "digest"}},
+	}})
+	ctx := t.Context()
+	taskmill.RunSchedules(ctx, w)
+
+	// No maintainer ran for an hour, so 60 regular runs were missed.
+	var missed time.Time
+	if err := e.pool.QueryRow(ctx, "SELECT date_trunc('minute', now()) - interval '1 hour'").Scan(&missed); err != nil {
+		t.Fatal(err)
+	}
+	e.scheduleDueAt(t, missed)
+	taskmill.RunSchedules(ctx, w)
+	if got := e.runTimes(t); !sameTimes(got, missed) {
+		t.Fatalf("got runs at %s, want one run at %s, the first that was missed", got, missed)
+	}
+	ss, err := e.client.Schedules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next := ss[0].NextRunAt; !next.After(missed.Add(time.Hour)) {
+		t.Fatalf("the next run is at %s, among the missed runs: it will run them one by one", next)
+	}
+}
+
+func TestRunScheduleWhileARegularRunIsDueKeepsThatRun(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w, slot := newDailySchedule(t, e)
+	ctx := t.Context()
+
+	// Today's regular run is due, and the maintainer has not passed by yet.
+	// The request must not take its place: that run is the run.
+	e.scheduleDueAt(t, slot)
+	if err := e.client.RunSchedule(ctx, "digest"); err != nil {
+		t.Fatal(err)
+	}
+	taskmill.RunSchedules(ctx, w)
+	taskmill.RunSchedules(ctx, w)
+	if got := e.runTimes(t); !sameTimes(got, slot) {
+		t.Fatalf("got runs at %s, want the regular run at %s", got, slot)
+	}
+}
+
 func TestRemovedSchedulesArePruned(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

@@ -192,6 +192,14 @@ All notable changes to taskmill are recorded here. The format follows
   pass, stored it again every second, and skipped its run. Now it compares
   numbers by their exact value, as PostgreSQL does, so it stores such a
   schedule once. And a schedule that did change still runs when it is due.
+- `RunSchedule` close to a regular run of the schedule lost one of the two
+  runs. A request in the second after a regular run was dropped as its
+  duplicate, although `RunSchedule` returned nil. A request in the second
+  before a regular run, or while that run waited for the maintainer, took
+  its place: one task ran, with the request's time as its `RunAt`. Now the
+  requested run and the regular run both happen. A request made while a run
+  of the schedule is already due adds no run: that run starts within about
+  a second anyway.
 
 ### Security
 

@@ -1353,16 +1353,21 @@ FROM minutes
 GROUP BY at
 ORDER BY at`),
 
-		// runSchedule makes schedule $1 due now, unless it is paused, and
-		// reports whether it exists and is paused. The maintainer then runs
-		// it as it runs any due schedule, and computes the next regular run
-		// from the expression as usual.
+		// runSchedule makes schedule $1 due now, unless it is paused or due
+		// already, and reports whether it exists and is paused. The time of
+		// the request takes the place of the next regular run's time: the
+		// maintainer tells the two apart, runs the request as it runs any due
+		// schedule, and computes the regular run again from the expression. A
+		// run that is due already stays, since its time cannot be computed
+		// again. The statement decides on the row it locked, not on the one it
+		// first read, which the maintainer may be moving on.
 		runSchedule: q(`
 WITH s AS (
-    SELECT name, paused_at IS NOT NULL AS paused FROM {s}.schedules WHERE name = $1 FOR UPDATE
-), due AS (
+    SELECT name, paused_at IS NOT NULL AS paused, next_run_at <= now() AS due
+    FROM {s}.schedules WHERE name = $1 FOR UPDATE
+), requested AS (
     UPDATE {s}.schedules t SET next_run_at = now(), updated_at = now()
-    FROM s WHERE t.name = s.name AND NOT s.paused
+    FROM s WHERE t.name = s.name AND NOT s.paused AND NOT s.due
 )
 SELECT paused FROM s`),
 

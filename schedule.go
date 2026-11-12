@@ -233,10 +233,29 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 		return nil
 	}
 
+	// A regular run is due at a whole minute of the timetable. Any other
+	// time is the time of a request, which Client.RunSchedule stored.
 	due := st.nextRunAt
-	next, err := s.expr.Next(now.In(s.Location))
+	requested := due.In(s.Location).Second() != 0 || due.Nanosecond() != 0
+	// The regular runs missed since a regular run collapse into it, so the
+	// next one comes after now. A requested run stands for no regular run,
+	// so the next one comes after the request: if it is due already, the
+	// next pass enqueues it. One case is left: in the hour after clocks
+	// went forward, Next does not find a run that the jump moved to later
+	// in that hour, so a request made before such a run takes its place.
+	after := now
+	if requested {
+		after = due
+	}
+	next, err := s.expr.Next(after.In(s.Location))
 	if err != nil {
 		return err
+	}
+	// The key is the due time, in the unit that tells the two kinds of run
+	// apart: a request may come in the second of a regular run.
+	key := due.Unix()
+	if requested {
+		key = due.UnixMicro()
 	}
 	return pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
 		// An enqueue into a FIFO group waits for the group's row. The election
@@ -250,7 +269,7 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 			return err // another maintainer ran it, or it was paused meanwhile
 		}
 		opts := s.opts
-		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(due.Unix(), 10)
+		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(key, 10)
 		opts.DedupeWindow = max(24*time.Hour, 2*next.Sub(due))
 		opts.RunAt = due // in the past: the task is available at once
 		_, err = m.c.enqueue(ctx, pgxQuerier{q: tx}, []EnqueueParams{{Args: s.Args, Options: &opts}})
@@ -355,8 +374,11 @@ func (c *Client) ResumeSchedule(ctx context.Context, name string) error {
 // RunSchedule runs a schedule once now, in addition to its timetable. The
 // maintainer enqueues the run within about a second, if it defines the
 // schedule, with the schedule's options, and the task's RunAt is the time of
-// the request. The next regular run stays as it was. It returns [ErrNotFound]
-// for an unknown schedule, and [ErrInvalidState] for a paused one.
+// the request. The regular runs stay as they were. A request adds no run
+// while a run of the schedule is due and waits for the maintainer, whether a
+// regular run or an earlier request: that run is the one that runs now. It
+// returns [ErrNotFound] for an unknown schedule, and [ErrInvalidState] for a
+// paused one.
 func (c *Client) RunSchedule(ctx context.Context, name string) error {
 	if err := checkName("schedule name", name, maxNameLength); err != nil {
 		return err
