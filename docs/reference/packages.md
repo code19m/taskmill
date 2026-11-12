@@ -23,7 +23,7 @@ Its only direct dependency is pgx, the PostgreSQL driver
 
 ## The `otel` module
 
-`otel` is a Go module of its own, so that applications without OpenTelemetry
+`otel` is a Go module of its own, so that apps without OpenTelemetry
 download none of it:
 
 ```sh
@@ -44,7 +44,7 @@ why.
 ## See also
 
 - [Metrics and traces](metrics.md): what the `otel` module reports
-- [Dashboard](../guides/dashboard.md): `ui` or `taskmill-ui`, and when to use which
-- [Testing](../guides/testing.md): how to use `taskmilltest`
+- [The dashboard](../guides/dashboard.md): `ui` or `taskmill-ui`, and when to use which
+- [Test your code](../guides/testing.md): how to use `taskmilltest`
 
 **Next:** [Performance](performance.md)

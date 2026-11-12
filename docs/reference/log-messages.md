@@ -15,8 +15,8 @@ taskmill logs through `log/slog`. Without a logger, it logs nothing.
 | The `taskmill-ui` command | Text lines on standard error, at Info and above. JSON lines with `TASKMILL_UI_LOG_FORMAT=json` | — |
 
 > [!TIP]
-> Pass your application's logger to all three configs, and run at Info. Send
-> Error lines to a person. Watch Warn lines that repeat.
+> Pass your app's logger to all three configs, and run at Info. Send Error
+> lines to a person. Watch Warn lines that repeat.
 
 ## Levels
 
@@ -25,8 +25,8 @@ Each message has one level, chosen by what it asks of you.
 | Level | Meaning | What you do |
 |---|---|---|
 | Error | Something needs a person: a task is dead, an operation has failed for a minute, or a privilege is missing. | Act on each one. |
-| Warn | Something failed or looks wrong, but taskmill goes on and recovers by itself. | Act if it repeats or lasts. |
-| Info | Lifecycle: a worker starts or stops, the maintainer changes, a migration runs, an operation recovers, someone acts in the dashboard. | Nothing. |
+| Warn | Something failed or looks wrong, but taskmill continues and recovers by itself. | Act if it repeats or lasts. |
+| Info | Lifecycle: a worker starts or stops, the [maintainer](../concepts/glossary.md#maintainer) changes, a migration runs, an operation recovers, someone acts in the dashboard. | Nothing. Keep these lines if you need a record of what was done in the dashboard. |
 | Debug | Routine events of single tasks, such as a retry. | Turn it on to follow one kind's retries. |
 
 ## Attributes
@@ -53,14 +53,14 @@ No line shows a task's payload or metadata. A connection error shows what pgx
 reports, such as the host, user, and database, but never the password.
 
 **Keep secrets out of your errors.** A handler's error is logged as the
-handler returned it, so a token or a card number in an error ends up in your
+handler returned it, so a token or a card number in an error appears in your
 logs.
 
 ## Operations that repeat
 
 A worker repeats some operations all the time, such as fetching tasks. While
 the database is down, they fail at every try. To keep the log small, each
-operation logs only three lines about one incident:
+operation logs only three kinds of lines about one incident:
 
 ```mermaid
 flowchart LR
@@ -76,8 +76,8 @@ successes between them.
 
 | Operation | What it does | How often | If it keeps failing, check |
 |---|---|---|---|
-| `fetch tasks` | Takes tasks of the queue in `queue` | Every poll, and on each wake-up | The database |
-| `renew leases` | Renews the leases of running tasks | Every third of `LeaseDuration` | The database, and the pool size |
+| `fetch tasks` | Takes tasks of the queue in `queue` | Every poll, and on each [notification](../concepts/glossary.md#notification) | The database |
+| `renew leases` | Renews the [leases](../concepts/glossary.md#lease) of running tasks | Every third of `LeaseDuration` | The database, and the pool size |
 | `record check-in` | Notes in the database that the worker is alive, at its [check-in](../concepts/glossary.md#check-in) | Every third of `LeaseDuration` | The database |
 | `record results` | Saves the results of finished attempts | After each attempt | The database |
 | `load queue settings` | Reads pauses and limits of the queues | Every 10 seconds | The database |
@@ -85,11 +85,11 @@ successes between them.
 | `listen for notifications` | Keeps the connection that receives notifications. Idle queues poll every `PollInterval` meanwhile | On failure, again after 1 to 30 seconds | `ListenConfig`, and any proxy in between |
 | `elect maintainer` | Takes or keeps the maintainer role | Every 1 to 2 seconds | The database |
 | `promote due tasks` | Makes delayed tasks and retries available | As they come due | The database |
-| `wake queues` | Notifies queues whose tasks wait, and sends the heartbeat | Every second | The database |
-| `rescue expired leases` | Fails the attempts of workers that lost their leases | Every second | The database |
+| `wake queues` | Notifies queues whose tasks wait, and sends the [heartbeat](../concepts/glossary.md#heartbeat) | Every second | The database |
+| `rescue expired leases` | Rescues tasks: fails the attempts of workers that lost their leases, so that the tasks retry | Every second | The database |
 | `run schedules` | Enqueues due schedule runs | Every second | The database |
 | `refresh statistics` | Counts tasks for `Client.Queues` | Every 10 seconds | The database |
-| `apply retention` | Prepares history partitions, and deletes old history and rows | Every minute | That the role that runs workers owns the taskmill tables |
+| `apply retention` | Prepares history partitions, and deletes old history and rows | Every minute | That the role that runs workers owns the taskmill tables. If `error` says `detach …: timeout`, a long transaction, such as a backup, uses the history: the maintainer tries again every minute |
 | `delete removed schedules` | Deletes stored schedules that are gone from the code | Every minute | The database |
 
 `elect maintainer` runs on every worker that takes part in the election.
@@ -112,22 +112,22 @@ backticks.
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
-| `worker started` | Info | `Run` started, and serves `queues`. | Nothing. |
+| `worker started` | Info | `Run` started, and reads the queues in `queues`. | Nothing. |
 | `the worker does not serve the default queue of these registered kinds` | Warn | The worker has handlers for `kinds`, but does not read their default queues. Their tasks wait for another worker. | Add the queues to `WorkerConfig.Queues`, or run a worker that reads them. |
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended. It waits up to `timeout` for `tasks` running tasks. | Nothing. |
 | `handler ignored shutdown; releasing its task` | Warn | A handler did not return within 5 seconds after its context was canceled. Its task goes back to the queue and runs again. The handler may still be running. | Make the handler return when its context ends. |
 | `worker stopped` | Info | `Run` returned. `released` tasks went back to their queues. | Nothing. |
 | `unregister worker failed` | Warn | The stopped worker could not remove itself from the list of workers. It stays listed for 5 minutes. | Nothing, unless it repeats: then check the database. |
-| `worker was removed as stale; registering again` | Warn | The worker did not report to the database for 5 minutes, for example while its machine slept, so the maintainer removed it. It registers again and goes on. | Find out what paused the process. |
+| `worker was removed as stale; registering again` | Warn | The worker made no check-in for 5 minutes, for example while its machine slept, so the maintainer removed it. It registers again and continues. | Find out what paused the process. |
 
 ### Tasks and attempts
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
 | `attempt failed; retrying` | Debug | The handler failed. The task runs again in `retry_in`. Also has `attempt`, `error`, and `duration`. | Nothing. |
-| `attempt failed; the task is dead` | Error | The task failed for good: no attempts left, `Permanent`, a payload that did not decode, or no handler for an hour. Also logged when the last attempt's worker lost its lease. | Fix the cause. Then retry the task, or delete it. A dead task halts its FIFO group. |
+| `attempt failed; the task is dead` | Error | The task failed permanently: no attempts left, `Permanent`, a payload that did not decode, or no handler for an hour. Also logged when the last attempt's worker lost its lease. | Fix the cause. Then retry the task, or delete it. A dead task [halts its FIFO group](../concepts/glossary.md#halted-group). |
 | `no handler for task kind; snoozing` | Warn | This worker has no handler for `kind`. The task waits up to an hour for a worker that has one, without using attempts. Later snoozes of the same task log at Debug. | Normal during a rolling deploy. Otherwise, give every worker of the queue the same handlers. |
-| `the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own` | Warn | All `max_conns` connections of the pool were in use, so renewing leases waited `duration` for one. Usually handlers that share the pool hold them. If renewals keep waiting, leases run out and tasks run twice. Logged at most once a minute. | Raise the pool's `MaxConns`, for example with `pool_max_conns` in the URL. Or give handlers a pool of their own. See [Database](../production/database.md#size-the-connection-pool). |
+| `the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own` | Warn | All `max_conns` connections of the pool were in use, so renewing leases waited `duration` for one. Usually handlers that share the pool hold them. If renewals keep waiting, leases run out and tasks run twice. | Raise the pool's `MaxConns`, for example with `pool_max_conns` in the URL. Or give handlers a pool of their own. See [Database](../production/database.md#size-the-connection-pool). |
 | `attempt lost its lease; canceling it` | Warn | The worker could not renew the lease in time. The task may already run on another worker. | Check the database and the pool size. |
 | `result discarded: the attempt lost its lease` | Debug | An attempt ended after it lost its lease. Its result does not count. | Nothing. |
 | `record attempt failed; the task is rescued when its lease expires` | Warn | The result of the attempt could not be saved in time. Once the lease runs out, the maintainer rescues the task. | Check the database. |
@@ -152,8 +152,8 @@ backticks.
 |---|---|---|---|
 | `notifications disabled; polling only` | Error | The worker cannot listen. `ListenConfig` was not created with `pgx.ParseConfig`, or the connection goes through a pooler in transaction mode, such as PgBouncer. The worker polls every `PollInterval` instead: tasks start later, and the database works more. | Point `ListenConfig` at a direct connection, made with `pgx.ParseConfig`. See [Connection poolers](../production/connection-poolers.md). |
 | `maintainer heartbeats arrive; idle queues poll once a minute` | Info | The maintainer's heartbeats reach this worker, at start or after a gap. | Nothing. |
-| `maintainer heartbeats do not arrive; idle queues poll every PollInterval` | Warn | No heartbeat came for 15 seconds. No maintainer runs (every worker has `NoMaintainer`, or the maintainer crashed and its lease has not run out yet), the maintainer runs an older version during an upgrade, or notifications don't reach this worker. The worker logs it again only after the heartbeats came back. | Check that a maintainer runs: `Client.Workers`, or the `taskmill.stats.age` gauge. Point `ListenConfig` at the primary of the same database. |
-| `notification failed` | Warn | A wake-up for `queue` was not sent. Its tasks start a little later, when the maintainer wakes the queue or a worker polls. | Nothing, unless it repeats: then check the database. |
+| `maintainer heartbeats do not arrive; idle queues poll every PollInterval` | Warn | No heartbeat came for 15 seconds, so idle queues poll every `PollInterval`. Either no maintainer runs, or notifications don't reach this worker: [Troubleshooting](../production/troubleshooting.md#the-log-says-maintainer-heartbeats-do-not-arrive) lists the causes. The worker logs it again only after the heartbeats came back. | Check that a maintainer runs: `Client.Workers`, or the `taskmill_stats_age_seconds` gauge. Point `ListenConfig` at the primary of the same database. |
+| `notification failed` | Warn | A notification for `queue` was not sent. Its tasks start a little later, when the maintainer wakes the queue or a worker polls. | Nothing, unless it repeats: then check the database. |
 
 ### History and migrations
 
@@ -167,7 +167,7 @@ backticks.
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
-| `dashboard action` | Info | Someone did `action` on `target` in the dashboard. A bulk action also has `tasks`, how many tasks it changed, and `skipped`, how many other work held. | Nothing. To log who did it, see [One dashboard for many services](../recipes/one-dashboard-for-many-services.md). |
+| `dashboard action` | Info | Someone did `action` on `target` in the dashboard. A bulk action also has `tasks`: how many tasks it changed, and `skipped`: how many it left, because another transaction held them. [Actions in the log](taskmill-ui.md#actions-in-the-log) lists every `action`. | Nothing. To log who did it, see [One dashboard for many services](../recipes/one-dashboard-for-many-services.md). |
 | `dashboard request failed` | Warn | A page or an action at `path` failed, often because the database is out of reach. | Check the database, if it repeats. |
 | `dashboard request timed out` | Warn | The database did not answer within 10 seconds. The page says "Taking too long". | Check the database's load. |
 | `read activity failed` | Warn | The overview's charts could not read their history, and show none. | Check the database, if it repeats. |
@@ -183,12 +183,12 @@ backticks.
 | `the dashboard has no password: set TASKMILL_UI_PASSWORD, unless something in front of it authenticates` | Warn | Anyone who reaches the address can use the dashboard. | Set `TASKMILL_UI_PASSWORD`, unless a proxy in front of it asks for a login. |
 | `taskmill-ui not ready` | Warn | `/readyz` asked the database, which did not answer. `error` says why. Until the database answers, `/readyz` fails, and Kubernetes sends no one to the pod. Only a request to `/readyz`, such as a probe, asks. | Check the database. The pod recovers by itself. |
 | `taskmill-ui ready again` | Info | The database answers `/readyz` again, after `taskmill-ui not ready`. | Nothing. |
-| `taskmill-ui stopped` | Error | The command could not start or serve, and exited. `error` says why: for example, the schema is not migrated yet, or a setting is wrong. | Fix what `error` names. If the schema is not migrated yet, let your application run `Migrate`, then start the command again. |
+| `taskmill-ui stopped` | Error | The command could not start or serve, and exited. `error` says why: for example, the schema is not migrated yet, or a setting is wrong. | Fix what `error` names: [Why it exits at start](taskmill-ui.md#why-it-exits-at-start) lists the causes. |
 
 ## See also
 
 - [Monitoring](../production/monitoring.md): which lines and metrics to alert on
 - [Troubleshooting](../production/troubleshooting.md): from a symptom to its fix
-- [Observability](../guides/observability.md): how to set up logs, traces, and metrics
+- [Logs, traces, and metrics](../guides/observability.md): how to set up logs, traces, and metrics
 
 **Next:** [Metrics and traces](metrics.md)

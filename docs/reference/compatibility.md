@@ -31,7 +31,7 @@ From v1.0.0 on, this is the promise:
   `RetryPolicy`, and `outbox.Publisher`. So do `PgxQuerier` and
   `SQLQuerier`, which your transactions and pools satisfy. New features come
   as new optional interfaces, the way `ArgsWithDefaults` extends `Args`.
-  `Executor` is sealed: only taskmill implements it.
+- **`Executor` is sealed:** only taskmill implements it.
 - **Function types keep their signatures:** `HandlerFunc`, `Middleware`,
   `EnqueueMiddleware`, and `outbox.PublisherFunc`.
 - **Config structs only get new fields whose zero value keeps the old
@@ -68,6 +68,7 @@ From v1.0.0 on, this is the promise:
 |---|---|---|
 | Go | The two newest Go releases, as Go itself supports. The `go` line in `go.mod` names the older one, today 1.26. | Go 1.26 with every supported PostgreSQL, and the newest Go with PostgreSQL 18 |
 | PostgreSQL | Every major version with community support, from 15: today 15, 16, 17, and 18 | All four |
+| Managed PostgreSQL services | Expected to work with a supported PostgreSQL version: taskmill needs no extension and no superuser | Not tested: CI runs community PostgreSQL only |
 
 When a new Go comes out, the next minor release of taskmill needs the Go
 before it. A PostgreSQL version is dropped in the first minor release after
@@ -89,7 +90,7 @@ To report a vulnerability, see [SECURITY.md](../../SECURITY.md).
 ## Old code on a newer schema
 
 Migrations only move forward: there are no down migrations. Each release's
-[schema](../concepts/glossary.md) works with the previous release's
+[schema](../concepts/glossary.md#schema) works with the previous release's
 clients, workers, and dashboard. So old and new versions can run side by
 side during a rolling deploy.
 
