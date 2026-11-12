@@ -14,6 +14,10 @@ import (
 // per enqueue caps throughput.
 const notifyWindow = 50 * time.Millisecond
 
+// minForget is the fewest queues at which a notifier looks for those it can
+// forget: below it, remembering them all costs less than looking.
+const minForget = 64
+
 // Notifications on an installation's channel, named after its schema, carry
 // "<kind>|<argument>". Any role in the database can send one, so a
 // notification is only a hint: before a worker changes anything, it reads
@@ -37,8 +41,9 @@ type notifier struct {
 	logger  *slog.Logger
 
 	mu       sync.Mutex
-	last     map[string]time.Time // last notification per queue
-	trailing map[string]bool      // trailing notification scheduled per queue
+	last     map[string]time.Time // last notification per queue, until forget drops it
+	trailing map[string]bool      // the queues with a trailing notification scheduled
+	forgetAt int                  // the size of last at which forget next looks through it
 }
 
 func newNotifier(pool *pgxpool.Pool, channel string, logger *slog.Logger) *notifier {
@@ -61,6 +66,7 @@ func (n *notifier) allow(ctx context.Context, queue string) bool {
 	defer n.mu.Unlock()
 
 	if elapsed := now.Sub(n.last[queue]); elapsed >= notifyWindow {
+		n.forget(now)
 		n.last[queue] = now
 		return true
 	}
@@ -72,10 +78,27 @@ func (n *notifier) allow(ctx context.Context, queue string) bool {
 	return false
 }
 
+// forget drops the queues whose last notification is older than the window:
+// they hold no notification back any more. A client may enqueue into ever
+// new queues, such as one for each tenant, and would otherwise remember them
+// all. It looks through the queues only when their number has doubled since
+// it last did, so that it costs each notification a constant.
+func (n *notifier) forget(now time.Time) {
+	if len(n.last) < n.forgetAt {
+		return
+	}
+	for queue, at := range n.last {
+		if now.Sub(at) >= notifyWindow {
+			delete(n.last, queue)
+		}
+	}
+	n.forgetAt = max(2*len(n.last), minForget)
+}
+
 // sendTrailing sends the notification that allow deferred.
 func (n *notifier) sendTrailing(ctx context.Context, queue string) {
 	n.mu.Lock()
-	n.trailing[queue] = false
+	delete(n.trailing, queue)
 	n.last[queue] = time.Now()
 	n.mu.Unlock()
 

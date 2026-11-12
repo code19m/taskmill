@@ -163,6 +163,10 @@ All notable changes to taskmill are recorded here. The format follows
   no filter read 4 GB in 22 seconds, far past its 5-second limit, so it
   failed. That count now reads 0.6 GB in under half a second. A count by
   kind or FIFO group alone still reads every task of each state.
+- A client no longer remembers every queue it ever enqueued into. With
+  queues named after tenants, for example, its memory grew with each new
+  name for the life of the process. It now forgets the queues whose last
+  notification is older than the 50 milliseconds for which it matters.
 
 ### Security
 
