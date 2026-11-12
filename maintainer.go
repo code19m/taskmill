@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -363,14 +362,10 @@ func (m *maintainer) applyRetention(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 
-	var historySecs, deadSecs int64
-	if err := m.c.pool.QueryRow(ctx, m.c.sql.retention).Scan(&historySecs, &deadSecs); err != nil {
-		return errors.Join(append(errs, fmt.Errorf("read retention settings: %w", err))...)
-	}
-	if err := m.dropHistory(ctx, time.Duration(historySecs)*time.Second); err != nil {
+	if err := m.dropHistory(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("drop expired history: %w", err))
 	}
-	if err := m.deleteInBatches(ctx, m.c.sql.deleteFinished, deadSecs); err != nil {
+	if err := m.deleteInBatches(ctx, m.c.sql.deleteFinished); err != nil {
 		errs = append(errs, fmt.Errorf("delete old dead and canceled tasks: %w", err))
 	}
 	if err := m.deleteInBatches(ctx, m.c.sql.deleteDedupeKeys); err != nil {
@@ -386,46 +381,30 @@ func (m *maintainer) applyRetention(ctx context.Context) error {
 }
 
 // dropHistory detaches and drops the history partitions whose whole day is
-// older than the retention period.
-func (m *maintainer) dropHistory(ctx context.Context, retention time.Duration) error {
-	var names []string
-	pending := map[string]bool{}
-	err := pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
-		existing, err := historyPartitions(ctx, tx, m.c.schema)
-		if err != nil {
-			return err
-		}
-		for name := range existing {
-			names = append(names, name)
-		}
-		r, err := tx.Query(ctx, m.c.sql.pendingDetach)
-		if err != nil {
-			return err
-		}
-		detaching, err := pgx.CollectRows(r, pgx.RowTo[string])
-		if err != nil {
-			return err
-		}
-		for _, name := range detaching {
-			pending[name] = true
-		}
-		return nil
+// older than the retention period. The database says which ones, by its own
+// clock.
+func (m *maintainer) dropHistory(ctx context.Context) error {
+	type partition struct {
+		name    string
+		pending bool // its detach was interrupted
+	}
+	r, err := m.c.pool.Query(ctx, m.c.sql.expiredHistory)
+	if err != nil {
+		return err
+	}
+	expired, err := pgx.CollectRows(r, func(row pgx.CollectableRow) (partition, error) {
+		var p partition
+		err := row.Scan(&p.name, &p.pending)
+		return p, err
 	})
 	if err != nil {
 		return err
 	}
-	slices.Sort(names)
-
-	cutoff := time.Now().Add(-retention)
-	for _, name := range names {
-		day, err := time.Parse("20060102", strings.TrimPrefix(name, "task_history_"))
-		if err != nil || !day.AddDate(0, 0, 1).Before(cutoff) {
-			continue
-		}
-		if err := m.dropPartition(ctx, name, pending[name]); err != nil {
+	for _, p := range expired {
+		if err := m.dropPartition(ctx, p.name, p.pending); err != nil {
 			return err
 		}
-		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "dropped expired history", slog.String(logKeyPartition, name))
+		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "dropped expired history", slog.String(logKeyPartition, p.name))
 	}
 	return nil
 }

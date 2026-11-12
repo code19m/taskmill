@@ -76,6 +76,13 @@ All notable changes to taskmill are recorded here. The format follows
   exists`, when the pool's `default_transaction_isolation` was not
   `read committed`. `Migrate` now works at any default level. A client
   still needs `read committed`, as `NewClient` checks.
+- History partitions follow the database's clock. Workers created the daily
+  partitions, and the maintainer dropped the expired ones, by the clock of
+  their own machine. A maintainer whose clock was ahead by more than the
+  history retention dropped history that had not expired, and a machine
+  whose clock was days off created partitions for the wrong days, so
+  completed tasks skipped history. Both now use the database's clock, as
+  every other time that taskmill sets.
 
 ### Security
 

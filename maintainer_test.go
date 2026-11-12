@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -366,6 +367,49 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	waitFor(t, "the expired partition to be dropped", func() bool {
 		return e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = $2", e.schema, part) == 0
 	})
+}
+
+// A completed task's day is the database's, so the history partitions must
+// follow the database's clock too, wherever the application's clock stands.
+func TestHistoryPartitionsFollowTheDatabaseClock(t *testing.T) {
+	t.Parallel()
+	// The pool's sessions find this now() before PostgreSQL's own: for them,
+	// the database's clock is 30 days behind the application's.
+	admin := testdb.Pool(t)
+	clock := testdb.Schema(t, admin)
+	for _, sql := range []string{
+		"CREATE SCHEMA " + clock,
+		"CREATE FUNCTION " + clock + ".now() RETURNS timestamptz LANGUAGE sql STABLE AS " +
+			"$$ SELECT pg_catalog.now() - interval '30 days' $$",
+	} {
+		if _, err := admin.Exec(t.Context(), sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t)) // a proxy refuses the parameter
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = clock + ", pg_catalog"
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	e := newEnvWith(t, pool, nil)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	if _, err := w.RunTask(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.client.Get(t.Context(), id); err != nil {
+		t.Fatalf("the history has no partition for the database's day: %v", err)
+	}
+	taskmill.RunRetention(t.Context(), w)
+	if _, err := e.client.Get(t.Context(), id); err != nil {
+		t.Fatalf("retention dropped the history of the database's day: %v", err)
+	}
 }
 
 func TestRetentionDeletesOldFinishedTasks(t *testing.T) {

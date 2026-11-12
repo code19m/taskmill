@@ -96,7 +96,7 @@ type statements struct {
 	wakeQueues    string
 	rescue        string
 
-	pendingDetach   string
+	expiredHistory  string
 	retention       string
 	deleteFinished  string
 	pruneSchedules  string
@@ -903,23 +903,34 @@ FROM expired
 WHERE t.id = expired.id
 RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`),
 
-		// pendingDetach lists the history partitions whose detach was
-		// interrupted, which must be finalized before they can be dropped.
-		pendingDetach: q(`
-SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
-WHERE i.inhparent = '{s}.task_history'::regclass AND i.inhdetachpending`),
+		// expiredHistory lists the history partitions whose whole UTC day is
+		// older than the history retention, oldest first, each with whether
+		// its detach was interrupted, which must be finalized before it can be
+		// dropped. The database applies the period to its own clock, so the
+		// application's clock and arithmetic cannot expire history. A
+		// partition's name ends in its day, so names sort by day, and the
+		// pattern keeps to names that are safe in the text of a statement.
+		expiredHistory: q(`
+SELECT c.relname, i.inhdetachpending
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = '{s}.task_history'::regclass
+  AND c.relname ~ '^task_history_[0-9]{8}$'
+  AND c.relname < 'task_history_' || to_char(
+          (now() - (SELECT history_retention FROM {s}.settings)) AT TIME ZONE 'UTC', 'YYYYMMDD')
+ORDER BY c.relname`),
 
 		retention: q(`
 SELECT extract(epoch FROM history_retention)::bigint, extract(epoch FROM dead_retention)::bigint FROM {s}.settings`),
 
-		// deleteFinished deletes dead and canceled tasks older than $1
-		// seconds, except the dead heads that keep their groups halted. It
+		// deleteFinished deletes dead and canceled tasks older than the dead
+		// retention, except the dead heads that keep their groups halted. It
 		// locks the rows it picks and skips locked ones, so a task that an
 		// operator is retrying is never deleted.
 		deleteFinished: q(`
 WITH old AS (
     SELECT t.id FROM {s}.tasks t
-    WHERE t.state IN ('dead', 'canceled') AND t.finalized_at < now() - $1 * interval '1 second'
+    WHERE t.state IN ('dead', 'canceled')
+      AND t.finalized_at < now() - (SELECT dead_retention FROM {s}.settings)
       AND NOT EXISTS (SELECT 1 FROM {s}.groups g WHERE g.halted_task_id = t.id)
     LIMIT {batch}
     FOR UPDATE SKIP LOCKED

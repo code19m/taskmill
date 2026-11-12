@@ -282,40 +282,20 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 }
 
 // missingHistoryDays returns the days among the next historyDaysAhead, from
-// today, that have no history partition, in order.
+// today, that have no history partition, in order. Today is the database's:
+// its clock sets the day of a completed task.
 func missingHistoryDays(ctx context.Context, tx pgx.Tx, schema string) ([]time.Time, error) {
-	existing, err := historyPartitions(ctx, tx, schema)
-	if err != nil {
-		return nil, err
-	}
-	var days []time.Time
-	start := time.Now().UTC().Truncate(24 * time.Hour)
-	for i := range historyDaysAhead {
-		if day := start.AddDate(0, 0, i); !existing[historyPartition(day)] {
-			days = append(days, day)
-		}
-	}
-	return days, nil
-}
-
-// historyPartitions returns the names of the attached history partitions.
-func historyPartitions(ctx context.Context, tx pgx.Tx, schema string) (map[string]bool, error) {
 	r, err := tx.Query(ctx, `
-SELECT c.relname FROM pg_inherits i
-JOIN pg_class c ON c.oid = i.inhrelid
-WHERE i.inhparent = $1::regclass`, schema+".task_history")
+SELECT d.day
+FROM (SELECT (now() AT TIME ZONE 'UTC')::date + i AS day FROM generate_series(0, $2::integer - 1) AS i) d
+WHERE NOT EXISTS (
+    SELECT FROM pg_inherits h JOIN pg_class c ON c.oid = h.inhrelid
+    WHERE h.inhparent = $1::regclass AND c.relname = 'task_history_' || to_char(d.day, 'YYYYMMDD'))
+ORDER BY d.day`, schema+".task_history", historyDaysAhead)
 	if err != nil {
 		return nil, err
 	}
-	names, err := pgx.CollectRows(r, pgx.RowTo[string])
-	if err != nil {
-		return nil, err
-	}
-	existing := make(map[string]bool, len(names))
-	for _, n := range names {
-		existing[n] = true
-	}
-	return existing, nil
+	return pgx.CollectRows(r, pgx.RowTo[time.Time])
 }
 
 // historyPartition names the history partition of the UTC day that starts at
