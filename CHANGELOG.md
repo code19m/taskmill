@@ -95,6 +95,10 @@ All notable changes to taskmill are recorded here. The format follows
   answer was lost while the worker stopped. No worker then led until the
   lease expired, up to 10 seconds, so delayed tasks, retries, and schedules
   waited. A stopping worker now gives up the lease whatever it knows.
+- `taskmill-ui` waited without a limit for the body of a request, so a
+  client that never sent it kept its connection for good, without a login.
+  Enough of them left the dashboard and its probes without connections. A
+  whole request now has 10 seconds to arrive.
 
 ### Security
 

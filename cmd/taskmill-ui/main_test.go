@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -111,29 +112,49 @@ func TestHandlerServesItsSettings(t *testing.T) {
 	}
 }
 
-func TestRunAnswersProbesAndLogsJSON(t *testing.T) {
-	t.Parallel()
+// start runs the command on a fresh schema, with a password, JSON logs, and
+// vars over those settings. It returns the address the command listens on,
+// its log, and a function that stops it and fails the test unless it stops
+// well; the command also stops when the test ends.
+func start(t *testing.T, vars map[string]string) (addr string, logs *jsonLog, stop func()) {
+	t.Helper()
 	pool := testdb.Pool(t)
 	schema := testdb.Schema(t, pool)
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		t.Fatal(err)
 	}
-	db := newProxy(t) // taskmill-ui reaches the database through it, and the test cuts it
-	logs := &jsonLog{}
-	ctx, stop := context.WithCancel(t.Context())
-	defer stop()
+	settings := map[string]string{
+		"TASKMILL_DATABASE_URL":  testdb.URL(t),
+		"TASKMILL_SCHEMA":        schema,
+		"TASKMILL_UI_ADDR":       "127.0.0.1:0",
+		"TASKMILL_UI_PASSWORD":   "s3cret",
+		"TASKMILL_UI_LOG_FORMAT": "json",
+	}
+	maps.Copy(settings, vars)
+	logs = &jsonLog{}
+	ctx, cancel := context.WithCancel(context.Background()) // t.Context ends before the cleanup
 	stopped := make(chan error, 1)
-	go func() {
-		stopped <- run(ctx, env(map[string]string{
-			"TASKMILL_DATABASE_URL":  db.url,
-			"TASKMILL_SCHEMA":        schema,
-			"TASKMILL_UI_ADDR":       "127.0.0.1:0",
-			"TASKMILL_UI_PASSWORD":   "s3cret",
-			"TASKMILL_UI_PREFIX":     "/admin/jobs",
-			"TASKMILL_UI_LOG_FORMAT": "json",
-		}), logs)
-	}()
-	addr, _ := logs.wait(t, "taskmill-ui listening")["addr"].(string)
+	go func() { stopped <- run(ctx, env(settings), logs) }()
+	stop = sync.OnceFunc(func() {
+		cancel()
+		select {
+		case err := <-stopped:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("run did not stop")
+		}
+	})
+	t.Cleanup(stop)
+	addr, _ = logs.wait(t, "taskmill-ui listening")["addr"].(string)
+	return addr, logs, stop
+}
+
+func TestRunAnswersProbesAndLogsJSON(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t) // taskmill-ui reaches the database through it, and the test cuts it
+	addr, logs, stop := start(t, map[string]string{"TASKMILL_DATABASE_URL": db.url, "TASKMILL_UI_PREFIX": "/admin/jobs"})
 	base := "http://" + addr
 
 	// The probes need no login, and are at the root whatever the prefix.
@@ -157,16 +178,36 @@ func TestRunAnswersProbesAndLogsJSON(t *testing.T) {
 	logs.wait(t, "taskmill-ui ready again")
 
 	stop()
-	select {
-	case err := <-stopped:
-		if err != nil {
-			t.Fatalf("run: %v", err)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("run did not stop")
-	}
 	if bad := logs.notJSON(); len(bad) > 0 {
 		t.Errorf("lines that are not JSON: %q", bad)
+	}
+}
+
+// A client needs no login to announce a request body and never send it. The
+// server must not wait for that body for good.
+func TestRunGivesUpOnARequestBodyThatNeverComes(t *testing.T) {
+	t.Parallel()
+	addr, _, _ := start(t, nil)
+	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, "POST /tasks/1/delete HTTP/1.1\r\nHost: taskmill\r\nContent-Length: 1000\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The server answers once it gives up on the body, and closes the
+	// connection. The test waits twice as long as the server may.
+	if err := conn.SetReadDeadline(time.Now().Add(20 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	answer, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("the server kept the connection: %v", err)
+	}
+	if !bytes.HasPrefix(answer, []byte("HTTP/1.1 401 ")) {
+		t.Fatalf("got %q, want the answer to a request without a login", answer)
 	}
 }
 
