@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 )
@@ -268,6 +269,31 @@ func TestFailuresOfAFlappingOperationEscalateAndStayRare(t *testing.T) {
 	if last, want := l.lines[len(l.lines)-1], "INFO operation recovered failures="+strconv.Itoa(tries); last != want {
 		t.Errorf("the last line is %q, want %q", last, want)
 	}
+}
+
+// A notifier forgets a queue once its window has passed, so that a client
+// that enqueues into ever new queues, such as one for each tenant, does not
+// keep an entry for every queue it ever notified.
+func TestNotifierForgetsQueuesAfterTheirWindow(t *testing.T) {
+	t.Parallel()
+	// In the bubble, the clock moves only when the test sleeps.
+	synctest.Test(t, func(t *testing.T) {
+		n := newNotifier(nil, "taskmill", slog.New(slog.DiscardHandler))
+		const queues = 1000
+		for _, window := range []string{"first", "second", "third"} {
+			for i := range queues {
+				if queue := window + "-" + strconv.Itoa(i); !n.allow(t.Context(), queue) {
+					t.Fatalf("the first notification of queue %s was held back", queue)
+				}
+			}
+			time.Sleep(notifyWindow)
+		}
+		n.mu.Lock()
+		defer n.mu.Unlock()
+		if kept := len(n.last); kept > 2*queues {
+			t.Fatalf("after 3 windows of %d new queues each, the notifier keeps %d queues", queues, kept)
+		}
+	})
 }
 
 // newFailureLines returns the failures of an operation with a report

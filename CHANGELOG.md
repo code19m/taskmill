@@ -125,6 +125,72 @@ All notable changes to taskmill are recorded here. The format follows
   too. These now lead to the clean path under the prefix. A path that only
   starts like the prefix, such as `/admin/jobsx`, was redirected as well,
   to `/x`, and is now not found.
+- Retention no longer reads the whole `tasks` table once a minute. On
+  PostgreSQL 15 to 17, once a few hundred thousand dead or canceled tasks
+  waited for the end of their retention, the maintainer's connection
+  switched to a plan that read every task to find the old ones: 1.4 GB a
+  minute with 3.4 million tasks, and about 1 GB for each 1,000 tasks it
+  then deleted. The statement now reads each queue's old tasks through
+  `tasks_finished_idx`: a few pages when no task is old enough.
+- Renewing leases and completing tasks no longer take time that grows with
+  the square of the number of tasks. A worker that held 5,000 tasks at the same time,
+  as with a batch size of 1,000 and a concurrency of 5, spent about 1 second
+  in the database at each check-in, and now spends about 0.1 seconds. At
+  that growth, a worker that held about 12,000 tasks could not have renewed
+  its leases in time, and its tasks would have run twice. A full batch of
+  500 completions takes a third of the time.
+- A transaction that cancels several running tasks, oldest first, can no
+  longer fail with `deadlock detected` against a worker that completes
+  those tasks. A completion took the rows of its tasks in the order in
+  which it met them, which is not always that of their IDs: on PostgreSQL
+  18, for 200 completions among 20,000 tasks, once a renewed lease had
+  moved an older task's row behind a newer one's. PostgreSQL then ended the
+  transaction, or the completion, which the worker tried again. A
+  completion now locks its tasks in the order of their IDs before it
+  deletes them.
+- A worker that is not the maintainer no longer writes to the database each
+  time it tries to become it, 24 times a minute. Every such try took a
+  transaction ID and wrote WAL, though it changed nothing: with 100 idle
+  workers, 40 write transactions a second and 3.5 million transaction IDs a
+  day. A try now writes only when it takes or renews the maintainer's
+  lease.
+- Filling a batch for a batch handler, as the outbox relay does at every
+  fetch, reads only the tasks it takes. It read and sorted the queue's
+  first 1,000 available tasks to take a few of them, about three times the
+  pages of a plain fetch. On PostgreSQL 15 and 16 with JIT on, which is
+  the default, each fill also took about 0.1 seconds, where it now takes
+  about 2 milliseconds: the sort made PostgreSQL compile the statement at
+  every run. PostgreSQL 17 plans it as they do, and 18 did not compile it.
+- `Client.List` and the dashboard's task list read a page through the index
+  that fits their filters. A list of one queue's completed tasks, of one
+  FIFO group's waiting tasks (which a task's page shows), or of the dead
+  tasks of a queue that has few of them read every newer task first: with
+  3.4 million tasks and 1.5 million completed ones, 0.5 to 2 seconds a
+  page, and past the 5-second limit on a larger table. Such a list now
+  reads about the tasks it shows. A list of one state across all queues,
+  such as every dead task, still reads the newer tasks of other states
+  first.
+- `RetryMatching`, `CancelMatching`, and `DeleteMatching` get past any
+  number of tasks that do not match. A batch read on until it had found
+  1,000 matching tasks: with 2.4 million other tasks before the first dead
+  one, the first batch of a retry read them all. On a table where that
+  took more than the batch's 5 seconds, the action failed, and failed
+  again at the same place with the cursor it returned. Now the database
+  ends a statement of such a batch after a second, and the action continues
+  in batches that read at most 100,000 tasks, each of which moves its
+  position. It still acts on each matching task once. An action whose
+  tasks an index finds reads only those, as before.
+- `Client.Count`, which the dashboard asks before it confirms a bulk
+  action, reads each state's tasks through that state's index. Where the
+  tasks of a state lay together in the table, as tasks of one age do, it
+  read the table once for each state: with 3.4 million tasks, a count with
+  no filter read 4 GB in 22 seconds, far past its 5-second limit, so it
+  failed. That count now reads 0.6 GB in under half a second. A count by
+  kind or FIFO group alone still reads every task of each state.
+- A client no longer remembers every queue it ever enqueued into. With
+  queues named after tenants, for example, its memory grew with each new
+  name for the life of the process. It now forgets the queues whose last
+  notification is older than the 50 milliseconds for which it matters.
 
 ### Security
 
