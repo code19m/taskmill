@@ -378,7 +378,9 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch batchFunc) (B
 	return res, nil
 }
 
-// nextBatch runs the next batch of the action, within batchTimeout.
+// nextBatch runs the next batch of the action, within batchTimeout from when
+// its first transaction began: the wait for a connection is not the batch's
+// time.
 //
 // A batch first reads without a window, up to the action's last task. With a
 // filter that an index serves, it then reads the tasks that match and no
@@ -390,11 +392,17 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch batchFunc) (B
 // batch that the action is in: a batch in a window always moves the
 // position, so an action that goes on from where it stopped does not stop
 // there again.
+//
+// The database reports a statement that somebody canceled, with
+// pg_cancel_backend, under the same code as one that it ended on the
+// timeout. Only the message tells them apart, and that is in the server's
+// language. So a canceled batch is tried again in a window too, once.
 func (c *Client) nextBatch(ctx context.Context, m *matching, batch batchFunc) (step, error) {
-	ends := time.Now().Add(batchTimeout)
+	var ends time.Time
 	if !m.windowed {
-		s, err := c.runBatch(ctx, m, batch, openSettings, ends)
-		if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "57014" { // query_canceled
+		s, err := c.runBatch(ctx, m, batch, openSettings, &ends)
+		// 57014 is query_canceled. Before the transaction began, ends is not set.
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "57014" || ends.IsZero() {
 			return s, err
 		}
 		m.windowed, m.until = true, m.after
@@ -407,7 +415,7 @@ func (c *Client) nextBatch(ctx context.Context, m *matching, batch batchFunc) (s
 			return step{}, err
 		}
 	}
-	return c.runBatch(ctx, m, batch, bulkSettings, ends)
+	return c.runBatch(ctx, m, batch, bulkSettings, &ends)
 }
 
 // nextWindow sets the window of the next batches: the next bulkWindow tasks
@@ -436,13 +444,17 @@ func (c *Client) nextWindow(ctx context.Context, m *matching) error {
 
 // runBatch runs batch in a transaction of its own, which starts with
 // settings. Once the transaction began, the batch goes on if ctx ends
-// meanwhile, until ends.
-func (c *Client) runBatch(ctx context.Context, m *matching, batch batchFunc, settings string, ends time.Time) (step, error) {
+// meanwhile, until ends: batchTimeout from now, unless a transaction of the
+// same batch set it before.
+func (c *Client) runBatch(ctx context.Context, m *matching, batch batchFunc, settings string, ends *time.Time) (step, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return step{}, err
 	}
-	ctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), ends)
+	if ends.IsZero() {
+		*ends = time.Now().Add(batchTimeout)
+	}
+	ctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), *ends)
 	defer cancel()
 	var s step
 	if _, err = tx.Exec(ctx, settings); err == nil {

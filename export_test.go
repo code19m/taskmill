@@ -11,6 +11,9 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// BatchTimeout is the time that a batch of a bulk action has.
+const BatchTimeout = batchTimeout
+
 // Timing shortens a worker's fixed intervals in tests. Zero fields keep
 // their defaults.
 type Timing struct {

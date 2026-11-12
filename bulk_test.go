@@ -607,10 +607,16 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 // connections send: the picks of the batches, and the searches for a window.
 type bulkStatements struct {
 	picks, windows atomic.Int64
+	onBegin        atomic.Pointer[func()] // called once, before the next transaction begins
 }
 
 func (s *bulkStatements) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
-	if strings.Contains(d.SQL, "WITH candidates AS") {
+	switch {
+	case d.SQL == "begin":
+		if f := s.onBegin.Swap(nil); f != nil {
+			(*f)()
+		}
+	case strings.Contains(d.SQL, "WITH candidates AS"):
 		s.picks.Add(1)
 	}
 	return ctx
@@ -633,6 +639,24 @@ func (*bulkStatements) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchE
 // reset returns the counts since the last reset.
 func (s *bulkStatements) reset() (picks, windows int64) {
 	return s.picks.Swap(0), s.windows.Swap(0)
+}
+
+// A batch has its time from when its transaction began: what the action
+// waited for that, as for a connection of a busy pool, is not taken off it.
+func TestBulkBatchTimeStartsWhenItsTransactionBegan(t *testing.T) {
+	t.Parallel()
+	sent := &bulkStatements{}
+	e := newTracedEnv(t, sent)
+	for range 10 {
+		e.die(t, e.enqueue(t, sendEmail{}, nil))
+	}
+	// The batch's transaction begins only after more than a batch's time.
+	wait := func() { time.Sleep(taskmill.BatchTimeout + 200*time.Millisecond) }
+	sent.onBegin.Store(&wait)
+	res, err := e.client.RetryMatching(t.Context(), bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}))
+	if err != nil || res != (taskmill.BulkResult{Changed: 10}) {
+		t.Fatalf("retried %+v, %v; want 10 tasks retried", res, err)
+	}
 }
 
 // A bulk action whose filter an index serves reads the tasks that match, in
