@@ -120,7 +120,7 @@ func waitCompleted(t *testing.T, client *taskmill.Client, kind string) {
 	}
 }
 
-// lockedBuffer is a buffer that goroutines may write to at once.
+// lockedBuffer is a buffer that goroutines may write to at the same time.
 type lockedBuffer struct {
 	mu  sync.Mutex
 	buf bytes.Buffer
