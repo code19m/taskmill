@@ -85,20 +85,27 @@ func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 
 ## Why did my context end?
 
-`context.Cause(ctx)` tells you why. What happens next depends on what your
-handler then returns:
+`context.Cause(ctx)` tells you why:
 
-| `context.Cause(ctx)` | Why | You return an error | You return nil |
-|---|---|---|---|
-| `ErrTaskCanceled` | Someone canceled the task | It becomes canceled | It is completed |
-| `ErrAttemptTimeout` | The attempt ran longer than `Timeout` | The attempt fails, and the task is retried | It is completed |
-| `ErrShutdown` | The worker is stopping, and its drain time passed | It goes back to its queue, without using an attempt | It is completed |
-| `ErrLeaseLost` | The worker lost the task's [lease](../concepts/glossary.md#lease), for example because it lost the database | Ignored: taskmill counts a failed attempt, with the code `lease_lost` | Ignored, the same way |
+- `ErrTaskCanceled`: someone canceled the task.
+- `ErrAttemptTimeout`: the attempt ran longer than `Timeout`.
+- `ErrShutdown`: the worker is stopping, and its drain time passed.
+- `ErrLeaseLost`: the worker lost the task's
+  [lease](../concepts/glossary.md#lease), for example because it lost the
+  database.
 
-Return soon after the context ends. taskmill can't stop your code: a
-handler that ignores its context keeps running, and keeps its place in the
-queue's `Concurrency`. [Stop a worker cleanly](workers-and-queues.md#stop-a-worker-cleanly)
-shows what happens to it at shutdown.
+In every case, do the same:
+
+- **Stop the work, and return the context's error.** taskmill then cancels
+  the task, retries it, or puts it back in its queue, as the cause needs.
+  [Errors](../reference/errors.md) has the table.
+- **If the work finished anyway, return nil.** The task is completed,
+  except after `ErrLeaseLost`: then the result is ignored.
+- **Return soon.** taskmill can't stop your code: a handler that ignores its
+  context keeps running, and keeps its
+  [slot](../concepts/glossary.md#slot) in the queue.
+  [Stop a worker cleanly](workers-and-queues.md#stop-a-worker-cleanly) shows
+  what happens to it at shutdown.
 
 ## Options per kind
 
@@ -113,7 +120,7 @@ taskmill.AddHandler(&handlers, &ReportBuilder{}, &taskmill.HandlerOptions{
 |---|---|---|
 | `Timeout` | The time limit of each attempt, or each batch. You can't turn it off | 1 minute |
 | `Retry` | The wait before each retry: see [Retries and errors](retries-and-errors.md) | `ExponentialBackoff{}` |
-| `BatchSize` | The most tasks per call of a batch handler: see [Batch handlers](batch-handlers.md) | 100 |
+| `BatchSize` | The most tasks per call of a batch handler: see [Handle tasks in batches](batch-handlers.md) | 100 |
 | `DiscardCompleted` | Deletes completed tasks right away, instead of keeping them in history | `false` |
 
 - **`Timeout`:** set it a little above the slowest normal run. For tasks
@@ -131,4 +138,4 @@ taskmill.AddHandler(&handlers, &ReportBuilder{}, &taskmill.HandlerOptions{
 - [Use your own transactions](transactions.md): complete a task in the transaction that does its work
 - [`Handler`](https://pkg.go.dev/github.com/code19m/taskmill#Handler) and [`HandlerOptions`](https://pkg.go.dev/github.com/code19m/taskmill#HandlerOptions) on pkg.go.dev
 
-**Next:** [Workers and queues](workers-and-queues.md)
+**Next:** [Retries and errors](retries-and-errors.md)

@@ -8,7 +8,7 @@ keep runs from overlapping.
 
 | Situation | What to use | Why |
 |---|---|---|
-| A fixed timetable that you know when you deploy: a nightly report, an hourly cleanup | A `Schedule` | It runs once per time across all workers, survives restarts, and handles time zones |
+| A fixed timetable that you know when you deploy: a nightly report, an hourly cleanup | A `Schedule` | Each run happens once, however many workers you have. It survives restarts, and handles time zones |
 | A time that depends on your data: a reminder 2 days after each order | A task with `RunAt`, and a [dedupe key](deduplication.md#set-the-window-for-a-task-that-runs-later) | Delayed tasks are rows: millions can wait cheaply |
 | A repeating interval per customer, or more often than once a minute | A task that enqueues its own next run with `RunAt` | Schedules are the same for everyone, and run at most once a minute |
 
@@ -38,9 +38,16 @@ use `t.RunAt`, not the clock, to know which day or hour the run is for.
 
 `Cron` takes a standard five-field expression: minute, hour, day of month,
 month, and day of week. For example, `*/15 * * * 1-5` is every 15 minutes on
-weekdays. It also takes the macros `@yearly`, `@annually`, `@monthly`,
-`@weekly`, `@daily`, `@midnight`, and `@hourly`. There are no seconds, and
-no `@every`.
+weekdays.
+
+- Months and weekdays also have names: `JAN` to `DEC`, and `SUN` to `SAT`.
+  So `*/15 * * * MON-FRI` means the same.
+- The macros `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`,
+  `@midnight`, and `@hourly` work too. There are no seconds, and no
+  `@every`.
+- **Take care when you set both day fields.** A run then happens when
+  **either** one matches, as in classic cron. So `0 3 1 * 1` runs on the 1st
+  of each month and on every Monday, not only on a 1st that is a Monday.
 
 `NewWorker` returns an error for an expression that never matches, and for
 `Options` that set `RunAt`, `DedupeKey`, or `DedupeWindow`: the schedule
@@ -60,8 +67,8 @@ workers. Then a worker runs the task like any other.
 > [!WARNING]
 > The maintainer runs only the schedules that **it** defines. Give every
 > worker the same `Schedules` list, or set `NoMaintainer` on the workers
-> without it. Otherwise your schedules stop while such a worker leads, and
-> nothing tells you.
+> without it. Otherwise your schedules stop while such a worker is the
+> maintainer, and no error or log line tells you.
 
 If no maintainer runs at the run time, the run waits. When a maintainer
 that defines the schedule starts again, it enqueues **one** run for all the
