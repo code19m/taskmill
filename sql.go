@@ -317,10 +317,16 @@ SELECT ids.ord, ids.id, false FROM ids CROSS JOIN notified ORDER BY ids.ord`),
 		// complete finishes running tasks whose attempts still hold their
 		// leases: it moves them to history, except tasks $3, which it only
 		// deletes.
+		//
+		// It waits for a row that another transaction holds, so it takes the
+		// rows in the order of their IDs, not in the order in which the
+		// attempts ended. While it waits for a task, it then holds only
+		// tasks with lower IDs, and cannot deadlock with a transaction that
+		// takes tasks in that order too, such as one that cancels several.
 		complete: q(`
 WITH done AS (
     DELETE FROM {s}.tasks
-    USING unnest($1::bigint[], $2::integer[]) AS u(i, t)
+    USING (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t) ORDER BY i) u
     WHERE id = u.i AND lease_token = u.t AND {leased}
     RETURNING id, created_at, run_at, attempted_at, priority, attempt, max_attempts,
               queue, kind, group_key, attempted_by, payload, metadata, errors

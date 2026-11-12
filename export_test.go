@@ -192,6 +192,26 @@ func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (f
 	return found, err
 }
 
+// Complete completes the attempts (ids, tokens), given in the order in which
+// they ended, as a worker's completer does, in a transaction that starts
+// with settings. It returns how many tasks it completed.
+func Complete(ctx context.Context, c *Client, settings string, ids []int64, tokens []int32) (int, error) {
+	cs := make([]completion, len(ids))
+	for i := range ids {
+		cs[i] = completion{id: ids[i], token: tokens[i]}
+	}
+	var done []completedTask
+	err := pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, settings); err != nil {
+			return err
+		}
+		var err error
+		done, err = c.complete(ctx, c.logger, pgxQuerier{q: tx}, cs)
+		return err
+	})
+	return len(done), err
+}
+
 // explain returns the plan of sql, after settings if any, in a transaction
 // that it rolls back.
 func explain(ctx context.Context, c *Client, settings, sql string, args ...any) (string, error) {

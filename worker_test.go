@@ -2528,6 +2528,61 @@ func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 	}
 }
 
+// A completion waits for the row of a task that another transaction holds.
+// It takes the rows in the order of their IDs, whatever the order in which
+// the attempts ended, so that it cannot deadlock with a transaction that
+// takes tasks in that order too, such as one that cancels several of them.
+func TestCompletionTakesTasksInTheOrderOfTheirIDs(t *testing.T) {
+	t.Parallel()
+	for _, plans := range []string{"force_custom_plan", "force_generic_plan"} {
+		t.Run(plans, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			ctx := t.Context()
+			e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+			           SELECT 'default', 'email.send', 'available', now(), '{}', 1 FROM generate_series(1, 20000)`)
+			e.exec(t, "ANALYZE {s}.tasks")
+			running := func() int64 {
+				return int64(e.count(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt,
+				                                               lease_token, lease_expires_at, attempted_at, attempted_by)
+				                         VALUES ('default', 'email.send', 'running', now(), '{}', 5, 1, 1,
+				                                 now() + interval '1 minute', now(), 'w')
+				                         RETURNING id`))
+			}
+			older, newer := running(), running()
+
+			// A transaction cancels the older task, and so holds its row.
+			tx := e.begin(t)
+			if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), older); err != nil {
+				t.Fatal(err)
+			}
+			// The newer task's attempt ended first.
+			type result struct {
+				tasks int
+				err   error
+			}
+			completion := make(chan result, 1)
+			go func() {
+				n, err := taskmill.Complete(ctx, e.client, "SET LOCAL plan_cache_mode = "+plans, []int64{newer, older}, []int32{1, 1})
+				completion <- result{n, err}
+			}()
+			e.waitBlocked(t, "DELETE FROM {s}.tasks")
+
+			// The completion waits for the older task and holds no other
+			// yet, so the transaction gets the newer one.
+			if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), newer); err != nil {
+				t.Fatalf("the transaction could not take the newer task: %v", err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if got := <-completion; got.err != nil || got.tasks != 2 {
+				t.Fatalf("the completion finished %d tasks, %v; want both", got.tasks, got.err)
+			}
+		})
+	}
+}
+
 func TestMiddlewareCannotRunAHandlerTwice(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
