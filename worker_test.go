@@ -2470,10 +2470,10 @@ func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The lock reads each task twice, the renewal three times and returns
-	// it, the read of cancel requests once, and the completion reads and
-	// returns it.
-	if n > 9*attempts {
-		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 9*attempts)
+	// it, the read of cancel requests once, and the completion reads it to
+	// lock it and to delete it, and returns it.
+	if n > 10*attempts {
+		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 10*attempts)
 	}
 }
 
@@ -2529,57 +2529,101 @@ func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 }
 
 // A completion waits for the row of a task that another transaction holds.
-// It takes the rows in the order of their IDs, whatever the order in which
-// the attempts ended, so that it cannot deadlock with a transaction that
-// takes tasks in that order too, such as one that cancels several of them.
-func TestCompletionTakesTasksInTheOrderOfTheirIDs(t *testing.T) {
+// It locks the rows in the order of their IDs before it deletes any, so that
+// it cannot deadlock with a transaction that takes tasks in that order too,
+// such as one that cancels several of them. That holds whatever the order
+// in which the attempts ended, wherever the rows lie in the table, and
+// however the planner joins the attempts to the tasks.
+func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 	t.Parallel()
-	for _, plans := range []string{"force_custom_plan", "force_generic_plan"} {
-		t.Run(plans, func(t *testing.T) {
-			t.Parallel()
-			e := newEnv(t)
-			ctx := t.Context()
-			e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
-			           SELECT 'default', 'email.send', 'available', now(), '{}', 1 FROM generate_series(1, 20000)`)
-			e.exec(t, "ANALYZE {s}.tasks")
-			running := func() int64 {
-				return int64(e.count(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt,
-				                                               lease_token, lease_expires_at, attempted_at, attempted_by)
-				                         VALUES ('default', 'email.send', 'running', now(), '{}', 5, 1, 1,
-				                                 now() + interval '1 minute', now(), 'w')
-				                         RETURNING id`))
-			}
-			older, newer := running(), running()
+	e := newEnv(t)
+	ctx := t.Context()
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+	                                 lease_expires_at, attempted_at, attempted_by)
+	           SELECT 'default', 'email.send', 'running', now(), '{}', 5, 1, 1, now() + interval '1 minute', now(), 'w'
+	           FROM generate_series(1, 20000)`)
+	// The lease of the older task was renewed, which moved its row behind
+	// those of the tasks after it: the table's order is not that of the IDs.
+	const older, newer = 3, 9
+	e.exec(t, "UPDATE {s}.tasks SET lease_expires_at = lease_expires_at + interval '1 minute' WHERE id = $1", older)
+	e.exec(t, "ANALYZE {s}.tasks")
+	if e.count(t, "SELECT count(*) FROM {s}.tasks o, {s}.tasks n WHERE o.id = $1 AND n.id = $2 AND o.ctid > n.ctid", older, newer) != 1 {
+		t.Fatal("the row of the older task does not lie behind the newer one's")
+	}
+	// The attempts ended newest first.
+	attempts := func(n int) []int64 {
+		ids := make([]int64, n)
+		for i := range ids {
+			ids[i] = int64(older + n - 1 - i)
+		}
+		return ids
+	}
+	// complete completes ids while tx, which holds one of their rows, does
+	// more and ends, and returns how many tasks it completed.
+	complete := func(settings string, ids []int64, tx func() error) (int, error) {
+		t.Helper()
+		type result struct {
+			tasks int
+			err   error
+		}
+		done := make(chan result, 1)
+		go func() {
+			n, err := taskmill.Complete(ctx, e.client, settings, ids)
+			done <- result{n, err}
+		}()
+		e.waitBlocked(t, "INSERT INTO {s}.task_history")
+		if err := tx(); err != nil {
+			t.Errorf("%s, %d attempts: the transaction that held a task failed: %v", settings, len(ids), err)
+		}
+		got := <-done
+		return got.tasks, got.err
+	}
 
-			// A transaction cancels the older task, and so holds its row.
-			tx := e.begin(t)
-			if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), older); err != nil {
-				t.Fatal(err)
+	type plan struct {
+		settings string
+		attempts int
+	}
+	// By default, the planner joins this many attempts to this many tasks
+	// by reading the table.
+	plans := []plan{{"SELECT set_config('plan_cache_mode', 'auto', true)", 200}}
+	for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
+		for _, off := range [][]string{
+			nil, {"nestloop"}, {"nestloop", "mergejoin"}, {"hashjoin"}, {"mergejoin"}, {"hashjoin", "mergejoin"}, {"nestloop", "hashjoin"},
+		} {
+			settings := "SELECT set_config('plan_cache_mode', '" + mode + "', true)"
+			for _, join := range off {
+				settings += ", set_config('enable_" + join + "', 'off', true)"
 			}
-			// The newer task's attempt ended first.
-			type result struct {
-				tasks int
-				err   error
-			}
-			completion := make(chan result, 1)
-			go func() {
-				n, err := taskmill.Complete(ctx, e.client, "SET LOCAL plan_cache_mode = "+plans, []int64{newer, older}, []int32{1, 1})
-				completion <- result{n, err}
-			}()
-			e.waitBlocked(t, "DELETE FROM {s}.tasks")
-
-			// The completion waits for the older task and holds no other
-			// yet, so the transaction gets the newer one.
+			plans = append(plans, plan{settings, 7})
+		}
+	}
+	for _, p := range plans {
+		// A transaction cancels the older task, and so holds its row. The
+		// completion then waits for that row and holds no other yet, so
+		// the transaction gets the newer task too.
+		tx := e.begin(t)
+		if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), older); err != nil {
+			t.Fatal(err)
+		}
+		n, err := complete(p.settings, attempts(p.attempts), func() error {
 			if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), newer); err != nil {
-				t.Fatalf("the transaction could not take the newer task: %v", err)
+				_ = tx.Rollback(ctx)
+				return err
 			}
-			if err := tx.Commit(ctx); err != nil {
-				t.Fatal(err)
-			}
-			if got := <-completion; got.err != nil || got.tasks != 2 {
-				t.Fatalf("the completion finished %d tasks, %v; want both", got.tasks, got.err)
-			}
+			return tx.Rollback(ctx)
 		})
+		if err != nil || n != p.attempts {
+			t.Errorf("%s: the completion finished %d of %d tasks, %v", p.settings, n, p.attempts, err)
+		}
+	}
+
+	// Another worker took the older task while the completion waited for its
+	// row: the completion leaves that task.
+	tx := e.begin(t)
+	e.txExec(t, tx, "UPDATE {s}.tasks SET lease_token = lease_token + 1 WHERE id = $1", older)
+	n, err := complete(plans[0].settings, attempts(7), func() error { return tx.Commit(ctx) })
+	if err != nil || n != 6 {
+		t.Errorf("the completion finished %d tasks, %v; want the 6 that the attempts still own", n, err)
 	}
 }
 

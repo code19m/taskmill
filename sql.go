@@ -318,16 +318,25 @@ SELECT ids.ord, ids.id, false FROM ids CROSS JOIN notified ORDER BY ids.ord`),
 		// leases: it moves them to history, except tasks $3, which it only
 		// deletes.
 		//
-		// It waits for a row that another transaction holds, so it takes the
-		// rows in the order of their IDs, not in the order in which the
-		// attempts ended. While it waits for a task, it then holds only
-		// tasks with lower IDs, and cannot deadlock with a transaction that
-		// takes tasks in that order too, such as one that cancels several.
+		// It waits for a row that another transaction holds. So it first
+		// locks the tasks that the attempts own, in the order of their IDs,
+		// and then deletes the tasks it holds. While it waits for a task, it
+		// holds only tasks with lower IDs, and cannot deadlock with a
+		// transaction that takes tasks in that order too, such as one that
+		// cancels several. A delete alone takes the rows as its plan meets
+		// them: in the order of the attempts, or in that of the table, where
+		// a renewed lease moves a row behind newer ones. A read that locks
+		// sorts first, whatever its plan.
 		complete: q(`
-WITH done AS (
+WITH held AS (
+    SELECT t.id FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
+    JOIN {s}.tasks t USING (id, lease_token)
+    WHERE {leased}
+    ORDER BY t.id
+    FOR UPDATE OF t
+), done AS (
     DELETE FROM {s}.tasks
-    USING (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t) ORDER BY i) u
-    WHERE id = u.i AND lease_token = u.t AND {leased}
+    WHERE id = ANY(ARRAY(SELECT id FROM held))
     RETURNING id, created_at, run_at, attempted_at, priority, attempt, max_attempts,
               queue, kind, group_key, attempted_by, payload, metadata, errors
 ), kept AS (

@@ -126,6 +126,15 @@ All notable changes to taskmill are recorded here. The format follows
   that growth, a worker that held about 12,000 tasks could not have renewed
   its leases in time, and its tasks would have run twice. A full batch of
   500 completions takes a third of the time.
+- A transaction that cancels several running tasks, oldest first, can no
+  longer fail with `deadlock detected` against a worker that completes
+  those tasks. A completion took the rows of its tasks in the order in
+  which it met them, which is not always that of their IDs: on PostgreSQL
+  18, for 200 completions among 20,000 tasks, once a renewed lease had
+  moved an older task's row behind a newer one's. PostgreSQL then ended the
+  transaction, or the completion, which the worker tried again. A
+  completion now locks its tasks in the order of their IDs before it
+  deletes them.
 - A worker that is not the maintainer no longer writes to the database each
   time it tries to become it, 24 times a minute. Every such try took a
   transaction ID and wrote WAL, though it changed nothing: with 100 idle
