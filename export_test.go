@@ -198,7 +198,9 @@ func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (f
 // Complete completes the attempts with the IDs ids, each with the lease
 // token 1, given in the order in which they ended, as a worker's completer
 // does. It does so in a transaction that starts with settings, and that it
-// rolls back. It returns how many tasks it completed.
+// rolls back. The connection first drops the plans it kept: it would run a
+// generic plan again whatever the settings became since. It returns how many
+// tasks it completed.
 func Complete(ctx context.Context, c *Client, settings string, ids []int64) (int, error) {
 	cs := make([]completion, len(ids))
 	for i, id := range ids {
@@ -209,8 +211,10 @@ func Complete(ctx context.Context, c *Client, settings string, ids []int64) (int
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
-	if _, err := tx.Exec(ctx, settings); err != nil {
-		return 0, err
+	for _, s := range []string{"DISCARD PLANS", settings} {
+		if _, err := tx.Exec(ctx, s); err != nil {
+			return 0, err
+		}
 	}
 	done, err := c.complete(ctx, c.logger, pgxQuerier{q: tx}, cs)
 	return len(done), err

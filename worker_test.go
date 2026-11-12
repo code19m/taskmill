@@ -3,6 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strconv"
@@ -2558,43 +2559,27 @@ func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 		}
 		return ids
 	}
-	// complete completes ids while tx, which holds one of their rows, does
-	// more and ends, and returns how many tasks it completed.
-	complete := func(settings string, ids []int64, tx func() error) (int, error) {
-		t.Helper()
-		type result struct {
-			tasks int
-			err   error
-		}
-		done := make(chan result, 1)
-		go func() {
-			n, err := taskmill.Complete(ctx, e.client, settings, ids)
-			done <- result{n, err}
-		}()
-		e.waitBlocked(t, "INSERT INTO {s}.task_history")
-		if err := tx(); err != nil {
-			t.Errorf("%s, %d attempts: the transaction that held a task failed: %v", settings, len(ids), err)
-		}
-		got := <-done
-		return got.tasks, got.err
-	}
 
 	type plan struct {
 		settings string
 		attempts int
 	}
-	// By default, the planner joins this many attempts to this many tasks
-	// by reading the table.
+	// by reading the table. Fewer attempts get a custom and a generic plan
+	// with each set of join methods on: nested loop, hash, merge.
+	// set of join methods but none: nested loop, hash and merge.
 	plans := []plan{{"SELECT set_config('plan_cache_mode', 'auto', true)", 200}}
 	for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
-		for _, off := range [][]string{
-			nil, {"nestloop"}, {"nestloop", "mergejoin"}, {"hashjoin"}, {"mergejoin"}, {"hashjoin", "mergejoin"}, {"nestloop", "hashjoin"},
+		for _, on := range [][3]bool{
+			{true, true, true},
+			{false, true, true},
+			{true, false, true},
+			{true, true, false},
+			{true, false, false},
+			{false, true, false},
+			{false, false, true},
 		} {
-			settings := "SELECT set_config('plan_cache_mode', '" + mode + "', true)"
-			for _, join := range off {
-				settings += ", set_config('enable_" + join + "', 'off', true)"
-			}
-			plans = append(plans, plan{settings, 7})
+			plans = append(plans, plan{fmt.Sprintf("SELECT set_config('plan_cache_mode', '%s', true), set_config('enable_nestloop', '%t', true), "+
+				"set_config('enable_hashjoin', '%t', true), set_config('enable_mergejoin', '%t', true)", mode, on[0], on[1], on[2]), 7})
 		}
 	}
 	for _, p := range plans {
@@ -2605,7 +2590,7 @@ func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 		if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), older); err != nil {
 			t.Fatal(err)
 		}
-		n, err := complete(p.settings, attempts(p.attempts), func() error {
+		n, err := completeWhileHeld(t, e, p.settings, attempts(p.attempts), func() error {
 			if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), newer); err != nil {
 				_ = tx.Rollback(ctx)
 				return err
@@ -2621,10 +2606,33 @@ func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 	// row: the completion leaves that task.
 	tx := e.begin(t)
 	e.txExec(t, tx, "UPDATE {s}.tasks SET lease_token = lease_token + 1 WHERE id = $1", older)
-	n, err := complete(plans[0].settings, attempts(7), func() error { return tx.Commit(ctx) })
+	n, err := completeWhileHeld(t, e, plans[0].settings, attempts(7), func() error { return tx.Commit(ctx) })
 	if err != nil || n != 6 {
 		t.Errorf("the completion finished %d tasks, %v; want the 6 that the attempts still own", n, err)
 	}
+}
+
+// completeWhileHeld completes the tasks ids, planned with settings, while a
+// transaction holds the row of one of them. Once the completion waits for
+// that row, it calls release, which ends the transaction. It returns how
+// many tasks the completion finished.
+func completeWhileHeld(t *testing.T, e *env, settings string, ids []int64, release func() error) (int, error) {
+	t.Helper()
+	type result struct {
+		tasks int
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := taskmill.Complete(t.Context(), e.client, settings, ids)
+		done <- result{n, err}
+	}()
+	e.waitBlocked(t, "INSERT INTO {s}.task_history")
+	if err := release(); err != nil {
+		t.Errorf("%s, %d attempts: the transaction that held a task failed: %v", settings, len(ids), err)
+	}
+	got := <-done
+	return got.tasks, got.err
 }
 
 func TestMiddlewareCannotRunAHandlerTwice(t *testing.T) {
