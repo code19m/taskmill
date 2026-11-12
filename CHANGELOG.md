@@ -112,6 +112,13 @@ All notable changes to taskmill are recorded here. The format follows
   too. These now lead to the clean path under the prefix. A path that only
   starts like the prefix, such as `/admin/jobsx`, was redirected as well,
   to `/x`, and is now not found.
+- Retention no longer reads the whole `tasks` table once a minute. On
+  PostgreSQL 15 to 17, once a few hundred thousand dead or canceled tasks
+  waited for the end of their retention, the maintainer's connection
+  switched to a plan that read every task to find the old ones: 1.4 GB a
+  minute with 3.4 million tasks, and about 1 GB for each 1,000 tasks it
+  then deleted. The statement now reads each queue's old tasks through
+  `tasks_finished_idx`: a few pages when no task is old enough.
 
 ### Security
 

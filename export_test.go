@@ -2,8 +2,11 @@ package taskmill
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Timing shortens a worker's fixed intervals in tests. Zero fields keep
@@ -175,42 +178,94 @@ func GroupRowsRead(ctx context.Context, c *Client, params *GroupParams) (int64, 
 	return rowsRead(ctx, c, groupsSettings, sql, args, func(rel string) bool { return rel == "groups" })
 }
 
+// RetentionRowsRead runs the statement that deletes a batch of the dead and
+// canceled tasks older than the dead retention, under EXPLAIN ANALYZE in a
+// transaction that it rolls back, and returns how many rows its scans of
+// tasks read.
+func RetentionRowsRead(ctx context.Context, c *Client) (int64, error) {
+	return rowsRead(ctx, c, "", c.sql.deleteFinished, nil, func(rel string) bool { return rel == "tasks" })
+}
+
 // rowsRead runs sql after settings under EXPLAIN ANALYZE, in a transaction
 // that it rolls back, and returns how many rows the scans of the relations
 // that match read.
 func rowsRead(ctx context.Context, c *Client, settings, sql string, args []any, match func(rel string) bool) (int64, error) {
+	plan, err := analyze(ctx, c, false, settings, sql, args...)
+	return planSum(plan, scanned(match)), err
+}
+
+// analyze runs sql after settings, if any, under EXPLAIN ANALYZE, in a
+// transaction that it rolls back, and returns its plan. With generic, sql
+// runs with its generic plan: the plan that a connection keeps for a
+// statement once it stops planning it for each call's arguments, which it
+// does after five calls if that plan looks no costlier.
+func analyze(ctx context.Context, c *Client, generic bool, settings, sql string, args ...any) (map[string]any, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, settings); err != nil {
-		return 0, err
+	// Only a prepared statement has a generic plan, and EXECUTE takes its
+	// arguments as text, so pgx writes them into the statement. A prepared
+	// statement outlives its transaction, on a connection that others use
+	// next: it gets the schema's name, which is unique, and is dropped.
+	setup, query, name := []string{settings}, "EXPLAIN (ANALYZE, FORMAT JSON) "+sql, c.schema+"_generic"
+	if generic {
+		params := make([]string, len(args))
+		for i := range args {
+			params[i] = "$" + strconv.Itoa(i+1)
+		}
+		setup = append(setup, "SET LOCAL plan_cache_mode = force_generic_plan", "PREPARE "+name+" AS "+sql)
+		query = "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE " + name + "(" + strings.Join(params, ", ") + ")"
+		args = append([]any{pgx.QueryExecModeSimpleProtocol}, args...)
+	}
+	for _, s := range setup {
+		if s == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, s); err != nil {
+			return nil, err
+		}
 	}
 	var plan []map[string]any
-	if err := tx.QueryRow(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+sql, args...).Scan(&plan); err != nil {
-		return 0, err
+	if err := tx.QueryRow(ctx, query, args...).Scan(&plan); err != nil {
+		return nil, err
 	}
-	var read func(node map[string]any) int64
-	read = func(node map[string]any) int64 {
-		var n int64
+	if generic {
+		if _, err := tx.Exec(ctx, "DEALLOCATE "+name); err != nil {
+			return nil, err
+		}
+	}
+	root, _ := plan[0]["Plan"].(map[string]any)
+	return root, nil
+}
+
+// scanned returns a count for planSum: the rows that a node read, if it
+// scans a relation that matches.
+func scanned(match func(rel string) bool) func(node map[string]any) float64 {
+	return func(node map[string]any) float64 {
+		var n float64
 		if rel, _ := node["Relation Name"].(string); match(rel) {
 			for _, key := range []string{"Actual Rows", "Rows Removed by Filter", "Rows Removed by Index Recheck"} {
 				v, _ := node[key].(float64)
-				loops, _ := node["Actual Loops"].(float64)
-				n += int64(v * loops)
-			}
-		}
-		children, _ := node["Plans"].([]any)
-		for _, child := range children {
-			if c, ok := child.(map[string]any); ok {
-				n += read(c)
+				n += v
 			}
 		}
 		return n
 	}
-	root, _ := plan[0]["Plan"].(map[string]any)
-	return read(root), nil
+}
+
+// planSum adds up count, times the node's loops, over the nodes of plan.
+func planSum(plan map[string]any, count func(node map[string]any) float64) int64 {
+	loops, _ := plan["Actual Loops"].(float64)
+	n := int64(count(plan) * loops)
+	children, _ := plan["Plans"].([]any)
+	for _, child := range children {
+		if c, ok := child.(map[string]any); ok {
+			n += planSum(c, count)
+		}
+	}
+	return n
 }
 
 // StoredSize returns at most the size of JSON text as PostgreSQL writes it

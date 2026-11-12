@@ -309,6 +309,41 @@ func TestPromotionStaysOnItsIndexBesideABacklog(t *testing.T) {
 	}
 }
 
+// Retention reads the tasks it deletes, not the table and not every old
+// task, though the planner cannot know the age from which a task is old.
+func TestRetentionReadsOnlyTheTasksItDeletes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// Tasks that wait, and after them as many dead tasks of an hour ago:
+	// with so many, a plan that does not know the age expects to meet an
+	// old task soon wherever it reads. The table is large enough that the
+	// planner deletes the picked tasks by their IDs, at half the cost of
+	// reading the table for them.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT 'q' || i % 10, 'email.send', CASE WHEN i > 200000 THEN 'dead' ELSE 'scheduled' END::{s}.task_state,
+	                  now() + interval '1 year', '{}', 1, CASE WHEN i > 200000 THEN now() - interval '1 hour' END
+	           FROM generate_series(1, 400000) i`)
+	e.exec(t, "ANALYZE {s}.tasks")
+
+	for _, c := range []struct {
+		what, retention string
+		most            int64
+	}{
+		{"no task is old enough", "30 days", 100},
+		// A batch reads its tasks once to pick them, and once to delete them.
+		{"every dead task is old enough", "1 minute", 2100},
+	} {
+		e.exec(t, "UPDATE {s}.settings SET dead_retention = $1::interval", c.retention)
+		n, err := taskmill.RetentionRowsRead(t.Context(), e.client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n > c.most {
+			t.Errorf("%s: a batch read %d rows of tasks, want at most %d", c.what, n, c.most)
+		}
+	}
+}
+
 func TestMaintainerWakesQueuesWhoseTasksWait(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -551,6 +586,10 @@ func TestRetentionDeletesOldFinishedTasks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// More than two batches of old tasks in a second queue.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT 'reports', 'report.build', 'canceled', now(), '{}', 1, now() - interval '40 days'
+	           FROM generate_series(1, 2500)`)
 	e.exec(t, "INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at) VALUES ('default', 'ledger', 1, $1, now())", haltingHead)
 	e.exec(t, "INSERT INTO {s}.dedupe_keys (key, task_id, expires_at) VALUES (sha256('k'), $1, now() - interval '1 second')", recentDead)
 	e.exec(t, "INSERT INTO {s}.workers (id, queues, hostname, version, heartbeat_at) VALUES ('gone', '{}', 'h', 'v', now() - interval '1 hour')")
@@ -565,6 +604,9 @@ func TestRetentionDeletesOldFinishedTasks(t *testing.T) {
 		if _, err := e.client.Get(t.Context(), id); !errors.Is(err, taskmill.ErrNotFound) {
 			t.Errorf("old finished task %d: got %v, want ErrNotFound", id, err)
 		}
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE queue = 'reports'"); n != 0 {
+		t.Errorf("%d old tasks of the second queue were kept", n)
 	}
 	e.wantState(t, recentDead, taskmill.StateDead)
 	e.wantState(t, haltingHead, taskmill.StateDead) // it keeps its group halted

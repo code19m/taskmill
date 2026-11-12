@@ -933,14 +933,40 @@ ORDER BY c.relname`),
 		// retention, except the dead heads that keep their groups halted. It
 		// locks the rows it picks and skips locked ones, so a task that an
 		// operator is retrying is never deleted.
+		//
+		// The index of finished tasks leads with the queue, so old tasks are
+		// a range of it only within one queue. The statement finds the
+		// queues with one index probe each, as countStats does, and reads
+		// each queue's range, up to a batch: that limit lets the planner read
+		// the range in order and stop, not collect all of it first. With a
+		// filter by age alone, the planner, which cannot know the cutoff that
+		// the statement reads from the settings, expects old tasks everywhere,
+		// and scans the whole table for them.
+		//
+		// A dead task halts only its own group, so its halt is found by the
+		// group's key, with one lookup per old task. OFFSET 0 keeps it a
+		// lookup: joined to the groups instead, the statement can read every
+		// halted group for each queue, or every old task before it deletes
+		// the first.
 		deleteFinished: q(`
-WITH old AS (
-    SELECT t.id FROM {s}.tasks t
-    WHERE t.state IN ('dead', 'canceled')
-      AND t.finalized_at < ({utc} - (SELECT dead_retention FROM {s}.settings)) AT TIME ZONE 'UTC'
-      AND NOT EXISTS (SELECT 1 FROM {s}.groups g WHERE g.halted_task_id = t.id)
+WITH RECURSIVE finished AS (
+    (SELECT queue FROM {s}.tasks WHERE state IN ('dead', 'canceled') ORDER BY queue LIMIT 1)
+    UNION ALL
+    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state IN ('dead', 'canceled') AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
+    FROM finished x WHERE x.queue IS NOT NULL
+), old AS (
+    SELECT o.id FROM finished x
+    CROSS JOIN LATERAL (
+        SELECT t.id FROM {s}.tasks t
+        WHERE t.queue = x.queue AND t.state IN ('dead', 'canceled')
+          AND t.finalized_at < ({utc} - (SELECT dead_retention FROM {s}.settings)) AT TIME ZONE 'UTC'
+          AND NOT EXISTS (SELECT FROM {s}.groups g
+                          WHERE g.queue = t.queue AND g.group_key = t.group_key AND g.halted_task_id = t.id
+                          OFFSET 0)
+        LIMIT {batch}
+        FOR UPDATE SKIP LOCKED
+    ) o
     LIMIT {batch}
-    FOR UPDATE SKIP LOCKED
 )
 DELETE FROM {s}.tasks t USING old WHERE t.id = old.id`),
 
