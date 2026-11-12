@@ -373,7 +373,7 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 // cannot start before the worker stops go back to the queue.
 func (w *Worker) dispatch(ctx context.Context, r *run, q *queueState, tasks []*tracked) {
 	for _, t := range tasks {
-		w.track(t)
+		w.track(ctx, t)
 	}
 
 	for _, unit := range w.units(tasks) {

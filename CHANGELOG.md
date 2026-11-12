@@ -41,6 +41,14 @@ All notable changes to taskmill are recorded here. The format follows
   fails with the code `panic` and the panic's stack in the task's errors.
   The task is retried after the default backoff, or becomes dead after its
   last attempt.
+- A worker that fetched a task again while its own older attempt of that
+  task still ran forgot the older attempt. This can happen after the worker
+  was cut off from the database, or paused, for longer than the lease: the
+  task is rescued, and the worker's next fetch can come before its next
+  check-in. The older handler's context was never canceled, so it ran to its
+  end beside the new attempt; only its result was refused. The worker now
+  cancels the older attempt's context with `ErrLeaseLost` as soon as it
+  fetches the task again.
 
 ## [0.5.0] - 2026-11-12
 

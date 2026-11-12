@@ -1515,6 +1515,43 @@ func testLostLease(t *testing.T, lose func(e *env, id int64) (release func())) {
 	}
 }
 
+// A worker can fetch a task again while its own older attempt of that task
+// still runs: it was cut off for longer than the lease, another worker's
+// maintainer rescued the task, and its fetch came before its check-in. No
+// check-in sees the older attempt after that, so the worker cancels it when
+// it fetches the task.
+func TestFetchingATaskAgainCancelsItsOlderAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	first := make(chan struct{})
+	cause := make(chan error, 1)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			if task.Attempt > 1 {
+				return nil
+			}
+			close(first)
+			<-ctx.Done()
+			cause <- context.Cause(ctx)
+			return context.Cause(ctx)
+		}, nil),
+		Queues:        defaultQueue(2),
+		LeaseDuration: time.Minute, // no check-in comes during the test
+		NoMaintainer:  true,
+	})
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, first, "the first attempt to start")
+
+	// What the rescue and the promotion do: the task is available again. The
+	// worker fetches it at its next poll, and completes it.
+	e.exec(t, `UPDATE {s}.tasks SET state = 'available', lease_expires_at = NULL WHERE id = $1`, id)
+	e.waitState(t, id, taskmill.StateCompleted)
+
+	if err := recv(t, cause, "the first attempt to be canceled"); !errors.Is(err, taskmill.ErrLeaseLost) {
+		t.Fatalf("the first attempt was canceled with %v, want ErrLeaseLost", err)
+	}
+}
+
 // failingBatch fails or panics on its first batch.
 type failingBatch struct {
 	panics bool
