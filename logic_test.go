@@ -61,7 +61,7 @@ func TestExponentialBackoff(t *testing.T) {
 func TestErrorJSON(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("é", errorMessageLimit) // two bytes each: the cut falls inside a rune
-	raw := errorJSON(outcome{err: errors.New("a\x00" + long), code: CodeTimeout})
+	raw := errorJSON(outcome{msg: "a\x00" + long, code: CodeTimeout})
 	var got struct {
 		Message string    `json:"message"`
 		Code    ErrorCode `json:"code"`

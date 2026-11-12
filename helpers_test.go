@@ -98,6 +98,56 @@ func newEnvWith(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *
 	return e
 }
 
+// newTracedEnv returns an env whose pool reports the statements that its
+// connections send to tracer.
+func newTracedEnv(t *testing.T, tracer pgx.QueryTracer) *env {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return newEnvWith(t, pool, nil)
+}
+
+// statementLog keeps the statements that a pool's connections send outside
+// batches.
+type statementLog struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (l *statementLog) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sent = append(l.sent, d.SQL)
+	return ctx
+}
+
+func (*statementLog) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// reset forgets the statements sent so far.
+func (l *statementLog) reset() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sent = nil
+}
+
+// count returns how many of the statements sent since the last reset contain
+// every fragment.
+func (l *statementLog) count(fragments ...string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(slices.DeleteFunc(slices.Clone(l.sent), func(sql string) bool {
+		return slices.ContainsFunc(fragments, func(f string) bool { return !strings.Contains(sql, f) })
+	}))
+}
+
 // checkGroups fails the test unless every FIFO group satisfies the
 // invariants in docs/design/task-lifecycle.md.
 func (e *env) checkGroups(tb testing.TB) {

@@ -231,7 +231,9 @@ func (hs *Handlers) fail(err error) {
 // RetryPolicy decides how long to wait before retrying a failed attempt.
 type RetryPolicy interface {
 	// Backoff returns the delay before the retry that follows the given
-	// failed attempt, counting from 1.
+	// failed attempt, counting from 1. If it panics, the attempt fails with
+	// the code [CodePanic] instead of the handler's error, and the task is
+	// retried after the default backoff.
 	Backoff(attempt int) time.Duration
 }
 

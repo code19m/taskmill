@@ -163,6 +163,8 @@ func TestWorkerFailureKinds(t *testing.T) {
 				return taskmill.Permanent(errors.New("bad address"))
 			case "panic":
 				panic("boom")
+			case "panic with a value that panics":
+				panic(&stubbornError{})
 			case "timeout":
 				<-ctx.Done()
 				return ctx.Err()
@@ -176,19 +178,118 @@ func TestWorkerFailureKinds(t *testing.T) {
 		to       string
 		attempts int
 		code     taskmill.ErrorCode
+		message  string // part of the first error's message
 	}{
-		{"permanent", 1, ""},
-		{"panic", 2, taskmill.CodePanic},
-		{"timeout", 2, taskmill.CodeTimeout},
+		{"permanent", 1, "", "bad address"},
+		{"panic", 2, taskmill.CodePanic, "panic: boom"},
+		{"panic with a value that panics", 2, taskmill.CodePanic, "stubbornError"},
+		{"timeout", 2, taskmill.CodeTimeout, "context deadline exceeded"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.to, func(t *testing.T) {
 			t.Parallel()
 			id := e.enqueue(t, sendEmail{To: tt.to}, &taskmill.EnqueueOptions{MaxAttempts: 2})
 			info := e.waitState(t, id, taskmill.StateDead)
-			if info.Attempt != tt.attempts || len(info.Errors) != tt.attempts || info.Errors[0].Code != tt.code {
+			if info.Attempt != tt.attempts || len(info.Errors) != tt.attempts || info.Errors[0].Code != tt.code ||
+				!strings.Contains(info.Errors[0].Message, tt.message) {
 				t.Errorf("got attempt %d, errors %+v", info.Attempt, info.Errors)
 			}
+		})
+	}
+}
+
+// stubbornError is an error whose Error method panics with the error itself,
+// so that the panic's value panics again when it is formatted.
+type stubbornError struct{}
+
+func (e *stubbornError) Error() string { panic(e) }
+
+// apiError is an error type as applications write them. A function that
+// returns a nil *apiError as an error returns an error that is not nil, and
+// whose Error method panics: a well-known Go mistake.
+type apiError struct{ status int }
+
+func (e *apiError) Error() string { return "status " + strconv.Itoa(e.status) }
+
+// callAPI makes that mistake, except for the address "up".
+func callAPI(to string) error {
+	var failed *apiError
+	if to == "up" {
+		return nil
+	}
+	return failed
+}
+
+// apiBatch is a batch handler that calls the API for each task.
+type apiBatch struct{}
+
+func (apiBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+	errs := make([]error, len(tasks))
+	for i, task := range tasks {
+		errs[i] = callAPI(task.Args.To)
+	}
+	return errs
+}
+
+// tableBackoff is a retry policy with a table of delays. It panics for an
+// attempt beyond its table.
+type tableBackoff []time.Duration
+
+func (b tableBackoff) Backoff(attempt int) time.Duration { return b[attempt-1] }
+
+// taskmill runs code of the application after a handler returned: the
+// methods of the handler's error, and the retry policy. A panic there fails
+// the attempt as a handler's panic does, and the worker goes on.
+func TestPanicAfterTheHandlerReturnedFailsTheAttempt(t *testing.T) {
+	t.Parallel()
+	var batch taskmill.Handlers
+	taskmill.AddBatchHandler[sendEmail](&batch, apiBatch{}, &taskmill.HandlerOptions{Retry: fastRetry})
+	tests := map[string]struct {
+		handlers *taskmill.Handlers
+		where    string // the function that panics, as the recorded stack names it
+	}{
+		"the error's method": {
+			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+				return callAPI(task.Args.To)
+			}, &taskmill.HandlerOptions{Retry: fastRetry}),
+			"(*apiError).Error",
+		},
+		"the error's method, from a batch": {&batch, "(*apiError).Error"},
+		"the error's method, with a value that panics again": {
+			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+				if task.Args.To == "up" {
+					return nil
+				}
+				return &stubbornError{}
+			}, &taskmill.HandlerOptions{Retry: fastRetry}),
+			"(*stubbornError).Error",
+		},
+		"the retry policy": {
+			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+				if task.Args.To == "up" {
+					return nil
+				}
+				return errors.New("the partner is down")
+			}, &taskmill.HandlerOptions{Retry: tableBackoff{}}),
+			"tableBackoff.Backoff",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			runWorker(t, e, &taskmill.WorkerConfig{Handlers: tt.handlers, Queues: defaultQueue(1)})
+
+			// The first attempt is recorded as a panic, and the task is retried
+			// after the default backoff of about a second.
+			id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 2})
+			info := e.waitState(t, id, taskmill.StateDead)
+			first := info.Errors[0]
+			if info.Attempt != 2 || first.Attempt != 1 || first.Code != taskmill.CodePanic || !strings.Contains(first.Message, tt.where) {
+				t.Fatalf("got attempt %d with errors %+v, want a first error with the code panic that names %s",
+					info.Attempt, info.Errors, tt.where)
+			}
+			e.waitState(t, e.enqueue(t, sendEmail{To: "up"}, nil), taskmill.StateCompleted)
 		})
 	}
 }
@@ -273,6 +374,91 @@ func TestWorkerSnoozesUnknownKinds(t *testing.T) {
 	}
 	if waited := info.Errors[1].At.Sub(info.Errors[0].At); waited < timeout {
 		t.Fatalf("gave up after %s, want at least %s", waited, timeout)
+	}
+}
+
+// The wait for a handler ends when a worker that has one takes the task,
+// however its attempt ends, and when an operator retries the task. A worker
+// without a handler that meets the task later, after a rollback for example,
+// starts a new wait: the note of the old wait must not make the task dead at
+// once.
+func TestWaitForAHandlerStartsAgain(t *testing.T) {
+	t.Parallel()
+	// Each case is what happens to the task after it began to wait.
+	tests := map[string]func(t *testing.T, e *env, id int64){
+		"a handler's attempt failed":      handledBy(errors.New("the partner is down"), taskmill.StateRetryable),
+		"a handler snoozed the task":      handledBy(taskmill.Snooze(time.Hour), taskmill.StateScheduled),
+		"a handler's worker gave it back": handledBy(nil, taskmill.StateAvailable),
+		"an operator canceled and retried it": func(t *testing.T, e *env, id int64) {
+			t.Helper()
+			if err := errors.Join(e.client.Cancel(t.Context(), id), e.client.Retry(t.Context(), id)); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"an operator canceled it and retried its kind": func(t *testing.T, e *env, id int64) {
+			t.Helper()
+			if err := e.client.Cancel(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+			res, err := e.client.RetryMatching(t.Context(), bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}}))
+			if err != nil || res.Changed != 1 {
+				t.Fatalf("retried %d tasks: %v", res.Changed, err)
+			}
+		},
+	}
+	for name, since := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			var other taskmill.Handlers
+			taskmill.AddHandler(&other, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+			without := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &other})
+			id := e.enqueue(t, sendEmail{}, nil)
+
+			// A rolling deploy: a worker of the old release meets the task, which
+			// begins to wait for a handler. That was two hours ago.
+			info, err := without.RunTask(t.Context(), id)
+			if err != nil || info.State != taskmill.StateScheduled || info.Errors[0].Code != taskmill.CodeNoHandler {
+				t.Fatalf("got %+v, %v, want a snooze with a note", info, err)
+			}
+			e.exec(t, `UPDATE {s}.tasks SET errors = jsonb_set(errors, '{0,at}', to_jsonb(now() - interval '2 hours'))
+			           WHERE id = $1`, id)
+
+			since(t, e, id)
+
+			// A rollback: a worker without the handler meets the task again.
+			if info, err = without.RunTask(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+			last := info.Errors[len(info.Errors)-1]
+			if info.State != taskmill.StateScheduled || last.Code != taskmill.CodeNoHandler || time.Since(last.At) > time.Hour {
+				t.Fatalf("the task is %s with errors %+v, want it to wait for a handler again, with a new note", info.State, info.Errors)
+			}
+		})
+	}
+}
+
+// handledBy returns a step of TestWaitForAHandlerStartsAgain: a worker with a
+// handler runs the task, which leaves it in the state want. The handler
+// returns result, or, if result is nil, runs until RunTask's context ends.
+func handledBy(result error, want taskmill.State) func(t *testing.T, e *env, id int64) {
+	return func(t *testing.T, e *env, id int64) {
+		t.Helper()
+		runCtx, stopRun := context.WithCancel(t.Context())
+		defer stopRun()
+		with := newWorker(t, e, &taskmill.WorkerConfig{
+			Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+				if result != nil {
+					return result
+				}
+				stopRun()
+				<-ctx.Done()
+				return ctx.Err()
+			}, nil),
+		})
+		if info, err := with.RunTask(runCtx, id); err != nil || info.State != want {
+			t.Fatalf("the worker with the handler left the task as %+v, %v, want %s", info, err, want)
+		}
 	}
 }
 
@@ -598,6 +784,173 @@ func TestQueueConcurrencyLimitAcrossWorkers(t *testing.T) {
 	if p := peak.Load(); p != 1 {
 		t.Fatalf("peak concurrency %d across workers, want 1", p)
 	}
+}
+
+// A wait for a row before a task is taken must not be taken off the task's
+// lease: the task would start with a lease that is almost over, and be
+// rescued while it runs.
+func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
+	t.Parallel()
+	const lease, wait = time.Second, 700 * time.Millisecond
+	// measuring returns a handler that sends how much of its lease an attempt
+	// has left when it starts.
+	measuring := func(e *env, left chan<- time.Duration) *taskmill.Handlers {
+		query := replaceSchema("SELECT extract(epoch FROM lease_expires_at - clock_timestamp()) FROM {s}.tasks WHERE id = $1", e.schema)
+		return handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			var secs float64
+			if err := e.pool.QueryRow(ctx, query, task.ID).Scan(&secs); err != nil {
+				return err
+			}
+			left <- time.Duration(secs * float64(time.Second))
+			return nil
+		}, nil)
+	}
+	// holdThenFree keeps tx's row lock for wait once a statement of the
+	// worker waits for it, then frees it, and checks the lease that the
+	// handler finds.
+	holdThenFree := func(t *testing.T, e *env, tx pgx.Tx, blocked string, left <-chan time.Duration) {
+		t.Helper()
+		e.waitBlocked(t, blocked)
+		time.Sleep(wait)
+		if err := tx.Rollback(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if d := recv(t, left, "the handler to start"); d < lease/2 {
+			t.Fatalf("the handler started with %s of its %s lease left: the wait for the row was taken off the lease", d, lease)
+		}
+	}
+
+	t.Run("fetch from a queue with a limit", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t)
+		e.limitDefaultQueue(t, 5)
+		left := make(chan time.Duration, 1)
+		w := newWorker(t, e, &taskmill.WorkerConfig{
+			Handlers: measuring(e, left), Queues: defaultQueue(1), LeaseDuration: lease,
+			NoMaintainer: true, // nothing rescues: the test only measures the lease
+		})
+		// Another fetch of the queue holds its row, as a worker does that
+		// stalls in the middle of its fetch.
+		tx := e.begin(t)
+		e.txExec(t, tx, "SELECT FROM {s}.queues WHERE name = 'default' FOR UPDATE")
+		e.enqueue(t, sendEmail{}, nil)
+		startWorker(t, w)
+		holdThenFree(t, e, tx, "SELECT max_running FROM {s}.queues", left)
+	})
+	t.Run("RunTask", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t)
+		left := make(chan time.Duration, 1)
+		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: measuring(e, left), LeaseDuration: lease})
+		id := e.enqueue(t, sendEmail{}, nil)
+		// Another transaction holds the task's row, as CancelTx does until
+		// its caller commits or rolls back.
+		tx := e.begin(t)
+		e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", id)
+		done := make(chan error, 1)
+		go func() {
+			_, err := w.RunTask(t.Context(), id)
+			done <- err
+		}()
+		holdThenFree(t, e, tx, "{s}.tasks", left)
+		if err := recv(t, done, "RunTask to return"); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// queueLock is part of the statement that locks the row of a queue with a
+// limit, for a statementLog to count.
+const queueLock = "queues WHERE name = $1 FOR UPDATE"
+
+// A fetch from a queue with a limit waits only briefly for the queue's row.
+// While another transaction holds the row, the fetch gives up, and the worker
+// fetches again later. Giving up is no failure to report: the queue's fetches
+// hold the row in turn, so with many workers a fetch can wait as long while
+// nothing is stuck.
+func TestLimitedFetchGivesUpOnAHeldQueueRow(t *testing.T) {
+	t.Parallel()
+	sent, logs := &statementLog{}, &logRecorder{}
+	e := newTracedEnv(t, sent).withLogger(t, slog.New(logs))
+	e.limitDefaultQueue(t, 5)
+	ran := make(chan struct{}, 1)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			ran <- struct{}{}
+			return nil
+		}, nil),
+		Queues:       defaultQueue(1),
+		NoMaintainer: true,
+	})
+
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.queues WHERE name = 'default' FOR UPDATE")
+	e.enqueue(t, sendEmail{}, nil)
+	startWorker(t, w)
+	waitFor(t, "the fetch to give up on the held row, and to try again", func() bool {
+		return sent.count(queueLock) >= 2
+	})
+	if lines := operationLines(logs.all())["fetch tasks"]; len(lines) > 0 {
+		t.Fatalf("the fetch that gave up was reported as a failed operation: %s", recordText(lines[0]))
+	}
+	select {
+	case <-ran:
+		t.Fatal("the task ran while another transaction held its queue's row")
+	default:
+	}
+
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, ran, "the task to run once the row is free")
+}
+
+// A queue with a limit and a backlog is at its limit most of the time. A
+// worker with free slots then only counts the queue's running tasks: it locks
+// the queue's row, in a transaction, only once a task may start.
+func TestFetchDoesNotLockAQueueAtItsLimit(t *testing.T) {
+	t.Parallel()
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	e.limitDefaultQueue(t, 1)
+	started, release := make(chan struct{}, 2), make(chan struct{})
+	var active, peak atomic.Int32
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			storeMax(&peak, active.Add(1))
+			defer active.Add(-1)
+			started <- struct{}{}
+			<-release
+			return nil
+		}, nil),
+		Queues:       defaultQueue(2),
+		NoMaintainer: true,
+	})
+	t.Cleanup(func() { close(release) })
+	e.enqueue(t, sendEmail{}, nil)
+	waiting := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the first task to start")
+
+	// One task runs, one waits behind the limit, and the worker has a free
+	// slot: it polls.
+	sent.reset()
+	waitFor(t, "the worker to count the queue's running tasks five times", func() bool {
+		return sent.count("SELECT", "count(*)", "state = 'running'") >= 5
+	})
+	if n := sent.count(queueLock); n != 0 {
+		t.Fatalf("the worker locked the queue's row %d times while the queue was at its limit", n)
+	}
+
+	// Once the running task ends, the fetch locks the row and takes the next.
+	release <- struct{}{}
+	recv(t, started, "the second task to start")
+	if n := sent.count(queueLock); n == 0 {
+		t.Error("the second task started without a lock on the queue's row: nothing serialized its fetch")
+	}
+	if p := peak.Load(); p != 1 {
+		t.Errorf("peak concurrency %d, want the limit of 1", p)
+	}
+	e.wantState(t, waiting, taskmill.StateRunning)
 }
 
 func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
@@ -1272,6 +1625,43 @@ func testLostLease(t *testing.T, lose func(e *env, id int64) (release func())) {
 	info := e.waitState(t, id, taskmill.StateCompleted)
 	if info.Attempt != 2 || len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseLost {
 		t.Fatalf("got attempt %d with errors %+v, want attempt 2 after a lost lease", info.Attempt, info.Errors)
+	}
+}
+
+// A worker can fetch a task again while its own older attempt of that task
+// still runs: it was cut off for longer than the lease, another worker's
+// maintainer rescued the task, and its fetch came before its check-in. No
+// check-in sees the older attempt after that, so the worker cancels it when
+// it fetches the task.
+func TestFetchingATaskAgainCancelsItsOlderAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	first := make(chan struct{})
+	cause := make(chan error, 1)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			if task.Attempt > 1 {
+				return nil
+			}
+			close(first)
+			<-ctx.Done()
+			cause <- context.Cause(ctx)
+			return context.Cause(ctx)
+		}, nil),
+		Queues:        defaultQueue(2),
+		LeaseDuration: time.Minute, // no check-in comes during the test
+		NoMaintainer:  true,
+	})
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, first, "the first attempt to start")
+
+	// What the rescue and the promotion do: the task is available again. The
+	// worker fetches it at its next poll, and completes it.
+	e.exec(t, `UPDATE {s}.tasks SET state = 'available', lease_expires_at = NULL WHERE id = $1`, id)
+	e.waitState(t, id, taskmill.StateCompleted)
+
+	if err := recv(t, cause, "the first attempt to be canceled"); !errors.Is(err, taskmill.ErrLeaseLost) {
+		t.Fatalf("the first attempt was canceled with %v, want ErrLeaseLost", err)
 	}
 }
 

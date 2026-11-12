@@ -77,6 +77,7 @@ type statements struct {
 	fetch         string
 	fetchKind     string
 	leaseTask     string
+	atLimit       string
 	lockQueue     string
 	countRunning  string
 	renewLeases   string
@@ -169,6 +170,11 @@ func newStatements(schema string) *statements {
 		// {trimmed} is a task's errors without the oldest entry once it holds
 		// keptErrors, so that appending one keeps at most keptErrors.
 		"{trimmed}", "(CASE WHEN jsonb_array_length(errors) >= "+strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
+		// {unnoted} is a task's errors without a no_handler note at their
+		// end. The note says that the task waits for a worker with a handler
+		// for its kind: the wait is over once such a worker has the task, or
+		// an operator retries it.
+		"{unnoted}", "(CASE WHEN (errors -> -1) ->> 'code' = '"+string(CodeNoHandler)+"' THEN errors - (-1) ELSE errors END)",
 		// {leased} checks that a task is leased. The statements that find
 		// tasks by their attempts look each one up by ID, and compare the
 		// state as text, so that the planner cannot read tasks_running_idx
@@ -342,7 +348,7 @@ UPDATE {s}.tasks SET state = 'canceled', finalized_at = now(), cancel_requested_
 		retry: q(`
 UPDATE {s}.tasks
 SET state = CASE WHEN $2 THEN 'pending' ELSE 'available' END::{s}.task_state,
-    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL
+    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted}
 WHERE id = $1 AND state IN ('dead', 'canceled')
 RETURNING queue`),
 
@@ -544,7 +550,7 @@ RETURNING queue, group_key`),
 WITH retried AS (
     UPDATE {s}.tasks
     SET state = CASE WHEN id = ANY($2::bigint[]) THEN 'pending' ELSE 'available' END::{s}.task_state,
-        attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL
+        attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted}
     WHERE id = ANY($1::bigint[])
 ), notified AS (
     SELECT count(pg_notify($3, '{available}' || q)) AS n FROM unnest($4::text[]) AS q
@@ -608,6 +614,11 @@ DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[])`),
 		// the picked tasks through an array of their IDs: a join with the
 		// picked rows can make a generic plan scan the whole table, as the
 		// planner cannot know how few rows LIMIT $2 returns.
+		//
+		// The lease counts from clock_timestamp(), the moment the task is
+		// taken, not from now(), the start of the transaction: the fetch of
+		// a queue with a concurrency limit waits for the queue's row first,
+		// and that wait must not be taken off the lease.
 		fetch: q(`
 WITH picked AS (
     SELECT id FROM {s}.tasks
@@ -620,7 +631,7 @@ UPDATE {s}.tasks t
 SET state = 'running',
     attempt = t.attempt + 1,
     lease_token = t.lease_token + 1,
-    lease_expires_at = now() + $3 * interval '1 microsecond',
+    lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $4
 WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
@@ -646,24 +657,41 @@ UPDATE {s}.tasks t
 SET state = 'running',
     attempt = t.attempt + 1,
     lease_token = t.lease_token + 1,
-    lease_expires_at = now() + $3 * interval '1 microsecond',
+    lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $4
 WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
 RETURNING ` + leasedColumns),
 
 		// leaseTask leases task $1 for $2 microseconds, whatever its run time,
-		// unless it is pending, running, or finished.
+		// unless it is pending, running, or finished. It locks the task's row
+		// before it updates it, so that the lease counts from the end of a
+		// wait for a row that another transaction holds: an UPDATE alone
+		// computes the row's new values before it waits.
 		leaseTask: q(`
+WITH picked AS (
+    SELECT id FROM {s}.tasks
+    WHERE id = $1 AND state IN ('scheduled', 'available', 'retryable')
+    FOR UPDATE
+)
 UPDATE {s}.tasks t
 SET state = 'running',
     attempt = t.attempt + 1,
     lease_token = t.lease_token + 1,
-    lease_expires_at = now() + $2 * interval '1 microsecond',
+    lease_expires_at = clock_timestamp() + $2 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $3
-WHERE t.id = $1 AND t.state IN ('scheduled', 'available', 'retryable')
+WHERE t.id = (SELECT id FROM picked)
 RETURNING ` + leasedColumns),
+
+		// atLimit reports whether queue $1 runs as many tasks as its limit
+		// allows, or more; a queue without a limit never does. It locks
+		// nothing, so its answer may be out of date at once: a fetch uses it
+		// only to skip the transaction below, never to lease.
+		atLimit: q(`
+SELECT coalesce((
+    SELECT (SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND state = 'running') >= q.max_running
+    FROM {s}.queues q WHERE q.name = $1), false)`),
 
 		// lockQueue serializes fetches from a queue with a concurrency limit.
 		// countRunning then runs as its own statement, so it sees the tasks
@@ -712,7 +740,9 @@ RETURNING queue, coalesce(group_key, ''), state::text`),
 
 		// snooze runs the task again after $3 microseconds and gives the
 		// attempt back, recording $4 as a note if it is not null; the note
-		// carries the number of attempts used. A task whose cancellation was
+		// carries the number of attempts used. If $5 is set, the worker has
+		// a handler for the task, so the task's wait for one is over: its
+		// errors lose the note of that wait. A task whose cancellation was
 		// requested is canceled instead. The cast makes $3 a bigint: compared
 		// with 0 alone, it would be an integer, which holds only 35 minutes.
 		snooze: q(`
@@ -726,20 +756,25 @@ SET state = CASE
     attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
     finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
     lease_expires_at = NULL,
-    errors = CASE WHEN $4::jsonb IS NULL THEN errors
-                  ELSE {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt - 1, 'at', now()) || $4::jsonb)
+    errors = CASE WHEN $4::jsonb IS NOT NULL
+                  THEN {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt - 1, 'at', now()) || $4::jsonb)
+                  WHEN $5 THEN {unnoted}
+                  ELSE errors
              END
 WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
 
-		// release gives a task back during shutdown, attempt included. A task
-		// whose cancellation was requested is canceled instead.
+		// release gives a task back during shutdown, attempt included. If $3
+		// is set, the worker has a handler for the task, and its errors lose
+		// the note of a wait for one, as in snooze. A task whose cancellation
+		// was requested is canceled instead.
 		release: q(`
 UPDATE {s}.tasks
 SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'canceled' END::{s}.task_state,
     attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
     finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
-    lease_expires_at = NULL
+    lease_expires_at = NULL,
+    errors = CASE WHEN $3 THEN {unnoted} ELSE errors END
 WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
 
