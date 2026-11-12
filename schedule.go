@@ -25,9 +25,16 @@ import (
 // define once they have not run or changed for a day.
 //
 // Runs that are missed while no maintainer runs, or while the schedule is
-// paused, collapse into one run. The expression is read on the wall clock of
-// Location, so daylight saving time behaves as in classic cron. The task's
-// RunAt is the time it was scheduled for.
+// paused, collapse into one run. The task's RunAt is the time it was
+// scheduled for.
+//
+// The expression is read on the wall clock of Location, and each time on
+// that clock runs once. When clocks go forward, a time that they skip runs
+// after the jump, as long after it as the time is into the skipped hour:
+// 02:30 runs at 03:30. When clocks go back, a time in the repeated hour runs
+// the first time the clock shows it, and not the second. So a schedule that
+// runs several times an hour, such as "*/15 * * * *", makes no run during
+// the second pass of that hour, where classic cron keeps it running.
 type Schedule struct {
 	// Name identifies the schedule. Schedules are kept in the database by
 	// name, so renaming one creates a new schedule.

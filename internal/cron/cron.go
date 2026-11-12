@@ -168,9 +168,12 @@ var errNoTime = errors.New("cron schedule matches no time in the next five years
 // Next returns the first time after t that the schedule matches, in t's
 // location. It fails if the schedule never matches, such as on February 31.
 //
-// The schedule is matched against the wall clock, so daylight saving time
-// behaves as in classic cron: a time skipped when clocks go forward runs right
-// after the jump, and a time repeated when clocks go back runs once.
+// The schedule is matched against the wall clock, and each wall-clock time
+// runs once: a time skipped when clocks go forward runs as far after the jump
+// as it is into the gap, and a time repeated when clocks go back runs at its
+// first occurrence only. Unlike classic cron, this holds for wildcard
+// schedules too: "*/15 * * * *" makes no run in the repeated hour's second
+// pass.
 func (s *Schedule) Next(t time.Time) (time.Time, error) {
 	loc := t.Location()
 	// wall is the wall clock in loc, held as a UTC time so that arithmetic
