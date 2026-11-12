@@ -37,13 +37,16 @@ the run is for:
 ```go
 func (h *ReportBuilder) Handle(ctx context.Context, t *taskmill.Task[BuildReport]) error {
     night := t.ScheduledFor() // 03:00 Berlin time, on the night the run is for
+    if night.IsZero() {
+        night = t.RunAt // the task carries no such time: see below
+    }
     return h.build(ctx, night)
 }
 ```
 
-Don't use the clock or `t.RunAt` for this. A run that fails at 03:00 may
-succeed hours later, after its retries. It must still build the report of
-its own night.
+Don't use the clock, or `t.RunAt` alone, for this. A run that fails at
+03:00 may succeed hours later, after its retries. It must still build the
+report of its own night.
 
 | Value | What it tells you |
 |---|---|
@@ -54,8 +57,17 @@ its own night.
 taskmill keeps this time in the task's
 [metadata](../concepts/glossary.md#metadata), as `taskmill.scheduled_for`,
 next to the schedule's name, as `taskmill.schedule`. So the dashboard shows
-which schedule made a task. For a task that no schedule enqueued, such as
-one that a test enqueues, `ScheduledFor` returns the zero time.
+which schedule made a task.
+
+`ScheduledFor` returns the zero time in two cases. So fall back to
+`t.RunAt`, as the handler above does:
+
+- **No schedule enqueued the task.** To test a handler as a scheduled run,
+  enqueue its task with a time such as `2026-11-12T03:00:00+01:00` in its
+  `Metadata`, under `taskmill.MetadataScheduledFor`.
+- **An older maintainer enqueued the run.** While you upgrade, a worker of
+  the older taskmill release may still enqueue runs, and it stores no such
+  time.
 
 ## Write the timetable
 

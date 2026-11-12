@@ -1333,6 +1333,20 @@ func TestScheduledRunKeepsItsTimeWhateverEnqueueMiddlewareDoes(t *testing.T) {
 	}
 }
 
+func TestEnqueuedTaskCanStandForAScheduledRun(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// A test of a handler sets taskmill's keys itself: Enqueue keeps them.
+	id := e.enqueue(t, sendEmail{To: "report"}, &taskmill.EnqueueOptions{Metadata: map[string]string{
+		taskmill.MetadataSchedule:     "nightly-report",
+		taskmill.MetadataScheduledFor: "2026-11-12T03:00:00+01:00",
+	}})
+	want := time.Date(2026, 11, 12, 2, 0, 0, 0, time.UTC)
+	if got := e.get(t, id).ScheduledFor(); !got.Equal(want) || got.Hour() != 3 {
+		t.Fatalf("the task is for %s, want 03:00 at %s", got, want)
+	}
+}
+
 func TestNewWorkerCountsTheMetadataThatItAddsToAScheduledRun(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

@@ -63,9 +63,14 @@ type Schedule struct {
 // Metadata keys that taskmill sets itself on every task that a [Schedule]
 // enqueues. Their values never change, whatever happens to the task, so a
 // handler reads the same on every attempt, and the dashboard shows which
-// schedule made a task. taskmill's values replace those that the schedule's
-// Options or the kind's defaults give the same keys. Keys that start with
-// "taskmill." are taskmill's own: do not set them on your tasks.
+// schedule made a task. taskmill sets its values over those that the
+// schedule's Options, the kind's defaults, or an [EnqueueMiddleware] give
+// the same keys.
+//
+// Keys that start with "taskmill." belong to taskmill, and later releases
+// may add more of them: do not use the prefix for keys of your own. A test
+// of a handler may set these two, so that its task stands for a scheduled
+// run.
 const (
 	// MetadataSchedule holds the name of the schedule that enqueued the
 	// task.
@@ -79,11 +84,19 @@ const (
 // ScheduledFor returns the time that the task's run is for, if a [Schedule]
 // enqueued the task: the time of the timetable, or the time of the request
 // for a run that [Client.RunSchedule] asked for. It is the same on every
-// attempt, unlike RunAt, which a retry, a snooze, or a lost lease moves. The
-// time is on the clock of the schedule's Location, so its day and hour are
-// those that the schedule's expression names.
+// attempt, unlike RunAt, which a retry, a snooze, or a lost lease moves.
 //
-// It returns the zero time for a task that no schedule enqueued.
+// The time shows the clock of the schedule's Location, so its day and hour
+// are those that the schedule's expression names. But it carries only the
+// offset from UTC that this Location had at that moment, not the Location
+// with its rules. So for arithmetic on the calendar that may cross a clock
+// change, such as AddDate, first convert the time with In to the schedule's
+// Location. For a Location whose offset is not a whole number of minutes,
+// the time is in UTC.
+//
+// It returns the zero time for a task that no schedule enqueued, and for a
+// run that a maintainer of an older release enqueued, which stored no such
+// time: a handler can fall back to RunAt then.
 func (t *TaskInfo) ScheduledFor() time.Time {
 	at, err := time.Parse(time.RFC3339Nano, t.Metadata[MetadataScheduledFor])
 	if err != nil {

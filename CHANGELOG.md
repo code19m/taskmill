@@ -19,10 +19,12 @@ All notable changes to taskmill are recorded here. The format follows
   (`taskmill.scheduled_for`) and `MetadataSchedule` (`taskmill.schedule`).
   So the dashboard's task page shows which schedule made a task. These
   values replace those that the schedule's `Options` give the same keys,
-  and enqueue middleware can read them but not change or remove them: keys
-  that start with `taskmill.` are taskmill's own. During a rolling
+  and enqueue middleware can read them but not change or remove them. Keys
+  that start with `taskmill.` now belong to taskmill, and later releases
+  may add more: don't use the prefix for keys of your own. During a rolling
   deploy, a run that a maintainer of the previous release enqueues has no
-  such metadata, and `ScheduledFor` returns the zero time for it.
+  such metadata. `ScheduledFor` returns the zero time for it, as for a task
+  that no schedule enqueued, so let the handler fall back to `t.RunAt`.
 
 ### Changed
 

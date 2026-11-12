@@ -185,6 +185,11 @@ func ExampleSchedule() {
 			// The night the run is for, in Berlin time. It is the same on
 			// every attempt, unlike t.RunAt, which a retry moves.
 			night := t.ScheduledFor()
+			if night.IsZero() {
+				// No schedule enqueued the task, or a maintainer of an
+				// older release did, which stored no such time.
+				night = t.RunAt
+			}
 			log.Printf("sending the receipts of %s", night.Format(time.DateOnly))
 			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
 		},

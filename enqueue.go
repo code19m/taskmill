@@ -85,8 +85,10 @@ type EnqueueOptions struct {
 	// Metadata is stored with the task and passed to its handler, for
 	// example for tracing. Encoded as JSON, it may take at most 64 KiB,
 	// including what [EnqueueMiddleware] adds. Keys that start with
-	// "taskmill." are taskmill's own, such as [MetadataSchedule]: do not
-	// set them. Default: none.
+	// "taskmill." belong to taskmill, such as [MetadataSchedule], and later
+	// releases may add more of them: do not use the prefix for keys of
+	// your own. A test of a handler may set taskmill's keys, so that its
+	// task stands for a scheduled run. Default: none.
 	Metadata map[string]string
 }
 
