@@ -73,8 +73,9 @@ on purpose.
 - **One group runs slowly.** Its tasks run one after the other. Even tasks
   that take no time run at only about 20 a second with one worker. With
   thousands of tasks waiting for one key, expect minutes, not seconds.
-- **Keep the transactions that enqueue into a group short.** Producers of
-  one group wait for each other's transactions to commit.
+- **Keep the transactions that enqueue into a group short.**
+  [Producers](../concepts/glossary.md#producer) of one group wait for each
+  other's transactions to commit.
 - **A group lives in one queue.** The same key in another queue is another
   group. And a snoozed head blocks its group until it runs again.
 

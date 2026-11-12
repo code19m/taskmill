@@ -25,7 +25,7 @@ Read them as rough sizes, not as a promise for your hardware.
 |---|---|
 | One worker, with `Concurrency` 64, drains a backlog | About 30,000 tasks a second |
 | The same, with tasks in 100,000 FIFO groups | About 26,000 tasks a second |
-| End to end: producers enqueue, 2 workers run and complete, history kept | About 17,000 tasks a second |
+| End to end: [producers](../concepts/glossary.md#producer) enqueue, 2 workers run and complete, history kept | About 17,000 tasks a second |
 | One outbox relay publishes messages on 10,000 keys | About 27,000 messages a second |
 | `EnqueueMany` in batches of 100, 8 producers | About 190,000 tasks a second |
 | `Enqueue`, one task per transaction, 16 producers | 8,000 to 16,000 tasks a second, limited by database round trips |

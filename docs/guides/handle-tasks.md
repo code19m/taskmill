@@ -123,6 +123,9 @@ taskmill.AddHandler(&handlers, &ReportBuilder{}, &taskmill.HandlerOptions{
 | `BatchSize` | The most tasks per call of a batch handler: see [Handle tasks in batches](batch-handlers.md) | 100 |
 | `DiscardCompleted` | Deletes completed tasks right away, instead of keeping them in history | `false` |
 
+[Configuration](../reference/configuration.md#handleroptions) has each
+option's type and limits.
+
 - **`Timeout`:** set it a little above the slowest normal run. For tasks
   that take minutes or hours, see [Run long tasks](../recipes/run-long-tasks.md).
 - **`DiscardCompleted`:** use it for busy kinds when nobody looks at their

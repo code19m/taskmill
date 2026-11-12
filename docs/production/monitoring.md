@@ -161,7 +161,7 @@ workers use it. Also pass it to `MigrateConfig.Logger` and `ui.Config.Logger`.
 Without a logger, taskmill writes no logs at all.
 
 Alert a person on every Error line. Look at Warn lines when they repeat.
-Keep Info lines if you need a record of who did what in the dashboard.
+Keep Info lines if you need a record of what was done in the dashboard.
 [Levels](../reference/log-messages.md#levels) says what each level means.
 
 Two Error lines can be expected. Silence them only in these cases:

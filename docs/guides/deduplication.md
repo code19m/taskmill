@@ -51,8 +51,12 @@ Name the work in the key, not the moment of the call:
 | One delayed task per thing, such as a reminder | The thing: `remind-42` | The delay, plus the time to run: see below |
 
 A key lasts for its window, also after its task completed. So a key can't
-mean "one task until it is done". For that, use a time bucket, as in the
-fourth row: the next bucket allows the next task.
+mean "one task until it is done". A time bucket, as in the fourth row, comes
+close: the next bucket allows the next task.
+
+But a change that comes after the task ran, in the same bucket, gets no
+task. If the last change must not be lost, follow
+[Keep at most one waiting task per key](../recipes/one-waiting-task-per-key.md).
 
 ## Set the window for a task that runs later
 

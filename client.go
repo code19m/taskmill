@@ -55,8 +55,9 @@ type ClientConfig struct {
 // taskmill's statements rely on the READ COMMITTED isolation level, so
 // NewClient fails with [ErrInvalidArgument] if the pool's
 // default_transaction_isolation is another level; set it in the pool's
-// ConnConfig.RuntimeParams. Transactions that
-// callers pass to the Tx methods may use any level.
+// ConnConfig.RuntimeParams. Transactions that callers pass to the Tx methods
+// may use any level. At REPEATABLE READ or SERIALIZABLE, [Task.CompleteTx]
+// must be the transaction's first statement, as its comment explains.
 func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Client, error) {
 	if pool == nil {
 		return nil, invalidArgument("pool is nil")

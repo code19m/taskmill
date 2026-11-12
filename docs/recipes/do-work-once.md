@@ -96,8 +96,9 @@ func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 - **The key is safe only while task IDs never repeat.** A restore from a
   backup moves the ID counter back. New tasks then get the IDs of tasks that
   ran before the loss, and the provider skips their charges as repeats.
-  After a restore, move the counter forward before you start workers
-  ([Database](../production/database.md)).
+  After a restore, move the counter forward before any process enqueues:
+  [Restore a backup](../production/backups-and-failover.md#restore-a-backup)
+  has the steps.
 - **`CompleteTx` needs a transaction:** a `pgx.Tx` or a `*sql.Tx`, not a
   pool. Return its error, so that your transaction rolls back.
 

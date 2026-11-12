@@ -96,8 +96,8 @@ flowchart LR
 | `> [!NOTE]` | Good to know |
 | `> [!WARNING]` | You can lose data, run work twice by surprise, or break production |
 
-**10. Round numbers in prose,** and link to
-[Defaults and limits](../reference/defaults-and-limits.md) for exact values.
+**10. Round numbers in prose,** and link to the exact value in the
+[reference](../reference/README.md): Configuration, or Defaults and limits.
 Contributor pages, such as [Benchmarks](benchmarks.md), keep exact numbers.
 - Before: "One worker drained a backlog at over 31,000 tasks per second…"
 - After: "One worker runs about 30,000 tasks a second on a laptop."
@@ -158,7 +158,7 @@ never copy godoc, and godoc links to pages, never to anchors, which move.
 | Steps that build one program, with what the reader sees | `docs/tutorial/`. The reasons stay in the guides and concepts |
 | The exact contract of one identifier, and its edge cases | Its godoc comment |
 | Runnable code for one API | Godoc `Example` functions |
-| Exact defaults and limits | `docs/reference/defaults-and-limits.md`, and the field's godoc |
+| Exact defaults and limits | A field's: `docs/reference/configuration.md`, and the field's godoc. Fixed timings, and limits that are not a field: `docs/reference/defaults-and-limits.md` |
 | What changed, and how to migrate | `CHANGELOG.md` |
 | Why taskmill is built this way | `docs/design/`, `docs/adr/` |
 

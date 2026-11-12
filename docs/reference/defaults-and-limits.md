@@ -14,7 +14,7 @@ changes it.
 | Queue names, kinds, and schedule names | 1 to 128 characters |
 | Payload | At most 1 MiB of JSON. The godoc of [`Args`](https://pkg.go.dev/github.com/code19m/taskmill#Args) has the exact rules |
 | One enqueue call (`EnqueueMany`, `EnqueueManyTx`, `outbox.Store`) | At most 10,000 tasks, and 64 MiB of payload and metadata |
-| A delayed task, a retry, or a snoozed task becomes available | Within about 1 second of its run time, while a maintainer runs |
+| A delayed task, a retry, or a snoozed task becomes available | Within about 1 second of its [run time](../concepts/glossary.md#run-time), while a maintainer runs |
 
 ## Handlers
 
@@ -54,8 +54,8 @@ work.
 | Wake queues whose next task waited over 1 second | Every second |
 | Send its heartbeat to the workers | Every 5 seconds, and right away when a new maintainer starts |
 | Workers notice that the heartbeats stopped | After 15 seconds without one. Idle queues then poll every `PollInterval` |
-| Promote due tasks (delayed tasks, retries, snoozed tasks): make them available | As they come due, at most 20 times a second |
-| Rescue tasks whose leases ran out: fail their attempts, so that they retry | Every second |
+| [Promote](../concepts/glossary.md#promote) due tasks: delayed tasks, retries, and snoozed tasks | As they come due, at most 20 times a second |
+| [Rescue](../concepts/glossary.md#rescue) tasks whose leases ran out | Every second |
 | Enqueue due schedule runs | Every second |
 | `Client.RunSchedule` | The run is enqueued within about 1 second, if the maintainer defines the schedule |
 | Dedupe window of a schedule run | 24 hours, or twice the time to the schedule's next run if that is longer |

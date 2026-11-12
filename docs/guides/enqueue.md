@@ -106,8 +106,9 @@ wins:
 3. taskmill's default.
 
 `Metadata` merges key by key: the call's keys win, and the other keys of
-both are kept. An invalid option fails with `ErrInvalidArgument`. The exact
-limits are in [Defaults and limits](../reference/defaults-and-limits.md).
+both are kept. An invalid option fails with `ErrInvalidArgument`.
+[Configuration](../reference/configuration.md#enqueueoptions) has each
+option's type and exact limits.
 
 ## Read the result
 

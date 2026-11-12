@@ -207,6 +207,13 @@ type attempt struct {
 // the attempt as usual. Returning nil after a rollback records nothing: once
 // the task's lease expires, the maintainer rescues it as a failed attempt,
 // with the code lease_lost.
+//
+// At the REPEATABLE READ and SERIALIZABLE isolation levels, call CompleteTx
+// as the first statement of the transaction. The worker's lease renewals
+// change the task's row, and PostgreSQL fails CompleteTx with a serialization
+// failure (SQLSTATE 40001) when a renewal commits after the transaction's
+// first statement. The statements after CompleteTx still commit together
+// with the completion.
 func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	if t.attempt == nil {
 		return invalidArgument("task was not created by a worker")

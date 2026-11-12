@@ -37,9 +37,9 @@ taskmill.AddHandler(&handlers, taskmill.HandlerFunc[SendReceipt](
 Give the new type the same `EnqueueDefaults` as the old one. Then ship the
 change in three deploys:
 
-1. **Add the new handler.** Producers still enqueue the old kind. Wait until
-   every worker runs this version: `Client.Workers` lists each worker's
-   `Kinds`.
+1. **Add the new handler.** [Producers](../concepts/glossary.md#producer)
+   still enqueue the old kind. Wait until every worker runs this version:
+   `Client.Workers` lists each worker's `Kinds`.
 2. **Switch the producers** to the new kind. Every worker can run it, so no
    task waits.
 3. **Remove the old handler and type,** once no unfinished task of the old

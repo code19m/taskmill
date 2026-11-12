@@ -159,7 +159,7 @@ of these instead:
 
 | You want… | Do this |
 |---|---|
-| A person to learn of it | Alert when the number of dead tasks grows, or on the Error log line above. Both see every dead task |
+| A person to learn of it | Alert when the number of dead tasks grows, or on the Error log line above. Both cover every way that a task dies. [Monitoring](../production/monitoring.md#what-to-alert-on) has the rules |
 | Your code to react, such as to mark the order as failed | Check for the last attempt in the handler, as below. To do it for every kind, put the same check in [middleware](middleware.md) |
 | One piece of code that handles every dead task | List them with `client.List`: see [Manage tasks from code](operations-api.md#find-tasks) |
 

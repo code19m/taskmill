@@ -84,9 +84,9 @@ successes between them.
 | `record activity` | Writes the counts for the charts | Every 10 seconds | The database |
 | `listen for notifications` | Keeps the connection that receives notifications. Idle queues poll every `PollInterval` meanwhile | On failure, again after 1 to 30 seconds | `ListenConfig`, and any proxy in between |
 | `elect maintainer` | Takes or keeps the maintainer role | Every 1 to 2 seconds | The database |
-| `promote due tasks` | Makes delayed tasks and retries available | As they come due | The database |
+| `promote due tasks` | [Promotes](../concepts/glossary.md#promote) delayed tasks and retries | As they come due | The database |
 | `wake queues` | Notifies queues whose tasks wait, and sends the [heartbeat](../concepts/glossary.md#heartbeat) | Every second | The database |
-| `rescue expired leases` | Rescues tasks: fails the attempts of workers that lost their leases, so that the tasks retry | Every second | The database |
+| `rescue expired leases` | [Rescues](../concepts/glossary.md#rescue) the tasks of workers that lost their leases | Every second | The database |
 | `run schedules` | Enqueues due schedule runs | Every second | The database |
 | `refresh statistics` | Counts tasks for `Client.Queues` | Every 10 seconds | The database |
 | `apply retention` | Prepares history partitions, and deletes old history and rows | Every minute | That the role that runs workers owns the taskmill tables. If `error` says `detach …: timeout`, a long transaction, such as a backup, uses the history: the maintainer tries again every minute |

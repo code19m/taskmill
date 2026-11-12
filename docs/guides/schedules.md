@@ -10,7 +10,8 @@ keep runs from overlapping.
 |---|---|---|
 | A fixed timetable that you know when you deploy: a nightly report, an hourly cleanup | A `Schedule` | Each run happens once, however many workers you have. It survives restarts, and handles time zones |
 | A time that depends on your data: a reminder 2 days after each order | A task with `RunAt`, and a [dedupe key](deduplication.md#set-the-window-for-a-task-that-runs-later) | Delayed tasks are rows: millions can wait cheaply |
-| A repeating interval per customer, or more often than once a minute | A task that enqueues its own next run with `RunAt` | Schedules are the same for everyone, and run at most once a minute |
+| A repeating time per customer: a summary at 09:00 in each customer's time zone | A due time per customer in your own table, and one `Schedule` that enqueues what is due: [Run a task at each customer's local time](../recipes/run-at-each-customers-local-time.md) | Schedules are the same for everyone. A new customer is then only a change to a row |
+| More often than once a minute, or a next time that depends on what the last run did | A task that enqueues its own next run with `RunAt` | A schedule runs at most once a minute. But the chain ends silently when one of its tasks becomes dead or is canceled |
 
 ## Quick example
 

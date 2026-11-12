@@ -97,6 +97,6 @@ its disk, and correct the size.
 
 - [Autoscaling](autoscaling.md): let KEDA add and remove workers
 - [Performance](../reference/performance.md): how fast and how light taskmill is
-- [Defaults and limits](../reference/defaults-and-limits.md): retention and every other default
+- [Configuration](../reference/configuration.md#settings): the retention settings, and the default of every other field
 
 **Next:** [Monitoring](monitoring.md)
