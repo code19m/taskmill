@@ -35,8 +35,8 @@ type MigrateConfig struct {
 }
 
 // Migrate creates or upgrades taskmill's schema, and prepares the next week's
-// history partitions. It is safe to run from several processes at once: one
-// applies the migrations while the others wait. A schema that is up to date
+// history partitions. It is safe to run from several processes at the same
+// time: one applies the migrations while the others wait. A schema that is up to date
 // is left as it is, so Migrate then needs no privilege to change it, and a
 // failure to prepare partitions is only logged. cfg may be nil.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error {
@@ -103,8 +103,8 @@ const unprepared = pgx.QueryExecModeSimpleProtocol
 
 // applyMigrations applies the migrations that the schema lacks, in tx. One
 // process migrates at a time; the others wait for its lock, then find nothing
-// left to do. A transaction-scoped lock works behind transaction-pooling
-// proxies.
+// left to do. A transaction-scoped lock works behind poolers in transaction
+// mode.
 func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrations.Migration, logger *slog.Logger) error {
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "taskmill.migrate."+schema); err != nil {
 		return err

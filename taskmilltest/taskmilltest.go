@@ -143,10 +143,11 @@ func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Han
 
 // Work runs a worker with cfg until no task is available or running, then
 // stops it. Tasks that wait for a later run time, such as retries, stay
-// waiting. If cfg.PollInterval is zero, the worker polls every 10
-// milliseconds. Work fails the test if the worker fails, or if tasks are
-// still available or running after a minute, for example in a queue that the
-// worker does not serve.
+// waiting. cfg must not be nil: the worker needs its handlers. If
+// cfg.PollInterval is zero, the worker polls every 10 milliseconds. Work
+// fails the test if cfg is nil, if the worker fails, or if tasks are still
+// available or running after a minute, for example in a queue that the
+// worker does not read.
 func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig) {
 	tb.Helper()
 	if cfg == nil {

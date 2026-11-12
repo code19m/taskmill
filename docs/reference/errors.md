@@ -27,14 +27,39 @@ Messages may change in any release
 | Error | Class | What it means | What to do |
 |---|---|---|---|
 | [`ErrNotFound`](https://pkg.go.dev/github.com/code19m/taskmill#ErrNotFound) | `not_found` | The task or schedule does not exist, or no longer exists: it was deleted, or retention removed it. | Treat it as gone. |
-| [`ErrInvalidState`](https://pkg.go.dev/github.com/code19m/taskmill#ErrInvalidState) | `invalid_state` | The action does not fit the task's state. For example: retry a task that is not dead or canceled, cancel a finished task, delete a running one, or run a paused schedule. `Worker.Run` also returns it if the worker already runs. | Check the state first with `State.CanRetry`, `CanCancel`, or `CanDelete`, or accept that there is nothing to do. |
+| [`ErrInvalidState`](https://pkg.go.dev/github.com/code19m/taskmill#ErrInvalidState) | `invalid_state` | The action does not fit the task's state. For example: retry a task that is not dead or canceled, cancel a finished task, delete a running one, or run a paused schedule. | Check the state first with `State.CanRetry`, `CanCancel`, or `CanDelete`, or accept that there is nothing to do. |
 | [`ErrInvalidArgument`](https://pkg.go.dev/github.com/code19m/taskmill#ErrInvalidArgument) | `invalid_argument` | An argument, option, or configuration is wrong: out of range, too long, or text that PostgreSQL can't store, such as a NUL character. `NewClient` also returns it when the pool does not use READ COMMITTED. | Fix the call: the message says what is wrong. Retrying the same call doesn't help. |
-| [`ErrSchemaOutdated`](https://pkg.go.dev/github.com/code19m/taskmill#ErrSchemaOutdated) | `schema_outdated` | The [schema](../concepts/glossary.md) is missing, or older than this version of taskmill. `NewClient` checks it. | Run `Migrate`, or apply `Migrations` with your own tool, before you start the new version. |
-| [`ErrConflict`](https://pkg.go.dev/github.com/code19m/taskmill#ErrConflict) | `conflict` | `UpdateQueue` or `UpdateSettings` lost to other updates of the same settings 10 times in a row. | Try again a little later. |
+| [`ErrSchemaOutdated`](https://pkg.go.dev/github.com/code19m/taskmill#ErrSchemaOutdated) | `schema_outdated` | The [schema](../concepts/glossary.md#schema) is missing, or older than this version of taskmill. `NewClient` checks it. | Run `Migrate`, or apply `Migrations` with your own tool, before you start the new version. |
+| [`ErrConflict`](https://pkg.go.dev/github.com/code19m/taskmill#ErrConflict) | `conflict` | `UpdateQueue` or `UpdateSettings` tried 10 times. Each time, another update changed the same settings first. | Try again a little later. |
 | [`ErrLeaseLost`](https://pkg.go.dev/github.com/code19m/taskmill#ErrLeaseLost) | `lease_lost` | Returned by `Task.CompleteTx`: another attempt took the task over. | Return it from your handler, so that your transaction rolls back. |
 
 The `outbox`, `ui`, and `otel` packages return the same errors, such as
 `ErrInvalidArgument` for a message without a topic.
+
+A database or network error has none of these classes. taskmill wraps it
+with what it was doing, so `errors.As` still finds pgx's error types in it.
+
+## Which call returns which error
+
+Every call that takes arguments can return `ErrInvalidArgument`. This table
+lists the other errors of each call.
+
+| Call | Errors |
+|---|---|
+| `NewClient` | `ErrSchemaOutdated` |
+| `Get` | `ErrNotFound` |
+| `Cancel`, `CancelTx` | `ErrNotFound`. `ErrInvalidState` for a finished task |
+| `Retry` | `ErrNotFound`. `ErrInvalidState` for a task that is not dead or canceled |
+| `Delete` | `ErrNotFound`. `ErrInvalidState` for a running task |
+| `RetryMatching`, `CancelMatching`, `DeleteMatching` | The context's error, if it ends first. They skip the tasks that the action does not fit |
+| `PauseQueue`, `ResumeQueue` | Never `ErrNotFound`: they create the queue's settings if it has none |
+| `UpdateQueue`, `UpdateSettings` | `ErrConflict`. `UpdateQueue` never returns `ErrNotFound` |
+| `PauseSchedule`, `ResumeSchedule` | `ErrNotFound` |
+| `RunSchedule` | `ErrNotFound`. `ErrInvalidState` for a paused schedule |
+| `Worker.Run` | `ErrInvalidState` if the worker already runs. An error without a class if it cannot register in the database |
+| `Worker.RunTask` | `ErrNotFound`. `ErrInvalidState` for a task that is running, that waits behind its FIFO group, or that has finished |
+| `Worker.Health` | An error without a class |
+| `Task.CompleteTx` | `ErrLeaseLost` |
 
 ## Errors your handler returns
 
@@ -54,7 +79,7 @@ soon in every case.
 | Cause | Class | What happened | What happens to the task |
 |---|---|---|---|
 | [`ErrTaskCanceled`](https://pkg.go.dev/github.com/code19m/taskmill#ErrTaskCanceled) | `canceled` | Someone canceled the task while it ran. | It becomes canceled when the attempt ends. If the handler returns nil, it completes instead. |
-| [`ErrLeaseLost`](https://pkg.go.dev/github.com/code19m/taskmill#ErrLeaseLost) | `lease_lost` | The worker could not renew the [lease](../concepts/glossary.md) in time. The task may already run on another worker. | The result is thrown away. The task is retried. |
+| [`ErrLeaseLost`](https://pkg.go.dev/github.com/code19m/taskmill#ErrLeaseLost) | `lease_lost` | The worker could not renew the [lease](../concepts/glossary.md#lease) in time. The task may already run on another worker. | The result is thrown away. The task is retried. |
 | [`ErrAttemptTimeout`](https://pkg.go.dev/github.com/code19m/taskmill#ErrAttemptTimeout) | `timeout` | The attempt ran longer than `HandlerOptions.Timeout`. | An error fails the attempt, with the code `timeout`. Nil completes the task. |
 | [`ErrShutdown`](https://pkg.go.dev/github.com/code19m/taskmill#ErrShutdown) | `shutdown` | The worker is stopping and `DrainTimeout` passed, or the context of `Worker.RunTask` ended. | It goes back to its queue without using an attempt. Nil completes it. |
 
@@ -64,7 +89,7 @@ a cancel request or a lost lease of one of its tasks
 
 ## Error classes
 
-Each of taskmill's errors names its class with an `ErrorType() string`
+Each error in the tables above names its class with an `ErrorType() string`
 method. The `otel` module reports it as `error.type` on spans and metrics.
 
 | Class | Comes from |
@@ -74,10 +99,11 @@ method. The `otel` module reports it as `error.type` on spans and metrics.
 | `panic` | A handler that panicked |
 | `invalid_payload` | A payload that did not decode into the kind's `Args` type |
 | `middleware` | A middleware that returned nil without calling `next` |
+| A Go type name, such as `*errors.errorString` | Your own error. OpenTelemetry takes the name from the error's type, unless the error has an `ErrorType() string` method |
+| `*taskmill.PermanentError` | `Permanent(err)`, when `err` has no `ErrorType() string` method. If it has one, you see that class instead |
 
-Your own errors get a name that OpenTelemetry takes from their Go type,
-unless they have an `ErrorType() string` method too. A minor release may add
-a class: treat one you don't know like any other failure.
+A snooze is not a failure, so it has no class. A minor release may add a
+class: treat one you don't know like any other failure.
 
 ## Error history codes
 

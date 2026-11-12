@@ -18,7 +18,7 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 	fetches := newFailures(w, "fetch tasks", slog.String(logKeyQueue, q.name))
 
 	// notified reports that a notification caused the last fetch, and held
-	// that the queue's concurrency limit held tasks back.
+	// that the queue's MaxRunning limit blocked tasks.
 	notified, held := false, false
 	wait := func(pause bool) (ok bool) {
 		ok, notified = waitForWork(ctx, q, w.pollWait(held), pause)
@@ -53,7 +53,7 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 
 // pollWait returns how long an idle queue waits before it fetches again,
 // unless a notification or a freed slot wakes it first. While the
-// maintainer's heartbeats arrive, it polls every idlePoll, give or take a
+// maintainer's heartbeats arrive, it polls every idlePoll, plus or minus a
 // tenth so that workers started together poll apart: the maintainer wakes
 // each queue whose tasks wait in the same statement that sends the
 // heartbeat, so this poll only bounds the harm of a fault in that. Otherwise
@@ -99,8 +99,8 @@ func waitForWork(ctx context.Context, q *queueState, poll time.Duration, pause b
 
 // fetch leases up to slots tasks of q, one per free slot, then fills the
 // batches of batch kinds among them with more tasks of those kinds, so that
-// every fetched task starts at once. A queue with an installation-wide
-// concurrency limit fetches only up to its remaining capacity. more reports
+// every fetched task starts right away. A queue with an installation-wide
+// MaxRunning limit fetches only up to its remaining capacity. more reports
 // that the first lease took all it asked for, so more tasks may be waiting,
 // and held that the limit kept it from asking for as many as slots.
 // If filling the batches fails outside a transaction, it returns the tasks
@@ -111,7 +111,7 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 
-	// A queue with a concurrency limit fetches in one transaction, which
+	// A queue with a MaxRunning limit fetches in one transaction, which
 	// checks the capacity first. Other queues run each fetch statement in a
 	// transaction of its own, sent in one round trip.
 	lease, allowed := leaseFunc(w.leaseAlone), maxFetch
@@ -175,7 +175,7 @@ func (w *Worker) fillBatches(ctx context.Context, q *queueState, lease leaseFunc
 	return extra, nil
 }
 
-// beginLimited begins the fetch transaction of a queue with a concurrency
+// beginLimited begins the fetch transaction of a queue with a MaxRunning
 // limit, and returns how many more of its tasks may run.
 func (w *Worker) beginLimited(ctx context.Context, q *queueState) (pgx.Tx, int, error) { //nolint:ireturn // pgx represents a transaction as an interface
 	tx, err := w.client.pool.Begin(ctx)

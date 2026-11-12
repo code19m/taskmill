@@ -302,3 +302,195 @@ func ExampleClient_RetryMatching() {
 	// dedupe keys: run it again for them.
 	log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
 }
+
+// This example enqueues many tasks in one call: one round trip and one
+// transaction, so all of them exist or none does.
+func ExampleClient_EnqueueMany() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+	params := make([]taskmill.EnqueueParams, 0, 100)
+	for orderID := int64(1); orderID <= 100; orderID++ {
+		params = append(params, taskmill.EnqueueParams{Args: SendReceipt{OrderID: orderID}})
+	}
+	results, err := client.EnqueueMany(ctx, params)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// The results are in the order of params.
+	log.Printf("enqueued %d tasks; the first is task %d", len(results), results[0].ID)
+}
+
+// ResizeImage is the payload of an example task whose kind has defaults of
+// its own.
+type ResizeImage struct {
+	ImageID int64 `json:"image_id"`
+}
+
+// Kind implements taskmill.Args.
+func (ResizeImage) Kind() string { return "image.resize" }
+
+// EnqueueDefaults implements taskmill.ArgsWithDefaults.
+func (ResizeImage) EnqueueDefaults() taskmill.EnqueueOptions {
+	return taskmill.EnqueueOptions{Queue: "images", MaxAttempts: 5}
+}
+
+// This example gives a kind its own queue and number of attempts. An option
+// set in the call wins over the kind's default, field by field.
+func ExampleArgsWithDefaults() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+
+	// Goes to the queue "images", with at most 5 attempts.
+	if _, err := client.Enqueue(ctx, ResizeImage{ImageID: 7}, nil); err != nil {
+		log.Fatal(err)
+	}
+	// Still goes to "images" with 5 attempts, but with a high priority.
+	_, err := client.Enqueue(ctx, ResizeImage{ImageID: 8}, &taskmill.EnqueueOptions{Priority: taskmill.PriorityHigh})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+// This example lets at most 4 tasks of a queue run at the same time, across
+// all workers. The setting is stored in the database, so one call is enough.
+func ExampleClient_UpdateQueue() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+	err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+// This example pauses a queue during an incident, and resumes it afterwards.
+func ExampleClient_PauseQueue() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+
+	// Workers stop fetching the queue's tasks. Running tasks finish.
+	if err := client.PauseQueue(ctx, "partner-api"); err != nil {
+		log.Fatal(err)
+	}
+	// ... the partner's API works again ...
+	if err := client.ResumeQueue(ctx, "partner-api"); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// This example prints each queue's available tasks and its lag.
+func ExampleClient_Queues() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+	queues, err := client.Queues(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, q := range queues {
+		// Counting stops at a cap: Capped then says that N is a lower bound.
+		// Lag has no cap.
+		available := q.Counts[taskmill.StateAvailable]
+		log.Printf("queue %s: %d available (capped: %t), the oldest has waited %s",
+			q.Name, available.N, available.Capped, q.Lag)
+	}
+}
+
+// This example prints the dead tasks of one queue with their last errors,
+// newest first, one page at a time.
+func ExampleClient_List() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+	params := &taskmill.ListParams{Filter: taskmill.TaskFilter{
+		Queues: []string{"emails"},
+		States: []taskmill.State{taskmill.StateDead},
+	}}
+	for {
+		page, err := client.List(ctx, params)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for _, task := range page.Tasks {
+			if n := len(task.Errors); n > 0 {
+				log.Printf("task %d (%s): %s", task.ID, task.Kind, task.Errors[n-1].Message)
+			}
+		}
+		if page.Next == "" {
+			break
+		}
+		params.Cursor = page.Next
+	}
+}
+
+// This example cancels a task, and tells apart the two reasons why a task
+// cannot be canceled.
+func ExampleClient_Cancel() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+	var id int64                // from EnqueueResult.ID
+	err := client.Cancel(ctx, id)
+	switch {
+	case errors.Is(err, taskmill.ErrNotFound):
+		log.Print("the task is gone: deleted, or past its retention")
+	case errors.Is(err, taskmill.ErrInvalidState):
+		log.Print("the task already finished")
+	case err != nil:
+		log.Fatal(err)
+	}
+}
+
+// This example answers a readiness probe from a worker's health. Do not base
+// a liveness probe on it: Health fails while the database is out of reach,
+// which a restart does not fix.
+func ExampleWorker_Health() {
+	var worker *taskmill.Worker // from taskmill.NewWorker; its Run runs in another goroutine
+
+	// Health is nil while Run runs and the worker's last check-in is at most
+	// one LeaseDuration old. It reads only memory, so call it at every probe.
+	if err := worker.Health(); err != nil {
+		log.Printf("not ready: %v", err) // answer the probe with 503
+	}
+}
+
+// This example runs one task now, in the calling goroutine, as a test or an
+// operator's tool does. Run does not need to be running.
+func ExampleWorker_RunTask() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+	var handlers taskmill.Handlers
+	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[SendReceipt](
+		func(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
+			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
+		},
+	), nil)
+	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers, NoMaintainer: true})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	res, err := client.Enqueue(ctx, SendReceipt{OrderID: 7}, &taskmill.EnqueueOptions{RunAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		log.Fatal(err)
+	}
+	// RunTask ignores the run time, so the task runs now.
+	info, err := worker.RunTask(ctx, res.ID)
+	if err != nil {
+		log.Fatal(err) // such as ErrInvalidState for a task that is running or has finished
+	}
+	log.Printf("task %d is %s after attempt %d", info.ID, info.State, info.Attempt)
+}
+
+// fixedDelay retries every failed attempt after the same wait.
+type fixedDelay time.Duration
+
+// Backoff implements taskmill.RetryPolicy.
+func (d fixedDelay) Backoff(int) time.Duration { return time.Duration(d) }
+
+// This example retries the tasks of one kind every 30 seconds, instead of
+// with the default exponential backoff.
+func ExampleRetryPolicy() {
+	var handlers taskmill.Handlers
+	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[SendReceipt](
+		func(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
+			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
+		},
+	), &taskmill.HandlerOptions{Retry: fixedDelay(30 * time.Second)})
+}

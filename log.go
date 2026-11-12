@@ -53,7 +53,7 @@ type failures struct {
 	last    time.Time // its last failure
 	failing bool      // the last try failed
 	pending bool      // the operation recovered, and no line said so yet
-	paired  bool      // the last line was a failure line: the recovery follows at once
+	paired  bool      // the last line was a failure line: the recovery follows right away
 	logged  time.Time // when the last line was logged
 }
 

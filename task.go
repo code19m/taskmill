@@ -37,9 +37,9 @@ func (p Priority) String() string {
 	return "Priority(" + strconv.Itoa(int(p)) + ")"
 }
 
-// State is the lifecycle state of a task. The lifecycle and its guarantees
-// are described in
-// https://github.com/code19m/taskmill/blob/main/docs/design/task-lifecycle.md.
+// State is the lifecycle state of a task. The states, and what moves a task
+// from one to the next, are described in
+// https://github.com/code19m/taskmill/blob/main/docs/concepts/task-lifecycle.md.
 type State string
 
 // Task states.
@@ -116,6 +116,7 @@ type TaskInfo struct {
 	// recent entries.
 	Errors []AttemptError
 
+	// CreatedAt is when the task was enqueued, by the database's clock.
 	CreatedAt time.Time
 
 	// RunAt is the earliest time the task may start: for a retryable or
@@ -160,7 +161,7 @@ const (
 	CodeTimeout ErrorCode = "timeout"
 
 	// CodeInvalidPayload means the payload did not decode into the kind's
-	// Args, so the task became dead at once.
+	// Args, so the task became dead right away.
 	CodeInvalidPayload ErrorCode = "invalid_payload"
 
 	// CodeUnknownKind means no worker with a handler for the kind appeared

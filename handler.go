@@ -16,8 +16,8 @@ import (
 //
 // Returning nil completes the task. Returning an error fails the attempt: the
 // task is retried with backoff until it runs out of attempts. Wrap the error
-// with [Permanent] to make the task dead at once, or return [Snooze] to run it
-// again later without using an attempt.
+// with [Permanent] to make the task dead right away, or return [Snooze] to
+// run it again later without using an attempt.
 //
 // Handle must return promptly once ctx is canceled. [context.Cause] says
 // why: [ErrTaskCanceled], [ErrLeaseLost], [ErrAttemptTimeout], or
@@ -56,7 +56,8 @@ type BatchHandler[A Args] interface {
 
 // HandlerOptions configure how a worker runs one kind.
 type HandlerOptions struct {
-	// Timeout bounds each attempt, or each batch. Default: 1 minute.
+	// Timeout bounds each attempt, or each batch. It must not be negative.
+	// Default: 1 minute.
 	Timeout time.Duration
 
 	// Retry decides the delay before each retry. A task whose worker lost its
@@ -64,13 +65,13 @@ type HandlerOptions struct {
 	// rescues it knows no handler's options. Default: [ExponentialBackoff]{}.
 	Retry RetryPolicy
 
-	// BatchSize is the most tasks a [BatchHandler] receives at once.
+	// BatchSize is the most tasks a [BatchHandler] receives in one call.
 	// Default: 100. Maximum: 1,000. Ignored for other handlers.
 	BatchSize int
 
-	// DiscardCompleted deletes completed tasks of the kind at once, instead
-	// of keeping them in history, for high-volume kinds whose history nobody
-	// reads.
+	// DiscardCompleted deletes completed tasks of the kind right away,
+	// instead of keeping them in history, for high-volume kinds whose history
+	// nobody reads.
 	DiscardCompleted bool
 }
 
@@ -240,8 +241,13 @@ type RetryPolicy interface {
 // reach 10% above Max. The zero value uses a base of 1 second and a maximum
 // of 1 hour.
 type ExponentialBackoff struct {
+	// Base is the delay after the first failed attempt. Zero or less means
+	// the default, 1 second.
 	Base time.Duration
-	Max  time.Duration
+
+	// Max is the longest delay, before jitter. Zero or less means the
+	// default, 1 hour.
+	Max time.Duration
 }
 
 // Backoff implements [RetryPolicy].

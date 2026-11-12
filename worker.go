@@ -126,12 +126,15 @@ type Worker struct {
 }
 
 // WorkerConfig configures a [Worker]. The zero value is valid: a worker
-// without handlers only takes part in maintenance.
+// without handlers only takes part in maintenance. A config that sets Queues
+// needs handlers too: without them, [NewWorker] returns an error that wraps
+// [ErrInvalidArgument].
 type WorkerConfig struct {
 	// Handlers runs the tasks this worker fetches.
 	Handlers *Handlers
 
-	// Queues lists the queues to fetch from, with per-process options.
+	// Queues lists the queues to fetch from, with per-process options. A
+	// queue's name has 1 to 128 characters.
 	// Default: the default queue of every registered kind, from
 	// [ArgsWithDefaults] or else [DefaultQueue], with default options. If
 	// Queues leaves out a registered kind's default queue, Run logs a warning
@@ -145,23 +148,34 @@ type WorkerConfig struct {
 	// 30 seconds.
 	LeaseDuration time.Duration
 
-	// PollInterval is how often idle queues are checked while the
-	// maintainer's heartbeats do not reach the worker: until the first one,
-	// within 5 seconds of the start, once none came for 15 seconds, and
-	// while no maintainer of this version or later runs. While they arrive,
-	// every 5 seconds, notifications wake the worker, and the maintainer
-	// wakes each queue whose next task waited more than a second, so idle
-	// queues are checked only once a minute. So a task whose notification
-	// came too early or was lost starts within about 2 seconds while
-	// heartbeats arrive, within about 16 seconds if the maintainer or the
-	// notification connection fails without a word, and within PollInterval
-	// while no maintainer of this version runs. Default: 1 second.
+	// PollInterval is how often the worker checks an idle queue while the
+	// maintainer's heartbeats do not reach it. It must not be negative.
+	// Default: 1 second.
+	//
+	// The maintainer sends a heartbeat every 5 seconds. While heartbeats
+	// arrive, notifications wake the worker, and the maintainer wakes each
+	// queue whose next task waited more than a second. So the worker checks
+	// an idle queue only once a minute, or every PollInterval if that is
+	// longer, and a task whose notification came too early or was lost
+	// starts within about 2 seconds.
+	//
+	// The worker uses PollInterval from its start until the first heartbeat,
+	// which a running maintainer sends within 5 seconds, and again once no
+	// heartbeat came for 15 seconds. So if the maintainer or the
+	// notification connection fails silently, such a task starts within
+	// about 16 seconds, and then within PollInterval while no heartbeat
+	// arrives.
+	//
+	// A queue that its [QueueSettings.MaxRunning] limit keeps from fetching
+	// more tasks is checked every PollInterval too, whether heartbeats
+	// arrive or not: no notification says when another worker's task of the
+	// queue ends.
 	PollInterval time.Duration
 
 	// DrainTimeout is how long Run waits for running tasks after its context
 	// is canceled, before canceling their contexts and, 5 seconds later,
 	// releasing them. Keep it at least 10 seconds below the time the platform
-	// gives a stopping process. Default: 20 seconds.
+	// gives a stopping process. It must not be negative. Default: 20 seconds.
 	DrainTimeout time.Duration
 
 	// Middleware wraps every attempt, in order: the first is the outermost.
@@ -175,19 +189,19 @@ type WorkerConfig struct {
 	NoMaintainer bool
 
 	// ListenConfig is the connection that receives notifications. Set it to
-	// a direct connection when the pool goes through a transaction-pooling
-	// proxy, which cannot deliver them: without it, the worker finds that
+	// a direct connection when the pool goes through a pooler in transaction
+	// mode, which cannot deliver them: without it, the worker finds that
 	// out when it starts, logs an error, and polls every PollInterval.
 	// Create it with [pgx.ParseConfig]. Default: the pool's configuration.
 	ListenConfig *pgx.ConnConfig
 }
 
-// QueueOptions configure how one worker process serves one queue.
-// Installation-wide settings, such as a concurrency limit, are
+// QueueOptions configure how one worker process reads one queue.
+// Installation-wide settings, such as a limit on running tasks, are
 // [QueueSettings].
 type QueueOptions struct {
-	// Concurrency is how many of the queue's tasks this process runs at once.
-	// A batch counts as one. Default: 10.
+	// Concurrency is how many of the queue's tasks this process runs at the
+	// same time. A batch counts as one. It must not be negative. Default: 10.
 	Concurrency int
 }
 
@@ -348,7 +362,7 @@ type tracked struct {
 	att    *attempt
 	info   *TaskInfo
 	reg    *registration // nil if no handler knows the kind
-	direct bool          // run by RunTask, which records its completion at once
+	direct bool          // run by RunTask, which records its completion right away
 
 	// completedDirectly is set once RunTask recorded the completion.
 	completedDirectly bool
@@ -402,11 +416,11 @@ func (w *Worker) prepareHistory(ctx context.Context) {
 
 // Run fetches and runs tasks until ctx is canceled. It then stops fetching
 // and, if it is the maintainer, resigns, so that another worker takes over
-// at once. It waits up to DrainTimeout for running tasks, cancels and
+// right away. It waits up to DrainTimeout for running tasks, cancels and
 // releases those still running, and returns nil. If ctx ends before the
-// worker registered, it returns nil at once. It returns an error only if the
-// worker cannot start: it is already running, which is [ErrInvalidState], or
-// it cannot register in the database.
+// worker registered, it returns nil right away. It returns an error only if
+// the worker cannot start: it is already running, which is
+// [ErrInvalidState], or it cannot register in the database.
 //
 // Before it fetches, Run creates the history partitions that the next week
 // lacks, as [Migrate] does, so that a schema applied with [Migrations] keeps
@@ -546,7 +560,7 @@ func (w *Worker) tracking() int {
 // RunTask runs one task now, in the calling goroutine, the way [Worker.Run]
 // runs tasks: it leases the task, runs the middleware and the handler of its
 // kind while renewing the lease, and records the outcome. It ignores the
-// task's run time, queue pauses, and concurrency limits, but not FIFO order.
+// task's run time, queue pauses, and MaxRunning limits, but not FIFO order.
 // It does not need Run to be running, which makes it the tool for tests. If
 // ctx is canceled before the handler returns, the handler's context is
 // canceled too, and the task goes back to its queue without using an attempt.

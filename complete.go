@@ -252,7 +252,7 @@ func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedT
 // while an error that persists ends the tries. Each try gets its own timeout.
 func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context.Context) error) error {
 	// The deadline is fixed now: the leases are still renewed while the
-	// tries go on, which would otherwise never let them end.
+	// tries continue, which would otherwise never let them end.
 	deadline := w.leaseEnd(ts)
 	delay := recordRetryFirst
 	for {

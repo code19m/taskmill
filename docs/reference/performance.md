@@ -17,7 +17,7 @@ All numbers below come from one run on a laptop, not on server hardware:
 - **Runs:** shorter than the targets ask: 60 seconds end to end instead of
   10 minutes, and a 1-hour soak instead of 4 hours. Handlers do nothing.
 
-Read them as the shape of the results, not as a promise for your hardware.
+Read them as rough sizes, not as a promise for your hardware.
 
 ## Throughput
 
@@ -38,7 +38,7 @@ Read them as the shape of the results, not as a promise for your hardware.
 | The same, at 10,000 tasks a second | p99: about 45 ms |
 | An `Enqueue` call, one task | p99: 0.5 ms |
 | A delayed task, retry, or schedule run starts after its time | p99: about 0.4 s; at most 1 s |
-| A killed worker's task runs again | After the lease, plus about 2 seconds |
+| A killed worker's task runs again | After the [lease](../concepts/glossary.md#lease), plus about 2 seconds |
 | `Worker.Run` returns when its handlers ignore shutdown | After `DrainTimeout`, plus about 5 seconds |
 
 ## Resource use
@@ -51,11 +51,11 @@ Read them as the shape of the results, not as a promise for your hardware.
 | Worker memory | About 17 MiB idle, plus about 8 KiB per running task |
 | Database connections | A client uses its pool. A worker uses its pool, plus 1 connection for notifications |
 | An idle worker | About one fetch per queue per minute, plus a few small queries |
-| Many schemas in one database | 100 schemas with 500 workers cost the database about a quarter of a CPU, for the maintainers' heartbeats |
+| Many schemas in one database | 100 schemas with 500 workers cost the database about a quarter of a CPU, for the [heartbeats](../concepts/glossary.md#heartbeat) of the [maintainers](../concepts/glossary.md#maintainer) |
 
 ## Reliability under faults
 
-Every fault test passed, and each has zero tolerance:
+Every fault test passed. Each one fails on a single lost or repeated task:
 
 - **Workers killed** every second: no task lost or stuck, and each task
   completed exactly once in history. Some tasks ran again after a kill, as
@@ -66,26 +66,27 @@ Every fault test passed, and each has zero tolerance:
 - **Dedupe keys** raced by 20 processes: exactly one task per key.
 - **PostgreSQL restarted**, cleanly or killed: workers resumed within a
   second of its return, and no task was lost.
-- **A worker cut off from the database** for longer than its lease: none of
-  its late results counted, and every task completed once.
+- **A worker that lost its connection to the database** for longer than its
+  lease: none of its late results counted, and every task completed once.
 - **PgBouncer** in transaction mode: every test passes, and CI checks it on
   every pull request.
-- **Clocks 5 minutes off** between the application and the database: no task
+- **Clocks 5 minutes off** between the app and the database: no task
   started early.
 
 ## Honest limits
 
 - **No server run yet.** The targets are set for an 8-CPU database server.
   These numbers come from a shared laptop.
-- **Three targets miss on the laptop:** enqueueing one task per transaction,
+- **The laptop run does not reach four targets.** Three of them need a run
+  on server hardware. They are enqueueing one task per transaction,
   end-to-end throughput, and throughput while 100,000 FIFO groups wait in
-  another queue (73% to 90% of normal, against a target of 90%). They need a
-  run on server hardware.
-- **Many small workers on one queue cost more.** With 50 worker processes
-  that each serve the same 100 queues, at 1,000 tasks a second, the
-  maintainer's work took 1.2 to 2.1 seconds a round, against a target of 1.
-  Each new task wakes every worker of its queue, and all but one find
-  nothing.
+  another queue. The last one reached 73% to 90% of normal, against a
+  target of 90%.
+- **The fourth is a real cost: many small workers on one queue.** The test
+  ran 50 worker processes that each read the same 100 queues, at 1,000
+  tasks a second. The maintainer's work then took 1.2 to 2.1 seconds a
+  round, against a target of 1. Each new task wakes every worker of its
+  queue, and all but one find nothing.
 
 ## What this means for you
 
@@ -101,4 +102,4 @@ Every fault test passed, and each has zero tolerance:
 - [Defaults and limits](defaults-and-limits.md): the exact limits
 - [Autoscaling](../production/autoscaling.md): when to add workers
 
-**Next:** [Documentation home](../README.md)
+**Next:** [How taskmill is built](../design/README.md)

@@ -132,12 +132,13 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 	return info, nil
 }
 
-// Cancel cancels a task. A waiting task is canceled at once; a running task's
-// context is canceled, and the task becomes canceled when its attempt ends,
-// unless the handler completed it. A batch handler does not see the request:
-// a task of a batch becomes canceled when its batch ends, unless the batch
-// completed it. Cancel frees the task's dedupe key. It returns [ErrNotFound]
-// if no task has the ID, and [ErrInvalidState] if the task already finished.
+// Cancel cancels a task. A waiting task is canceled right away; a running
+// task's context is canceled, and the task becomes canceled when its attempt
+// ends, unless the handler completed it. A batch handler does not see the
+// request: a task of a batch becomes canceled when its batch ends, unless
+// the batch completed it. Cancel frees the task's dedupe key. It returns
+// [ErrNotFound] if no task has the ID, and [ErrInvalidState] if the task
+// already finished.
 func (c *Client) Cancel(ctx context.Context, id int64) error {
 	return c.inTx(ctx, func(q querier) error { return c.cancel(ctx, q, id) })
 }

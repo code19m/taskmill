@@ -34,6 +34,8 @@ how many tasks are failing.
 
 ## Transitions
 
+The diagram shows the main flow:
+
 ```mermaid
 flowchart TD
     enqueue((enqueue)) -->|run later| scheduled
@@ -52,7 +54,7 @@ flowchart TD
     retryable -->|backoff passed| available
     available -->|fetch| running
 
-    running -->|failed, attempts left| retryable
+    running -->|"failed, attempts left"| retryable
     running -->|snoozed| scheduled
     running -->|released at shutdown| available
 
@@ -63,18 +65,19 @@ flowchart TD
     end
 
     running -->|succeeded| completed
-    running -->|failed, no attempts left| dead
+    running -->|"failed, no attempts left"| dead
     running -->|cancel requested| canceled
 ```
 
-The diagram shows the main flow. It leaves out a few edges: a waiting task
-can be canceled or deleted, an expired lease is rescued, an operator can
-retry a dead or canceled task, and `Worker.RunTask` can start a scheduled or
-retryable task at once. The table below is complete.
+The diagram leaves out a few edges: a waiting task can be canceled or
+deleted, an expired lease is rescued, an operator can retry a dead or
+canceled task, and `Worker.RunTask` can start a scheduled or retryable task
+right away. The table below is complete.
 
 Each transition is atomic. Most are a single SQL statement. Those that
 involve a FIFO group, and those that an operator starts, take a few
-statements in one transaction (see [FIFO groups](schema.md#fifo-groups)).
+statements in one transaction (see
+[FIFO groups](schema-groups.md#fifo-groups)).
 
 | # | From | To | Trigger | By |
 |---|---|---|---|---|
@@ -83,7 +86,7 @@ statements in one transaction (see [FIFO groups](schema.md#fifo-groups)).
 | 3 | | `pending` | Enqueued into a FIFO group that already has an unfinished task, or that a dead head halts. | Client |
 | 4 | `scheduled`, `retryable` | `available` | The run time is reached. | Maintainer |
 | 5 | `pending` | `available` or `scheduled` | The task ahead of it in its group finished. It becomes `scheduled` if its run time is still in the future. | Whoever finished that task |
-| 6 | `available`; also `scheduled` or `retryable` through `Worker.RunTask` | `running` | Fetched, or run at once by `Worker.RunTask`, which ignores the run time. Uses one attempt, issues a new lease token, and starts a lease. | Worker |
+| 6 | `available`; also `scheduled` or `retryable` through `Worker.RunTask` | `running` | Fetched, or run right away by `Worker.RunTask`, which ignores the run time. Uses one attempt, issues a new lease token, and starts a lease. | Worker |
 | 7 | `running` | `running` | The worker renews the lease, every third of it. | Worker |
 | 8 | `running` | `completed` | The handler returned no error. | Worker |
 | 9 | `running` | `retryable` | The handler failed and attempts remain. The run time becomes now plus a backoff. | Worker |
@@ -108,7 +111,7 @@ Notes on specific transitions:
 - **8.** A completed task moves to a history table, where transition 17
   deletes it after the retention period. A kind registered with
   `HandlerOptions.DiscardCompleted` keeps no history: transition 8 then
-  deletes the task at once.
+  deletes the task right away.
 - **11.** A worker that has no handler for a task's kind snoozes it for
   1 minute at a time, without using an attempt. The first snooze records a
   note with the code `no_handler`. If no worker runs the task within 1 hour of
@@ -120,7 +123,7 @@ Notes on specific transitions:
   retried at some point, not crash workers forever. A task whose
   cancellation was requested becomes `canceled` instead.
 - **14, 15, and 18.** Canceling or deleting a task releases its dedupe key,
-  so the same key can be enqueued again at once. A completed or dead task
+  so the same key can be enqueued again right away. A completed or dead task
   keeps its key until the key's window ends.
 - **15.** If the handler succeeds before it notices the cancellation, the
   task becomes `completed`, because the work was done. Canceling one task of
@@ -212,9 +215,9 @@ Each guarantee names the mechanism that provides it.
 - **Exactly-once execution in general.** A handler can finish its work and then
   crash before the completion is recorded; the task then runs again. Handlers
   must be idempotent, or use transactional completion (guarantee 5).
-- **No overlap between attempts.** If a worker is cut off from the database
-  long enough for its lease to expire, a second attempt can start while the
-  first is still running. Guarantee 4 ensures that only one of them can record
+- **No overlap between attempts.** A worker can lose its connection to the
+  database for so long that its lease expires. Then a second attempt can
+  start while the first is still running. Guarantee 4 ensures that only one of them can record
   a result.
 - **A global order across workers.** See guarantee 7.
 - **Survival of an unsynchronized failover.** With asynchronous replication, a
@@ -235,3 +238,11 @@ taskmill's guarantees hold only if handlers follow these rules:
 - **Mark permanent failures.** Return a permanent error when retrying cannot
   help, such as a payload that fails validation, so the task does not use up
   its attempts for nothing.
+
+## See also
+
+- [Storage schema](schema.md): the tables and statements behind each transition
+- [Task lifecycle](../concepts/task-lifecycle.md): the same states, for users
+- [Guarantees](../concepts/guarantees.md): the same promises, for users
+
+**Next:** [Storage schema](schema.md)
