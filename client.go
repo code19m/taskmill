@@ -333,14 +333,18 @@ const takeTries = 5
 //   - With the task's row alone, it reads the state that the lock protects.
 //
 // If the task changed sides meanwhile, takeTask gives back what it holds, by
-// rolling back to a savepoint, and locks again in the other order. An
-// ungrouped task needs none of this, and no savepoint.
+// rolling back to a savepoint, and locks again in the other order.
+//
+// A task that it sees, and that is in no FIFO group or is completed, needs
+// none of this, and no savepoint. A task that it does not see does: its
+// enqueue may commit before the next statement, and make it pending.
 func (c *Client) takeTask(ctx context.Context, q querier, id int64, take string, state, queue, group *string) (bool, error) {
 	var grouped bool
-	if _, err := queryRow(ctx, q, c.sql.taskGrouped, []any{id}, &grouped); err != nil {
+	seen, err := queryRow(ctx, q, c.sql.taskGrouped, []any{id}, &grouped)
+	if err != nil {
 		return false, err
 	}
-	if !grouped {
+	if seen && !grouped {
 		return queryRow(ctx, q, take, []any{id, false}, state, queue, group)
 	}
 	if _, err := q.exec(ctx, "SAVEPOINT taskmill_take_task"); err != nil {

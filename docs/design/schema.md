@@ -502,14 +502,17 @@ transaction that holds a group's row never waits for the row of a task that
 is not pending.
 
 `Cancel` and `Delete` cannot know which order applies before they hold a
-lock: a `Retry` or a promotion may commit between the read of the task's
-state and the lock. So they check again under the lock. With the group's
+lock: a `Retry`, a promotion, or the task's own enqueue may commit between
+the read of the task's state and the lock. So they check again under the
+lock. With the group's
 row, which every change into and out of `pending` takes, they lock the task
 only if it is still pending. With the task's row alone, they read the state
 that the lock protects. If the task changed sides, they release what they
 hold, by rolling back to a savepoint, and lock again in the other order.
 After five tries they go on with the locks they hold, and PostgreSQL's
-deadlock detection is the last resort. An ungrouped task needs no savepoint.
+deadlock detection is the last resort. A task that they see needs no
+savepoint if it has no group, or is completed. A task that they do not see
+does: its enqueue may commit before their next statement.
 
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the

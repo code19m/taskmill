@@ -339,6 +339,41 @@ func (e *env) waitBlockedCount(t *testing.T, n int) {
 	})
 }
 
+// removals are the actions that take a task out of its FIFO group, each with
+// what a Cancel of the same task finds after it.
+var removals = []struct {
+	name  string
+	act   func(c *taskmill.Client, ctx context.Context, id int64) error
+	after error
+}{
+	{"cancel", (*taskmill.Client).Cancel, taskmill.ErrInvalidState},
+	{"delete", (*taskmill.Client).Delete, taskmill.ErrNotFound},
+}
+
+// endWithASecondCancel goes on from an action on the pending task id that
+// got the task's row late, and now waits for the task's dedupe key, which
+// keyTx holds. A second operator cancels the task, which takes the group's
+// row first: if the action holds the task's row alone, the two wait for each
+// other once the key is free. Both must end: the action with no error, and
+// the second cancel with after.
+func (e *env) endWithASecondCancel(t *testing.T, id int64, keyTx pgx.Tx, acted <-chan error, after error) {
+	t.Helper()
+	e.waitBlocked(t, "DELETE FROM {s}.dedupe_keys")
+	again := make(chan error, 1)
+	go func() { again <- e.client.Cancel(t.Context(), id) }()
+	e.waitBlockedCount(t, 2)
+
+	if err := keyTx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, acted, "the action"); err != nil {
+		t.Fatalf("the action: %v", err)
+	}
+	if err := recv(t, again, "the second cancel"); !errors.Is(err, after) {
+		t.Fatalf("the second cancel: got %v, want %v", err, after)
+	}
+}
+
 // A Retry makes a canceled task pending while a Cancel or a Delete of the
 // same task waits for the task's row. The waiting action read the task as
 // canceled, so it did not lock the group's row first, as it must for a
@@ -346,14 +381,7 @@ func (e *env) waitBlockedCount(t *testing.T, n int) {
 // which takes the group's row first, closes a cycle with it.
 func TestCancelAndDeleteOfATaskRetriedMeanwhileDoNotDeadlock(t *testing.T) {
 	t.Parallel()
-	for _, tt := range []struct {
-		name  string
-		act   func(c *taskmill.Client, ctx context.Context, id int64) error
-		after error // what the second Cancel finds
-	}{
-		{"cancel", (*taskmill.Client).Cancel, taskmill.ErrInvalidState},
-		{"delete", (*taskmill.Client).Delete, taskmill.ErrNotFound},
-	} {
+	for _, tt := range removals {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t)
@@ -388,21 +416,62 @@ func TestCancelAndDeleteOfATaskRetriedMeanwhileDoNotDeadlock(t *testing.T) {
 			if err := recv(t, retried, "the retry"); err != nil {
 				t.Fatalf("retry: %v", err)
 			}
-			e.waitBlocked(t, "DELETE FROM {s}.dedupe_keys")
-			// A second operator cancels the task, and waits for the first.
-			again := make(chan error, 1)
-			go func() { again <- e.client.Cancel(ctx, id) }()
-			e.waitBlockedCount(t, 2)
+			e.endWithASecondCancel(t, id, keyTx, acted, tt.after)
+		})
+	}
+}
 
-			if err := keyTx.Commit(ctx); err != nil {
+// An enqueue commits a pending task while a Cancel or a Delete of the same
+// ID is between two of its statements: the first did not see the task, and
+// the next locks the task's row. If the action took a task that it did not
+// see for one without a FIFO group, it now holds a pending task's row
+// without the group's row.
+func TestCancelAndDeleteOfATaskEnqueuedMeanwhileDoNotDeadlock(t *testing.T) {
+	t.Parallel()
+	for _, tt := range removals {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			ctx := t.Context()
+			opts := &taskmill.EnqueueOptions{GroupKey: "g", DedupeKey: "k"}
+			e.enqueue(t, sendEmail{To: "head"}, &taskmill.EnqueueOptions{GroupKey: "g"})
+			// The task is enqueued behind the head, in a transaction that
+			// stays open.
+			enqueueTx := e.begin(t)
+			res, err := e.client.EnqueueTx(ctx, taskmill.Pgx(enqueueTx), sendEmail{To: "next"}, opts)
+			if err != nil {
 				t.Fatal(err)
 			}
-			if err := recv(t, acted, "the action"); err != nil {
-				t.Fatalf("%s: %v", tt.name, err)
+			// A lock on the table waits for that transaction. Until it is
+			// granted and released, whoever comes to lock a row of the table
+			// waits behind it, but a plain read goes through.
+			tableTx := e.begin(t)
+			tableLocked := make(chan error, 1)
+			go func() {
+				_, err := tableTx.Exec(ctx, replaceSchema("LOCK TABLE {s}.tasks IN EXCLUSIVE MODE", e.schema))
+				tableLocked <- err
+			}()
+			e.waitBlocked(t, "LOCK TABLE {s}.tasks")
+			// The action reads no such task, and waits to lock its row.
+			acted := make(chan error, 1)
+			go func() { acted <- tt.act(e.client, ctx, res.ID) }()
+			e.waitBlocked(t, "FROM {s}.tasks WHERE id = $1")
+
+			// The enqueue commits: the task is there, and pending. The
+			// action gets its row once the table is free, and stops at the
+			// dedupe key.
+			if err := enqueueTx.Commit(ctx); err != nil {
+				t.Fatal(err)
 			}
-			if err := recv(t, again, "the second cancel"); !errors.Is(err, tt.after) {
-				t.Fatalf("the second cancel: got %v, want %v", err, tt.after)
+			if err := recv(t, tableLocked, "the lock on the table"); err != nil {
+				t.Fatal(err)
 			}
+			keyTx := e.begin(t)
+			e.txExec(t, keyTx, "SELECT FROM {s}.dedupe_keys FOR UPDATE")
+			if err := tableTx.Rollback(ctx); err != nil {
+				t.Fatal(err)
+			}
+			e.endWithASecondCancel(t, res.ID, keyTx, acted, tt.after)
 		})
 	}
 }

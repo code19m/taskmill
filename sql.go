@@ -363,9 +363,16 @@ SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(g
 FROM {s}.task_history WHERE id = $1
 LIMIT 1`),
 
-		// taskGrouped reports whether task $1 is in a FIFO group, which never
-		// changes.
-		taskGrouped: q(`SELECT group_key IS NOT NULL FROM {s}.tasks WHERE id = $1`),
+		// taskGrouped reports whether task $1 can be in a FIFO group, which
+		// never changes: a task with a group key can, unless it is completed
+		// and in history, which it does not leave. It returns no row for a
+		// task that it does not see: there is none, or its enqueue has not
+		// committed yet.
+		taskGrouped: q(`
+SELECT group_key IS NOT NULL FROM {s}.tasks WHERE id = $1
+UNION ALL
+SELECT false FROM {s}.task_history WHERE id = $1
+LIMIT 1`),
 
 		// lockTask locks a task's row and returns its state; if $2, only if
 		// the task is pending, and without waiting for the row of a task that

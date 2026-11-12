@@ -227,13 +227,14 @@ All notable changes to taskmill are recorded here. The format follows
   matches the first value only, here day 1.
 - `Cancel`, `CancelTx`, and `Delete` could fail with PostgreSQL's
   `deadlock detected` (SQLSTATE 40P01) after a second, and a bulk action
-  with a lock timeout, when another `Cancel`, a `Retry`, or a worker changed
-  the same task of a FIFO group at the same moment. They decided which row
-  to lock first, the task's or its group's, from a state that could change
-  before they held the lock. Now they check the state again under the lock,
-  and lock in the other order if it changed. For a task of a FIFO group,
-  they use a savepoint for this, named `taskmill_take_task`; `CancelTx`
-  sets it in your transaction and releases it.
+  with a lock timeout, when another `Cancel`, a `Retry`, a worker, or the
+  commit of the task's enqueue changed the same task of a FIFO group at the
+  same moment. They decided which row to lock first, the task's or its
+  group's, from a state that could change before they held the lock. Now
+  they check the state again under the lock, and lock in the other order if
+  it changed. For a task of a FIFO group, and for one whose enqueue they do
+  not see yet, they use a savepoint for this, named `taskmill_take_task`;
+  `CancelTx` sets it in your transaction and releases it.
 - When two producers enqueued the same dedupe key just after its window
   ended, one created the task, as it should, but the other's
   `EnqueueResult.ID` named the old task that held the key before. Now it
