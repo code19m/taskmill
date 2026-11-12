@@ -613,12 +613,109 @@ func TestListSomeGroups(t *testing.T) {
 	b := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"})
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "c"})
 	a2 := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
-	page, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{GroupKeys: []string{"a", "b"}}})
-	if err != nil {
-		t.Fatal(err)
+	for _, c := range []struct {
+		groups []string
+		want   []int64
+	}{{[]string{"a", "b"}, []int64{a2, b, a1}}, {[]string{"a"}, []int64{a2, a1}}} {
+		page, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{GroupKeys: c.groups}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ids(page.Tasks); !slices.Equal(got, c.want) {
+			t.Fatalf("groups %v: got %v, want %v", c.groups, got, c.want)
+		}
 	}
-	if got := ids(page.Tasks); !slices.Equal(got, []int64{a2, b, a1}) {
-		t.Fatalf("got %v, want %v", got, []int64{a2, b, a1})
+}
+
+func TestListSomeStatesAndKinds(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.rawGroups = true // the pending task is written by hand, without its group
+	// One task in each state, of a kind named after the state.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key, lease_expires_at, finalized_at)
+	           SELECT 'default', s, s::{s}.task_state, now(), '{}', 1, CASE WHEN s = 'pending' THEN 'g' END,
+	                  CASE WHEN s = 'running' THEN now() END, CASE WHEN s IN ('dead', 'canceled') THEN now() END
+	           FROM unnest('{scheduled,pending,available,running,retryable,dead,canceled}'::text[]) AS s`)
+	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+	                                         priority, attempt, max_attempts, payload, metadata, errors)
+	           VALUES (100, now(), 'default', now(), 'completed', now(), 'w', now(), 2, 1, 1, '{}', '{}', '[]')`)
+	list := func(filter taskmill.TaskFilter) []taskmill.State {
+		t.Helper()
+		page, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: filter})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var states []taskmill.State
+		for _, task := range page.Tasks {
+			if string(task.State) != task.Kind {
+				t.Fatalf("task %d of kind %s is listed as %s", task.ID, task.Kind, task.State)
+			}
+			states = append(states, task.State)
+		}
+		slices.Sort(states)
+		return states
+	}
+	all := []taskmill.State{
+		taskmill.StateAvailable, taskmill.StateCanceled, taskmill.StateCompleted, taskmill.StateDead,
+		taskmill.StatePending, taskmill.StateRetryable, taskmill.StateRunning, taskmill.StateScheduled,
+	}
+	if got := list(taskmill.TaskFilter{}); !slices.Equal(got, all) {
+		t.Fatalf("no filter: got %v, want %v", got, all)
+	}
+	for _, s := range all {
+		if got := list(taskmill.TaskFilter{States: []taskmill.State{s}}); !slices.Equal(got, []taskmill.State{s}) {
+			t.Errorf("state %s: got %v", s, got)
+		}
+		if got := list(taskmill.TaskFilter{Kinds: []string{string(s)}}); !slices.Equal(got, []taskmill.State{s}) {
+			t.Errorf("kind %s: got %v", s, got)
+		}
+	}
+	two := []taskmill.State{taskmill.StateCompleted, taskmill.StateDead}
+	if got := list(taskmill.TaskFilter{States: two}); !slices.Equal(got, two) {
+		t.Errorf("states %v: got %v", two, got)
+	}
+	if got := list(taskmill.TaskFilter{Kinds: []string{"completed", "dead"}}); !slices.Equal(got, two) {
+		t.Errorf("kinds of %v: got %v", two, got)
+	}
+}
+
+// A page of tasks reads about its own rows where an index holds the rows of
+// its filters, or gives them in the order of their IDs: not the newer tasks
+// of other queues, however many they are.
+func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.rawGroups = true // pending tasks are written by hand, without their groups
+	// The oldest tasks are those of the queue "rare": pending ones of two
+	// groups, and completed ones. The others are newer.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key)
+	           SELECT CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, 'email.send',
+	                  CASE WHEN i <= 400 THEN 'pending' ELSE 'available' END::{s}.task_state, now(), '{}', 1,
+	                  CASE WHEN i <= 400 THEN 'g' || i % 2 END
+	           FROM generate_series(1, 100000) i`)
+	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+	                                         priority, attempt, max_attempts, payload, metadata, errors)
+	           SELECT 1000000 + i, now(), CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, now(), 'email.send', now(), 'w', now(),
+	                  2, 1, 1, '{}', '{}', '[]'
+	           FROM generate_series(1, 100000) i`)
+	e.exec(t, "ANALYZE {s}.tasks")
+	e.exec(t, "ANALYZE {s}.task_history")
+
+	rare := []string{"rare"}
+	for _, filter := range []taskmill.TaskFilter{
+		{Queues: rare, States: []taskmill.State{taskmill.StateCompleted}},
+		{Queues: rare, States: []taskmill.State{taskmill.StatePending}, GroupKeys: []string{"g1"}},
+		{Queues: rare, States: []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}},
+	} {
+		const limit = 50
+		read, err := taskmill.ListRowsRead(t.Context(), e.client, &taskmill.ListParams{Filter: filter, Limit: limit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A page reads one row past its limit, to know whether more follow.
+		if read > limit+1 {
+			t.Errorf("%+v: read %d rows of tasks, want at most %d", filter, read, limit+1)
+		}
 	}
 }
 

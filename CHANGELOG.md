@@ -139,6 +139,15 @@ All notable changes to taskmill are recorded here. The format follows
   the default, each fill also took about 0.1 seconds, where it now takes
   about 2 milliseconds: the sort made PostgreSQL compile the statement at
   every run. PostgreSQL 17 plans it as they do, and 18 did not compile it.
+- `Client.List` and the dashboard's task list read a page through the index
+  that fits their filters. A list of one queue's completed tasks, of one
+  FIFO group's waiting tasks (which a task's page shows), or of the dead
+  tasks of a queue that has few of them read every newer task first: with
+  3.4 million tasks and 1.5 million completed ones, 0.5 to 2 seconds a
+  page, and past the 5-second limit on a larger table. Such a list now
+  reads about the tasks it shows. A list of one state across all queues,
+  such as every dead task, still reads the newer tasks of other states
+  first.
 
 ### Security
 

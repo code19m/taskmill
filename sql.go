@@ -1096,22 +1096,24 @@ ORDER BY w.id`),
 
 		// listTasks pages through live tasks and history, newest first. Each
 		// branch is limited on its own, so both can use their indexes. It runs
-		// with custom plans, so that the planner sees which filters are set.
+		// with custom plans, so that the planner sees which filters are set,
+		// and its filters are written so that the planner also sees a single
+		// queue or group and the selected states: see inList and inStates.
 		listTasks: q(`
 SELECT ` + taskColumns + ` FROM (
     (SELECT ` + taskColumns + ` FROM {s}.tasks
-     WHERE $6 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
-       AND (cardinality($2::text[]) = 0 OR state = ANY($2::text[]::{s}.task_state[]))
-       AND (cardinality($3::text[]) = 0 OR kind = ANY($3::text[]))
-       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4
+     WHERE $6 AND ` + inList(`queue`, `$1::text[]`) + `
+       AND (cardinality($2::text[]) = 0 OR ` + inStates(`$2::text[]`) + `)
+       AND ` + inList(`kind`, `$3::text[]`) + `
+       AND ` + inList(`group_key`, `$8::text[]`) + ` AND id < $4
      ORDER BY id DESC LIMIT $5)
     UNION ALL
     (SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(group_key, ''),
             metadata, payload, errors, created_at, run_at, attempted_at, finalized_at
      FROM {s}.task_history
-     WHERE $7 AND (cardinality($1::text[]) = 0 OR queue = ANY($1::text[]))
-       AND (cardinality($3::text[]) = 0 OR kind = ANY($3::text[]))
-       AND (cardinality($8::text[]) = 0 OR group_key = ANY($8::text[])) AND id < $4
+     WHERE $7 AND ` + inList(`queue`, `$1::text[]`) + `
+       AND ` + inList(`kind`, `$3::text[]`) + `
+       AND ` + inList(`group_key`, `$8::text[]`) + ` AND id < $4
      ORDER BY id DESC LIMIT $5)
 ) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
        created_at, run_at, attempted_at, finalized_at)
@@ -1340,6 +1342,31 @@ SELECT paused FROM s`),
 UPDATE {s}.schedules SET paused_at = CASE WHEN $2 THEN coalesce(paused_at, now()) END, updated_at = now()
 WHERE name = $1`),
 	}
+}
+
+// inList matches the rows whose column is among the values of the text array
+// param, or every row if param is empty. It compares a single value with =,
+// so that a custom plan can read an index that leads with the column in the
+// order of the index's next column. Through a list, even a list of one
+// value, the planner does not see that order.
+func inList(column, param string) string {
+	return `CASE cardinality(` + param + `) WHEN 0 THEN true WHEN 1 THEN ` + column + ` = (` + param + `)[1]
+            ELSE ` + column + ` = ANY(` + param + `) END`
+}
+
+// inStates matches the tasks whose state is among the names in the text
+// array param. It tests each state as a literal, and only if param names it,
+// so that a custom plan sees which states are left, and which partial indexes
+// hold them. A cast of param to the enum hides them: it is not evaluated when
+// the statement is planned.
+func inStates(param string) string {
+	var tests []string
+	for _, s := range allStates {
+		if s != StateCompleted {
+			tests = append(tests, `(state = '`+string(s)+`' AND '`+string(s)+`' = ANY(`+param+`))`)
+		}
+	}
+	return `(` + strings.Join(tests, ` OR `) + `)`
 }
 
 // countTasks returns the statement that counts tasks per state, up to one

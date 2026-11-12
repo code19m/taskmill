@@ -253,6 +253,24 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	})
 }
 
+// ListRowsRead runs the read of a page of tasks on params, as List runs it,
+// under EXPLAIN ANALYZE, and returns how many rows its scans of the task
+// tables read.
+func ListRowsRead(ctx context.Context, c *Client, params *ListParams) (int64, error) {
+	limit, before, err := listBounds(params)
+	if err != nil {
+		return 0, err
+	}
+	m, err := match(&params.Filter, allStates)
+	if err != nil {
+		return 0, err
+	}
+	args := []any{m.queues, m.states, m.kinds, before, limit + 1, len(m.states) > 0, m.history, m.groups}
+	return rowsRead(ctx, c, "SET LOCAL plan_cache_mode = force_custom_plan", c.sql.listTasks, args, func(rel string) bool {
+		return rel == "tasks" || strings.HasPrefix(rel, "task_history")
+	})
+}
+
 // GroupRowsRead runs the read of a page of groups on params, as Groups runs
 // it, under EXPLAIN ANALYZE, and returns how many rows its scans of groups
 // read.
