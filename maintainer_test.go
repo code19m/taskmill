@@ -182,6 +182,26 @@ func TestMaintainerStoppedWhileRenewingResigns(t *testing.T) {
 	}
 }
 
+// A worker can hold the maintainer's lease without knowing it: a renewal
+// failed, as here, or the answer to its election was lost. When it stops, it
+// must give the lease up all the same.
+func TestWorkerThatForgotItLeadsStillResigns(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	stop := runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+
+	// From now on, every renewal fails, and the lease stays in the table.
+	e.exec(t, "ALTER TABLE {s}.leader ADD CONSTRAINT no_renewal CHECK (false) NOT VALID")
+	waitFor(t, "the worker to stop leading", func() bool { return logs.count("no longer maintainer") == 1 })
+
+	stop()
+	if n := e.count(t, "SELECT count(*) FROM {s}.leader"); n != 0 {
+		t.Fatal("the worker stopped without resigning; another worker waits for its lease to expire")
+	}
+}
+
 // TestStoppingWorkerHandsMaintenanceOverBeforeItDrains checks that a worker
 // resigns as maintainer when it starts to stop, not when its running tasks
 // end: another worker leads at once, and enqueues the runs of its schedules.

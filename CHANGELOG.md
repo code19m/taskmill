@@ -90,6 +90,11 @@ All notable changes to taskmill are recorded here. The format follows
   The database now applies the period itself, and `Settings` reads it
   without overflow. The longest duration, about 292 years, keeps completed
   tasks for good.
+- A worker that held the maintainer's lease without knowing it kept the
+  lease when it stopped: after a renewal that failed, or an election whose
+  answer was lost while the worker stopped. No worker then led until the
+  lease expired, up to 10 seconds, so delayed tasks, retries, and schedules
+  waited. A stopping worker now gives up the lease whatever it knows.
 
 ### Security
 

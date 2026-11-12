@@ -175,8 +175,8 @@ func (m *maintainer) elect(ctx context.Context) bool {
 	var id string
 	err := m.c.pool.QueryRow(ctx, m.c.sql.electLeader, m.w.id, m.w.timing.leaderLease.Microseconds()).Scan(&id)
 	if err != nil && ctx.Err() != nil {
-		// The worker stops. A leader stays one, so that it resigns, and
-		// another worker takes over at once, not once the lease expires.
+		// The worker stops, and the statement may have committed all the
+		// same. Whatever this worker knows, resign gives the lease up.
 		return false
 	}
 	leader := err == nil
@@ -206,13 +206,17 @@ func (m *maintainer) elect(ctx context.Context) bool {
 	return leader
 }
 
+// resign gives up the maintainer's lease when the worker stops, so that
+// another worker takes over at once, not once the lease expires. It asks the
+// database even if this worker does not know that it leads: an election
+// whose answer was lost, or a renewal that failed, leaves a lease that only
+// the database knows of. For a worker without a lease, the statement changes
+// nothing and notifies nobody.
 func (m *maintainer) resign(ctx context.Context) {
-	if !m.leader.Swap(false) {
-		return
-	}
+	led := m.leader.Swap(false)
 	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
-	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignLeader, m.w.id, m.c.schema); err != nil {
+	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignLeader, m.w.id, m.c.schema); err != nil && led {
 		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "resign maintainer failed; another worker leads when the lease expires",
 			slog.Any(logKeyError, err))
 	}
