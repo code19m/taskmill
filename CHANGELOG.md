@@ -82,7 +82,7 @@ All notable changes to taskmill are recorded here. The format follows
 - `Retry` and `RetryMatching` did not start a new wait for a handler if the
   task had been canceled while it waited. More than an hour after the task's
   `no_handler` note, the next worker without the handler made the retried
-  task dead at once. A retry now removes that note, so the wait starts
+  task dead right away. A retry now removes that note, so the wait starts
   again, as documented.
 
 ## [0.5.0] - 2026-11-12
