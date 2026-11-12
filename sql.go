@@ -608,6 +608,11 @@ DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[])`),
 		// the picked tasks through an array of their IDs: a join with the
 		// picked rows can make a generic plan scan the whole table, as the
 		// planner cannot know how few rows LIMIT $2 returns.
+		//
+		// The lease counts from clock_timestamp(), the moment the task is
+		// taken, not from now(), the start of the transaction: the fetch of
+		// a queue with a concurrency limit waits for the queue's row first,
+		// and that wait must not be taken off the lease.
 		fetch: q(`
 WITH picked AS (
     SELECT id FROM {s}.tasks
@@ -620,7 +625,7 @@ UPDATE {s}.tasks t
 SET state = 'running',
     attempt = t.attempt + 1,
     lease_token = t.lease_token + 1,
-    lease_expires_at = now() + $3 * interval '1 microsecond',
+    lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $4
 WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
@@ -646,23 +651,31 @@ UPDATE {s}.tasks t
 SET state = 'running',
     attempt = t.attempt + 1,
     lease_token = t.lease_token + 1,
-    lease_expires_at = now() + $3 * interval '1 microsecond',
+    lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $4
 WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
 RETURNING ` + leasedColumns),
 
 		// leaseTask leases task $1 for $2 microseconds, whatever its run time,
-		// unless it is pending, running, or finished.
+		// unless it is pending, running, or finished. It locks the task's row
+		// before it updates it, so that the lease counts from the end of a
+		// wait for a row that another transaction holds: an UPDATE alone
+		// computes the row's new values before it waits.
 		leaseTask: q(`
+WITH picked AS (
+    SELECT id FROM {s}.tasks
+    WHERE id = $1 AND state IN ('scheduled', 'available', 'retryable')
+    FOR UPDATE
+)
 UPDATE {s}.tasks t
 SET state = 'running',
     attempt = t.attempt + 1,
     lease_token = t.lease_token + 1,
-    lease_expires_at = now() + $2 * interval '1 microsecond',
+    lease_expires_at = clock_timestamp() + $2 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $3
-WHERE t.id = $1 AND t.state IN ('scheduled', 'available', 'retryable')
+WHERE t.id = (SELECT id FROM picked)
 RETURNING ` + leasedColumns),
 
 		// lockQueue serializes fetches from a queue with a concurrency limit.

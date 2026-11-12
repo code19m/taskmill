@@ -600,6 +600,116 @@ func TestQueueConcurrencyLimitAcrossWorkers(t *testing.T) {
 	}
 }
 
+// A wait for a row before a task is taken must not be taken off the task's
+// lease: the task would start with a lease that is almost over, and be
+// rescued while it runs.
+func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
+	t.Parallel()
+	const lease, wait = time.Second, 700 * time.Millisecond
+	// measuring returns a handler that sends how much of its lease an attempt
+	// has left when it starts.
+	measuring := func(e *env, left chan<- time.Duration) *taskmill.Handlers {
+		query := replaceSchema("SELECT extract(epoch FROM lease_expires_at - clock_timestamp()) FROM {s}.tasks WHERE id = $1", e.schema)
+		return handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			var secs float64
+			if err := e.pool.QueryRow(ctx, query, task.ID).Scan(&secs); err != nil {
+				return err
+			}
+			left <- time.Duration(secs * float64(time.Second))
+			return nil
+		}, nil)
+	}
+	// holdThenFree keeps tx's row lock for wait once a statement of the
+	// worker waits for it, then frees it, and checks the lease that the
+	// handler finds.
+	holdThenFree := func(t *testing.T, e *env, tx pgx.Tx, blocked string, left <-chan time.Duration) {
+		t.Helper()
+		e.waitBlocked(t, blocked)
+		time.Sleep(wait)
+		if err := tx.Rollback(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if d := recv(t, left, "the handler to start"); d < lease/2 {
+			t.Fatalf("the handler started with %s of its %s lease left: the wait for the row was taken off the lease", d, lease)
+		}
+	}
+
+	t.Run("fetch from a queue with a limit", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t)
+		e.limitDefaultQueue(t, 5)
+		left := make(chan time.Duration, 1)
+		w := newWorker(t, e, &taskmill.WorkerConfig{
+			Handlers: measuring(e, left), Queues: defaultQueue(1), LeaseDuration: lease,
+			NoMaintainer: true, // nothing rescues: the test only measures the lease
+		})
+		// Another fetch of the queue holds its row, as a worker does that
+		// stalls in the middle of its fetch.
+		tx := e.begin(t)
+		e.txExec(t, tx, "SELECT FROM {s}.queues WHERE name = 'default' FOR UPDATE")
+		e.enqueue(t, sendEmail{}, nil)
+		startWorker(t, w)
+		holdThenFree(t, e, tx, "SELECT max_running FROM {s}.queues", left)
+	})
+	t.Run("RunTask", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t)
+		left := make(chan time.Duration, 1)
+		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: measuring(e, left), LeaseDuration: lease})
+		id := e.enqueue(t, sendEmail{}, nil)
+		// Another transaction holds the task's row, as CancelTx does until
+		// its caller commits or rolls back.
+		tx := e.begin(t)
+		e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", id)
+		done := make(chan error, 1)
+		go func() {
+			_, err := w.RunTask(t.Context(), id)
+			done <- err
+		}()
+		holdThenFree(t, e, tx, "{s}.tasks", left)
+		if err := recv(t, done, "RunTask to return"); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// A fetch from a queue with a limit waits only briefly for the queue's row.
+// While another transaction holds the row, the fetch gives up, the worker
+// says so, and it fetches again once the row is free.
+func TestLimitedFetchGivesUpOnAHeldQueueRow(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	e.limitDefaultQueue(t, 5)
+	ran := make(chan struct{}, 1)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			ran <- struct{}{}
+			return nil
+		}, nil),
+		Queues:       defaultQueue(1),
+		NoMaintainer: true,
+	})
+
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.queues WHERE name = 'default' FOR UPDATE")
+	e.enqueue(t, sendEmail{}, nil)
+	startWorker(t, w)
+	waitFor(t, "the fetch to give up on the held row", func() bool {
+		return len(operationLines(logs.all())["fetch tasks"]) > 0
+	})
+	select {
+	case <-ran:
+		t.Fatal("the task ran while another transaction held its queue's row")
+	default:
+	}
+
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, ran, "the task to run once the row is free")
+}
+
 func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

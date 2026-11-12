@@ -176,14 +176,15 @@ func (w *Worker) fillBatches(ctx context.Context, q *queueState, lease leaseFunc
 }
 
 // beginLimited begins the fetch transaction of a queue with a concurrency
-// limit, and returns how many more of its tasks may run.
+// limit, and returns how many more of its tasks may run. It fails if another
+// transaction holds the queue's row for longer than limitedSettings allow.
 func (w *Worker) beginLimited(ctx context.Context, q *queueState) (pgx.Tx, int, error) { //nolint:ireturn // pgx represents a transaction as an interface
 	tx, err := w.client.pool.Begin(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
 	allowed := 0
-	if _, err = tx.Exec(ctx, planSettings); err == nil {
+	if _, err = tx.Exec(ctx, limitedSettings); err == nil {
 		allowed, err = w.capacity(ctx, tx, q.name)
 	}
 	if err != nil {
@@ -234,6 +235,15 @@ func (w *Worker) capacity(ctx context.Context, tx pgx.Tx, queue string) (int, er
 // every fetch. Turning sorts and bitmap scans off for the fetch's transaction
 // rules that out.
 const planSettings = `SELECT set_config('enable_sort', 'off', true), set_config('enable_bitmapscan', 'off', true)`
+
+// limitedSettings are planSettings for the fetch transaction of a queue with
+// a concurrency limit. They also bound its wait for the queue's row to one
+// second. The queue's fetches lock that row in turn, each for a moment, so a
+// longer wait means that some transaction holds it, such as a stalled
+// worker's. The fetch then fails, and the queue is fetched again when it is
+// next woken or polled, instead of each waiting worker tying up a connection,
+// and being kept from stopping, for as long as the row is held.
+const limitedSettings = planSettings + `, set_config('lock_timeout', '1s', true)`
 
 // leaseAlone runs a fetch statement for up to limit tasks of q, with extra
 // arguments after the standard four, in a transaction of its own with

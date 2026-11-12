@@ -7,6 +7,23 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A task of a queue with `MaxRunning` could start with a lease that was
+  almost over, or already over. Its lease counted from the start of the
+  fetch, before the fetch waited for the queue's row, which another worker's
+  fetch can hold. The maintainer then rescued the task while it ran: the task
+  used an attempt with the code `lease_lost` and ran twice, or became dead
+  with `MaxAttempts: 1`. A lease now counts from the moment the task is
+  taken. This holds for `Worker.RunTask` too, which lost the time it waited
+  for a task's row that another transaction held.
+- A fetch from a queue with `MaxRunning` waits at most one second for the
+  queue's row, not 30. If a transaction holds the row longer, such as a
+  stalled worker's, the fetch fails, the worker logs `operation failed` for
+  `fetch tasks` with a lock timeout, and it fetches again when the queue is
+  next woken or polled. Before, each worker of the queue kept a connection
+  waiting, and could not stop until the wait ended.
+
 ## [0.5.0] - 2026-11-12
 
 ### Changed
