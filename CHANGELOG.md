@@ -200,6 +200,11 @@ All notable changes to taskmill are recorded here. The format follows
   requested run and the regular run both happen. A request made while a run
   of the schedule is already due adds no run: that run starts within about
   a second anyway.
+- `taskmilltest.Run` returned a nil error when the handler never ran,
+  because the task's payload did not decode into its args, for example
+  with a field of an interface type. A test that checked only the error
+  passed. Now `Run` returns an error that says the handler did not run, and
+  why.
 
 ### Security
 

@@ -3,6 +3,7 @@ package taskmilltest_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -125,6 +126,40 @@ func TestRunReportsPanics(t *testing.T) {
 	info, err := taskmilltest.Run(t, client, h, greet{})
 	if err == nil || info.State != taskmill.StateRetryable || info.Errors[0].Code != taskmill.CodePanic {
 		t.Fatalf("got %s with %+v, %v", info.State, info.Errors, err)
+	}
+}
+
+// measure has a payload that encodes but does not decode, because its field
+// is an interface: the kind of mistake that a handler's test should catch.
+type measure struct {
+	Shape shape `json:"shape"`
+}
+
+func (measure) Kind() string { return "measure" }
+
+type shape interface{ Area() float64 }
+
+type square struct {
+	Side float64 `json:"side"`
+}
+
+func (s square) Area() float64 { return s.Side * s.Side }
+
+func TestRunReportsAHandlerThatDidNotRun(t *testing.T) {
+	t.Parallel()
+	client := taskmilltest.NewClient(t, testdb.Pool(t), nil)
+	ran := false
+	h := taskmill.HandlerFunc[measure](func(context.Context, *taskmill.Task[measure]) error {
+		ran = true
+		return nil
+	})
+	info, err := taskmilltest.Run(t, client, h, measure{Shape: square{Side: 2}})
+	if ran || info.State != taskmill.StateDead || info.Errors[0].Code != taskmill.CodeInvalidPayload {
+		t.Fatalf("the handler ran (%v), or the task is not dead of its payload: %s with %+v", ran, info.State, info.Errors)
+	}
+	// A test that checks only the error must not pass, and the error says why.
+	if err == nil || !strings.Contains(err.Error(), info.Errors[0].Message) {
+		t.Fatalf("got the error %v, want one with the reason: %s", err, info.Errors[0].Message)
 	}
 }
 

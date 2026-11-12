@@ -105,8 +105,10 @@ func Enqueued[A taskmill.Args](tb testing.TB, client *taskmill.Client) []*taskmi
 // and records the outcome. The attempt holds a real lease, so h may complete
 // the task with [taskmill.Task.CompleteTx]. Run does not retry: a failed task
 // stays retryable or dead. It returns the task afterwards, and the error h
-// returned, or an error describing its panic. To run a task enqueued with
-// other options, or again after a failure, use [taskmill.Worker.RunTask].
+// returned, or an error describing its panic. If h did not run, because the
+// task's payload does not decode into A, Run returns an error that says so,
+// and the task is dead. To run a task enqueued with other options, or again
+// after a failure, use [taskmill.Worker.RunTask].
 func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Handler[A], args A) (*taskmill.TaskInfo, error) {
 	tb.Helper()
 	res, err := client.Enqueue(tb.Context(), args, nil)
@@ -115,9 +117,11 @@ func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Han
 	}
 
 	var handlerErr error
+	ran := false
 	var hs taskmill.Handlers
 	if h != nil {
 		taskmill.AddHandler(&hs, taskmill.HandlerFunc[A](func(ctx context.Context, task *taskmill.Task[A]) error {
+			ran = true
 			defer func() {
 				if r := recover(); r != nil {
 					handlerErr = fmt.Errorf("handler panicked: %v", r)
@@ -137,6 +141,15 @@ func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Han
 	info, err := w.RunTask(tb.Context(), res.ID)
 	if err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
+	}
+	if !ran {
+		// The worker ended the attempt before the handler, and recorded why
+		// as the task's last error.
+		reason := "the task is " + string(info.State)
+		if n := len(info.Errors); n > 0 {
+			reason = info.Errors[n-1].Message
+		}
+		return info, fmt.Errorf("handler did not run: %s", reason)
 	}
 	return info, handlerErr
 }
