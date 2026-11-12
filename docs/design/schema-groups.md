@@ -79,7 +79,38 @@ group key: `COLLATE "C"` in SQL, and Go's string order in code, which is the
 same. A `pending` task's row is locked only after its group's row: promotion
 takes them in that order, and `Cancel` and `Delete` lock a pending task's
 group first. Locking in one order prevents deadlocks, for example between a
-`Cancel` and the promotion of the same task.
+`Cancel` and the promotion of the same task. The row of any other task is
+locked before its group's row, as a worker that records a failure and a
+`Retry` do, or only if it is free, as completions and bulk actions do. So a
+transaction that holds a group's row never waits for the row of a task that
+is not pending.
+
+`Cancel` and `Delete` cannot know which order applies before they hold a
+lock: a `Retry`, a promotion, or the task's own enqueue may commit between
+the read of the task's state and the lock. So they check again under the
+lock. With the group's row, which every change into and out of `pending`
+takes, they lock the task only if it is still pending. With the task's row
+alone, they read the state that the lock protects. If the task changed
+sides, they roll their transaction back, which releases what they hold, and
+start again: the new read locks in the other order. After five tries they
+continue with the locks they hold, and PostgreSQL's deadlock detection is
+the last resort.
+
+`CancelTx` cannot do this. It runs in the caller's transaction, which it
+may not roll back, and a savepoint there costs more than it saves. Each
+savepoint that writes is a subtransaction, and past 64 of them in one
+transaction, every session's visibility checks slow down until that
+transaction ends. A released savepoint also makes whoever waits for a row
+that it locked wait for the caller's whole transaction. So `CancelTx`
+continues with the locks as it took them, which may be the wrong order. Then
+it can deadlock with another transaction that changes the same task or its
+group at the same moment: a retry of the task, the end of the group's head,
+which promotes the task while a cancel or a delete of it comes in, or an
+enqueue that commits between the two statements of `CancelTx`. PostgreSQL
+ends one of the transactions with a deadlock error (SQLSTATE 40P01), which
+may hit the other one. `Cancel`, `Delete`, and `Retry` run again when it
+hits them, within their five tries. Any other transaction that got the
+error can be run again by its caller.
 
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the
@@ -126,9 +157,12 @@ key finds no key row, which leaves the key without its task.
 A duplicate's row reports the task that holds the key, found in the same
 statement. If that task's transaction committed while the statement waited
 for the key, the statement cannot see it, and the client reads the key again
-in a second statement. Two concurrent enqueues of the same key cannot both
-succeed: the second waits on the first's key and then finds it taken. A
-duplicate wastes one sequence value, which is harmless.
+in a second statement. It does the same when the holder it sees is one
+whose window ended: the statement did not get that key, so another enqueue
+claimed it meanwhile, and its task is the one to report. Two concurrent
+enqueues of the same key cannot both succeed: the second waits on the
+first's key and then finds it taken. A duplicate wastes one sequence value,
+which is harmless.
 
 `Cancel` and `Delete` delete the task's key, through the index on `task_id`,
 so the same key can be enqueued again right away. A completed or dead task

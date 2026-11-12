@@ -1,11 +1,15 @@
 package taskmill
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"math/big"
+	"slices"
 	"strconv"
 	"time"
 
@@ -21,11 +25,20 @@ import (
 // define once they have not run or changed for a day.
 //
 // Runs that are missed while no maintainer runs, or while the schedule is
-// paused, collapse into one run. The expression is read on the wall clock of
-// Location, so daylight saving time behaves as in classic cron: a time that
-// the clocks skip when they go forward runs right after the jump, and a time
-// that repeats when they go back runs once. The task's RunAt is the time it
-// was scheduled for.
+// paused, collapse into one run, for the first time that was missed. Each
+// run's task carries the schedule's name and the time the run is for in its
+// metadata; see [MetadataSchedule]. In a handler, read that time with
+// [TaskInfo.ScheduledFor]: the task's RunAt is that time only until the
+// first retry or snooze moves it.
+//
+// The expression is read on the wall clock of Location, and each time on
+// that clock that it names runs once. When clocks go forward, every time
+// that they skip runs after the jump, as long after it as the time is into
+// the skipped hour: 02:30 runs at 03:30. When clocks go back, a time in the
+// repeated hour runs the first time the clock shows it, and not the second.
+// So a schedule that runs several times an hour, such as "*/15 * * * *",
+// makes no run during the second pass of that hour, where classic cron
+// keeps it running.
 type Schedule struct {
 	// Name identifies the schedule, in 1 to 128 characters. Schedules are
 	// kept in the database by name, so renaming one creates a new schedule.
@@ -55,6 +68,51 @@ type Schedule struct {
 	// DedupeKey, or DedupeWindow.
 	Args    Args
 	Options *EnqueueOptions
+}
+
+// Metadata keys that taskmill sets itself on every task that a [Schedule]
+// enqueues. Their values never change, whatever happens to the task, so a
+// handler reads the same on every attempt, and the dashboard shows which
+// schedule made a task. taskmill sets its values over those that the
+// schedule's Options, the kind's defaults, or an [EnqueueMiddleware] give
+// the same keys.
+//
+// Keys that start with "taskmill." belong to taskmill, and later releases
+// may add more of them: do not use the prefix for keys of your own. A test
+// of a handler may set these two, so that its task stands for a scheduled
+// run.
+const (
+	// MetadataSchedule holds the name of the schedule that enqueued the
+	// task.
+	MetadataSchedule = "taskmill.schedule"
+
+	// MetadataScheduledFor holds the time that the run is for, in the
+	// format of RFC 3339. Read it with [TaskInfo.ScheduledFor].
+	MetadataScheduledFor = "taskmill.scheduled_for"
+)
+
+// ScheduledFor returns the time that the task's run is for, if a [Schedule]
+// enqueued the task: the time of the timetable, or the time of the request
+// for a run that [Client.RunSchedule] asked for. It is the same on every
+// attempt, unlike RunAt, which a retry, a snooze, or a lost lease moves.
+//
+// The time shows the clock of the schedule's Location, so its day and hour
+// are those that the schedule's expression names. But it carries only the
+// offset from UTC that this Location had at that moment, not the Location
+// with its rules. So for arithmetic on the calendar that may cross a clock
+// change, such as AddDate, first convert the time with In to the schedule's
+// Location. For a Location whose offset is not a whole number of minutes,
+// the time is in UTC.
+//
+// It returns the zero time for a task that no schedule enqueued, and for a
+// run that a maintainer of an older release enqueued, which stored no such
+// time: a handler can fall back to RunAt then.
+func (t *TaskInfo) ScheduledFor() time.Time {
+	at, err := time.Parse(time.RFC3339Nano, t.Metadata[MetadataScheduledFor])
+	if err != nil {
+		return time.Time{}
+	}
+	return at
 }
 
 // ScheduleInfo describes a schedule and its state.
@@ -131,10 +189,35 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 		opts = mergeOptions(opts, *s.Options)
 	}
 	opts.Queue = cmp.Or(opts.Queue, DefaultQueue)
+	c := compiledSchedule{Schedule: s, expr: expr, opts: opts}
+	// Check the task as a run enqueues it: with taskmill's own metadata, at
+	// its longest.
+	run := resolvedTask{meta: opts.Metadata, own: c.ownMetadata(longestScheduledFor)}
+	opts.Metadata = run.metadata()
 	if err := checkScheduledTask(s.Args, opts); err != nil {
 		return compiledSchedule{}, fmt.Errorf("%w (schedule %q)", err, s.Name)
 	}
-	return compiledSchedule{Schedule: s, expr: expr, opts: opts}, nil
+	return c, nil
+}
+
+// longestScheduledFor takes as much room as any value of
+// MetadataScheduledFor: the database keeps times to the microsecond.
+const longestScheduledFor = "2006-01-02T15:04:05.999999+07:00"
+
+// scheduledFor returns the value of MetadataScheduledFor for the run of s
+// that is for the time at: at on the clock of the schedule's location.
+func (s *compiledSchedule) scheduledFor(at time.Time) string {
+	at = at.In(s.Location)
+	if _, offset := at.Zone(); offset%60 != 0 {
+		at = at.UTC() // RFC 3339 has no seconds in an offset, and would lose them
+	}
+	return at.Format(time.RFC3339Nano)
+}
+
+// ownMetadata returns taskmill's own metadata of a run of s, which is stored
+// over the metadata of the schedule's task.
+func (s *compiledSchedule) ownMetadata(scheduledFor string) map[string]string {
+	return map[string]string{MetadataSchedule: s.Name, MetadataScheduledFor: scheduledFor}
 }
 
 // checkScheduledTask validates the task that a schedule enqueues, so that a
@@ -237,16 +320,41 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 		resetNext := st == nil || st.cron != s.Cron || st.timezone != tz
 		_, err = m.c.pool.Exec(ctx, m.c.sql.upsertSchedule,
 			s.Name, s.opts.Queue, s.Args.Kind(), s.Cron, tz, string(payload), next, resetNext)
-		return err
+		if err != nil || resetNext {
+			return err // with a new next run time, no run is due
+		}
+		// Continue to the due run: a definition that differs in every pass,
+		// such as args that encode the time, must not keep it from running.
 	}
 	if st.paused || st.nextRunAt.After(now) {
 		return nil
 	}
+	return m.enqueueRun(ctx, s, st.nextRunAt, now)
+}
 
-	due := st.nextRunAt
-	next, err := s.expr.Next(now.In(s.Location))
+// enqueueRun enqueues the run of s that is due at due, and stores the time of
+// the next regular run.
+func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, now time.Time) error {
+	// A regular run is due at a whole minute of the timetable. Any other
+	// time is the time of a request, which Client.RunSchedule stored.
+	requested := due.In(s.Location).Second() != 0 || due.Nanosecond() != 0
+	// The regular runs missed since a regular run collapse into it, so the
+	// next one comes after now. A requested run stands for no regular run,
+	// so the next one comes after the request: if it is due already, the
+	// next pass enqueues it.
+	after := now
+	if requested {
+		after = due
+	}
+	next, err := s.expr.Next(after.In(s.Location))
 	if err != nil {
 		return err
+	}
+	// The key is the due time, in the unit that tells the two kinds of run
+	// apart: a request may come in the second of a regular run.
+	key := due.Unix()
+	if requested {
+		key = due.UnixMicro()
 	}
 	return pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
 		// An enqueue into a FIFO group waits for the group's row. The election
@@ -260,10 +368,17 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 			return err // another maintainer ran it, or it was paused meanwhile
 		}
 		opts := s.opts
-		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(due.Unix(), 10)
+		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(key, 10)
 		opts.DedupeWindow = max(24*time.Hour, 2*next.Sub(due))
 		opts.RunAt = due // in the past: the task is available right away
-		_, err = m.c.enqueue(ctx, pgxQuerier{q: tx}, []EnqueueParams{{Args: s.Args, Options: &opts}})
+		run, err := resolve(EnqueueParams{Args: s.Args, Options: &opts})
+		if err != nil {
+			return err
+		}
+		// The enqueue middleware sees taskmill's own metadata, and cannot
+		// change it: a handler must find the run's time whatever it does.
+		run.own = s.ownMetadata(s.scheduledFor(due))
+		_, err = m.c.storeThrough(ctx, pgxQuerier{q: tx}, []*resolvedTask{run})
 		return err
 	})
 }
@@ -284,14 +399,47 @@ func (m *maintainer) pruneSchedules(ctx context.Context) {
 	m.pruning.observe(ctx, err)
 }
 
+// jsonEqual reports whether a and b hold the same JSON value, as PostgreSQL's
+// jsonb compares them: numbers by their exact value, so that 0 equals -0 and
+// 100 equals 1e2. jsonb stores numbers in its own form, so comparing their
+// text, or their values as float64, would find a stored payload changed in
+// every pass.
 func jsonEqual(a, b []byte) bool {
 	var x, y any
-	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
-		return false
+	return decodeJSON(a, &x) == nil && decodeJSON(b, &y) == nil && sameJSON(x, y)
+}
+
+// decodeJSON decodes JSON text into v, and keeps each number as its text.
+func decodeJSON(text []byte, v *any) error {
+	dec := json.NewDecoder(bytes.NewReader(text))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
+// sameJSON reports whether two values from decodeJSON are equal.
+func sameJSON(x, y any) bool {
+	switch x := x.(type) {
+	case json.Number:
+		y, ok := y.(json.Number)
+		return ok && (x == y || sameNumber(x, y))
+	case []any:
+		y, ok := y.([]any)
+		return ok && slices.EqualFunc(x, y, sameJSON)
+	case map[string]any:
+		y, ok := y.(map[string]any)
+		return ok && maps.EqualFunc(x, y, sameJSON)
+	default: // a string, a bool, or null
+		return x == y
 	}
-	ax, _ := json.Marshal(x)
-	by, _ := json.Marshal(y)
-	return string(ax) == string(by)
+}
+
+// sameNumber reports whether two JSON numbers have the same value. It is
+// false for a number whose exponent is beyond what math/big reads, a million,
+// which is far beyond what PostgreSQL stores.
+func sameNumber(x, y json.Number) bool {
+	p, okP := new(big.Rat).SetString(x.String())
+	q, okQ := new(big.Rat).SetString(y.String())
+	return okP && okQ && p.Cmp(q) == 0
 }
 
 // Schedules returns every schedule stored in the database.
@@ -331,9 +479,12 @@ func (c *Client) ResumeSchedule(ctx context.Context, name string) error {
 
 // RunSchedule runs a schedule once now, in addition to its timetable. The
 // maintainer enqueues the run within about a second, if it defines the
-// schedule, with the schedule's options, and the task's RunAt is the time of
-// the request. The next regular run stays as it was. It returns [ErrNotFound]
-// for an unknown schedule, and [ErrInvalidState] for a paused one.
+// schedule, with the schedule's options, and the run is for the time of the
+// request: its RunAt at first, and its [TaskInfo.ScheduledFor]. The regular
+// runs stay as they were. A request adds no run while a run of the schedule
+// is due and waits for the maintainer, whether a regular run or an earlier
+// request: that run is the one that runs now. It returns [ErrNotFound] for
+// an unknown schedule, and [ErrInvalidState] for a paused one.
 func (c *Client) RunSchedule(ctx context.Context, name string) error {
 	if err := checkName("schedule name", name, maxNameLength); err != nil {
 		return err

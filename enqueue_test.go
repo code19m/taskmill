@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -96,6 +97,13 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 		{"number with too many digits before the point", rawArgs{Body: json.RawMessage("1e131072")}, nil},
 		{"number with too many digits after the point", rawArgs{Body: json.RawMessage("1e-16384")}, nil},
 		{"zero with too many digits after the point", rawArgs{Body: json.RawMessage("0e-99999")}, nil},
+		// Run times that PostgreSQL cannot store. The first two are common
+		// ways to say "never"; unchecked, they wrap around into the past.
+		{"run time at the largest Unix second", sendEmail{}, &taskmill.EnqueueOptions{RunAt: time.Unix(math.MaxInt64, 0)}},
+		{"run time at Go's largest time", sendEmail{}, &taskmill.EnqueueOptions{RunAt: time.Unix(1<<63-62135596801, 999999999)}},
+		{"run time just after the last timestamp", sendEmail{}, &taskmill.EnqueueOptions{RunAt: lastTimestamp.Add(time.Microsecond)}},
+		{"run time just before the first timestamp", sendEmail{}, &taskmill.EnqueueOptions{RunAt: firstTimestamp.Add(-time.Microsecond)}},
+		{"a kind's default run time after the last timestamp", parked{}, nil},
 	}
 	// Runs after the parallel subtests, once the test's context is canceled.
 	t.Cleanup(func() {
@@ -119,6 +127,40 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 			// The checks run before the query: the caller's transaction goes on.
 			e.txExec(t, tx, "SELECT 1")
 		})
+	}
+}
+
+// The first and last instants that PostgreSQL's timestamptz type holds.
+var (
+	firstTimestamp = time.Date(-4713, time.November, 24, 0, 0, 0, 0, time.UTC)
+	lastTimestamp  = time.Date(294276, time.December, 31, 23, 59, 59, 999_999_000, time.UTC)
+)
+
+// parked is a kind whose default run time is past what PostgreSQL stores.
+type parked struct{}
+
+func (parked) Kind() string { return "test.parked" }
+
+func (parked) EnqueueDefaults() taskmill.EnqueueOptions {
+	return taskmill.EnqueueOptions{RunAt: time.Date(300_000, time.January, 1, 0, 0, 0, 0, time.UTC)}
+}
+
+func TestEnqueueStoresRunTimesAtTheEdgesOfTimestamps(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for _, c := range []struct {
+		runAt time.Time
+		state taskmill.State
+	}{
+		{firstTimestamp, taskmill.StateAvailable},
+		{lastTimestamp, taskmill.StateScheduled},
+		// Finer than a microsecond, which is all that PostgreSQL keeps.
+		{lastTimestamp.Add(999 * time.Nanosecond), taskmill.StateScheduled},
+	} {
+		info := e.get(t, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{RunAt: c.runAt}))
+		if want := c.runAt.Truncate(time.Microsecond); info.State != c.state || !info.RunAt.Equal(want) {
+			t.Errorf("run time %s: the task is %s at %s, want %s at %s", c.runAt, info.State, info.RunAt, c.state, want)
+		}
 	}
 }
 
@@ -599,30 +641,41 @@ func TestEnqueueNotifiesListeners(t *testing.T) {
 
 func TestEnqueueFindsADuplicateCommittedWhileItWaited(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
-	opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
-	tx := e.begin(t)
-	first, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{To: "first"}, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, held := range []string{"a new key", "a key whose window ended"} {
+		t.Run(held, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
+			if held != "a new key" {
+				// An earlier task held the key, and the maintainer has not
+				// deleted the key yet.
+				e.enqueue(t, sendEmail{To: "earlier"}, opts)
+				e.exec(t, "UPDATE {s}.dedupe_keys SET expires_at = now() - interval '1 second'")
+			}
+			tx := e.begin(t)
+			first, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{To: "first"}, opts)
+			if err != nil || first.Duplicate {
+				t.Fatalf("the first enqueue: got %+v, %v; want a new task", first, err)
+			}
 
-	// A second enqueue of the key waits for the first one's transaction.
-	type result struct {
-		res taskmill.EnqueueResult
-		err error
-	}
-	second := make(chan result, 1)
-	go func() {
-		res, err := e.client.Enqueue(t.Context(), sendEmail{To: "second"}, opts)
-		second <- result{res, err}
-	}()
-	e.waitBlocked(t, "{s}.dedupe_keys")
-	if err := tx.Commit(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	got := recv(t, second, "the second enqueue")
-	if got.err != nil || !got.res.Duplicate || got.res.ID != first.ID {
-		t.Fatalf("got %+v, %v; want a duplicate of task %d", got.res, got.err, first.ID)
+			// A second enqueue of the key waits for the first one's transaction.
+			type result struct {
+				res taskmill.EnqueueResult
+				err error
+			}
+			second := make(chan result, 1)
+			go func() {
+				res, err := e.client.Enqueue(t.Context(), sendEmail{To: "second"}, opts)
+				second <- result{res, err}
+			}()
+			e.waitBlocked(t, "{s}.dedupe_keys")
+			if err := tx.Commit(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			got := recv(t, second, "the second enqueue")
+			if got.err != nil || !got.res.Duplicate || got.res.ID != first.ID {
+				t.Fatalf("got %+v, %v; want a duplicate of task %d", got.res, got.err, first.ID)
+			}
+		})
 	}
 }

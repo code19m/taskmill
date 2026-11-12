@@ -207,8 +207,8 @@ func (m *maintainer) elect(ctx context.Context) bool {
 }
 
 // resign gives up the maintainer's lease when the worker stops, so that
-// another worker takes over at once, not once the lease expires. It asks the
-// database even if this worker does not know that it leads: an election
+// another worker takes over right away, not once the lease expires. It asks
+// the database even if this worker does not know that it leads: an election
 // whose answer was lost, or a renewal that failed, leaves a lease that only
 // the database knows of. For a worker without a lease, the statement changes
 // nothing and notifies nobody.

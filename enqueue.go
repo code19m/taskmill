@@ -36,6 +36,15 @@ const (
 	maxEnqueueBytes     = 64 << 20 // most payload and metadata of one enqueue call
 )
 
+// PostgreSQL stores the times from minRunAt up to, but not including,
+// endRunAt. The driver does not check: it sends a later time as a number
+// that wraps around, which PostgreSQL reads as a time in the past, or
+// rejects.
+var (
+	minRunAt = time.Date(-4713, time.November, 24, 0, 0, 0, 0, time.UTC) // 4714 BC
+	endRunAt = time.Date(294277, time.January, 1, 0, 0, 0, 0, time.UTC)
+)
+
 // EnqueueOptions control how a task is enqueued. Zero values mean "not set":
 // a field set in the call wins over the kind's defaults (see
 // [ArgsWithDefaults]), which win over taskmill's defaults. Metadata merges
@@ -49,7 +58,9 @@ type EnqueueOptions struct {
 	// Priority orders tasks within the queue. Default: [PriorityNormal].
 	Priority Priority
 
-	// RunAt is the earliest time the task may start. Default: now.
+	// RunAt is the earliest time the task may start. Default: now. It must
+	// be a time that PostgreSQL can store, from 4713 BC to 294276 AD, so a
+	// time that stands for "never", such as Go's largest, is rejected.
 	RunAt time.Time
 
 	// MaxAttempts is how many times the task may run, from 1 to 10,000.
@@ -75,7 +86,11 @@ type EnqueueOptions struct {
 
 	// Metadata is stored with the task and passed to its handler, for
 	// example for tracing. Encoded as JSON, it may take at most 64 KiB,
-	// including what [EnqueueMiddleware] adds. Default: none.
+	// including what [EnqueueMiddleware] adds. Keys that start with
+	// "taskmill." belong to taskmill, such as [MetadataSchedule], and later
+	// releases may add more of them: do not use the prefix for keys of
+	// your own. A test of a handler may set taskmill's keys, so that its
+	// task stands for a scheduled run. Default: none.
 	Metadata map[string]string
 }
 
@@ -120,7 +135,10 @@ type EnqueueTask struct {
 	Kind  string
 
 	// Metadata holds the task's metadata, from [EnqueueOptions.Metadata]. It
-	// is never nil, and middleware may change it before calling next.
+	// is never nil, and middleware may change it before calling next. For a
+	// schedule's run, it also holds taskmill's own keys, such as
+	// [MetadataSchedule]: middleware can read them, but taskmill sets them
+	// again after it, so it cannot change or remove them.
 	Metadata map[string]string
 
 	// Result is set once next returns nil.
@@ -214,18 +232,21 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 		}
 		tasks[i] = t
 	}
-	if len(c.enqueueMiddleware) == 0 {
-		return c.store(ctx, q, tasks)
-	}
 	return c.storeThrough(ctx, q, tasks)
 }
 
-// storeThrough stores tasks through the enqueue middleware.
+// storeThrough stores tasks through the enqueue middleware, if there is any.
+// The middleware sees taskmill's own metadata of a task, and store sets it
+// again after the middleware.
 func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedTask) ([]EnqueueResult, error) {
+	if len(c.enqueueMiddleware) == 0 {
+		return c.store(ctx, q, tasks)
+	}
 	views := make([]*EnqueueTask, len(tasks))
 	for i, t := range tasks {
-		meta := make(map[string]string, len(t.meta)) // t.meta may belong to the caller
+		meta := make(map[string]string, len(t.meta)+len(t.own)) // t.meta may belong to the caller
 		maps.Copy(meta, t.meta)
+		maps.Copy(meta, t.own)
 		views[i] = &EnqueueTask{Queue: t.queue, Kind: t.kind, Metadata: meta}
 	}
 	var results []EnqueueResult
@@ -291,7 +312,7 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 	size := 0 // the payload and metadata of the call
 
 	for i, t := range tasks {
-		meta, err := encodeMetadata(t.meta)
+		meta, err := encodeMetadata(t.metadata())
 		if err != nil {
 			return nil, inBatch(err, i, len(tasks))
 		}
@@ -432,6 +453,19 @@ type resolvedTask struct {
 	dedupeWindow       time.Duration
 	payload            []byte
 	meta               map[string]string // may belong to the caller or the kind: never modified
+	own                map[string]string // taskmill's own metadata, of a schedule's run: stored over meta
+}
+
+// metadata returns the task's metadata as it is stored: meta, and over it
+// taskmill's own.
+func (t *resolvedTask) metadata() map[string]string {
+	if len(t.own) == 0 {
+		return t.meta
+	}
+	all := make(map[string]string, len(t.meta)+len(t.own))
+	maps.Copy(all, t.meta)
+	maps.Copy(all, t.own)
+	return all
 }
 
 // resolve merges a task's options over its kind's defaults and taskmill's,
@@ -660,6 +694,10 @@ func (t *resolvedTask) validate() error {
 	}
 	if t.dedupeWindow < 0 {
 		return invalidArgument("dedupe window must not be negative")
+	}
+	if t.runAt.Before(minRunAt) || !t.runAt.Before(endRunAt) {
+		return invalidArgument("run time %s is outside the range that PostgreSQL stores, 4713 BC to 294276 AD",
+			t.runAt.UTC().Format(time.RFC3339))
 	}
 	return nil
 }

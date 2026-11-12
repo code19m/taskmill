@@ -116,6 +116,9 @@ func (f field) parsePart(part string) (bits uint64, star bool, err error) {
 		if err != nil || step < 1 {
 			return 0, false, fmt.Errorf("invalid step %q in %s field", stepText, f.name)
 		}
+		// Every step beyond the field's range matches the same values: the
+		// first one only. Capping it keeps the loop below from overflowing.
+		step = min(step, f.max+1)
 	}
 
 	lo, hi := f.min, f.max
@@ -165,48 +168,98 @@ var errNoTime = errors.New("cron schedule matches no time in the next five years
 // Next returns the first time after t that the schedule matches, in t's
 // location. It fails if the schedule never matches, such as on February 31.
 //
-// The schedule is matched against the wall clock, so daylight saving time
-// behaves as in classic cron: a time skipped when clocks go forward runs right
-// after the jump, and a time repeated when clocks go back runs once.
+// The schedule is matched against the wall clock, and each wall-clock time
+// that it matches runs once, whatever the clock does. A time that the clock
+// skips, when clocks go forward, runs as far after the jump as it is into the
+// gap, among the times that the clock shows then. A time that the clock shows
+// twice, when clocks go back, runs the first time only. Unlike classic cron,
+// this holds for wildcard schedules too: "*/15 * * * *" makes no run in the
+// repeated hour's second pass.
 func (s *Schedule) Next(t time.Time) (time.Time, error) {
 	loc := t.Location()
+	// moved is when the next skipped time runs, once one is found. It is not
+	// the answer yet: a time that the clock shows may come before it.
+	moved := s.skippedBefore(t)
 	// wall is the wall clock in loc, held as a UTC time so that arithmetic
 	// on it never meets a daylight saving transition.
 	wall := civil(t).Add(time.Minute)
 	for {
 		match, err := s.nextCivil(wall)
 		if err != nil {
-			return time.Time{}, err
+			if moved.IsZero() {
+				return time.Time{}, err
+			}
+			return moved, nil
 		}
-		at := instant(match, loc)
-		if at.After(t) {
+		// The search ends at moved. A time that is later on the wall clock
+		// runs later, whether the clock shows it or skips it too. Without
+		// this end, the search would continue for ever in a location that skips
+		// every time that the schedule matches.
+		if !moved.IsZero() && match.After(civil(moved)) {
+			return moved, nil
+		}
+		at, skipped := instant(match, loc)
+		switch {
+		case skipped && moved.IsZero():
+			moved = at
+		case skipped, !at.After(t):
+			// A skipped time after the first one, or the repeat of a time
+			// that clocks going back already passed.
+		case !moved.IsZero() && moved.Before(at):
+			return moved, nil
+		default:
 			return at, nil
 		}
-		// The wall time occurred earlier: it is the repeat of a time that
-		// clocks going back already passed.
 		wall = match.Add(time.Minute)
 	}
 }
 
-// instant returns when the wall-clock time c happens in loc. A time skipped
-// when clocks go forward moves forward by the length of the jump, and a time
-// that happens twice when clocks go back resolves to its first occurrence.
-func instant(c time.Time, loc *time.Location) time.Time {
-	at := time.Date(c.Year(), c.Month(), c.Day(), c.Hour(), c.Minute(), 0, 0, loc)
-	if !civil(at).Equal(c) {
-		// c falls in a gap. Read with the offset in effect before the jump,
-		// it lands as far after the jump as it is into the gap. Transitions
-		// are months apart, and offsets reach 14 hours, so two days earlier
-		// is safely before this one.
-		_, offset := c.Add(-48 * time.Hour).In(loc).Zone()
-		return c.Add(-time.Duration(offset) * time.Second).In(loc)
+// skippedBefore returns when the first time runs, after t, among the times
+// that the clock skipped at its last change before t. It returns the zero
+// time if there is none: clocks went back, or t is the gap's length or more
+// past the jump, so every skipped time has run.
+func (s *Schedule) skippedBefore(t time.Time) time.Time {
+	jump, _ := t.ZoneBounds()
+	if jump.IsZero() {
+		return time.Time{}
 	}
-	for _, back := range []time.Duration{time.Hour, 30 * time.Minute} {
-		if earlier := at.Add(-back); civil(earlier).Equal(c) {
-			return earlier
-		}
+	_, after := jump.Zone()
+	_, before := jump.Add(-time.Second).Zone()
+	gap := time.Duration(after-before) * time.Second
+	if !t.Before(jump.Add(gap)) {
+		return time.Time{}
 	}
+	// A skipped time runs the gap's length later than the wall clock says.
+	match, err := s.nextCivil(civil(t).Add(time.Minute - gap))
+	if err != nil || !match.Before(civil(jump)) {
+		return time.Time{}
+	}
+	at, _ := instant(match, t.Location())
 	return at
+}
+
+// instant returns when the wall-clock time c happens in loc, and whether the
+// clock skips c. A time that the clock shows twice, when clocks go back,
+// resolves to its first occurrence. A time that it skips, when clocks go
+// forward, moves forward by the length of the jump: it lands as far after
+// the jump as it is into the gap.
+func instant(c time.Time, loc *time.Location) (at time.Time, skipped bool) {
+	// Read c with the offset in effect before a clock change near it, and
+	// with the one after. Changes are months apart, and offsets reach 14
+	// hours, so two days away is safely on either side of one.
+	_, before := c.Add(-48 * time.Hour).In(loc).Zone()
+	_, after := c.Add(48 * time.Hour).In(loc).Zone()
+	early := c.Add(-time.Duration(max(before, after)) * time.Second).In(loc)
+	late := c.Add(-time.Duration(min(before, after)) * time.Second).In(loc)
+	switch {
+	case civil(early).Equal(c):
+		return early, false // the only occurrence, or the first of two
+	case civil(late).Equal(c):
+		return late, false
+	}
+	// Neither offset shows c: clocks went forward over it, so before is the
+	// smaller offset, and late is c read with it.
+	return late, true
 }
 
 // civil returns t's wall clock as a UTC time.

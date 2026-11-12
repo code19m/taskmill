@@ -9,6 +9,22 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Added
 
+- A scheduled run knows the time it is for, on every attempt.
+  `TaskInfo.ScheduledFor` returns that time, on the clock of the schedule's
+  `Location`. Use it in handlers in place of `t.RunAt`, which is that time
+  on the first attempt only: a retry, a snooze, or a lost lease moves
+  `RunAt`, so a nightly report that failed once could build the wrong day.
+  The maintainer stores the time, and the schedule's name, in the metadata
+  of each task that a `Schedule` enqueues, under `MetadataScheduledFor`
+  (`taskmill.scheduled_for`) and `MetadataSchedule` (`taskmill.schedule`).
+  So the dashboard's task page shows which schedule made a task. These
+  values replace those that the schedule's `Options` give the same keys,
+  and enqueue middleware can read them but not change or remove them. Keys
+  that start with `taskmill.` now belong to taskmill, and later releases
+  may add more: don't use the prefix for keys of your own. During a rolling
+  deploy, a run that a maintainer of the previous release enqueues has no
+  such metadata. `ScheduledFor` returns the zero time for it, as for a task
+  that no schedule enqueued, so let the handler fall back to `t.RunAt`.
 - The docs have a [tutorial](docs/tutorial/README.md) that builds a small
   shop in seven parts, reference pages for every config field and for the
   `taskmill-ui` command, a guide to middleware, five new recipes, and
@@ -191,6 +207,67 @@ All notable changes to taskmill are recorded here. The format follows
   queues named after tenants, for example, its memory grew with each new
   name for the life of the process. It now forgets the queues whose last
   notification is older than the 50 milliseconds for which it matters.
+- A `RunAt` after the year 294276, such as `time.Unix(math.MaxInt64, 0)` to
+  mean "never", was stored as a time in the past, so the task ran right
+  away. Other far-future times made PostgreSQL fail the statement, which
+  aborted the caller's transaction. Now every enqueue returns
+  `ErrInvalidArgument` for a `RunAt` that PostgreSQL cannot store, before
+  4713 BC or after 294276 AD. The check runs before any statement, so the
+  caller's transaction stays usable.
+- A schedule never ran, with no error or log line, when its task's payload
+  did not read back from PostgreSQL as the maintainer compared it: a
+  `float64` of `-0`, a number that no `float64` holds, or args that encode
+  differently each time. The maintainer found the schedule changed in every
+  pass, stored it again every second, and skipped its run. Now it compares
+  numbers by their exact value, as PostgreSQL does, so it stores such a
+  schedule once. And a schedule that did change still runs when it is due.
+- `RunSchedule` close to a regular run of the schedule lost one of the two
+  runs. A request in the second after a regular run was dropped as its
+  duplicate, although `RunSchedule` returned nil. A request in the second
+  before a regular run, or while that run waited for the maintainer, took
+  its place: one task ran, with the request's time as its `RunAt`. Now the
+  requested run and the regular run both happen. A request made while a run
+  of the schedule is already due adds no run: that run starts within about
+  a second anyway.
+- `taskmilltest.Run` returned a nil error when the handler never ran,
+  because the task's payload did not decode into its args, for example
+  with a field of an interface type. A test that checked only the error
+  passed. Now `Run` returns an error that says the handler did not run, and
+  why.
+- `NewWorker` panicked on a schedule whose cron expression has a step near
+  the largest integer, such as `0 0 */9223372036854775807 * *`. Now it reads
+  such a step like any other step beyond the field's range: the schedule
+  matches the first value only, here day 1.
+- A schedule lost runs when clocks went forward. Of several times in the
+  skipped hour, only the first ran: `0,30 2 * * *` ran at 03:00, and its
+  02:30 run was dropped. In a zone whose clocks change by 30 minutes, a run
+  just after the jump could be dropped too. And in a zone whose clocks
+  change by two hours, the runs of the repeated hours came in their second
+  pass. Now each time that the clock skips runs once, as long after the jump
+  as the time is into the skipped hour, and each time that the clock shows
+  twice runs the first time only.
+- `Cancel` and `Delete` could fail with PostgreSQL's `deadlock detected`
+  (SQLSTATE 40P01) after a second, and a bulk action with a lock timeout,
+  when another `Cancel`, a `Retry`, a worker, or the commit of the task's
+  enqueue changed the same task of a FIFO group at the same moment. They
+  decided which row to lock first, the task's or its group's, from a state
+  that could change before they held the lock. Now they check the state
+  again under the lock. If it changed, they roll their transaction back and
+  start again, which locks in the other order. `CancelTx` cannot do that in
+  your transaction, so it works as before. When another transaction changes
+  the same task or its FIFO group at the same moment, PostgreSQL may still
+  end one of the two with that error, which may hit the other transaction.
+  The transaction that got it can be run again.
+- `Cancel`, `Delete`, and `Retry` run again, up to 5 times in all, when
+  PostgreSQL ends their transaction with `deadlock detected` (SQLSTATE
+  40P01). PostgreSQL ends any one of the transactions that wait for each
+  other, so the error could hit a call that did nothing wrong, when another
+  transaction, such as one with `CancelTx`, took the same rows in another
+  order.
+- When two producers enqueued the same dedupe key just after its window
+  ended, one created the task, as it should, but the other's
+  `EnqueueResult.ID` named the old task that held the key before. Now it
+  names the task that the first producer created.
 
 ### Security
 

@@ -156,7 +156,7 @@ statement timeout.
   - **Groups stay in order.** Once a retry skips a task of a group, it skips
     the group's later tasks too, until it ends, and counts them as skipped.
     A later run then retries the group's tasks oldest first.
-  - **One bounded wait.** A retry into a group that has no row creates the
+  - **Two bounded waits.** A retry into a group that has no row creates the
     row. A concurrent enqueue may be creating the same row, uncommitted, and
     an insert must wait for it to decide. The batch inserts under a
     savepoint with a lock timeout of 100 ms, far below the deadlock timeout
@@ -164,7 +164,14 @@ statement timeout.
     never stalls an application transaction for long, and never makes one
     fail with a deadlock. A transaction per new group would avoid the wait
     too, but cost a transaction per group when every group is new, as after
-    canceling a whole queue.
+    canceling a whole queue. The promotion of a group's next task waits for
+    that task's row, under the same lock timeout. The batch holds the
+    group's row, so only two callers can hold the task's row (see
+    [Lock order](schema-groups.md#fifo-groups)): a `Cancel` or a `Delete`
+    that is about to start again, which makes the wait short, and a
+    `CancelTx` that locked the task after another transaction made it
+    pending. If the wait times out, the batch rolls back, and the action
+    stops with a cursor to continue.
   - **Exact counts, and continuing.** A batch whose statements ran commits
     even if the caller's context ends meanwhile, so the number of changed
     tasks is exact. An action that stops early returns a cursor to continue:

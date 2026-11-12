@@ -10,6 +10,15 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+### Fixed
+
+- When a publisher wrapped with `Publisher` panicked, the `send {topic}`
+  spans of its deliveries never ended, so the failed publish left no trace,
+  and `messaging.client.sent.messages` did not count its deliveries. Now
+  each span ends with the panic as its error, and each delivery is counted,
+  with the `error.type` `panic`. The panic still reaches the worker, which
+  records it as before.
+
 ## [0.4.0] - 2026-11-12
 
 ### Security
