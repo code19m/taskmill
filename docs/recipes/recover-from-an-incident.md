@@ -32,7 +32,7 @@ flowchart LR
 
 ```go
 // retryDead retries the dead tasks of one queue, after the cause is fixed.
-// If it returns an error, the queue is still paused: resume it yourself.
+// If a retry fails, the queue stays paused: resume it yourself.
 func retryDead(ctx context.Context, client *taskmill.Client, queue string) error {
     if err := client.PauseQueue(ctx, queue); err != nil { // 1. hold the retried tasks
         return err
@@ -60,8 +60,8 @@ func retryDead(ctx context.Context, client *taskmill.Client, queue string) error
 ```
 
 A paused queue is the safe state: nothing is lost, and the tasks that were
-retried wait. So on an error the function leaves the queue paused. Find the
-cause, run it again, or call `ResumeQueue`.
+retried wait. So when a retry fails, the function leaves the queue paused.
+Find the cause. Then run the function again, or call `ResumeQueue`.
 
 ## Why
 
