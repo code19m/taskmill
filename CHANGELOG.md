@@ -7,6 +7,22 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A scheduled run knows the time it is for, on every attempt.
+  `TaskInfo.ScheduledFor` returns that time, on the clock of the schedule's
+  `Location`. Use it in handlers in place of `t.RunAt`, which is that time
+  on the first attempt only: a retry, a snooze, or a lost lease moves
+  `RunAt`, so a nightly report that failed once could build the wrong day.
+  The maintainer stores the time, and the schedule's name, in the metadata
+  of each task that a `Schedule` enqueues, under `MetadataScheduledFor`
+  (`taskmill.scheduled_for`) and `MetadataSchedule` (`taskmill.schedule`).
+  So the dashboard's task page shows which schedule made a task. These
+  values replace those that the schedule's `Options` give the same keys:
+  keys that start with `taskmill.` are taskmill's own. During a rolling
+  deploy, a run that a maintainer of the previous release enqueues has no
+  such metadata, and `ScheduledFor` returns the zero time for it.
+
 ### Changed
 
 - A worker with a free slot for a queue that is at its `MaxRunning` now

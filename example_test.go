@@ -182,7 +182,10 @@ func ExampleSchedule() {
 	var handlers taskmill.Handlers
 	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[SendReceipt](
 		func(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
-			// t.RunAt is the night the run is for.
+			// The night the run is for, in Berlin time. It is the same on
+			// every attempt, unlike t.RunAt, which a retry moves.
+			night := t.ScheduledFor()
+			log.Printf("sending the receipts of %s", night.Format(time.DateOnly))
 			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
 		},
 	), nil)

@@ -391,7 +391,7 @@ func (s *shop) handlers() *taskmill.Handlers {
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[SyncWithPartner](s.syncWithPartner), &taskmill.HandlerOptions{Timeout: 10 * time.Second})
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[BuildReport](
 		func(ctx context.Context, t *taskmill.Task[BuildReport]) error {
-			s.logger.LogAttrs(ctx, slog.LevelInfo, "the sales report is built", slog.Time(logKeyScheduledFor, t.RunAt))
+			s.logger.LogAttrs(ctx, slog.LevelInfo, "the sales report is built", slog.Time(logKeyScheduledFor, t.ScheduledFor()))
 			return nil
 		},
 	), nil)

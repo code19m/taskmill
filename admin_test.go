@@ -1002,8 +1002,13 @@ func TestRunScheduleNow(t *testing.T) {
 		t.Fatalf("got %d tasks, want 1", len(page.Tasks))
 	}
 	// The run has the schedule's options, and runs at the time of the request.
-	if task := page.Tasks[0]; task.Priority != taskmill.PriorityHigh || task.RunAt.Sub(asked).Abs() > 5*time.Second {
+	task := page.Tasks[0]
+	if task.Priority != taskmill.PriorityHigh || task.RunAt.Sub(asked).Abs() > 5*time.Second {
 		t.Fatalf("got priority %s and run time %s, want high and about %s", task.Priority, task.RunAt, asked)
+	}
+	// It is a run of the schedule, for the time of the request.
+	if got := task.Metadata[taskmill.MetadataSchedule]; got != "yearly-report" || !task.ScheduledFor().Equal(task.RunAt) {
+		t.Fatalf("the run is of schedule %q, for %s; want yearly-report, for %s", got, task.ScheduledFor(), task.RunAt)
 	}
 	// The timetable stays as it was.
 	after, err := e.client.Schedules(ctx)
@@ -1191,6 +1196,116 @@ func TestRemovedSchedulesArePruned(t *testing.T) {
 	}
 	if !slices.Equal(names, []string{"kept", "removed-today"}) {
 		t.Fatalf("got schedules %v", names)
+	}
+}
+
+func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	// The schedule runs every day at this minute, on the clock of a shop
+	// that is 5 hours 30 minutes ahead of UTC.
+	var slot time.Time
+	if err := e.pool.QueryRow(ctx, "SELECT date_trunc('minute', now())").Scan(&slot); err != nil {
+		t.Fatal(err)
+	}
+	slot = slot.In(time.FixedZone("shop", (5*60+30)*60))
+
+	// The handler fails, then snoozes, then loses its lease, and then
+	// succeeds. Each time, it notes what it knows about its run.
+	type seen struct {
+		attempt             int
+		schedule            string
+		scheduledFor, runAt time.Time
+	}
+	calls := make(chan seen, 4)
+	leaseLost := make(chan struct{})
+	var called atomic.Int32
+	h := func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+		calls <- seen{task.Attempt, task.Metadata[taskmill.MetadataSchedule], task.ScheduledFor(), task.RunAt}
+		switch called.Add(1) {
+		case 1:
+			return errors.New("the database is down")
+		case 2:
+			return taskmill.Snooze(10 * time.Millisecond)
+		case 3:
+			select {
+			case <-leaseLost:
+			case <-ctx.Done():
+			}
+			return errors.New("too late: the task was rescued")
+		}
+		return nil
+	}
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(h, &taskmill.HandlerOptions{Retry: fastRetry}),
+		Queues:   defaultQueue(1),
+		Schedules: []taskmill.Schedule{{
+			Name: "nightly-report", Cron: fmt.Sprintf("%d %d * * *", slot.Minute(), slot.Hour()), Location: slot.Location(),
+			Args: sendEmail{To: "report"},
+			// taskmill's own keys win over the same keys of the schedule.
+			Options: &taskmill.EnqueueOptions{Metadata: map[string]string{taskmill.MetadataSchedule: "mine", "team": "billing"}},
+		}},
+	})
+	waitFor(t, "the schedule to be stored", func() bool { return e.count(t, "SELECT count(*) FROM {s}.schedules") == 1 })
+	e.scheduleDueAt(t, slot)
+
+	var got []seen
+	for range 3 {
+		got = append(got, recv(t, calls, "an attempt"))
+	}
+	id := int64(e.count(t, "SELECT id FROM {s}.tasks"))
+	// The worker of the third attempt is lost: the maintainer rescues the
+	// task. A lease that the worker renews meanwhile is expired again.
+	waitFor(t, "the rescue", func() bool {
+		e.exec(t, "UPDATE {s}.tasks SET lease_expires_at = now() - interval '1 second' WHERE state = 'running'")
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE state = 'retryable'") == 1
+	})
+	close(leaseLost)
+	got = append(got, recv(t, calls, "the attempt after the rescue"))
+
+	for i, call := range got {
+		if want := []int{1, 2, 2, 3}[i]; call.attempt != want {
+			t.Errorf("call %d is attempt %d, want %d", i+1, call.attempt, want)
+		}
+		// The time is on the schedule's clock, so its day and hour are those
+		// that the expression names.
+		if call.schedule != "nightly-report" || call.scheduledFor.Format(time.RFC3339) != slot.Format(time.RFC3339) {
+			t.Errorf("call %d is a run of schedule %q for %s, want nightly-report for %s",
+				i+1, call.schedule, call.scheduledFor.Format(time.RFC3339), slot.Format(time.RFC3339))
+		}
+	}
+	// RunAt is the time the run is for on the first attempt only.
+	if first, last := got[0].runAt, got[3].runAt; !first.Equal(slot) || !last.After(slot) {
+		t.Errorf("the run time was %s on the first attempt and %s on the last, want %s and a later time", first, last, slot)
+	}
+
+	// An operator sees the same in the finished task.
+	task := e.waitState(t, id, taskmill.StateCompleted)
+	want := map[string]string{
+		taskmill.MetadataSchedule:     "nightly-report",
+		taskmill.MetadataScheduledFor: slot.Format(time.RFC3339),
+		"team":                        "billing",
+	}
+	if !maps.Equal(task.Metadata, want) || !task.ScheduledFor().Equal(slot) {
+		t.Errorf("the task has the metadata %v, for %s; want %v", task.Metadata, task.ScheduledFor(), want)
+	}
+}
+
+func TestNewWorkerCountsTheMetadataThatItAddsToAScheduledRun(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// This metadata fits the limit of 64 KiB as it is, but not with the two
+	// keys of a scheduled run: every run would fail.
+	opts := &taskmill.EnqueueOptions{Metadata: map[string]string{"k": strings.Repeat("x", 64<<10-20)}}
+	if _, err := e.client.Enqueue(t.Context(), sendEmail{}, opts); err != nil {
+		t.Fatalf("the metadata alone: %v", err)
+	}
+	_, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{
+		Schedules: []taskmill.Schedule{{Name: "digest", Cron: "@daily", Args: sendEmail{}, Options: opts}},
+	})
+	if !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
 	}
 }
 

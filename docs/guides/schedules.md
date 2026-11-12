@@ -31,8 +31,31 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 ```
 
 A scheduled run is an ordinary task of its kind, so it needs a handler like
-any other. Its `RunAt` is the time it was scheduled for. In the handler,
-use `t.RunAt`, not the clock, to know which day or hour the run is for.
+any other. In the handler, use `t.ScheduledFor()` to know which day or hour
+the run is for:
+
+```go
+func (h *ReportBuilder) Handle(ctx context.Context, t *taskmill.Task[BuildReport]) error {
+    night := t.ScheduledFor() // 03:00 Berlin time, on the night the run is for
+    return h.build(ctx, night)
+}
+```
+
+Don't use the clock or `t.RunAt` for this. A run that fails at 03:00 may
+succeed hours later, after its retries. It must still build the report of
+its own night.
+
+| Value | What it tells you |
+|---|---|
+| `t.ScheduledFor()` | The time the run is for, on the clock of the schedule's `Location`. It is the same on every attempt |
+| `t.RunAt` | The same time, but on the first attempt only. A retry, a snooze, or a lost worker moves it to the time the task runs again |
+| The clock | When this attempt runs |
+
+taskmill keeps this time in the task's
+[metadata](../concepts/glossary.md#metadata), as `taskmill.scheduled_for`,
+next to the schedule's name, as `taskmill.schedule`. So the dashboard shows
+which schedule made a task. For a task that no schedule enqueued, such as
+one that a test enqueues, `ScheduledFor` returns the zero time.
 
 ## Write the timetable
 
@@ -73,7 +96,8 @@ schedule works the same way when you resume it.
 Each run time enqueues its own task, whatever the last run is doing. A slow
 run, or one that retries for hours, can still run when the next one starts.
 Make the handler safe to overlap: each run works on the period of its own
-`t.RunAt`. For frequent schedules, also lower `MaxAttempts`.
+`t.ScheduledFor()`, which no retry changes. For frequent schedules, also
+lower `MaxAttempts`.
 
 If two runs must **never** run at the same time, give the schedule a
 `GroupKey`. Its runs then form a [FIFO group](ordering.md), and run one

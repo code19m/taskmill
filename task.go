@@ -106,7 +106,8 @@ type TaskInfo struct {
 	GroupKey string
 
 	// Metadata holds the tags from [EnqueueOptions.Metadata] and
-	// [EnqueueMiddleware].
+	// [EnqueueMiddleware], and for a task that a [Schedule] enqueued,
+	// taskmill's own: [MetadataSchedule] and [MetadataScheduledFor].
 	Metadata map[string]string
 
 	// Payload is the task's Args as stored, in JSON.
@@ -118,9 +119,11 @@ type TaskInfo struct {
 
 	CreatedAt time.Time
 
-	// RunAt is the earliest time the task may start: for a retryable or
-	// snoozed task, when it runs again, and for a task that a [Schedule]
-	// enqueued, the time it was scheduled for.
+	// RunAt is the earliest time the task may start. A retry, a snooze, and
+	// a lost lease move it to when the task runs again. So for a task that a
+	// [Schedule] enqueued, it is the time the run is for on the first
+	// attempt only: [TaskInfo.ScheduledFor] returns that time on every
+	// attempt.
 	RunAt time.Time
 
 	AttemptedAt time.Time // zero if never attempted

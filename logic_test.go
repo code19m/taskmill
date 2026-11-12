@@ -64,6 +64,40 @@ func TestJSONEqual(t *testing.T) {
 	}
 }
 
+func TestScheduledFor(t *testing.T) {
+	t.Parallel()
+	// A run's time comes back as it went into the metadata, to the
+	// microsecond, on the clock of the schedule's location.
+	at := time.Date(2026, 11, 12, 22, 30, 0, 123_456_000, time.UTC)
+	for _, tt := range []struct {
+		loc  *time.Location
+		want string // the hour and minute that ScheduledFor shows
+	}{
+		{time.UTC, "22:30"},
+		{time.FixedZone("ahead", (5*60+30)*60), "04:00"},
+		{time.FixedZone("behind", -8*60*60), "14:30"},
+		// RFC 3339 cannot write this offset, so the time stays in UTC.
+		{time.FixedZone("seconds", 60*60+17), "22:30"},
+	} {
+		s := compiledSchedule{Schedule: Schedule{Name: "nightly", Location: tt.loc}}
+		info := TaskInfo{Metadata: s.runMetadata(s.scheduledFor(at))}
+		if got := info.ScheduledFor(); !got.Equal(at) || got.Format("15:04") != tt.want {
+			t.Errorf("in %s: got %s, want %s at %s", tt.loc, got.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), tt.want)
+		}
+		if got := info.Metadata[MetadataSchedule]; got != "nightly" {
+			t.Errorf("in %s: got the schedule %q, want nightly", tt.loc, got)
+		}
+	}
+
+	// A task that no schedule enqueued has no such time.
+	for _, meta := range []map[string]string{nil, {"trace": "abc"}, {MetadataScheduledFor: "tomorrow"}} {
+		info := TaskInfo{Metadata: meta}
+		if got := info.ScheduledFor(); !got.IsZero() {
+			t.Errorf("metadata %v: got %s, want the zero time", meta, got)
+		}
+	}
+}
+
 func TestExponentialBackoff(t *testing.T) {
 	t.Parallel()
 	b := ExponentialBackoff{}

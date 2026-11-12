@@ -25,8 +25,11 @@ import (
 // define once they have not run or changed for a day.
 //
 // Runs that are missed while no maintainer runs, or while the schedule is
-// paused, collapse into one run. The task's RunAt is the time it was
-// scheduled for.
+// paused, collapse into one run, for the first time that was missed. Each
+// run's task carries the schedule's name and the time the run is for in its
+// metadata; see [MetadataSchedule]. In a handler, read that time with
+// [TaskInfo.ScheduledFor]: the task's RunAt is that time only until the
+// first retry or snooze moves it.
 //
 // The expression is read on the wall clock of Location, and each time on
 // that clock runs once. When clocks go forward, a time that they skip runs
@@ -54,6 +57,38 @@ type Schedule struct {
 	// DedupeKey, or DedupeWindow.
 	Args    Args
 	Options *EnqueueOptions
+}
+
+// Metadata keys that taskmill sets itself on every task that a [Schedule]
+// enqueues. Their values never change, whatever happens to the task, so a
+// handler reads the same on every attempt, and the dashboard shows which
+// schedule made a task. taskmill's values replace those that the schedule's
+// Options or the kind's defaults give the same keys. Keys that start with
+// "taskmill." are taskmill's own: do not set them on your tasks.
+const (
+	// MetadataSchedule holds the name of the schedule that enqueued the
+	// task.
+	MetadataSchedule = "taskmill.schedule"
+
+	// MetadataScheduledFor holds the time that the run is for, in the
+	// format of RFC 3339. Read it with [TaskInfo.ScheduledFor].
+	MetadataScheduledFor = "taskmill.scheduled_for"
+)
+
+// ScheduledFor returns the time that the task's run is for, if a [Schedule]
+// enqueued the task: the time of the timetable, or the time of the request
+// for a run that [Client.RunSchedule] asked for. It is the same on every
+// attempt, unlike RunAt, which a retry, a snooze, or a lost lease moves. The
+// time is on the clock of the schedule's Location, so its day and hour are
+// those that the schedule's expression names.
+//
+// It returns the zero time for a task that no schedule enqueued.
+func (t *TaskInfo) ScheduledFor() time.Time {
+	at, err := time.Parse(time.RFC3339Nano, t.Metadata[MetadataScheduledFor])
+	if err != nil {
+		return time.Time{}
+	}
+	return at
 }
 
 // ScheduleInfo describes a schedule and its state.
@@ -124,10 +159,38 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 		opts = mergeOptions(opts, *s.Options)
 	}
 	opts.Queue = cmp.Or(opts.Queue, DefaultQueue)
+	c := compiledSchedule{Schedule: s, expr: expr, opts: opts}
+	// Check the task as a run enqueues it: with taskmill's own metadata, at
+	// its longest.
+	opts.Metadata = c.runMetadata(longestScheduledFor)
 	if err := checkScheduledTask(s.Args, opts); err != nil {
 		return compiledSchedule{}, fmt.Errorf("%w (schedule %q)", err, s.Name)
 	}
-	return compiledSchedule{Schedule: s, expr: expr, opts: opts}, nil
+	return c, nil
+}
+
+// longestScheduledFor takes as much room as any value of
+// MetadataScheduledFor: the database keeps times to the microsecond.
+const longestScheduledFor = "2006-01-02T15:04:05.999999+07:00"
+
+// scheduledFor returns the value of MetadataScheduledFor for the run of s
+// that is for the time at: at on the clock of the schedule's location.
+func (s *compiledSchedule) scheduledFor(at time.Time) string {
+	at = at.In(s.Location)
+	if _, offset := at.Zone(); offset%60 != 0 {
+		at = at.UTC() // RFC 3339 has no seconds in an offset, and would lose them
+	}
+	return at.Format(time.RFC3339Nano)
+}
+
+// runMetadata returns the metadata of a run of s: the metadata of the
+// schedule's task, and over it taskmill's own keys.
+func (s *compiledSchedule) runMetadata(scheduledFor string) map[string]string {
+	meta := make(map[string]string, len(s.opts.Metadata)+2)
+	maps.Copy(meta, s.opts.Metadata)
+	meta[MetadataSchedule] = s.Name
+	meta[MetadataScheduledFor] = scheduledFor
+	return meta
 }
 
 // checkScheduledTask validates the task that a schedule enqueues, so that a
@@ -276,6 +339,7 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 			return err // another maintainer ran it, or it was paused meanwhile
 		}
 		opts := s.opts
+		opts.Metadata = s.runMetadata(s.scheduledFor(due))
 		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(key, 10)
 		opts.DedupeWindow = max(24*time.Hour, 2*next.Sub(due))
 		opts.RunAt = due // in the past: the task is available at once
@@ -380,12 +444,12 @@ func (c *Client) ResumeSchedule(ctx context.Context, name string) error {
 
 // RunSchedule runs a schedule once now, in addition to its timetable. The
 // maintainer enqueues the run within about a second, if it defines the
-// schedule, with the schedule's options, and the task's RunAt is the time of
-// the request. The regular runs stay as they were. A request adds no run
-// while a run of the schedule is due and waits for the maintainer, whether a
-// regular run or an earlier request: that run is the one that runs now. It
-// returns [ErrNotFound] for an unknown schedule, and [ErrInvalidState] for a
-// paused one.
+// schedule, with the schedule's options, and the run is for the time of the
+// request: its RunAt at first, and its [TaskInfo.ScheduledFor]. The regular
+// runs stay as they were. A request adds no run while a run of the schedule
+// is due and waits for the maintainer, whether a regular run or an earlier
+// request: that run is the one that runs now. It returns [ErrNotFound] for
+// an unknown schedule, and [ErrInvalidState] for a paused one.
 func (c *Client) RunSchedule(ctx context.Context, name string) error {
 	if err := checkName("schedule name", name, maxNameLength); err != nil {
 		return err
