@@ -630,6 +630,7 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 
 			// Each notification commits alone: PostgreSQL delivers equal ones
 			// of one transaction only once.
+			flooded := time.Now()
 			e.exec(t, "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(flood)+" LOOP PERFORM pg_notify('"+e.schema+"', '"+
 				tc.payload(running)+"'); COMMIT; END LOOP; END $$")
 			start := time.Now()
@@ -642,8 +643,10 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 			if waited := time.Since(start); waited > 2*time.Second {
 				t.Errorf("the cancellation waited %s behind %d notifications", waited.Round(time.Millisecond), flood)
 			}
-			if n := sent.count(tc.reads); n > flood/20 {
-				t.Errorf("the worker read the database %d times for %d notifications", n, flood)
+			// The worker reads at most once per 20 ms, however long a slow
+			// database takes to commit the flood.
+			if n, most := sent.count(tc.reads), int(time.Since(flooded)/(20*time.Millisecond))+flood/1000; n > most {
+				t.Errorf("the worker read the database %d times for %d notifications, want at most %d", n, flood, most)
 			}
 			close(proceed)
 			e.waitState(t, running, taskmill.StateCompleted)
