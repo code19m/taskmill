@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -94,9 +95,62 @@ func TestConcurrentMigratesOnWarmConnections(t *testing.T) {
 		c.Release()
 	}
 
-	for range 5 {
-		migrateAtOnce(t, pool, testdb.Schema(t, pool), processes)
+	for round := range 6 {
+		schema := testdb.Schema(t, pool)
+		if round%2 == 1 {
+			// An administrator created the schema: the processes then meet
+			// at the migrations table.
+			if _, err := pool.Exec(t.Context(), "CREATE SCHEMA "+schema); err != nil {
+				t.Fatal(err)
+			}
+		}
+		migrateAtOnce(t, pool, schema, processes)
 	}
+}
+
+// Any role of the database may take any advisory lock, also a role with no
+// right on taskmill's schema, and hold it for as long as it likes. Migrate
+// and a starting worker must not wait for it.
+func TestRoleWithoutRightsCannotHoldUpMigrateOrWorkers(t *testing.T) {
+	t.Parallel()
+	admin := testdb.Pool(t)
+	// hold takes the locks that Migrate and the history partitions once
+	// waited for, in a session of a new role, until the test ends.
+	hold := func(t *testing.T, schema string) {
+		t.Helper()
+		conn, err := newRole(t, admin, schema+"_outsider").Acquire(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(conn.Release)
+		for _, key := range []string{"taskmill.migrate." + schema, "taskmill.partitions." + schema} {
+			if _, err := conn.Exec(t.Context(), "SELECT pg_advisory_lock(hashtextextended($1, 0))", key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	t.Run("migrate", func(t *testing.T) {
+		t.Parallel()
+		schema := testdb.Schema(t, admin)
+		hold(t, schema)
+		ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+		defer cancel()
+		if err := taskmill.Migrate(ctx, admin, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("worker", func(t *testing.T) {
+		t.Parallel()
+		schema := testdb.Schema(t, admin)
+		applyWithoutMigrate(t, admin, schema) // without partitions: the worker creates them
+		hold(t, schema)
+		e := (&env{pool: admin, schema: schema}).withLogger(t, testLogger(t))
+		id := e.enqueue(t, sendEmail{}, nil)
+		runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+		e.waitState(t, id, taskmill.StateCompleted) // in the history, so the partitions exist
+	})
 }
 
 // Migrate runs before NewClient checks the pool's isolation level. A process

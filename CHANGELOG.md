@@ -88,6 +88,17 @@ All notable changes to taskmill are recorded here. The format follows
   if that row has the request. `Cancel` still stops a running task at once:
   the worker reads one row first. If other roles can connect to your
   database, upgrade.
+- A role with no rights on taskmill's schema can no longer keep workers and
+  `Migrate` from starting. Both waited, without a limit, for advisory locks,
+  which PostgreSQL lets every role of a database take and hold: a worker
+  registered but never fetched a task, `Migrate` did not return, and the
+  maintainer stopped applying retention and refreshing statistics. They now
+  wait only for locks on taskmill's own tables, which a role needs rights
+  on those tables to take. Preparing history partitions takes no lock while
+  every partition is ready, and waits at most 5 seconds otherwise. `Migrate`
+  still waits while another process migrates. It now creates the schema and
+  the `migrations` table before the transaction that migrates, so a first
+  `Migrate` that fails leaves those two behind; run it again.
 
 ## [0.5.0] - 2026-11-12
 

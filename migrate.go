@@ -72,6 +72,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 		}
 		return nil
 	}
+	if err := createMigrationsTable(ctx, pool, schema); err != nil {
+		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+	}
 	if err := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
 		return applyMigrations(ctx, tx, schema, all, logger)
 	}); err != nil {
@@ -106,31 +109,48 @@ const unprepared = pgx.QueryExecModeSimpleProtocol
 // default level: only NewClient checks it, later.
 var readCommitted = pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
 
-// applyMigrations applies the migrations that the schema lacks, in tx. One
-// process migrates at a time; the others wait for its lock, then find nothing
-// left to do. A transaction-scoped lock works behind transaction-pooling
-// proxies.
-func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrations.Migration, logger *slog.Logger) error {
-	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "taskmill.migrate."+schema); err != nil {
-		return err
-	}
-	// CREATE SCHEMA IF NOT EXISTS would not do. PostgreSQL checks the CREATE
-	// privilege on the database before it checks whether the schema exists,
-	// and a role that owns its schema may lack it. And waiting for the lock
-	// does not make the connection read the catalog changes that the lock's
-	// holder committed meanwhile: its cache can still hold that the schema
-	// does not exist, as schemaVersion found. Reading the catalog table
-	// applies those changes, and sees a schema created meanwhile.
-	var exists bool
-	if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT FROM pg_catalog.pg_namespace WHERE nspname = $1)", schema).Scan(&exists); err != nil {
-		return err
-	}
-	if !exists {
-		if _, err := tx.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+// createMigrationsTable creates the schema and the table that records
+// migrations, unless they exist, in a transaction of its own. Processes that
+// do this at the same time need no lock: the one that comes second waits
+// until the first commits, and then finds both or fails because one exists,
+// with an error that depends on the moment. So after an error, the table
+// decides: if it exists, another process created it.
+func createMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+	createErr := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
+		// CREATE SCHEMA IF NOT EXISTS would not do. PostgreSQL checks the
+		// CREATE privilege on the database before it checks whether the
+		// schema exists, and a role that owns its schema may lack it.
+		var exists bool
+		if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT FROM pg_catalog.pg_namespace WHERE nspname = $1)", schema).Scan(&exists); err != nil {
 			return err
 		}
+		if !exists {
+			if _, err := tx.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
+				return err
+			}
+		}
+		_, err := tx.Exec(ctx, migrationsTableSQL(schema))
+		return err
+	})
+	if createErr == nil {
+		return nil
 	}
-	if _, err := tx.Exec(ctx, migrationsTableSQL(schema)); err != nil {
+	var created bool
+	if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", schema+".migrations").Scan(&created); err != nil || !created {
+		return createErr
+	}
+	return nil
+}
+
+// applyMigrations applies the migrations that the schema lacks, in tx. One
+// process migrates at a time: it locks the migrations table, and the others
+// wait for that lock, then find nothing left to do. Only a role that may
+// change the table can take this lock, so a role without rights on the
+// schema cannot keep Migrate waiting, as it could with an advisory lock,
+// which any role may take. The lock lets everyone read the table, and ends
+// with tx, so it works behind transaction-pooling proxies.
+func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrations.Migration, logger *slog.Logger) error {
+	if _, err := tx.Exec(ctx, fmt.Sprintf("LOCK TABLE %s.migrations IN SHARE ROW EXCLUSIVE MODE", schema)); err != nil {
 		return err
 	}
 
@@ -210,30 +230,35 @@ func Migrations(schema string) ([]Migration, error) {
 // ensureHistoryPartitions creates the daily history partitions of the next
 // historyDaysAhead days, today's first, skipping those that exist. Each
 // partition is created detached and then attached, which does not block
-// completions the way CREATE TABLE ... PARTITION OF would. An advisory lock
-// keeps processes that do this at the same time from colliding. An error for
-// a missing privilege names the fix.
+// completions the way CREATE TABLE ... PARTITION OF would. An error for a
+// missing privilege names the fix.
+//
+// A call that finds every partition ready takes no lock. Otherwise it first
+// takes the lock on the history table that attaching takes anyway, so that
+// processes that do this at the same time wait for each other, for at most
+// partitionLockTimeout. Only a role that may change the table can take this
+// lock, so a role without rights on the schema cannot keep workers from
+// starting, as it could with an advisory lock, which any role may take.
 func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema string) error {
 	err := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "taskmill.partitions."+schema); err != nil {
+		days, err := missingHistoryDays(ctx, tx, schema)
+		if err != nil || len(days) == 0 {
 			return err
 		}
 		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+partitionLockTimeout+"'"); err != nil {
 			return err
 		}
-
-		existing, err := historyPartitions(ctx, tx, schema)
-		if err != nil {
+		// ONLY: the partitions stay free for autovacuum.
+		lock := fmt.Sprintf("LOCK TABLE ONLY %s.task_history IN SHARE UPDATE EXCLUSIVE MODE", schema)
+		if _, err := tx.Exec(ctx, lock); err != nil {
 			return err
 		}
-
-		start := time.Now().UTC().Truncate(24 * time.Hour)
-		for i := range historyDaysAhead {
-			from := start.AddDate(0, 0, i)
+		// Another process may have created them while this one waited.
+		if days, err = missingHistoryDays(ctx, tx, schema); err != nil {
+			return err
+		}
+		for _, from := range days {
 			name := historyPartition(from)
-			if existing[name] {
-				continue
-			}
 			create := fmt.Sprintf("CREATE TABLE %[1]s.%[2]s (LIKE %[1]s.task_history INCLUDING DEFAULTS INCLUDING CONSTRAINTS)",
 				schema, name)
 			attach := fmt.Sprintf("ALTER TABLE %[1]s.task_history ATTACH PARTITION %[1]s.%[2]s FOR VALUES FROM ('%[3]s') TO ('%[4]s')",
@@ -254,6 +279,23 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 		return fmt.Errorf("prepare history partitions: %w", err)
 	}
 	return nil
+}
+
+// missingHistoryDays returns the days among the next historyDaysAhead, from
+// today, that have no history partition, in order.
+func missingHistoryDays(ctx context.Context, tx pgx.Tx, schema string) ([]time.Time, error) {
+	existing, err := historyPartitions(ctx, tx, schema)
+	if err != nil {
+		return nil, err
+	}
+	var days []time.Time
+	start := time.Now().UTC().Truncate(24 * time.Hour)
+	for i := range historyDaysAhead {
+		if day := start.AddDate(0, 0, i); !existing[historyPartition(day)] {
+			days = append(days, day)
+		}
+	}
+	return days, nil
 }
 
 // historyPartitions returns the names of the attached history partitions.
