@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -19,6 +20,13 @@ const (
 	// changed tasks is exact, and no batch is left behind, on a connection
 	// that ctx closed, to hold its rows after the action returns.
 	batchTimeout = 5 * time.Second
+
+	// openTimeout bounds each statement of a batch that reads without a
+	// window, and bulkWindow is the most tasks that a batch in a window
+	// reads from a table, whether they match or not: see nextBatch. A
+	// window of 100 batches costs little to find where most tasks match.
+	openTimeout = batchTimeout / 5
+	bulkWindow  = 100 * maintenanceBatch
 )
 
 // bulkSettings start each batch of a bulk action. Custom plans see which
@@ -27,6 +35,18 @@ const (
 // deadlock timeout, so that a batch never holds other transactions up for
 // long, and never takes part in a deadlock.
 const bulkSettings = `SELECT set_config('plan_cache_mode', 'force_custom_plan', true), set_config('lock_timeout', '100ms', true)`
+
+// openSettings are bulkSettings for a batch that reads without a window. The
+// database ends a statement of such a batch after openTimeout, so that a
+// read that goes too far stops there, and does not go on in the database
+// after the batch gave up on it.
+var openSettings = bulkSettings + `, set_config('statement_timeout', '` + strconv.FormatInt(openTimeout.Milliseconds(), 10) + `ms', true)`
+
+// windowSettings keep the search for a window's end on the indexes that give
+// the tasks in ID order, where it stops at the window's size. Without them,
+// a plan that expects few tasks after the position, as a plan made without
+// the position does, reads every one of them and sorts them.
+const windowSettings = `SELECT set_config('enable_sort', 'off', true)`
 
 // TaskFilter selects tasks by queue, state, kind, and FIFO group, for
 // [Client.List], [Client.Count], and the bulk actions: a task matches if it
@@ -119,6 +139,8 @@ type matching struct {
 	states                []string // the selected states, except completed
 	history               bool     // completed tasks are selected
 	after, last           int64    // the action goes on after task after, up to task last
+	windowed              bool     // the batches read in windows: one without a window ran out of time
+	until                 int64    // the batches read up to task until: last, or where their window ends
 	left                  groupSet // the groups that a retry left, and whose later tasks it leaves
 }
 
@@ -157,6 +179,18 @@ func match(filter *TaskFilter, states []State) (*matching, error) {
 	return &m, nil
 }
 
+// countSettings start a count. Custom plans leave out the branches of the
+// states not counted. With sequential and bitmap scans off, each branch reads
+// the index of its state and stops at its cap. Otherwise the planner, which
+// expects to meet a state's tasks anywhere in the table, may scan the table
+// for them, once for each state: far, when those tasks lie together, as
+// tasks of one age do. JIT is off, as for the maintainer's statistics: the
+// branches make the planner think the count costly, and compiling it takes
+// longer than running it.
+const countSettings = `SELECT set_config('statement_timeout', '` + listTimeout + `', true),
+       set_config('plan_cache_mode', 'force_custom_plan', true), set_config('jit', 'off', true),
+       set_config('enable_seqscan', 'off', true), set_config('enable_bitmapscan', 'off', true)`
+
 // Count counts the tasks that match filter, which may be nil. It counts at
 // most 10,000 tasks per state. Like [Client.List], the query is canceled
 // after 5 seconds.
@@ -171,11 +205,7 @@ func (c *Client) Count(ctx context.Context, filter *TaskFilter) (*TaskCounts, er
 	}
 	out := &TaskCounts{States: make(map[State]TaskCount, len(states))}
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
-			return err
-		}
-		// Custom plans leave out the branches of the states not counted.
-		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
+		if _, err := tx.Exec(ctx, countSettings); err != nil {
 			return err
 		}
 		r, err := tx.Query(ctx, c.sql.countTasks, m.queues, m.kinds, m.groups, states)
@@ -228,12 +258,14 @@ func (c *TaskCount) plus(other TaskCount) {
 // It goes through the tasks enqueued before it started, oldest first, in
 // batches of 1,000, each in a short transaction of its own. It reads each
 // task once, so it retries a task at most once, even if the task fails again
-// meanwhile, and it ends however fast new tasks arrive. It skips the tasks,
-// the FIFO groups, and the dedupe keys that other transactions hold at that
-// moment, never waiting while it holds rows. If ctx ends first, it finishes
-// the batch it is in, for at most 5 seconds, and returns what it did, with an
-// error and [BulkResult.Next] to go on; each batch commits whole or not at
-// all.
+// meanwhile, and it ends however fast new tasks arrive. If a batch cannot
+// reach its tasks within a second, because too many tasks that do not match
+// lie before them, the action goes on in batches that read at most 100,000
+// tasks each, and so gets past those. It skips the tasks, the FIFO groups,
+// and the dedupe keys that other transactions hold at that moment, never
+// waiting while it holds rows. If ctx ends first, it finishes the batch it
+// is in, for at most 5 seconds, and returns what it did, with an error and
+// [BulkResult.Next] to go on; each batch commits whole or not at all.
 func (c *Client) RetryMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
 	m, err := checkBulk(params, retryStates)
 	if err != nil {
@@ -302,10 +334,14 @@ type step struct {
 	left             groupSet // groups that a retry left
 }
 
+// batchFunc does the work of one batch of a bulk action on the tasks that
+// match m, in the transaction of q.
+type batchFunc func(ctx context.Context, q querier, m *matching) (step, error)
+
 // inBatches runs batch, each time in a transaction of its own, until it goes
 // through the last task. A batch that began goes on if ctx ends meanwhile,
 // for at most batchTimeout, so that the result is exact.
-func (c *Client) inBatches(ctx context.Context, m *matching, batch func(context.Context, querier, *matching) (step, error)) (BulkResult, error) {
+func (c *Client) inBatches(ctx context.Context, m *matching, batch batchFunc) (BulkResult, error) {
 	var res BulkResult
 	var firstSkipped int64
 	// stop returns what the action did when it stops early, with where to go
@@ -322,11 +358,12 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch func(context.
 	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
 		return stop(err)
 	}
+	m.until = m.last
 	for m.after < m.last {
 		if err := ctx.Err(); err != nil {
 			return stop(err)
 		}
-		s, err := c.runBatch(ctx, m, batch)
+		s, err := c.nextBatch(ctx, m, batch)
 		if err != nil {
 			return stop(err)
 		}
@@ -341,17 +378,86 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch func(context.
 	return res, nil
 }
 
-// runBatch runs batch in a transaction of its own. Once the transaction
-// began, the batch goes on if ctx ends meanwhile, for at most batchTimeout.
-func (c *Client) runBatch(ctx context.Context, m *matching, batch func(context.Context, querier, *matching) (step, error)) (step, error) {
+// nextBatch runs the next batch of the action, within batchTimeout from when
+// its first transaction began: the wait for a connection is not the batch's
+// time.
+//
+// A batch first reads without a window, up to the action's last task. With a
+// filter that an index serves, it then reads the tasks that match and no
+// others, however large the table. Without such an index, it reads every
+// task before the next full batch of matching ones, however far apart those
+// are. So the database ends a statement of such a batch after openTimeout.
+// The action then reads in windows from there on, and tries the batch again
+// in one. It does that also if ctx ended meanwhile, since this is still the
+// batch that the action is in: a batch in a window always moves the
+// position, so an action that goes on from where it stopped does not stop
+// there again.
+//
+// The database reports a statement that somebody canceled, with
+// pg_cancel_backend, under the same code as one that it ended on the
+// timeout. Only the message tells them apart, and that is in the server's
+// language. So a canceled batch is tried again in a window too, once.
+func (c *Client) nextBatch(ctx context.Context, m *matching, batch batchFunc) (step, error) {
+	var ends time.Time
+	if !m.windowed {
+		s, err := c.runBatch(ctx, m, batch, openSettings, &ends)
+		// 57014 is query_canceled. Before the transaction began, ends is not set.
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "57014" || ends.IsZero() {
+			return s, err
+		}
+		m.windowed, m.until = true, m.after
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(context.WithoutCancel(ctx), ends)
+		defer cancel()
+	}
+	if m.after >= m.until {
+		if err := c.nextWindow(ctx, m); err != nil {
+			return step{}, err
+		}
+	}
+	return c.runBatch(ctx, m, batch, bulkSettings, &ends)
+}
+
+// nextWindow sets the window of the next batches: the next bulkWindow tasks
+// after the position, in each table that the action reads. The batches read
+// no task beyond its end, m.until, and move the position there once they
+// find less than a full batch before it.
+//
+// A window is counted in tasks, not in IDs: completed tasks leave the tasks
+// table, so its IDs can lie far apart. Its end is only a bound on what a
+// batch reads. Whatever it is, the batches go through the IDs in order,
+// each batch through the IDs after the last one's, so the action still
+// reads each task once.
+//
+// The statement runs in a transaction of its own with windowSettings, all in
+// one round trip.
+func (c *Client) nextWindow(ctx context.Context, m *matching) error {
+	b := &pgx.Batch{}
+	b.Queue("BEGIN")
+	b.Queue(windowSettings)
+	b.Queue(c.sql.windowEnd, m.after, m.last, len(m.states) > 0, m.history).QueryRow(func(row pgx.Row) error {
+		return row.Scan(&m.until)
+	})
+	b.Queue("COMMIT")
+	return c.pool.SendBatch(ctx, b).Close()
+}
+
+// runBatch runs batch in a transaction of its own, which starts with
+// settings. Once the transaction began, the batch goes on if ctx ends
+// meanwhile, until ends: batchTimeout from now, unless a transaction of the
+// same batch set it before.
+func (c *Client) runBatch(ctx context.Context, m *matching, batch batchFunc, settings string, ends *time.Time) (step, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return step{}, err
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), batchTimeout)
+	if ends.IsZero() {
+		*ends = time.Now().Add(batchTimeout)
+	}
+	ctx, cancel := context.WithDeadline(context.WithoutCancel(ctx), *ends)
 	defer cancel()
 	var s step
-	if _, err = tx.Exec(ctx, bulkSettings); err == nil {
+	if _, err = tx.Exec(ctx, settings); err == nil {
 		s, err = batch(ctx, pgxQuerier{q: tx}, m)
 	}
 	if err != nil {
@@ -373,7 +479,7 @@ type bulkTask struct {
 // pick reads the next batch of the tasks that match m, with one of the pick
 // statements, and locks those it can.
 func pick(ctx context.Context, q querier, sql string, m *matching) ([]bulkTask, error) {
-	r, err := q.query(ctx, sql, m.queues, m.kinds, m.groups, m.states, m.after, m.last, m.left.queues, m.left.groups)
+	r, err := q.query(ctx, sql, m.queues, m.kinds, m.groups, m.states, m.after, m.until, m.left.queues, m.left.groups)
 	if err != nil {
 		return nil, err
 	}
@@ -392,10 +498,10 @@ func pick(ctx context.Context, q querier, sql string, m *matching) ([]bulkTask, 
 }
 
 // end returns the last task that a batch with ids goes through: the last one
-// it read, or the last of the action if it read less than a full batch.
+// it read, or the last one it may read if it read less than a full batch.
 func (m *matching) end(ids []int64) int64 {
 	if len(ids) < maintenanceBatch {
-		return m.last
+		return m.until
 	}
 	return ids[len(ids)-1]
 }
@@ -671,7 +777,7 @@ func (c *Client) deleteBatch(ctx context.Context, q querier, m *matching) (step,
 
 // pickCompleted is pick for the completed tasks in history.
 func (c *Client) pickCompleted(ctx context.Context, q querier, m *matching) ([]bulkTask, error) {
-	r, err := q.query(ctx, c.sql.pickCompleted, m.queues, m.kinds, m.groups, m.after, m.last)
+	r, err := q.query(ctx, c.sql.pickCompleted, m.queues, m.kinds, m.groups, m.after, m.until)
 	if err != nil {
 		return nil, err
 	}

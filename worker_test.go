@@ -3,6 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strconv"
@@ -2150,6 +2151,65 @@ func TestBatchFillsWithoutLeasingOtherKinds(t *testing.T) {
 	}
 }
 
+// Filling a batch reads no more of the queue than the tasks it takes, where
+// they are the queue's next ones, as an outbox's are.
+func TestBatchFillReadsOnlyTheTasksItTakes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'default', 'report.build', 'available', now(), '{}', 1 FROM generate_series(1, 2000)`)
+	e.exec(t, "ANALYZE {s}.tasks")
+	const fill = 90
+	n, err := taskmill.FillRowsRead(t.Context(), e.client, taskmill.DefaultQueue, "report.build", fill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// It reads each task as a candidate, to lock it, and to lease it, and
+	// returns it.
+	if n > 4*fill {
+		t.Fatalf("filling a batch with %d tasks read %d rows, want at most %d", fill, n, 4*fill)
+	}
+}
+
+// A batch fills with the next tasks of its kind in the queue's order: by
+// priority, and then by age.
+func TestBatchFillsInTheQueuesOrder(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var mu sync.Mutex
+	var batches [][]int64
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler[report](&hs, batchFunc(func(tasks []*taskmill.Task[report]) {
+		mu.Lock()
+		defer mu.Unlock()
+		ids := make([]int64, len(tasks))
+		for i, task := range tasks {
+			ids[i] = task.ID
+		}
+		batches = append(batches, ids)
+	}), &taskmill.HandlerOptions{BatchSize: 4})
+
+	// Three reports of low priority, then three of high priority.
+	var ids []int64
+	for _, p := range []taskmill.Priority{taskmill.PriorityLow, taskmill.PriorityHigh} {
+		for range 3 {
+			ids = append(ids, e.enqueue(t, report{}, &taskmill.EnqueueOptions{Queue: taskmill.DefaultQueue, Priority: p}))
+		}
+	}
+
+	// The one slot's fetch takes the first report of high priority, and
+	// fills its batch with the two others and the oldest of low priority.
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+	for _, id := range ids {
+		e.waitState(t, id, taskmill.StateCompleted)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := [][]int64{{ids[3], ids[4], ids[5], ids[0]}, {ids[1], ids[2]}}; !slices.EqualFunc(batches, want, slices.Equal[[]int64]) {
+		t.Fatalf("got the batches %v, want %v", batches, want)
+	}
+}
+
 // batchFunc is a batch handler for reports that completes them all.
 type batchFunc func(tasks []*taskmill.Task[report])
 
@@ -2381,6 +2441,198 @@ func TestLeasedTasksAreFoundByID(t *testing.T) {
 	if strings.Contains(plans, "tasks_running_idx") || strings.Contains(plans, "Seq Scan on tasks") {
 		t.Fatalf("leased tasks are not found by their IDs:\n%s", plans)
 	}
+}
+
+// The statements that find a batch of tasks by their attempts look each
+// attempt's task up once. Their work grows with the number of attempts, not
+// with its square, also with the generic plan that a worker's connection
+// keeps for them.
+func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	const attempts = 2000
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'default', 'email.send', 'available', now(), '{}', 1 FROM generate_series(1, 50000)`)
+	// The running tasks were all asked to stop, as after a bulk cancel.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+	                                 lease_expires_at, attempted_at, attempted_by, cancel_requested_at)
+	           SELECT 'default', 'email.send', 'running', now(), '{}', 1, 1, 1, now() + interval '1 minute', now(), 'w', now()
+	           FROM generate_series(1, $1)`, attempts)
+	e.exec(t, "ANALYZE {s}.tasks")
+	var ids []int64
+	var tokens []int32
+	running := replaceSchema("SELECT array_agg(id), array_agg(lease_token) FROM {s}.tasks WHERE state = 'running'", e.schema)
+	if err := e.pool.QueryRow(t.Context(), running).Scan(&ids, &tokens); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := taskmill.LeasedRowsRead(t.Context(), e.client, ids, tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The lock reads each task twice, the renewal three times and returns
+	// it, the read of cancel requests once, and the completion reads it to
+	// lock it and to delete it, and returns it.
+	if n > 10*attempts {
+		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 10*attempts)
+	}
+}
+
+// The statements that find a batch of tasks by their attempts find a task
+// only for an attempt with its ID and its lease token, and only while it
+// runs.
+func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	task := func(state string, token int) int64 {
+		var lease any
+		if state == "running" {
+			lease = time.Now().Add(time.Minute)
+		}
+		return int64(e.count(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+		                                               lease_expires_at, attempted_at, attempted_by)
+		                         VALUES ('default', 'email.send', $1, now(), '{}', 5, 1, $2, $3, now(), 'w')
+		                         RETURNING id`, state, token, lease))
+	}
+	owned, alsoOwned := task("running", 3), task("running", 7)
+	takenOver := task("running", 5)   // its attempt holds token 4
+	released := task("available", 2)  // its attempt holds its token, but the task no longer runs
+	swapped := task("running", 1)     // its attempt holds the token of the next task,
+	swappedBack := task("running", 2) // and that task's attempt holds this one's
+	gone := swappedBack + 1           // no such task
+	// Someone asked to cancel one task of each sort.
+	e.exec(t, "UPDATE {s}.tasks SET cancel_requested_at = now() WHERE id = ANY($1)",
+		[]int64{alsoOwned, takenOver, released, swapped})
+
+	found, err := taskmill.LeasedFound(t.Context(), e.client,
+		[]int64{owned, takenOver, released, swapped, swappedBack, gone, alsoOwned, owned},
+		[]int32{3, 4, 2, 2, 1, 1, 7, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The lock and the renewal return each task they find twice: as locked
+	// or renewed, and as owned. The others return it once. An attempt
+	// listed twice changes none of this.
+	twice := []int64{owned, owned, alsoOwned, alsoOwned}
+	for i, want := range [][]int64{twice, twice, {alsoOwned}, {owned, alsoOwned}} {
+		if !slices.Equal(found[i], want) {
+			t.Errorf("%s found the tasks %v, want %v",
+				[]string{"the lock", "the renewal", "the read of cancel requests", "the completion"}[i], found[i], want)
+		}
+	}
+	for id, state := range map[int64]taskmill.State{
+		owned: taskmill.StateCompleted, alsoOwned: taskmill.StateCompleted,
+		takenOver: taskmill.StateRunning, released: taskmill.StateAvailable,
+		swapped: taskmill.StateRunning, swappedBack: taskmill.StateRunning,
+	} {
+		e.wantState(t, id, state)
+	}
+}
+
+// A completion waits for the row of a task that another transaction holds.
+// It locks the rows in the order of their IDs before it deletes any, so that
+// it cannot deadlock with a transaction that takes tasks in that order too,
+// such as one that cancels several of them. That holds whatever the order
+// in which the attempts ended, wherever the rows lie in the table, and
+// however the planner joins the attempts to the tasks.
+func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+	                                 lease_expires_at, attempted_at, attempted_by)
+	           SELECT 'default', 'email.send', 'running', now(), '{}', 5, 1, 1, now() + interval '1 minute', now(), 'w'
+	           FROM generate_series(1, 20000)`)
+	// The lease of the older task was renewed, which moved its row behind
+	// those of the tasks after it: the table's order is not that of the IDs.
+	const older, newer = 3, 9
+	e.exec(t, "UPDATE {s}.tasks SET lease_expires_at = lease_expires_at + interval '1 minute' WHERE id = $1", older)
+	e.exec(t, "ANALYZE {s}.tasks")
+	if e.count(t, "SELECT count(*) FROM {s}.tasks o, {s}.tasks n WHERE o.id = $1 AND n.id = $2 AND o.ctid > n.ctid", older, newer) != 1 {
+		t.Fatal("the row of the older task does not lie behind the newer one's")
+	}
+	// The attempts ended newest first.
+	attempts := func(n int) []int64 {
+		ids := make([]int64, n)
+		for i := range ids {
+			ids[i] = int64(older + n - 1 - i)
+		}
+		return ids
+	}
+
+	type plan struct {
+		settings string
+		attempts int
+	}
+	// by reading the table. Fewer attempts get a custom and a generic plan
+	// with each set of join methods on: nested loop, hash, merge.
+	// set of join methods but none: nested loop, hash and merge.
+	plans := []plan{{"SELECT set_config('plan_cache_mode', 'auto', true)", 200}}
+	for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
+		for _, on := range [][3]bool{
+			{true, true, true},
+			{false, true, true},
+			{true, false, true},
+			{true, true, false},
+			{true, false, false},
+			{false, true, false},
+			{false, false, true},
+		} {
+			plans = append(plans, plan{fmt.Sprintf("SELECT set_config('plan_cache_mode', '%s', true), set_config('enable_nestloop', '%t', true), "+
+				"set_config('enable_hashjoin', '%t', true), set_config('enable_mergejoin', '%t', true)", mode, on[0], on[1], on[2]), 7})
+		}
+	}
+	for _, p := range plans {
+		// A transaction cancels the older task, and so holds its row. The
+		// completion then waits for that row and holds no other yet, so
+		// the transaction gets the newer task too.
+		tx := e.begin(t)
+		if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), older); err != nil {
+			t.Fatal(err)
+		}
+		n, err := completeWhileHeld(t, e, p.settings, attempts(p.attempts), func() error {
+			if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), newer); err != nil {
+				_ = tx.Rollback(ctx)
+				return err
+			}
+			return tx.Rollback(ctx)
+		})
+		if err != nil || n != p.attempts {
+			t.Errorf("%s: the completion finished %d of %d tasks, %v", p.settings, n, p.attempts, err)
+		}
+	}
+
+	// Another worker took the older task while the completion waited for its
+	// row: the completion leaves that task.
+	tx := e.begin(t)
+	e.txExec(t, tx, "UPDATE {s}.tasks SET lease_token = lease_token + 1 WHERE id = $1", older)
+	n, err := completeWhileHeld(t, e, plans[0].settings, attempts(7), func() error { return tx.Commit(ctx) })
+	if err != nil || n != 6 {
+		t.Errorf("the completion finished %d tasks, %v; want the 6 that the attempts still own", n, err)
+	}
+}
+
+// completeWhileHeld completes the tasks ids, planned with settings, while a
+// transaction holds the row of one of them. Once the completion waits for
+// that row, it calls release, which ends the transaction. It returns how
+// many tasks the completion finished.
+func completeWhileHeld(t *testing.T, e *env, settings string, ids []int64, release func() error) (int, error) {
+	t.Helper()
+	type result struct {
+		tasks int
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := taskmill.Complete(t.Context(), e.client, settings, ids)
+		done <- result{n, err}
+	}()
+	e.waitBlocked(t, "INSERT INTO {s}.task_history")
+	if err := release(); err != nil {
+		t.Errorf("%s, %d attempts: the transaction that held a task failed: %v", settings, len(ids), err)
+	}
+	got := <-done
+	return got.tasks, got.err
 }
 
 func TestMiddlewareCannotRunAHandlerTwice(t *testing.T) {
