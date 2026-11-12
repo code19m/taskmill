@@ -193,6 +193,87 @@ func TestWorkerFailureKinds(t *testing.T) {
 	}
 }
 
+// apiError is an error type as applications write them. A function that
+// returns a nil *apiError as an error returns an error that is not nil, and
+// whose Error method panics: a well-known Go mistake.
+type apiError struct{ status int }
+
+func (e *apiError) Error() string { return "status " + strconv.Itoa(e.status) }
+
+// callAPI makes that mistake, except for the address "up".
+func callAPI(to string) error {
+	var failed *apiError
+	if to == "up" {
+		return nil
+	}
+	return failed
+}
+
+// apiBatch is a batch handler that calls the API for each task.
+type apiBatch struct{}
+
+func (apiBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+	errs := make([]error, len(tasks))
+	for i, task := range tasks {
+		errs[i] = callAPI(task.Args.To)
+	}
+	return errs
+}
+
+// tableBackoff is a retry policy with a table of delays. It panics for an
+// attempt beyond its table.
+type tableBackoff []time.Duration
+
+func (b tableBackoff) Backoff(attempt int) time.Duration { return b[attempt-1] }
+
+// taskmill runs code of the application after a handler returned: the
+// methods of the handler's error, and the retry policy. A panic there fails
+// the attempt as a handler's panic does, and the worker goes on.
+func TestPanicAfterTheHandlerReturnedFailsTheAttempt(t *testing.T) {
+	t.Parallel()
+	var batch taskmill.Handlers
+	taskmill.AddBatchHandler[sendEmail](&batch, apiBatch{}, &taskmill.HandlerOptions{Retry: fastRetry})
+	tests := map[string]struct {
+		handlers *taskmill.Handlers
+		where    string // the function that panics, as the recorded stack names it
+	}{
+		"the error's method": {
+			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+				return callAPI(task.Args.To)
+			}, &taskmill.HandlerOptions{Retry: fastRetry}),
+			"(*apiError).Error",
+		},
+		"the error's method, from a batch": {&batch, "(*apiError).Error"},
+		"the retry policy": {
+			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+				if task.Args.To == "up" {
+					return nil
+				}
+				return errors.New("the partner is down")
+			}, &taskmill.HandlerOptions{Retry: tableBackoff{}}),
+			"tableBackoff.Backoff",
+		},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			runWorker(t, e, &taskmill.WorkerConfig{Handlers: tt.handlers, Queues: defaultQueue(1)})
+
+			// The first attempt is recorded as a panic, and the task is retried
+			// after the default backoff of about a second.
+			id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 2})
+			info := e.waitState(t, id, taskmill.StateDead)
+			first := info.Errors[0]
+			if info.Attempt != 2 || first.Attempt != 1 || first.Code != taskmill.CodePanic || !strings.Contains(first.Message, tt.where) {
+				t.Fatalf("got attempt %d with errors %+v, want a first error with the code panic that names %s",
+					info.Attempt, info.Errors, tt.where)
+			}
+			e.waitState(t, e.enqueue(t, sendEmail{To: "up"}, nil), taskmill.StateCompleted)
+		})
+	}
+}
+
 func TestWorkerRejectsUndecodablePayload(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

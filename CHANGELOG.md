@@ -32,6 +32,15 @@ All notable changes to taskmill are recorded here. The format follows
   `fetch tasks` with a lock timeout, and it fetches again when the queue is
   next woken or polled. Before, each worker of the queue kept a connection
   waiting, and could not stop until the wait ended.
+- A panic in `RetryPolicy.Backoff`, or in a method of the error that a
+  handler returned, ended the worker's process. The usual cause of the
+  second is a nil pointer returned as an `error`, whose `Error` method
+  panics. Every other task of that process lost its lease, and the task
+  ended each process that ran it next, until its attempts ran out. The
+  worker now recovers such a panic as it recovers a handler's: the attempt
+  fails with the code `panic` and the panic's stack in the task's errors.
+  The task is retried after the default backoff, or becomes dead after its
+  last attempt.
 
 ## [0.5.0] - 2026-11-12
 
