@@ -163,7 +163,8 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 	c := compiledSchedule{Schedule: s, expr: expr, opts: opts}
 	// Check the task as a run enqueues it: with taskmill's own metadata, at
 	// its longest.
-	opts.Metadata = c.runMetadata(longestScheduledFor)
+	run := resolvedTask{meta: opts.Metadata, own: c.ownMetadata(longestScheduledFor)}
+	opts.Metadata = run.metadata()
 	if err := checkScheduledTask(s.Args, opts); err != nil {
 		return compiledSchedule{}, fmt.Errorf("%w (schedule %q)", err, s.Name)
 	}
@@ -184,14 +185,10 @@ func (s *compiledSchedule) scheduledFor(at time.Time) string {
 	return at.Format(time.RFC3339Nano)
 }
 
-// runMetadata returns the metadata of a run of s: the metadata of the
-// schedule's task, and over it taskmill's own keys.
-func (s *compiledSchedule) runMetadata(scheduledFor string) map[string]string {
-	meta := make(map[string]string, len(s.opts.Metadata)+2)
-	maps.Copy(meta, s.opts.Metadata)
-	meta[MetadataSchedule] = s.Name
-	meta[MetadataScheduledFor] = scheduledFor
-	return meta
+// ownMetadata returns taskmill's own metadata of a run of s, which is stored
+// over the metadata of the schedule's task.
+func (s *compiledSchedule) ownMetadata(scheduledFor string) map[string]string {
+	return map[string]string{MetadataSchedule: s.Name, MetadataScheduledFor: scheduledFor}
 }
 
 // checkScheduledTask validates the task that a schedule enqueues, so that a
@@ -303,10 +300,14 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 	if st.paused || st.nextRunAt.After(now) {
 		return nil
 	}
+	return m.enqueueRun(ctx, s, st.nextRunAt, now)
+}
 
+// enqueueRun enqueues the run of s that is due at due, and stores the time of
+// the next regular run.
+func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, now time.Time) error {
 	// A regular run is due at a whole minute of the timetable. Any other
 	// time is the time of a request, which Client.RunSchedule stored.
-	due := st.nextRunAt
 	requested := due.In(s.Location).Second() != 0 || due.Nanosecond() != 0
 	// The regular runs missed since a regular run collapse into it, so the
 	// next one comes after now. A requested run stands for no regular run,
@@ -338,11 +339,17 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 			return err // another maintainer ran it, or it was paused meanwhile
 		}
 		opts := s.opts
-		opts.Metadata = s.runMetadata(s.scheduledFor(due))
 		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(key, 10)
 		opts.DedupeWindow = max(24*time.Hour, 2*next.Sub(due))
 		opts.RunAt = due // in the past: the task is available at once
-		_, err = m.c.enqueue(ctx, pgxQuerier{q: tx}, []EnqueueParams{{Args: s.Args, Options: &opts}})
+		run, err := resolve(EnqueueParams{Args: s.Args, Options: &opts})
+		if err != nil {
+			return err
+		}
+		// The enqueue middleware sees taskmill's own metadata, and cannot
+		// change it: a handler must find the run's time whatever it does.
+		run.own = s.ownMetadata(s.scheduledFor(due))
+		_, err = m.c.storeThrough(ctx, pgxQuerier{q: tx}, []*resolvedTask{run})
 		return err
 	})
 }

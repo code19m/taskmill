@@ -80,7 +80,7 @@ func TestScheduledFor(t *testing.T) {
 		{time.FixedZone("seconds", 60*60+17), "22:30"},
 	} {
 		s := compiledSchedule{Schedule: Schedule{Name: "nightly", Location: tt.loc}}
-		info := TaskInfo{Metadata: s.runMetadata(s.scheduledFor(at))}
+		info := TaskInfo{Metadata: s.ownMetadata(s.scheduledFor(at))}
 		if got := info.ScheduledFor(); !got.Equal(at) || got.Format("15:04") != tt.want {
 			t.Errorf("in %s: got %s, want %s at %s", tt.loc, got.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), tt.want)
 		}

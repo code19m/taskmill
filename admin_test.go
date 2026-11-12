@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/code19m/taskmill"
+	"github.com/code19m/taskmill/internal/testdb"
 )
 
 func noopHandlers() *taskmill.Handlers {
@@ -1289,6 +1290,46 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 	}
 	if !maps.Equal(task.Metadata, want) || !task.ScheduledFor().Equal(slot) {
 		t.Errorf("the task has the metadata %v, for %s; want %v", task.Metadata, task.ScheduledFor(), want)
+	}
+}
+
+func TestScheduledRunKeepsItsTimeWhateverEnqueueMiddlewareDoes(t *testing.T) {
+	t.Parallel()
+	// The first middleware notes the metadata that it gets, and writes over
+	// taskmill's keys. The second replaces the whole map, as a middleware
+	// that builds its own may do.
+	var seen map[string]string
+	overwrite := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		seen = maps.Clone(tasks[0].Metadata)
+		tasks[0].Metadata[taskmill.MetadataSchedule] = "mine"
+		tasks[0].Metadata[taskmill.MetadataScheduledFor] = "never"
+		return next(ctx)
+	}
+	replace := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		tasks[0].Metadata = map[string]string{"trace": "abc"}
+		return next(ctx)
+	}
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{overwrite, replace}})
+	w, slot := newDailySchedule(t, e)
+	e.scheduleDueAt(t, slot)
+	taskmill.RunSchedules(t.Context(), w)
+
+	page, err := e.client.List(t.Context(), nil)
+	if err != nil || len(page.Tasks) != 1 {
+		t.Fatalf("got %d tasks, %v; want the scheduled run", len(page.Tasks), err)
+	}
+	own := map[string]string{
+		taskmill.MetadataSchedule:     "digest",
+		taskmill.MetadataScheduledFor: slot.Format(time.RFC3339),
+	}
+	// The middleware sees taskmill's keys, but cannot change or drop them.
+	if !maps.Equal(seen, own) {
+		t.Errorf("the middleware got the metadata %v, want %v", seen, own)
+	}
+	stored := maps.Clone(own)
+	stored["trace"] = "abc"
+	if task := page.Tasks[0]; !maps.Equal(task.Metadata, stored) || !task.ScheduledFor().Equal(slot) {
+		t.Errorf("the run has the metadata %v, for %s; want %v", task.Metadata, task.ScheduledFor(), stored)
 	}
 }
 

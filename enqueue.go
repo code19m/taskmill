@@ -131,7 +131,10 @@ type EnqueueTask struct {
 	Kind  string
 
 	// Metadata holds the task's metadata, from [EnqueueOptions.Metadata]. It
-	// is never nil, and middleware may change it before calling next.
+	// is never nil, and middleware may change it before calling next. For a
+	// schedule's run, it also holds taskmill's own keys, such as
+	// [MetadataSchedule]: middleware can read them, but taskmill sets them
+	// again after it, so it cannot change or remove them.
 	Metadata map[string]string
 
 	// Result is set once next returns nil.
@@ -225,18 +228,21 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 		}
 		tasks[i] = t
 	}
-	if len(c.enqueueMiddleware) == 0 {
-		return c.store(ctx, q, tasks)
-	}
 	return c.storeThrough(ctx, q, tasks)
 }
 
-// storeThrough stores tasks through the enqueue middleware.
+// storeThrough stores tasks through the enqueue middleware, if there is any.
+// The middleware sees taskmill's own metadata of a task, and store sets it
+// again after the middleware.
 func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedTask) ([]EnqueueResult, error) {
+	if len(c.enqueueMiddleware) == 0 {
+		return c.store(ctx, q, tasks)
+	}
 	views := make([]*EnqueueTask, len(tasks))
 	for i, t := range tasks {
-		meta := make(map[string]string, len(t.meta)) // t.meta may belong to the caller
+		meta := make(map[string]string, len(t.meta)+len(t.own)) // t.meta may belong to the caller
 		maps.Copy(meta, t.meta)
+		maps.Copy(meta, t.own)
 		views[i] = &EnqueueTask{Queue: t.queue, Kind: t.kind, Metadata: meta}
 	}
 	var results []EnqueueResult
@@ -302,7 +308,7 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 	size := 0 // the payload and metadata of the call
 
 	for i, t := range tasks {
-		meta, err := encodeMetadata(t.meta)
+		meta, err := encodeMetadata(t.metadata())
 		if err != nil {
 			return nil, inBatch(err, i, len(tasks))
 		}
@@ -443,6 +449,19 @@ type resolvedTask struct {
 	dedupeWindow       time.Duration
 	payload            []byte
 	meta               map[string]string // may belong to the caller or the kind: never modified
+	own                map[string]string // taskmill's own metadata, of a schedule's run: stored over meta
+}
+
+// metadata returns the task's metadata as it is stored: meta, and over it
+// taskmill's own.
+func (t *resolvedTask) metadata() map[string]string {
+	if len(t.own) == 0 {
+		return t.meta
+	}
+	all := make(map[string]string, len(t.meta)+len(t.own))
+	maps.Copy(all, t.meta)
+	maps.Copy(all, t.own)
+	return all
 }
 
 // resolve merges a task's options over its kind's defaults and taskmill's,
