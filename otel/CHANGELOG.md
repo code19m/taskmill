@@ -10,6 +10,15 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+### Security
+
+- The module now requires pgx v5.12.0, which fixes two vulnerabilities in
+  pgx:
+  [GHSA-j38q-h3ph-jjpq](https://github.com/jackc/pgx/security/advisories/GHSA-j38q-h3ph-jjpq)
+  and
+  [GHSA-95fj-3fxw-g62g](https://github.com/jackc/pgx/security/advisories/GHSA-95fj-3fxw-g62g).
+  See [taskmill's changelog](../CHANGELOG.md) for what they affect.
+
 ## [0.3.0] - 2026-10-29
 
 ### Added
