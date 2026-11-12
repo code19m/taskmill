@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -39,7 +40,8 @@ func Example() {
 	if err := taskmill.Migrate(ctx, pool, nil); err != nil {
 		log.Fatal(err)
 	}
-	client, err := taskmill.NewClient(ctx, pool, nil)
+	// Without a logger, taskmill logs nothing, not even errors.
+	client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: slog.Default()})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -163,7 +165,7 @@ func ExampleTask_CompleteTx() {
 func ExampleHandlerFunc() {
 	handler := taskmill.HandlerFunc[SendReceipt](func(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
 		if t.Args.Email == "" {
-			return taskmill.Permanent(errors.New("no email address")) // dead at once
+			return taskmill.Permanent(errors.New("no email address")) // dead right away
 		}
 		if rateLimited() {
 			return taskmill.Snooze(time.Minute) // later, without using an attempt
