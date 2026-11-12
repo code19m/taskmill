@@ -134,6 +134,16 @@ All notable changes to taskmill are recorded here. The format follows
   still waits while another process migrates. It now creates the schema and
   the `migrations` table before the transaction that migrates, so a first
   `Migrate` that fails leaves those two behind; run it again.
+- A flood of notifications can no longer hold up a worker. A worker read
+  the database once for each notification that a queue's settings changed,
+  one after the other, where it receives notifications, and every role of a
+  database can send thousands of them a second. Cancellations and wake-ups
+  then waited behind them, for seconds, and the worker logged that the
+  maintainer's heartbeats did not arrive and polled its queues. A worker
+  now only notes what a notification says. It reads the settings, and the
+  rows of the tasks to cancel, at most once every 20 milliseconds for all
+  the notifications that arrived, so `Cancel` still stops a running task
+  within that time.
 
 ## [0.5.0] - 2026-11-12
 

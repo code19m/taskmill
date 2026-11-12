@@ -571,9 +571,10 @@ func TestCancelNotificationAloneDoesNotCancel(t *testing.T) {
 	recv(t, started, "the second handler to start")
 	e.waitListening(t)
 
-	// Nobody asked to cancel the first task. The worker handles notifications
-	// in order, so once the second task's context ends, it has handled the
-	// first task's notification too.
+	// Nobody asked to cancel the first task. The worker reads the row of a
+	// task that a notification named no later than the rows of the tasks
+	// named after it, so once the second task's context ends, it has read
+	// the first task's row too.
 	e.exec(t, "SELECT pg_notify($1, $2)", e.schema, "c|"+strconv.FormatInt(unasked, 10))
 	if err := e.client.Cancel(t.Context(), asked); err != nil {
 		t.Fatal(err)
@@ -584,6 +585,70 @@ func TestCancelNotificationAloneDoesNotCancel(t *testing.T) {
 	close(proceed)
 	e.waitState(t, unasked, taskmill.StateCompleted)
 	e.waitState(t, asked, taskmill.StateCanceled)
+}
+
+// Any role can send notifications faster than a worker reads the database
+// for each: one statement commits thousands. They must neither hold up a
+// real cancellation nor cost a read each.
+func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
+	t.Parallel()
+	const flood = 20000
+	for _, tc := range []struct {
+		name    string
+		payload func(running int64) string // of every notification of the flood
+		reads   string                     // a part of the statement that a worker sends to follow it
+	}{
+		{"cancel", func(running int64) string { return "c|" + strconv.FormatInt(running, 10) }, "cancel_requested_at IS NOT NULL"},
+		{"settings", func(int64) string { return "q|" + taskmill.DefaultQueue }, "paused_at IS NOT NULL"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sent := &statementLog{}
+			e := newTracedEnv(t, sent)
+			started := make(chan struct{}, 2)
+			ended := make(chan int64, 2)
+			proceed := make(chan struct{})
+			runWorker(t, e, &taskmill.WorkerConfig{
+				Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+					started <- struct{}{}
+					select {
+					case <-ctx.Done():
+						ended <- task.ID
+						return context.Cause(ctx)
+					case <-proceed:
+						return nil
+					}
+				}, &taskmill.HandlerOptions{Timeout: time.Minute}),
+				Queues: defaultQueue(2),
+			})
+			running := e.enqueue(t, sendEmail{}, nil)
+			asked := e.enqueue(t, sendEmail{}, nil)
+			recv(t, started, "the first handler to start")
+			recv(t, started, "the second handler to start")
+			e.waitListening(t)
+			sent.reset()
+
+			// Each notification commits alone: PostgreSQL delivers equal ones
+			// of one transaction only once.
+			e.exec(t, "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(flood)+" LOOP PERFORM pg_notify('"+e.schema+"', '"+
+				tc.payload(running)+"'); COMMIT; END LOOP; END $$")
+			start := time.Now()
+			if err := e.client.Cancel(t.Context(), asked); err != nil {
+				t.Fatal(err)
+			}
+			if id := recv(t, ended, "the canceled task's context to end"); id != asked {
+				t.Fatalf("a notification alone ended the context of task %d", id)
+			}
+			if waited := time.Since(start); waited > 2*time.Second {
+				t.Errorf("the cancellation waited %s behind %d notifications", waited.Round(time.Millisecond), flood)
+			}
+			if n := sent.count(tc.reads); n > flood/20 {
+				t.Errorf("the worker read the database %d times for %d notifications", n, flood)
+			}
+			close(proceed)
+			e.waitState(t, running, taskmill.StateCompleted)
+		})
+	}
 }
 
 // The task's row decides whether an attempt ends in a cancellation, whatever

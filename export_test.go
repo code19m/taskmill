@@ -92,7 +92,7 @@ func ExplainLeased(ctx context.Context, c *Client) (string, error) {
 		{c.sql.fail, []any{int64(1), int32(1), "retryable", int64(1), `{"message": "m"}`}},
 		{c.sql.snooze, []any{int64(1), int32(1), int64(1), nil, true}},
 		{c.sql.release, []any{int64(1), int32(1), true}},
-		{c.sql.cancelRequest, []any{int64(1), int32(1)}},
+		{c.sql.cancelRequest, []any{ids, tokens}},
 	} {
 		plan, err := explain(ctx, c, "", s.sql, s.args...)
 		if err != nil {

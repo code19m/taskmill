@@ -723,11 +723,12 @@ UNION ALL
 SELECT id, false, cancel_requested_at IS NOT NULL FROM {s}.tasks
 WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}`),
 
-		// cancelRequest finds task $1 if the attempt with lease token $2
-		// still owns it and its cancellation was requested.
+		// cancelRequest returns, of the tasks $1 that the attempts with the
+		// lease tokens $2 still own, those whose cancellation was requested.
 		cancelRequest: q(`
-SELECT FROM {s}.tasks
-WHERE id = $1 AND lease_token = $2 AND {leased} AND cancel_requested_at IS NOT NULL`),
+SELECT id FROM {s}.tasks
+WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t))
+  AND {leased} AND cancel_requested_at IS NOT NULL`),
 
 		// fail records a failed attempt: retryable after a delay of $4
 		// microseconds, or dead. $5 is the error as a JSON object. A task
