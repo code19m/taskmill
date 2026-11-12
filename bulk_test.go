@@ -599,6 +599,84 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 	e.rawGroups = true
 }
 
+// A batch reads a window of at most 100,000 tasks, so a bulk action gets
+// through any number of tasks that do not match, batch by batch. It still
+// acts on each matching task once: where a batch ends with its window, where
+// a window holds no match, and when a task matches again behind the action.
+func TestBulkActionsReadTheTableInWindows(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	// Tasks 1 to 250,000: of those from 120,005 to 240,000, every fifth is a
+	// dead task of the queue q, 24,000 in all. So the first window has none
+	// of them, and the second ends with one, task 200,000. Every 500th task
+	// is of a rare kind, 500 in all.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT CASE WHEN dead THEN 'q' ELSE 'other' END, CASE WHEN i % 500 = 0 THEN 'rare' ELSE 'email.send' END,
+	                  CASE WHEN dead THEN 'dead' ELSE 'available' END::{s}.task_state, now(), '{}', 3,
+	                  CASE WHEN dead THEN now() END
+	           FROM (SELECT i, i > 120000 AND i <= 240000 AND i % 5 = 0 AS dead FROM generate_series(1, 250000) i) x`)
+	// 120,000 completed tasks after them, 120 of them of the rare kind.
+	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+	                                         priority, attempt, max_attempts, payload, metadata, errors)
+	           SELECT 1000000 + i, now(), 'other', now(), CASE WHEN i % 1000 = 0 THEN 'rare' ELSE 'email.send' END, now(), 'w', now(),
+	                  2, 1, 3, '{}', '{}', '[]'
+	           FROM generate_series(1, 120000) i`)
+	e.exec(t, "ANALYZE {s}.tasks")
+	e.exec(t, "ANALYZE {s}.task_history")
+	q := taskmill.TaskFilter{Queues: []string{"q"}}
+
+	for _, c := range []struct {
+		action string
+		filter taskmill.TaskFilter
+	}{
+		{"retry", taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}},
+		{"cancel", q},
+		{"delete", q},
+	} {
+		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, &c.filter, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n > 100_000 {
+			t.Errorf("%s %+v: the first batch read %d rows, want at most a window of 100,000", c.action, c.filter, n)
+		}
+	}
+	// Finding a window reads its own entries of each table's index.
+	for _, generic := range []bool{false, true} {
+		n, err := taskmill.WindowRowsRead(ctx, e.client, 0, generic)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n > 200_000 {
+			t.Errorf("generic plan %t: finding a window read %d rows, want at most 100,000 of each table", generic, n)
+		}
+	}
+
+	// A retried task dies again at once, so it matches again.
+	e.exec(t, `CREATE FUNCTION {s}.die_again() RETURNS trigger LANGUAGE plpgsql AS
+	           'BEGIN NEW.state := ''dead''; NEW.finalized_at := now(); RETURN NEW; END'`)
+	e.exec(t, `CREATE TRIGGER die_again BEFORE UPDATE ON {s}.tasks FOR EACH ROW
+	           WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.die_again()`)
+	res, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: q})
+	if err != nil || res != (taskmill.BulkResult{Changed: 24000}) {
+		t.Fatalf("retry: %+v, %v; want each of the 24,000 dead tasks retried once", res, err)
+	}
+
+	// A delete goes through both tables, here with a few matches in each
+	// window.
+	res, err = e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: taskmill.TaskFilter{Kinds: []string{"rare"}}})
+	if err != nil || res != (taskmill.BulkResult{Changed: 620}) {
+		t.Fatalf("delete: %+v, %v; want the 500 tasks and the 120 completed tasks of the kind deleted", res, err)
+	}
+	left := e.count(t, `SELECT (SELECT count(*) FROM {s}.tasks WHERE kind = 'rare')
+	                         + (SELECT count(*) FROM {s}.task_history WHERE kind = 'rare')`)
+	all := e.count(t, "SELECT (SELECT count(*) FROM {s}.tasks) + (SELECT count(*) FROM {s}.task_history)")
+	if left != 0 || all != 250000-500+120000-120 {
+		t.Fatalf("%d tasks of the kind are left, of %d tasks; want none, and every other task kept", left, all)
+	}
+}
+
 // A bulk action that ctx ends midway leaves the tasks and their FIFO groups
 // consistent, and says exactly how many tasks it changed.
 func TestBulkActionsStopMidway(t *testing.T) {

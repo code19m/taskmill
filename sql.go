@@ -62,6 +62,7 @@ type statements struct {
 	resumeHaltedHead  string
 
 	lastTask        string
+	windowEnd       string
 	pickRetry       string
 	pickCancel      string
 	pickDelete      string
@@ -160,6 +161,7 @@ func newStatements(schema string) *statements {
 	r := strings.NewReplacer(
 		"{s}", schema,
 		"{batch}", strconv.Itoa(maintenanceBatch),
+		"{window}", strconv.Itoa(bulkWindow),
 		"{cap}", strconv.Itoa(countCap),
 		// {available} and {cancel} start the payloads of notifications.
 		"{available}", notifyAvailable+"|",
@@ -514,16 +516,27 @@ WHERE queue = $1 AND group_key = $2 AND halted_task_id = $3`),
 		lastTask: q(`
 SELECT greatest((SELECT coalesce(max(id), 0) FROM {s}.tasks), (SELECT coalesce(max(id), 0) FROM {s}.task_history))`),
 
+		// windowEnd returns where the window of a bulk action's next batches
+		// ends: the ID of the {window}th task after $1, in the tasks table
+		// if $3 and in the history if $4, whichever comes first, and at most
+		// $2. With windowSettings, it reads that many index entries of each
+		// table, in ID order, and no row beyond them.
+		windowEnd: q(`
+SELECT least($2::bigint,
+    (SELECT id FROM {s}.tasks WHERE $3 AND id > $1 AND id <= $2 ORDER BY id OFFSET {window} - 1 LIMIT 1),
+    (SELECT id FROM {s}.task_history WHERE $4 AND id > $1 AND id <= $2 ORDER BY id OFFSET {window} - 1 LIMIT 1))`),
+
 		// The pick statements read the next batch of the tasks that a bulk
-		// action changes, in ID order after $5 up to $6: those of states $4
-		// that match the filters. Each batch starts where the last one ended,
-		// so a bulk action reads each task once, and the oldest tasks of a
-		// FIFO group come first. They return each of them, and whether they
-		// hold its lock: they skip the tasks, the FIFO groups, and the dedupe
-		// keys that other transactions hold, the groups ($7, $8) that the
-		// action left before, and tasks that changed meanwhile. They report
-		// whether each task's group had a row, which they then hold. A cancel
-		// skips running tasks already asked to stop.
+		// action changes, in ID order after $5 up to $6, where the batch's
+		// window ends: those of states $4 that match the filters. Each batch
+		// starts where the last one ended, so a bulk action reads each task
+		// once, and the oldest tasks of a FIFO group come first. They return
+		// each of them, and whether they hold its lock: they skip the tasks,
+		// the FIFO groups, and the dedupe keys that other transactions hold,
+		// the groups ($7, $8) that the action left before, and tasks that
+		// changed meanwhile. They report whether each task's group had a
+		// row, which they then hold. A cancel skips running tasks already
+		// asked to stop.
 		pickRetry: pick(`t.state IN ('dead', 'canceled')`, ``),
 		pickCancel: pick(`t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
       AND t.cancel_requested_at IS NULL`, ` AND `+keyFree),

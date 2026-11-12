@@ -227,9 +227,9 @@ func RunRetention(ctx context.Context, w *Worker) {
 }
 
 // BulkRowsRead runs the next batch's pick of a bulk action (retry, cancel,
-// delete, or history) on filter after task after, under EXPLAIN ANALYZE in a
-// transaction that it rolls back, and returns how many rows the scans of
-// the task tables read.
+// delete, or history) on filter after task after, in the window that the
+// action finds there, under EXPLAIN ANALYZE in a transaction that it rolls
+// back, and returns how many rows the scans of the task tables read.
 func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFilter, after int64) (int64, error) {
 	sql, states := map[string]string{
 		"retry": c.sql.pickRetry, "cancel": c.sql.pickCancel, "delete": c.sql.pickDelete, "history": c.sql.pickCompleted,
@@ -241,16 +241,37 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	if err != nil {
 		return 0, err
 	}
+	m.after = after
 	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
 		return 0, err
 	}
-	args := []any{m.queues, m.kinds, m.groups, m.states, after, m.last, m.left.queues, m.left.groups}
-	if action == "history" {
-		args = []any{m.queues, m.kinds, m.groups, after, m.last}
+	if err := c.nextWindow(ctx, m); err != nil {
+		return 0, err
 	}
-	return rowsRead(ctx, c, bulkSettings, sql, args, func(rel string) bool {
-		return rel == "tasks" || strings.HasPrefix(rel, "task_history")
-	})
+	args := []any{m.queues, m.kinds, m.groups, m.states, m.after, m.until, m.left.queues, m.left.groups}
+	if action == "history" {
+		args = []any{m.queues, m.kinds, m.groups, m.after, m.until}
+	}
+	return rowsRead(ctx, c, bulkSettings, sql, args, taskTables)
+}
+
+// WindowRowsRead runs the statement that finds the window of a bulk action
+// on every task, after task after, as the action runs it, under EXPLAIN
+// ANALYZE, and returns how many rows the scans of the task tables read. With
+// generic, the statement runs with its generic plan.
+func WindowRowsRead(ctx context.Context, c *Client, after int64, generic bool) (int64, error) {
+	var last int64
+	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&last); err != nil {
+		return 0, err
+	}
+	plan, err := analyze(ctx, c, generic, windowSettings, c.sql.windowEnd, after, last, true, true)
+	return planSum(plan, scanned(taskTables)), err
+}
+
+// taskTables matches the tables of tasks: the unfinished ones, and the
+// partitions of the history.
+func taskTables(rel string) bool {
+	return rel == "tasks" || strings.HasPrefix(rel, "task_history")
 }
 
 // ListRowsRead runs the read of a page of tasks on params, as List runs it,
@@ -266,9 +287,7 @@ func ListRowsRead(ctx context.Context, c *Client, params *ListParams) (int64, er
 		return 0, err
 	}
 	args := []any{m.queues, m.states, m.kinds, before, limit + 1, len(m.states) > 0, m.history, m.groups}
-	return rowsRead(ctx, c, "SET LOCAL plan_cache_mode = force_custom_plan", c.sql.listTasks, args, func(rel string) bool {
-		return rel == "tasks" || strings.HasPrefix(rel, "task_history")
-	})
+	return rowsRead(ctx, c, "SET LOCAL plan_cache_mode = force_custom_plan", c.sql.listTasks, args, taskTables)
 }
 
 // GroupRowsRead runs the read of a page of groups on params, as Groups runs
