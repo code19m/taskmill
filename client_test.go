@@ -609,6 +609,63 @@ func TestTxMethodsAcceptWrappedSQLTransactions(t *testing.T) {
 	e.wantState(t, id, taskmill.StateCanceled)
 }
 
+// PostgreSQL ends one transaction of a deadlock, and it may be a Cancel, a
+// Delete, or a Retry that took its locks in the right order: here, another
+// transaction holds the group's row and then asks for the task's row. The
+// three own their transactions, so they run again.
+func TestCancelDeleteAndRetryRunAgainAfterADeadlock(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		act  func(c *taskmill.Client, ctx context.Context, id int64) error
+		want taskmill.State // of the task in the end; empty if it is gone
+	}{
+		{"cancel", (*taskmill.Client).Cancel, taskmill.StateCanceled},
+		{"delete", (*taskmill.Client).Delete, ""},
+		{"retry", (*taskmill.Client).Retry, taskmill.StatePending},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			ctx := t.Context()
+			group := &taskmill.EnqueueOptions{GroupKey: "g"}
+			id := e.enqueue(t, sendEmail{To: "head"}, group)
+			if tt.name == "retry" {
+				// A canceled task behind the group's head.
+				id = e.enqueue(t, sendEmail{To: "next"}, group)
+				if err := e.client.Cancel(ctx, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// The other transaction holds the group's row, and is in no hurry
+			// to look for a deadlock: PostgreSQL will end the action's.
+			other := e.begin(t)
+			e.txExec(t, other, "SET LOCAL deadlock_timeout = '1min'")
+			e.txExec(t, other, "SELECT FROM {s}.groups FOR UPDATE")
+			// The action locks the task's row, and waits for the group's.
+			acted := make(chan error, 1)
+			go func() { acted <- tt.act(e.client, ctx, id) }()
+			e.waitBlockedCount(t, 1)
+			// The other transaction gets the task's row once the action's
+			// transaction has ended, after a second.
+			e.txExec(t, other, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", id)
+			if err := other.Rollback(ctx); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := recv(t, acted, "the action"); err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			if tt.want != "" {
+				e.wantState(t, id, tt.want)
+			} else if _, err := e.client.Get(ctx, id); !errors.Is(err, taskmill.ErrNotFound) {
+				t.Fatalf("the deleted task: got %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
 // spyTx is a transaction that notes the statements that run on it.
 type spyTx struct {
 	pgx.Tx

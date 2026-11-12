@@ -209,7 +209,7 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64, check bool) er
 // it. It returns [ErrNotFound] if no task has the ID, and [ErrInvalidState]
 // for tasks in other states.
 func (c *Client) Retry(ctx context.Context, id int64) error {
-	return c.inTx(ctx, func(q querier) error { return c.retry(ctx, q, id) })
+	return c.inLockOrder(ctx, func(q querier, _ bool) error { return c.retry(ctx, q, id) })
 }
 
 func (c *Client) retry(ctx context.Context, q querier, id int64) error {
@@ -326,23 +326,37 @@ func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) er
 var errLockOrder = errors.New("taskmill: the task changed while its rows were locked")
 
 // lockOrderTries is how many times inLockOrder runs its transaction. Each new
-// try takes another change of the same task, committed between two
-// statements of the try before.
+// try takes another transaction that changes the same task or its group
+// while the try before runs.
 const lockOrderTries = 5
 
-// inLockOrder runs fn in a transaction on the client's pool, as Cancel and
-// Delete need it: if takeTask finds its locks in the wrong order, the
-// transaction is rolled back, which releases them, and fn runs again in a
-// new one. The last try runs without the check, as CancelTx does: PostgreSQL
-// then ends a deadlock, should one follow.
+// inLockOrder runs fn in a transaction on the client's pool, as Cancel,
+// Delete, and Retry need it. It runs fn again, in a new transaction, when
+// the first lost to another transaction over the order of their locks:
+//
+//   - takeTask found its locks in the wrong order: the rollback releases
+//     them.
+//   - PostgreSQL ended the transaction to end a deadlock. It may pick any of
+//     the transactions that wait for each other, also one that kept the
+//     order, when another, such as a CancelTx, could not.
+//
+// The last try runs without takeTask's check, as CancelTx does, and returns
+// what it gets.
 func (c *Client) inLockOrder(ctx context.Context, fn func(q querier, check bool) error) error {
 	for try := 1; ; try++ {
-		check := try < lockOrderTries
-		err := c.inTx(ctx, func(q querier) error { return fn(q, check) })
-		if !errors.Is(err, errLockOrder) {
+		last := try == lockOrderTries
+		err := c.inTx(ctx, func(q querier) error { return fn(q, !last) })
+		if last || !errors.Is(err, errLockOrder) && !isDeadlock(err) {
 			return err
 		}
 	}
+}
+
+// isDeadlock reports whether err is PostgreSQL's error for the transaction
+// that it ended to end a deadlock.
+func isDeadlock(err error) bool {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && pgErr.Code == "40P01" // deadlock_detected
 }
 
 // takeTask runs take, which is lockTask or deleteTask, on task id for Cancel

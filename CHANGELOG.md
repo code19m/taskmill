@@ -247,6 +247,12 @@ All notable changes to taskmill are recorded here. The format follows
   your transaction, so it works as before: when it meets a `Retry` of the
   same task, it may still end with that error, and you may run your
   transaction again.
+- `Cancel`, `Delete`, and `Retry` run again, up to 5 times in all, when
+  PostgreSQL ends their transaction with `deadlock detected` (SQLSTATE
+  40P01). PostgreSQL ends any one of the transactions that wait for each
+  other, so the error could hit a call that did nothing wrong, when another
+  transaction, such as one with `CancelTx`, took the same rows in another
+  order.
 - When two producers enqueued the same dedupe key just after its window
   ended, one created the task, as it should, but the other's
   `EnqueueResult.ID` named the old task that held the key before. Now it
