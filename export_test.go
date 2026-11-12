@@ -2,6 +2,7 @@ package taskmill
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strconv"
 	"strings"
@@ -68,6 +69,23 @@ func WakeQueues(ctx context.Context, w *Worker) {
 // maintainer does once a minute.
 func PruneSchedules(ctx context.Context, w *Worker) {
 	newMaintainer(w).pruneSchedules(ctx)
+}
+
+// Elect runs one try of worker id to take or renew the maintainer's lease,
+// as its maintainer does, in a transaction of its own. It reports whether
+// the worker leads, and whether the try wrote: a transaction that writes
+// gets a transaction ID.
+func Elect(ctx context.Context, c *Client, id string) (leads, wrote bool, err error) {
+	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
+		var leader string
+		err := tx.QueryRow(ctx, c.sql.electLeader, id, time.Minute.Microseconds()).Scan(&leader)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		leads = err == nil
+		return tx.QueryRow(ctx, "SELECT pg_current_xact_id_if_assigned() IS NOT NULL").Scan(&wrote)
+	})
+	return leads, wrote, err
 }
 
 // ExplainFetch returns the plan of a fetch from queue, as a worker runs it.

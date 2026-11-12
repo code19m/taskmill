@@ -126,6 +126,12 @@ All notable changes to taskmill are recorded here. The format follows
   that growth, a worker that held about 12,000 tasks could not have renewed
   its leases in time, and its tasks would have run twice. A full batch of
   500 completions takes a third of the time.
+- A worker that is not the maintainer no longer writes to the database each
+  time it tries to become it, 24 times a minute. Every such try took a
+  transaction ID and wrote WAL, though it changed nothing: with 100 idle
+  workers, 40 write transactions a second and 3.5 million transaction IDs a
+  day. A try now writes only when it takes or renews the maintainer's
+  lease.
 
 ### Security
 

@@ -812,10 +812,14 @@ SET queues = EXCLUDED.queues, kinds = EXCLUDED.kinds, hostname = EXCLUDED.hostna
 		deleteWorker:  q(`DELETE FROM {s}.workers WHERE id = $1`),
 
 		// electLeader takes or renews the maintainer's lease for $2
-		// microseconds. It returns a row only if $1 is the leader.
+		// microseconds. It returns a row only if $1 is the leader. It
+		// proposes its row only if no other worker's lease lasts: a conflict
+		// locks the leader's row even when it then changes nothing, which
+		// makes every try of every other worker a write.
 		electLeader: q(`
 INSERT INTO {s}.leader AS l (name, worker_id, elected_at, expires_at)
-VALUES ('maintainer', $1, now(), now() + $2 * interval '1 microsecond')
+SELECT 'maintainer', $1, now(), now() + $2 * interval '1 microsecond'
+WHERE NOT EXISTS (SELECT FROM {s}.leader WHERE name = 'maintainer' AND worker_id <> $1 AND expires_at >= now())
 ON CONFLICT (name) DO UPDATE
 SET worker_id = EXCLUDED.worker_id,
     elected_at = CASE WHEN l.worker_id = EXCLUDED.worker_id THEN l.elected_at ELSE now() END,

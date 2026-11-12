@@ -141,6 +141,32 @@ func TestOneMaintainerLeadsAndAnotherTakesOver(t *testing.T) {
 	waitFor(t, "another worker to take over", func() bool { id, _ := leader(); return id != "" && id != first })
 }
 
+// Every worker that does not lead tries to, every election interval. A try
+// writes only when it takes or renews the lease: while another worker's
+// lease lasts, it changes nothing, so it must not cost a transaction ID and
+// a WAL flush either.
+func TestElectionTryWritesOnlyWhenItWins(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	try := func(worker string, wantLead bool) {
+		t.Helper()
+		leads, wrote, err := taskmill.Elect(t.Context(), e.client, worker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if leads != wantLead || wrote != wantLead {
+			t.Fatalf("worker %s: leads %t, wrote %t; want both %t", worker, leads, wrote, wantLead)
+		}
+	}
+	try("a", true) // nobody leads
+	try("a", true) // it renews its lease
+	try("b", false)
+	// The leader crashed, and its lease ran out.
+	e.exec(t, "UPDATE {s}.leader SET expires_at = now() - interval '1 second'")
+	try("b", true)
+	try("a", false)
+}
+
 // TestMaintainerStoppedWhileRenewingResigns checks that a maintainer that
 // stops while it renews its lease still resigns, so that another worker
 // takes over at once, not once the lease expires.
