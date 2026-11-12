@@ -7,6 +7,7 @@ import (
 	"maps"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -603,21 +604,27 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 	e.rawGroups = true
 }
 
-// bulkStatements counts the statements of bulk actions that a pool's
-// connections send: the picks of the batches, and the searches for a window.
+// bulkStatements keeps the statements of bulk actions that a pool's
+// connections send, in their order: a p for the pick of a batch, and a w for
+// the search for a window.
 type bulkStatements struct {
-	picks, windows atomic.Int64
-	onBegin        atomic.Pointer[func()] // called once, before the next transaction begins
+	mu   sync.Mutex
+	sent []byte
+	// Each is called once: before the next transaction begins, and before
+	// the next pick.
+	onBegin, onPick atomic.Pointer[func()]
 }
 
 func (s *bulkStatements) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
-	switch {
-	case d.SQL == "begin":
-		if f := s.onBegin.Swap(nil); f != nil {
-			(*f)()
-		}
-	case strings.Contains(d.SQL, "WITH candidates AS"):
-		s.picks.Add(1)
+	on := &s.onBegin
+	if strings.Contains(d.SQL, "WITH candidates AS") {
+		s.add('p')
+		on = &s.onPick
+	} else if d.SQL != "begin" {
+		return ctx
+	}
+	if f := on.Swap(nil); f != nil {
+		(*f)()
 	}
 	return ctx
 }
@@ -630,15 +637,25 @@ func (*bulkStatements) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.T
 
 func (s *bulkStatements) TraceBatchQuery(_ context.Context, _ *pgx.Conn, d pgx.TraceBatchQueryData) {
 	if strings.Contains(d.SQL, "SELECT least(") {
-		s.windows.Add(1)
+		s.add('w')
 	}
+}
+
+func (s *bulkStatements) add(statement byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sent = append(s.sent, statement)
 }
 
 func (*bulkStatements) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
 
-// reset returns the counts since the last reset.
-func (s *bulkStatements) reset() (picks, windows int64) {
-	return s.picks.Swap(0), s.windows.Swap(0)
+// reset returns the statements since the last reset.
+func (s *bulkStatements) reset() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sent := string(s.sent)
+	s.sent = nil
+	return sent
 }
 
 // A batch has its time from when its transaction began: what the action
@@ -659,9 +676,9 @@ func TestBulkBatchTimeStartsWhenItsTransactionBegan(t *testing.T) {
 	}
 }
 
-// A bulk action whose filter an index serves reads the tasks that match, in
-// as many batches as they fill, however many other tasks the tables hold: it
-// reads in no windows.
+// A bulk action whose filter an index serves reads the tasks that match,
+// however many other tasks the tables hold: a batch reads them through the
+// index, and the action starts with a batch, not with a window.
 func TestBulkActionsWithAnIndexReadOnlyTheirTasks(t *testing.T) {
 	t.Parallel()
 	sent := &bulkStatements{}
@@ -705,8 +722,10 @@ func TestBulkActionsWithAnIndexReadOnlyTheirTasks(t *testing.T) {
 		if err != nil || res != (taskmill.BulkResult{Changed: 300}) {
 			t.Fatalf("%s %+v: %+v, %v; want 300 tasks changed", c.pick, c.filter, res, err)
 		}
-		if picks, windows := sent.reset(); picks != 1 || windows != 0 {
-			t.Errorf("%s %+v: the action read %d batches and looked for %d windows, want 1 batch and no window", c.pick, c.filter, picks, windows)
+		// A window follows only a batch that a busy database did not end
+		// in time.
+		if got := sent.reset(); !strings.HasPrefix(got, "p") {
+			t.Errorf("%s %+v: the action sent %q, want a batch before any window", c.pick, c.filter, got)
 		}
 	}
 }
@@ -771,12 +790,12 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 		}
 	}
 
-	// A retried task dies again at once, so it matches again. While batches
-	// are held, the statement that changes a task does not end.
-	e.exec(t, "CREATE TABLE {s}.batches AS SELECT false AS held")
+	// A retried task dies again at once, so it matches again. Where a
+	// statement has a time limit, which only a batch without a window sets,
+	// the statement that changes a task does not end before it.
 	e.exec(t, `CREATE FUNCTION {s}.hold() RETURNS trigger LANGUAGE plpgsql AS '
 	           BEGIN
-	               IF (SELECT held FROM {s}.batches) THEN PERFORM pg_sleep(60); END IF;
+	               IF current_setting(''statement_timeout'') <> ''0'' THEN PERFORM pg_sleep(600); END IF;
 	               IF TG_OP = ''DELETE'' THEN RETURN OLD; END IF;
 	               NEW.state := ''dead'';
 	               NEW.finalized_at := now();
@@ -785,56 +804,33 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 	e.exec(t, `CREATE TRIGGER hold_retry BEFORE UPDATE ON {s}.tasks FOR EACH ROW
 	           WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.hold()`)
 	e.exec(t, "CREATE TRIGGER hold_delete BEFORE DELETE ON {s}.tasks FOR EACH ROW EXECUTE FUNCTION {s}.hold()")
-	// slowly runs an action whose first batch is held until the database
-	// ends its statement. Once that batch is held, it calls held, and holds
-	// no batch after it.
-	type result struct {
-		taskmill.BulkResult
-		err error
-	}
-	slowly := func(action func() (taskmill.BulkResult, error), held func()) result {
-		t.Helper()
-		e.exec(t, "UPDATE {s}.batches SET held = true")
-		sent.reset()
-		done := make(chan result, 1)
-		go func() {
-			res, err := action()
-			done <- result{res, err}
-		}()
-		waitFor(t, "the first batch to be held", func() bool {
-			return e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND strpos(query, $1) > 0", e.schema) > 0
-		})
-		held()
-		e.exec(t, "UPDATE {s}.batches SET held = false")
-		return <-done
-	}
 
 	// The retry goes through three windows: the first has 100 of the tasks,
 	// the second ends with its 16th full batch, and the third ends at the
 	// last task.
-	got := slowly(func() (taskmill.BulkResult, error) {
-		return e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: q})
-	}, func() {})
-	if got.err != nil || got.BulkResult != (taskmill.BulkResult{Changed: 24100}) {
-		t.Fatalf("retry: %+v, %v; want each of the 24,100 dead tasks retried once", got.BulkResult, got.err)
+	sent.reset()
+	got, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: q})
+	if err != nil || got != (taskmill.BulkResult{Changed: 24100}) {
+		t.Fatalf("retry: %+v, %v; want each of the 24,100 dead tasks retried once", got, err)
 	}
-	if _, windows := sent.reset(); windows != 3 {
-		t.Errorf("the retry looked for %d windows, want 3", windows)
+	if statements := sent.reset(); strings.Count(statements, "w") != 3 {
+		t.Errorf("the retry sent %q, want 3 windows", statements)
 	}
 
-	// The context of a delete ends while its first batch is held. The
-	// action still goes through one window, which has 200 of the 500 tasks
-	// and none of the 120 completed ones, and a second run does the rest.
+	// The context of a delete ends when its first batch picks its tasks.
+	// The action still goes through one window, which has 200 of the 500
+	// tasks and none of the 120 completed ones, and a second run does the
+	// rest.
 	stopped, stop := context.WithCancel(ctx)
 	defer stop()
-	got = slowly(func() (taskmill.BulkResult, error) {
-		return e.client.DeleteMatching(stopped, &taskmill.BulkParams{Filter: rare})
-	}, stop)
-	if !errors.Is(got.err, context.Canceled) || got.Changed != 200 || got.Next == "" {
-		t.Fatalf("delete: %+v, %v; want 200 tasks deleted in one window after the context ended", got.BulkResult, got.err)
+	atPick := func() { stop() }
+	sent.onPick.Store(&atPick)
+	got, err = e.client.DeleteMatching(stopped, &taskmill.BulkParams{Filter: rare})
+	if !errors.Is(err, context.Canceled) || got.Changed != 200 || got.Next == "" {
+		t.Fatalf("delete: %+v, %v; want 200 tasks deleted in one window after the context ended", got, err)
 	}
-	if _, windows := sent.reset(); windows != 1 {
-		t.Errorf("the delete looked for %d windows, want 1", windows)
+	if statements := sent.reset(); strings.Count(statements, "w") != 1 {
+		t.Errorf("the delete sent %q, want 1 window", statements)
 	}
 	rest, err := e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: rare, Cursor: got.Next})
 	if err != nil || rest != (taskmill.BulkResult{Changed: 420}) {
