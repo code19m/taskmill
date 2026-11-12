@@ -30,10 +30,11 @@ const (
 )
 
 // QueueSettings are a queue's installation-wide settings, stored in the
-// database. The zero value means no concurrency limit.
+// database. The zero value means no limit.
 type QueueSettings struct {
-	// MaxRunning caps the tasks of the queue running at once across all
-	// workers of the installation. Zero means no limit.
+	// MaxRunning caps the tasks of the queue running at the same time across
+	// all workers of the installation. It must not be negative. Zero means
+	// no limit.
 	MaxRunning int
 }
 
@@ -42,9 +43,12 @@ type QueueSettings struct {
 type QueueInfo struct {
 	Name     string
 	Settings QueueSettings
-	Paused   bool
 
-	// Workers counts the workers registered to serve the queue. A worker
+	// Paused reports that the queue is paused: workers fetch none of its
+	// tasks until [Client.ResumeQueue].
+	Paused bool
+
+	// Workers counts the workers registered to read the queue. A worker
 	// that stopped without unregistering, such as after a crash, counts
 	// until it is removed, 5 minutes after its last check-in.
 	Workers int
@@ -69,8 +73,8 @@ type QueueInfo struct {
 	// behind their FIFO group wait by design and do not count. Zero when no
 	// task was due at the last count. The maintainer finds the oldest task
 	// when it counts, so for up to one refresh, about 10 seconds, Lag may
-	// read high: a task that finished since still counts. Work can be stuck
-	// while Lag stays near zero: HaltedGroups and MostFailures show it.
+	// be too high: a task that finished since still counts. Work can be
+	// stuck while Lag stays near zero: HaltedGroups and MostFailures show it.
 	Lag time.Duration
 
 	// HaltedGroups counts the queue's FIFO groups that a dead task halts.
@@ -92,7 +96,7 @@ type QueueInfo struct {
 	// task's wait before its retry grows with its failures, so the tasks
 	// that failed most retry last. Once the waits reach their maximum, such
 	// as 1 hour by default, they no longer tell the tasks apart: with more
-	// than 10,000 tasks at that wait, MostFailures may read lower than the
+	// than 10,000 tasks at that wait, MostFailures may be lower than the
 	// most failures of any one task.
 	MostFailures int
 }
@@ -114,11 +118,16 @@ type Settings struct {
 
 // WorkerInfo describes a worker process.
 type WorkerInfo struct {
-	ID          string
-	Hostname    string
-	Version     string // taskmill's version in the worker's binary
-	Queues      []string
-	Kinds       []string // the kinds it has handlers for
+	// ID names the worker: its host name, its process ID, and a random
+	// suffix, joined by dashes.
+	ID       string
+	Hostname string
+	Version  string // taskmill's version in the worker's binary
+	Queues   []string
+	Kinds    []string // the kinds it has handlers for
+
+	// StartedAt is when the worker last registered: when its Run started,
+	// or when it registered again after the maintainer removed it as stale.
 	StartedAt   time.Time
 	CheckedInAt time.Time // its last check-in, which it makes every third of its LeaseDuration
 	Maintainer  bool      // the worker is the elected maintainer
@@ -188,8 +197,9 @@ func retryConflicts(ctx context.Context, op string, try func() (saved bool, err 
 // gives up with an error that wraps [ErrConflict]. So concurrent updates
 // never lose each other's changes, and update may run more than once: it
 // must only change the settings it gets, with no I/O and no calls to the
-// Client. Workers apply the change within 10 seconds, and at once if they
-// receive notifications.
+// Client. Workers apply the change within 10 seconds, and right away if
+// they receive notifications. A negative MaxRunning is an error that wraps
+// [ErrInvalidArgument].
 //
 //	err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
 func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*QueueSettings)) error {
@@ -256,7 +266,7 @@ func (c *Client) changeQueue(ctx context.Context, name, sql string, args ...any)
 }
 
 // Queues returns every known queue: those with settings, those that workers
-// serve, and those that hold tasks, as of the latest statistics.
+// read, and those that hold tasks, as of the latest statistics.
 func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 	r, err := c.pool.Query(ctx, c.sql.listQueues)
 	if err != nil {
@@ -452,7 +462,7 @@ type GroupParams struct {
 	Queues []string
 
 	// Search limits the result to groups whose keys contain it, ignoring
-	// case. Empty means all groups.
+	// case. At most 256 characters. Empty means all groups.
 	Search string
 
 	// Halted limits the result to the groups that a dead task halts.

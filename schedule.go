@@ -25,13 +25,23 @@ import (
 // Location, so daylight saving time behaves as in classic cron. The task's
 // RunAt is the time it was scheduled for.
 type Schedule struct {
-	// Name identifies the schedule. Schedules are kept in the database by
-	// name, so renaming one creates a new schedule.
+	// Name identifies the schedule, in 1 to 128 characters. Schedules are
+	// kept in the database by name, so renaming one creates a new schedule.
 	Name string
 
-	// Cron is a five-field cron expression, such as "0 3 * * *", or one of
-	// the macros @yearly, @annually, @monthly, @weekly, @daily, @midnight,
-	// and @hourly.
+	// Cron is a cron expression of five fields separated by spaces, such as
+	// "0 3 * * *": minute (0-59), hour (0-23), day of month (1-31), month
+	// (1-12 or JAN-DEC), and day of week (0-7 or SUN-SAT, where 0 and 7 both
+	// mean Sunday). A field is "*", a value, a range "a-b", or a list of
+	// those separated by commas, and each of them may have a step "/n":
+	// "*/15" in the first field means every 15 minutes. Names are read in
+	// any letter case. If neither day field is "*", a day matches when
+	// either field matches, as in classic cron.
+	//
+	// Cron can also be one of the macros @yearly, @annually, @monthly,
+	// @weekly, @daily, @midnight, and @hourly. [NewWorker] rejects an
+	// expression that matches no time in the next five years, such as
+	// February 31.
 	Cron string
 
 	// Location is the time zone the expression is read in. Default: UTC.
@@ -47,11 +57,17 @@ type Schedule struct {
 
 // ScheduleInfo describes a schedule and its state.
 type ScheduleInfo struct {
-	Name      string
-	Queue     string
-	Kind      string
-	Cron      string
-	Location  string
+	Name  string
+	Queue string
+	Kind  string
+	Cron  string
+
+	// Location is the name of the schedule's time zone, such as
+	// "Europe/Berlin" or "UTC".
+	Location string
+
+	// NextRunAt is when the schedule's next run is due. A paused schedule
+	// does not run then.
 	NextRunAt time.Time
 	LastRunAt time.Time // zero if it never ran
 	Paused    bool
@@ -244,7 +260,7 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 		opts := s.opts
 		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(due.Unix(), 10)
 		opts.DedupeWindow = max(24*time.Hour, 2*next.Sub(due))
-		opts.RunAt = due // in the past: the task is available at once
+		opts.RunAt = due // in the past: the task is available right away
 		_, err = m.c.enqueue(ctx, pgxQuerier{q: tx}, []EnqueueParams{{Args: s.Args, Options: &opts}})
 		return err
 	})

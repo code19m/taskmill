@@ -665,7 +665,7 @@ SET state = 'running',
 WHERE t.id = $1 AND t.state IN ('scheduled', 'available', 'retryable')
 RETURNING ` + leasedColumns),
 
-		// lockQueue serializes fetches from a queue with a concurrency limit.
+		// lockQueue serializes fetches from a queue with a MaxRunning limit.
 		// countRunning then runs as its own statement, so it sees the tasks
 		// that fetches committed while lockQueue waited.
 		lockQueue:    q(`SELECT max_running FROM {s}.queues WHERE name = $1 FOR UPDATE`),
@@ -673,7 +673,7 @@ RETURNING ` + leasedColumns),
 
 		// renewLeases renews the leases of attempts that still own their
 		// tasks. It skips rows that other transactions lock, so that one
-		// locked task cannot hold up the renewal of all the others. It returns
+		// locked task cannot block the renewal of all the others. It returns
 		// each renewed task with true, and each task the attempts still own
 		// with false, both with whether its cancellation was requested; a task
 		// it does not return lost its lease.
@@ -774,7 +774,7 @@ SET worker_id = EXCLUDED.worker_id,
 WHERE l.worker_id = EXCLUDED.worker_id OR l.expires_at < now()
 RETURNING worker_id`),
 		// resignLeader gives up $1's lease, and tells the workers on channel
-		// $2, so that another takes over at once.
+		// $2, so that another takes over right away.
 		resignLeader: q(`
 WITH resigned AS (
     DELETE FROM {s}.leader WHERE name = 'maintainer' AND worker_id = $1 RETURNING 1

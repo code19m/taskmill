@@ -65,10 +65,12 @@ type EnqueueOptions struct {
 	// DedupeKey makes the enqueue idempotent: while the key's window lasts,
 	// enqueueing the same kind with the same key in the same queue creates no
 	// new task, and reports the existing one. Canceling or deleting the task
-	// frees the key at once. Default: none.
+	// frees the key right away. The key may have any length: taskmill stores
+	// a SHA-256 hash of the queue, the kind, and the key. Default: none.
 	DedupeKey string
 
-	// DedupeWindow is how long DedupeKey blocks duplicates. Default: 24 hours.
+	// DedupeWindow is how long DedupeKey blocks duplicates, counted from the
+	// enqueue. It must not be negative. Default: 24 hours.
 	DedupeWindow time.Duration
 
 	// Metadata is stored with the task and passed to its handler, for
@@ -245,7 +247,7 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 		results = res
 		return nil
 	}
-	// A middleware that returns nil without calling its next fails at once,
+	// A middleware that returns nil without calling its next fails right away,
 	// so that the middleware outside it sees the failure too.
 	for _, m := range slices.Backward(c.enqueueMiddleware) {
 		inner := next
@@ -663,7 +665,7 @@ func (t *resolvedTask) validate() error {
 }
 
 // add appends t, with its encoded metadata, to the batch. now is the batch's
-// time, which decides whether t is due at once.
+// time, which decides whether t is due right away.
 func (b *enqueueBatch) add(t *resolvedTask, metadata []byte, now time.Time) {
 	b.queues = append(b.queues, t.queue)
 	b.kinds = append(b.kinds, t.kind)

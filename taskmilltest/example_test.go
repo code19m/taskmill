@@ -51,3 +51,28 @@ func testSignUp(t *testing.T, pool *pgxpool.Pool, sendEmail func(userID int64) e
 func Example() {
 	_ = testSignUp
 }
+
+// testSignUpEndToEnd is the body of a test that signs a user up, then runs
+// every task that this enqueued, with the application's handlers. pool
+// connects to the test database.
+func testSignUpEndToEnd(t *testing.T, pool *pgxpool.Pool, handlers *taskmill.Handlers) {
+	t.Helper()
+	client := taskmilltest.NewClient(t, pool, nil)
+	if err := signUp(t.Context(), client, 42); err != nil {
+		t.Fatal(err)
+	}
+
+	// Work runs a worker until no task is available or running.
+	taskmilltest.Work(t, client, &taskmill.WorkerConfig{Handlers: handlers})
+	for _, task := range taskmilltest.Enqueued[SendWelcome](t, client) {
+		if task.State != taskmill.StateCompleted {
+			t.Errorf("task %d is %s", task.ID, task.State)
+		}
+	}
+}
+
+// This example runs every task that the code under test enqueues, with a
+// real worker; see testSignUpEndToEnd above.
+func ExampleWork() {
+	_ = testSignUpEndToEnd
+}

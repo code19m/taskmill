@@ -120,7 +120,7 @@ func safeBatch(ctx context.Context, reg *registration, infos []*TaskInfo, atts [
 
 // invoke runs call through the middleware chain, turning panics into errors.
 // It runs call at most once, whatever the middleware does. A middleware that
-// returns nil without calling its next fails at once, so that the middleware
+// returns nil without calling its next fails right away, so that the middleware
 // outside it sees the failure too.
 func (w *Worker) invoke(ctx context.Context, t *tracked, call func(context.Context) error) (err error) {
 	defer func() {

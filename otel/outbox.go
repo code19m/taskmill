@@ -22,8 +22,8 @@ import (
 // the message, from [outbox.Delivery.Metadata], and its context is added to
 // the message's headers, replacing any already there, so that consumers
 // continue the trace. system names the broker as the conventions do for
-// messaging.system, such as "kafka" or "rabbitmq". A nil pub returns nil,
-// which [outbox.Outbox.AddRelay] reports.
+// messaging.system, such as "kafka" or "rabbitmq". A nil pub returns nil:
+// pass it to [outbox.Outbox.AddRelay], and [taskmill.NewWorker] reports it.
 func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox.Publisher { //nolint:ireturn // it wraps the interface it returns
 	if pub == nil {
 		return nil

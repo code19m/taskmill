@@ -33,7 +33,7 @@ import (
 )
 
 // Queue is the taskmill queue that holds stored messages. A worker with a
-// relay serves it by default.
+// relay reads it by default.
 const Queue = "outbox"
 
 const (
@@ -80,10 +80,11 @@ type Delivery struct {
 
 // Publisher sends deliveries to a broker. It returns one error per delivery,
 // in the same order: nil marks that delivery as published, an error retries
-// it later, and an error wrapped with [taskmill.Permanent] makes it dead at
-// once. A batch holds at most [RelayOptions.BatchSize] deliveries, never two
-// with the same topic and key. Each call has [RelayOptions.Timeout]: then its
-// context is canceled, and the deliveries without a nil result are retried.
+// it later, and an error wrapped with [taskmill.Permanent] makes it dead
+// right away. A batch holds at most [RelayOptions.BatchSize] deliveries,
+// never two with the same topic and key. Each call has
+// [RelayOptions.Timeout]: then its context is canceled, and the deliveries
+// without a nil result are retried.
 type Publisher interface {
 	Publish(ctx context.Context, deliveries []Delivery) []error
 }
@@ -145,7 +146,7 @@ type RelayOptions struct {
 }
 
 // AddRelay registers the batch handler that publishes stored messages through
-// pub. opts may be nil. A worker with no Queues set serves [Queue] for it.
+// pub. opts may be nil. A worker with no Queues set reads [Queue] for it.
 // [taskmill.NewWorker] reports a nil pub, or options out of range, as an
 // error that wraps [taskmill.ErrInvalidArgument].
 func (*Outbox) AddRelay(hs *taskmill.Handlers, pub Publisher, opts *RelayOptions) {

@@ -84,7 +84,11 @@ func invalidArgument(format string, args ...any) error {
 }
 
 // PermanentError marks a handler error that retrying cannot fix. The task
-// becomes dead at once, keeping its remaining attempts unused.
+// becomes dead right away, keeping its remaining attempts unused.
+//
+// It names no error class of its own. OpenTelemetry's semconv.ErrorType
+// reports the class of the first error in Err's chain that has an
+// ErrorType() string method, and "*taskmill.PermanentError" if none has.
 type PermanentError struct {
 	Err error
 }
@@ -120,7 +124,7 @@ type SnoozeError struct {
 // Snooze returns an error that reschedules the task to run after d, without
 // using an attempt. Use it when the task cannot proceed yet, for example while
 // waiting for a rate limit to reset. A delay of zero or less makes the task
-// available at once. A task that always snoozes never becomes dead.
+// available right away. A task that always snoozes never becomes dead.
 func Snooze(d time.Duration) error {
 	return &SnoozeError{Delay: d}
 }
