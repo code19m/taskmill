@@ -129,8 +129,8 @@ func buildReport(logger *slog.Logger) taskmill.HandlerFunc[BuildReport] {
 			return ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
-		// RunAt is the minute that the schedule enqueued this run for.
-		logger.LogAttrs(ctx, slog.LevelInfo, "sales report built", slog.Time(logKeyScheduledFor, t.RunAt))
+		// ScheduledFor is the minute that this run is for, on every attempt.
+		logger.LogAttrs(ctx, slog.LevelInfo, "sales report built", slog.Time(logKeyScheduledFor, t.ScheduledFor()))
 		return nil
 	}
 }

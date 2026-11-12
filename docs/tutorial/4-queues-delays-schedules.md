@@ -162,8 +162,8 @@ func buildReport(logger *slog.Logger) taskmill.HandlerFunc[BuildReport] {
 			return ctx.Err()
 		case <-time.After(5 * time.Second):
 		}
-		// RunAt is the minute that the schedule enqueued this run for.
-		logger.LogAttrs(ctx, slog.LevelInfo, "sales report built", slog.Time(logKeyScheduledFor, t.RunAt))
+		// ScheduledFor is the minute that this run is for, on every attempt.
+		logger.LogAttrs(ctx, slog.LevelInfo, "sales report built", slog.Time(logKeyScheduledFor, t.ScheduledFor()))
 		return nil
 	}
 }
@@ -185,9 +185,12 @@ Start the shop, and wait for the next full minute. **You should see** one
 report per minute, 5 seconds after the minute that it is for:
 
 ```text
-time=…22:53:05.866… level=INFO msg="sales report built" scheduled_for=…22:53:00.000…
-time=…22:54:05.868… level=INFO msg="sales report built" scheduled_for=…22:54:00.000…
+time=…02:38:05.147+05:00 level=INFO msg="sales report built" scheduled_for=…21:38:00.000Z
+time=…02:39:05.145+05:00 level=INFO msg="sales report built" scheduled_for=…21:39:00.000Z
 ```
+
+The schedule sets no `Location`, so `scheduled_for` shows the minute in
+UTC. The log's own time is in your time zone.
 
 ## Step 5. Look at it in the dashboard
 
@@ -208,6 +211,7 @@ later.
 | `RunAt` | a delayed task. It waits in the `scheduled` [state](../concepts/glossary.md#state) |
 | `DedupeKey` and `DedupeWindow` | a [dedupe key](../concepts/glossary.md#dedupe-key), and how long it blocks a second task |
 | `Schedules` | a [schedule](../concepts/glossary.md#schedule), which the [maintainer](../concepts/glossary.md#maintainer) runs |
+| `t.ScheduledFor()` | the time that a scheduled run is for. It is the same on every attempt |
 
 ## Go deeper
 
