@@ -185,6 +185,13 @@ All notable changes to taskmill are recorded here. The format follows
   `ErrInvalidArgument` for a `RunAt` that PostgreSQL cannot store, before
   4713 BC or after 294276 AD. The check runs before any statement, so the
   caller's transaction stays usable.
+- A schedule never ran, with no error or log line, when its task's payload
+  did not read back from PostgreSQL as the maintainer compared it: a
+  `float64` of `-0`, a number that no `float64` holds, or args that encode
+  differently each time. The maintainer found the schedule changed in every
+  pass, stored it again every second, and skipped its run. Now it compares
+  numbers by their exact value, as PostgreSQL does, so it stores such a
+  schedule once. And a schedule that did change still runs when it is due.
 
 ### Security
 

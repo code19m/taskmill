@@ -1,11 +1,15 @@
 package taskmill
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"math/big"
+	"slices"
 	"strconv"
 	"time"
 
@@ -219,7 +223,11 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 		resetNext := st == nil || st.cron != s.Cron || st.timezone != tz
 		_, err = m.c.pool.Exec(ctx, m.c.sql.upsertSchedule,
 			s.Name, s.opts.Queue, s.Args.Kind(), s.Cron, tz, string(payload), next, resetNext)
-		return err
+		if err != nil || resetNext {
+			return err // with a new next run time, no run is due
+		}
+		// Go on to the due run: a definition that differs in every pass,
+		// such as args that encode the time, must not keep it from running.
 	}
 	if st.paused || st.nextRunAt.After(now) {
 		return nil
@@ -266,14 +274,47 @@ func (m *maintainer) pruneSchedules(ctx context.Context) {
 	m.pruning.observe(ctx, err)
 }
 
+// jsonEqual reports whether a and b hold the same JSON value, as PostgreSQL's
+// jsonb compares them: numbers by their exact value, so that 0 equals -0 and
+// 100 equals 1e2. jsonb stores numbers in its own form, so comparing their
+// text, or their values as float64, would find a stored payload changed in
+// every pass.
 func jsonEqual(a, b []byte) bool {
 	var x, y any
-	if json.Unmarshal(a, &x) != nil || json.Unmarshal(b, &y) != nil {
-		return false
+	return decodeJSON(a, &x) == nil && decodeJSON(b, &y) == nil && sameJSON(x, y)
+}
+
+// decodeJSON decodes JSON text into v, and keeps each number as its text.
+func decodeJSON(text []byte, v *any) error {
+	dec := json.NewDecoder(bytes.NewReader(text))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
+// sameJSON reports whether two values from decodeJSON are equal.
+func sameJSON(x, y any) bool {
+	switch x := x.(type) {
+	case json.Number:
+		y, ok := y.(json.Number)
+		return ok && (x == y || sameNumber(x, y))
+	case []any:
+		y, ok := y.([]any)
+		return ok && slices.EqualFunc(x, y, sameJSON)
+	case map[string]any:
+		y, ok := y.(map[string]any)
+		return ok && maps.EqualFunc(x, y, sameJSON)
+	default: // a string, a bool, or null
+		return x == y
 	}
-	ax, _ := json.Marshal(x)
-	by, _ := json.Marshal(y)
-	return string(ax) == string(by)
+}
+
+// sameNumber reports whether two JSON numbers have the same value. It is
+// false for a number whose exponent is beyond what math/big reads, a million,
+// which is far beyond what PostgreSQL stores.
+func sameNumber(x, y json.Number) bool {
+	p, okP := new(big.Rat).SetString(x.String())
+	q, okQ := new(big.Rat).SetString(y.String())
+	return okP && okQ && p.Cmp(q) == 0
 }
 
 // Schedules returns every schedule stored in the database.

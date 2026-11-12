@@ -3,12 +3,15 @@ package taskmill_test
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -905,6 +908,66 @@ func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 
 	if err := e.client.PauseSchedule(ctx, "unknown"); !errors.Is(err, taskmill.ErrNotFound) {
 		t.Fatalf("unknown schedule: got %v", err)
+	}
+}
+
+// adjust is a task whose payload holds a float.
+type adjust struct {
+	Delta float64 `json:"delta"`
+}
+
+func (adjust) Kind() string { return "test.adjust" }
+
+// ticking is a task whose payload differs every time it is encoded.
+type ticking struct {
+	encoded *atomic.Int64
+}
+
+func (ticking) Kind() string { return "test.ticking" }
+
+func (a ticking) MarshalJSON() ([]byte, error) {
+	return fmt.Appendf(nil, `{"n":%d}`, a.encoded.Add(1)), nil
+}
+
+func TestScheduleRunsWhateverItsStoredPayloadLooksLike(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// jsonb rewrites the numbers of the first two payloads: -0 becomes 0,
+	// 1e2 becomes 100, and 1e400, which no float64 holds, is written in
+	// full. The third payload really changes with every pass.
+	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+		{Name: "negative-zero", Cron: "@hourly", Args: adjust{Delta: math.Copysign(0, -1)}},
+		{Name: "exponents", Cron: "@hourly", Args: rawArgs{Body: json.RawMessage(`[1e2, 1.50e1, 1e400]`)}},
+		{Name: "ticking", Cron: "@hourly", Args: ticking{encoded: new(atomic.Int64)}},
+	}})
+	ctx := t.Context()
+	storedAt := func(name string) time.Time {
+		var at time.Time
+		err := e.pool.QueryRow(ctx, replaceSchema("SELECT updated_at FROM {s}.schedules WHERE name = $1", e.schema), name).Scan(&at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+
+	// A definition that did not change is stored once, not in every pass.
+	taskmill.RunSchedules(ctx, w)
+	for _, name := range []string{"negative-zero", "exponents"} {
+		first := storedAt(name)
+		taskmill.RunSchedules(ctx, w)
+		if again := storedAt(name); !again.Equal(first) {
+			t.Errorf("schedule %s did not change, but the next pass stored it again", name)
+		}
+	}
+
+	// Each schedule runs when it is due, also the one that changes in the
+	// same pass.
+	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
+	taskmill.RunSchedules(ctx, w)
+	for _, kind := range []string{"test.adjust", "raw", "test.ticking"} {
+		if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE kind = $1", kind); n != 1 {
+			t.Errorf("the due schedule of kind %s enqueued %d tasks, want 1", kind, n)
+		}
 	}
 }
 

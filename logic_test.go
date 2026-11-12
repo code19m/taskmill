@@ -32,6 +32,38 @@ func TestHasNUL(t *testing.T) {
 	}
 }
 
+func TestJSONEqual(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		a, b string
+		want bool
+	}{
+		// What jsonb does to a value leaves it equal.
+		{`{"a": 1, "b": [true, null, "x"]}`, `{"b":[true,null,"x"],"a":1}`, true},
+		{`-0`, `0`, true},
+		{`[1e2, 1.50e1, 1E-2]`, `[100, 15.0, 0.01]`, true},
+		{`1e400`, `1` + strings.Repeat("0", 400), true},
+		{`"é"`, `"é"`, true},
+		// A change is a change, however small.
+		{`9007199254740993`, `9007199254740992`, false},
+		{`1e400`, `1e401`, false},
+		{`1`, `"1"`, false},
+		{`[1, 2]`, `[2, 1]`, false},
+		{`{"a": null}`, `{}`, false},
+		{`{"a": 1}`, `{"b": 1}`, false},
+		{`null`, `false`, false},
+		{`{"a": [1]}`, `{"a": {"0": 1}}`, false},
+		{`{`, `{`, false},
+	} {
+		if got := jsonEqual([]byte(tt.a), []byte(tt.b)); got != tt.want {
+			t.Errorf("jsonEqual(%.20s, %.20s) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+		if got := jsonEqual([]byte(tt.b), []byte(tt.a)); got != tt.want {
+			t.Errorf("jsonEqual(%.20s, %.20s) = %v, want %v", tt.b, tt.a, got, tt.want)
+		}
+	}
+}
+
 func TestExponentialBackoff(t *testing.T) {
 	t.Parallel()
 	b := ExponentialBackoff{}
