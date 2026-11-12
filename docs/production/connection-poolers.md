@@ -19,14 +19,18 @@ client after each transaction. Everything in taskmill works that way, `Migrate`
 included, except notifications. A worker waits for them with `LISTEN`, and
 that needs a connection that stays yours: a *session*.
 
-taskmill's CI runs every test through PgBouncer in transaction mode.
+taskmill's CI runs every test through PgBouncer in transaction mode, with
+prepared statements kept. CI does not test `QueryExecModeExec`, and it does
+not test the managed poolers in the table below.
 
 ## Set it up
 
 1. Point the pool at the pooler.
 2. Let the pooler keep prepared statements, because pgx prepares its
    statements. Use PgBouncer 1.21 or newer, with `max_prepared_statements`
-   set. If your pooler cannot keep them, set pgx's `QueryExecModeExec`.
+   set. If your pooler cannot keep them, set pgx's `QueryExecModeExec`: in
+   Go, as below, or with `default_query_exec_mode=exec` in the URL. The URL
+   works for `taskmill-ui` too.
 3. Point `WorkerConfig.ListenConfig` at a direct connection to the primary.
    Create it with `pgx.ParseConfig`.
 
@@ -49,6 +53,10 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 Each worker then holds one direct connection. Count it in the database's
 `max_connections`.
 
+If your role's default isolation level is not READ COMMITTED, set it on the
+role when you use PgBouncer:
+[Keep the isolation level at READ COMMITTED](database.md#keep-the-isolation-level-at-read-committed).
+
 ## What happens without a direct connection
 
 When a worker starts, it checks its notification connection. If that
@@ -62,6 +70,10 @@ query the database more often.
 
 ## Settings per provider
 
+These settings follow each provider's documentation. Whether a managed
+pooler keeps prepared statements depends on the provider, so check its
+documentation, and set `QueryExecModeExec` if it does not.
+
 | Provider | The pool goes through | `ListenConfig` points at |
 |---|---|---|
 | PgBouncer that you run | PgBouncer, with `pool_mode = transaction` | PostgreSQL itself |
@@ -73,12 +85,13 @@ query the database more often.
 
 > [!NOTE]
 > Neon's compute never scales to zero while workers run, because workers
-> query the database every few seconds. Plan for a compute that stays on.
+> query the database every few seconds
+> ([Capacity planning](capacity.md#know-what-an-idle-system-costs)).
 
 ## See also
 
-- [Database](database.md): roles, pool size, and failover
+- [Database](database.md): roles, pool size, and the isolation level
 - [Count the database connections](kubernetes.md#count-the-database-connections)
 - [`WorkerConfig.ListenConfig`](https://pkg.go.dev/github.com/code19m/taskmill#WorkerConfig) on pkg.go.dev
 
-**Next:** [Deploys](deploys.md)
+**Next:** [Backups, failover, and replicas](backups-and-failover.md)

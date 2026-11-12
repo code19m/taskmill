@@ -7,8 +7,8 @@ with what to check and what to do.
 > Many failures fix themselves. A crashed worker's tasks run again about 30
 > seconds later, when their [leases](../concepts/glossary.md#lease) run out.
 > Another worker replaces a crashed [maintainer](../concepts/glossary.md#maintainer)
-> within about 12 seconds. Workers reconnect after a database outage. Look
-> for a cause when a problem lasts longer than a minute.
+> within about 12 seconds, and workers reconnect after a database outage.
+> So look for a cause when a problem lasts longer than a minute.
 
 ## Tasks start late or not at all
 
@@ -22,9 +22,10 @@ shows many available tasks.
 | The queue is paused | The queues on the dashboard's Overview, or `QueueInfo.Paused` | Resume it |
 | No worker reads the queue | `QueueInfo.Workers` is 0, or a worker logs `the worker does not serve the default queue of these registered kinds` | Add the queue to `WorkerConfig.Queues`, or run a worker for it |
 | The workers are full | Running tasks are about replicas × `Concurrency` | Add replicas, or raise `Concurrency` and the pool with it |
-| A queue limit holds tasks back | `QueueInfo.Settings.MaxRunning` is set, and running tasks equal it | Raise or remove it with `Client.UpdateQueue` |
+| A queue limit (`MaxRunning`) blocks tasks | `QueueInfo.Settings.MaxRunning` is set, and running tasks equal it | Raise or remove it with `Client.UpdateQueue` |
+| The workers crash | Pod restarts | See [Worker pods restart again and again](#worker-pods-restart-again-and-again) |
 | No maintainer runs | `taskmill_stats_age_seconds` is over 60 | See [the next entry](#retries-delayed-tasks-or-schedules-dont-run) |
-| Fetches got slow | Snapshot ages grow | See [Throughput falls over hours](#throughput-falls-over-hours) |
+| Fetches got slow | A transaction has been open for a long time | See [Throughput falls over hours](#throughput-falls-over-hours) |
 
 ### Retries, delayed tasks, or schedules don't run
 
@@ -34,8 +35,8 @@ need the maintainer, which another worker replaces within about 12 seconds.
 
 | Likely cause | Check | Do |
 |---|---|---|
-| No worker can become the maintainer: all have `NoMaintainer: true`, or KEDA stopped them all | Dashboard › Workers: no worker has the *maintainer* label | Keep one such worker running: [Scale to zero](autoscaling.md#scale-to-zero) |
-| Workers restart again and again | Pod restarts, and [start-up errors](#start-up-errors) | Fix the start-up error |
+| No worker can become the maintainer: all have `NoMaintainer: true`, or KEDA stopped them all | Dashboard › Workers: no worker has the *maintainer* label | Keep such workers running: [Scale to zero](autoscaling.md#scale-to-zero) |
+| Workers restart again and again | Pod restarts, and [the errors at start](#errors-at-start-and-in-calls) | Fix the error |
 | The database is out of reach | `operation still failing` for `elect maintainer` | Fix the database or the network |
 | Only schedules: the maintainer does not define them | Dashboard › Workers shows the maintainer. Check its `Schedules` | Define the same `Schedules` on every worker that can become the maintainer |
 | Only one schedule: it is paused | Dashboard › Schedules | Resume it |
@@ -60,19 +61,18 @@ its idle queues every `PollInterval` (1 second by default), which adds load.
 | Likely cause | Check | Do |
 |---|---|---|
 | No maintainer runs | As in [Retries, delayed tasks, or schedules don't run](#retries-delayed-tasks-or-schedules-dont-run) | As there |
-| During an upgrade, the maintainer still runs an older release that sends no heartbeats | Dashboard › Workers: the versions | Nothing: it ends with the rollout |
-| Notifications don't reach this worker | Where `ListenConfig` points | Point it at the primary of the same database |
+| Notifications don't reach this worker | Where `ListenConfig` points, and the Warn line `operation failed` for `listen for notifications` | Point it at the primary of the same database. If that line's `error` says `idle-session timeout`, remove `idle_session_timeout` from taskmill's role |
 
 ### Tasks wait in `pending`
 
 **You see:** tasks in a [FIFO group](../concepts/glossary.md#fifo-group) stay
 `pending`. They wait for the tasks before them in their group, so they don't
-count in lag.
+count in [lag](../concepts/glossary.md#lag).
 
 | Likely cause | Check | Do |
 |---|---|---|
-| The group's first task is dead, so the group is [halted](../concepts/glossary.md#halted-group) | `taskmill_queue_halted_groups` is above 0. Open a pending task in the dashboard: it shows the task it waits behind. Or call `Client.Groups` with `Halted: true` | Fix the cause, then retry the dead task: the group continues in order. Delete it only to skip that step for good |
-| The group's first task still runs, waits for a retry, or is snoozed | The same page shows that task's state | Wait, or fix why it fails: see [the next entry](#tasks-keep-failing-and-lag-stays-low) |
+| The group's first task is dead, so the group is [halted](../concepts/glossary.md#halted-group) | `taskmill_queue_halted_groups` is above 0. Open a pending task in the dashboard: it shows the task it waits behind. Or call `Client.Groups` with `Halted: true` | Fix the cause, then retry the dead task: the group continues in order. Delete it only if that step must never run |
+| The group's first task still runs, waits for a retry, or is [snoozed](../concepts/glossary.md#snooze) | The same page shows that task's state | Wait, or fix why it fails: see [the next entry](#tasks-keep-failing-and-lag-stays-low) |
 
 ### Tasks keep failing, and lag stays low
 
@@ -85,23 +85,44 @@ zero, because each task waits for its next retry, not for a worker.
 | A service that the handler calls is down, such as the outbox's broker | The task's errors, on its page in the dashboard or with `Client.Get` | Fix the service. The tasks run at their next retry: within about an hour with the default policy, or about 5 minutes for the outbox |
 | A bug or bad data makes some tasks fail every time | The same errors, on some tasks only | Deploy a fix: the tasks succeed at their next retry. Cancel a task that must not run |
 
+### Throughput falls over hours
+
+- **Cause:** an old snapshot keeps vacuum from cleaning the `tasks` table.
+- **Check:** the [queries for long transactions](database.md#keep-long-transactions-from-slowing-the-queue),
+  and `idle in transaction` sessions in `pg_stat_activity`.
+- **Do:** end the long transaction, or drop the unused replication slot. Then
+  set the timeouts that the same page lists.
+
 ## Tasks run twice or die
 
 ### A task ran twice
 
 **You see:** a handler ran twice for one task. The logs show `attempt lost
-its lease; canceling it`, or `rescued tasks whose workers lost their leases`.
-Some repeats are expected: [Guarantees](../concepts/guarantees.md).
+its lease; canceling it`, or `rescued tasks whose workers lost their leases`:
+the maintainer [rescued](../concepts/glossary.md#rescue) them. Some repeats
+are expected ([Guarantees](../concepts/guarantees.md)), so
+[make handlers safe to run twice](../recipes/do-work-once.md).
 
 | Likely cause | Check | Do |
 |---|---|---|
 | Handlers use up the pool's connections | The warning `the pool was full, so renewing leases waited` | [Size the pool](database.md#size-the-connection-pool) |
-| A pod was killed before it drained | `terminationGracePeriodSeconds` below `DrainTimeout` plus 10, or pods killed for their memory | Raise the grace period, or the memory limit |
+| A pod was killed before it drained | `terminationGracePeriodSeconds` below `DrainTimeout` plus 10, or pods killed because they used too much memory (`OOMKilled`) | Raise the grace period, or the memory limit |
 | A handler ignores its context | The log `handler ignored shutdown; releasing its task` | Make the handler return when `ctx` ends |
-| A failover or network cut of more than about 20 s | `operation still failing` during the incident | Expected: [When the database fails](database.md#when-the-database-fails) |
+| A failover or network outage of more than about 20 s | `operation still failing` during the incident | Expected: [When the database fails](database.md#when-the-database-fails) |
 | The handler finished, but its result was not saved | The log `complete tasks failed; they are rescued when their leases expire` | Expected after a database outage |
 
-In the long run, [make handlers safe to run twice](../recipes/do-work-once.md).
+### Worker pods restart again and again
+
+**You see:** worker pods restart, often with `OOMKilled`. About 30 seconds
+after each restart, the log says `rescued tasks whose workers lost their
+leases`. The same tasks come back, with the code `lease_lost` in their errors.
+
+- **Cause:** one task kills its worker, for example with too much memory.
+  Each crash uses an attempt of every task that the worker ran. So the task
+  comes back up to `MaxAttempts` times: 25 by default, over about 13 hours.
+- **Check:** the errors of the `retryable` tasks with the most attempts.
+- **Do:** cancel that task, or raise the memory limit. If the worker fails
+  when it starts, see [the errors at start](#errors-at-start-and-in-calls).
 
 ### Tasks die with `unknown_kind`, or wait with a `no_handler` note
 
@@ -111,12 +132,9 @@ code `unknown_kind`.
 
 | Likely cause | Check | Do |
 |---|---|---|
-| Code that enqueues a new kind went out before the workers that handle it | Your deploy order | Deploy the workers, then retry the dead tasks |
+| Code that enqueues a new kind was deployed before the workers that handle it | Your deploy order | Deploy the workers. Then retry the dead tasks: filter them by kind and choose *Retry all*, or call `Client.RetryMatching` |
 | A kind was renamed | The history of the `Kind()` method | Handle the old name too, until no old tasks are left |
 | Workers with different handlers read the same queue | `Client.Workers` lists each worker's `Kinds` | Give each set of kinds its own queue |
-
-To retry them, filter the dead tasks by kind and choose *Retry all*, or call
-`Client.RetryMatching`.
 
 ### Tasks die with `invalid_payload`
 
@@ -125,15 +143,7 @@ To retry them, filter the dead tasks by kind and choose *Retry all*, or call
 - **Do:** deploy a handler that also decodes the old payloads, then retry the
   dead tasks. Next time, [add a new kind](../recipes/change-a-task-safely.md).
 
-### Throughput falls over hours
-
-- **Cause:** an old snapshot keeps vacuum from cleaning the `tasks` table.
-- **Check:** the [snapshot ages](database.md#keep-long-transactions-from-slowing-the-queue),
-  and `idle in transaction` sessions in `pg_stat_activity`.
-- **Do:** end the long transaction, or drop the unused replication slot. Then
-  set the timeouts that the same page lists.
-
-## Start-up errors
+## Errors at start and in calls
 
 ### `NewClient` fails with `ErrSchemaOutdated`
 
@@ -154,12 +164,34 @@ need 3`. `taskmill-ui` exits with the same error.
 - **Do:** [set the level](database.md#keep-the-isolation-level-at-read-committed)
   for taskmill's pool.
 
-### `Migrate` fails with a lock timeout
+### `Migrate` fails, or never returns
 
-- **You see:** `canceling statement due to lock timeout`.
-- **Cause:** a long transaction held a lock for more than 5 seconds.
-- **Do:** let a pod restart or the Job's next try run it again. If it keeps
-  failing, find the long transaction in `pg_stat_activity`.
+A failed `Migrate` changes nothing: the schema is as it was before.
+
+| You see | Cause | Do |
+|---|---|---|
+| `canceling statement due to lock timeout` | A long transaction held a lock on a taskmill table for more than 5 seconds. A `pg_dump` backup does that until it ends | Let a pod restart or the Job's next try run it again. If it keeps failing, find the long transaction in `pg_stat_activity` |
+| The process hangs when it starts. In `pg_stat_activity`, its session has `wait_event = 'advisory'` | Another session holds taskmill's migration lock. Its migration is slow, or its client is gone and its transaction stays open | Find that session with the query below. If it is stuck, end it with `pg_terminate_backend`: its migration rolls back, and a waiting process migrates. Pass `Migrate` a context with a deadline, so that the wait ends with an error |
+
+```sql
+-- The sessions that hold an advisory lock, such as taskmill's migration lock
+SELECT a.pid, a.usename, a.state, now() - a.xact_start AS open_for, left(a.query, 60) AS query
+FROM pg_locks l JOIN pg_stat_activity a USING (pid)
+WHERE l.locktype = 'advisory' AND l.granted;
+```
+
+### Enqueue calls fail
+
+**You see:** `Enqueue` returns an error to your code. taskmill logs nothing
+for it. With the `otel` module, `messaging_client_sent_messages_total` counts
+those tasks with an `error_type`.
+
+| The error says | Likely cause | Do |
+|---|---|---|
+| `read-only transaction` (SQLSTATE 25006). `Worker.Run` fails the same way, with `register worker: …` | The process is connected to a read replica, or to an old primary after a failover. `Migrate` and `NewClient` still succeed there | Use the primary's address, with `target_session_attrs=read-write`: [Keep taskmill away from read replicas](backups-and-failover.md#keep-taskmill-away-from-read-replicas). After a failover, restart the process |
+| `permission denied for table …` | The role lacks a right, maybe on a table that a new release added | [Grant on all tables](security.md#give-each-process-the-smallest-role) |
+| `invalid argument` | Your code passed something that taskmill refuses, such as a payload over 1 MiB | Fix the call: [Errors](../reference/errors.md) |
+| A timeout, or a connection error | The database is out of reach, or the pool is full | Check the database and `pool_max_conns` |
 
 ### `taskmill-ui` restarts again and again
 
@@ -170,15 +202,15 @@ setting. Fix what it names.
 
 ## Other log lines and pages
 
-### The log says `task history has no partition for today`
+### The log says `apply retention` keeps failing
 
-- **Cause:** the role that runs your workers does not own taskmill's tables.
-  Tasks still complete, but without history.
-- **Check:** `operation still failing` for `apply retention`, or
-  `prepare history partitions failed` when a worker starts. Their error says
-  `the role that runs workers must own the taskmill tables`.
-- **Do:** [make that role the owner](database.md#run-workers-as-the-owner-of-taskmills-tables).
-  The maintainer creates the missing partitions within a minute.
+**You see:** `operation still failing` with `operation="apply retention"`.
+Later, maybe `task history has no partition for today`.
+
+| Its `error` says | Cause | Do |
+|---|---|---|
+| `detach …: timeout` | A long transaction uses the history, such as `pg_dump`. The maintainer waits for it before it drops an old partition | Nothing: it ends with that transaction, and the log says `operation recovered` |
+| `must own the taskmill tables`, or `must be owner of table` | The workers' role is not the owner. Tasks still complete, but soon without history. A worker also logs `prepare history partitions failed` when it starts | [Make that role the owner](database.md#run-workers-as-the-owner-of-taskmills-tables). The maintainer creates the missing partitions within a minute |
 
 ### Kubernetes marks workers as not ready
 
@@ -188,18 +220,15 @@ returns 503, with `the worker has not reached the database for …` or
 
 | Likely cause | Check | Do |
 |---|---|---|
-| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases` | Fix the database or the network. Pods are ready again about 20 s after it is back |
+| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases` | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
 | Handlers hold every connection of the pool | The warning `the pool was full, so renewing leases waited` | Raise `pool_max_conns`, or give handlers their own pool |
-| `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix the start-up error |
-
-Don't restart the workers: that does not fix a database outage
-([Kubernetes](kubernetes.md#tell-kubernetes-when-a-worker-is-ready)).
+| `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix that error: see [the errors at start](#errors-at-start-and-in-calls) |
 
 ### Counts in the dashboard stop at 10,000
 
 This is on purpose, so that counting stays cheap on a large backlog: the
 dashboard shows "10,000+". To watch a backlog, use lag: it has no cap
-([Monitoring](monitoring.md#know-the-catches)).
+([Monitoring](monitoring.md#know-the-limits-of-each-signal)).
 
 ### The dashboard says "Taking too long" or "Something went wrong"
 

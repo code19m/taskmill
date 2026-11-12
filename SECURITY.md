@@ -16,13 +16,24 @@ Flaws in taskmill's own code are in scope, for example:
 - SQL injection through any argument of taskmill's API;
 - cross-site request forgery (CSRF) or cross-site scripting (XSS) in the
   dashboard (the `ui` package);
-- a way around `ui.Config.ReadOnly` or `ui.Config.BasicAuth`.
+- a way around `ui.Config.ReadOnly` or `ui.Config.BasicAuth`;
+- a way for a database role to read, run, change, or cancel a task without
+  the table privileges for it.
 
 How you expose the dashboard is a deployment choice, and not in scope. The
 `ui` handler asks for a login only when `ui.Config.BasicAuth` is set.
-Otherwise, your application must put its own authentication in front of it.
-A dashboard exposed without authentication, or with basic authentication
-over plain HTTP, is a deployment issue, not a vulnerability in taskmill.
+Otherwise, your app must put its own authentication in front of it. A
+dashboard exposed without authentication, or with basic authentication over
+plain HTTP, is a deployment issue, not a vulnerability in taskmill.
+
+Who can connect to your database is a deployment choice too. PostgreSQL has
+no privilege for `NOTIFY`, so any role that can connect to the database can
+send notifications on taskmill's channel. taskmill treats them as hints, and
+reads the truth from its tables before it acts.
+
+So a forged notification only changes when workers query the database,
+which costs extra queries. That load is not a vulnerability in taskmill. A
+notification that makes taskmill run, change, or cancel a task is one.
 
 ## Reporting a vulnerability
 
@@ -57,9 +68,9 @@ A fix ships as a patch release, with:
 
 ## See also
 
-- [Security in production](docs/production/security.md): how to protect the
-  dashboard and the database
+- [Security](docs/production/security.md): how to protect the dashboard, the
+  database, and the data in your tasks
 - [Compatibility](docs/reference/compatibility.md): versions and support
 - [CONTRIBUTING.md](CONTRIBUTING.md): how changes get merged
 
-**Next:** [Security in production](docs/production/security.md)
+**Next:** [Security](docs/production/security.md)

@@ -53,7 +53,7 @@ docker run -p 8080:8080 \
 ```
 
 Or install it with Go: `go install github.com/code19m/taskmill/cmd/taskmill-ui@latest`.
-It reads its settings from environment variables:
+It reads its settings from environment variables. A first setup needs these:
 
 | Variable | What it sets | Default |
 |---|---|---|
@@ -61,9 +61,9 @@ It reads its settings from environment variables:
 | `TASKMILL_SCHEMA` | The taskmill [schema](../concepts/glossary.md#schema) | `taskmill` |
 | `TASKMILL_UI_ADDR` | The address to listen on | `localhost:8080`. In a container, set `:8080` |
 | `TASKMILL_UI_PASSWORD` | The login password | None: anyone who reaches it can use it |
-| `TASKMILL_UI_LOG_FORMAT` | The format of the logs on standard error: `text` or `json` | `text` |
 
-The next section lists the rest.
+[The `taskmill-ui` reference](../reference/taskmill-ui.md) lists every
+variable, with its values and its default.
 
 - **Pin the image tag** to the taskmill version your apps run. A newer
   dashboard refuses to start on an older schema, with `ErrSchemaOutdated`.
@@ -72,8 +72,9 @@ The next section lists the rest.
 - For probes, it answers `/livez` and `/readyz` with no login. See
   [Kubernetes](../production/kubernetes.md) for what each one checks.
 - It exports no metrics. Export the queue gauges from your apps, with the
-  `otel` module ([Observability](observability.md)). A metrics library in
-  `taskmill-ui` would become a dependency of every app that uses taskmill.
+  `otel` module ([Logs, traces, and metrics](observability.md)). A metrics
+  library in `taskmill-ui` would become a dependency of every app that uses
+  taskmill.
 - To check that a download is genuine, see [Security](../production/security.md).
 
 ## Protect it
@@ -86,7 +87,7 @@ Each setting means the same in both ways of running it:
 
 | You want to… | In your app (`ui.Config`) | With `taskmill-ui` |
 |---|---|---|
-| Ask for a login | Your own login in front of it, or `BasicAuth` | `TASKMILL_UI_PASSWORD`, and `TASKMILL_UI_USERNAME` (default `admin`) |
+| Ask for a login | Your own login in front of it, or `BasicAuth` | `TASKMILL_UI_PASSWORD`, and `TASKMILL_UI_USERNAME` |
 | Let people look, but not change anything | `ReadOnly: true` | `TASKMILL_UI_READ_ONLY=true` |
 | Put it under a path that a proxy forwards, such as `/admin/tasks` | `Prefix` | `TASKMILL_UI_PREFIX` |
 | Show it in another site's frame | `FrameAncestors` | `TASKMILL_UI_FRAME_ANCESTORS` |
@@ -129,7 +130,12 @@ To match your app's theme, add `?theme=light`, `?theme=dark`, or
 | **Tasks** | Tasks filtered by state, queue, kind, and FIFO group | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its next and last run | Pause, resume, or run it now |
-| **Workers** | Each worker, with its host, version, and queues, and which one is the maintainer. The **Kinds** column counts the kinds that the worker has handlers for; click the count to list them. The **Checked in** column says when the worker last reported to the database, at its [check-in](../concepts/glossary.md#check-in) | Nothing: this page is for looking |
+| **Workers** | Each worker, with its host, version, and queues, and which one is the [maintainer](../concepts/glossary.md#maintainer) | Nothing: this page is for looking |
+
+On the **Workers** page, the **Kinds** column counts the kinds that the
+worker has handlers for: click the count to list them. The **Checked in**
+column shows the worker's last
+[check-in](../concepts/glossary.md#check-in).
 
 Before an action on many tasks, the dashboard shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,
