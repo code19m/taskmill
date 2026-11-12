@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -150,19 +151,34 @@ func TestPagesRender(t *testing.T) {
 	}
 }
 
-func TestNavMarksACappedDeadCount(t *testing.T) {
+func TestNavShowsTheStoredDeadCount(t *testing.T) {
 	t.Parallel()
-	client, pool, schema := setupDB(t)
-	// The maintainer stopped counting the dead tasks at the cap.
-	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.queue_stats (queue, state, tasks, capped, refreshed_at)
-	    VALUES ('mail', 'dead', 10000, true, now())`); err != nil {
-		t.Fatal(err)
-	}
-	h := handler(t, client, nil)
-	for _, path := range []string{"/", "/tasks?state=dead", "/workers"} {
-		if _, body, _ := get(t, h, path); !strings.Contains(body, `<span>Dead</span><span class="count mono">10,000&#43;</span>`) {
-			t.Errorf("%s: want the nav's dead count marked as capped\n%s", path, body)
-		}
+	for _, tc := range []struct {
+		name   string
+		tasks  int64
+		capped bool
+		want   string
+	}{
+		// The maintainer stopped counting the dead tasks at the cap.
+		{"capped", 10000, true, "10,000&#43;"},
+		// No maintainer stores this count, but the column holds it, and a
+		// page must show whatever the column holds.
+		{"smallest", math.MinInt64, false, "-9,223,372,036,854,775,808"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, pool, schema := setupDB(t)
+			if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.queue_stats (queue, state, tasks, capped, refreshed_at)
+			    VALUES ('mail', 'dead', $1, $2, now())`, tc.tasks, tc.capped); err != nil {
+				t.Fatal(err)
+			}
+			h := handler(t, client, nil)
+			for _, path := range []string{"/", "/tasks?state=dead", "/workers"} {
+				if _, body, _ := get(t, h, path); !strings.Contains(body, `<span>Dead</span><span class="count mono">`+tc.want+`</span>`) {
+					t.Errorf("%s: want the nav's dead count as %s\n%s", path, tc.want, body)
+				}
+			}
+		})
 	}
 }
 

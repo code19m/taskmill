@@ -1301,16 +1301,17 @@ func timestamp(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05.000 UTC")
 }
 
-// number formats n with thousands separators.
+// number formats n with thousands separators. It works on the digits, not
+// on -n, which the smallest number does not have.
 func number(n int64) string {
-	s := strconv.FormatInt(n, 10)
+	sign, s := "", strconv.FormatInt(n, 10)
 	if n < 0 {
-		return "-" + number(-n)
+		sign, s = "-", s[1:]
 	}
 	for i := len(s) - 3; i > 0; i -= 3 {
 		s = s[:i] + "," + s[i:]
 	}
-	return s
+	return sign + s
 }
 
 // count formats a count of tasks, marking one that stopped at its cap.

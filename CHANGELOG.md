@@ -99,6 +99,11 @@ All notable changes to taskmill are recorded here. The format follows
   client that never sent it kept its connection for good, without a login.
   Enough of them left the dashboard and its probes without connections. A
   whole request now has 10 seconds to arrive.
+- A row of `queue_stats` whose count was the smallest 64-bit number ended
+  the process that served the dashboard, at the next page, with `fatal
+  error: stack overflow`: for a mounted dashboard, that process is your
+  application. No maintainer stores such a count, but the column can hold
+  it. The dashboard now shows every count that the column can hold.
 
 ### Security
 
