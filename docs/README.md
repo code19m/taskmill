@@ -17,7 +17,7 @@ commit with your data, run at least once, and survive a crashed worker.
 | Fix a problem | [Troubleshooting](production/troubleshooting.md) |
 | Look up a default, an error, a log line, or a metric | [Reference](reference/README.md) |
 | See every function and type | [API on pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill) |
-| Contribute | [CONTRIBUTING.md](../CONTRIBUTING.md) and [Design](design/README.md) |
+| Contribute | [CONTRIBUTING.md](../CONTRIBUTING.md) and [How taskmill is built](design/README.md) |
 
 ## Learning path
 
@@ -67,6 +67,7 @@ that, open a [guide](guides/README.md) when you need a feature.
 - [Handle tasks](guides/handle-tasks.md)
 - [Retries and errors](guides/retries-and-errors.md)
 - [Handle tasks in batches](guides/batch-handlers.md)
+- [Add middleware](guides/middleware.md)
 - [Workers and queues](guides/workers-and-queues.md)
 - [Task order and FIFO groups](guides/ordering.md)
 - [Avoid duplicate tasks](guides/deduplication.md)
@@ -82,6 +83,11 @@ that, open a [guide](guides/README.md) when you need a feature.
 - [Do work once](recipes/do-work-once.md)
 - [Call a rate-limited API](recipes/call-a-rate-limited-api.md)
 - [Keep order per key](recipes/keep-order-per-key.md)
+- [Share a queue fairly between customers](recipes/share-a-queue-between-customers.md)
+- [Keep at most one waiting task per key](recipes/one-waiting-task-per-key.md)
+- [Cancel or replace a delayed task](recipes/cancel-a-delayed-task.md)
+- [Run a task at each customer's local time](recipes/run-at-each-customers-local-time.md)
+- [Move a cron job to a schedule](recipes/move-a-cron-job-to-a-schedule.md)
 - [Consume from a broker](recipes/consume-from-a-broker.md)
 - [Change a task safely](recipes/change-a-task-safely.md)
 - [Run long tasks](recipes/run-long-tasks.md)
@@ -95,9 +101,11 @@ that, open a [guide](guides/README.md) when you need a feature.
 - [Production checklist](production/checklist.md)
 - [Database](production/database.md)
 - [Connection poolers](production/connection-poolers.md)
+- [Backups, failover, and replicas](production/backups-and-failover.md)
 - [Deploys](production/deploys.md)
 - [Kubernetes](production/kubernetes.md)
 - [Autoscaling](production/autoscaling.md)
+- [Capacity planning](production/capacity.md)
 - [Monitoring](production/monitoring.md)
 - [Security](production/security.md)
 - [Troubleshooting](production/troubleshooting.md)
@@ -115,10 +123,22 @@ that, open a [guide](guides/README.md) when you need a feature.
 - [Packages](reference/packages.md)
 - [Performance](reference/performance.md)
 
+### [How taskmill is built](design/README.md)
+
+These pages are for contributors.
+
+- [Task lifecycle and guarantees](design/task-lifecycle.md)
+- [Storage schema](design/schema.md)
+- [Key statements](design/schema-statements.md)
+- [FIFO groups and deduplication](design/schema-groups.md)
+- [Maintenance and notifications](design/schema-maintenance.md)
+- [Benchmarks](design/benchmarks.md)
+- [Releasing](design/releasing.md)
+- [Writing docs](design/writing-docs.md)
+
 ### Contribute
 
 - [CONTRIBUTING.md](../CONTRIBUTING.md): setup, tests, and pull requests
-- [Design](design/README.md): how taskmill is built, for contributors
 - [Decisions](adr/README.md): why taskmill is built this way
 
 ## See also
