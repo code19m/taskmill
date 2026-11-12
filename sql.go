@@ -81,10 +81,10 @@ type statements struct {
 	lockQueue     string
 	countRunning  string
 	renewLeases   string
+	cancelRequest string
 	fail          string
 	snooze        string
 	release       string
-	cancelRunning string
 	queueSettings string
 	upsertWorker  string
 	checkInWorker string
@@ -724,6 +724,12 @@ UNION ALL
 SELECT id, false, cancel_requested_at IS NOT NULL FROM {s}.tasks
 WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}`),
 
+		// cancelRequest finds task $1 if the attempt with lease token $2
+		// still owns it and its cancellation was requested.
+		cancelRequest: q(`
+SELECT FROM {s}.tasks
+WHERE id = $1 AND lease_token = $2 AND {leased} AND cancel_requested_at IS NOT NULL`),
+
 		// fail records a failed attempt: retryable after a delay of $4
 		// microseconds, or dead. $5 is the error as a JSON object. A task
 		// whose cancellation was requested is canceled instead.
@@ -764,10 +770,14 @@ SET state = CASE
 WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
 
-		// release gives a task back during shutdown, attempt included. If $3
-		// is set, the worker has a handler for the task, and its errors lose
-		// the note of a wait for one, as in snooze. A task whose cancellation
-		// was requested is canceled instead.
+		// release ends an attempt that the worker stopped: it cancels the
+		// task if its cancellation was requested, and otherwise gives it
+		// back, attempt included. It records a shutdown, and an attempt that
+		// ended after the worker read a cancel request. So the task's row
+		// decides, as in fail and snooze: no statement cancels a running
+		// task whose row has no request. If $3 is set, the worker has a
+		// handler for the task, and its errors lose the note of a wait for
+		// one, as in snooze.
 		release: q(`
 UPDATE {s}.tasks
 SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'canceled' END::{s}.task_state,
@@ -777,12 +787,6 @@ SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'cancele
     errors = CASE WHEN $3 THEN {unnoted} ELSE errors END
 WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
-
-		cancelRunning: q(`
-UPDATE {s}.tasks
-SET state = 'canceled', finalized_at = now(), lease_expires_at = NULL
-WHERE id = $1 AND lease_token = $2 AND {leased}
-RETURNING queue, coalesce(group_key, '')`),
 
 		queueSettings: q(`SELECT name, paused_at IS NOT NULL, coalesce(max_running, 0) FROM {s}.queues WHERE name = ANY($1)`),
 

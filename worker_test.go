@@ -544,6 +544,84 @@ func TestWorkerCancelsRunningTask(t *testing.T) {
 	e.waitState(t, id, taskmill.StateCanceled)
 }
 
+// Any role in the database can send a notification, with no right on
+// taskmill's tables, so a notification alone must not cancel a task.
+func TestCancelNotificationAloneDoesNotCancel(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	started := make(chan struct{}, 2)
+	ended := make(chan int64, 2)
+	proceed := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			select {
+			case <-ctx.Done():
+				ended <- task.ID
+				return context.Cause(ctx)
+			case <-proceed:
+				return nil
+			}
+		}, &taskmill.HandlerOptions{Timeout: time.Minute}),
+		Queues: defaultQueue(2),
+	})
+	unasked := e.enqueue(t, sendEmail{}, nil)
+	asked := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the first handler to start")
+	recv(t, started, "the second handler to start")
+	e.waitListening(t)
+
+	// Nobody asked to cancel the first task. The worker handles notifications
+	// in order, so once the second task's context ends, it has handled the
+	// first task's notification too.
+	e.exec(t, "SELECT pg_notify($1, $2)", e.schema, "c|"+strconv.FormatInt(unasked, 10))
+	if err := e.client.Cancel(t.Context(), asked); err != nil {
+		t.Fatal(err)
+	}
+	if id := recv(t, ended, "the canceled task's context to end"); id != asked {
+		t.Fatalf("a notification alone ended the context of task %d", id)
+	}
+	close(proceed)
+	e.waitState(t, unasked, taskmill.StateCompleted)
+	e.waitState(t, asked, taskmill.StateCanceled)
+}
+
+// The task's row decides whether an attempt ends in a cancellation, whatever
+// the worker believed while the handler ran.
+func TestAttemptEndsCanceledOnlyIfTheTaskSaysSo(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var calls atomic.Int32
+	started := make(chan struct{}, 1)
+	ended := make(chan struct{})
+	proceed := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			if calls.Add(1) > 1 {
+				return nil
+			}
+			started <- struct{}{}
+			<-ctx.Done()
+			close(ended)
+			<-proceed
+			return context.Cause(ctx)
+		}, &taskmill.HandlerOptions{Timeout: time.Minute}),
+		Queues: defaultQueue(1),
+	})
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the handler to start")
+	e.waitListening(t)
+	if err := e.client.Cancel(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, ended, "the handler's context to end")
+
+	// The request leaves the row before the attempt ends, here by hand.
+	e.exec(t, "UPDATE {s}.tasks SET cancel_requested_at = NULL WHERE id = $1", id)
+	close(proceed)
+	e.waitState(t, id, taskmill.StateCompleted)
+}
+
 func TestHandlerContextSaysWhyItEnded(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

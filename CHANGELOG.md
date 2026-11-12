@@ -72,6 +72,18 @@ All notable changes to taskmill are recorded here. The format follows
   task dead at once. A retry now removes that note, so the wait starts
   again, as documented.
 
+### Security
+
+- A notification alone no longer cancels a running task. PostgreSQL lets
+  every role of a database send notifications, also a role with no rights
+  on taskmill's tables, and a worker canceled the task that a cancel
+  notification named: the task ended as `canceled`, though nobody had
+  called `Cancel`. A worker now takes the notification as a hint and reads
+  the request from the task's row, and an attempt ends as `canceled` only
+  if that row has the request. `Cancel` still stops a running task at once:
+  the worker reads one row first. If other roles can connect to your
+  database, upgrade.
+
 ## [0.5.0] - 2026-11-12
 
 ### Changed

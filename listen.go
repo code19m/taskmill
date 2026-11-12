@@ -261,7 +261,7 @@ func (w *Worker) handleNotification(ctx context.Context, payload string) (heartb
 		w.mu.Lock()
 		t := w.attempts[id]
 		w.mu.Unlock()
-		if t != nil {
+		if t != nil && w.cancelRequested(ctx, t) {
 			t.requestCancel()
 		}
 	case notifyQueue:
@@ -277,4 +277,16 @@ func (w *Worker) handleNotification(ctx context.Context, payload string) (heartb
 		}
 	}
 	return false
+}
+
+// cancelRequested reports whether the row of t's task says that its
+// cancellation was requested. A notification is only a hint to look: any
+// role in the database can send one, and one can arrive late, for a later
+// run of its task. If the read fails, or takes as long as a check-in may,
+// the next check-in reads the request.
+func (w *Worker) cancelRequested(ctx context.Context, t *tracked) bool {
+	ctx, cancel := context.WithTimeout(ctx, w.cfg.LeaseDuration/3)
+	defer cancel()
+	found, _ := queryRow(ctx, pgxQuerier{q: w.client.pool}, w.client.sql.cancelRequest, []any{t.att.id, t.att.token})
+	return found
 }
