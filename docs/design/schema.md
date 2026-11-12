@@ -391,7 +391,7 @@ statement timeout.
   - **Groups stay in order.** Once a retry skips a task of a group, it skips
     the group's later tasks too, until it ends, and counts them as skipped.
     A later run then retries the group's tasks oldest first.
-  - **One bounded wait.** A retry into a group that has no row creates the
+  - **Two bounded waits.** A retry into a group that has no row creates the
     row. A concurrent enqueue may be creating the same row, uncommitted, and
     an insert must wait for it to decide. The batch inserts under a
     savepoint with a lock timeout of 100 ms, far below the deadlock timeout
@@ -399,7 +399,13 @@ statement timeout.
     never stalls an application transaction for long, and never makes one
     fail with a deadlock. A transaction per new group would avoid the wait
     too, but cost a transaction per group when every group is new, as after
-    canceling a whole queue.
+    canceling a whole queue. The promotion of a group's next task waits for
+    that task's row, under the same lock timeout. The batch holds the
+    group's row, so only two callers can hold the task's row (see
+    [Lock order](#fifo-groups)): a `Cancel` or a `Delete` that is about to
+    start again, which makes the wait short, and a `CancelTx` that locked
+    the task after another transaction made it pending. If the wait times
+    out, the batch rolls back, and the action stops with a cursor to go on.
   - **Exact counts, and going on.** A batch whose statements ran commits
     even if the caller's context ends meanwhile, so the number of changed
     tasks is exact. An action that stops early returns a cursor to go on: at
@@ -490,7 +496,38 @@ group key: `COLLATE "C"` in SQL, and Go's string order in code, which is the
 same. A `pending` task's row is locked only after its group's row: promotion
 takes them in that order, and `Cancel` and `Delete` lock a pending task's
 group first. Locking in one order prevents deadlocks, for example between a
-`Cancel` and the promotion of the same task.
+`Cancel` and the promotion of the same task. The row of any other task is
+locked before its group's row, as a worker that records a failure and a
+`Retry` do, or only if it is free, as completions and bulk actions do. So a
+transaction that holds a group's row never waits for the row of a task that
+is not pending.
+
+`Cancel` and `Delete` cannot know which order applies before they hold a
+lock: a `Retry`, a promotion, or the task's own enqueue may commit between
+the read of the task's state and the lock. So they check again under the
+lock. With the group's row, which every change into and out of `pending`
+takes, they lock the task only if it is still pending. With the task's row
+alone, they read the state that the lock protects. If the task changed
+sides, they roll their transaction back, which releases what they hold, and
+start again: the new read locks in the other order. After five tries they
+go on with the locks they hold, and PostgreSQL's deadlock detection is the
+last resort.
+
+`CancelTx` cannot do this. It runs in the caller's transaction, which it
+may not roll back, and a savepoint there costs more than it saves. Each
+savepoint that writes is a subtransaction, and past 64 of them in one
+transaction, every session's visibility checks slow down until that
+transaction ends. A released savepoint also makes whoever waits for a row
+that it locked wait for the caller's whole transaction. So `CancelTx` goes
+on with the locks as it took them, which may be the wrong order. Then it
+can deadlock with another transaction that changes the same task or its
+group at the same moment: a retry of the task, the end of the group's head,
+which promotes the task while a cancel or a delete of it comes in, or an
+enqueue that commits between the two statements of `CancelTx`. PostgreSQL
+ends one of the transactions with a deadlock error (SQLSTATE 40P01), which
+may hit the other one. `Cancel`, `Delete`, and `Retry` run again when it
+hits them, within their five tries. Any other transaction that got the
+error can be run again by its caller.
 
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the
@@ -537,7 +574,9 @@ key finds no key row, which leaves the key without its task.
 A duplicate's row reports the task that holds the key, found in the same
 statement. If that task's transaction committed while the statement waited
 for the key, the statement cannot see it, and the client reads the key again
-in a second statement. Two concurrent enqueues of the same key cannot both
+in a second statement. It does the same when the holder it sees is one
+whose window ended: the statement did not get that key, so another enqueue
+claimed it meanwhile, and its task is the one to report. Two concurrent enqueues of the same key cannot both
 succeed: the second waits on the first's key and then finds it taken. A
 duplicate wastes one sequence value, which is harmless.
 

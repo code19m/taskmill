@@ -32,6 +32,72 @@ func TestHasNUL(t *testing.T) {
 	}
 }
 
+func TestJSONEqual(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		a, b string
+		want bool
+	}{
+		// What jsonb does to a value leaves it equal.
+		{`{"a": 1, "b": [true, null, "x"]}`, `{"b":[true,null,"x"],"a":1}`, true},
+		{`-0`, `0`, true},
+		{`[1e2, 1.50e1, 1E-2]`, `[100, 15.0, 0.01]`, true},
+		{`1e400`, `1` + strings.Repeat("0", 400), true},
+		{`"é"`, `"é"`, true},
+		// A change is a change, however small.
+		{`9007199254740993`, `9007199254740992`, false},
+		{`1e400`, `1e401`, false},
+		{`1`, `"1"`, false},
+		{`[1, 2]`, `[2, 1]`, false},
+		{`{"a": null}`, `{}`, false},
+		{`{"a": 1}`, `{"b": 1}`, false},
+		{`null`, `false`, false},
+		{`{"a": [1]}`, `{"a": {"0": 1}}`, false},
+		{`{`, `{`, false},
+	} {
+		if got := jsonEqual([]byte(tt.a), []byte(tt.b)); got != tt.want {
+			t.Errorf("jsonEqual(%.20s, %.20s) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+		if got := jsonEqual([]byte(tt.b), []byte(tt.a)); got != tt.want {
+			t.Errorf("jsonEqual(%.20s, %.20s) = %v, want %v", tt.b, tt.a, got, tt.want)
+		}
+	}
+}
+
+func TestScheduledFor(t *testing.T) {
+	t.Parallel()
+	// A run's time comes back as it went into the metadata, to the
+	// microsecond, on the clock of the schedule's location.
+	at := time.Date(2026, 11, 12, 22, 30, 0, 123_456_000, time.UTC)
+	for _, tt := range []struct {
+		loc  *time.Location
+		want string // the hour and minute that ScheduledFor shows
+	}{
+		{time.UTC, "22:30"},
+		{time.FixedZone("ahead", (5*60+30)*60), "04:00"},
+		{time.FixedZone("behind", -8*60*60), "14:30"},
+		// RFC 3339 cannot write this offset, so the time stays in UTC.
+		{time.FixedZone("seconds", 60*60+17), "22:30"},
+	} {
+		s := compiledSchedule{Schedule: Schedule{Name: "nightly", Location: tt.loc}}
+		info := TaskInfo{Metadata: s.ownMetadata(s.scheduledFor(at))}
+		if got := info.ScheduledFor(); !got.Equal(at) || got.Format("15:04") != tt.want {
+			t.Errorf("in %s: got %s, want %s at %s", tt.loc, got.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), tt.want)
+		}
+		if got := info.Metadata[MetadataSchedule]; got != "nightly" {
+			t.Errorf("in %s: got the schedule %q, want nightly", tt.loc, got)
+		}
+	}
+
+	// A task that no schedule enqueued has no such time.
+	for _, meta := range []map[string]string{nil, {"trace": "abc"}, {MetadataScheduledFor: "tomorrow"}} {
+		info := TaskInfo{Metadata: meta}
+		if got := info.ScheduledFor(); !got.IsZero() {
+			t.Errorf("metadata %v: got %s, want the zero time", meta, got)
+		}
+	}
+}
+
 func TestExponentialBackoff(t *testing.T) {
 	t.Parallel()
 	b := ExponentialBackoff{}
