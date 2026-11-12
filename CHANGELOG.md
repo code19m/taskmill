@@ -84,11 +84,11 @@ All notable changes to taskmill are recorded here. The format follows
   `no_handler` note, the next worker without the handler made the retried
   task dead right away. A retry now removes that note, so the wait starts
   again, as documented.
-- `Migrate` called from several processes at the same time failed in the processes
-  that waited, with `schema ... already exists` or `relation ... already
-  exists`, when the pool's `default_transaction_isolation` was not
-  `read committed`. `Migrate` now works at any default level. A client
-  still needs `read committed`, as `NewClient` checks.
+- `Migrate` called from several processes at the same time failed in the
+  processes that waited, with `schema ... already exists` or `relation ...
+  already exists`, when the pool's `default_transaction_isolation` was not
+  `read committed`. `Migrate` now works at any default level. A client still
+  needs `read committed`, as `NewClient` checks.
 - History partitions follow the database's clock. Workers created the daily
   partitions, and the maintainer dropped the expired ones, by the clock of
   their own machine. A maintainer whose clock was ahead by more than the
