@@ -132,13 +132,13 @@ All notable changes to taskmill are recorded here. The format follows
   minute with 3.4 million tasks, and about 1 GB for each 1,000 tasks it
   then deleted. The statement now reads each queue's old tasks through
   `tasks_finished_idx`: a few pages when no task is old enough.
-- Renewing leases and completing tasks no longer take time that grows with
-  the square of the number of tasks. A worker that held 5,000 tasks at the same time,
-  as with a batch size of 1,000 and a concurrency of 5, spent about 1 second
-  in the database at each check-in, and now spends about 0.1 seconds. At
-  that growth, a worker that held about 12,000 tasks could not have renewed
-  its leases in time, and its tasks would have run twice. A full batch of
-  500 completions takes a third of the time.
+- Renewing leases and completing tasks no longer take time that grows with the
+  square of the number of tasks. A worker that held 5,000 tasks at the same
+  time, as with a batch size of 1,000 and a concurrency of 5, spent about 1
+  second in the database at each check-in, and now spends about 0.1 seconds.
+  At that growth, a worker that held about 12,000 tasks could not have renewed
+  its leases in time, and its tasks would have run twice. A full batch of 500
+  completions takes a third of the time.
 - A transaction that cancels several running tasks, oldest first, can no
   longer fail with `deadlock detected` against a worker that completes
   those tasks. A completion took the rows of its tasks in the order in
