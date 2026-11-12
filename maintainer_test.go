@@ -8,6 +8,7 @@ import (
 	"maps"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -177,6 +178,72 @@ func TestMaintainerStoppedWhileRenewingResigns(t *testing.T) {
 	if n := e.count(t, "SELECT count(*) FROM {s}.leader"); n != 0 {
 		t.Fatal("the maintainer stopped without resigning; another worker waits for its lease to expire")
 	}
+}
+
+// TestStoppingWorkerHandsMaintenanceOverBeforeItDrains checks that a worker
+// resigns as maintainer when it starts to stop, not when its running tasks
+// end: another worker leads at once, and enqueues the runs of its schedules.
+func TestStoppingWorkerHandsMaintenanceOverBeforeItDrains(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+
+	// The old worker leads, and runs a task that ends only when the test
+	// says so.
+	started, unblock := make(chan struct{}, 1), make(chan struct{})
+	stopOld := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-unblock
+			return nil
+		}, nil),
+		Queues:       defaultQueue(1),
+		DrainTimeout: time.Minute,
+	})
+	finish := sync.OnceFunc(func() { close(unblock) })
+	t.Cleanup(finish) // before the worker's own cleanup, which waits for the task
+	e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the old worker's task to start")
+	waitFor(t, "the old worker to lead", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+
+	// The new worker has a schedule that the old one lacks, as in a deploy
+	// that adds one.
+	var hs taskmill.Handlers
+	ran := make(chan struct{}, 1)
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error {
+		ran <- struct{}{}
+		return nil
+	}), nil)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers:  &hs,
+		Queues:    map[string]taskmill.QueueOptions{"reports": {Concurrency: 1}},
+		Schedules: []taskmill.Schedule{{Name: "yearly-report", Cron: "@yearly", Args: report{}}},
+	})
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stopOld()
+	}()
+	// Only the maintainer stores its schedules, and enqueues their runs.
+	waitFor(t, "the new worker to lead, and store its schedule", func() bool {
+		schedules, err := e.client.Schedules(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(schedules) == 1
+	})
+	if err := e.client.RunSchedule(ctx, "yearly-report"); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, ran, "the schedule's run")
+	select {
+	case <-stopped:
+		t.Fatal("the old worker stopped before its task ended, so the test did not see it drain")
+	default:
+	}
+	finish()
+	<-stopped
 }
 
 func TestRescueCapsTheBackoffOfManyAttempts(t *testing.T) {
