@@ -16,6 +16,18 @@ All notable changes to taskmill are recorded here. The format follows
   and a process that is killed during its drain leaves no gap in which
   delayed tasks, retries, and schedules wait.
 
+### Security
+
+- taskmill now requires pgx v5.12.0, which fixes two vulnerabilities in
+  pgx: SQL injection in batches sent with the simple protocol
+  ([GHSA-j38q-h3ph-jjpq](https://github.com/jackc/pgx/security/advisories/GHSA-j38q-h3ph-jjpq)),
+  and a bypass of `require_auth` and `channel_binding=require`
+  ([GHSA-95fj-3fxw-g62g](https://github.com/jackc/pgx/security/advisories/GHSA-95fj-3fxw-g62g)).
+  taskmill's own batches were not open to the first one, since none ends in
+  a comment. Your application's batches and connection settings may be
+  affected, so upgrade. pgx v5.12.0 also adds a `Tx` method to
+  `pgx.BatchResults`: add it to your own implementations, such as mocks.
+
 ## [0.4.0] - 2026-10-29
 
 ### Added

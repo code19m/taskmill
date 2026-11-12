@@ -7,7 +7,7 @@ GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION   := v1.9.0
 ACTIONLINT_VERSION    := v1.7.12
 GORELEASER_VERSION    := v2.19.0
-SYFT_VERSION          := v1.55.0
+SYFT_VERSION          := v1.57.1
 GORELEASE_VERSION     := v0.0.0-20261014143641-f0251eb4aa3e
 
 # The repository's modules: the core, and the integrations that need modules
