@@ -163,6 +163,8 @@ func TestWorkerFailureKinds(t *testing.T) {
 				return taskmill.Permanent(errors.New("bad address"))
 			case "panic":
 				panic("boom")
+			case "panic with a value that panics":
+				panic(&stubbornError{})
 			case "timeout":
 				<-ctx.Done()
 				return ctx.Err()
@@ -176,22 +178,31 @@ func TestWorkerFailureKinds(t *testing.T) {
 		to       string
 		attempts int
 		code     taskmill.ErrorCode
+		message  string // part of the first error's message
 	}{
-		{"permanent", 1, ""},
-		{"panic", 2, taskmill.CodePanic},
-		{"timeout", 2, taskmill.CodeTimeout},
+		{"permanent", 1, "", "bad address"},
+		{"panic", 2, taskmill.CodePanic, "panic: boom"},
+		{"panic with a value that panics", 2, taskmill.CodePanic, "stubbornError"},
+		{"timeout", 2, taskmill.CodeTimeout, "context deadline exceeded"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.to, func(t *testing.T) {
 			t.Parallel()
 			id := e.enqueue(t, sendEmail{To: tt.to}, &taskmill.EnqueueOptions{MaxAttempts: 2})
 			info := e.waitState(t, id, taskmill.StateDead)
-			if info.Attempt != tt.attempts || len(info.Errors) != tt.attempts || info.Errors[0].Code != tt.code {
+			if info.Attempt != tt.attempts || len(info.Errors) != tt.attempts || info.Errors[0].Code != tt.code ||
+				!strings.Contains(info.Errors[0].Message, tt.message) {
 				t.Errorf("got attempt %d, errors %+v", info.Attempt, info.Errors)
 			}
 		})
 	}
 }
+
+// stubbornError is an error whose Error method panics with the error itself,
+// so that the panic's value panics again when it is formatted.
+type stubbornError struct{}
+
+func (e *stubbornError) Error() string { panic(e) }
 
 // apiError is an error type as applications write them. A function that
 // returns a nil *apiError as an error returns an error that is not nil, and
@@ -244,6 +255,15 @@ func TestPanicAfterTheHandlerReturnedFailsTheAttempt(t *testing.T) {
 			"(*apiError).Error",
 		},
 		"the error's method, from a batch": {&batch, "(*apiError).Error"},
+		"the error's method, with a value that panics again": {
+			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+				if task.Args.To == "up" {
+					return nil
+				}
+				return &stubbornError{}
+			}, &taskmill.HandlerOptions{Retry: fastRetry}),
+			"(*stubbornError).Error",
+		},
 		"the retry policy": {
 			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 				if task.Args.To == "up" {

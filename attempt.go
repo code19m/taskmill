@@ -166,7 +166,20 @@ var errSkippedHandler = classError("taskmill: middleware returned nil without ru
 
 func panicFailure(r any) *failure {
 	stack := debug.Stack()
-	return &failure{code: CodePanic, err: fmt.Errorf("panic: %v\n%s", r, stack)}
+	return &failure{code: CodePanic, err: fmt.Errorf("panic: %s\n%s", panicText(r), stack)}
+}
+
+// panicText formats the value of a recovered panic. Formatting runs the
+// value's own methods, which can panic again, as an Error method that panics
+// with its receiver does. The text then names the value's type instead: the
+// recover must not end the process that it is there to save.
+func panicText(r any) (text string) {
+	defer func() {
+		if recover() != nil {
+			text = fmt.Sprintf("a %T that panics when it is formatted", r)
+		}
+	}()
+	return fmt.Sprint(r)
 }
 
 // outcome is how an attempt ended, and what to record for it.

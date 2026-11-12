@@ -41,6 +41,11 @@ All notable changes to taskmill are recorded here. The format follows
   fails with the code `panic` and the panic's stack in the task's errors.
   The task is retried after the default backoff, or becomes dead after its
   last attempt.
+- A panic still ended the worker's process if its value panicked again when
+  the worker formatted it, as an `Error` method that panics with its own
+  receiver does. This held for a handler's own panic too. The worker now
+  formats the value under a recover of its own, and the task's error names
+  the value's type instead of its text.
 - A worker that fetched a task again while its own older attempt of that
   task still ran forgot the older attempt. This can happen after the worker
   was cut off from the database, or paused, for longer than the lease: the
