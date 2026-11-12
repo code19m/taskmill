@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -144,13 +146,57 @@ func TestRoleWithoutRightsCannotHoldUpMigrateOrWorkers(t *testing.T) {
 	t.Run("worker", func(t *testing.T) {
 		t.Parallel()
 		schema := testdb.Schema(t, admin)
-		applyWithoutMigrate(t, admin, schema) // without partitions: the worker creates them
+		applyWithoutMigrate(t, admin, schema, 0) // without partitions: the worker creates them
 		hold(t, schema)
 		e := (&env{pool: admin, schema: schema}).withLogger(t, testLogger(t))
 		id := e.enqueue(t, sendEmail{}, nil)
 		runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
 		e.waitState(t, id, taskmill.StateCompleted) // in the history, so the partitions exist
 	})
+}
+
+// A migration changes tables that workers use all the time, and while it
+// waits for a table's lock, every later statement on that table waits behind
+// it. So Migrate gives up after 5 seconds, and changes nothing: the next try
+// migrates.
+func TestMigrateGivesUpOnBusyTables(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	schema := testdb.Schema(t, pool)
+	applyWithoutMigrate(t, pool, schema, 1) // as before a deploy that brings a migration
+	e := &env{pool: pool, schema: schema}
+	version := e.count(t, "SELECT max(version) FROM {s}.migrations")
+
+	// A transaction that writes the tables of the tasks stays open.
+	busy := e.begin(t)
+	r, err := pool.Query(t.Context(), "SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename <> 'migrations'", schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables, err := pgx.CollectRows(r, pgx.RowTo[string])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range tables {
+		e.txExec(t, busy, "LOCK TABLE {s}."+table+" IN ROW EXCLUSIVE MODE")
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	err = taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Schema: schema})
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "55P03" { // lock_not_available
+		t.Fatalf("migrate with busy tables: got %v, want a lock timeout", err)
+	}
+	if got := e.count(t, "SELECT max(version) FROM {s}.migrations"); got != version {
+		t.Fatalf("a migration that gave up left version %d, want %d", got, version)
+	}
+
+	if err := busy.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		t.Fatalf("migrate again: %v", err)
+	}
 }
 
 // Migrate runs before NewClient checks the pool's isolation level. A process
@@ -218,7 +264,7 @@ func TestMigrationsApplyWithoutMigrate(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Pool(t)
 	schema := testdb.Schema(t, pool)
-	applyWithoutMigrate(t, pool, schema)
+	applyWithoutMigrate(t, pool, schema, 0)
 	logs := &logRecorder{}
 	e := (&env{pool: pool, schema: schema}).withLogger(t, slog.New(logs))
 
@@ -239,7 +285,7 @@ func TestWorkerStartsWhenItsRoleMayNotCreatePartitions(t *testing.T) {
 	t.Parallel()
 	admin := testdb.Pool(t)
 	schema := testdb.Schema(t, admin)
-	applyWithoutMigrate(t, admin, schema)
+	applyWithoutMigrate(t, admin, schema, 0)
 	// The role may use the tables, but does not own them.
 	role := schema + "_worker"
 	pool := newRole(t, admin, role,
@@ -272,14 +318,14 @@ func TestWorkerStartsWhenItsRoleMayNotCreatePartitions(t *testing.T) {
 
 // applyWithoutMigrate applies the schema the way teams with their own
 // migration tools do: each migration from Migrations in a transaction, and
-// the record of its version.
-func applyWithoutMigrate(t *testing.T, pool *pgxpool.Pool, schema string) {
+// the record of its version. It leaves the newest pending migrations out.
+func applyWithoutMigrate(t *testing.T, pool *pgxpool.Pool, schema string, pending int) {
 	t.Helper()
 	ms, err := taskmill.Migrations(schema)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range ms {
+	for _, m := range ms[:len(ms)-pending] {
 		sql := m.SQL
 		if m.Version > 0 {
 			sql += fmt.Sprintf("\nINSERT INTO %s.migrations (version, name) VALUES (%d, '%s');", schema, m.Version, m.Name)

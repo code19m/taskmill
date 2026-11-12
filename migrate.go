@@ -149,6 +149,11 @@ func createMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema strin
 // schema cannot keep Migrate waiting, as it could with an advisory lock,
 // which any role may take. The lock lets everyone read the table, and ends
 // with tx, so it works behind transaction-pooling proxies.
+//
+// Only this wait has no limit but ctx: no worker writes the migrations
+// table, so it waits for another migration alone. For the tables that
+// workers use, each migration sets a lock timeout before its first
+// statement, which holds until tx ends.
 func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrations.Migration, logger *slog.Logger) error {
 	if _, err := tx.Exec(ctx, fmt.Sprintf("LOCK TABLE %s.migrations IN SHARE ROW EXCLUSIVE MODE", schema)); err != nil {
 		return err
