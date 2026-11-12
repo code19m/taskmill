@@ -799,3 +799,27 @@ func TestCount(t *testing.T) {
 		t.Fatalf("over the cap: %+v, %v", got, err)
 	}
 }
+
+// A count reads each state's tasks through that state's index, up to its
+// cap: not the table, once for each state, to find the tasks of a state that
+// lie together, as tasks of one age do.
+func TestCountReadsEachStatesIndex(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// Available tasks, and after them dead ones.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT 'default', 'email.send', CASE WHEN i > 100000 THEN 'dead' ELSE 'available' END::{s}.task_state,
+	                  now(), '{}', 3, CASE WHEN i > 100000 THEN now() END
+	           FROM generate_series(1, 150000) i`)
+	e.exec(t, "ANALYZE {s}.tasks")
+	for _, filter := range []*taskmill.TaskFilter{nil, {Queues: []string{taskmill.DefaultQueue}}} {
+		n, err := taskmill.CountRowsRead(t.Context(), e.client, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Two states have tasks, and each count stops one task past 10,000.
+		if n > 2*10_001 {
+			t.Errorf("filter %+v: the count read %d rows, want at most %d", filter, n, 2*10_001)
+		}
+	}
+}

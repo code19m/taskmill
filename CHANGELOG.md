@@ -156,6 +156,13 @@ All notable changes to taskmill are recorded here. The format follows
   again at the same place with the cursor it returned. A batch now reads
   at most 100,000 tasks, and the action still acts on each matching task
   once.
+- `Client.Count`, which the dashboard asks before it confirms a bulk
+  action, reads each state's tasks through that state's index. Where the
+  tasks of a state lay together in the table, as tasks of one age do, it
+  read the table once for each state: with 3.4 million tasks, a count with
+  no filter read 4 GB in 22 seconds, far past its 5-second limit, so it
+  failed. That count now reads 0.6 GB in under half a second. A count by
+  kind or FIFO group alone still reads every task of each state.
 
 ### Security
 

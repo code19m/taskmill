@@ -255,6 +255,21 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	return rowsRead(ctx, c, bulkSettings, sql, args, taskTables)
 }
 
+// CountRowsRead runs the count of the tasks that match filter, as Count runs
+// it, under EXPLAIN ANALYZE, and returns how many rows its scans of the task
+// tables read.
+func CountRowsRead(ctx context.Context, c *Client, filter *TaskFilter) (int64, error) {
+	m, err := match(filter, allStates)
+	if err != nil {
+		return 0, err
+	}
+	states := m.states
+	if m.history {
+		states = append(states, string(StateCompleted))
+	}
+	return rowsRead(ctx, c, countSettings, c.sql.countTasks, []any{m.queues, m.kinds, m.groups, states}, taskTables)
+}
+
 // WindowRowsRead runs the statement that finds the window of a bulk action
 // on every task, after task after, as the action runs it, under EXPLAIN
 // ANALYZE, and returns how many rows the scans of the task tables read. With

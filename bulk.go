@@ -172,6 +172,18 @@ func match(filter *TaskFilter, states []State) (*matching, error) {
 	return &m, nil
 }
 
+// countSettings start a count. Custom plans leave out the branches of the
+// states not counted. With sequential and bitmap scans off, each branch reads
+// the index of its state and stops at its cap. Otherwise the planner, which
+// expects to meet a state's tasks anywhere in the table, may scan the table
+// for them, once for each state: far, when those tasks lie together, as
+// tasks of one age do. JIT is off, as for the maintainer's statistics: the
+// branches make the planner think the count costly, and compiling it takes
+// longer than running it.
+const countSettings = `SELECT set_config('statement_timeout', '` + listTimeout + `', true),
+       set_config('plan_cache_mode', 'force_custom_plan', true), set_config('jit', 'off', true),
+       set_config('enable_seqscan', 'off', true), set_config('enable_bitmapscan', 'off', true)`
+
 // Count counts the tasks that match filter, which may be nil. It counts at
 // most 10,000 tasks per state. Like [Client.List], the query is canceled
 // after 5 seconds.
@@ -186,11 +198,7 @@ func (c *Client) Count(ctx context.Context, filter *TaskFilter) (*TaskCounts, er
 	}
 	out := &TaskCounts{States: make(map[State]TaskCount, len(states))}
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
-			return err
-		}
-		// Custom plans leave out the branches of the states not counted.
-		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
+		if _, err := tx.Exec(ctx, countSettings); err != nil {
 			return err
 		}
 		r, err := tx.Query(ctx, c.sql.countTasks, m.queues, m.kinds, m.groups, states)
