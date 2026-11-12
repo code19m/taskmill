@@ -116,6 +116,9 @@ func (f field) parsePart(part string) (bits uint64, star bool, err error) {
 		if err != nil || step < 1 {
 			return 0, false, fmt.Errorf("invalid step %q in %s field", stepText, f.name)
 		}
+		// Every step beyond the field's range matches the same values: the
+		// first one only. Capping it keeps the loop below from overflowing.
+		step = min(step, f.max+1)
 	}
 
 	lo, hi := f.min, f.max

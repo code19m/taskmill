@@ -205,6 +205,10 @@ All notable changes to taskmill are recorded here. The format follows
   with a field of an interface type. A test that checked only the error
   passed. Now `Run` returns an error that says the handler did not run, and
   why.
+- `NewWorker` panicked on a schedule whose cron expression has a step near
+  the largest integer, such as `0 0 */9223372036854775807 * *`. Now it reads
+  such a step like any other step beyond the field's range: the schedule
+  matches the first value only, here day 1.
 
 ### Security
 

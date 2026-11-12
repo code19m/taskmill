@@ -31,6 +31,12 @@ func TestNext(t *testing.T) {
 		{"5,10 1-2 * JAN,FEB *", time.Date(2026, 12, 31, 23, 0, 0, 0, utc), time.Date(2027, 1, 1, 1, 5, 0, 0, utc)},
 		{"@hourly", time.Date(2026, 1, 1, 10, 59, 59, 0, utc), time.Date(2026, 1, 1, 11, 0, 0, 0, utc)},
 		{"@weekly", time.Date(2026, 1, 1, 0, 0, 0, 0, utc), time.Date(2026, 1, 4, 0, 0, 0, 0, utc)},
+		// A step beyond the field's range matches the range's first value
+		// only, up to the largest step that fits an int.
+		{"*/100 * * * *", time.Date(2026, 1, 1, 10, 0, 0, 0, utc), time.Date(2026, 1, 1, 11, 0, 0, 0, utc)},
+		{"5/9223372036854775807 * * * *", time.Date(2026, 1, 1, 10, 0, 0, 0, utc), time.Date(2026, 1, 1, 10, 5, 0, 0, utc)},
+		{"0 0 */9223372036854775807 * *", time.Date(2026, 1, 15, 0, 0, 0, 0, utc), time.Date(2026, 2, 1, 0, 0, 0, 0, utc)},
+		{"0 0 1 3-12/9223372036854775807 *", time.Date(2026, 1, 15, 0, 0, 0, 0, utc), time.Date(2026, 3, 1, 0, 0, 0, 0, utc)},
 		// Spring forward: 02:30 does not exist on 2026-03-08 in New York.
 		{"30 2 * * *", time.Date(2026, 3, 7, 12, 0, 0, 0, ny), time.Date(2026, 3, 8, 3, 30, 0, 0, ny)},
 		{"0 9 * * *", time.Date(2026, 3, 7, 12, 0, 0, 0, ny), time.Date(2026, 3, 8, 9, 0, 0, 0, ny)},
@@ -113,7 +119,12 @@ func TestParseRejects(t *testing.T) {
 }
 
 func FuzzParse(f *testing.F) {
-	for _, s := range []string{"* * * * *", "*/5 1-3 1,15 JAN-MAR MON", "@daily", "0 0 29 2 *"} {
+	for _, s := range []string{
+		"* * * * *", "*/5 1-3 1,15 JAN-MAR MON", "@daily", "0 0 29 2 *",
+		// Steps near the largest int once overflowed the loop that sets a
+		// field's bits, which then panicked.
+		"0 0 */9223372036854775807 * *", "5/9223372036854775807 * * * *", "0 0 1 1-12/9223372036854775807 *",
+	} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, expr string) {
