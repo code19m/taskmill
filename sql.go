@@ -713,12 +713,13 @@ RETURNING queue, coalesce(group_key, ''), state::text`),
 		// snooze runs the task again after $3 microseconds and gives the
 		// attempt back, recording $4 as a note if it is not null; the note
 		// carries the number of attempts used. A task whose cancellation was
-		// requested is canceled instead.
+		// requested is canceled instead. The cast makes $3 a bigint: compared
+		// with 0 alone, it would be an integer, which holds only 35 minutes.
 		snooze: q(`
 UPDATE {s}.tasks
 SET state = CASE
             WHEN cancel_requested_at IS NOT NULL THEN 'canceled'
-            WHEN $3 > 0 THEN 'scheduled'
+            WHEN $3::bigint > 0 THEN 'scheduled'
             ELSE 'available'
         END::{s}.task_state,
     run_at = CASE WHEN cancel_requested_at IS NULL THEN now() + $3 * interval '1 microsecond' ELSE run_at END,

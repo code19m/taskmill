@@ -230,6 +230,24 @@ func TestWorkerSnoozeKeepsTheAttempt(t *testing.T) {
 	}
 }
 
+func TestWorkerSnoozesForADay(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// A day is more microseconds than a 32-bit integer holds.
+	const delay = 24 * time.Hour
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return taskmill.Snooze(delay) }, nil),
+		Queues:   defaultQueue(1),
+	})
+
+	asked := time.Now()
+	id := e.enqueue(t, sendEmail{}, nil)
+	info := e.waitState(t, id, taskmill.StateScheduled)
+	if wait := info.RunAt.Sub(asked); info.Attempt != 0 || (wait-delay).Abs() > 10*time.Minute {
+		t.Fatalf("the task waits %s after %d attempts, want about %s after none", wait, info.Attempt, delay)
+	}
+}
+
 func TestWorkerSnoozesUnknownKinds(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

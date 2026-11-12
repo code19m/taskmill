@@ -18,6 +18,15 @@ All notable changes to taskmill are recorded here. The format follows
   and a process that is killed during its drain leaves no gap in which
   delayed tasks, retries, and schedules wait.
 
+### Fixed
+
+- `Snooze` with a delay above 35 minutes was not recorded. The worker
+  logged `record attempt failed; the task is rescued when its lease
+  expires`, and the task counted a failed attempt with the code
+  `lease_lost`, ran again after the retry backoff, and became dead after its
+  last attempt. Now the task waits the delay and keeps its attempt, as
+  documented.
+
 ### Security
 
 - taskmill now requires pgx v5.12.0, which fixes two vulnerabilities in
