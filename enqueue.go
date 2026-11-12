@@ -36,6 +36,15 @@ const (
 	maxEnqueueBytes     = 64 << 20 // most payload and metadata of one enqueue call
 )
 
+// PostgreSQL stores the times from minRunAt up to, but not including,
+// endRunAt. The driver does not check: it sends a later time as a number
+// that wraps around, which PostgreSQL reads as a time in the past, or
+// rejects.
+var (
+	minRunAt = time.Date(-4713, time.November, 24, 0, 0, 0, 0, time.UTC) // 4714 BC
+	endRunAt = time.Date(294277, time.January, 1, 0, 0, 0, 0, time.UTC)
+)
+
 // EnqueueOptions control how a task is enqueued. Zero values mean "not set":
 // a field set in the call wins over the kind's defaults (see
 // [ArgsWithDefaults]), which win over taskmill's defaults. Metadata merges
@@ -49,7 +58,9 @@ type EnqueueOptions struct {
 	// Priority orders tasks within the queue. Default: [PriorityNormal].
 	Priority Priority
 
-	// RunAt is the earliest time the task may start. Default: now.
+	// RunAt is the earliest time the task may start. Default: now. It must
+	// be a time that PostgreSQL can store, from 4713 BC to 294276 AD, so a
+	// time that stands for "never", such as Go's largest, is rejected.
 	RunAt time.Time
 
 	// MaxAttempts is how many times the task may run, from 1 to 10,000.
@@ -658,6 +669,10 @@ func (t *resolvedTask) validate() error {
 	}
 	if t.dedupeWindow < 0 {
 		return invalidArgument("dedupe window must not be negative")
+	}
+	if t.runAt.Before(minRunAt) || !t.runAt.Before(endRunAt) {
+		return invalidArgument("run time %s is outside the range that PostgreSQL stores, 4713 BC to 294276 AD",
+			t.runAt.UTC().Format(time.RFC3339))
 	}
 	return nil
 }

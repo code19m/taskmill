@@ -178,6 +178,13 @@ All notable changes to taskmill are recorded here. The format follows
   queues named after tenants, for example, its memory grew with each new
   name for the life of the process. It now forgets the queues whose last
   notification is older than the 50 milliseconds for which it matters.
+- A `RunAt` after the year 294276, such as `time.Unix(math.MaxInt64, 0)` to
+  mean "never", was stored as a time in the past, so the task ran right
+  away. Other far-future times made PostgreSQL fail the statement, which
+  aborted the caller's transaction. Now every enqueue returns
+  `ErrInvalidArgument` for a `RunAt` that PostgreSQL cannot store, before
+  4713 BC or after 294276 AD. The check runs before any statement, so the
+  caller's transaction stays usable.
 
 ### Security
 
