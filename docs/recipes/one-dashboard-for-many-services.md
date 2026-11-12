@@ -10,7 +10,7 @@ people may only look. Others may retry and delete tasks."
 |---|---|---|
 | The services are written in Go | **Each service mounts its [dashboard](../concepts/glossary.md#dashboard) with `ui.New`,** on an internal address. The admin app forwards a path to each | Each dashboard runs its own service's taskmill version |
 | A service isn't written in Go | `taskmill-ui` next to that service, with `TASKMILL_UI_PREFIX` and `TASKMILL_SCHEMA`. The admin app forwards the same way | No Go code needed |
-| All schemas are in one database, and the admin app is in Go | The admin app mounts one `ui.New` per schema itself | Fewer moving parts, but its taskmill version must fit every schema |
+| All schemas are in one database, and the admin app is in Go | The admin app mounts one `ui.New` per schema itself | Less to deploy, but its taskmill version must fit every schema |
 
 ## The recommended way
 
@@ -111,10 +111,16 @@ mux.HandleFunc("GET /internal/queues", func(w http.ResponseWriter, r *http.Reque
 > the admin app can reach it. Anyone else who reaches it can set the role
 > header too.
 
+- **Keep the `Host` header when you forward.** The dashboard refuses an
+  action if the browser's `Origin` header and the `Host` header name
+  different hosts. The proxy above keeps `Host`. A proxy that replaces it,
+  as nginx does by default, gets a 403 for every action when the admin app
+  is on plain HTTP. In nginx, set `proxy_set_header Host $host;`.
 - **Pin `taskmill-ui` to your services' taskmill version.** A newer one
   fails on an older schema with `ErrSchemaOutdated`.
-- **Counts in `Client.Queues` stop at 10,000 per state.** Lag has no limit,
-  so compare services by lag.
+- **Counts in `Client.Queues` stop at 10,000 per state.**
+  [Lag](../concepts/glossary.md#lag) has no limit, so compare services by
+  lag.
 
 ## See also
 

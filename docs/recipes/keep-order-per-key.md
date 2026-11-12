@@ -32,7 +32,8 @@ func postEntry(ctx context.Context, t *taskmill.Task[PostLedgerEntry]) error {
 
 - Only the group's first unfinished task, its
   [head](../concepts/glossary.md#head), can run. The next task starts when
-  the head finishes. Groups need no setup, and millions of keys work well.
+  the head finishes. Groups need no setup, and the benchmarks run 100,000
+  of them in one queue ([Performance](../reference/performance.md)).
 - A failed head is retried before anything behind it runs. So a short outage
   doesn't change the order.
 - If the head becomes dead, the group stops and waits for a person: it is a
@@ -54,7 +55,7 @@ func postEntry(ctx context.Context, t *taskmill.Task[PostLedgerEntry]) error {
    task, and choose **View group** to see what waits behind it.
 2. Fix the cause: deploy a fix, or correct the data.
 3. Retry the dead task. It runs again as the head, and the group continues
-   in order. Delete it instead only if that step must be skipped for good.
+   in order. Delete it instead only if that step must never run.
 
 [Fix a halted group](../guides/ordering.md#fix-a-halted-group) shows how to
 do this from code. Did one bug halt many groups? See
@@ -65,18 +66,22 @@ on purpose.
 ## Watch out
 
 - **Alert on halted groups.** A halted group waits for a person, and its
-  waiting tasks don't count in the queue's lag. Alert when
+  waiting tasks don't count in the queue's
+  [lag](../concepts/glossary.md#lag). Alert when
   `taskmill_queue_halted_groups` is above 0
   ([Monitoring](../production/monitoring.md)).
+- **One group runs slowly.** Its tasks run one after the other. Even tasks
+  that take no time run at only about 20 a second with one worker. With
+  thousands of tasks waiting for one key, expect minutes, not seconds.
 - **Keep the transactions that enqueue into a group short.** Producers of
   one group wait for each other's transactions to commit.
 - **A group lives in one queue.** The same key in another queue is another
-  group. And a snoozed head holds back its group until it runs again.
+  group. And a snoozed head blocks its group until it runs again.
 
 ## See also
 
 - [Task order and FIFO groups](../guides/ordering.md): priorities and groups in detail
-- [Shop example](../../examples/shop/README.md): a halted group to try in the dashboard
+- [The shop example](../../examples/shop/README.md): a halted group to try in the dashboard
 - [`EnqueueOptions.GroupKey`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions) on pkg.go.dev
 
 **Next:** [Consume from a broker](consume-from-a-broker.md)
