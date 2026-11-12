@@ -14,23 +14,24 @@ changes it.
 | Queue names, kinds, and schedule names | 1 to 128 characters |
 | Payload | At most 1 MiB of JSON. The godoc of [`Args`](https://pkg.go.dev/github.com/code19m/taskmill#Args) has the exact rules |
 | One enqueue call (`EnqueueMany`, `EnqueueManyTx`, `outbox.Store`) | At most 10,000 tasks, and 64 MiB of payload and metadata |
-| A delayed task, a retry, or a snoozed task becomes available | Within about 1 second of its run time |
+| A delayed task, a retry, or a snoozed task becomes available | Within about 1 second of its run time, while a maintainer runs |
 
 ## Handlers
 
 | What | Value |
 |---|---|
+| Wait after the nth failed attempt, with the default `Retry` | 2^(n−1) seconds: 1, 2, 4, and so on, up to 1 hour from the 13th failure on. Each wait varies at random by ±10% |
 | Time from the first failure to dead, with the default `MaxAttempts` and `Retry` | About 13 hours (25 attempts) |
 | Retry wait after a lost [lease](../concepts/glossary.md#lease) | The default [backoff](../concepts/glossary.md#backoff), whatever the kind's `Retry` says |
 | A task whose kind has no handler on the worker that fetched it | Snoozed 1 minute at a time, without using an attempt. Dead with `unknown_kind` after 1 hour |
-| Error history (`TaskInfo.Errors`) | The 20 most recent entries, with 4 KiB per message |
+| Error history (`TaskInfo.Errors`) | The 20 most recent entries, with at most 4 KiB per message |
 
 ## Workers
 
 | What | Value |
 |---|---|
 | The worker's [check-in](../concepts/glossary.md#check-in): it renews its leases and notes that it is alive | Every third of `LeaseDuration`: 10 seconds by default |
-| Poll of an idle queue while the maintainer's [heartbeats](../concepts/glossary.md#heartbeat) arrive | Once a minute, ±10%. Every `PollInterval`, if that is longer |
+| Poll of an idle queue while the [heartbeats](../concepts/glossary.md#heartbeat) of the [maintainer](../concepts/glossary.md#maintainer) arrive | Once a minute, ±10%. Every `PollInterval`, if that is longer |
 | A task whose [notification](../concepts/glossary.md#notification) was lost starts | Within about 2 seconds while heartbeats arrive. Within about 16 seconds if the maintainer or the notification connection fails silently |
 | Handlers that still run when `DrainTimeout` ends | Their contexts are canceled. 5 seconds later, their tasks go back to their queues |
 | Database connections of one worker | Its pool, plus 1 for notifications |
@@ -45,8 +46,8 @@ changes it.
 
 ## The maintainer
 
-The [maintainer](../concepts/glossary.md#maintainer) is one worker, chosen
-by election, that does the shared work.
+The maintainer is one worker, chosen by election, that does the shared
+work.
 
 | What | When |
 |---|---|
@@ -65,7 +66,7 @@ by election, that does the shared work.
 | Other workers try to take over | Every 2 seconds |
 | A new maintainer after a crash | Within about 12 seconds (the maintainer's lease is 10 seconds) |
 | A new maintainer after a clean stop | Right away, when the old one starts to stop. It gives the role up before it waits for its running tasks |
-| Remove a worker that stopped checking in | After 5 minutes without a check-in |
+| Remove a worker that stopped checking in | After 5 minutes without a check-in. A worker with a `LeaseDuration` above 15 minutes checks in less often, so it is removed, and registers again |
 | Delete a schedule removed from the code | After 24 hours without a run or a change |
 
 ## Retention
@@ -109,7 +110,7 @@ by election, that does the shared work.
 | Live updates | About every 5 seconds while the browser tab is visible. Up to 1 minute apart while the server is out of reach |
 | Tasks per page of the task list | 50 |
 | One bulk action request | Works for about 5 seconds, then offers to continue |
-| The dashboard marks a worker as stale | After 30 seconds without a check-in |
+| The dashboard marks a worker as stale | After 30 seconds without a check-in. So with a `LeaseDuration` above 90 seconds, a healthy worker shows as stale between check-ins |
 | Values per filter | Up to 100 |
 | FIFO groups that a filter lists | The first 100. Its search finds the others |
 | Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds |
