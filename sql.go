@@ -97,7 +97,6 @@ type statements struct {
 	rescue        string
 
 	expiredHistory  string
-	retention       string
 	deleteFinished  string
 	pruneSchedules  string
 	loadSchedules   string
@@ -918,9 +917,6 @@ WHERE i.inhparent = '{s}.task_history'::regclass
   AND c.relname < 'task_history_' || to_char(
           (now() - (SELECT history_retention FROM {s}.settings)) AT TIME ZONE 'UTC', 'YYYYMMDD')
 ORDER BY c.relname`),
-
-		retention: q(`
-SELECT extract(epoch FROM history_retention)::bigint, extract(epoch FROM dead_retention)::bigint FROM {s}.settings`),
 
 		// deleteFinished deletes dead and canceled tasks older than the dead
 		// retention, except the dead heads that keep their groups halted. It

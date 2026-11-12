@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -409,6 +410,31 @@ func TestHistoryPartitionsFollowTheDatabaseClock(t *testing.T) {
 	taskmill.RunRetention(t.Context(), w)
 	if _, err := e.client.Get(t.Context(), id); err != nil {
 		t.Fatalf("retention dropped the history of the database's day: %v", err)
+	}
+}
+
+// The longest duration is how Go code says "for good".
+func TestLongestHistoryRetentionKeepsHistory(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+	id := e.enqueue(t, sendEmail{}, nil)
+	if _, err := w.RunTask(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	longest := time.Duration(math.MaxInt64)
+	if err := e.client.UpdateSettings(t.Context(), func(s *taskmill.Settings) { s.HistoryRetention = longest }); err != nil {
+		t.Fatal(err)
+	}
+
+	taskmill.RunRetention(t.Context(), w)
+	if _, err := e.client.Get(t.Context(), id); err != nil {
+		t.Fatalf("retention dropped history that is kept for good: %v", err)
+	}
+	// The database stores whole microseconds.
+	s, err := e.client.Settings(t.Context())
+	if err != nil || s.HistoryRetention != longest.Truncate(time.Microsecond) {
+		t.Fatalf("got a history retention of %s, %v; want %s", s.HistoryRetention, err, longest.Truncate(time.Microsecond))
 	}
 }
 

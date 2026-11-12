@@ -83,6 +83,13 @@ All notable changes to taskmill are recorded here. The format follows
   whose clock was days off created partitions for the wrong days, so
   completed tasks skipped history. Both now use the database's clock, as
   every other time that taskmill sets.
+- `HistoryRetention` set to the longest duration,
+  `time.Duration(math.MaxInt64)`, deleted all history: the period
+  overflowed when the maintainer read it, so it dropped every history
+  partition, each minute, and `Client.Settings` reported a negative period.
+  The database now applies the period itself, and `Settings` reads it
+  without overflow. The longest duration, about 292 years, keeps completed
+  tasks for good.
 
 ### Security
 
