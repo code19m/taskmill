@@ -142,7 +142,9 @@ func (c *Client) Cancel(ctx context.Context, id int64) error {
 	return c.inTx(ctx, func(q querier) error { return c.cancel(ctx, q, id) })
 }
 
-// CancelTx is [Client.Cancel] in the caller's transaction.
+// CancelTx is [Client.Cancel] in the caller's transaction. For a task of a
+// FIFO group, it sets a savepoint named taskmill_take_task in the
+// transaction, and releases it before it returns.
 func (c *Client) CancelTx(ctx context.Context, tx Executor, id int64) error {
 	q, err := txQuerier(tx)
 	if err != nil {
@@ -153,11 +155,8 @@ func (c *Client) CancelTx(ctx context.Context, tx Executor, id int64) error {
 
 func (c *Client) cancel(ctx context.Context, q querier, id int64) error {
 	fail := func(err error) error { return fmt.Errorf("taskmill: cancel task %d: %w", id, err) }
-	if _, err := q.exec(ctx, c.sql.lockPendingGroup, id); err != nil {
-		return fail(err)
-	}
 	var state, queue, group string
-	found, err := queryRow(ctx, q, c.sql.lockTask, []any{id}, &state, &queue, &group)
+	found, err := c.takeTask(ctx, q, id, c.sql.lockTask, &state, &queue, &group)
 	if err != nil {
 		return fail(err)
 	}
@@ -208,7 +207,7 @@ func (c *Client) Retry(ctx context.Context, id int64) error {
 
 func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	var state, queue, group string
-	found, err := queryRow(ctx, q, c.sql.lockTask, []any{id}, &state, &queue, &group)
+	found, err := queryRow(ctx, q, c.sql.lockTask, []any{id, false}, &state, &queue, &group)
 	if err != nil {
 		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
 	}
@@ -272,11 +271,8 @@ func (c *Client) Delete(ctx context.Context, id int64) error {
 }
 
 func (c *Client) delete(ctx context.Context, q querier, id int64) error {
-	if _, err := q.exec(ctx, c.sql.lockPendingGroup, id); err != nil {
-		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
-	}
 	var state, queue, group string
-	found, err := queryRow(ctx, q, c.sql.deleteTask, []any{id}, &state, &queue, &group)
+	found, err := c.takeTask(ctx, q, id, c.sql.deleteTask, &state, &queue, &group)
 	if err != nil {
 		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
 	}
@@ -315,6 +311,61 @@ func (c *Client) delete(ctx context.Context, q querier, id int64) error {
 		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
 	}
 	return nil
+}
+
+// takeTries is how many times takeTask locks a task before it goes on with
+// the locks it holds. Each new try takes another change of the same task,
+// committed between two of its statements.
+const takeTries = 5
+
+// takeTask runs take, which is lockTask or deleteTask, on task id for Cancel
+// and Delete, and scans the task's state, queue, and FIFO group. It reports
+// whether take found the task.
+//
+// It keeps the lock order of FIFO groups: a pending task's row is locked only
+// after its group's row, and with a group's row in hand, it waits for no row
+// of a task that is not pending. Whether a task is pending is certain only
+// under a lock, because a Retry or a promotion may commit between a read and
+// the lock that follows it. So takeTask checks again once it holds a lock:
+//
+//   - With the group's row, which every change into and out of pending
+//     takes, it takes the task only if the task is still pending.
+//   - With the task's row alone, it reads the state that the lock protects.
+//
+// If the task changed sides meanwhile, takeTask gives back what it holds, by
+// rolling back to a savepoint, and locks again in the other order. An
+// ungrouped task needs none of this, and no savepoint.
+func (c *Client) takeTask(ctx context.Context, q querier, id int64, take string, state, queue, group *string) (bool, error) {
+	var grouped bool
+	if _, err := queryRow(ctx, q, c.sql.taskGrouped, []any{id}, &grouped); err != nil {
+		return false, err
+	}
+	if !grouped {
+		return queryRow(ctx, q, take, []any{id, false}, state, queue, group)
+	}
+	if _, err := q.exec(ctx, "SAVEPOINT taskmill_take_task"); err != nil {
+		return false, err
+	}
+	for try := 1; ; try++ {
+		groupHeld, err := queryRow(ctx, q, c.sql.lockPendingGroup, []any{id}, new(bool))
+		if err != nil {
+			return false, err
+		}
+		// The last try takes the task in any state, as if nothing had
+		// changed: PostgreSQL then ends a deadlock, should one follow.
+		last := try == takeTries
+		found, err := queryRow(ctx, q, take, []any{id, groupHeld && !last}, state, queue, group)
+		if err != nil {
+			return false, err
+		}
+		if pending := found && State(*state) == StatePending; pending == groupHeld || last {
+			_, err = q.exec(ctx, "RELEASE SAVEPOINT taskmill_take_task")
+			return found, err
+		}
+		if _, err := q.exec(ctx, "ROLLBACK TO SAVEPOINT taskmill_take_task"); err != nil {
+			return false, err
+		}
+	}
 }
 
 // stateError explains why an operation found no task to act on.

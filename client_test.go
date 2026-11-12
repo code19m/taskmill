@@ -329,6 +329,124 @@ func TestRetryAndDeleteSeeTheLatestGroupHalt(t *testing.T) {
 	}
 }
 
+// waitBlockedCount waits until n statements on the env's schema wait for
+// locks.
+func (e *env) waitBlockedCount(t *testing.T, n int) {
+	t.Helper()
+	waitFor(t, "statements to wait for locks", func() bool {
+		return e.count(t, `SELECT count(*) FROM pg_stat_activity
+			WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0`, e.schema) == n
+	})
+}
+
+// A Retry makes a canceled task pending while a Cancel or a Delete of the
+// same task waits for the task's row. The waiting action read the task as
+// canceled, so it did not lock the group's row first, as it must for a
+// pending task. If it goes on with the task's row alone, a second Cancel,
+// which takes the group's row first, closes a cycle with it.
+func TestCancelAndDeleteOfATaskRetriedMeanwhileDoNotDeadlock(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		act   func(c *taskmill.Client, ctx context.Context, id int64) error
+		after error // what the second Cancel finds
+	}{
+		{"cancel", (*taskmill.Client).Cancel, taskmill.ErrInvalidState},
+		{"delete", (*taskmill.Client).Delete, taskmill.ErrNotFound},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			ctx := t.Context()
+			group := &taskmill.EnqueueOptions{GroupKey: "g"}
+			e.enqueue(t, sendEmail{To: "head"}, group)
+			id := e.enqueue(t, sendEmail{To: "next"}, group)
+			if err := e.client.Cancel(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			// A dedupe key of the task, whose lock holds the action later.
+			e.exec(t, "INSERT INTO {s}.dedupe_keys (key, task_id, expires_at) VALUES (sha256('k'), $1, now() + interval '1 hour')", id)
+
+			// The Retry locks the task, and waits for the group's row.
+			groupTx := e.begin(t)
+			e.txExec(t, groupTx, "SELECT FROM {s}.groups FOR UPDATE")
+			retried := make(chan error, 1)
+			go func() { retried <- e.client.Retry(ctx, id) }()
+			e.waitBlocked(t, "INSERT INTO {s}.groups")
+			// The action reads the task as canceled, and waits for its row.
+			keyTx := e.begin(t)
+			e.txExec(t, keyTx, "SELECT FROM {s}.dedupe_keys FOR UPDATE")
+			acted := make(chan error, 1)
+			go func() { acted <- tt.act(e.client, ctx, id) }()
+			e.waitBlocked(t, "FROM {s}.tasks WHERE id = $1")
+
+			// The Retry ends: the task is pending. The action gets the task's
+			// row, and stops at the dedupe key.
+			if err := groupTx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := recv(t, retried, "the retry"); err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			e.waitBlocked(t, "DELETE FROM {s}.dedupe_keys")
+			// A second operator cancels the task, and waits for the first.
+			again := make(chan error, 1)
+			go func() { again <- e.client.Cancel(ctx, id) }()
+			e.waitBlockedCount(t, 2)
+
+			if err := keyTx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if err := recv(t, acted, "the action"); err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			if err := recv(t, again, "the second cancel"); !errors.Is(err, tt.after) {
+				t.Fatalf("the second cancel: got %v, want %v", err, tt.after)
+			}
+		})
+	}
+}
+
+// A Delete reads a task as pending and waits for the group's row, which a
+// Cancel of the same task holds. Once the Cancel ends, the task is no longer
+// pending, and a Retry locks it and waits for the group's row. If the Delete
+// then waits for the task's row with the group's row in its hands, the two
+// wait for each other.
+func TestDeleteOfATaskCanceledMeanwhileDoesNotDeadlockWithItsRetry(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	e.enqueue(t, sendEmail{To: "head"}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	id := e.enqueue(t, sendEmail{To: "next"}, &taskmill.EnqueueOptions{GroupKey: "g", DedupeKey: "k"})
+
+	// The Cancel holds the group's row and the task's, and stops at the
+	// task's dedupe key.
+	keyTx := e.begin(t)
+	e.txExec(t, keyTx, "SELECT FROM {s}.dedupe_keys FOR UPDATE")
+	canceled := make(chan error, 1)
+	go func() { canceled <- e.client.Cancel(ctx, id) }()
+	e.waitBlocked(t, "DELETE FROM {s}.dedupe_keys")
+	// The Delete waits for the group's row, and the Retry for the task's.
+	deleted := make(chan error, 1)
+	go func() { deleted <- e.client.Delete(ctx, id) }()
+	e.waitBlockedCount(t, 2)
+	retried := make(chan error, 1)
+	go func() { retried <- e.client.Retry(ctx, id) }()
+	e.waitBlockedCount(t, 3)
+
+	if err := keyTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for what, done := range map[string]chan error{"cancel": canceled, "retry": retried, "delete": deleted} {
+		if err := recv(t, done, "the "+what); err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+	}
+	if _, err := e.client.Get(ctx, id); !errors.Is(err, taskmill.ErrNotFound) {
+		t.Fatalf("the deleted task: got %v, want ErrNotFound", err)
+	}
+}
+
 func TestOperationsOnCompletedTasks(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -387,6 +505,11 @@ func TestTxMethodsWithDatabaseSQL(t *testing.T) {
 	inTx(func(tx *sql.Tx) error { return e.client.CancelTx(ctx, taskmill.SQL(tx), next) })
 	e.wantState(t, head, taskmill.StateAvailable)
 
+	// A pending task's group is locked before the task, under a savepoint.
+	last := e.enqueue(t, sendEmail{To: "3"}, group)
+	inTx(func(tx *sql.Tx) error { return e.client.CancelTx(ctx, taskmill.SQL(tx), last) })
+	e.wantState(t, last, taskmill.StateCanceled)
+
 	if err := e.client.CancelTx(ctx, taskmill.SQL(db), head); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("a database instead of a transaction: got %v, want ErrInvalidArgument", err)
 	}
@@ -430,7 +553,7 @@ func TestCancelWhileTheWorkerRecordsAResult(t *testing.T) {
 	                 run_at = now() + interval '1 minute' WHERE id = $1`, id)
 	done := make(chan error, 1)
 	go func() { done <- e.client.Cancel(t.Context(), id) }()
-	e.waitBlocked(t, "{s}.tasks WHERE id = $1 FOR UPDATE")
+	e.waitBlocked(t, "FROM {s}.tasks WHERE id = $1 AND")
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}

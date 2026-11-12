@@ -38,6 +38,7 @@ type statements struct {
 	complete string
 
 	getTask       string
+	taskGrouped   string
 	lockTask      string
 	flagCancel    string
 	cancelWaiting string
@@ -357,10 +358,17 @@ SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(g
 FROM {s}.task_history WHERE id = $1
 LIMIT 1`),
 
-		// lockTask locks a task's row and returns its state. Statements that
-		// change the task run after it, as statements of their own, so that
-		// they read the row as it is once locked.
-		lockTask: q(`SELECT state::text, queue, coalesce(group_key, '') FROM {s}.tasks WHERE id = $1 FOR UPDATE`),
+		// taskGrouped reports whether task $1 is in a FIFO group, which never
+		// changes.
+		taskGrouped: q(`SELECT group_key IS NOT NULL FROM {s}.tasks WHERE id = $1`),
+
+		// lockTask locks a task's row and returns its state; if $2, only if
+		// the task is pending, and without waiting for the row of a task that
+		// is not. Statements that change the task run after it, as statements
+		// of their own, so that they read the row as it is once locked.
+		lockTask: q(`
+SELECT state::text, queue, coalesce(group_key, '')
+FROM {s}.tasks WHERE id = $1 AND (NOT $2 OR state = 'pending') FOR UPDATE`),
 
 		// flagCancel asks the worker running task $1 to cancel it.
 		flagCancel: q(`UPDATE {s}.tasks SET cancel_requested_at = now() WHERE id = $1`),
@@ -380,8 +388,11 @@ RETURNING queue`),
 		// can be enqueued again.
 		releaseKey: q(`DELETE FROM {s}.dedupe_keys WHERE task_id = $1`),
 
+		// deleteTask deletes task $1 unless it is running, and returns the
+		// state it was in; if $2, only if the task is pending, as lockTask
+		// does.
 		deleteTask: q(`
-DELETE FROM {s}.tasks WHERE id = $1 AND state <> 'running'
+DELETE FROM {s}.tasks WHERE id = $1 AND state <> 'running' AND (NOT $2 OR state = 'pending')
 RETURNING state::text, queue, coalesce(group_key, '')`),
 
 		deleteHistory: q(`DELETE FROM {s}.task_history WHERE id = $1`),
@@ -510,11 +521,14 @@ WITH next AS (
 SELECT count(pg_notify($3, '{available}' || queue))
 FROM (SELECT DISTINCT queue FROM promoted WHERE state = 'available' AND queue = ANY($4)) q`),
 
-		// lockPendingGroup locks the group of task $1 if the task is pending.
-		// A pending task's row is locked only after its group's, the order
-		// in which promotion takes them, so the two cannot deadlock.
+		// lockPendingGroup locks the group of task $1 if the task is pending,
+		// and returns a row if it did. A pending task's row is locked only
+		// after its group's, the order in which promotion takes them, so the
+		// two cannot deadlock. The statement reads the task before it waits
+		// for the group's row, so the task may no longer be pending once it
+		// holds that row: takeTask checks.
 		lockPendingGroup: q(`
-SELECT FROM {s}.groups g JOIN {s}.tasks t ON t.queue = g.queue AND t.group_key = g.group_key
+SELECT true FROM {s}.groups g JOIN {s}.tasks t ON t.queue = g.queue AND t.group_key = g.group_key
 WHERE t.id = $1 AND t.state = 'pending'
 FOR UPDATE OF g`),
 

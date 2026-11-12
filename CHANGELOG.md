@@ -209,6 +209,15 @@ All notable changes to taskmill are recorded here. The format follows
   the largest integer, such as `0 0 */9223372036854775807 * *`. Now it reads
   such a step like any other step beyond the field's range: the schedule
   matches the first value only, here day 1.
+- `Cancel`, `CancelTx`, and `Delete` could fail with PostgreSQL's
+  `deadlock detected` (SQLSTATE 40P01) after a second, and a bulk action
+  with a lock timeout, when another `Cancel`, a `Retry`, or a worker changed
+  the same task of a FIFO group at the same moment. They decided which row
+  to lock first, the task's or its group's, from a state that could change
+  before they held the lock. Now they check the state again under the lock,
+  and lock in the other order if it changed. For a task of a FIFO group,
+  they use a savepoint for this, named `taskmill_take_task`; `CancelTx`
+  sets it in your transaction and releases it.
 
 ### Security
 

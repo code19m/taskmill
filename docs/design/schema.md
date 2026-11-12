@@ -391,7 +391,7 @@ statement timeout.
   - **Groups stay in order.** Once a retry skips a task of a group, it skips
     the group's later tasks too, until it ends, and counts them as skipped.
     A later run then retries the group's tasks oldest first.
-  - **One bounded wait.** A retry into a group that has no row creates the
+  - **Two bounded waits.** A retry into a group that has no row creates the
     row. A concurrent enqueue may be creating the same row, uncommitted, and
     an insert must wait for it to decide. The batch inserts under a
     savepoint with a lock timeout of 100 ms, far below the deadlock timeout
@@ -399,7 +399,12 @@ statement timeout.
     never stalls an application transaction for long, and never makes one
     fail with a deadlock. A transaction per new group would avoid the wait
     too, but cost a transaction per group when every group is new, as after
-    canceling a whole queue.
+    canceling a whole queue. The promotion of a group's next task waits for
+    that task's row, under the same lock timeout. The batch holds the
+    group's row, so only a `Cancel` or a `Delete` that is about to release
+    the task's row can hold it (see [Lock order](#fifo-groups)): the wait is
+    short. If it does time out, the batch rolls back, and the action stops
+    with a cursor to go on.
   - **Exact counts, and going on.** A batch whose statements ran commits
     even if the caller's context ends meanwhile, so the number of changed
     tasks is exact. An action that stops early returns a cursor to go on: at
@@ -490,7 +495,21 @@ group key: `COLLATE "C"` in SQL, and Go's string order in code, which is the
 same. A `pending` task's row is locked only after its group's row: promotion
 takes them in that order, and `Cancel` and `Delete` lock a pending task's
 group first. Locking in one order prevents deadlocks, for example between a
-`Cancel` and the promotion of the same task.
+`Cancel` and the promotion of the same task. The row of any other task is
+locked before its group's row, as a worker that records a failure and a
+`Retry` do, or only if it is free, as completions and bulk actions do. So a
+transaction that holds a group's row never waits for the row of a task that
+is not pending.
+
+`Cancel` and `Delete` cannot know which order applies before they hold a
+lock: a `Retry` or a promotion may commit between the read of the task's
+state and the lock. So they check again under the lock. With the group's
+row, which every change into and out of `pending` takes, they lock the task
+only if it is still pending. With the task's row alone, they read the state
+that the lock protects. If the task changed sides, they release what they
+hold, by rolling back to a savepoint, and lock again in the other order.
+After five tries they go on with the locks they hold, and PostgreSQL's
+deadlock detection is the last resort. An ungrouped task needs no savepoint.
 
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the
