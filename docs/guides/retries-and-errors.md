@@ -2,11 +2,27 @@
 
 When a handler fails, taskmill runs the task again later. This page shows
 how long it waits, how to change that, and what to do with a task that
-fails for good.
+fails permanently.
+
+## Quick example
+
+Return an error, and taskmill retries the task. You write no retry loop:
+
+```go
+func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
+    if err := s.mailer.SendReceipt(ctx, t.Args.OrderID); err != nil {
+        return fmt.Errorf("send the receipt: %w", err) // the task runs again later
+    }
+    return nil
+}
+```
+
+By default, a task runs up to 25 times, over about 13 hours. Then it is
+[dead](../concepts/glossary.md#dead-task), and waits for you.
 
 ## How retries work
 
-Each failed attempt leads to a wait, or to a dead task:
+Each failed attempt ends in a wait, or in a dead task:
 
 ```mermaid
 flowchart TD
@@ -33,8 +49,9 @@ don't all come back at the same moment. With the defaults:
 | 25 | None: the task is dead |
 | **In total** | **About 13 hours** |
 
-The [maintainer](../concepts/glossary.md#maintainer) puts each task back in
-its queue when the wait is over, up to about a second late.
+When the wait is over, the [maintainer](../concepts/glossary.md#maintainer)
+[promotes](../concepts/glossary.md#promote) the task, up to about a second
+late. Then a worker runs it again.
 
 A task that waits to retry doesn't count in the queue's
 [lag](../concepts/glossary.md#lag). To learn that a task keeps failing,
@@ -51,6 +68,7 @@ about 9 minutes after the first failure. See
 | The work must never run again after a failure | `MaxAttempts: 1` | One try, then dead |
 | A retry can't help: bad input | `return taskmill.Permanent(err)` | Dead right away, with no attempts wasted |
 | What you call recovers on a known time scale | `ExponentialBackoff` with your own `Base` and `Max` | Retries match the recovery time |
+| The wait must not grow, or follows your own timetable | Your own `RetryPolicy` | You decide the wait after each failure |
 
 Most kinds need only the defaults.
 
@@ -78,24 +96,45 @@ taskmill.AddHandler(&handlers, &PartnerSync{}, &taskmill.HandlerOptions{
 })
 ```
 
-For a fixed wait, or a timetable of your own, implement
+For a fixed wait, or a timetable of your own, write a
 [`RetryPolicy`](https://pkg.go.dev/github.com/code19m/taskmill#RetryPolicy).
-Its `Backoff` method gets the number of the attempt that failed, from 1.
+Its `Backoff` method gets the number of the attempt that failed, from 1,
+and returns the wait before the next attempt:
+
+```go
+// FixedDelay waits the same time before every retry.
+type FixedDelay time.Duration
+
+func (d FixedDelay) Backoff(attempt int) time.Duration { return time.Duration(d) }
+
+taskmill.AddHandler(&handlers, &StockSync{}, &taskmill.HandlerOptions{Retry: FixedDelay(time.Minute)})
+```
+
+`ExponentialBackoff` spreads retries out by ±10%. Your own policy does not,
+unless you add that yourself. If your `Backoff` panics, the attempt fails
+with the code `panic`, and the task waits by the default backoff.
 
 > [!NOTE]
-> If a task's worker crashes or loses its lease, the task waits by the
-> default backoff, not by your policy. The maintainer retries such a task,
-> and it doesn't know your handler's options.
+> If a task's worker crashes or loses its
+> [lease](../concepts/glossary.md#lease), the task waits by the default
+> backoff, not by your policy. The maintainer retries such a task, and it
+> doesn't know your handler's options.
 
 ## What is a dead task?
 
-A [dead task](../concepts/glossary.md#dead-task) failed for good: its
-attempts ran out, its handler returned `Permanent`, or its payload does not
-decode. It doesn't run again unless someone retries it. Dead tasks are your
-dead-letter queue.
+A [dead task](../concepts/glossary.md#dead-task) failed permanently. It
+doesn't run again unless someone retries it. Dead tasks are your dead-letter
+queue. A task becomes dead when:
 
-- taskmill logs `attempt failed; the task is dead` at the Error level.
-- A dead task is kept for 30 days by default, then deleted.
+- its attempts ran out;
+- its handler returned `Permanent`;
+- its payload does not decode; or
+- no worker had a handler for its kind for an hour.
+
+What taskmill does with it:
+
+- It logs `attempt failed; the task is dead` at the Error level.
+- It keeps the task for 30 days by default, then deletes it.
 - In a FIFO group, a dead task stops the tasks behind it, and is kept until
   you retry or delete it. See [Task order and FIFO groups](ordering.md).
 
@@ -114,14 +153,47 @@ For many dead tasks, follow
 > Dead tasks stay for 30 days, so "above zero" stays red for a month. See
 > [Monitoring](../production/monitoring.md).
 
+## Run code when a task dies
+
+taskmill calls no code of yours when a task dies: there is no hook. Do one
+of these instead:
+
+| You want… | Do this |
+|---|---|
+| A person to learn of it | Alert when the number of dead tasks grows, or on the Error log line above. Both cover every way that a task dies. [Monitoring](../production/monitoring.md#what-to-alert-on) has the rules |
+| Your code to react, such as to mark the order as failed | Check for the last attempt in the handler, as below. To do it for every kind, put the same check in [middleware](middleware.md) |
+| One piece of code that handles every dead task | List them with `client.List`: see [Manage tasks from code](operations-api.md#find-tasks) |
+
+```go
+func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
+    err := s.mailer.SendReceipt(ctx, t.Args.OrderID)
+    if err != nil && t.Attempt == t.MaxAttempts {
+        // The last attempt failed, so the task becomes dead.
+        s.orders.MarkReceiptFailed(ctx, t.Args.OrderID)
+    }
+    return err
+}
+```
+
+The check is not exact, so keep that code safe to repeat:
+
+- It misses a task that dies in another way: its payload does not decode,
+  its worker crashed during the last attempt, or no worker has a handler for
+  its kind.
+- It also runs when the last attempt ends for another reason: the worker
+  stops, or someone cancels the task.
+
 ## Where do I see a task's errors?
 
 Open the task in the dashboard, or read it with `client.Get`.
-`TaskInfo.Errors` holds the 20 most recent entries, oldest first. Each has
-the `Attempt`, the time (`At`), the error's `Message`, and a `Code`. The
-code is empty for an error that your handler returned in time. Otherwise it says
-what happened, such as `timeout`, `panic`, or `lease_lost`:
-[Errors](../reference/errors.md) lists every code.
+`TaskInfo.Errors` holds the 20 most recent entries, oldest first. Each entry
+has:
+
+- the `Attempt`, and the time (`At`);
+- the error's `Message`;
+- a `Code`, which is empty for an error that your handler returned in time.
+  Otherwise it says what happened, such as `timeout`, `panic`, or
+  `lease_lost`. [Errors](../reference/errors.md) lists every code.
 
 ## See also
 

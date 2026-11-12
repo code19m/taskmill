@@ -74,16 +74,21 @@ first.
   newer than billing's schema, its `NewClient` for billing fails with
   `ErrSchemaOutdated`. Older code on a newer schema works for one release
   ([Compatibility](../reference/compatibility.md)).
-- **If the services use different database roles,** the orders role needs
-  these rights to enqueue into billing's schema:
+- **If the services use different database roles,** give the orders role
+  only what an enqueue needs in billing's schema:
 
   ```sql
   GRANT USAGE ON SCHEMA billing TO orders;
   GRANT SELECT ON billing.migrations TO orders;
-  GRANT SELECT, INSERT ON billing.tasks TO orders;
+  GRANT INSERT, SELECT (id) ON billing.tasks TO orders;
   GRANT SELECT, INSERT, UPDATE ON billing.groups, billing.dedupe_keys TO orders;
   GRANT USAGE ON SEQUENCE billing.tasks_id_seq TO orders;
   ```
+
+  This is the smallest set that works for every enqueue call and option.
+  With `SELECT (id)`, the orders role reads only the `id` column. It can add
+  tasks, but it can't read a payload, and it can't change, cancel, or delete
+  a task. Billing still trusts the orders service: it can enqueue any task.
 
   These tables are internal, so a later release may need more. The error
   `permission denied for table …` then names the table.
@@ -99,12 +104,13 @@ first.
 ## Watch out
 
 - **Run no worker on the client for billing's schema.** It only enqueues. A
-  worker there would join billing's maintainer election. While it leads,
-  billing's schedules don't run.
+  worker there could become billing's maintainer. While it is, billing's
+  schedules don't run.
 - **Services in one database pay a little for each other.** PostgreSQL wakes
   every listening connection in the database for each notification,
   whatever its schema. With 100 schemas and 500 workers, the maintainers'
-  heartbeats cost about a quarter of a CPU.
+  [heartbeats](../concepts/glossary.md#heartbeat) cost about a quarter of a
+  CPU.
 
 ## See also
 

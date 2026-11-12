@@ -113,9 +113,9 @@ const heartbeatsMissed = 3
 // queues poll only every idlePoll while they arrive. Without them, they poll
 // every PollInterval: no maintainer may run, an older one may, or
 // notifications do not arrive. The connection is replaced if it does not
-// answer then, since it may have died without a word.
+// answer then, since it may have died silently.
 func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
-	// A network that drops packets would stall the connection for good.
+	// A network that drops packets would stall the connection forever.
 	startCtx, cancel := context.WithTimeout(ctx, w.timing.listen)
 	defer cancel()
 	conn, err := w.connectListener(startCtx)

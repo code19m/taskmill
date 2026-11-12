@@ -31,7 +31,7 @@ From v1.0.0 on, this is the promise:
   `RetryPolicy`, and `outbox.Publisher`. So do `PgxQuerier` and
   `SQLQuerier`, which your transactions and pools satisfy. New features come
   as new optional interfaces, the way `ArgsWithDefaults` extends `Args`.
-  `Executor` is sealed: only taskmill implements it.
+- **`Executor` is sealed:** only taskmill implements it.
 - **Function types keep their signatures:** `HandlerFunc`, `Middleware`,
   `EnqueueMiddleware`, and `outbox.PublisherFunc`.
 - **Config structs only get new fields whose zero value keeps the old
@@ -44,7 +44,10 @@ From v1.0.0 on, this is the promise:
   - the error classes that `ErrorType()` returns
     ([list](errors.md#error-classes));
   - the outbox's queue, `outbox`, and its task kind,
-    `taskmill.outbox.message`.
+    `taskmill.outbox.message`;
+  - the metadata keys of a scheduled run, `taskmill.schedule` and
+    `taskmill.scheduled_for`, and the format of the second: RFC 3339 with
+    the schedule's offset from UTC, to the microsecond.
 - **One table is public: `migrations`.** If you apply migrations with your
   own tool, you record each one in `<schema>.migrations`. It keeps its name
   and its columns: `version` (`integer`, the primary key), `name` (`text`),
@@ -55,6 +58,7 @@ From v1.0.0 on, this is the promise:
 | What | What to do |
 |---|---|
 | A new error code or error class | Treat one you don't know like any other failure. |
+| A new metadata key that starts with `taskmill.` | The prefix belongs to taskmill: don't start your own keys with it. taskmill does not reject such a key, but a later release may set it. |
 | Log messages and their attributes | Match on the [current list](log-messages.md), and check it when you upgrade. |
 | Error messages | Test errors with `errors.Is`, never by their text. |
 | Span, attribute, and metric names of the `otel` module | The module stays below v1 while OpenTelemetry's messaging conventions settle. Its [changelog](../../otel/CHANGELOG.md) announces each rename. |
@@ -68,6 +72,7 @@ From v1.0.0 on, this is the promise:
 |---|---|---|
 | Go | The two newest Go releases, as Go itself supports. The `go` line in `go.mod` names the older one, today 1.26. | Go 1.26 with every supported PostgreSQL, and the newest Go with PostgreSQL 18 |
 | PostgreSQL | Every major version with community support, from 15: today 15, 16, 17, and 18 | All four |
+| Managed PostgreSQL services | Expected to work with a supported PostgreSQL version: taskmill needs no extension and no superuser | Not tested: CI runs community PostgreSQL only |
 
 When a new Go comes out, the next minor release of taskmill needs the Go
 before it. A PostgreSQL version is dropped in the first minor release after
@@ -89,7 +94,7 @@ To report a vulnerability, see [SECURITY.md](../../SECURITY.md).
 ## Old code on a newer schema
 
 Migrations only move forward: there are no down migrations. Each release's
-[schema](../concepts/glossary.md) works with the previous release's
+[schema](../concepts/glossary.md#schema) works with the previous release's
 clients, workers, and dashboard. So old and new versions can run side by
 side during a rolling deploy.
 

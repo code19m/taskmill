@@ -31,7 +31,8 @@ says otherwise.
 
 No run on the reference hardware exists yet. These results come from a
 smaller laptop run in October 2026: they show the shape of the results, not
-the numbers of the reference hardware.
+the numbers of the reference hardware. No number was measured again after
+the latest changes to the fetch, completion, renewal, and election statements.
 
 - **Machine:** Apple M5, 10 cores, 16 GiB, shared with builds, tests, and an
   example application. Throughput moved by up to half between runs.
@@ -70,9 +71,9 @@ queue.
   while 20,000 tasks waited, beside 2 workers with concurrency 64. 4 workers
   with concurrency 16 batch less: 15,536 tasks/s, 0.58 statements per task.
 - **A backlog drains slower as it goes,** and taskmill, not the laptop,
-  causes it. Each fetch
-  reads the queue's entries in `tasks_fetch_idx` from the front, where
-  fetched tasks' entries stay, marked dead, until autovacuum removes them.
+  causes it. Each fetch reads the queue's entries in `tasks_fetch_idx` from
+  the front, where fetched tasks' entries stay, marked dead, until
+  autovacuum removes them.
 
 ### Latency
 
@@ -103,7 +104,7 @@ queue.
 |---|---|---|
 | S1 | T3 with 10 million scheduled and 1 million available tasks waiting: within 20% of T3 | Two runs: 14,869 tasks/s against 17,164 without them, 87%; and 16,257 against 18,539, 88%: pass |
 | S2 | T3 with 100,000 FIFO groups holding pending tasks in another queue: within 10% of T3 | Two runs: 12,522 tasks/s against 17,164, 73%; and 16,671 against 18,539, 89.9%: just below target here |
-| S3 | 100 queues served by 50 worker processes: maintainer cycle under 1 s | At 1,000 tasks/s, three runs on a busy laptop: slowest loop 1.23 to 2.12 s: fails, see below. Idle first: 153 transactions/s on average, 456 to 464 in the busiest 10 seconds |
+| S3 | 100 queues read by 50 worker processes: maintainer cycle under 1 s | At 1,000 tasks/s, three runs on a busy laptop: slowest loop 1.23 to 2.12 s: fails, see below. Idle first: 153 transactions/s on average, 456 to 464 in the busiest 10 seconds |
 
 - **S1 and S2** compare T3 end to end with and without the waiting tasks,
   which were vacuumed, analyzed, and on disk first. Runs here move by up to
@@ -140,7 +141,7 @@ queue.
 | E7 | The database's CPU for heartbeats when several schemas share a database (no target) | 500 connections listening: 0.24 CPUs at 20 heartbeats a second, what 100 schemas send, and 1.11 CPUs at 100 a second; about 24 µs per heartbeat per listening connection |
 
 - **E1 counts every statement,** with a fetch's `BEGIN`, settings, and
-  `COMMIT` ([Fetch](schema.md#fetch)). End to end, batches are smaller.
+  `COMMIT` ([Fetch](schema-statements.md#fetch)). End to end, batches are smaller.
 - **E2 leaves out the enqueue's WAL** and the full-page writes after
   checkpoints, which a short run misses. A long run writes more.
 - **E6** measured a worker with `NoMaintainer`. Each queue fetches at start,
@@ -243,7 +244,7 @@ go run ./internal/cmd/bench -db 'postgres://postgres:postgres@localhost:54333/ta
 ## See also
 
 - [Performance](../reference/performance.md): the summary for users
-- [Storage schema](schema.md): the statements these numbers measure
+- [Key statements](schema-statements.md): the statements these numbers measure
 - [Task lifecycle and guarantees](task-lifecycle.md): what F1 to F9 check
 
 **Next:** [Releasing](releasing.md)

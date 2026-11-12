@@ -40,24 +40,32 @@ Put IDs in the payload, not whole records. `SendReceipt` holds only the
 order's ID, and its handler loads the order when it runs. A copy of the
 order could be out of date by then.
 
-A payload can be up to 1 MiB of valid UTF-8 JSON. Keep it far below that.
-A payload that breaks a limit fails the enqueue with
-[`ErrInvalidArgument`](https://pkg.go.dev/github.com/code19m/taskmill#ErrInvalidArgument).
+- **Big data goes elsewhere.** Save a file or a report in your own table, or
+  in object storage, and put only its ID or path in the payload.
+- **A payload can be up to 1 MiB** of valid UTF-8 JSON. Keep it far below
+  that. A payload that breaks a limit fails the enqueue with
+  [`ErrInvalidArgument`](https://pkg.go.dev/github.com/code19m/taskmill#ErrInvalidArgument).
+- **Values arrive exact, but the JSON text does not.** PostgreSQL stores the
+  payload as `jsonb`, so a large `int64` is safe. But inside a
+  `json.RawMessage` field, the order of keys and the spaces change. To keep
+  exact bytes, such as a signed webhook body, use a `string` or `[]byte`
+  field.
 
 ## Change a payload safely
 
-Tasks wait in the database, sometimes for hours. So a worker may decode a
-task that an older version of your code enqueued.
+Tasks wait in the database, sometimes for hours. So a new worker may decode
+a task that older code enqueued. During a rolling deploy, an old worker may
+also decode a task that newer code enqueued.
 
-| Change | Safe? | What happens to old tasks |
-|---|---|---|
-| Add an optional field | Yes | The field gets its zero value |
-| Remove a field | Yes | The worker ignores the field |
-| Rename a field, or its `json` tag | No | The renamed field silently gets its zero value |
-| Change a field's type, such as string to number | No | They don't decode, and become dead right away, with the code `invalid_payload` |
+- **A new optional field is safe,** in one deploy. Old tasks don't have the
+  field, so give its zero value a meaning.
+- **Every other change needs more than one deploy,** or a new kind: a
+  removed field, a renamed field, or a field with a new type. A renamed
+  field silently gets its zero value. A new type does not decode, so the
+  task becomes dead right away, with the code `invalid_payload`.
 
-For a change that is not safe, add a new kind. See
-[Change a task safely](../recipes/change-a-task-safely.md).
+[Change a task safely](../recipes/change-a-task-safely.md) has the steps for
+each change.
 
 ## Set defaults per kind
 
@@ -78,7 +86,7 @@ queue to read.
 
 | Situation | What to use | Why |
 |---|---|---|
-| The queue, max attempts, or priority of every task of a kind | `EnqueueDefaults` | One place decides, so producers and workers can't disagree |
+| The queue, max attempts, or priority of every task of a kind | `EnqueueDefaults` | One place decides, so [producers](../concepts/glossary.md#producer) and workers can't disagree |
 | A value that changes per task: run time, group key, dedupe key, metadata | Options in the enqueue call | Only the caller knows it |
 | One kind that belongs in two queues, such as a bulk import next to live traffic | `Queue` in the enqueue call | Then list both queues in `WorkerConfig.Queues` |
 

@@ -44,7 +44,8 @@ sequenceDiagram
 ```
 
 Workers can't see the task before your transaction commits, and the
-message that wakes them is sent at commit, too.
+[notification](../concepts/glossary.md#notification) that wakes them is sent
+at commit, too.
 
 ## Which should I use?
 
@@ -58,14 +59,36 @@ Keep the database library your app already uses, and wrap its transaction:
 | bun | `taskmill.SQL(tx.Tx)` | Pass the `*sql.Tx` inside: bun rewrites query placeholders itself |
 | lib/pq | Not supported | Switch to pgx's `database/sql` driver |
 
-[`ExampleSQL`](https://pkg.go.dev/github.com/code19m/taskmill#example-SQL)
-shows a whole `database/sql` transaction. taskmill itself still needs a pgx
-pool ([Setup](setup.md#size-the-pool)). Open your `*sql.DB` on that same
-pool with `stdlib.OpenDBFromPool(pool)`, and one pool serves both.
+The quick example again, with `database/sql`:
 
-The enqueue calls also accept a connection or a pool. `CancelTx` and
-`Task.CompleteTx` need a transaction, because they run several statements
-that must commit together. Anything else fails with `ErrInvalidArgument`.
+```go
+db := stdlib.OpenDBFromPool(pool) // once, at start: taskmill's pool also serves database/sql
+
+tx, err := db.BeginTx(ctx, nil)
+if err != nil {
+    return err
+}
+defer tx.Rollback() // does nothing after Commit
+
+var orderID int64
+err = tx.QueryRowContext(ctx, "INSERT INTO orders (email) VALUES ($1) RETURNING id", email).Scan(&orderID)
+if err != nil {
+    return err
+}
+if _, err := client.EnqueueTx(ctx, taskmill.SQL(tx), SendReceipt{OrderID: orderID}, nil); err != nil {
+    return err
+}
+return tx.Commit()
+```
+
+- taskmill itself still needs a pgx pool
+  ([Set up the database and client](setup.md#size-the-pool)).
+  `stdlib.OpenDBFromPool` opens your `*sql.DB` on that same pool, so both
+  use the same connections.
+- The enqueue calls also accept a connection or a pool. `CancelTx` and
+  `Task.CompleteTx` need a transaction, because they run several statements
+  that must commit together. If you pass them a connection or a pool, they
+  return `ErrInvalidArgument`.
 
 ## Complete a task in the same transaction
 
@@ -88,8 +111,8 @@ func (a *PaymentApplier) Handle(ctx context.Context, t *taskmill.Task[ApplyPayme
 ```
 
 `CompleteTx` checks that this attempt still holds the task's
-[lease](../concepts/glossary.md#lease). `pgx.BeginFunc` follows these rules
-for you:
+[lease](../concepts/glossary.md#lease). Follow these rules. With
+`pgx.BeginFunc`, as above, your code already does:
 
 - If `CompleteTx` returns `ErrLeaseLost`, another attempt took the task
   over. Return that error, so your transaction rolls back.
@@ -122,21 +145,90 @@ func (c *OrderConfirmer) Handle(ctx context.Context, t *taskmill.Task[ConfirmOrd
 `ShipOrder` exists only if `ConfirmOrder` completed. If `ConfirmOrder` runs
 twice, only one run can commit, so there is only one `ShipOrder`.
 
-## Keep transactions short, at any isolation level
+## Cancel a task in the same transaction
 
-- A task with a `GroupKey` or a `DedupeKey` makes other producers of the
-  same group or key wait until your transaction ends.
+`CancelTx` cancels a task only if your transaction commits. Here, a paid
+order needs no reminder. The order's row holds the ID of its reminder task,
+saved from `EnqueueResult.ID` when the reminder was enqueued:
+
+```go
+err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+    var reminderID int64
+    err := tx.QueryRow(ctx,
+        "UPDATE orders SET paid = true WHERE id = $1 RETURNING reminder_task_id", orderID).Scan(&reminderID)
+    if err != nil {
+        return err
+    }
+    err = client.CancelTx(ctx, taskmill.Pgx(tx), reminderID)
+    if errors.Is(err, taskmill.ErrInvalidState) || errors.Is(err, taskmill.ErrNotFound) {
+        return nil // the reminder already finished, or was deleted: nothing to cancel
+    }
+    return err
+})
+```
+
+Often you need no cancel at all: let the handler check the order, and
+return nil when the reminder is no longer needed
+([Handle tasks](handle-tasks.md#what-should-my-handler-return)).
+
+> [!NOTE]
+> PostgreSQL may end your transaction with `deadlock detected` (SQLSTATE
+> `40P01`) when another transaction changes the same task, or its
+> [FIFO group](ordering.md), at the same moment as `CancelTx`: for example,
+> a retry of the task, or the end of the task ahead of it in its group.
+> Nothing was saved, so run your transaction again. `Cancel` does that by
+> itself, because the transaction is its own.
+
+## Keep transactions short
+
+- A task with a `GroupKey` or a `DedupeKey` makes other
+  [producers](../concepts/glossary.md#producer) of the same group or key
+  wait until your transaction ends.
 - Any long transaction slows down the queue for everyone: see
   [Database](../production/database.md).
-- Your transactions may use any isolation level. At REPEATABLE READ or
-  SERIALIZABLE, PostgreSQL may stop a transaction with a serialization
-  failure: retrying it is up to you. Only taskmill's own pool must use READ
-  COMMITTED ([Setup](setup.md#why-does-newclient-fail)).
+
+## Use REPEATABLE READ or SERIALIZABLE
+
+Your transactions may use any isolation level. Only taskmill's own pool must
+use READ COMMITTED
+([Set up the database and client](setup.md#why-does-newclient-fail)).
+
+At REPEATABLE READ and SERIALIZABLE, PostgreSQL stops a transaction that
+changes a row which another transaction changed after yours began. The
+statement fails with a serialization failure, SQLSTATE `40001`.
+
+> [!WARNING]
+> At these levels, call `CompleteTx` as the **first** statement of your
+> transaction. The worker renews the task's lease every 10 seconds by
+> default, and each renewal changes the task's row. So a `CompleteTx` that
+> comes after a renewal fails with `40001`. A transaction that runs longer
+> than those 10 seconds fails on every attempt, until the task is dead.
+
+```go
+func (a *PaymentApplier) Handle(ctx context.Context, t *taskmill.Task[ApplyPayment]) error {
+    opts := pgx.TxOptions{IsoLevel: pgx.Serializable}
+    return pgx.BeginTxFunc(ctx, a.pool, opts, func(tx pgx.Tx) error {
+        if err := t.CompleteTx(ctx, taskmill.Pgx(tx)); err != nil { // first: it locks the task's row
+            return err
+        }
+        _, err := tx.Exec(ctx, "UPDATE accounts SET balance = balance + $1 WHERE id = $2",
+            t.Args.Cents, t.Args.AccountID)
+        return err
+    })
+}
+```
+
+- As the first statement, `CompleteTx` locks the task's row before a renewal
+  can change it. The work after it still commits together with the
+  completion, or not at all.
+- `EnqueueTx` and `CancelTx` can fail with `40001` at these levels too.
+  Nothing was saved, so it is safe to run your transaction again.
 
 ## See also
 
 - [Do work once](../recipes/do-work-once.md): `CompleteTx`, an idempotency key, or a check before you act
 - [Guarantees](../concepts/guarantees.md): why a task can run twice
+- [`ExampleSQL`](https://pkg.go.dev/github.com/code19m/taskmill#example-SQL): the same enqueue, with a `*sql.DB` from `sql.Open`
 - [`Executor`](https://pkg.go.dev/github.com/code19m/taskmill#Executor) and [`Task.CompleteTx`](https://pkg.go.dev/github.com/code19m/taskmill#Task.CompleteTx) on pkg.go.dev
 
 **Next:** [Handle tasks](handle-tasks.md)

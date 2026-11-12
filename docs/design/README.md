@@ -12,16 +12,19 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | Order | Page | Read it to learn |
 |---|---|---|
 | 1 | [Task lifecycle and guarantees](task-lifecycle.md) | The contract: every state change, the invariants, and how each guarantee is kept |
-| 2 | [Storage schema](schema.md) | The tables and indexes, the key statements, FIFO groups, deduplication, and notifications |
-| 3 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
-| 4 | [Releasing](releasing.md) | How the project team publishes a version |
-| 5 | [Writing docs](writing-docs.md) | The style guide and the page templates |
+| 2 | [Storage schema](schema.md) | The tables and indexes, and the reasoning behind them |
+| 3 | [Key statements](schema-statements.md) | The statements that enqueue, fetch, complete, list, and change tasks |
+| 4 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
+| 5 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, how it counts the queues, and how workers are woken |
+| 6 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
+| 7 | [Releasing](releasing.md) | How the project team publishes a version |
+| 8 | [Writing docs](writing-docs.md) | The style guide and the page templates |
 
 The [Architecture Decision Records](../adr/README.md) (ADRs) explain the big
 choices: the dependency policy, the supported Go and PostgreSQL versions, the
 outbox on the shared engine, pgx as the driver, OpenTelemetry in its own
-module, and the health and scaling read paths. Their index also says how to
-write a new one.
+module, the health and scaling read paths, and how stuck work is counted.
+Their index also says how to write a new one.
 
 ## Change the docs with the code
 

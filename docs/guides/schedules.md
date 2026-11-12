@@ -8,9 +8,10 @@ keep runs from overlapping.
 
 | Situation | What to use | Why |
 |---|---|---|
-| A fixed timetable that you know when you deploy: a nightly report, an hourly cleanup | A `Schedule` | It runs once per time across all workers, survives restarts, and handles time zones |
+| A fixed timetable that you know when you deploy: a nightly report, an hourly cleanup | A `Schedule` | Each run happens once, however many workers you have. It survives restarts, and handles time zones |
 | A time that depends on your data: a reminder 2 days after each order | A task with `RunAt`, and a [dedupe key](deduplication.md#set-the-window-for-a-task-that-runs-later) | Delayed tasks are rows: millions can wait cheaply |
-| A repeating interval per customer, or more often than once a minute | A task that enqueues its own next run with `RunAt` | Schedules are the same for everyone, and run at most once a minute |
+| A repeating time per customer: a summary at 09:00 in each customer's time zone | A due time per customer in your own table, and one `Schedule` that enqueues what is due: [Run a task at each customer's local time](../recipes/run-at-each-customers-local-time.md) | Schedules are the same for everyone. A new customer is then only a change to a row |
+| More often than once a minute, or a next time that depends on what the last run did | A task that enqueues its own next run with `RunAt` | A schedule runs at most once a minute. But the chain ends silently when one of its tasks becomes dead or is canceled |
 
 ## Quick example
 
@@ -73,18 +74,29 @@ which schedule made a task.
 
 `Cron` takes a standard five-field expression: minute, hour, day of month,
 month, and day of week. For example, `*/15 * * * 1-5` is every 15 minutes on
-weekdays. It also takes the macros `@yearly`, `@annually`, `@monthly`,
-`@weekly`, `@daily`, `@midnight`, and `@hourly`. There are no seconds, and
-no `@every`.
+weekdays.
+
+- Months and weekdays also have names: `JAN` to `DEC`, and `SUN` to `SAT`.
+  So `*/15 * * * MON-FRI` means the same.
+- The macros `@yearly`, `@annually`, `@monthly`, `@weekly`, `@daily`,
+  `@midnight`, and `@hourly` work too. There are no seconds, and no
+  `@every`.
+- **Take care when you set both day fields.** A run then happens when
+  **either** one matches, as in classic cron. So `0 3 1 * 1` runs on the 1st
+  of each month and on every Monday, not only on a 1st that is a Monday.
 
 `NewWorker` returns an error for an expression that never matches, and for
 `Options` that set `RunAt`, `DedupeKey`, or `DedupeWindow`: the schedule
 sets those itself.
 
-The expression is read on the wall clock of `Location`, as classic cron
-does. Without a `Location`, the time is UTC. When clocks go forward and skip
-the run time, the run happens right after the jump. When clocks go back and
-repeat it, the run happens once.
+The expression is read on the wall clock of `Location`. Without a
+`Location`, the time is UTC. Each time that the expression names on that
+clock runs once, also when the clocks change:
+
+| When the clocks… | What happens | Example, in Berlin |
+|---|---|---|
+| Go forward, and skip an hour | Each skipped time runs once, as long after the jump as the time is into the skipped hour | `0,30 2 * * *` runs at 03:00 and at 03:30 |
+| Go back, and repeat an hour | A time in the repeated hour runs the first time the clock shows it, and not the second | `30 2 * * *` runs once. `*/15 * * * *` makes no run during the second pass of that hour, where classic cron keeps running |
 
 ## How a run happens
 
@@ -95,13 +107,14 @@ workers. Then a worker runs the task like any other.
 > [!WARNING]
 > The maintainer runs only the schedules that **it** defines. Give every
 > worker the same `Schedules` list, or set `NoMaintainer` on the workers
-> without it. Otherwise your schedules stop while such a worker leads, and
-> nothing tells you.
+> without it. Otherwise your schedules stop while such a worker is the
+> maintainer, and no error or log line tells you.
 
 If no maintainer runs at the run time, the run waits. When a maintainer
 that defines the schedule starts again, it enqueues **one** run for all the
-times it missed. That run's `RunAt` is the first time it missed. A paused
-schedule works the same way when you resume it.
+times it missed. That run is for the first time it missed: its
+`ScheduledFor()` returns that time. A paused schedule works the same way
+when you resume it.
 
 ## Keep runs from overlapping
 
@@ -137,6 +150,11 @@ after the other:
 | Run it once now, such as after a fix | `client.RunSchedule`. The run comes within about a second, and the timetable doesn't change. It fails for a paused schedule |
 | Change its time, time zone, or task | Change the definition and deploy |
 | Remove it, or rename it | Change the code. The old schedule no longer runs. A maintainer that defines other schedules deletes it from the database after a day |
+
+A run that you ask for with `RunSchedule` is for the time of your request:
+its `ScheduledFor()` returns that time. Close to a regular run, you get both
+runs. While a run of the schedule is already due, a request adds none: that
+run starts within about a second anyway.
 
 ## See also
 

@@ -666,7 +666,7 @@ DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[])`),
 		//
 		// The lease counts from clock_timestamp(), the moment the task is
 		// taken, not from now(), the start of the transaction: the fetch of
-		// a queue with a concurrency limit waits for the queue's row first,
+		// a queue with a MaxRunning limit waits for the queue's row first,
 		// and that wait must not be taken off the lease.
 		fetch: q(`
 WITH picked AS (
@@ -740,14 +740,14 @@ RETURNING ` + leasedColumns),
 
 		// atLimit reports whether queue $1 runs as many tasks as its limit
 		// allows, or more; a queue without a limit never does. It locks
-		// nothing, so its answer may be out of date at once: a fetch uses it
+		// nothing, so its answer may be out of date right away: a fetch uses it
 		// only to skip the transaction below, never to lease.
 		atLimit: q(`
 SELECT coalesce((
     SELECT (SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND state = 'running') >= q.max_running
     FROM {s}.queues q WHERE q.name = $1), false)`),
 
-		// lockQueue serializes fetches from a queue with a concurrency limit.
+		// lockQueue serializes fetches from a queue with a MaxRunning limit.
 		// countRunning then runs as its own statement, so it sees the tasks
 		// that fetches committed while lockQueue waited.
 		lockQueue:    q(`SELECT max_running FROM {s}.queues WHERE name = $1 FOR UPDATE`),
@@ -755,7 +755,7 @@ SELECT coalesce((
 
 		// renewLeases renews the leases of attempts that still own their
 		// tasks. It skips rows that other transactions lock, so that one
-		// locked task cannot hold up the renewal of all the others. It returns
+		// locked task cannot block the renewal of all the others. It returns
 		// each renewed task with true, and each task the attempts still own
 		// with false, both with whether its cancellation was requested; a task
 		// it does not return lost its lease.
@@ -874,7 +874,7 @@ SET worker_id = EXCLUDED.worker_id,
 WHERE l.worker_id = EXCLUDED.worker_id OR l.expires_at < now()
 RETURNING worker_id`),
 		// resignLeader gives up $1's lease, and tells the workers on channel
-		// $2, so that another takes over at once.
+		// $2, so that another takes over right away.
 		resignLeader: q(`
 WITH resigned AS (
     DELETE FROM {s}.leader WHERE name = 'maintainer' AND worker_id = $1 RETURNING 1

@@ -25,8 +25,9 @@ import (
 // continue the trace. system names the broker as the conventions do for
 // messaging.system, such as "kafka" or "rabbitmq". If pub panics, the spans
 // of its deliveries end with the panic as their error, of the error.type
-// "panic", and the panic goes on to the worker, which records it. A nil pub
-// returns nil, which [outbox.Outbox.AddRelay] reports.
+// "panic", and the panic continues to the worker, which records it. A nil
+// pub returns nil: pass it to [outbox.Outbox.AddRelay], and
+// [taskmill.NewWorker] reports it.
 func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox.Publisher { //nolint:ireturn // it wraps the interface it returns
 	if pub == nil {
 		return nil
@@ -54,7 +55,7 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 		}
 
 		// The spans end when the publisher returns, and also when it panics:
-		// the panic then fails every delivery, and goes on.
+		// the panic then fails every delivery, and continues.
 		defer func() {
 			panicked := recover()
 			for i, span := range spans {

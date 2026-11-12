@@ -15,7 +15,7 @@ import (
 const (
 	countCap = 10_000 // most tasks that Client.Count counts in one state
 
-	// batchTimeout bounds a batch of a bulk action, which goes on when ctx
+	// batchTimeout bounds a batch of a bulk action, which continues when ctx
 	// ends meanwhile: a batch that began ends whole, so that the count of
 	// changed tasks is exact, and no batch is left behind, on a connection
 	// that ctx closed, to hold its rows after the action returns.
@@ -38,7 +38,7 @@ const bulkSettings = `SELECT set_config('plan_cache_mode', 'force_custom_plan', 
 
 // openSettings are bulkSettings for a batch that reads without a window. The
 // database ends a statement of such a batch after openTimeout, so that a
-// read that goes too far stops there, and does not go on in the database
+// read that goes too far stops there, and does not continue in the database
 // after the batch gave up on it.
 var openSettings = bulkSettings + `, set_config('statement_timeout', '` + strconv.FormatInt(openTimeout.Milliseconds(), 10) + `ms', true)`
 
@@ -50,7 +50,9 @@ const windowSettings = `SELECT set_config('enable_sort', 'off', true)`
 
 // TaskFilter selects tasks by queue, state, kind, and FIFO group, for
 // [Client.List], [Client.Count], and the bulk actions: a task matches if it
-// matches every filter that is set.
+// matches every filter that is set. A queue name or kind has at most 128
+// characters, and a group key at most 256. An unknown state, like a value
+// that is empty or too long, is an error that wraps [ErrInvalidArgument].
 type TaskFilter struct {
 	// Queues limits the tasks to these queues. Empty means all queues.
 	Queues []string
@@ -98,7 +100,7 @@ type BulkParams struct {
 	// Filter selects the tasks. It must not be empty.
 	Filter TaskFilter
 
-	// Cursor goes on with an action that stopped early, from its
+	// Cursor continues an action that stopped early, from its
 	// [BulkResult.Next].
 	Cursor string
 }
@@ -114,7 +116,7 @@ type BulkResult struct {
 	// tasks of a group it left. Run the action again to act on them.
 	Skipped int64
 
-	// Next goes on with the action, as [BulkParams.Cursor], if it stopped
+	// Next continues the action, as [BulkParams.Cursor], if it stopped
 	// before it went through every task: at the first task it skipped, if it
 	// skipped any, so that a group it left comes back in order. Empty if it
 	// went through every task.
@@ -138,7 +140,7 @@ type matching struct {
 	queues, kinds, groups []string
 	states                []string // the selected states, except completed
 	history               bool     // completed tasks are selected
-	after, last           int64    // the action goes on after task after, up to task last
+	after, last           int64    // the action continues after task after, up to task last
 	windowed              bool     // the batches read in windows: one without a window ran out of time
 	until                 int64    // the batches read up to task until: last, or where their window ends
 	left                  groupSet // the groups that a retry left, and whose later tasks it leaves
@@ -260,12 +262,12 @@ func (c *TaskCount) plus(other TaskCount) {
 // task once, so it retries a task at most once, even if the task fails again
 // meanwhile, and it ends however fast new tasks arrive. If a batch cannot
 // reach its tasks within a second, because too many tasks that do not match
-// lie before them, the action goes on in batches that read at most 100,000
+// lie before them, the action continues in batches that read at most 100,000
 // tasks each, and so gets past those. It skips the tasks, the FIFO groups,
 // and the dedupe keys that other transactions hold at that moment, never
 // waiting while it holds rows. If ctx ends first, it finishes the batch it
 // is in, for at most 5 seconds, and returns what it did, with an error and
-// [BulkResult.Next] to go on; each batch commits whole or not at all.
+// [BulkResult.Next] to continue; each batch commits whole or not at all.
 func (c *Client) RetryMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
 	m, err := checkBulk(params, retryStates)
 	if err != nil {
@@ -339,13 +341,13 @@ type step struct {
 type batchFunc func(ctx context.Context, q querier, m *matching) (step, error)
 
 // inBatches runs batch, each time in a transaction of its own, until it goes
-// through the last task. A batch that began goes on if ctx ends meanwhile,
+// through the last task. A batch that began continues if ctx ends meanwhile,
 // for at most batchTimeout, so that the result is exact.
 func (c *Client) inBatches(ctx context.Context, m *matching, batch batchFunc) (BulkResult, error) {
 	var res BulkResult
 	var firstSkipped int64
-	// stop returns what the action did when it stops early, with where to go
-	// on: before the first task it skipped, so that the next run takes that
+	// stop returns what the action did when it stops early, with where to
+	// continue: before the first task it skipped, so that the next run takes that
 	// task first, or else after the last task it went through.
 	stop := func(err error) (BulkResult, error) {
 		res.Next = encodeCursor(m.after)
@@ -390,7 +392,7 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch batchFunc) (B
 // The action then reads in windows from there on, and tries the batch again
 // in one. It does that also if ctx ended meanwhile, since this is still the
 // batch that the action is in: a batch in a window always moves the
-// position, so an action that goes on from where it stopped does not stop
+// position, so an action that continues from where it stopped does not stop
 // there again.
 //
 // The database reports a statement that somebody canceled, with
@@ -443,7 +445,7 @@ func (c *Client) nextWindow(ctx context.Context, m *matching) error {
 }
 
 // runBatch runs batch in a transaction of its own, which starts with
-// settings. Once the transaction began, the batch goes on if ctx ends
+// settings. Once the transaction began, the batch continues if ctx ends
 // meanwhile, until ends: batchTimeout from now, unless a transaction of the
 // same batch set it before.
 func (c *Client) runBatch(ctx context.Context, m *matching, batch batchFunc, settings string, ends *time.Time) (step, error) {
@@ -730,7 +732,7 @@ func (c *Client) cancelBatch(ctx context.Context, q querier, m *matching) (step,
 
 // deleteBatch deletes a batch of the tasks that match m, unfinished, dead,
 // canceled, and completed in history. It reads the next batch of both
-// tables, and goes up to the end of the shorter one, so that the two go on
+// tables, and goes up to the end of the shorter one, so that the two advance
 // together. Unfinished tasks leave their FIFO groups, and so does a dead
 // head that halts its group, which resumes it.
 func (c *Client) deleteBatch(ctx context.Context, q querier, m *matching) (step, error) {

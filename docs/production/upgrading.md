@@ -32,7 +32,7 @@ each kind of release may change is in
 
 Each release's schema works with the previous release's code, and CI tests
 exactly that. So a rolling deploy is safe across one release. See the table
-in [Run two versions side by side](deploys.md#run-two-versions-side-by-side).
+in [Compatibility](../reference/compatibility.md#old-code-on-a-newer-schema).
 
 To skip a release, do one of these:
 

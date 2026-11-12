@@ -1,7 +1,7 @@
 # Kubernetes
 
 This page gives you manifests to copy: workers, their probe, the dashboard,
-and a migration Job. It also shows the numbers that tie them together: the
+and a migration Job. It also shows how to set two numbers: the
 grace period and the database connections.
 
 ## Which should I use?
@@ -47,11 +47,27 @@ spec:
 ```
 
 - `args: [worker]` assumes that your binary picks its role from its first
-  argument, such as `shop worker` or `shop migrate`.
+  argument, such as `shop worker` or `shop migrate`:
+  [One binary, two roles](deploys.md#one-binary-two-roles) shows the code.
 - Workers get no traffic, so they need no Service and no `preStop` hook.
-- A worker itself needs about 20 MiB of memory, plus about 8 KiB per running
-  task ([Performance](../reference/performance.md)). Size the limits for
-  your handlers.
+- A worker itself needs about 17 MiB of memory when idle, plus about 8 KiB
+  per running task ([Performance](../reference/performance.md)). Size the
+  limits for your handlers.
+- Run at least 2 replicas. With one, a lost node stops all work, and the
+  [maintainer](../concepts/glossary.md#maintainer) with it, until Kubernetes
+  starts the pod elsewhere: about 5 minutes by default. A
+  PodDisruptionBudget makes a node drain stop one worker at a time:
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: worker
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: {app: worker}
+```
 
 ## Tell Kubernetes when a worker is ready
 
@@ -85,10 +101,12 @@ worker pauses a rolling deploy, which is right while the database is down.
 ## Give workers time to drain
 
 Kubernetes kills the pod when the grace period ends. So set
-`terminationGracePeriodSeconds` to at least `DrainTimeout` plus 10 seconds:
-after `DrainTimeout`, the worker cancels the tasks that still run, and waits
-up to 5 seconds before it gives them back. The defaults fit: 20 seconds, and Kubernetes' 30.
-For a `DrainTimeout` of 2 minutes, set 130. See
+`terminationGracePeriodSeconds` to at least `DrainTimeout` plus 10 seconds.
+Why: after `DrainTimeout`, the worker cancels the tasks that still run, and
+waits up to 5 seconds before it gives them back.
+
+The defaults fit: 20 seconds, and Kubernetes' 30. For a `DrainTimeout` of 2
+minutes, set 130. See
 [Stop workers without losing work](deploys.md#stop-workers-without-losing-work).
 
 ## Count the database connections
@@ -121,7 +139,7 @@ So this app needs `max_connections` of about 200, or a pooler in front: see
 ## Run the dashboard
 
 We recommend that you mount the dashboard in your app with `ui.New`
-([Dashboard](../guides/dashboard.md)). Without a Go HTTP server, run the
+([The dashboard](../guides/dashboard.md)). Without a Go HTTP server, run the
 `taskmill-ui` image in a Deployment of its own:
 
 ```yaml
@@ -187,7 +205,7 @@ spec:
 - **Reach it** through your Ingress with TLS, or with
   `kubectl port-forward service/taskmill-ui 8080:80`.
 - **The other settings**, such as `TASKMILL_UI_READ_ONLY`, are in
-  [Dashboard](../guides/dashboard.md).
+  [the `taskmill-ui` reference](../reference/taskmill-ui.md).
 
 ## Migrate in a Job
 

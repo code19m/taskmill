@@ -24,13 +24,15 @@ flowchart LR
    and no new ones start.
 3. Open the task list. Filter by the queue and the state *dead*, and by the
    kind if other kinds died for other reasons. Choose **Retry all**. If the
-   page says that other work held some tasks, try again for those.
+   page says that other work held some tasks, they were busy in another
+   transaction: try again for those.
 4. Choose **Resume** for the queue when you are ready for the load.
 
 **From code,** for example in an admin command:
 
 ```go
 // retryDead retries the dead tasks of one queue, after the cause is fixed.
+// If a retry fails, the queue stays paused: resume it yourself.
 func retryDead(ctx context.Context, client *taskmill.Client, queue string) error {
     if err := client.PauseQueue(ctx, queue); err != nil { // 1. hold the retried tasks
         return err
@@ -39,19 +41,27 @@ func retryDead(ctx context.Context, client *taskmill.Client, queue string) error
         Queues: []string{queue},
         States: []taskmill.State{taskmill.StateDead}, // not the canceled ones
     }}
-    for range 5 { // 2. retry; run again for the tasks that other work held
+    var skipped int64
+    for range 5 { // 2. retry; try again for the tasks that were busy
         res, err := client.RetryMatching(ctx, params)
         if err != nil {
-            return err
+            return fmt.Errorf("queue %s stays paused: %w", queue, err)
         }
         log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
-        if res.Skipped == 0 {
+        if skipped = res.Skipped; skipped == 0 {
             break
         }
+    }
+    if skipped > 0 {
+        log.Printf("%d dead tasks are still busy: run this again for them", skipped)
     }
     return client.ResumeQueue(ctx, queue) // 3. let them run
 }
 ```
+
+A paused queue is the safe state: nothing is lost, and the tasks that were
+retried wait. So when a retry fails, the function leaves the queue paused.
+Find the cause. Then run the function again, or call `ResumeQueue`.
 
 ## Why
 
@@ -81,8 +91,9 @@ func retryDead(ctx context.Context, client *taskmill.Client, queue string) error
 - **Filter by the state `dead`.** `RetryMatching` retries dead and canceled
   tasks. Without the state, it also runs tasks that someone canceled on
   purpose.
-- **A pause stops new work in the queue too.** Its lag grows, and lag alerts
-  can fire. Keep the pause short.
+- **A pause stops new work in the queue too.** Its
+  [lag](../concepts/glossary.md#lag) grows, and lag alerts can fire. Keep
+  the pause short.
 - **Check that the fix works first.** Retry one task, and check that it
   completes. Tasks that fail again for the same reason get a fresh set of
   attempts: by default, about 13 more hours of retries.

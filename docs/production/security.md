@@ -1,7 +1,8 @@
 # Security
 
-This page shows how to protect the dashboard and the data in your tasks, how
-to check a download, and how to report a vulnerability.
+This page shows how to protect the dashboard, the database, and the data in
+your tasks. It also shows how to check a download, and how to report a
+vulnerability.
 
 ## Which should I use?
 
@@ -29,21 +30,74 @@ The dashboard already protects its forms against cross-site request forgery,
 and other sites cannot show it in a frame.
 [Protect it](../guides/dashboard.md#protect-it) lists every setting.
 
-## Give the dashboard a read-only role
+## Know who can reach the database
 
-A read-only dashboard can use a database role that may only read taskmill's
-tables:
+taskmill relies on PostgreSQL for access control: who can connect, and what
+each role may do.
+
+- **Table privileges protect the tasks.** A role that cannot read taskmill's
+  tables sees no payload. A role that cannot write them cannot enqueue,
+  change, cancel, or delete a task.
+- **Table privileges do not cover notifications.** PostgreSQL has no
+  privilege for `NOTIFY`. So any role that can connect to the database can
+  send [notifications](../concepts/glossary.md#notification) on taskmill's
+  channel, whatever its rights on the tables.
+- **taskmill treats a notification as a hint.** Before a worker acts on one,
+  it reads the truth from taskmill's tables. So a forged notification cannot
+  run, change, or cancel a task. It only changes when workers query the
+  database, which costs extra queries. That cost has a limit: however many
+  notifications arrive, a worker reads the cancel requests, the queue
+  settings, and each idle queue at most about 50 times a second.
+- **taskmill waits only for locks on its own tables.** A role needs rights
+  on a table to lock it. taskmill takes no advisory locks, which PostgreSQL
+  lets every role of a database take and hold.
+- **Let only code that you trust connect to the database.** Services that
+  must not affect each other's load belong in separate databases:
+  notifications never leave their database.
+- **Encrypt the connection.** Payloads travel over it. Add
+  `sslmode=verify-full` to every connection URL, so that pgx uses TLS and
+  checks the server's certificate.
+
+## Give each process the smallest role
+
+Workers must own taskmill's tables
+([Database](database.md#run-workers-as-the-owner-of-taskmills-tables)).
+Other processes can use a role with fewer rights. In this example, `shop` is
+the owner, and the role that runs `Migrate`:
 
 ```sql
+-- Reads and writes, but owns nothing: for web processes that enqueue,
+-- and for a dashboard with actions.
+CREATE ROLE shop_web LOGIN PASSWORD '...';
+GRANT USAGE ON SCHEMA taskmill TO shop_web;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA taskmill TO shop_web;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA taskmill TO shop_web;
+-- The tables and sequences that later releases add.
+ALTER DEFAULT PRIVILEGES FOR ROLE shop IN SCHEMA taskmill
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO shop_web;
+ALTER DEFAULT PRIVILEGES FOR ROLE shop IN SCHEMA taskmill
+    GRANT USAGE ON SEQUENCES TO shop_web;
+
+-- Reads only: for a read-only dashboard.
 CREATE ROLE taskmill_viewer LOGIN PASSWORD '...';
 GRANT USAGE ON SCHEMA taskmill TO taskmill_viewer;
 GRANT SELECT ON ALL TABLES IN SCHEMA taskmill TO taskmill_viewer;
--- Tables that later releases add; shop is the role that runs Migrate.
-ALTER DEFAULT PRIVILEGES FOR ROLE shop IN SCHEMA taskmill GRANT SELECT ON TABLES TO taskmill_viewer;
+ALTER DEFAULT PRIVILEGES FOR ROLE shop IN SCHEMA taskmill
+    GRANT SELECT ON TABLES TO taskmill_viewer;
 ```
 
-Use this role only with `ReadOnly`. Otherwise the dashboard shows its action
-buttons, and each action fails.
+| Role | What it can do | What it cannot do |
+|---|---|---|
+| `shop`, the owner | Everything: `Migrate`, workers, enqueue calls, the dashboard | — |
+| `shop_web` | Every enqueue call, `outbox.Store`, the operations API, and every action in the dashboard | Migrate an outdated schema. A worker with this role runs tasks, but loses the history of completed ones |
+| `taskmill_viewer` | Show every page of a dashboard with `ReadOnly`, payloads included | Enqueue, change, cancel, or delete a task |
+
+- **Use the viewer role only with `ReadOnly`.** Otherwise the dashboard
+  shows its action buttons, and each action fails.
+- **Grant on all tables, not on single ones.** taskmill's tables are
+  internal, and a minor release can add one. A service that only enqueues
+  into another service's schema can use a shorter list, at that risk:
+  [Split work across services](../recipes/split-across-services.md#check-versions-and-privileges).
 
 ## Keep secrets out of tasks and errors
 
@@ -57,6 +111,33 @@ buttons, and each action fails.
 
 So keep secrets out of payloads and out of your handlers' errors. Store an
 ID in the payload, and look the secret up in the handler.
+
+## Know how long task data stays
+
+Payloads often hold personal data, such as an email address. This is where
+taskmill keeps a task's data, and for how long:
+
+| Data | Kept |
+|---|---|
+| A task that waits or runs: payload, metadata, and errors | Until it finishes |
+| A completed task | 7 days, plus up to 1 day (`HistoryRetention`). Not kept for a kind with `DiscardCompleted`, or for published outbox messages |
+| A dead or canceled task | 30 days (`DeadRetention`). A dead task that halts its FIFO group stays until someone retries or deletes it |
+| A task's errors | The last 20, with up to 4 KiB of each message |
+| A FIFO group's key | As plain text, with each task of the group |
+| A dedupe key | Only as a SHA-256 hash, until its window ends at the latest |
+| The charts' activity | Counts per queue only, for 24 hours |
+
+- **To keep data for a shorter time,** change the retention:
+  [Choose how long finished tasks are kept](../guides/operations-api.md#choose-how-long-finished-tasks-are-kept).
+- **To erase one person's tasks,** call `Client.Delete` for each task, or
+  `Client.DeleteMatching` for a queue, kind, state, or FIFO group. Both also
+  delete completed tasks from the history. Neither deletes a running task.
+- **taskmill cannot search by payload.** So store the task's ID with the
+  person's data when you enqueue, or keep personal data out of the payload:
+  store an ID, and look the data up in the handler.
+- **Copies outside taskmill stay.** Your backups, the database's
+  write-ahead log, your logs, and your traces keep what they got, for as
+  long as you keep them.
 
 ## Verify a download
 
@@ -81,7 +162,8 @@ next, and which releases get fixes.
 ## See also
 
 - [SECURITY.md](../../SECURITY.md): the full policy
-- [Dashboard](../guides/dashboard.md): the ways to run it
+- [The dashboard](../guides/dashboard.md): the ways to run it
+- [Database](database.md): the owner role, and the connection settings
 - [`ui.Config`](https://pkg.go.dev/github.com/code19m/taskmill/ui#Config) on pkg.go.dev
 
 **Next:** [Troubleshooting](troubleshooting.md)

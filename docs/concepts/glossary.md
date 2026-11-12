@@ -21,7 +21,7 @@ The wait before a failed task runs again. By default, it doubles after each fail
 A [handler](#handler) that gets many tasks of one [kind](#kind) in one call, for work that is cheaper in bulk.
 
 ### Cancel
-Stop a task for good, but keep it as `canceled`, so you can still see it and [retry](#retry) it. A running task is asked to stop through its context.
+Stop a task so that it does not run again, but keep it as `canceled`, so you can still see it and [retry](#retry) it. A running task is asked to stop through its context.
 
 ### Check-in
 A worker's report to the database, every 10 seconds by default: it renews the [leases](#lease) of its running tasks, and notes that it is alive. The dashboard's **Checked in** column shows the last one. Not the same as the maintainer's [heartbeat](#heartbeat).
@@ -39,10 +39,13 @@ The web page where you watch queues, tasks, and workers, and retry, cancel, or d
 A task that will not run again unless you retry it: it used all its attempts, returned a [permanent error](#permanent-error), or could not run at all. It waits for you, 30 days by default.
 
 ### Dedupe key
-A key you choose, like `receipt-42`. For 24 hours after the enqueue (by default), a second task with the same key, kind, and queue is not added: you get the first task back.
+A key you choose, like `receipt-42`. For 24 hours after the enqueue (by default), a second task with the same key, kind, and queue is not added: the call returns the first task's ID.
 
 ### Drain
 What a worker does when it stops: it takes no new tasks, and waits for its running tasks to finish, for up to 20 seconds by default.
+
+### Due
+A task is due when its [run time](#run-time) has passed: it may start now.
 
 ### Enqueue
 Add a task. `Enqueue` adds it on its own; `EnqueueTx` adds it inside your own database transaction.
@@ -63,7 +66,7 @@ Your code that runs one [kind](#kind) of task. It returns nil when the work is d
 The first unfinished task of a [FIFO group](#fifo-group): the only task of the group that can run.
 
 ### Heartbeat
-The [maintainer](#maintainer)'s signal to all workers, every few seconds, that it is alive. While workers hear it, they check idle queues only rarely. A worker's own report to the database is its [check-in](#check-in).
+The [maintainer](#maintainer)'s signal to all workers, every 5 seconds, that it is alive. While workers hear it, they check idle queues only rarely. A worker's own report to the database is its [check-in](#check-in).
 
 ### Idempotent
 Safe to run twice: two runs have the same effect as one. Write handlers this way, because a task can run more than once.
@@ -78,19 +81,19 @@ The word that the API reference (godoc) uses for a [schema](#schema).
 The name of a type of task, like `email.send_receipt`. It tells taskmill which [handler](#handler) runs the task.
 
 ### Lag
-How long the oldest due task of a [queue](#queue) has waited since its run time. It grows when workers fall behind.
+How long the oldest [due](#due) task of a [queue](#queue) has waited since its [run time](#run-time). It grows when workers fall behind.
 
 ### Lease
 A worker's claim on a running task, for a limited time (30 seconds by default). The worker renews it while the handler runs. If the worker dies, the lease runs out, and another worker runs the task.
 
 ### Maintainer
-The one worker that taskmill chooses to do shared work: wake queues, make due tasks ready, give the tasks of crashed workers back, and run [schedules](#schedule). If it stops, another worker takes over.
+The one worker that taskmill chooses to do shared work: wake queues, [promote](#promote) due tasks, [rescue](#rescue) the tasks of crashed workers, and run [schedules](#schedule). If it stops, another worker takes over.
 
 ### `MaxRunning`
 A limit on how many tasks of one [queue](#queue) run at the same time on all workers together. It counts tasks, not batches.
 
 ### Metadata
-Small text tags stored with a task, such as a trace ID.
+Small text tags that you store with a task, such as a tenant or a trace ID. The task's handler can read them.
 
 ### Middleware
 Code that wraps every attempt, or every enqueue, for logs, metrics, or tracing.
@@ -99,13 +102,13 @@ Code that wraps every attempt, or every enqueue, for logs, metrics, or tracing.
 Create or update taskmill's tables with `taskmill.Migrate`. It is safe to run every time your app starts.
 
 ### Notification
-A message from PostgreSQL (`LISTEN` and `NOTIFY`) that wakes workers when a task is ready.
+A message from PostgreSQL (`LISTEN` and `NOTIFY`) that wakes workers when a task is ready. If one is lost, [polling](#polling) finds the task.
 
 ### Outbox
 A safe way to send messages to a broker such as Kafka: you store the message in your transaction, and a [relay](#relay) publishes it after the commit.
 
 ### Pause
-Stop workers from taking new tasks from a [queue](#queue) for a while. Running tasks finish, and waiting tasks keep their place.
+Stop workers from taking new tasks from a [queue](#queue) for a while. Running tasks finish, and waiting tasks stay in the queue.
 
 ### Payload
 A task's data, stored as JSON. In Go, it is the task's [Args](#args) struct.
@@ -119,6 +122,12 @@ Checking the database for tasks on a timer. Workers poll as a backup, so a lost 
 ### Priority
 Which ready task of a queue starts first: `low`, `normal` (the default), `high`, or `critical`.
 
+### Producer
+The code or process that enqueues tasks, such as your web server. It needs a [client](#client), but no worker.
+
+### Promote
+What the [maintainer](#maintainer) does when a delayed task or a retry reaches its [run time](#run-time): it makes the task `available`, so a worker can take it.
+
 ### Queue
 A named line of tasks, such as `default` or `emails`. Each worker chooses the queues it takes tasks from. Limits and pauses work per queue.
 
@@ -126,7 +135,10 @@ A named line of tasks, such as `default` or `emails`. Each worker chooses the qu
 The [batch handler](#batch-handler) that publishes [outbox](#outbox) messages to your broker. It runs on a worker.
 
 ### Release
-Give a running task back to its queue when the worker stops, without using an attempt. Another worker runs it again.
+What a stopping worker does with a task that is still running: it gives the task back to its queue, without using an [attempt](#attempt). Another worker runs it again. Not the same as a [rescue](#rescue).
+
+### Rescue
+What the [maintainer](#maintainer) does with a running task whose [lease](#lease) ran out, because its worker crashed or lost the database. It counts a failed [attempt](#attempt), and the task waits to retry, or becomes dead. Not the same as a [release](#release), which uses no attempt.
 
 ### Retention
 How long taskmill keeps [finished](#finished) tasks: completed tasks for 7 days, and dead and canceled tasks for 30 days, by default.
@@ -134,14 +146,17 @@ How long taskmill keeps [finished](#finished) tasks: completed tasks for 7 days,
 ### Retry
 Run a task again. taskmill retries a failed task by itself, after a [backoff](#backoff). You can also retry a dead or canceled task, in the dashboard or with `Client.Retry`.
 
+### Run time
+The earliest time a task may start. At first it is the task's `RunAt`, or the time of the enqueue. After a failure or a snooze, it is the end of the wait. A task whose run time has passed is [due](#due).
+
 ### Schedule
-A task that runs on a cron timetable, such as every night at 03:00. Not the same as the `scheduled` [state](#state), which means "waiting for its run time".
+A task that runs on a cron timetable, such as every night at 03:00. Not the same as the `scheduled` [state](#state), which means "waiting for its [run time](#run-time)".
 
 ### Schema
 One taskmill schema, with its own tasks, queues, and workers. Its tables live in one PostgreSQL schema, `taskmill` by default. Two schemas never see each other's tasks.
 
 ### Slot
-A worker's place for one running task, or one batch, in a queue. A worker has [Concurrency](#concurrency) slots per queue.
+Room on a worker for one running task, or one batch, of a queue. A worker has [Concurrency](#concurrency) slots per queue. A task that runs fills a slot until its handler returns.
 
 ### Snooze
 A handler's way to say "try again later": the task runs again after the delay you choose, without using an attempt.

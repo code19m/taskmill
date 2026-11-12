@@ -1,6 +1,6 @@
 # 0007. Count stuck work with the queue statistics
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-29
 
 ## Context

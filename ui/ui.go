@@ -580,7 +580,7 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	n := a.count(counts)
-	// The form carries where a run that stopped early goes on.
+	// The form carries where a run that stopped early continues.
 	action := filterQuery(f)
 	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
 		action.Set("cursor", cursor)
@@ -984,10 +984,10 @@ func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error,
 // bulkAction retries, cancels, or deletes every task that the filters in
 // the query select. It works for half the time left before the request's
 // deadline, so that it answers in time. If more tasks remain, it leads back
-// to its page, whose form goes on where it stopped. If it left tasks that
+// to its page, whose form continues where it stopped. If it left tasks that
 // other work held, it leads back to its page, which offers to try those
 // again. Otherwise it leads to the task list. Only its page carries where a
-// run goes on: the task list always shows every task that the filters
+// run continues: the task list always shows every task that the filters
 // select.
 func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
@@ -1168,7 +1168,7 @@ func (s *server) path(p string) string {
 }
 
 // asset returns the path of a static file, versioned by its content so that
-// browsers may cache it for good.
+// browsers may cache it forever.
 func (s *server) asset(name string) string {
 	return s.path("/static/" + name + "?v=" + s.versions[name])
 }

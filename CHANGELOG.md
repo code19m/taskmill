@@ -25,9 +25,19 @@ All notable changes to taskmill are recorded here. The format follows
   deploy, a run that a maintainer of the previous release enqueues has no
   such metadata. `ScheduledFor` returns the zero time for it, as for a task
   that no schedule enqueued, so let the handler fall back to `t.RunAt`.
+- The docs have a [tutorial](docs/tutorial/README.md) that builds a small
+  shop in seven parts, reference pages for every config field and for the
+  `taskmill-ui` command, a guide to middleware, five new recipes, and
+  production pages about backups and failover and about capacity planning.
+- `examples/tutorial`, the program that the tutorial's reader has built
+  after part 7: one binary with a web role and a worker role.
 
 ### Changed
 
+- `examples/quickstart` listens on the address in `ADDR`, by default
+  `localhost:8080` as before. Its `POST /orders` now answers
+  `order 1 placed, task 1 enqueued`, without the link to the task's
+  dashboard page.
 - A worker with a free slot for a queue that is at its `MaxRunning` now
   sends one read each time it polls the queue: it counts the queue's running
   tasks without a lock. Before, each such worker opened a transaction and
@@ -88,13 +98,13 @@ All notable changes to taskmill are recorded here. The format follows
 - `Retry` and `RetryMatching` did not start a new wait for a handler if the
   task had been canceled while it waited. More than an hour after the task's
   `no_handler` note, the next worker without the handler made the retried
-  task dead at once. A retry now removes that note, so the wait starts
+  task dead right away. A retry now removes that note, so the wait starts
   again, as documented.
-- `Migrate` called from several processes at once failed in the processes
-  that waited, with `schema ... already exists` or `relation ... already
-  exists`, when the pool's `default_transaction_isolation` was not
-  `read committed`. `Migrate` now works at any default level. A client
-  still needs `read committed`, as `NewClient` checks.
+- `Migrate` called from several processes at the same time failed in the
+  processes that waited, with `schema ... already exists` or `relation ...
+  already exists`, when the pool's `default_transaction_isolation` was not
+  `read committed`. `Migrate` now works at any default level. A client still
+  needs `read committed`, as `NewClient` checks.
 - History partitions follow the database's clock. Workers created the daily
   partitions, and the maintainer dropped the expired ones, by the clock of
   their own machine. A maintainer whose clock was ahead by more than the
@@ -138,13 +148,13 @@ All notable changes to taskmill are recorded here. The format follows
   minute with 3.4 million tasks, and about 1 GB for each 1,000 tasks it
   then deleted. The statement now reads each queue's old tasks through
   `tasks_finished_idx`: a few pages when no task is old enough.
-- Renewing leases and completing tasks no longer take time that grows with
-  the square of the number of tasks. A worker that held 5,000 tasks at once,
-  as with a batch size of 1,000 and a concurrency of 5, spent about 1 second
-  in the database at each check-in, and now spends about 0.1 seconds. At
-  that growth, a worker that held about 12,000 tasks could not have renewed
-  its leases in time, and its tasks would have run twice. A full batch of
-  500 completions takes a third of the time.
+- Renewing leases and completing tasks no longer take time that grows with the
+  square of the number of tasks. A worker that held 5,000 tasks at the same
+  time, as with a batch size of 1,000 and a concurrency of 5, spent about 1
+  second in the database at each check-in, and now spends about 0.1 seconds.
+  At that growth, a worker that held about 12,000 tasks could not have renewed
+  its leases in time, and its tasks would have run twice. A full batch of 500
+  completions takes a third of the time.
 - A transaction that cancels several running tasks, oldest first, can no
   longer fail with `deadlock detected` against a worker that completes
   those tasks. A completion took the rows of its tasks in the order in
@@ -182,7 +192,7 @@ All notable changes to taskmill are recorded here. The format follows
   one, the first batch of a retry read them all. On a table where that
   took more than the batch's 5 seconds, the action failed, and failed
   again at the same place with the cursor it returned. Now the database
-  ends a statement of such a batch after a second, and the action goes on
+  ends a statement of such a batch after a second, and the action continues
   in batches that read at most 100,000 tasks, each of which moves its
   position. It still acts on each matching task once. An action whose
   tasks an index finds reads only those, as before.
@@ -267,7 +277,7 @@ All notable changes to taskmill are recorded here. The format follows
   notification named: the task ended as `canceled`, though nobody had
   called `Cancel`. A worker now takes the notification as a hint and reads
   the request from the task's row, and an attempt ends as `canceled` only
-  if that row has the request. `Cancel` still stops a running task at once:
+  if that row has the request. `Cancel` still stops a running task right away:
   the worker reads one row first. If other roles can connect to your
   database, upgrade.
 - A role with no rights on taskmill's schema can no longer keep workers and
@@ -281,7 +291,7 @@ All notable changes to taskmill are recorded here. The format follows
   still waits while another process migrates. It now creates the schema and
   the `migrations` table before the transaction that migrates, so a first
   `Migrate` that fails leaves those two behind; run it again.
-- A flood of notifications can no longer hold up a worker. A worker read
+- A flood of notifications can no longer block a worker. A worker read
   the database once for each notification that a queue's settings changed,
   one after the other, where it receives notifications, and every role of a
   database can send thousands of them a second. Cancellations and wake-ups

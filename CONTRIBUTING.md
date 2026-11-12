@@ -210,7 +210,9 @@ built](docs/design/README.md) explains the design.
 The docs live in [docs](docs/README.md). Follow the style guide in
 [Writing docs](docs/design/writing-docs.md): plain words, short sentences,
 and a table or a diagram where it explains better. `go test ./internal/docs/`
-fails on a broken link or a missing anchor.
+fails on a broken link or a missing anchor. It also fails where a page
+breaks a rule of the guide that a machine can check: a banned word, a page
+over the length limit, a page that no index lists, or a wrong Next line.
 
 ## Releasing
 

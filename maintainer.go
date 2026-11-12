@@ -36,7 +36,7 @@ type maintainer struct {
 	w      *Worker
 	c      *Client
 	leader atomic.Bool
-	term   chan struct{} // a term began: the wake loop sends the heartbeat at once
+	term   chan struct{} // a term began: the wake loop sends the heartbeat right away
 
 	lastElection time.Time // used by the main loop only
 
@@ -207,8 +207,8 @@ func (m *maintainer) elect(ctx context.Context) bool {
 }
 
 // resign gives up the maintainer's lease when the worker stops, so that
-// another worker takes over at once, not once the lease expires. It asks the
-// database even if this worker does not know that it leads: an election
+// another worker takes over right away, not once the lease expires. It asks
+// the database even if this worker does not know that it leads: an election
 // whose answer was lost, or a renewal that failed, leaves a lease that only
 // the database knows of. For a worker without a lease, the statement changes
 // nothing and notifies nobody.
@@ -243,7 +243,7 @@ func (m *maintainer) promote(ctx context.Context) {
 // crash before sending it. Idle queues poll rarely while heartbeats arrive,
 // so this finds such tasks within two intervals, with one statement for the
 // whole installation. A queue whose workers are all busy is woken too, which
-// changes nothing; a queue whose tasks start at once is not.
+// changes nothing; a queue whose tasks start right away is not.
 func (m *maintainer) wake(ctx context.Context, heartbeat bool) bool {
 	_, err := m.c.pool.Exec(ctx, m.c.sql.wakeQueues, m.c.schema, m.w.timing.maintainer.Microseconds(), heartbeat)
 	m.waking.observe(ctx, err)

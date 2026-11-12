@@ -5,16 +5,28 @@ tasks, and retry, cancel, or delete them, one at a time or a million in one
 call. This page also shows how long taskmill keeps finished tasks, and how
 to look at FIFO groups.
 
+## Quick example
+
+```go
+// Run a dead or canceled task again, with a new set of attempts.
+if err := client.Retry(ctx, taskID); err != nil {
+    return err
+}
+```
+
 ## Which should I use?
 
 | Situation | What to use | Why |
 |---|---|---|
-| Run failed tasks again, after you fixed the cause | `Retry`, or `RetryMatching` for many | They run again with fresh attempts |
-| Stop some tasks for good, and keep a record | `Cancel`, or `CancelMatching` for many | Canceled tasks are kept, 30 days by default, and you can retry them |
+| Run failed tasks again, after you fixed the cause | `Retry`, or `RetryMatching` for many | They run again, with a new set of attempts |
+| Stop some tasks permanently, and keep a record | `Cancel`, or `CancelMatching` for many | Canceled tasks are kept, 30 days by default, and you can retry them |
 | Stop a whole queue for a while: an incident, a partner is down | `PauseQueue`, then `ResumeQueue` | Tasks wait, and nothing is lost. Running tasks finish |
 | Remove tasks with no record: test data, a mistake | `Delete`, or `DeleteMatching` for many | It can't be undone |
 
-Prefer cancel to delete: a canceled task stays visible, and you can undo it.
+Prefer cancel to delete: a canceled task stays visible, and you can retry
+it. One limit: a cancel frees the task's dedupe key, and a retry does not
+take the key back. See
+[When is a key free again?](deduplication.md#when-is-a-key-free-again).
 
 The `Client` also reads and changes queues (`Queues`, `UpdateQueue`),
 schedules (`Schedules`, `PauseSchedule`), settings (`UpdateSettings`), and
@@ -51,35 +63,46 @@ for {
   matches when it matches every field you set. An empty field matches all.
 - Each page's query stops after 5 seconds, so listing never overloads the
   database. On a very large table, a filter that matches few tasks can hit
-  that limit and return an error. Add a queue or a state to the filter.
+  that limit and return an error. Add a queue and a state to the filter:
+  such a list reads about the tasks it shows. A list of one state across all
+  queues, such as every dead task, reads the newer tasks of other states
+  first.
 - `Get` returns one task by ID. `Count` counts the matching tasks per
   state, up to 10,000 per state.
 
 ## Retry, cancel, or delete one task
 
-Each action works only on some states:
+```go
+err := client.Cancel(ctx, taskID)
+switch {
+case errors.Is(err, taskmill.ErrInvalidState):
+    // The task already finished: there is nothing to cancel.
+case errors.Is(err, taskmill.ErrNotFound):
+    // No task has this ID, or it was deleted.
+case err != nil:
+    return err
+}
+```
 
-| State | `Cancel` | `Retry` | `Delete` |
-|---|---|---|---|
-| `scheduled`, `pending`, `available`, `retryable` | Yes, right away | No | Yes |
-| `running` | Yes, when its attempt ends | No | No: cancel it first |
-| `completed` | No | No: enqueue a new task | Yes, from history |
-| `dead`, `canceled` | No | Yes, with fresh attempts | Yes |
-
-In other states, the action returns `ErrInvalidState`. An unknown ID
-returns `ErrNotFound`. `CancelTx` cancels inside your own transaction.
-
-**Canceling a running task** asks it to stop. The worker cancels the
-handler's context, with the cause `ErrTaskCanceled`. The task becomes
-`canceled` when the handler returns an error. If the handler returns `nil`,
-because the work was already done, the task is `completed`. A
-[batch handler](batch-handlers.md#cancel-a-task-that-runs-in-a-batch)
-never sees the request: the task becomes `completed` if the batch returns
-`nil` for it, and `canceled` if the batch returns an error for it.
-
-In a [FIFO group](ordering.md), retrying the dead task that halts the group
-resumes the group. Any other retried task of a group waits as `pending`
-until the group's current head is done.
+- **Each action works only in some states.** For example, you can retry
+  only a dead or a canceled task.
+  [Task lifecycle](../concepts/task-lifecycle.md#what-you-can-do-in-each-state)
+  has the table. In another state, the action returns `ErrInvalidState`.
+- **An unknown ID returns `ErrNotFound`.**
+- **A running task is only asked to stop.** What its handler returns then
+  decides if it becomes `canceled` or `completed`. See
+  [Cancel a running task](../concepts/task-lifecycle.md#cancel-a-running-task).
+  For a batch, see
+  [Handle tasks in batches](batch-handlers.md#cancel-a-task-that-runs-in-a-batch).
+- **`CancelTx` cancels inside your own transaction:** see
+  [Use your own transactions](transactions.md#cancel-a-task-in-the-same-transaction).
+- **`Cancel`, `Delete`, and `Retry` run again by themselves,** up to 5 times
+  in all, when another transaction changes the same task or its FIFO group
+  at the same moment, and PostgreSQL ends theirs with `deadlock detected`.
+  `CancelTx` cannot do that in your transaction: run it again yourself.
+- **In a [FIFO group](ordering.md),** a retry of the dead task that halts
+  the group resumes the group. Any other retried task of a group waits as
+  `pending` until the group's current head is done.
 
 ## Act on many tasks
 
@@ -99,16 +122,19 @@ log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
 ```
 
 - **The filter must not be empty.** To retry every dead task, set `States`.
-- **They skip tasks that the action doesn't apply to,** as in the table
-  above.
+- **They change only tasks in a state that allows the action.** For
+  example, `DeleteMatching` leaves running tasks as they are.
 - **They work in small steps:** batches of 1,000 tasks, each in a short
   transaction, so they never hold locks for long. A retry keeps each FIFO
   group in order.
+- **They get past any number of tasks that don't match.** If a batch can't
+  reach its tasks within a second, the action continues in batches that
+  read at most 100,000 tasks each.
 - **`Skipped` counts the tasks that were busy** in another transaction at
   that moment. Run the action again to act on them.
 - **If your context ends,** they stop after the current batch. They return
-  what they did, an error, and `Next`: pass it as `BulkParams.Cursor` to go
-  on from there.
+  what they did, an error, and `Next`: pass it as `BulkParams.Cursor` to
+  continue from there.
 
 > [!TIP]
 > Call `Count` with the same filter first: `TaskCounts.Retry`, `Cancel`,

@@ -55,8 +55,9 @@ type ClientConfig struct {
 // taskmill's statements rely on the READ COMMITTED isolation level, so
 // NewClient fails with [ErrInvalidArgument] if the pool's
 // default_transaction_isolation is another level; set it in the pool's
-// ConnConfig.RuntimeParams. Transactions that
-// callers pass to the Tx methods may use any level.
+// ConnConfig.RuntimeParams. Transactions that callers pass to the Tx methods
+// may use any level. At REPEATABLE READ or SERIALIZABLE, [Task.CompleteTx]
+// must be the transaction's first statement, as its comment explains.
 func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Client, error) {
 	if pool == nil {
 		return nil, invalidArgument("pool is nil")
@@ -132,12 +133,13 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 	return info, nil
 }
 
-// Cancel cancels a task. A waiting task is canceled at once; a running task's
-// context is canceled, and the task becomes canceled when its attempt ends,
-// unless the handler completed it. A batch handler does not see the request:
-// a task of a batch becomes canceled when its batch ends, unless the batch
-// completed it. Cancel frees the task's dedupe key. It returns [ErrNotFound]
-// if no task has the ID, and [ErrInvalidState] if the task already finished.
+// Cancel cancels a task. A waiting task is canceled right away; a running
+// task's context is canceled, and the task becomes canceled when its attempt
+// ends, unless the handler completed it. A batch handler does not see the
+// request: a task of a batch becomes canceled when its batch ends, unless
+// the batch completed it. Cancel frees the task's dedupe key. It returns
+// [ErrNotFound] if no task has the ID, and [ErrInvalidState] if the task
+// already finished.
 func (c *Client) Cancel(ctx context.Context, id int64) error {
 	return c.inLockOrder(ctx, func(q querier, check bool) error { return c.cancel(ctx, q, id, check) })
 }
@@ -378,7 +380,7 @@ func isDeadlock(err error) bool {
 // If the task changed sides meanwhile, it returns errLockOrder: the caller
 // must roll back, which releases the locks, and start again. Only a caller
 // that owns its transaction can do that. Without check, as for CancelTx in
-// the caller's transaction, takeTask goes on with the locks as they are.
+// the caller's transaction, takeTask continues with the locks as they are.
 func (c *Client) takeTask(ctx context.Context, q querier, id int64, take string, check bool, state, queue, group *string) (bool, error) {
 	groupHeld, err := queryRow(ctx, q, c.sql.lockPendingGroup, []any{id}, new(bool))
 	if err != nil {

@@ -34,18 +34,64 @@ _, err := client.Enqueue(ctx, RemindCustomer{OrderID: 42}, &taskmill.EnqueueOpti
 })
 ```
 
-- The task waits as `scheduled` until `RunAt`. It can start up to about a
+- The task waits as `scheduled` until `RunAt`, its
+  [run time](../concepts/glossary.md#run-time). It can start up to about a
   second late. A `RunAt` in the past means "now".
+- There is no time that means "never". `RunAt` must be a time that
+  PostgreSQL can store, from 4713 BC to 294276 AD. For a time outside, such
+  as `time.Unix(math.MaxInt64, 0)`, the enqueue returns
+  `ErrInvalidArgument`, and your transaction stays usable.
 - Use `RunAt` for times that depend on your data, such as two days after
   each order. For a fixed timetable, such as every night at 03:00, use a
   [schedule](schedules.md).
 
 ## Run a task before others
 
-Set `Priority` to `PriorityHigh` or `PriorityCritical`. In a queue, waiting
-tasks with a higher priority start first. But a priority does not keep
-places free for urgent work: for that, use a queue of its own.
-[Task order and FIFO groups](ordering.md) explains the full start order.
+```go
+_, err := client.Enqueue(ctx, SendReceipt{OrderID: 42}, &taskmill.EnqueueOptions{
+    Priority: taskmill.PriorityHigh,
+})
+```
+
+- In a queue, a waiting task with a higher
+  [priority](../concepts/glossary.md#priority) starts first. There are four:
+  `PriorityLow`, `PriorityNormal` (the default), `PriorityHigh`, and
+  `PriorityCritical`.
+- A priority does not keep [slots](../concepts/glossary.md#slot) free for
+  urgent work: while every slot is busy, an urgent task waits too. For work
+  that must never wait, use a queue of its own.
+- [Task order and FIFO groups](ordering.md) explains the full start order.
+
+## Tag a task with metadata
+
+`Metadata` holds small text tags that describe a task, such as the customer
+or the request that it belongs to:
+
+```go
+_, err := client.Enqueue(ctx, SendReceipt{OrderID: 42}, &taskmill.EnqueueOptions{
+    Metadata: map[string]string{"tenant": "acme"},
+})
+```
+
+The handler reads them from `t.Metadata`, and the dashboard shows them on
+the task's page:
+
+```go
+func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
+    log.Printf("send the receipt of order %d for tenant %s", t.Args.OrderID, t.Metadata["tenant"])
+    return s.mailer.SendReceipt(ctx, t.Args.OrderID)
+}
+```
+
+- Put what the work needs in the payload. Use metadata for tags that many
+  kinds share, such as a tenant, a request ID, or a trace ID.
+- To add the same tag to every task, use enqueue middleware: see
+  [Add middleware](middleware.md).
+- All tags of one task can take up to 64 KiB.
+- Don't start your own keys with `taskmill.`: those keys belong to taskmill.
+  It sets `taskmill.schedule` and `taskmill.scheduled_for` on every task
+  that a [schedule](schedules.md) enqueues, and a later release may add
+  more.
 
 ## Options
 
@@ -68,12 +114,19 @@ wins:
 3. taskmill's default.
 
 `Metadata` merges key by key: the call's keys win, and the other keys of
-both are kept. An invalid option fails with `ErrInvalidArgument`. The exact
-limits are in [Defaults and limits](../reference/defaults-and-limits.md).
+both are kept. An invalid option fails with `ErrInvalidArgument`.
+[Configuration](../reference/configuration.md#enqueueoptions) has each
+option's type and exact limits.
 
-Each call returns an `EnqueueResult` per task. `ID` is the task's ID.
-`Duplicate` is true when a dedupe key was already taken: then no task was
-created, and `ID` is the task that holds the key.
+## Read the result
+
+Each call returns an `EnqueueResult` per task:
+
+- `ID` is the task's ID. Keep it if you want to cancel the task later, or
+  to find it with `client.Get`.
+- `Duplicate` is true when a dedupe key was already taken. Then no task was
+  created, and `ID` names the task that took the key:
+  [Avoid duplicate tasks](deduplication.md) says more.
 
 ## Enqueue many tasks in one call
 

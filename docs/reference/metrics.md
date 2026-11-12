@@ -1,8 +1,9 @@
 # Metrics and traces
 
 Every span, metric, and gauge that the `otel` module reports, with its
-attributes and its Prometheus name. To set the module up, see
-[Observability](../guides/observability.md).
+attributes, its Prometheus name, and queries for a dashboard. To set the
+module up, see [Logs, traces, and metrics](../guides/observability.md). To
+choose alerts and thresholds, see [Monitoring](../production/monitoring.md).
 
 The module follows OpenTelemetry's semantic conventions for messaging, with
 `messaging.system` set to `taskmill` and the queue as the destination. Its
@@ -14,7 +15,7 @@ instrumentation scope is `github.com/code19m/taskmill/otel`.
 |---|---|---|---|
 | `send {queue}` | Producer | `Instrumentation.EnqueueMiddleware` | Enqueue call. A batch has one span. Its context goes into each task's metadata. |
 | `process {queue}` | Consumer | `Instrumentation.Middleware` | Attempt. Its parent is the `send` span, so a task's attempts show in the trace of the request that enqueued it, even a retry hours later. |
-| `send {topic}` | Producer | `Instrumentation.Publisher` | Outbox delivery to the broker. Its parent is the span that stored the message. Its context goes into the message's headers, so consumers continue the trace. |
+| `send {topic}` | Producer | `Instrumentation.Publisher` | Outbox delivery to the broker. Its parent is the span that stored the message. Its context goes into the message's headers, so consumers continue the trace. If the publisher panics, the spans of its deliveries end with the panic as their error, and the `error.type` `panic`. |
 
 A span's name leaves out the queue when a batch holds tasks of several
 queues: it is then `send`.
@@ -42,70 +43,110 @@ why, such as `timeout`.
 
 ## Metrics
 
-| Metric | Type | Unit | What it measures | Prometheus name |
-|---|---|---|---|---|
-| `messaging.client.sent.messages` | Counter | `{message}` | Tasks enqueued, and outbox deliveries sent to the broker | `messaging_client_sent_messages_total` |
-| `messaging.client.operation.duration` | Histogram | `s` | How long enqueue calls take | `messaging_client_operation_duration_seconds` |
-| `messaging.process.duration` | Histogram | `s` | How long attempts take | `messaging_process_duration_seconds` |
+The second name in each row is the Prometheus name.
 
-Their attributes are `messaging.system`, `messaging.operation.name`, the
-queue or topic as `messaging.destination.name`, `taskmill.task.kind` for
-tasks, and `error.type` on failures. The enqueue duration also has
-`messaging.operation.type`. They never carry a task ID or an attempt number,
-so the number of series stays small. The histograms' buckets run
-from 5 ms to 10 seconds, as the conventions advise.
+| Metric | Type | Unit | What it measures |
+|---|---|---|---|
+| `messaging.client.sent.messages`<br/>`messaging_client_sent_messages_total` | Counter | `{message}` | The tasks of each enqueue call, and each outbox delivery to the broker. A failed call or delivery counts too, with `error.type` |
+| `messaging.client.operation.duration`<br/>`messaging_client_operation_duration_seconds` | Histogram | `s` | How long each enqueue call takes. A batch is one value |
+| `messaging.process.duration`<br/>`messaging_process_duration_seconds` | Histogram | `s` | How long each attempt takes. So its count is the number of attempts. A snooze counts, without `error.type` |
+
+| Attribute | On | Value |
+|---|---|---|
+| `messaging.system` | All | `taskmill`; for an outbox delivery, the broker name |
+| `messaging.operation.name` | All | `send` or `process` |
+| `messaging.operation.type` | The enqueue duration | `send` |
+| `messaging.destination.name` | All | The queue, or the topic of an outbox delivery. The enqueue duration of a batch with several queues has none |
+| `taskmill.task.kind` | All but outbox deliveries | The kind. The enqueue duration of a batch with several kinds has none |
+| `error.type` | Failures only | Why it failed. See [error classes](errors.md#error-classes) |
+
+The metrics never carry a task ID or an attempt number, so the number of
+time series stays small. The histograms' buckets run from 5 ms to 10
+seconds, as the conventions advise. A task whose kind has no handler on the
+worker that fetched it has no span and is not measured.
 
 ## Queue gauges
 
-`Instrumentation.ObserveQueues` reports these. The maintainer counts the
-queues every 10 seconds, and the gauges read its latest count.
+`Instrumentation.ObserveQueues` reports these. The
+[maintainer](../concepts/glossary.md#maintainer) counts the queues every 10
+seconds, and the gauges show its latest count.
 
-| Gauge | Unit | Attributes | What it reports | Prometheus name |
-|---|---|---|---|---|
-| `taskmill.queue.tasks` | `{task}` | `messaging.destination.name`, `taskmill.task.state` | Tasks per queue and state, except completed. Counting stops at 10,000 per queue and state, and at 100,000 scheduled and retryable tasks in all | `taskmill_queue_tasks` |
-| `taskmill.queue.capped` | — | `messaging.destination.name`, `taskmill.task.state` | 1 when that count stopped at its cap with more tasks left, else 0 | `taskmill_queue_capped` |
-| `taskmill.queue.lag` | `s` | `messaging.destination.name` | How long the queue's oldest due task has waited since its run time. No cap. May read high for up to 10 seconds | `taskmill_queue_lag_seconds` |
-| `taskmill.queue.halted_groups` | `{group}` | `messaging.destination.name` | FIFO groups of the queue that a dead task halts. Counting stops at 10,000 | `taskmill_queue_halted_groups` |
-| `taskmill.queue.most_failures` | `{failure}` | `messaging.destination.name` | The most times in a row that one task of the queue, waiting to retry, has failed. A task drops out while it runs its next attempt | `taskmill_queue_most_failures` |
-| `taskmill.stats.age` | `s` | — | How long ago the maintainer last counted. Absent until the first count | `taskmill_stats_age_seconds` |
+| Gauge | Unit | Attributes | What it reports |
+|---|---|---|---|
+| `taskmill.queue.tasks`<br/>`taskmill_queue_tasks` | `{task}` | `messaging.destination.name`, `taskmill.task.state` | Tasks per queue and state, except completed. Counting stops at 10,000 per queue and state, and at 100,000 scheduled and retryable tasks in all |
+| `taskmill.queue.capped`<br/>`taskmill_queue_capped` | — | `messaging.destination.name`, `taskmill.task.state` | 1 when that count stopped at its cap with more tasks left, else 0 |
+| `taskmill.queue.lag`<br/>`taskmill_queue_lag_seconds` | `s` | `messaging.destination.name` | The [lag](../concepts/glossary.md#lag): how long the queue's oldest due task has waited since its run time. No cap. It can be too high for up to 10 seconds |
+| `taskmill.queue.halted_groups`<br/>`taskmill_queue_halted_groups` | `{group}` | `messaging.destination.name` | The queue's [halted groups](../concepts/glossary.md#halted-group): FIFO groups that a dead task halts. Counting stops at 10,000 |
+| `taskmill.queue.most_failures`<br/>`taskmill_queue_most_failures` | `{failure}` | `messaging.destination.name` | The most times in a row that one task of the queue, waiting to retry, has failed. A task does not count while it runs its next attempt |
+| `taskmill.stats.age`<br/>`taskmill_stats_age_seconds` | `s` | — | How long ago the maintainer last counted, by the clock of the process that reports it. Absent until the first count |
 
-The states are `scheduled`, `pending`, `available`, `running`, `retryable`,
-`dead`, and `canceled`. Tasks that wait behind their FIFO group are not in
-the lag, and neither are tasks that wait for their next retry. Halted groups
-and most failures show that work instead: it is stuck while the lag stays
-near zero.
-
-Alert on `taskmill.queue.lag` for a backlog: it has no cap, and it keeps
-growing when workers stop. Alert on `taskmill.stats.age` over a minute: then
-no maintainer runs, and a queue that was empty at the last count shows no
-lag. Alert on `taskmill.queue.halted_groups` above 0, and on
-`taskmill.queue.most_failures` reaching 10 within 15 minutes.
-[Monitoring](../production/monitoring.md) has the full list of alerts.
-
-At each collection, every process that calls `ObserveQueues` runs two small
-queries, and stops after 5 seconds. A read that fails goes to
-OpenTelemetry's error handler, `otel.Handle`.
+- **The states** are `scheduled`, `pending`, `available`, `running`,
+  `retryable`, `dead`, and `canceled`. A queue reports 0 for a state in
+  which it has no task.
+- **Lag leaves out** the tasks that wait behind their FIFO group, and the
+  tasks that wait for their next retry. Halted groups and most failures
+  show that work instead: it is stuck while the lag stays near zero.
+- **Each collection costs two small queries** in every process that calls
+  `ObserveQueues`, and stops after 5 seconds. If the read fails, the gauges
+  report nothing for that collection, and the error goes to OpenTelemetry's
+  error handler, `otel.Handle`.
 
 ## Aggregate the gauges with `max`
 
-The queue gauges describe the whole [schema](../concepts/glossary.md), not
-the process that reports them. Every process reads the same stored count, so
-every process reports the same values. If 5 pods report them, `sum` shows 5
-times the real number. Use `max` to merge the pods, then `sum` across queues
-if you need a total:
-
-```promql
-# Lag of each queue
-max by (messaging_destination_name) (taskmill_queue_lag_seconds)
-
-# Available tasks across all queues
-sum(max by (messaging_destination_name) (taskmill_queue_tasks{taskmill_task_state="available"}))
-
-# No maintainer: fire after a minute
-max(taskmill_stats_age_seconds) > 60
-```
+The queue gauges describe the whole
+[schema](../concepts/glossary.md#schema), not the process that reports them.
+Every process reads the same stored count, so every process reports the
+same values. If 5 pods report them, `sum` shows 5 times the real number. Use
+`max` to merge the pods, then `sum` across queues if you need a total.
 
 The counters and histograms are per process, so `sum` is right for them.
+
+## Dashboard queries
+
+These PromQL queries build a dashboard. For alert rules, see
+[Monitoring](../production/monitoring.md).
+
+> [!TIP]
+> Select one service in every query, as `job="shop-worker"` does here. The
+> default queue of every service is called `default`, so without a selector
+> a query mixes the queues of all your services.
+
+```promql
+# Attempts per second, by queue and kind
+sum by (messaging_destination_name, taskmill_task_kind) (
+  rate(messaging_process_duration_seconds_count{job="shop-worker"}[5m]))
+
+# Failed attempts per second, by error type
+sum by (error_type) (
+  rate(messaging_process_duration_seconds_count{job="shop-worker", error_type!=""}[5m]))
+
+# Share of attempts that fail
+sum(rate(messaging_process_duration_seconds_count{job="shop-worker", error_type!=""}[5m]))
+  / sum(rate(messaging_process_duration_seconds_count{job="shop-worker"}[5m]))
+
+# 95th percentile of the attempt time, by queue
+histogram_quantile(0.95, sum by (le, messaging_destination_name) (
+  rate(messaging_process_duration_seconds_bucket{job="shop-worker"}[5m])))
+
+# Tasks enqueued per second, by queue. Use error_type!="" for failed enqueues
+sum by (messaging_destination_name) (
+  rate(messaging_client_sent_messages_total{job="shop-api", messaging_system="taskmill", error_type=""}[5m]))
+
+# Tasks per queue and state
+max by (messaging_destination_name, taskmill_task_state) (taskmill_queue_tasks{job="shop-worker"})
+
+# Counts that stopped at their cap: the real number is higher
+max by (messaging_destination_name, taskmill_task_state) (taskmill_queue_capped{job="shop-worker"}) == 1
+
+# Lag of each queue, in seconds
+max by (messaging_destination_name) (taskmill_queue_lag_seconds{job="shop-worker"})
+
+# Seconds since the maintainer last counted
+max(taskmill_stats_age_seconds{job="shop-worker"})
+```
+
+`shop-api` stands for the service that enqueues, and `shop-worker` for the
+one that runs the workers and calls `ObserveQueues`.
 
 ## Prometheus names
 
@@ -121,9 +162,9 @@ metric to follow OpenTelemetry's conventions, and its
 
 ## See also
 
-- [Observability](../guides/observability.md): set up the module, and write your own middleware
+- [Logs, traces, and metrics](../guides/observability.md): set up the module, and write your own middleware
+- [Monitoring](../production/monitoring.md): what to alert on, and the limits of each signal
 - [Autoscaling](../production/autoscaling.md): scale workers on these gauges
 - [`otel` on pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill/otel)
-- [ADR 0005](../adr/0005-opentelemetry-in-a-module-of-its-own.md): why the module looks like this
 
 **Next:** [Compatibility](compatibility.md)

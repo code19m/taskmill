@@ -20,7 +20,7 @@
 //	TASKMILL_UI_READ_ONLY        true to disable every action (any value
 //	                             that strconv.ParseBool accepts)
 //	TASKMILL_UI_PREFIX           the path the dashboard is served at, such as
-//	                             /admin/jobs, when a proxy forwards that path
+//	                             /admin/tasks, when a proxy forwards that path
 //	                             to it unchanged (default: the root)
 //	TASKMILL_UI_FRAME_ANCESTORS  the origins of the pages that may show the
 //	                             dashboard in a frame, separated by commas or
@@ -28,6 +28,10 @@
 //	                             (default: none)
 //	TASKMILL_UI_LOG_FORMAT       the format of the logs on standard error:
 //	                             text or json (default: text)
+//
+// TASKMILL_UI_USERNAME has no effect without TASKMILL_UI_PASSWORD. If a
+// setting is missing or not valid, the database is out of reach, or the
+// schema is not migrated, the command logs why and exits with status 1.
 //
 // For probes, it answers two paths at the root, with no login and whatever
 // the prefix: /livez answers 200 while the server runs, and /readyz answers

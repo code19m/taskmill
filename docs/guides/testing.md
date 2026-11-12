@@ -67,15 +67,13 @@ func testPool(t *testing.T) *pgxpool.Pool {
 | You want to test that… | Use | Good to know |
 |---|---|---|
 | Your code enqueued the right task, or none after a rollback | `taskmilltest.Enqueued` | It returns the committed tasks of one kind, with their payloads decoded |
-| Your handler does the right work, once | `taskmilltest.Run` | It holds a real lease, so `CompleteTx` works. It doesn't retry: a failed task stays `retryable` or `dead` |
-| A task succeeds after it failed, or a task with special options works | `Worker.RunTask` | It runs the task right away, without waiting for its backoff |
-| Everything your code enqueued gets done | `taskmilltest.Work` | It stops when no task is available or running. Tasks that wait for later, such as retries, stay waiting |
+| Your handler does the right work, once | `taskmilltest.Run` | It holds a real [lease](../concepts/glossary.md#lease), so `CompleteTx` works. It doesn't retry: a failed task stays `retryable` or `dead`. It returns the handler's error. If the handler did not run, because the payload does not decode into its `Args` type, it returns an error that says so |
+| A task succeeds after it failed, or a task with special options works | `Worker.RunTask` | It runs the task right away, without waiting for its [backoff](../concepts/glossary.md#backoff) |
+| Everything your code enqueued gets done | `taskmilltest.Work` | It runs a worker until no task is left to run: see [below](#test-that-everything-gets-done) |
 | Several workers work together, with real timing | `Worker.Run`, started by your test | Set a short `PollInterval` |
 
-`Work` fails the test if tasks are still there after a minute, for example
-in a queue that its worker doesn't read. To test that a rollback enqueues
-nothing, roll back instead of commit, and check that `Enqueued` returns no
-task.
+To test that a rollback enqueues nothing, roll back instead of commit, and
+check that `Enqueued` returns no task.
 
 ## Test retries
 
@@ -101,6 +99,50 @@ if info.State != taskmill.StateCompleted || info.Attempt != 3 {
 }
 ```
 
+## Test that everything gets done
+
+`taskmilltest.Work` runs a worker until no task is left to run, then stops
+it. Use it when one task enqueues another, or for a batch handler. This
+test checks what the [outbox](outbox.md) relay publishes, with a channel as
+the broker:
+
+```go
+func TestOrderPaidEvent(t *testing.T) {
+    pool := testPool(t)
+    client := taskmilltest.NewClient(t, pool, nil)
+    ob := outbox.New(client)
+
+    err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+        return payOrder(t.Context(), ob, tx, 42) // the code under test stores one message
+    })
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    published := make(chan outbox.Delivery, 10) // the fake broker
+    var handlers taskmill.Handlers
+    ob.AddRelay(&handlers, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
+        for _, d := range ds {
+            published <- d
+        }
+        return make([]error, len(ds)) // nil for each: published
+    }), nil)
+    taskmilltest.Work(t, client, &taskmill.WorkerConfig{Handlers: &handlers})
+
+    if len(published) != 1 {
+        t.Fatalf("published %d messages, want 1", len(published))
+    }
+    if d := <-published; d.Topic != "orders" || string(d.Key) != "42" {
+        t.Fatalf("published %+v", d)
+    }
+}
+```
+
+- `Work` returns when no task is `available` or `running`. Tasks that wait
+  for later, such as retries and delayed tasks, stay waiting.
+- `Work` fails the test if tasks are still there after a minute, for
+  example in a queue that its worker doesn't read.
+
 ## Test code that uses `database/sql`
 
 `taskmilltest.NewClient` takes a pgx pool. If your code uses
@@ -123,4 +165,4 @@ SELECT nspname FROM pg_namespace WHERE nspname LIKE 'taskmilltest\_%';
 - [Do work once](../recipes/do-work-once.md): handlers that are safe to run twice
 - [Package `taskmilltest`](https://pkg.go.dev/github.com/code19m/taskmill/taskmilltest) and [`Worker.RunTask`](https://pkg.go.dev/github.com/code19m/taskmill#Worker.RunTask) on pkg.go.dev
 
-**Next:** [Production checklist](../production/checklist.md)
+**Next:** [How do I…?](../recipes/README.md)

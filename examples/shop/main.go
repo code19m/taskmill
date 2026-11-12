@@ -160,8 +160,8 @@ func run(logger *slog.Logger) error {
 	}
 	// The workers and the ledger handler, which writes through it, share
 	// this pool. So that handlers cannot starve the workers' lease
-	// renewals, it has a connection for every task that may run at once,
-	// plus 5 per worker: see docs/production/database.md.
+	// renewals, it has a connection for every task that may run at the same
+	// time, plus 5 per worker: see docs/production/database.md.
 	cfg.MaxConns = 6*10 + 4 + 2 + 2*5 // the main worker's 6 queues of 10, the other's 4 and 2
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -295,7 +295,7 @@ func openShop(ctx context.Context, pool *pgxpool.Pool, schema string, logger *sl
 	if err != nil {
 		return nil, err
 	}
-	// A limit across all workers: at most two partner calls run at once.
+	// A limit across all workers: at most two partner calls run at the same time.
 	if err := client.UpdateQueue(ctx, "partner-api", func(q *taskmill.QueueSettings) { q.MaxRunning = 2 }); err != nil {
 		return nil, err
 	}
@@ -421,7 +421,7 @@ func addReceiptsAndImages(hs *taskmill.Handlers) {
 
 func sendReceipt(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
 	if t.Args.Email == "" {
-		// Retrying cannot help, so the task is dead at once.
+		// Retrying cannot help, so the task is dead right away.
 		return taskmill.Permanent(errors.New("the order has no email address"))
 	}
 	if err := work(ctx, randomDuration(50*time.Millisecond, 300*time.Millisecond)); err != nil {

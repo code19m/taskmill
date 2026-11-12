@@ -35,8 +35,8 @@ type MigrateConfig struct {
 }
 
 // Migrate creates or upgrades taskmill's schema, and prepares the next week's
-// history partitions. It is safe to run from several processes at once: one
-// applies the migrations while the others wait. A schema that is up to date
+// history partitions. It is safe to run from several processes at the same
+// time: one applies the migrations while the others wait. A schema that is up to date
 // is left as it is, so Migrate then needs no privilege to change it, and a
 // failure to prepare partitions is only logged. cfg may be nil.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error {

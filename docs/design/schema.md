@@ -1,14 +1,22 @@
 # Storage schema
 
-This document maps the [task lifecycle](task-lifecycle.md) onto PostgreSQL:
-the tables, the indexes, and the statements that move tasks between states,
-with the reasoning behind each choice. The exact definitions are in
+This page maps the [task lifecycle](task-lifecycle.md) onto PostgreSQL: the
+tables and the indexes, with the reasoning behind each choice. Three more
+pages cover the rest:
+
+| Page | What it covers |
+|---|---|
+| [Key statements](schema-statements.md) | The statements that enqueue, fetch, complete, list, and change tasks |
+| [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
+| [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, how it counts the queues, and how workers are woken |
+
+The exact definitions are in
 [`internal/migrations`](../../internal/migrations), starting with
 `0001_initial.sql`, and the exact statements are in [`sql.go`](../../sql.go).
 The statements were measured on PostgreSQL 15 and 18 with 1.7 million tasks.
 
 All objects live in one schema, `taskmill` by default. The name is
-configurable, so several installations can share a database. It must match
+configurable, so several schemas can share a database. It must match
 `^[a-z_][a-z0-9_]{0,62}$`, which makes it safe to use unquoted.
 
 ## Principles
@@ -23,16 +31,18 @@ configurable, so several installations can share a database. It must match
 3. **Most transitions are one statement.** A few take several statements in
    one transaction: those that involve a FIFO group, `Cancel`, `Retry`, and
    `Delete`, which lock the task before they change it, and fetches from a
-   queue with a concurrency limit. No statement depends on session state, so
-   all of them work inside the caller's transaction and behind
-   transaction-pooling proxies such as PgBouncer.
+   queue with a `MaxRunning` limit. No statement depends on session state, so
+   all of them work inside the caller's transaction and behind poolers in
+   transaction mode, such as PgBouncer.
 4. **The database enforces the lifecycle's invariants** with `CHECK`
    constraints, as a second line of defense behind the code.
 5. **Frequent updates touch no indexed column.** Lease renewals change only
    `lease_expires_at`, which no index contains, so PostgreSQL can update the
    row in place (a HOT update) without writing to any index.
-6. **Every timestamp that taskmill sets comes from the database clock**
-   (`now()`). Only a run time that the application passes in comes from the
+6. **Every timestamp that taskmill sets comes from the database clock:**
+   `now()`, or `clock_timestamp()` for a lease, which counts from the moment
+   the task is taken. The days of the history partitions come from it too.
+   Only a run time that the application passes in comes from the
    application's clock.
 
 ## Tables
@@ -43,8 +53,8 @@ configurable, so several installations can share a database. It must match
 | `task_history` | Completed tasks, one partition per day | Hot: one insert per completion; append-only |
 | `groups` | One row per FIFO group with unfinished tasks or a dead task that halts it | Warm: grouped enqueues and completions only |
 | `dedupe_keys` | Dedupe keys and their windows | Warm: deduplicated enqueues only |
-| `queues` | Per-queue state: paused, and the concurrency limit | Cold |
-| `settings` | Installation-wide retention, in a single row | Cold |
+| `queues` | Per-queue state: paused, and the `MaxRunning` limit | Cold |
+| `settings` | Retention for the whole schema, in a single row | Cold |
 | `schedules` | Recurring schedules and their next run times | Cold |
 | `workers` | Running worker processes | Cold: a check-in per process every third of `LeaseDuration`, 10 s by default |
 | `leader` | The elected maintainer | Cold |
@@ -56,10 +66,10 @@ configurable, so several installations can share a database. It must match
 
 - **Columns are ordered for compact rows:** fixed-width columns first, from
   the widest to the narrowest, then variable-width ones.
-- **`id` is the task's stable identity.** It is unique within an
-  installation and is kept when a task moves to history. Messages that cross
-  service boundaries need globally unique IDs; the outbox generates those (a
-  UUIDv7 in the message) rather than widening every task row.
+- **`id` is the task's stable identity.** It is unique within a schema and
+  is kept when a task moves to history. Messages that cross service
+  boundaries need globally unique IDs. The outbox generates those (a UUIDv7
+  in the message) rather than widening every task row.
 - **`lease_token` is a counter, not a random value.** It grows on every fetch
   and is never reset, not even by an operator retry, so a stale attempt's
   token can never match again. Unlike `attempt`, it never goes down, so
@@ -87,7 +97,7 @@ which is instant and leaves nothing for vacuum to clean up. Two indexes serve
 the list pages: `(queue, id)` for one queue, and `(id)` for `Get` and for all
 queues.
 
-History retention is one setting for the whole installation, stored in
+History retention is one setting for the whole schema, stored in
 `settings`, because dropping a day's partition removes every queue's rows for
 that day. Per-queue periods would need row deletes, which the partitions exist
 to avoid. A kind that needs no history skips it with
@@ -98,13 +108,16 @@ to avoid. A kind that needs no history skips it with
 One row per FIFO group that has unfinished tasks or a dead task that halts
 it. Its row lock serializes the enqueues and completions of a group. Its
 `tasks` column counts the group's unfinished tasks and the dead head that
-halts it, if any, which decides the head; a group halted by its only task
-counts 1. `halted_task_id` names that dead head. Two partial indexes cover
-the halted groups only, so they stay small: one on `halted_task_id` lets
-retention skip the dead heads that keep their groups halted, without
-scanning every group, and one on `(queue, group_key)` lets `Client.Groups`
-page through the halted groups in its order, and the maintainer count them
-per queue.
+halts it, if any, which decides the head. A group halted by its only task
+counts 1. `halted_task_id` names that dead head.
+
+Two partial indexes cover the halted groups only, so they stay small:
+
+- One on `halted_task_id` lets a bulk action find the groups that the tasks
+  of a batch halt, without scanning every group. Retention does not use it:
+  it looks up each old task's halt by the group's key.
+- One on `(queue, group_key)` lets `Client.Groups` page through the halted
+  groups in its order, and lets the maintainer count them per queue.
 
 ### `dedupe_keys`
 
@@ -121,14 +134,16 @@ or deleted. The index on `expires_at` serves retention, and the index on
   live in the database rather than in each process's configuration, so every
   worker that becomes the maintainer applies the same retention.
 - `schedules` holds each schedule's definition, next run time, and pause
-  state. A partial index on `next_run_at` finds the due ones.
+  state. The maintainer loads the schedules that it defines by name, and
+  checks in Go which are due. No statement uses the partial index on
+  `next_run_at` today.
 - `workers` gets a check-in from every worker process; `fillfactor = 50`
   keeps those updates HOT. A check-in sets the column `heartbeat_at`. The
   column keeps that name: renaming it needs a migration, and the workers of
   an older release would fail on it during a rolling deploy.
 - `leader` elects the maintainer with a lease row rather than an advisory
   lock. Session advisory locks need a dedicated connection and do not work
-  behind transaction-pooling proxies; a lease row works everywhere.
+  behind poolers in transaction mode. A lease row works everywhere.
 
 ### `activity`
 
@@ -159,8 +174,8 @@ period and deleting old rows.
 |---|---|---|---|
 | `tasks_pkey` | `id` | All | Every update by ID; lease renewals; completions; listing all tasks |
 | `tasks_fetch_idx` | `queue, priority DESC, run_at, id` | `available` | Fetch; filling batches; counting available tasks |
-| `tasks_due_idx` | `run_at`, including `queue` and `state` | `scheduled`, `retryable` | Making due tasks available; the next wake-up time; counting scheduled and retryable tasks |
-| `tasks_running_idx` | `queue` | `running` | Lease rescue; concurrency limits; counting running tasks |
+| `tasks_due_idx` | `run_at`, including `queue` and `state` | `scheduled`, `retryable` | Making due tasks available; finding when the next task is due; counting scheduled and retryable tasks |
+| `tasks_running_idx` | `queue` | `running` | Lease rescue; `MaxRunning` limits; counting running tasks |
 | `tasks_pending_idx` | `queue, group_key, id` | `pending` | Promoting the next task of a group; counting pending tasks |
 | `tasks_finished_idx` | `queue, state, finalized_at` | `dead`, `canceled` | Retention; counting dead and canceled tasks |
 
@@ -176,479 +191,6 @@ to an index's entries without making them part of its key. With `queue` and
 count those tasks from the index alone, without reading the table (an
 index-only scan).
 
-## Key statements
-
-The statements send batches as arrays and use `unnest`, so a batch, up to the
-10,000 tasks that one enqueue call takes, is one round trip with fixed SQL
-text, which lets prepared statements be reused.
-
-### Enqueue
-
-Every batch goes through one of two statements. Batches with dedupe keys or
-FIFO groups go through one that also claims the keys and counts the groups
-(see [FIFO groups](#fifo-groups) and [Deduplication](#deduplication)). All
-other batches go through a lean one. Both reserve IDs from the
-`tasks_id_seq` identity sequence first, so results map back to their inputs.
-
-### Fetch
-
-```sql
-WITH picked AS (
-    SELECT id
-    FROM taskmill.tasks
-    WHERE state = 'available' AND queue = $1
-    ORDER BY priority DESC, run_at, id
-    LIMIT $2
-    FOR UPDATE SKIP LOCKED
-)
-UPDATE taskmill.tasks t
-SET state            = 'running',
-    attempt          = t.attempt + 1,
-    lease_token      = t.lease_token + 1,
-    lease_expires_at = now() + $3 * interval '1 microsecond',
-    attempted_at     = now(),
-    attempted_by     = $4
-WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
-RETURNING t.*;
-```
-
-`FOR UPDATE SKIP LOCKED` lets many workers fetch at once: each one skips the
-rows another is taking instead of waiting for them. A worker that serves
-several queues fetches from each queue separately, so every fetch uses the
-index order.
-
-**The fetch must stay on its index,** and two things keep it there:
-
-- **Sorts and bitmap scans are off for the fetch.** A queue's table changes
-  so fast that its statistics are often far off. Measured: after a backlog of
-  200,000 tasks arrived faster than autovacuum analyzed the table, the
-  planner estimated 3 available tasks, and read and sorted all of them on
-  every fetch, 15 ms instead of 1 ms. So each fetch runs in a transaction of
-  its own that first turns sorts and bitmap scans off with `set_config(...,
-  true)`. The worker sends `BEGIN`, the settings, the fetch, and `COMMIT` as
-  one batch, in one round trip.
-- **The update finds the picked tasks through an array of their IDs.** A
-  join with `picked` lets a generic plan, which cannot know how few rows
-  `LIMIT $2` returns, hash-join against the whole table.
-
-For a queue with a concurrency limit, the fetch runs in a transaction that
-first locks the queue's row in `queues`, then counts its running tasks
-through `tasks_running_idx`, and fetches at most the remaining capacity. This
-serializes fetches for limited queues only.
-
-A worker fetches one task per free slot. If the fetched tasks include kinds
-that have a batch handler, a second statement fills each batch up to its
-size. It is the same fetch, limited to one kind, and it looks at no more than
-the first 1,000 available tasks of the queue, so it stays cheap in a queue of
-many kinds. A batch takes one slot, so every fetched task starts at once.
-
-### Renew leases
-
-At each check-in, one statement renews every lease a worker holds. It
-returns each task that the worker's attempts still own, and marks the ones it
-renewed. A task missing from the result lost its lease, and the worker
-cancels that attempt's context. A task with a cancellation request is
-canceled the same way.
-
-The statement locks with `SKIP LOCKED`, so one locked row, such as a task that
-an application transaction is canceling, cannot hold up the renewal of all
-the others. A skipped task is still owned: the worker keeps its attempt
-running and renews it at the next check-in. An attempt that completed its
-task with `CompleteTx` is never canceled as lost: its own transaction holds
-the row until it commits.
-
-### Complete
-
-One statement completes a batch: it deletes the tasks whose attempts still
-hold their lease tokens, and inserts them into history, except those of kinds
-that discard completed tasks. A task missing from the result had lost its
-lease, and its result is discarded. The same statement, run inside the
-handler's transaction, is transactional completion.
-
-Ungrouped tasks complete with this one statement, without a transaction of
-its own. Grouped tasks complete in one transaction per batch, which also
-updates their groups (see [FIFO groups](#fifo-groups)). If the database is
-unreachable, the worker retries a completion with backoff until the
-attempt's lease would expire.
-
-### Fail, snooze, and release
-
-A failure is one `UPDATE` that checks the lease token, sets the state that
-the kind's retry policy chose (`retryable` with a new run time, or `dead`),
-and appends the error, dropping the oldest once there are 20. A snooze and a
-release are similar updates that also give the attempt back
-(`attempt = attempt - 1`). All three cancel the task instead if its
-cancellation was requested, so a request whose notification was missed still
-takes effect when the attempt ends. For a grouped task, the update runs in a
-transaction that also updates the group if the task finished.
-
-### Maintenance
-
-| Step | What it does |
-|---|---|
-| Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
-| Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
-| Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that have not checked in for 5 minutes, and schedules that the maintainer does not define and that did not run or change for a day. |
-| History | Keeps partitions for today and the next 6 days, and drops a partition once its whole day is older than the retention period (see [Operational notes](#operational-notes)). |
-| Statistics | Every 10 seconds, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. |
-| Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
-
-**Statistics read indexes, and every count is capped,** so the cost
-stays bounded however large the backlog: up to 10,000 tasks per queue and
-state, and 100,000 scheduled and retryable tasks in all. The one exception,
-below, reads up to 10,000 retryable tasks, and one more per queue. The count
-runs in the transaction that stores it, with JIT off: its many subqueries
-make the planner think it costly, and compiling it would take longer than
-running it. A recursive query finds the next queue name with one index
-probe each, a technique called a
-loose index scan, so finding the queues costs one probe per queue, not one
-row per task. Scheduled and retryable tasks are read from `tasks_due_idx`,
-which is ordered by run time, not by queue, so they are counted together,
-and then each queue's count stops at 10,000 too. Each cap is read one row
-past, so a count that stops at its cap with more tasks left is stored with
-`capped = true`: it is a lower bound. A count of exactly 10,000 is not
-capped. Once the shared cap is passed, every queue's scheduled and
-retryable counts are capped, stored as capped zeros where none were
-counted, while its other counts keep their own flags.
-
-**Lag comes with the counts.** Each row of `queue_stats` keeps, in
-`oldest_due_at`, the run time of the oldest due task it counted: for
-`available`, the first entry of `tasks_fetch_idx` per priority, one more
-probe per queue and priority; for `scheduled` and `retryable`, the oldest
-task whose run time has passed, which the count meets first because it reads
-`tasks_due_idx` in run time order. A queue's lag is then the age of its
-oldest `oldest_due_at` by the database's clock, which `Client.Queues`
-computes without touching `tasks`; it keeps growing when no maintainer runs,
-and may read high for up to one refresh. The maintainer also stores a zero
-count for each known queue without tasks, so every queue shows when it was
-last counted. Only if more than 100,000 scheduled and retryable
-tasks are overdue can a queue's overdue tasks fall past the cap; the oldest
-ones, which set the largest lag, are always read.
-
-**Stuck work that lag leaves out comes with the counts too**
-([ADR 0007](../adr/0007-count-stuck-work-with-the-queue-statistics.md)):
-
-- **Halted groups.** Each queue's `dead` row keeps, in `halted_groups`, how
-  many of its groups a dead head halts, counted through one of the indexes
-  of halted groups up to 10,000, one more probe per queue with dead or
-  canceled tasks. The tasks behind them are `pending`, which lag leaves
-  out.
-- **Most failures.** Each queue's `retryable` row keeps, in
-  `most_failures`, the highest `attempt` of its retryable tasks: the most
-  times in a row that one of them has failed. Such a task waits for its next
-  retry, so lag leaves it out until the retry is due. `attempt` is not in
-  `tasks_due_idx`, so the count reads it with one probe by run time per
-  task, for the 10,000 counted retryable tasks that retry last, and for each
-  queue's task that retries last. Backoff grows with failures, so the tasks
-  that failed most retry last; the new failures of an outage retry first.
-  The count finds them by reading `tasks_due_idx` backward from the last
-  retryable task it counted, so the scheduled tasks after it cost nothing.
-  Measured on PostgreSQL 18 with JIT off and 1.7 million tasks, 150,000 of
-  them retryable: the count took about 15 ms longer.
-
-A maintainer of an older release leaves both columns `NULL`, which
-`Client.Queues` reads as 0.
-
-### Listing
-
-`Client.List` and the dashboard page through tasks by `id`, newest
-first, with keyset pagination: each page starts below the last `id` of the
-previous one. Unfinished tasks and history are read in two branches, each
-limited on its own, and merged. Each page runs with custom query plans
-(`plan_cache_mode = force_custom_plan`), so the planner sees which filters are
-set and uses the partial index that matches them, and with a 5-second
-statement timeout.
-
-### Operator actions
-
-- **Cancel** cancels a waiting task at once, and flags a running one with
-  `cancel_requested_at`. A `pending` task's group row is locked first.
-- **Retry** moves a `dead` or `canceled` task back to `available` with
-  `attempt = 0`, keeping its error history, or to `pending` if its group has
-  other unfinished tasks.
-- **Cancel and Delete** release the task's dedupe key in the same
-  transaction.
-- **Bulk actions** (`RetryMatching`, `CancelMatching`, `DeleteMatching`) do
-  the same to every task that matches a filter, in batches of 1,000, each in
-  a transaction of its own.
-  - **Keyset by ID.** A batch takes the next 1,000 matching tasks in ID
-    order after the last one of the previous batch, up to the newest task
-    when the action started. So each batch starts where the last one ended,
-    through the primary key or a state's partial index, and the work grows
-    with the tasks the action reads, not with their square: on 2 million
-    tasks, canceling 500,000 of one queue kept a steady pace of about 40,000 per second.
-    It also reads each task once, so a retry never retries a task twice, and
-    it ends however fast tasks arrive. And a retry larger than a batch keeps
-    a group in order: the group's oldest task becomes its head.
-  - **No waiting while holding rows.** The batch's one statement that picks
-    tasks reads the next 1,000 without locks, then locks those it can, the
-    rows of their groups, and the rows of their dedupe keys, all with
-    `SKIP LOCKED`, as rescue does, and checks again that they match. It
-    returns all 1,000, so that the batch knows which ones it skipped. Then
-    the batch changes only rows it holds: the tasks, their groups in a few
-    statements for all of them, and the next task of each group whose head
-    left, promoted in a statement of its own, as completions do.
-  - **Groups stay in order.** Once a retry skips a task of a group, it skips
-    the group's later tasks too, until it ends, and counts them as skipped.
-    A later run then retries the group's tasks oldest first.
-  - **Two bounded waits.** A retry into a group that has no row creates the
-    row. A concurrent enqueue may be creating the same row, uncommitted, and
-    an insert must wait for it to decide. The batch inserts under a
-    savepoint with a lock timeout of 100 ms, far below the deadlock timeout
-    of 1 s, and on timeout leaves those groups' tasks for a later run. So it
-    never stalls an application transaction for long, and never makes one
-    fail with a deadlock. A transaction per new group would avoid the wait
-    too, but cost a transaction per group when every group is new, as after
-    canceling a whole queue. The promotion of a group's next task waits for
-    that task's row, under the same lock timeout. The batch holds the
-    group's row, so only two callers can hold the task's row (see
-    [Lock order](#fifo-groups)): a `Cancel` or a `Delete` that is about to
-    start again, which makes the wait short, and a `CancelTx` that locked
-    the task after another transaction made it pending. If the wait times
-    out, the batch rolls back, and the action stops with a cursor to go on.
-  - **Exact counts, and going on.** A batch whose statements ran commits
-    even if the caller's context ends meanwhile, so the number of changed
-    tasks is exact. An action that stops early returns a cursor to go on: at
-    the first task it skipped, if any, or else after the last task it went
-    through. Going on at the first skipped task keeps no state between
-    calls, and still brings a group that the action left back in order: the
-    tasks that the action changed since no longer match, so reading past
-    them again is cheap.
-  - **Delete goes through two tables.** It reads the next batch of both
-    tasks and history, and goes up to the end of the shorter one, so that
-    one position covers both.
-  - **The remaining limit.** A filter by kind or FIFO group alone has no
-    index. A retry with one reads the dead and canceled entries of
-    `tasks_finished_idx` after its position in each batch: with 20,000 of
-    1 million dead tasks matching, about 135 ms a batch.
-
-## FIFO groups
-
-**The problem.** In a FIFO group only the head may run. If the rest of the
-group were `available`, every fetch would have to skip over them, and a group
-with a large backlog would slow every fetch down: the same problem that
-separate `scheduled` tasks avoid.
-
-**The design.** Tasks behind the head are in a separate state, `pending`, which
-no fetch reads. Measured: fetching 100 heads from a queue with 100,000 pending
-tasks read no pending task and took under 0.2 ms. The `groups` row counts
-the group's unfinished tasks.
-
-- **Enqueue** first upserts the group's row, which locks it, and then inserts
-  the task. The task is the head (`available` or `scheduled`) if the count is
-  now 1, and `pending` otherwise. Both steps are one statement (simplified
-  here to one task; the real statement takes a batch):
-
-  ```sql
-  WITH g AS (
-      INSERT INTO taskmill.groups AS g (queue, group_key, tasks) VALUES ($1, $2, 1)
-      ON CONFLICT (queue, group_key) DO UPDATE SET tasks = g.tasks + 1, updated_at = now()
-      RETURNING tasks
-  )
-  INSERT INTO taskmill.tasks (queue, kind, state, run_at, group_key, payload, max_attempts)
-  SELECT $1, $3, CASE WHEN g.tasks = 1 THEN 'available' ELSE 'pending' END::taskmill.task_state,
-         now(), $2, $4, $5
-  FROM g;
-  ```
-
-- **When the head finishes**, one transaction finishes it, decrements the
-  group's count, which locks the group's row, and then, in a statement of its
-  own, promotes the oldest `pending` task through `tasks_pending_idx`, or
-  deletes the group's row if the count reached zero.
-
-**Why a separate statement.** The promotion must see tasks that were enqueued
-while the decrement waited for the group's lock. At READ COMMITTED, each
-statement sees the data as of its own start. One combined statement therefore
-misses a task whose enqueue committed while it waited, and that task stays
-`pending` forever. A second statement starts after the lock was acquired, so
-it sees the task. We reproduced the failure of the one-statement version, and
-the correctness of the two-statement version, on both PostgreSQL versions.
-This is one reason taskmill's own transactions require READ COMMITTED.
-
-**Completing a batch.** A worker completes the grouped tasks of a batch in one
-transaction, with a few statements for the whole batch rather than a few per
-task. First it locks the rows of the batch's groups that no other
-transaction holds:
-
-```sql
-SELECT g.queue, g.group_key FROM taskmill.groups g
-JOIN unnest($1::text[], $2::text[]) AS u(queue, group_key)
-  ON g.queue = u.queue AND g.group_key = u.group_key
-FOR UPDATE OF g SKIP LOCKED;
-```
-
-Then it completes the tasks of the locked groups with the Complete statement,
-decrements each group's count, deletes the groups whose count reached zero,
-and promotes the oldest `pending` task of every other group, with a
-`LATERAL` subquery per group through `tasks_pending_idx`.
-
-`SKIP LOCKED` here means a batch never waits for, or deadlocks with,
-another transaction. A task whose group row another transaction holds, for
-example an open `EnqueueTx` into that group, stays with the worker, which
-keeps renewing its lease and tries it again in a later batch. So one busy
-group never holds up the batch, and a waiting completion never ties up a
-database connection. Maintenance works the same way: it skips group rows
-that other transactions hold and retries them in its next cycle, so a long
-application transaction cannot stall it.
-
-**Lock order.** Group rows are always locked in bytewise order of queue and
-group key: `COLLATE "C"` in SQL, and Go's string order in code, which is the
-same. A `pending` task's row is locked only after its group's row: promotion
-takes them in that order, and `Cancel` and `Delete` lock a pending task's
-group first. Locking in one order prevents deadlocks, for example between a
-`Cancel` and the promotion of the same task. The row of any other task is
-locked before its group's row, as a worker that records a failure and a
-`Retry` do, or only if it is free, as completions and bulk actions do. So a
-transaction that holds a group's row never waits for the row of a task that
-is not pending.
-
-`Cancel` and `Delete` cannot know which order applies before they hold a
-lock: a `Retry`, a promotion, or the task's own enqueue may commit between
-the read of the task's state and the lock. So they check again under the
-lock. With the group's row, which every change into and out of `pending`
-takes, they lock the task only if it is still pending. With the task's row
-alone, they read the state that the lock protects. If the task changed
-sides, they roll their transaction back, which releases what they hold, and
-start again: the new read locks in the other order. After five tries they
-go on with the locks they hold, and PostgreSQL's deadlock detection is the
-last resort.
-
-`CancelTx` cannot do this. It runs in the caller's transaction, which it
-may not roll back, and a savepoint there costs more than it saves. Each
-savepoint that writes is a subtransaction, and past 64 of them in one
-transaction, every session's visibility checks slow down until that
-transaction ends. A released savepoint also makes whoever waits for a row
-that it locked wait for the caller's whole transaction. So `CancelTx` goes
-on with the locks as it took them, which may be the wrong order. Then it
-can deadlock with another transaction that changes the same task or its
-group at the same moment: a retry of the task, the end of the group's head,
-which promotes the task while a cancel or a delete of it comes in, or an
-enqueue that commits between the two statements of `CancelTx`. PostgreSQL
-ends one of the transactions with a deadlock error (SQLSTATE 40P01), which
-may hit the other one. `Cancel`, `Delete`, and `Retry` run again when it
-hits them, within their five tries. Any other transaction that got the
-error can be run again by its caller.
-
-**Halting.** When a group's head becomes dead, the count is not decremented
-and `halted_task_id` is set. The group waits until an operator retries the
-dead head, which resumes the group, or deletes it, which promotes the next
-task. Halting is always on: groups exist to keep an order, and skipping a
-dead task would break it. A canceled head leaves its group like a completed
-one, because cancellation is an explicit choice.
-
-**Costs.** A grouped enqueue writes two rows instead of one, and finishing a
-grouped task writes up to two more: the group's row, and the next task it
-promotes. Ungrouped tasks pay nothing. Producers that enqueue into the same
-group wait for each other's transactions to commit, so transactions that
-enqueue grouped tasks should be short. Two transactions that enqueue into the
-same groups in opposite orders can deadlock; PostgreSQL detects this and
-aborts one of them, and batch enqueues sort their groups to avoid it.
-
-## Deduplication
-
-A deduplicated enqueue reserves the task's ID, claims the key with that ID,
-and inserts the task only if the claim succeeded, all in one statement. An
-expired key that the maintainer has not deleted yet is claimed again.
-Simplified to one task:
-
-```sql
-WITH next AS (
-    SELECT nextval('taskmill.tasks_id_seq') AS id
-), k AS (
-    INSERT INTO taskmill.dedupe_keys AS d (key, task_id, expires_at)
-    SELECT $1, next.id, now() + $2::interval FROM next
-    ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
-        WHERE d.expires_at <= now()
-    RETURNING task_id
-)
-INSERT INTO taskmill.tasks (id, queue, kind, state, run_at, payload, max_attempts)
-OVERRIDING SYSTEM VALUE
-SELECT k.task_id, $3, $4, 'available', now(), $5, $6 FROM k
-RETURNING id;
-```
-
-The ID is reserved first because the parts of one statement cannot see each
-other's writes: a final `UPDATE` that tries to store the new task's ID in the
-key finds no key row, which leaves the key without its task.
-
-A duplicate's row reports the task that holds the key, found in the same
-statement. If that task's transaction committed while the statement waited
-for the key, the statement cannot see it, and the client reads the key again
-in a second statement. It does the same when the holder it sees is one
-whose window ended: the statement did not get that key, so another enqueue
-claimed it meanwhile, and its task is the one to report. Two concurrent enqueues of the same key cannot both
-succeed: the second waits on the first's key and then finds it taken. A
-duplicate wastes one sequence value, which is harmless.
-
-`Cancel` and `Delete` delete the task's key, through the index on `task_id`,
-so the same key can be enqueued again at once. A completed or dead task
-keeps its key until the window ends: an inbox relies on that, so that a
-redelivered message does not run again after its task failed. Uniqueness
-among unfinished tasks only ("at most one queued refresh per product") can be
-added later as a new option, without a disruptive migration.
-
-## Notifications
-
-When enqueue or promotion makes tasks available, the client sends
-`pg_notify` on a channel named after the schema, with the payload
-`a|<queue>`, so idle workers fetch at once instead of waiting for their next
-poll. The same channel carries `c|<id>`, which asks the worker running task
-`<id>` to cancel it, `q|<queue>`, which tells workers that the queue's
-settings changed, `h|`, the maintainer's heartbeat, and `r|`, which tells
-workers that the maintainer resigned, so that one takes over at once.
-Notifications are delivered only when the transaction commits.
-
-Each notifying transaction takes a global lock at commit. At high commit
-rates this lock becomes a bottleneck: in a pgbench test before taskmill had
-any Go code, a `NOTIFY` in every enqueue capped throughput near 10,000 tasks
-per second. So a client sends at most one notification per queue per 50 ms:
-the first in its own transaction, and one for the rest when the 50 ms end.
-That one can arrive before the transactions it stands for commit, and a
-producer can crash before sending it. So once a second, the maintainer also
-notifies every queue that is not paused and whose next task has waited
-longer than a second, in one statement with one index probe per queue. A
-queue whose tasks start at once gets nothing, and one whose workers are all
-busy gets a notification that changes nothing. Every 5 seconds, the same
-statement sends `h|`, the maintainer's heartbeat, which shows workers that
-the wake ran and that notifications reach them. A new maintainer sends one
-at once.
-
-PostgreSQL wakes every connection that listens in a database for each
-notification, on any channel, so installations that share a database pay
-for each other's: E7 in [Benchmarks](benchmarks.md#resource-use)
-measures what heartbeats cost then. Hence a heartbeat every 5 seconds, not
-with every wake.
-
-**Polling.** Workers poll each queue as a fallback, and how often depends on
-the maintainer's heartbeats. While they arrive, notifications reach the
-worker and the maintainer wakes every queue whose task waits, so an idle
-queue polls only once a minute, which bounds the harm of a fault in either,
-and idle workers cost little however many queues and replicas there are. A
-worker that hears no heartbeat for 15 seconds, three missed, whatever the
-reason (no maintainer, an older one, or a connection that died without a
-word), polls every `PollInterval`, starting at once, and checks that its
-notification connection answers, by listening again; it replaces one that
-does not. A maintainer that stops hands over without such a gap: it
-resigns with `r|`, another worker takes over and sends its heartbeat. So a
-task whose notification came too early or was lost starts within about 2
-seconds while heartbeats arrive, within about 16 seconds if the maintainer
-or the notification connection fails without a word, and within
-`PollInterval` while no maintainer of this version runs. A queue whose
-installation-wide concurrency limit held tasks back polls every
-`PollInterval` too, since finishing a task sends no notification. A new
-connection makes every queue fetch at once, since notifications may have
-been missed meanwhile. `LISTEN` needs a session, so each
-worker holds one dedicated connection for it, made with the pool's settings
-unless `WorkerConfig.ListenConfig` says otherwise. Behind a
-transaction-pooling proxy, `ListenConfig` must point at the database
-directly. A worker checks that when it starts: through a direct
-connection, or a proxy that keeps sessions, the connection always runs on
-one server process, which the pool never gets; through a proxy that pools
-transactions, either changes within a few statements. It then logs an
-error and polls instead of listening, since `LISTEN` would stay on a server
-connection that goes back to the proxy's pool. All other traffic works
-through such proxies.
-
 ## Operational notes
 
 - **Long transactions slow the queue down.** A snapshot that stays open,
@@ -661,21 +203,48 @@ through such proxies.
   6 days, by UTC day. The worker does it because a schema applied with
   `Migrations` has none, and its first tasks may complete before the
   maintainer's first pass.
-  Each one is created with `CREATE TABLE ... (LIKE ...)` and then attached with
-  `ALTER TABLE ... ATTACH PARTITION` under a 5-second lock timeout, because
+- **The database's clock names the days.** One statement asks the database
+  which of those days have no partition, and another which partitions have
+  expired. So a machine whose clock is wrong can neither create partitions
+  for the wrong days nor drop history too early. The database applies the
+  retention period too, so the longest `HistoryRetention` cannot overflow.
+- **A partition is created apart, then attached.** It is created with
+  `CREATE TABLE ... (LIKE ...)` and then attached with
+  `ALTER TABLE ... ATTACH PARTITION`, because
   `CREATE TABLE ... PARTITION OF` locks the whole history table and blocks
   completions. Measured: with a completion's transaction open,
-  `PARTITION OF` timed out on its lock, while `LIKE` with `ATTACH` finished in
-  0.07 seconds. Old partitions are detached with `DETACH PARTITION ...
-  CONCURRENTLY`, bounded by 30 seconds, and dropped; an interrupted detach is
-  finished next time with `DETACH PARTITION ... FINALIZE`. These commands need
-  ownership of `task_history`.
+  `PARTITION OF` timed out on its lock, while `LIKE` with `ATTACH` finished
+  in 0.07 seconds.
+- **Creating partitions locks the history table only when one is missing.**
+  A call that finds every partition ready takes no lock. Otherwise it locks
+  `task_history` alone, not its partitions, in `SHARE UPDATE EXCLUSIVE` mode,
+  which attaching takes anyway, and waits for it at most 5 seconds. So
+  processes that create partitions at the same time wait for each other.
+- **Old partitions are detached, then dropped.** The detach is
+  `DETACH PARTITION ... CONCURRENTLY`, bounded by 30 seconds. An interrupted
+  detach is finished next time with `DETACH PARTITION ... FINALIZE`. These
+  commands need ownership of `task_history`.
 - **There is no default partition.** Attaching a partition would then have to
   scan and lock it. If a day's partition is missing, completions skip history
   and the worker logs an error, so the gap shows up in alerts.
 - **Schema changes are versioned.** Each migration is recorded in
-  `migrations`. `Migrate` applies all pending migrations in one transaction,
-  under a transaction-scoped advisory lock, so only one process migrates at a
-  time. A migration therefore cannot use `CREATE INDEX CONCURRENTLY`; a
-  future migration that indexes a large existing table will need a step of
-  its own outside the transaction.
+  `migrations`. `Migrate` first creates the schema and that table, in a
+  transaction of their own. Then it applies all pending migrations in one
+  transaction, which locks `migrations` in `SHARE ROW EXCLUSIVE` mode, so
+  only one process migrates at a time. The others wait for that lock, with
+  no limit but their context, and then find nothing left to do. A migration
+  therefore cannot use `CREATE INDEX CONCURRENTLY`; a future migration that
+  indexes a large existing table will need a step of its own outside the
+  transaction.
+- **Only table locks, never advisory locks.** PostgreSQL lets every role of
+  a database take an advisory lock, also a role with no rights on taskmill's
+  schema, which could then keep `Migrate` and workers from starting. A lock
+  on a table needs rights on that table.
+
+## See also
+
+- [Task lifecycle and guarantees](task-lifecycle.md): the contract that this schema keeps
+- [Benchmarks](benchmarks.md): what the statements cost under load
+- [Database](../production/database.md): what to set in production
+
+**Next:** [Key statements](schema-statements.md)

@@ -12,7 +12,7 @@ import (
 )
 
 // observeTimeout bounds the reading of the statistics at each collection, so
-// that a slow database does not hold up the application's other metrics.
+// that a slow database does not block the application's other metrics.
 const observeTimeout = 5 * time.Second
 
 // observedStates are the states that taskmill.queue.tasks reports, with zeros
@@ -34,23 +34,26 @@ var observedStates = []taskmill.State{
 //   - taskmill.queue.capped: per state, as taskmill.queue.tasks, 1 when
 //     that count stopped at its cap with more tasks left, else 0.
 //   - taskmill.queue.lag: in seconds, how long the queue's oldest due task
-//     has waited, as [taskmill.QueueInfo.Lag] says: it may read up to one
-//     refresh high. It stays right on a large backlog, and keeps growing
-//     when no maintainer runs: alert on it, not on the counts.
+//     has waited, as [taskmill.QueueInfo.Lag] says: for up to one
+//     refresh, it may be too high. It stays right on a large backlog, and
+//     keeps growing when no maintainer runs, so it shows a backlog better
+//     than the counts do.
 //   - taskmill.queue.halted_groups: the queue's FIFO groups that a dead task
 //     halts, as [taskmill.QueueInfo.HaltedGroups] says, counted up to
-//     10,000. Their tasks wait for an operator, and do not count in the lag:
-//     alert when it is above 0.
+//     10,000. Their tasks wait for an operator, and do not count in the lag.
 //   - taskmill.queue.most_failures: the most times in a row that one task of
 //     the queue, waiting to retry, has failed, as
 //     [taskmill.QueueInfo.MostFailures] says. It grows while a task keeps
-//     failing, and the lag stays near zero. A task drops out of it while it
-//     runs its next attempt, so alert on its maximum over some minutes.
+//     failing, and the lag stays near zero. A task does not count in it
+//     while it runs its next attempt, so read its maximum over some minutes.
 //   - taskmill.stats.age: in seconds, by this process's clock, how long ago
-//     the maintainer last counted the queues. Alert when it passes a minute:
-//     no maintainer runs, or it cannot count, and a queue that was empty at
-//     its last count cannot show lag. It is absent until the maintainer
+//     the maintainer last counted the queues. It grows when no maintainer
+//     runs, or when the maintainer cannot count: a queue that was empty at
+//     the last count then cannot show lag. It is absent until the maintainer
 //     first counts.
+//
+// The docs say which of these gauges to alert on, and at which values:
+// https://github.com/code19m/taskmill/blob/main/docs/production/monitoring.md.
 //
 // The gauges describe the whole installation, read from one small table, so
 // every process that observes it reports the same values: aggregate them with
