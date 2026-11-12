@@ -28,7 +28,7 @@ That gives you three things:
 |---|---|---|
 | Short work that you can lose if the process stops, such as warming a cache | A goroutine | Nothing to set up. But a crash loses the work, nothing retries it, and you cannot see it. |
 | Background work for a Go service that uses PostgreSQL | **taskmill** | Tasks commit with your data, survive crashes, and retry by themselves. |
-| You need workflows (tasks that wait for other tasks), a command-line tool, or a long production record | [River](https://riverqueue.com) | River has these, and taskmill does not. |
+| You need workflows (tasks that wait for other tasks), a command-line tool, or many years of use in production | [River](https://riverqueue.com) | River has these, and taskmill does not. |
 | Your app does not use PostgreSQL | A queue for the database you use, or a Redis-based queue | taskmill runs on PostgreSQL only. |
 | Your services exchange many events through Kafka, NATS, or RabbitMQ | Your broker, with taskmill's outbox to publish to it | The outbox publishes only what your transaction committed. |
 
@@ -42,8 +42,8 @@ PostgreSQL, use pgx, and enqueue in your own transaction. taskmill also
 includes [FIFO groups](../concepts/glossary.md#fifo-group), limits across all
 workers, batch handlers, an outbox, and a dashboard, in one MIT-licensed
 module. River offers several of these only in its paid River Pro. Choose
-River if you need workflows, a command-line tool, or a long production
-record.
+River if you need workflows, a command-line tool, or many years of use in
+production.
 
 ## What does it cost?
 

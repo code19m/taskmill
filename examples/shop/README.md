@@ -32,7 +32,7 @@ docker exec taskmill-test-db psql -U postgres -d taskmill -c 'DROP SCHEMA taskmi
 ```
 
 > [!WARNING]
-> The dashboard can retry, delete, and pause, so a real application puts it
+> The dashboard can retry, delete, and pause, so a real app puts it
 > behind its own login. In main.go, `requireAdmin` marks the place.
 
 ## What it shows
@@ -43,7 +43,7 @@ docker exec taskmill-test-db psql -U postgres -d taskmill -c 'DROP SCHEMA taskmi
 | Queues and defaults per kind | `EnqueueDefaults` puts each kind in its own queue. |
 | Retries with backoff | One receipt attempt in five fails, and taskmill tries it again later. |
 | Idempotent handlers (safe to run twice) | A ledger entry is saved in the same transaction that completes its task (`CompleteTx`). A partner call's idempotency key is the task ID, with the service and the schema. |
-| Dead tasks | A receipt without an email address returns `taskmill.Permanent`, so it fails for good, with no retry. |
+| Dead tasks | A receipt without an email address returns `taskmill.Permanent`, so it fails permanently, with no retry. |
 | FIFO groups | Each account's ledger entries post one at a time, in order. |
 | Deduplication | A receipt's `DedupeKey` allows one receipt per order, even if it is enqueued twice. |
 | Priorities and delays | Every 10th order is a VIP: its receipt runs first. A reminder runs two minutes after each order. |
@@ -55,7 +55,7 @@ docker exec taskmill-test-db psql -U postgres -d taskmill -c 'DROP SCHEMA taskmi
 | The outbox | Two events per order, published in order per key. |
 | Middleware | `logSlow` logs attempts that take over 1.5 seconds. |
 | Several workers | A second worker takes tasks only from the `emails` and `images` queues, as another process would. |
-| The dashboard in your application | Mounted at `/taskmill/` on the shop's own server. |
+| The dashboard in your app | Mounted at `/taskmill/` on the shop's own server. |
 | Graceful shutdown | Handlers stop when their context ends. Ctrl-C lets the workers finish their running tasks first. |
 
 ## Where to look in the dashboard
@@ -70,9 +70,10 @@ docker exec taskmill-test-db psql -U postgres -d taskmill -c 'DROP SCHEMA taskmi
 - **A halted FIFO group.** A group is
   [halted](../../docs/concepts/glossary.md#halted-group) when its first task
   is dead: the tasks behind it wait. The bad order's ledger entry halts the
-  group `account-2`, so the account's later entries wait, in order. Open the
-  dead entry and choose *View group*. *Retry* fails again, because the
-  amount is still negative. Delete the entry, and the group runs again.
+  group `account-2`, so the account's later entries wait, in order.
+- **Fix the halted group.** Open the dead entry and choose
+  *View group*. *Retry* fails again, because the amount is still negative.
+  Delete the entry, and the group runs again.
 - **The outbox.** The `outbox` queue holds the stored messages. The broker
   rejects the bad order's `order.placed` message, so that order's key halts
   the same way: its `order.paid` message waits behind the dead one.
@@ -88,10 +89,11 @@ docker exec taskmill-test-db psql -U postgres -d taskmill -c 'DROP SCHEMA taskmi
 
 ## See also
 
-- [Quickstart](../../docs/start/quickstart.md): build your first program
-  step by step
+- [Quickstart](../../docs/start/quickstart.md): run your first program
+- [Tutorial](../../docs/tutorial/README.md): build a smaller shop step by
+  step
 - [The dashboard](../../docs/guides/dashboard.md): mount it in your own
-  application
+  app
 - [How do I…?](../../docs/recipes/README.md): the recommended way for common
   situations
 

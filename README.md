@@ -1,4 +1,4 @@
-# Taskmill
+# taskmill
 
 [![CI](https://github.com/code19m/taskmill/actions/workflows/ci.yml/badge.svg)](https://github.com/code19m/taskmill/actions/workflows/ci.yml)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/code19m/taskmill/badge)](https://scorecard.dev/viewer/?uri=github.com/code19m/taskmill)
@@ -77,7 +77,8 @@ func runWorker(ctx context.Context, client *taskmill.Client) error {
 ```
 
 The [quickstart](docs/start/quickstart.md) runs this as a complete
-program, with the dashboard, in about 15 minutes.
+program, with the dashboard, in about 15 minutes. The
+[tutorial](docs/tutorial/README.md) builds it with you, step by step.
 
 ## Install
 
@@ -89,7 +90,8 @@ You need Go 1.26 or newer, and PostgreSQL 15 or newer.
 
 ## Learn more
 
-- **[Quickstart](docs/start/quickstart.md):** your first task, step by step.
+- **[Quickstart](docs/start/quickstart.md):** run your first task, and watch it in the dashboard.
+- **[Tutorial](docs/tutorial/README.md):** build a small shop step by step, from one task to a program that is ready to ship.
 - **[Documentation](docs/README.md):** concepts, guides, and running in production.
 - **[How do I…?](docs/recipes/README.md):** the best way to do common things.
 - **[API reference](https://pkg.go.dev/github.com/code19m/taskmill)** on pkg.go.dev.

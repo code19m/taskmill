@@ -44,7 +44,7 @@ hair" → "just". Split a sentence with "whose" and two "that" clauses in two.
 |---|---|---|
 | dashboard | "web interface", "web UI" | The package is `ui`; the command is `taskmill-ui`. |
 | task | "job" | Unless you compare taskmill with other tools. |
-| maintainer | | Only the worker chosen to do upkeep: wake queues, promote due tasks, take back the tasks of lost leases, and run schedules. For the people who run the project, write "the project team", and only in contributor docs. |
+| maintainer | | Only the worker chosen to do upkeep: wake queues, promote due tasks, rescue the tasks of lost leases, and run schedules. For the people who run the project, write "the project team", and only in contributor docs. |
 | heartbeat | | Only the maintainer's signal to the workers, every few seconds. |
 | check-in | "heartbeat" | Only a worker's own report to the database, every third of the lease: it renews its leases and notes that it is alive. For one task, the worker "renews its lease". |
 | schema | "installation" | One taskmill schema, with its own tasks, queues, and workers (`taskmill` by default). Godoc says "installation". |
@@ -74,10 +74,10 @@ instruction before the reason. Contractions such as "don't" are fine.
 
 **8. Draw flows; don't narrate them.** Use Mermaid `flowchart`,
 `sequenceDiagram`, or `stateDiagram-v2`, with about 12 nodes at most and
-verbs on the arrows. Quote labels that contain anything but letters, digits,
-and spaces. Use no styles, colors, `classDef`, or HTML except `<br/>`. Put
-one plain sentence above each diagram, like this: a worker shuts down in
-four steps.
+verbs on the arrows. In a flowchart, quote labels that contain anything but
+letters, digits, and spaces. Use no styles, colors, `classDef`, or HTML
+except `<br/>`. Put one plain sentence above each diagram, like this: a
+worker shuts down in four steps.
 
 ```mermaid
 flowchart LR
@@ -135,14 +135,15 @@ status lives in one place: [Compatibility](../reference/compatibility.md).
   a shop: orders, emails, receipts.
 - **Links:** relative, with `.md`. Link to another page's anchor only when
   its heading is unlikely to change. `go test ./internal/docs/` fails on a
-  broken link or a missing anchor.
+  broken link, on a missing anchor, and on code in the quickstart or the
+  tutorial that is not in the page's example program.
 - **End:** `## See also` with 2 to 4 links (related pages and pkg.go.dev),
   then, as the last line, `**Next:** [Page title](page.md)`:
-  - Within a section, follow the order of the section's `README.md`.
-  - On the learning path, follow the path instead.
-  - The last page of a section points to the next section's `README.md`.
-    The last page of the last section, and of `design/`, points to the
-    [documentation home](../README.md).
+  - Within a section, follow the order of the section's `README.md`. The
+    learning path is no exception.
+  - The last page of a section points to the next section's `README.md`:
+    start, tutorial, concepts, guides, recipes, production, reference, then
+    design. The last page of `design/` points to the [home](../README.md).
   - A section's `README.md` needs no See also. Its Next is its first page.
 
 ## Where content lives
@@ -154,6 +155,7 @@ never copy godoc, and godoc links to pages, never to anchors, which move.
 |---|---|
 | Pitch, install, a short taste, links | `README.md` |
 | Learning, how-to, choices, production | `docs/` |
+| Steps that build one program, with what the reader sees | `docs/tutorial/`. The reasons stay in the guides and concepts |
 | The exact contract of one identifier, and its edge cases | Its godoc comment |
 | Runnable code for one API | Godoc `Example` functions |
 | Exact defaults and limits | `docs/reference/defaults-and-limits.md`, and the field's godoc |
@@ -198,6 +200,23 @@ a choice:
 **Next:** [<Next page>](<next-page>.md)
 ```
 
+A part of the tutorial holds steps only: the reasons go under "Go deeper".
+Run every step yourself, and paste the output that you saw. Take each `go`
+block from the part's program in `examples/`. If a later step adds lines
+inside a block, write `<!-- grows -->` on the line above the block:
+
+```markdown
+# Part <N>: <What the reader builds>
+**Goal:** <one sentence.> **Time:** about <10 to 15> minutes. **You start from:** <the part before.>
+## Step 1. <What the reader does>
+<A sentence or two, and the code to add.> **You should see** <the real output.>
+## What you learned
+| In the code | taskmill calls it |
+## Go deeper
+<2 to 4 links to guides and concepts.>
+**Next:** [Part <N+1>: <its title>](<next-part>.md)
+```
+
 A troubleshooting entry starts with what the reader sees. With several
 causes, use a table, most likely cause first. With one cause, use the
 bullets **Cause:**, **Check:**, and **Do:** instead of the table:
@@ -211,16 +230,14 @@ bullets **Cause:**, **Check:**, and **Do:** instead of the table:
 | <The most likely cause> | <Where to look> | <The fix, with a link> |
 ```
 
-A section's `README.md`:
+A section's `README.md`. Its table may use "I want to…" rows instead:
 
 ```markdown
 # <Section name>
 <One sentence: who this section is for.>
-
 | Page | Read this when… |
 |---|---|
 | [<Page>](<page>.md) | <you want to …> |
-
 **Next:** [<First page>](<first-page>.md)
 ```
 

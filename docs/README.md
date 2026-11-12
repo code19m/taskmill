@@ -9,6 +9,7 @@ commit with your data, run at least once, and survive a crashed worker.
 |---|---|
 | Decide if taskmill fits my project | [Why taskmill](start/why-taskmill.md) |
 | Run my first task in 15 minutes | [Quickstart](start/quickstart.md) |
+| Learn by building a small shop, step by step | [Tutorial](tutorial/README.md) |
 | Understand how it works | [How it works](concepts/how-it-works.md) |
 | Use a feature: retries, schedules, the outbox… | [Guides](guides/README.md) |
 | Find the best way to do something | [How do I…?](recipes/README.md) |
@@ -20,38 +21,44 @@ commit with your data, run at least once, and survive a crashed worker.
 
 ## Learning path
 
-New to taskmill? Read these pages in order. Together they take about an
-hour, from "what is this?" to "ready for production".
+New to taskmill? Follow these steps in order. First you run a finished
+program, then you build it yourself, and then you read why it works. After
+that, open a [guide](guides/README.md) when you need a feature.
 
-| Step | Page | Time |
-|---|---|---|
-| 1 | [Why taskmill](start/why-taskmill.md) | 5 min |
-| 2 | [Quickstart](start/quickstart.md) | 15 min |
-| 3 | [How it works](concepts/how-it-works.md) | 5 min |
-| 4 | [Guarantees](concepts/guarantees.md): your handler may run twice | 5 min |
-| 5 | [Define tasks](guides/define-tasks.md) | 4 min |
-| 6 | [Enqueue tasks](guides/enqueue.md) | 5 min |
-| 7 | [Use your own transactions](guides/transactions.md) | 5 min |
-| 8 | [Handle tasks](guides/handle-tasks.md) | 6 min |
-| 9 | [Workers and queues](guides/workers-and-queues.md) | 8 min |
-| 10 | [Test your code](guides/testing.md) | 5 min |
-| 11 | [Production checklist](production/checklist.md) | 3 min |
+| Step | Page | What you do | Time |
+|---|---|---|---|
+| 1 | [Why taskmill](start/why-taskmill.md) | Decide if it fits | 5 min |
+| 2 | [Quickstart](start/quickstart.md) | Run a finished shop, and watch it in the dashboard | 15 min |
+| 3 | [Tutorial](tutorial/README.md) | Build that shop yourself, in seven parts of 10 to 15 minutes | 85 min |
+| 4 | [How it works](concepts/how-it-works.md) | See the parts in one picture | 5 min |
+| 5 | [Guarantees](concepts/guarantees.md) | Learn why your handler may run twice | 5 min |
+| 6 | [Production checklist](production/checklist.md) | Check your app before it goes live | 3 min |
 
 ## All pages
 
-### Get started
+### [Get started](start/README.md)
 
 - [Why taskmill](start/why-taskmill.md)
 - [Quickstart](start/quickstart.md)
 
-### Understand
+### [Tutorial](tutorial/README.md)
+
+- [Part 1: Your first task](tutorial/1-first-task.md)
+- [Part 2: Tasks with your data](tutorial/2-tasks-with-your-data.md)
+- [Part 3: When a task fails](tutorial/3-when-a-task-fails.md)
+- [Part 4: Queues, delays, and schedules](tutorial/4-queues-delays-schedules.md)
+- [Part 5: The outbox](tutorial/5-outbox.md)
+- [Part 6: Test it](tutorial/6-test-it.md)
+- [Part 7: Ready to ship](tutorial/7-ready-to-ship.md)
+
+### [Concepts](concepts/README.md)
 
 - [How it works](concepts/how-it-works.md)
 - [Task lifecycle](concepts/task-lifecycle.md)
 - [Guarantees](concepts/guarantees.md)
 - [Glossary](concepts/glossary.md)
 
-### Build with taskmill
+### [Guides](guides/README.md)
 
 - [Set up the database and client](guides/setup.md)
 - [Define tasks](guides/define-tasks.md)
@@ -70,7 +77,7 @@ hour, from "what is this?" to "ready for production".
 - [Logs, traces, and metrics](guides/observability.md)
 - [Test your code](guides/testing.md)
 
-### How do I…?
+### [How do I…?](recipes/README.md)
 
 - [Do work once](recipes/do-work-once.md)
 - [Call a rate-limited API](recipes/call-a-rate-limited-api.md)
@@ -83,7 +90,7 @@ hour, from "what is this?" to "ready for production".
 - [One dashboard for many services](recipes/one-dashboard-for-many-services.md)
 - [Use your own migration tool](recipes/use-your-migration-tool.md)
 
-### Run in production
+### [Run in production](production/README.md)
 
 - [Production checklist](production/checklist.md)
 - [Database](production/database.md)
@@ -96,9 +103,11 @@ hour, from "what is this?" to "ready for production".
 - [Troubleshooting](production/troubleshooting.md)
 - [Upgrading](production/upgrading.md)
 
-### Look it up
+### [Reference](reference/README.md)
 
+- [Configuration](reference/configuration.md)
 - [Defaults and limits](reference/defaults-and-limits.md)
+- [The `taskmill-ui` command](reference/taskmill-ui.md)
 - [Errors](reference/errors.md)
 - [Log messages](reference/log-messages.md)
 - [Metrics and traces](reference/metrics.md)
@@ -118,4 +127,4 @@ hour, from "what is this?" to "ready for production".
 - [Shop example](../examples/shop/README.md): most features in one small program
 - [Changelog](../CHANGELOG.md): what changed in each release
 
-**Next:** [Why taskmill](start/why-taskmill.md)
+**Next:** [Get started](start/README.md)

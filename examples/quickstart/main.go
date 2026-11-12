@@ -1,13 +1,15 @@
-// Command quickstart is the program of the quickstart tutorial,
+// Command quickstart is the program of the quickstart,
 // docs/start/quickstart.md: a tiny shop that emails a receipt for each order,
-// as a background task, and shows the tasks in the dashboard.
+// as a background task, and shows the tasks in the dashboard. It is also what
+// the reader of the tutorial, docs/tutorial, has built after part 3.
 //
 //	docker run --name taskmill-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d postgres:18
 //	go run ./examples/quickstart
 //
 // It reads the database from DATABASE_URL, by default the one that the docker
-// command above starts. The dashboard is at http://localhost:8080/taskmill/.
-// Ctrl-C stops it.
+// command above starts, and the address to listen on from ADDR, by default
+// localhost:8080. The dashboard is at http://localhost:8080/taskmill/. Ctrl-C
+// stops it.
 package main
 
 import (
@@ -31,11 +33,8 @@ import (
 	"github.com/code19m/taskmill/ui"
 )
 
-const (
-	// defaultDatabaseURL is the database that the docker command starts.
-	defaultDatabaseURL = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable" //nolint:gosec // the tutorial's local database
-	addr               = "localhost:8080"
-)
+// defaultDatabaseURL is the database that the quickstart's docker command starts.
+const defaultDatabaseURL = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable" //nolint:gosec // the tutorial's local database
 
 // Log attribute keys.
 const (
@@ -44,6 +43,9 @@ const (
 	logKeyTo     = "to"
 	logKeyURL    = "url"
 )
+
+// defaultAddr is where the shop listens.
+const defaultAddr = "localhost:8080"
 
 // SendReceipt is a task: a Go struct, saved as JSON, with a Kind method.
 type SendReceipt struct {
@@ -98,12 +100,10 @@ func run(logger *slog.Logger) error {
 	defer pool.Close()
 
 	// Create taskmill's tables, or update them. It is safe at every start.
-	if err := taskmill.Migrate(ctx, pool, nil); err != nil {
+	if err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Logger: logger}); err != nil {
 		return err
 	}
-	_, err = pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS orders (
-		id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, email text NOT NULL)`)
-	if err != nil {
+	if err := createTables(ctx, pool); err != nil {
 		return err
 	}
 
@@ -121,25 +121,37 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	// The shop's own server takes the orders.
+	mux := http.NewServeMux()
+	mux.Handle("POST /orders", placeOrder(pool, client, logger))
+
 	// The dashboard is an http.Handler. In a real app, put your login in front of it.
 	dashboard, err := ui.New(client, &ui.Config{Prefix: "/taskmill"})
 	if err != nil {
 		return err
 	}
-	mux := http.NewServeMux()
 	mux.Handle("/taskmill/", dashboard)
-	mux.Handle("POST /orders", placeOrder(pool, client, logger))
+
+	// Serve until run returns. Set ADDR if port 8080 is taken.
+	addr := cmp.Or(os.Getenv("ADDR"), defaultAddr)
 	ln, err := new(net.ListenConfig).Listen(ctx, "tcp", addr)
 	if err != nil {
 		return err
 	}
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = server.Serve(ln) }() // it returns when Shutdown is called
+	defer func() { _ = server.Shutdown(context.WithoutCancel(ctx)) }()
 	logger.LogAttrs(ctx, slog.LevelInfo, "open the dashboard", slog.String(logKeyURL, "http://"+addr+"/taskmill/"))
 
 	// Run the worker until Ctrl-C. Then it lets running tasks finish.
-	err = worker.Run(ctx)
-	_ = server.Shutdown(context.WithoutCancel(ctx))
+	return worker.Run(ctx)
+}
+
+// createTables creates the shop's own table, unless it exists. A real app
+// leaves this to its migration tool.
+func createTables(ctx context.Context, pool *pgxpool.Pool) error {
+	_, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS orders (
+		id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, email text NOT NULL)`)
 	return err
 }
 
@@ -149,9 +161,9 @@ func placeOrder(pool *pgxpool.Pool, client *taskmill.Client, logger *slog.Logger
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		email := r.FormValue("email")
+		var orderID int64
 		var res taskmill.EnqueueResult
 		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			var orderID int64
 			err := tx.QueryRow(ctx, "INSERT INTO orders (email) VALUES ($1) RETURNING id", email).Scan(&orderID)
 			if err != nil {
 				return err
@@ -164,6 +176,6 @@ func placeOrder(pool *pgxpool.Pool, client *taskmill.Client, logger *slog.Logger
 			http.Error(w, "placing the order failed", http.StatusInternalServerError)
 			return
 		}
-		_, _ = fmt.Fprintf(w, "task %d: http://%s/taskmill/tasks/%d\n", res.ID, addr, res.ID)
+		_, _ = fmt.Fprintf(w, "order %d placed, task %d enqueued\n", orderID, res.ID)
 	})
 }
