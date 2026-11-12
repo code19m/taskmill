@@ -225,6 +225,14 @@ All notable changes to taskmill are recorded here. The format follows
   the largest integer, such as `0 0 */9223372036854775807 * *`. Now it reads
   such a step like any other step beyond the field's range: the schedule
   matches the first value only, here day 1.
+- A schedule lost runs when clocks went forward. Of several times in the
+  skipped hour, only the first ran: `0,30 2 * * *` ran at 03:00, and its
+  02:30 run was dropped. In a zone whose clocks change by 30 minutes, a run
+  just after the jump could be dropped too. And in a zone whose clocks
+  change by two hours, the runs of the repeated hours came in their second
+  pass. Now each time that the clock skips runs once, as long after the jump
+  as the time is into the skipped hour, and each time that the clock shows
+  twice runs the first time only.
 - `Cancel`, `CancelTx`, and `Delete` could fail with PostgreSQL's
   `deadlock detected` (SQLSTATE 40P01) after a second, and a bulk action
   with a lock timeout, when another `Cancel`, a `Retry`, a worker, or the

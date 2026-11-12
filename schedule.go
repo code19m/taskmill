@@ -32,12 +32,13 @@ import (
 // first retry or snooze moves it.
 //
 // The expression is read on the wall clock of Location, and each time on
-// that clock runs once. When clocks go forward, a time that they skip runs
-// after the jump, as long after it as the time is into the skipped hour:
-// 02:30 runs at 03:30. When clocks go back, a time in the repeated hour runs
-// the first time the clock shows it, and not the second. So a schedule that
-// runs several times an hour, such as "*/15 * * * *", makes no run during
-// the second pass of that hour, where classic cron keeps it running.
+// that clock that it names runs once. When clocks go forward, every time
+// that they skip runs after the jump, as long after it as the time is into
+// the skipped hour: 02:30 runs at 03:30. When clocks go back, a time in the
+// repeated hour runs the first time the clock shows it, and not the second.
+// So a schedule that runs several times an hour, such as "*/15 * * * *",
+// makes no run during the second pass of that hour, where classic cron
+// keeps it running.
 type Schedule struct {
 	// Name identifies the schedule. Schedules are kept in the database by
 	// name, so renaming one creates a new schedule.
@@ -310,9 +311,7 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 	// The regular runs missed since a regular run collapse into it, so the
 	// next one comes after now. A requested run stands for no regular run,
 	// so the next one comes after the request: if it is due already, the
-	// next pass enqueues it. One case is left: in the hour after clocks
-	// went forward, Next does not find a run that the jump moved to later
-	// in that hour, so a request made before such a run takes its place.
+	// next pass enqueues it.
 	after := now
 	if requested {
 		after = due
