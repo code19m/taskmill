@@ -690,6 +690,39 @@ func TestBasicAuth(t *testing.T) {
 	}
 }
 
+// A dashboard with a prefix answers only for the paths under it, and never
+// sends a client to a path outside it.
+func TestPrefixKeepsRequestsAndRedirects(t *testing.T) {
+	t.Parallel()
+	h := handler(t, setup(t), &ui.Config{Prefix: "/tm"})
+	for _, tc := range []struct {
+		method, target string
+		code           int
+		location       string // of a redirect that the test knows
+	}{
+		{http.MethodGet, "/tm/tasks?state=dead", http.StatusOK, ""},
+		// The prefix alone, and a path that is not clean, lead to the clean
+		// path under the prefix, with the same method.
+		{http.MethodGet, "/tm", http.StatusTemporaryRedirect, "/tm/"},
+		{http.MethodGet, "/tm//tasks?state=dead", http.StatusTemporaryRedirect, "/tm/tasks?state=dead"},
+		{http.MethodGet, "/tm//example.com/x", http.StatusTemporaryRedirect, "/tm/example.com/x"},
+		{http.MethodGet, "/tm/../tasks", http.StatusTemporaryRedirect, "/tm/tasks"},
+		{http.MethodPost, "/tm//tasks/1/retry", http.StatusTemporaryRedirect, "/tm/tasks/1/retry"},
+		// An escaped slash is part of a name, here of the queue "a//b".
+		{http.MethodPost, "/tm/queues/a%2F%2Fb/pause", http.StatusSeeOther, ""},
+		// A path that only starts like the prefix is not under it.
+		{http.MethodGet, "/tmx/tasks", http.StatusNotFound, ""},
+		{http.MethodGet, "/tasks", http.StatusNotFound, ""},
+	} {
+		req := httptest.NewRequestWithContext(t.Context(), tc.method, tc.target, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Location"); rec.Code != tc.code || tc.location != "" && got != tc.location {
+			t.Errorf("%s %s: got %d to %q, want %d to %q", tc.method, tc.target, rec.Code, got, tc.code, tc.location)
+		}
+	}
+}
+
 func TestFrameAncestors(t *testing.T) {
 	t.Parallel()
 	client := setup(t)

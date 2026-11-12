@@ -104,6 +104,13 @@ All notable changes to taskmill are recorded here. The format follows
   error: stack overflow`: for a mounted dashboard, that process is your
   application. No maintainer stores such a count, but the column can hold
   it. The dashboard now shows every count that the column can hold.
+- A dashboard with a `Prefix`, or `taskmill-ui` with `TASKMILL_UI_PREFIX`,
+  redirected some requests out of the prefix, to the root of the host:
+  `/admin/jobs` without its last slash led to `/`, and behind a router that
+  passes paths on unchanged, a path with a double slash lost the prefix
+  too. These now lead to the clean path under the prefix. A path that only
+  starts like the prefix, such as `/admin/jobsx`, was redirected as well,
+  to `/x`, and is now not found.
 
 ### Security
 
