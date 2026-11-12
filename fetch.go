@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // fetchLoop fetches tasks for one queue whenever it has free capacity, until
@@ -102,7 +103,8 @@ func waitForWork(ctx context.Context, q *queueState, poll time.Duration, pause b
 // every fetched task starts at once. A queue with an installation-wide
 // concurrency limit fetches only up to its remaining capacity. more reports
 // that the first lease took all it asked for, so more tasks may be waiting,
-// and held that the limit kept it from asking for as many as slots.
+// and held that the limit kept it from asking for as many as slots, or that
+// it gave up waiting for the row of a queue with a limit (see errQueueHeld).
 // If filling the batches fails outside a transaction, it returns the tasks
 // leased before the error with the error: they must run.
 func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*tracked, more, held bool, err error) {
@@ -126,7 +128,12 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	lease, allowed := leaseFunc(w.leaseAlone), maxFetch
 	var tx pgx.Tx
 	if limited {
-		if tx, allowed, err = w.beginLimited(dbCtx, q); err != nil {
+		tx, allowed, err = w.beginLimited(dbCtx, q)
+		switch {
+		case errors.Is(err, errQueueHeld):
+			w.logger.LogAttrs(ctx, slog.LevelDebug, "fetch gave up waiting for the queue's row", slog.String(logKeyQueue, q.name))
+			return nil, false, true, nil
+		case err != nil:
 			return nil, false, false, err
 		}
 		defer func() { _ = tx.Rollback(dbCtx) }() // a no-op after commit
@@ -197,8 +204,9 @@ func (w *Worker) atLimit(ctx context.Context, queue string) (full bool, err erro
 }
 
 // beginLimited begins the fetch transaction of a queue with a concurrency
-// limit, and returns how many more of its tasks may run. It fails if another
-// transaction holds the queue's row for longer than limitedSettings allow.
+// limit, and returns how many more of its tasks may run. It returns
+// errQueueHeld if it cannot lock the queue's row in the time that
+// limitedSettings allow.
 func (w *Worker) beginLimited(ctx context.Context, q *queueState) (pgx.Tx, int, error) { //nolint:ireturn // pgx represents a transaction as an interface
 	tx, err := w.client.pool.Begin(ctx)
 	if err != nil {
@@ -231,12 +239,16 @@ func (w *Worker) leaseIn(tx pgx.Tx) leaseFunc {
 
 // capacity locks a limited queue's row and returns how many more of its tasks
 // may run. It counts running tasks in a statement of its own, after taking the
-// lock, so that it sees what concurrent fetches committed.
+// lock, so that it sees what concurrent fetches committed. It returns
+// errQueueHeld if the wait for the lock timed out.
 func (w *Worker) capacity(ctx context.Context, tx pgx.Tx, queue string) (int, error) {
 	var maxRunning *int
 	if err := tx.QueryRow(ctx, w.client.sql.lockQueue, queue).Scan(&maxRunning); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return maxFetch, nil
+		}
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "55P03" { // lock_not_available
+			return 0, errQueueHeld
 		}
 		return 0, err
 	}
@@ -259,12 +271,17 @@ const planSettings = `SELECT set_config('enable_sort', 'off', true), set_config(
 
 // limitedSettings are planSettings for the fetch transaction of a queue with
 // a concurrency limit. They also bound its wait for the queue's row to one
-// second. The queue's fetches lock that row in turn, each for a moment, so a
-// longer wait means that some transaction holds it, such as a stalled
-// worker's. The fetch then fails, and the queue is fetched again when it is
-// next woken or polled, instead of each waiting worker tying up a connection,
-// and being kept from stopping, for as long as the row is held.
+// second: a transaction that holds the row for long, such as a stalled
+// worker's, must not tie up a connection of every waiting worker, or keep
+// them from stopping, for as long as it holds the row.
 const limitedSettings = planSettings + `, set_config('lock_timeout', '1s', true)`
+
+// errQueueHeld reports that the fetch of a queue with a concurrency limit
+// gave up waiting for the queue's row. That is no failure of the fetch: the
+// queue's fetches lock the row in turn, each for a moment, and with many
+// workers the turns alone can take that long. The queue counts as held back
+// by its limit, and is fetched again when it is next woken or polled.
+var errQueueHeld = errors.New("taskmill: the queue's row is locked")
 
 // leaseAlone runs a fetch statement for up to limit tasks of q, with extra
 // arguments after the standard four, in a transaction of its own with

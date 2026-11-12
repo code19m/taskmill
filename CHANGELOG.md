@@ -28,10 +28,12 @@ All notable changes to taskmill are recorded here. The format follows
   for a task's row that another transaction held.
 - A fetch from a queue with `MaxRunning` waits at most one second for the
   queue's row, not 30. If a transaction holds the row longer, such as a
-  stalled worker's, the fetch fails, the worker logs `operation failed` for
-  `fetch tasks` with a lock timeout, and it fetches again when the queue is
-  next woken or polled. Before, each worker of the queue kept a connection
-  waiting, and could not stop until the wait ended.
+  stalled worker's, the fetch gives up, and the worker fetches again when
+  the queue is next woken or polled. Before, each worker of the queue kept a
+  connection waiting, and could not stop until the wait ended. Giving up is
+  not a failed operation, and logs only a debug line: the queue's fetches
+  take the row in turn, so with many workers on one queue a fetch can wait a
+  second while nothing is stuck.
 - A panic in `RetryPolicy.Backoff`, or in a method of the error that a
   handler returned, ended the worker's process. The usual cause of the
   second is a nil pointer returned as an `error`, whose `Error` method

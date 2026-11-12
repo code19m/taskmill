@@ -859,13 +859,19 @@ func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 	})
 }
 
+// queueLock is part of the statement that locks the row of a queue with a
+// limit, for a statementLog to count.
+const queueLock = "queues WHERE name = $1 FOR UPDATE"
+
 // A fetch from a queue with a limit waits only briefly for the queue's row.
-// While another transaction holds the row, the fetch gives up, the worker
-// says so, and it fetches again once the row is free.
+// While another transaction holds the row, the fetch gives up, and the worker
+// fetches again later. Giving up is no failure to report: the queue's fetches
+// hold the row in turn, so with many workers a fetch can wait as long while
+// nothing is stuck.
 func TestLimitedFetchGivesUpOnAHeldQueueRow(t *testing.T) {
 	t.Parallel()
-	logs := &logRecorder{}
-	e := newEnv(t).withLogger(t, slog.New(logs))
+	sent, logs := &statementLog{}, &logRecorder{}
+	e := newTracedEnv(t, sent).withLogger(t, slog.New(logs))
 	e.limitDefaultQueue(t, 5)
 	ran := make(chan struct{}, 1)
 	w := newWorker(t, e, &taskmill.WorkerConfig{
@@ -881,9 +887,12 @@ func TestLimitedFetchGivesUpOnAHeldQueueRow(t *testing.T) {
 	e.txExec(t, tx, "SELECT FROM {s}.queues WHERE name = 'default' FOR UPDATE")
 	e.enqueue(t, sendEmail{}, nil)
 	startWorker(t, w)
-	waitFor(t, "the fetch to give up on the held row", func() bool {
-		return len(operationLines(logs.all())["fetch tasks"]) > 0
+	waitFor(t, "the fetch to give up on the held row, and to try again", func() bool {
+		return sent.count(queueLock) >= 2
 	})
+	if lines := operationLines(logs.all())["fetch tasks"]; len(lines) > 0 {
+		t.Fatalf("the fetch that gave up was reported as a failed operation: %s", recordText(lines[0]))
+	}
 	select {
 	case <-ran:
 		t.Fatal("the task ran while another transaction held its queue's row")
@@ -924,19 +933,18 @@ func TestFetchDoesNotLockAQueueAtItsLimit(t *testing.T) {
 
 	// One task runs, one waits behind the limit, and the worker has a free
 	// slot: it polls.
-	const counted, locked = "state = 'running'", "queues WHERE name = $1 FOR UPDATE"
 	sent.reset()
 	waitFor(t, "the worker to count the queue's running tasks five times", func() bool {
-		return sent.count("SELECT", "count(*)", counted) >= 5
+		return sent.count("SELECT", "count(*)", "state = 'running'") >= 5
 	})
-	if n := sent.count(locked); n != 0 {
+	if n := sent.count(queueLock); n != 0 {
 		t.Fatalf("the worker locked the queue's row %d times while the queue was at its limit", n)
 	}
 
 	// Once the running task ends, the fetch locks the row and takes the next.
 	release <- struct{}{}
 	recv(t, started, "the second task to start")
-	if n := sent.count(locked); n == 0 {
+	if n := sent.count(queueLock); n == 0 {
 		t.Error("the second task started without a lock on the queue's row: nothing serialized its fetch")
 	}
 	if p := peak.Load(); p != 1 {
