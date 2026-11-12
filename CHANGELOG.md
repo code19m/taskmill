@@ -7,6 +7,15 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A worker with a free slot for a queue that is at its `MaxRunning` now
+  sends one read each time it polls the queue: it counts the queue's running
+  tasks without a lock. Before, each such worker opened a transaction and
+  locked the queue's row, once a second by default, although no task could
+  start. A fetch still locks the row and counts again before it takes a
+  task, so the limit holds as before.
+
 ### Fixed
 
 - A task of a queue with `MaxRunning` could start with a lease that was

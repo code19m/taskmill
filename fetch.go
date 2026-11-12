@@ -106,6 +106,15 @@ func waitForWork(ctx context.Context, q *queueState, poll time.Duration, pause b
 // If filling the batches fails outside a transaction, it returns the tasks
 // leased before the error with the error: they must run.
 func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*tracked, more, held bool, err error) {
+	// A queue with a concurrency limit and a backlog is at its limit most of
+	// the time: one statement, without a lock, then saves the transaction.
+	limited := q.maxRunning.Load() > 0
+	if limited {
+		if held, err = w.atLimit(ctx, q.name); err != nil || held {
+			return nil, false, held, err
+		}
+	}
+
 	// The statements run on a context that outlives ctx: once tasks are
 	// leased, they must reach the worker even if it is stopping.
 	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
@@ -116,7 +125,7 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	// transaction of its own, sent in one round trip.
 	lease, allowed := leaseFunc(w.leaseAlone), maxFetch
 	var tx pgx.Tx
-	if q.maxRunning.Load() > 0 {
+	if limited {
 		if tx, allowed, err = w.beginLimited(dbCtx, q); err != nil {
 			return nil, false, false, err
 		}
@@ -173,6 +182,18 @@ func (w *Worker) fillBatches(ctx context.Context, q *queueState, lease leaseFunc
 		extra = append(extra, more...)
 	}
 	return extra, nil
+}
+
+// atLimit reports whether a queue with a concurrency limit runs as many tasks
+// as its limit allows. It asks without a lock, so its answer can only save a
+// fetch its transaction, never let a task start: a queue that it finds below
+// its limit is counted again under the lock before anything is leased. As it
+// leases nothing, it ends with ctx, unlike the fetch's other statements.
+func (w *Worker) atLimit(ctx context.Context, queue string) (full bool, err error) {
+	ctx, cancel := context.WithTimeout(ctx, recordTimeout)
+	defer cancel()
+	err = w.client.pool.QueryRow(ctx, w.client.sql.atLimit, queue).Scan(&full)
+	return full, err
 }
 
 // beginLimited begins the fetch transaction of a queue with a concurrency

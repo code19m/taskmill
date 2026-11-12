@@ -710,6 +710,55 @@ func TestLimitedFetchGivesUpOnAHeldQueueRow(t *testing.T) {
 	recv(t, ran, "the task to run once the row is free")
 }
 
+// A queue with a limit and a backlog is at its limit most of the time. A
+// worker with free slots then only counts the queue's running tasks: it locks
+// the queue's row, in a transaction, only once a task may start.
+func TestFetchDoesNotLockAQueueAtItsLimit(t *testing.T) {
+	t.Parallel()
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	e.limitDefaultQueue(t, 1)
+	started, release := make(chan struct{}, 2), make(chan struct{})
+	var active, peak atomic.Int32
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			storeMax(&peak, active.Add(1))
+			defer active.Add(-1)
+			started <- struct{}{}
+			<-release
+			return nil
+		}, nil),
+		Queues:       defaultQueue(2),
+		NoMaintainer: true,
+	})
+	t.Cleanup(func() { close(release) })
+	e.enqueue(t, sendEmail{}, nil)
+	waiting := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the first task to start")
+
+	// One task runs, one waits behind the limit, and the worker has a free
+	// slot: it polls.
+	const counted, locked = "state = 'running'", "queues WHERE name = $1 FOR UPDATE"
+	sent.reset()
+	waitFor(t, "the worker to count the queue's running tasks five times", func() bool {
+		return sent.count("SELECT", "count(*)", counted) >= 5
+	})
+	if n := sent.count(locked); n != 0 {
+		t.Fatalf("the worker locked the queue's row %d times while the queue was at its limit", n)
+	}
+
+	// Once the running task ends, the fetch locks the row and takes the next.
+	release <- struct{}{}
+	recv(t, started, "the second task to start")
+	if n := sent.count(locked); n == 0 {
+		t.Error("the second task started without a lock on the queue's row: nothing serialized its fetch")
+	}
+	if p := peak.Load(); p != 1 {
+		t.Errorf("peak concurrency %d, want the limit of 1", p)
+	}
+	e.wantState(t, waiting, taskmill.StateRunning)
+}
+
 func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

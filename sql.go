@@ -77,6 +77,7 @@ type statements struct {
 	fetch         string
 	fetchKind     string
 	leaseTask     string
+	atLimit       string
 	lockQueue     string
 	countRunning  string
 	renewLeases   string
@@ -677,6 +678,15 @@ SET state = 'running',
     attempted_by = $3
 WHERE t.id = (SELECT id FROM picked)
 RETURNING ` + leasedColumns),
+
+		// atLimit reports whether queue $1 runs as many tasks as its limit
+		// allows, or more; a queue without a limit never does. It locks
+		// nothing, so its answer may be out of date at once: a fetch uses it
+		// only to skip the transaction below, never to lease.
+		atLimit: q(`
+SELECT coalesce((
+    SELECT (SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND state = 'running') >= q.max_running
+    FROM {s}.queues q WHERE q.name = $1), false)`),
 
 		// lockQueue serializes fetches from a queue with a concurrency limit.
 		// countRunning then runs as its own statement, so it sees the tasks
