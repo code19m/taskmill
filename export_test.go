@@ -93,6 +93,15 @@ func ExplainFetch(ctx context.Context, c *Client, queue string, limit int) (stri
 	return explain(ctx, c, planSettings, c.sql.fetch, queue, limit, int64(1), "w")
 }
 
+// FillRowsRead runs the statement that fills a batch with up to limit more
+// tasks of kind from queue, as a worker runs it, under EXPLAIN ANALYZE in a
+// transaction that it rolls back, and returns how many rows its scans of
+// tasks read.
+func FillRowsRead(ctx context.Context, c *Client, queue, kind string, limit int) (int64, error) {
+	return rowsRead(ctx, c, planSettings, c.sql.fetchKind, []any{queue, limit, int64(1), "w", kind, maxFetch},
+		func(rel string) bool { return rel == "tasks" })
+}
+
 // ExplainPromote returns the plan of the statement that promotes due tasks.
 func ExplainPromote(ctx context.Context, c *Client) (string, error) {
 	return explain(ctx, c, "", c.sql.promoteDue, c.schema)

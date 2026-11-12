@@ -2150,6 +2150,65 @@ func TestBatchFillsWithoutLeasingOtherKinds(t *testing.T) {
 	}
 }
 
+// Filling a batch reads no more of the queue than the tasks it takes, where
+// they are the queue's next ones, as an outbox's are.
+func TestBatchFillReadsOnlyTheTasksItTakes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'default', 'report.build', 'available', now(), '{}', 1 FROM generate_series(1, 2000)`)
+	e.exec(t, "ANALYZE {s}.tasks")
+	const fill = 90
+	n, err := taskmill.FillRowsRead(t.Context(), e.client, taskmill.DefaultQueue, "report.build", fill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// It reads each task as a candidate, to lock it, and to lease it, and
+	// returns it.
+	if n > 4*fill {
+		t.Fatalf("filling a batch with %d tasks read %d rows, want at most %d", fill, n, 4*fill)
+	}
+}
+
+// A batch fills with the next tasks of its kind in the queue's order: by
+// priority, and then by age.
+func TestBatchFillsInTheQueuesOrder(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var mu sync.Mutex
+	var batches [][]int64
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler[report](&hs, batchFunc(func(tasks []*taskmill.Task[report]) {
+		mu.Lock()
+		defer mu.Unlock()
+		ids := make([]int64, len(tasks))
+		for i, task := range tasks {
+			ids[i] = task.ID
+		}
+		batches = append(batches, ids)
+	}), &taskmill.HandlerOptions{BatchSize: 4})
+
+	// Three reports of low priority, then three of high priority.
+	var ids []int64
+	for _, p := range []taskmill.Priority{taskmill.PriorityLow, taskmill.PriorityHigh} {
+		for range 3 {
+			ids = append(ids, e.enqueue(t, report{}, &taskmill.EnqueueOptions{Queue: taskmill.DefaultQueue, Priority: p}))
+		}
+	}
+
+	// The one slot's fetch takes the first report of high priority, and
+	// fills its batch with the two others and the oldest of low priority.
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+	for _, id := range ids {
+		e.waitState(t, id, taskmill.StateCompleted)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := [][]int64{{ids[3], ids[4], ids[5], ids[0]}, {ids[1], ids[2]}}; !slices.EqualFunc(batches, want, slices.Equal[[]int64]) {
+		t.Fatalf("got the batches %v, want %v", batches, want)
+	}
+}
+
 // batchFunc is a batch handler for reports that completes them all.
 type batchFunc func(tasks []*taskmill.Task[report])
 

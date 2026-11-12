@@ -132,6 +132,13 @@ All notable changes to taskmill are recorded here. The format follows
   workers, 40 write transactions a second and 3.5 million transaction IDs a
   day. A try now writes only when it takes or renews the maintainer's
   lease.
+- Filling a batch for a batch handler, as the outbox relay does at every
+  fetch, reads only the tasks it takes. It read and sorted the queue's
+  first 1,000 available tasks to take a few of them, about three times the
+  pages of a plain fetch. On PostgreSQL 15 and 16 with JIT on, which is
+  the default, each fill also took about 0.1 seconds, where it now takes
+  about 2 milliseconds: the sort made PostgreSQL compile the statement at
+  every run. PostgreSQL 17 plans it as they do, and 18 did not compile it.
 
 ### Security
 

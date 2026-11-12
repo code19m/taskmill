@@ -646,19 +646,24 @@ RETURNING ` + leasedColumns),
 
 		// fetchKind is fetch for tasks of kind $5 only, to fill a batch. It
 		// looks at no more than the first $6 available tasks of the queue,
-		// so filling a batch in a queue of many kinds stays cheap.
+		// so filling a batch in a queue of many kinds stays cheap. It locks
+		// the candidates of its kind one by one, in their order, and stops
+		// at $2 of them: ordered by the columns of the locked rows, they
+		// would all be read and sorted first.
 		fetchKind: q(`
 WITH candidates AS (
-    SELECT id, kind FROM {s}.tasks
+    SELECT id, kind, priority, run_at FROM {s}.tasks
     WHERE state = 'available' AND queue = $1
     ORDER BY priority DESC, run_at, id
     LIMIT $6
 ), picked AS (
-    SELECT t.id FROM {s}.tasks t JOIN candidates c ON c.id = t.id
-    WHERE c.kind = $5 AND t.state = 'available'
-    ORDER BY t.priority DESC, t.run_at, t.id
+    SELECT t.id FROM candidates c
+    CROSS JOIN LATERAL (
+        SELECT id FROM {s}.tasks WHERE id = c.id AND state = 'available' FOR UPDATE SKIP LOCKED
+    ) t
+    WHERE c.kind = $5
+    ORDER BY c.priority DESC, c.run_at, c.id
     LIMIT $2
-    FOR UPDATE OF t SKIP LOCKED
 )
 UPDATE {s}.tasks t
 SET state = 'running',
