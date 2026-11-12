@@ -180,6 +180,11 @@ func newStatements(schema string) *statements {
 		// instead: statistics taken while few tasks ran make that index look
 		// small, but until vacuum it keeps an entry for every task that ran.
 		"{leased}", "state::text = 'running'",
+		// {utc} is the database's time in UTC, without a time zone. A
+		// retention period is subtracted from it, not from now(): there, a
+		// period's days are days of the session's time zone, which are 23 or
+		// 25 hours long when its clocks change.
+		"{utc}", "(now() AT TIME ZONE 'UTC')",
 	)
 	q := func(sql string) string { return r.Replace(sql) }
 	pick := func(cond, gates string) string {
@@ -910,13 +915,18 @@ RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.att
 		// application's clock and arithmetic cannot expire history. A
 		// partition's name ends in its day, so names sort by day, and the
 		// pattern keeps to names that are safe in the text of a statement.
+		//
+		// A period that only SQL can store, of thousands of years, has its
+		// cutoff before our era, whose year to_char prints without a sign,
+		// like a year after today. Such a cutoff counts as the year 1, so
+		// that nothing is older.
 		expiredHistory: q(`
 SELECT c.relname, i.inhdetachpending
 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
 WHERE i.inhparent = '{s}.task_history'::regclass
   AND c.relname ~ '^task_history_[0-9]{8}$'
-  AND c.relname < 'task_history_' || to_char(
-          (now() - (SELECT history_retention FROM {s}.settings)) AT TIME ZONE 'UTC', 'YYYYMMDD')
+  AND c.relname < 'task_history_' || to_char(greatest(
+          {utc} - (SELECT history_retention FROM {s}.settings), timestamp '0001-01-01'), 'YYYYMMDD')
 ORDER BY c.relname`),
 
 		// deleteFinished deletes dead and canceled tasks older than the dead
@@ -927,7 +937,7 @@ ORDER BY c.relname`),
 WITH old AS (
     SELECT t.id FROM {s}.tasks t
     WHERE t.state IN ('dead', 'canceled')
-      AND t.finalized_at < now() - (SELECT dead_retention FROM {s}.settings)
+      AND t.finalized_at < ({utc} - (SELECT dead_retention FROM {s}.settings)) AT TIME ZONE 'UTC'
       AND NOT EXISTS (SELECT 1 FROM {s}.groups g WHERE g.halted_task_id = t.id)
     LIMIT {batch}
     FOR UPDATE SKIP LOCKED

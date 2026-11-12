@@ -89,7 +89,8 @@ All notable changes to taskmill are recorded here. The format follows
   partition, each minute, and `Client.Settings` reported a negative period.
   The database now applies the period itself, and `Settings` reads it
   without overflow. The longest duration, about 292 years, keeps completed
-  tasks for good.
+  tasks for good, and so does a longer period that only SQL can store,
+  which `Settings` reports as the longest duration.
 - A worker that held the maintainer's lease without knowing it kept the
   lease when it stopped: after a renewal that failed, or an election whose
   answer was lost while the worker stopped. No worker then led until the
