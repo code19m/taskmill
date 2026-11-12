@@ -7,6 +7,22 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The docs have a [tutorial](docs/tutorial/README.md) that builds a small
+  shop in seven parts, reference pages for every config field and for the
+  `taskmill-ui` command, a guide to middleware, five new recipes, and
+  production pages about backups and failover and about capacity planning.
+- `examples/tutorial`, the program that the tutorial's reader has built
+  after part 7: one binary with a web role and a worker role.
+
+### Changed
+
+- `examples/quickstart` listens on the address in `ADDR`, by default
+  `localhost:8080` as before. Its `POST /orders` now answers
+  `order 1 placed, task 1 enqueued`, without the link to the task's
+  dashboard page.
+
 ## [0.5.0] - 2026-11-12
 
 ### Changed
