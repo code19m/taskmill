@@ -247,10 +247,11 @@ func RunRetention(ctx context.Context, w *Worker) {
 }
 
 // BulkRowsRead runs the next batch's pick of a bulk action (retry, cancel,
-// delete, or history) on filter after task after, in the window that the
-// action finds there, under EXPLAIN ANALYZE in a transaction that it rolls
-// back, and returns how many rows the scans of the task tables read.
-func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFilter, after int64) (int64, error) {
+// delete, or history) on filter after task after, under EXPLAIN ANALYZE in a
+// transaction that it rolls back, and returns how many rows the scans of
+// the task tables read. With window, the batch reads in the window that the
+// action finds there, as it does once a batch could not end in time.
+func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFilter, after int64, window bool) (int64, error) {
 	sql, states := map[string]string{
 		"retry": c.sql.pickRetry, "cancel": c.sql.pickCancel, "delete": c.sql.pickDelete, "history": c.sql.pickCompleted,
 	}[action], map[string][]State{"retry": retryStates, "cancel": cancelStates}[action]
@@ -265,8 +266,11 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
 		return 0, err
 	}
-	if err := c.nextWindow(ctx, m); err != nil {
-		return 0, err
+	m.until = m.last
+	if window {
+		if err := c.nextWindow(ctx, m); err != nil {
+			return 0, err
+		}
 	}
 	args := []any{m.queues, m.kinds, m.groups, m.states, m.after, m.until, m.left.queues, m.left.groups}
 	if action == "history" {

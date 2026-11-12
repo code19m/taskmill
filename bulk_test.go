@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/code19m/taskmill"
 )
@@ -587,7 +591,7 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 		{"delete", &taskmill.TaskFilter{Kinds: []string{"k3"}}, 140000},
 		{"history", &taskmill.TaskFilter{Queues: []string{"q1"}}, 1090000},
 	} {
-		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, c.filter, c.after)
+		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, c.filter, c.after, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -599,23 +603,110 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 	e.rawGroups = true
 }
 
-// A batch reads a window of at most 100,000 tasks, so a bulk action gets
-// through any number of tasks that do not match, batch by batch. It still
-// acts on each matching task once: where a batch ends with its window, where
-// a window holds no match, and when a task matches again behind the action.
-func TestBulkActionsReadTheTableInWindows(t *testing.T) {
+// bulkStatements counts the statements of bulk actions that a pool's
+// connections send: the picks of the batches, and the searches for a window.
+type bulkStatements struct {
+	picks, windows atomic.Int64
+}
+
+func (s *bulkStatements) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, "WITH candidates AS") {
+		s.picks.Add(1)
+	}
+	return ctx
+}
+
+func (*bulkStatements) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (*bulkStatements) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	return ctx
+}
+
+func (s *bulkStatements) TraceBatchQuery(_ context.Context, _ *pgx.Conn, d pgx.TraceBatchQueryData) {
+	if strings.Contains(d.SQL, "SELECT least(") {
+		s.windows.Add(1)
+	}
+}
+
+func (*bulkStatements) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
+
+// reset returns the counts since the last reset.
+func (s *bulkStatements) reset() (picks, windows int64) {
+	return s.picks.Swap(0), s.windows.Swap(0)
+}
+
+// A bulk action whose filter an index serves reads the tasks that match, in
+// as many batches as they fill, however many other tasks the tables hold: it
+// reads in no windows.
+func TestBulkActionsWithAnIndexReadOnlyTheirTasks(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	sent := &bulkStatements{}
+	e := newTracedEnv(t, sent)
 	ctx := t.Context()
-	// Tasks 1 to 250,000: of those from 120,005 to 240,000, every fifth is a
-	// dead task of the queue q, 24,000 in all. So the first window has none
-	// of them, and the second ends with one, task 200,000. Every 500th task
-	// is of a rare kind, 500 in all.
+	// 150,000 tasks and as many completed ones. Every 500th of each is of
+	// the queue q, 300 in all, and those not completed are dead.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT CASE WHEN i % 500 = 0 THEN 'q' ELSE 'other' END, 'email.send',
+	                  CASE WHEN i % 500 = 0 THEN 'dead' ELSE 'available' END::{s}.task_state, now(), '{}', 3,
+	                  CASE WHEN i % 500 = 0 THEN now() END
+	           FROM generate_series(1, 150000) i`)
+	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+	                                         priority, attempt, max_attempts, payload, metadata, errors)
+	           SELECT 1000000 + i, now(), CASE WHEN i % 500 = 0 THEN 'q' ELSE 'other' END, now(), 'email.send', now(), 'w', now(),
+	                  2, 1, 3, '{}', '{}', '[]'
+	           FROM generate_series(1, 150000) i`)
+	e.exec(t, "ANALYZE {s}.tasks")
+	e.exec(t, "ANALYZE {s}.task_history")
+
+	q := []string{"q"}
+	for _, c := range []struct {
+		pick   string
+		do     func(context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error)
+		filter taskmill.TaskFilter
+	}{
+		{"retry", e.client.RetryMatching, taskmill.TaskFilter{Queues: q}},
+		{"history", e.client.DeleteMatching, taskmill.TaskFilter{Queues: q, States: []taskmill.State{taskmill.StateCompleted}}},
+	} {
+		// A batch reads each task that matches once to pick it, and once to
+		// lock it.
+		read, err := taskmill.BulkRowsRead(ctx, e.client, c.pick, &c.filter, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if read > 1000 {
+			t.Errorf("%s %+v: the batch read %d rows for 300 tasks", c.pick, c.filter, read)
+		}
+		sent.reset()
+		res, err := c.do(ctx, &taskmill.BulkParams{Filter: c.filter})
+		if err != nil || res != (taskmill.BulkResult{Changed: 300}) {
+			t.Fatalf("%s %+v: %+v, %v; want 300 tasks changed", c.pick, c.filter, res, err)
+		}
+		if picks, windows := sent.reset(); picks != 1 || windows != 0 {
+			t.Errorf("%s %+v: the action read %d batches and looked for %d windows, want 1 batch and no window", c.pick, c.filter, picks, windows)
+		}
+	}
+}
+
+// A batch that cannot end in time, as when too many tasks lie before those
+// that match, gives way: the action goes on in windows of 100,000 tasks, in
+// which every batch moves its position, also if its context ended meanwhile.
+// It still acts on each matching task once: where a batch ends with its
+// window, and when a task matches again behind the action.
+func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
+	t.Parallel()
+	sent := &bulkStatements{}
+	e := newTracedEnv(t, sent)
+	ctx := t.Context()
+	// Tasks 1 to 250,000. The dead tasks of the queue q are every 1,000th
+	// of the first 100,000, and every fifth from 120,005 to 240,000: 24,100
+	// in all. So the first two windows each end with one of them, tasks
+	// 100,000 and 200,000. Every 500th task is of a rare kind, 500 in all.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
 	           SELECT CASE WHEN dead THEN 'q' ELSE 'other' END, CASE WHEN i % 500 = 0 THEN 'rare' ELSE 'email.send' END,
 	                  CASE WHEN dead THEN 'dead' ELSE 'available' END::{s}.task_state, now(), '{}', 3,
 	                  CASE WHEN dead THEN now() END
-	           FROM (SELECT i, i > 120000 AND i <= 240000 AND i % 5 = 0 AS dead FROM generate_series(1, 250000) i) x`)
+	           FROM (SELECT i, i <= 100000 AND i % 1000 = 0 OR i > 120000 AND i <= 240000 AND i % 5 = 0 AS dead
+	                 FROM generate_series(1, 250000) i) x`)
 	// 120,000 completed tasks after them, 120 of them of the rare kind.
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
@@ -625,24 +716,27 @@ func TestBulkActionsReadTheTableInWindows(t *testing.T) {
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "ANALYZE {s}.task_history")
 	q := taskmill.TaskFilter{Queues: []string{"q"}}
+	rare := taskmill.TaskFilter{Kinds: []string{"rare"}}
 
+	// A batch in a window reads the window at most, and the tasks it picks
+	// once more to lock them. Finding the window reads its own entries of
+	// each table's index.
 	for _, c := range []struct {
 		action string
 		filter taskmill.TaskFilter
 	}{
-		{"retry", taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}},
 		{"cancel", q},
 		{"delete", q},
+		{"delete", rare},
 	} {
-		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, &c.filter, 0)
+		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, &c.filter, 0, true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if n > 100_000 {
-			t.Errorf("%s %+v: the first batch read %d rows, want at most a window of 100,000", c.action, c.filter, n)
+		if n > 101_000 {
+			t.Errorf("%s %+v: a batch in a window read %d rows, want at most a window of 100,000 and a batch", c.action, c.filter, n)
 		}
 	}
-	// Finding a window reads its own entries of each table's index.
 	for _, generic := range []bool{false, true} {
 		n, err := taskmill.WindowRowsRead(ctx, e.client, 0, generic)
 		if err != nil {
@@ -653,21 +747,74 @@ func TestBulkActionsReadTheTableInWindows(t *testing.T) {
 		}
 	}
 
-	// A retried task dies again at once, so it matches again.
-	e.exec(t, `CREATE FUNCTION {s}.die_again() RETURNS trigger LANGUAGE plpgsql AS
-	           'BEGIN NEW.state := ''dead''; NEW.finalized_at := now(); RETURN NEW; END'`)
-	e.exec(t, `CREATE TRIGGER die_again BEFORE UPDATE ON {s}.tasks FOR EACH ROW
-	           WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.die_again()`)
-	res, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: q})
-	if err != nil || res != (taskmill.BulkResult{Changed: 24000}) {
-		t.Fatalf("retry: %+v, %v; want each of the 24,000 dead tasks retried once", res, err)
+	// A retried task dies again at once, so it matches again. While batches
+	// are held, the statement that changes a task does not end.
+	e.exec(t, "CREATE TABLE {s}.batches AS SELECT false AS held")
+	e.exec(t, `CREATE FUNCTION {s}.hold() RETURNS trigger LANGUAGE plpgsql AS '
+	           BEGIN
+	               IF (SELECT held FROM {s}.batches) THEN PERFORM pg_sleep(60); END IF;
+	               IF TG_OP = ''DELETE'' THEN RETURN OLD; END IF;
+	               NEW.state := ''dead'';
+	               NEW.finalized_at := now();
+	               RETURN NEW;
+	           END'`)
+	e.exec(t, `CREATE TRIGGER hold_retry BEFORE UPDATE ON {s}.tasks FOR EACH ROW
+	           WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.hold()`)
+	e.exec(t, "CREATE TRIGGER hold_delete BEFORE DELETE ON {s}.tasks FOR EACH ROW EXECUTE FUNCTION {s}.hold()")
+	// slowly runs an action whose first batch is held until the database
+	// ends its statement. Once that batch is held, it calls held, and holds
+	// no batch after it.
+	type result struct {
+		taskmill.BulkResult
+		err error
+	}
+	slowly := func(action func() (taskmill.BulkResult, error), held func()) result {
+		t.Helper()
+		e.exec(t, "UPDATE {s}.batches SET held = true")
+		sent.reset()
+		done := make(chan result, 1)
+		go func() {
+			res, err := action()
+			done <- result{res, err}
+		}()
+		waitFor(t, "the first batch to be held", func() bool {
+			return e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND strpos(query, $1) > 0", e.schema) > 0
+		})
+		held()
+		e.exec(t, "UPDATE {s}.batches SET held = false")
+		return <-done
 	}
 
-	// A delete goes through both tables, here with a few matches in each
-	// window.
-	res, err = e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: taskmill.TaskFilter{Kinds: []string{"rare"}}})
-	if err != nil || res != (taskmill.BulkResult{Changed: 620}) {
-		t.Fatalf("delete: %+v, %v; want the 500 tasks and the 120 completed tasks of the kind deleted", res, err)
+	// The retry goes through three windows: the first has 100 of the tasks,
+	// the second ends with its 16th full batch, and the third ends at the
+	// last task.
+	got := slowly(func() (taskmill.BulkResult, error) {
+		return e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: q})
+	}, func() {})
+	if got.err != nil || got.BulkResult != (taskmill.BulkResult{Changed: 24100}) {
+		t.Fatalf("retry: %+v, %v; want each of the 24,100 dead tasks retried once", got.BulkResult, got.err)
+	}
+	if _, windows := sent.reset(); windows != 3 {
+		t.Errorf("the retry looked for %d windows, want 3", windows)
+	}
+
+	// The context of a delete ends while its first batch is held. The
+	// action still goes through one window, which has 200 of the 500 tasks
+	// and none of the 120 completed ones, and a second run does the rest.
+	stopped, stop := context.WithCancel(ctx)
+	defer stop()
+	got = slowly(func() (taskmill.BulkResult, error) {
+		return e.client.DeleteMatching(stopped, &taskmill.BulkParams{Filter: rare})
+	}, stop)
+	if !errors.Is(got.err, context.Canceled) || got.Changed != 200 || got.Next == "" {
+		t.Fatalf("delete: %+v, %v; want 200 tasks deleted in one window after the context ended", got.BulkResult, got.err)
+	}
+	if _, windows := sent.reset(); windows != 1 {
+		t.Errorf("the delete looked for %d windows, want 1", windows)
+	}
+	rest, err := e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: rare, Cursor: got.Next})
+	if err != nil || rest != (taskmill.BulkResult{Changed: 420}) {
+		t.Fatalf("the rest of the delete: %+v, %v; want the other 300 tasks and the 120 completed ones deleted", rest, err)
 	}
 	left := e.count(t, `SELECT (SELECT count(*) FROM {s}.tasks WHERE kind = 'rare')
 	                         + (SELECT count(*) FROM {s}.task_history WHERE kind = 'rare')`)

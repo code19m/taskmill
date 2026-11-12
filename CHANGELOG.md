@@ -148,14 +148,16 @@ All notable changes to taskmill are recorded here. The format follows
   reads about the tasks it shows. A list of one state across all queues,
   such as every dead task, still reads the newer tasks of other states
   first.
-- `RetryMatching`, `CancelMatching`, and `DeleteMatching` get past tasks
-  that do not match in short batches. A batch read on until it had found
+- `RetryMatching`, `CancelMatching`, and `DeleteMatching` get past any
+  number of tasks that do not match. A batch read on until it had found
   1,000 matching tasks: with 2.4 million other tasks before the first dead
   one, the first batch of a retry read them all. On a table where that
   took more than the batch's 5 seconds, the action failed, and failed
-  again at the same place with the cursor it returned. A batch now reads
-  at most 100,000 tasks, and the action still acts on each matching task
-  once.
+  again at the same place with the cursor it returned. Now the database
+  ends a statement of such a batch after a second, and the action goes on
+  in batches that read at most 100,000 tasks, each of which moves its
+  position. It still acts on each matching task once. An action whose
+  tasks an index finds reads only those, as before.
 - `Client.Count`, which the dashboard asks before it confirms a bulk
   action, reads each state's tasks through that state's index. Where the
   tasks of a state lay together in the table, as tasks of one age do, it
