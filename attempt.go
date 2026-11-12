@@ -262,18 +262,21 @@ func classify(t *tracked, err, cause error) outcome {
 //
 // The wait counts from the first time a worker met the task without a
 // handler, which that worker records with the task's errors as a no_handler
-// note. A wait that ended in death, recorded as unknown_kind, does not count:
-// an operator retried the task since.
+// note. The note counts only while it is the last of those errors, which it
+// stays through this wait's snoozes. An error after it shows that the wait
+// is over: a worker with a handler ran the task, or the wait ended in death,
+// recorded as unknown_kind, and an operator retried the task. A worker with
+// a handler that records no error, because it snoozes the task or gives it
+// back, removes the note instead. After any of these, the next worker
+// without a handler starts a new wait.
 func (w *Worker) unknownKind(ctx context.Context, t *tracked) outcome {
 	limit := w.timing.noHandlerWait
 	var since time.Time
 	for _, e := range slices.Backward(t.info.Errors) {
-		if e.Code == CodeUnknownKind {
+		if e.Code != CodeNoHandler {
 			break
 		}
-		if e.Code == CodeNoHandler {
-			since = e.At
-		}
+		since = e.At
 	}
 	o := outcome{kind: outcomeSnooze, code: CodeNoHandler}
 	var waited time.Duration
@@ -427,9 +430,10 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 			s := errorJSON(o)
 			note = &s
 		}
-		found, err = queryRow(ctx, q, sql.snooze, []any{id, token, o.delay.Microseconds(), note}, &queue, &group, &state)
+		found, err = queryRow(ctx, q, sql.snooze, []any{id, token, o.delay.Microseconds(), note, t.reg != nil},
+			&queue, &group, &state)
 	case outcomeRelease:
-		found, err = queryRow(ctx, q, sql.release, []any{id, token}, &queue, &group, &state)
+		found, err = queryRow(ctx, q, sql.release, []any{id, token, t.reg != nil}, &queue, &group, &state)
 	case outcomeComplete, outcomeDiscard:
 		return endedOther, nil
 	}

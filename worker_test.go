@@ -357,6 +357,72 @@ func TestWorkerSnoozesUnknownKinds(t *testing.T) {
 	}
 }
 
+// The wait for a handler ends when a worker that has one takes the task,
+// however its attempt ends. A worker without a handler that meets the task
+// later, after a rollback for example, starts a new wait: the note of the
+// old wait must not make the task dead at once.
+func TestWaitForAHandlerStartsAgainAfterAHandlerHadTheTask(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct {
+		result error          // what the handler returns; nil means it runs until RunTask's context ends
+		want   taskmill.State // where that leaves the task
+	}{
+		"the attempt failed":  {errors.New("the partner is down"), taskmill.StateRetryable},
+		"the handler snoozed": {taskmill.Snooze(time.Hour), taskmill.StateScheduled},
+		"the task went back":  {nil, taskmill.StateAvailable},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			var other taskmill.Handlers
+			taskmill.AddHandler(&other, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+			without := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &other})
+			runCtx, stopRun := context.WithCancel(t.Context())
+			defer stopRun()
+			with := newWorker(t, e, &taskmill.WorkerConfig{
+				Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+					if tt.result != nil {
+						return tt.result
+					}
+					stopRun()
+					<-ctx.Done()
+					return ctx.Err()
+				}, nil),
+			})
+			id := e.enqueue(t, sendEmail{}, nil)
+			run := func(ctx context.Context, w *taskmill.Worker) *taskmill.TaskInfo {
+				t.Helper()
+				info, err := w.RunTask(ctx, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return info
+			}
+
+			// A rolling deploy: a worker of the old release meets the task, which
+			// begins to wait for a handler. That was two hours ago.
+			if info := run(t.Context(), without); info.State != taskmill.StateScheduled || info.Errors[0].Code != taskmill.CodeNoHandler {
+				t.Fatalf("got %s with errors %+v, want a snooze with a note", info.State, info.Errors)
+			}
+			e.exec(t, `UPDATE {s}.tasks SET errors = jsonb_set(errors, '{0,at}', to_jsonb(now() - interval '2 hours'))
+			           WHERE id = $1`, id)
+
+			// A worker of the new release had the task since.
+			if info := run(runCtx, with); info.State != tt.want {
+				t.Fatalf("the worker with the handler left the task %s, want %s", info.State, tt.want)
+			}
+
+			// A rollback: a worker without the handler meets the task again.
+			info := run(t.Context(), without)
+			last := info.Errors[len(info.Errors)-1]
+			if info.State != taskmill.StateScheduled || last.Code != taskmill.CodeNoHandler || time.Since(last.At) > time.Hour {
+				t.Fatalf("the task is %s with errors %+v, want it to wait for a handler again, with a new note", info.State, info.Errors)
+			}
+		})
+	}
+}
+
 func TestCompleteTxCommitsWithTheHandlersWrites(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

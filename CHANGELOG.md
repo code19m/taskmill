@@ -49,6 +49,16 @@ All notable changes to taskmill are recorded here. The format follows
   end beside the new attempt; only its result was refused. The worker now
   cancels the older attempt's context with `ErrLeaseLost` as soon as it
   fetches the task again.
+- A task could become dead with the code `unknown_kind` the first time a
+  worker without a handler for its kind met it, although workers with the
+  handler had run it since. The wait for a handler counted from the task's
+  oldest `no_handler` note, such as one from a deploy hours ago. So after a
+  rollback, or beside an old process that lingered, the hour was already
+  over, and the dead task halted its FIFO group. The wait now ends when a
+  worker with the handler takes the task. A note counts only while it is the
+  last of the task's errors, and a worker with the handler that snoozes the
+  task, or gives it back when it stops, removes the note. The next worker
+  without the handler starts a new wait of an hour, with a new note.
 
 ## [0.5.0] - 2026-11-12
 
