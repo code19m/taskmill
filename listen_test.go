@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -26,18 +25,8 @@ var idleQueues = map[string]taskmill.QueueOptions{"default": {}, "a": {}, "b": {
 // send.
 func newCountedEnv(t *testing.T) (*env, *fetchCounter) {
 	t.Helper()
-	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
 	fetches := &fetchCounter{}
-	cfg.ConnConfig.Tracer = fetches
-	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	return newEnvWith(t, pool, nil), fetches
+	return newTracedEnv(t, fetches), fetches
 }
 
 // startIdleWorker runs a worker of idleQueues that polls every 20 ms while

@@ -381,7 +381,7 @@ type trackedState int
 const (
 	stateRunning   trackedState = iota // the handler is running
 	stateRecording                     // the handler returned; its result is being recorded
-	stateAbandoned                     // released at shutdown; the result is ignored
+	stateAbandoned                     // released at shutdown, or its task was leased again; the result is ignored
 )
 
 // run is the state of one call to [Worker.Run].
@@ -577,7 +577,7 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 		return nil, err
 	}
 	t.direct = true
-	w.track(t)
+	w.track(ctx, t)
 
 	// The lease is renewed every third of it while the handler runs, and
 	// while its result is recorded.

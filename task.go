@@ -154,7 +154,8 @@ const (
 	// v0.3.0 have the code "lease_expired" instead.
 	CodeLeaseLost ErrorCode = "lease_lost"
 
-	// CodePanic means the handler panicked.
+	// CodePanic means the handler panicked, or code that the worker ran
+	// after it returned: a method of its error, or its retry policy.
 	CodePanic ErrorCode = "panic"
 
 	// CodeTimeout means the attempt ran longer than [HandlerOptions.Timeout].
@@ -170,7 +171,9 @@ const (
 
 	// CodeNoHandler marks a note, not a failure: a worker met the task
 	// without a handler for its kind, and the task began to wait for one,
-	// without using attempts.
+	// without using attempts. A worker with a handler that then snoozes the
+	// task, or gives it back when it stops, removes the note, and so does a
+	// retry of the task.
 	CodeNoHandler ErrorCode = "no_handler"
 )
 

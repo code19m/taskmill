@@ -297,10 +297,32 @@ func completionsOf(ts []*tracked) []completion {
 }
 
 // track starts tracking t, so that check-ins renew its lease.
-func (w *Worker) track(t *tracked) {
+//
+// The worker may still run an older attempt of t's task: it was out of touch
+// for longer than the lease, and the task was rescued and leased again
+// before a check-in found out. t takes that attempt's place, so no check-in
+// sees it again. The new lease proves that the older attempt lost its own,
+// so track cancels its context with ErrLeaseLost, and its result is ignored.
+func (w *Worker) track(ctx context.Context, t *tracked) {
 	w.mu.Lock()
+	old := w.attempts[t.att.id]
 	w.attempts[t.att.id] = t
+	replaced := false
+	if old != nil {
+		// Under w.mu, so that a shutdown either still finds the older
+		// attempt and abandons it, or finds it abandoned here.
+		old.mu.Lock()
+		if old.state == stateRunning {
+			old.state, replaced = stateAbandoned, true
+		}
+		old.mu.Unlock()
+	}
 	w.mu.Unlock()
+	if replaced && !old.lost.Swap(true) {
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "attempt lost its lease; canceling it",
+			slog.Int64(logKeyTaskID, old.att.id), slog.String(logKeyKind, old.info.Kind))
+		old.cancelAttempt(ErrLeaseLost)
+	}
 }
 
 func (w *Worker) untrack(t *tracked) {

@@ -22,6 +22,68 @@ All notable changes to taskmill are recorded here. The format follows
   `localhost:8080` as before. Its `POST /orders` now answers
   `order 1 placed, task 1 enqueued`, without the link to the task's
   dashboard page.
+- A worker with a free slot for a queue that is at its `MaxRunning` now
+  sends one read each time it polls the queue: it counts the queue's running
+  tasks without a lock. Before, each such worker opened a transaction and
+  locked the queue's row, once a second by default, although no task could
+  start. A fetch still locks the row and counts again before it takes a
+  task, so the limit holds as before.
+
+### Fixed
+
+- A task of a queue with `MaxRunning` could start with a lease that was
+  almost over, or already over. Its lease counted from the start of the
+  fetch, before the fetch waited for the queue's row, which another worker's
+  fetch can hold. The maintainer then rescued the task while it ran: the task
+  used an attempt with the code `lease_lost` and ran twice, or became dead
+  with `MaxAttempts: 1`. A lease now counts from the moment the task is
+  taken. This holds for `Worker.RunTask` too, which lost the time it waited
+  for a task's row that another transaction held.
+- A fetch from a queue with `MaxRunning` waits at most one second for the
+  queue's row, not 30. If a transaction holds the row longer, such as a
+  stalled worker's, the fetch gives up, and the worker fetches again when
+  the queue is next woken or polled. Before, each worker of the queue kept a
+  connection waiting, and could not stop until the wait ended. Giving up is
+  not a failed operation, and logs only a debug line: the queue's fetches
+  take the row in turn, so with many workers on one queue a fetch can wait a
+  second while nothing is stuck.
+- A panic in `RetryPolicy.Backoff`, or in a method of the error that a
+  handler returned, ended the worker's process. The usual cause of the
+  second is a nil pointer returned as an `error`, whose `Error` method
+  panics. Every other task of that process lost its lease, and the task
+  ended each process that ran it next, until its attempts ran out. The
+  worker now recovers such a panic as it recovers a handler's: the attempt
+  fails with the code `panic` and the panic's stack in the task's errors.
+  The task is retried after the default backoff, or becomes dead after its
+  last attempt.
+- A panic still ended the worker's process if its value panicked again when
+  the worker formatted it, as an `Error` method that panics with its own
+  receiver does. This held for a handler's own panic too. The worker now
+  formats the value under a recover of its own, and the task's error names
+  the value's type instead of its text.
+- A worker that fetched a task again while its own older attempt of that
+  task still ran forgot the older attempt. This can happen after the worker
+  was cut off from the database, or paused, for longer than the lease: the
+  task is rescued, and the worker's next fetch can come before its next
+  check-in. The older handler's context was never canceled, so it ran to its
+  end beside the new attempt; only its result was refused. The worker now
+  cancels the older attempt's context with `ErrLeaseLost` as soon as it
+  fetches the task again.
+- A task could become dead with the code `unknown_kind` the first time a
+  worker without a handler for its kind met it, although workers with the
+  handler had run it since. The wait for a handler counted from the task's
+  oldest `no_handler` note, such as one from a deploy hours ago. So after a
+  rollback, or beside an old process that lingered, the hour was already
+  over, and the dead task halted its FIFO group. The wait now ends when a
+  worker with the handler takes the task. A note counts only while it is the
+  last of the task's errors, and a worker with the handler that snoozes the
+  task, or gives it back when it stops, removes the note. The next worker
+  without the handler starts a new wait of an hour, with a new note.
+- `Retry` and `RetryMatching` did not start a new wait for a handler if the
+  task had been canceled while it waited. More than an hour after the task's
+  `no_handler` note, the next worker without the handler made the retried
+  task dead at once. A retry now removes that note, so the wait starts
+  again, as documented.
 
 ## [0.5.0] - 2026-11-12
 

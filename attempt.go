@@ -38,7 +38,7 @@ func (w *Worker) runOne(parent context.Context, t *tracked) {
 	err := w.invoke(ctx, t, func(ctx context.Context) error { return t.reg.run(ctx, t.info, t.att) })
 	cause := context.Cause(ctx)
 	cancelTimeout()
-	w.finish(ctx, t, classify(t, err, cause), start)
+	w.finish(ctx, t, outcomeOf(t, err, cause), start)
 }
 
 // runBatch runs a batch handler for tasks. Middleware still wraps each task:
@@ -99,7 +99,7 @@ func (w *Worker) runBatch(parent context.Context, tasks []*tracked) {
 
 	cause := context.Cause(ctx)
 	for i, t := range tasks {
-		w.finish(ctx, t, classify(t, errs[i], cause), start)
+		w.finish(ctx, t, outcomeOf(t, errs[i], cause), start)
 	}
 }
 
@@ -166,14 +166,28 @@ var errSkippedHandler = classError("taskmill: middleware returned nil without ru
 
 func panicFailure(r any) *failure {
 	stack := debug.Stack()
-	return &failure{code: CodePanic, err: fmt.Errorf("panic: %v\n%s", r, stack)}
+	return &failure{code: CodePanic, err: fmt.Errorf("panic: %s\n%s", panicText(r), stack)}
+}
+
+// panicText formats the value of a recovered panic. Formatting runs the
+// value's own methods, which can panic again, as an Error method that panics
+// with its receiver does. The text then names the value's type instead: the
+// recover must not end the process that it is there to save.
+func panicText(r any) (text string) {
+	defer func() {
+		if recover() != nil {
+			text = fmt.Sprintf("a %T that panics when it is formatted", r)
+		}
+	}()
+	return fmt.Sprint(r)
 }
 
 // outcome is how an attempt ended, and what to record for it.
 type outcome struct {
 	kind  outcomeKind
 	delay time.Duration // before the next run, for retries and snoozes
-	err   error
+	err   error         // the failure, for the log
+	msg   string        // the failure's text, or a snooze's note, for the task's errors
 	code  ErrorCode
 }
 
@@ -189,7 +203,32 @@ const (
 	outcomeDiscard // nothing to record: the lease is gone, or the handler completed the task itself
 )
 
-// classify turns a handler's result into the outcome to record.
+// outcomeOf turns a handler's result into the outcome to record, and reads
+// the text of its error. Both run code of the application after the handler
+// returned: the methods of the error, and the retry policy. A panic there
+// must not end the worker's process, and with it every other attempt. It
+// fails the attempt instead, as a handler's panic does: the task is retried
+// after the default backoff, or is dead after its last attempt.
+func outcomeOf(t *tracked, err, cause error) (o outcome) {
+	defer func() {
+		if r := recover(); r != nil {
+			f := panicFailure(r)
+			o = outcome{kind: outcomeDead, err: f, msg: f.Error(), code: f.code}
+			if t.info.Attempt < t.info.MaxAttempts {
+				o.kind, o.delay = outcomeRetry, ExponentialBackoff{}.Backoff(t.info.Attempt)
+			}
+		}
+	}()
+	o = classify(t, err, cause)
+	if o.err != nil {
+		o.msg = o.err.Error()
+	}
+	return o
+}
+
+// classify turns a handler's result into the outcome to record. It may
+// panic, as the application's code that it runs may: call it through
+// outcomeOf.
 func classify(t *tracked, err, cause error) outcome {
 	switch {
 	case t.lost.Load():
@@ -236,32 +275,33 @@ func classify(t *tracked, err, cause error) outcome {
 //
 // The wait counts from the first time a worker met the task without a
 // handler, which that worker records with the task's errors as a no_handler
-// note. A wait that ended in death, recorded as unknown_kind, does not count:
-// an operator retried the task since.
+// note. The note counts only while it is the last of those errors, which it
+// stays through this wait's snoozes. An error after it shows that the wait
+// is over: a worker with a handler ran the task, or the wait ended in death,
+// recorded as unknown_kind, and an operator retried the task. A worker with
+// a handler that records no error, because it snoozes the task or gives it
+// back, removes the note instead, and so does a retry of a task that was
+// canceled while it waited. After any of these, the next worker without a
+// handler starts a new wait.
 func (w *Worker) unknownKind(ctx context.Context, t *tracked) outcome {
 	limit := w.timing.noHandlerWait
 	var since time.Time
 	for _, e := range slices.Backward(t.info.Errors) {
-		if e.Code == CodeUnknownKind {
+		if e.Code != CodeNoHandler {
 			break
 		}
-		if e.Code == CodeNoHandler {
-			since = e.At
-		}
+		since = e.At
 	}
 	o := outcome{kind: outcomeSnooze, code: CodeNoHandler}
 	var waited time.Duration
 	if since.IsZero() {
-		o.err = fmt.Errorf("no handler for kind %q; waiting up to %s for a worker that has one", t.info.Kind, limit)
+		o.msg = fmt.Sprintf("no handler for kind %q; waiting up to %s for a worker that has one", t.info.Kind, limit)
 	} else {
 		waited = t.info.AttemptedAt.Sub(since) // both times come from the database's clock
 	}
 	if waited >= limit {
-		return outcome{
-			kind: outcomeDead,
-			code: CodeUnknownKind,
-			err:  fmt.Errorf("no handler for kind %q appeared within %s", t.info.Kind, limit),
-		}
+		err := fmt.Errorf("no handler for kind %q appeared within %s", t.info.Kind, limit)
+		return outcome{kind: outcomeDead, code: CodeUnknownKind, err: err, msg: err.Error()}
 	}
 	// Warn once per task, not at every snooze: a deploy can leave many tasks
 	// waiting for an hour.
@@ -400,13 +440,14 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 		found, err = queryRow(ctx, q, sql.cancelRunning, []any{id, token}, &queue, &group)
 	case outcomeSnooze:
 		var note *string // an error to record, if the snooze has one
-		if o.err != nil {
+		if o.msg != "" {
 			s := errorJSON(o)
 			note = &s
 		}
-		found, err = queryRow(ctx, q, sql.snooze, []any{id, token, o.delay.Microseconds(), note}, &queue, &group, &state)
+		found, err = queryRow(ctx, q, sql.snooze, []any{id, token, o.delay.Microseconds(), note, t.reg != nil},
+			&queue, &group, &state)
 	case outcomeRelease:
-		found, err = queryRow(ctx, q, sql.release, []any{id, token}, &queue, &group, &state)
+		found, err = queryRow(ctx, q, sql.release, []any{id, token, t.reg != nil}, &queue, &group, &state)
 	case outcomeComplete, outcomeDiscard:
 		return endedOther, nil
 	}
@@ -440,10 +481,7 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 
 // errorJSON encodes an attempt's error for the errors column.
 func errorJSON(o outcome) string {
-	msg := "unknown error"
-	if o.err != nil {
-		msg = strings.ReplaceAll(o.err.Error(), "\x00", "") // jsonb cannot store NUL
-	}
+	msg := strings.ReplaceAll(cmp.Or(o.msg, "unknown error"), "\x00", "") // jsonb cannot store NUL
 	if len(msg) > errorMessageLimit {
 		msg = strings.ToValidUTF8(msg[:errorMessageLimit], "") + "…"
 	}
