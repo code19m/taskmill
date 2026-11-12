@@ -37,20 +37,7 @@ func TestMigrateIsIdempotentAndConcurrencySafe(t *testing.T) {
 	t.Parallel()
 	pool := testdb.PoolSize(t, 16)
 	schema := testdb.Schema(t, pool)
-
-	var wg sync.WaitGroup
-	errs := make([]error, 8)
-	for i := range errs {
-		wg.Go(func() {
-			errs[i] = taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema})
-		})
-	}
-	wg.Wait()
-	for i, err := range errs {
-		if err != nil {
-			t.Fatalf("concurrent Migrate %d: %v", i, err)
-		}
-	}
+	migrateAtOnce(t, pool, schema, 8)
 
 	e := &env{pool: pool, schema: schema}
 	all, err := taskmill.Migrations(schema)
@@ -108,19 +95,44 @@ func TestConcurrentMigratesOnWarmConnections(t *testing.T) {
 	}
 
 	for range 5 {
-		schema := testdb.Schema(t, pool)
-		var wg sync.WaitGroup
-		errs := make([]error, processes)
-		for i := range errs {
-			wg.Go(func() {
-				errs[i] = taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema})
-			})
-		}
-		wg.Wait()
-		for i, err := range errs {
-			if err != nil {
-				t.Fatalf("concurrent Migrate %d: %v", i, err)
-			}
+		migrateAtOnce(t, pool, testdb.Schema(t, pool), processes)
+	}
+}
+
+// Migrate runs before NewClient checks the pool's isolation level. A process
+// that waited for another's migration must see what that one committed,
+// whatever the pool's level.
+func TestConcurrentMigratesAtRepeatableRead(t *testing.T) {
+	t.Parallel()
+	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t)) // a proxy refuses the parameter
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 8
+	cfg.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	migrateAtOnce(t, pool, testdb.Schema(t, pool), 8)
+}
+
+// migrateAtOnce runs Migrate on schema from several processes at once, and
+// fails the test if one of them fails.
+func migrateAtOnce(t *testing.T, pool *pgxpool.Pool, schema string, processes int) {
+	t.Helper()
+	var wg sync.WaitGroup
+	errs := make([]error, processes)
+	for i := range errs {
+		wg.Go(func() {
+			errs[i] = taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema})
+		})
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Migrate %d: %v", i, err)
 		}
 	}
 }

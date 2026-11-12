@@ -71,6 +71,11 @@ All notable changes to taskmill are recorded here. The format follows
   `no_handler` note, the next worker without the handler made the retried
   task dead at once. A retry now removes that note, so the wait starts
   again, as documented.
+- `Migrate` called from several processes at once failed in the processes
+  that waited, with `schema ... already exists` or `relation ... already
+  exists`, when the pool's `default_transaction_isolation` was not
+  `read committed`. `Migrate` now works at any default level. A client
+  still needs `read committed`, as `NewClient` checks.
 
 ### Security
 

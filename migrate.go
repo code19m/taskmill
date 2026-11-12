@@ -72,7 +72,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 		}
 		return nil
 	}
-	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+	if err := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
 		return applyMigrations(ctx, tx, schema, all, logger)
 	}); err != nil {
 		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
@@ -100,6 +100,11 @@ func schemaVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int,
 // the client when it prepares that name again
 // (https://github.com/pgbouncer/pgbouncer/issues/1630).
 const unprepared = pgx.QueryExecModeSimpleProtocol
+
+// readCommitted begins a transaction that sees, after it waited for another
+// process, what that process committed. Migrate cannot count on the pool's
+// default level: only NewClient checks it, later.
+var readCommitted = pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
 
 // applyMigrations applies the migrations that the schema lacks, in tx. One
 // process migrates at a time; the others wait for its lock, then find nothing
@@ -209,7 +214,7 @@ func Migrations(schema string) ([]Migration, error) {
 // keeps processes that do this at the same time from colliding. An error for
 // a missing privilege names the fix.
 func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema string) error {
-	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+	err := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", "taskmill.partitions."+schema); err != nil {
 			return err
 		}
