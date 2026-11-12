@@ -2,6 +2,7 @@ package taskmill
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -80,23 +81,14 @@ func ExplainPromote(ctx context.Context, c *Client) (string, error) {
 }
 
 // ExplainLeased returns the plans of the statements that find tasks by their
-// attempts: the completion, the lease renewal, and the lock of a grouped
-// completion.
+// attempts: those of a batch of attempts, and those of one.
 func ExplainLeased(ctx context.Context, c *Client) (string, error) {
-	ids, tokens := []int64{1, 2, 3}, []int32{1, 1, 1}
 	var plans []string
-	for _, s := range []struct {
-		sql  string
-		args []any
-	}{
-		{c.sql.complete, []any{ids, tokens, []int64{}}},
-		{c.sql.renewLeases, []any{ids, tokens, int64(1)}},
-		{c.sql.lockLeased, []any{ids, tokens}},
+	for _, s := range append(leased(c, []int64{1, 2, 3}, []int32{1, 1, 1}), []statement{
 		{c.sql.fail, []any{int64(1), int32(1), "retryable", int64(1), `{"message": "m"}`}},
 		{c.sql.snooze, []any{int64(1), int32(1), int64(1), nil, true}},
 		{c.sql.release, []any{int64(1), int32(1), true}},
-		{c.sql.cancelRequest, []any{ids, tokens}},
-	} {
+	}...) {
 		plan, err := explain(ctx, c, "", s.sql, s.args...)
 		if err != nil {
 			return "", err
@@ -104,6 +96,73 @@ func ExplainLeased(ctx context.Context, c *Client) (string, error) {
 		plans = append(plans, plan)
 	}
 	return strings.Join(plans, "\n"), nil
+}
+
+// statement is a statement with its arguments.
+type statement struct {
+	sql  string
+	args []any
+}
+
+// leased returns the statements that find a batch of tasks by their attempts
+// (ids, tokens): the lock of a grouped completion, the lease renewal, the
+// read of cancel requests, and the completion.
+func leased(c *Client, ids []int64, tokens []int32) []statement {
+	return []statement{
+		{c.sql.lockLeased, []any{ids, tokens}},
+		{c.sql.renewLeases, []any{ids, tokens, time.Hour.Microseconds()}},
+		{c.sql.cancelRequest, []any{ids, tokens}},
+		{c.sql.complete, []any{ids, tokens, []int64{}}},
+	}
+}
+
+// LeasedRowsRead runs the statements that find a batch of tasks by their
+// attempts (ids, tokens), with their generic plans, under EXPLAIN ANALYZE,
+// each in a transaction that it rolls back. It returns how many rows of
+// tasks they read, plus the pairs of a task and an attempt that their joins
+// compared and rejected.
+func LeasedRowsRead(ctx context.Context, c *Client, ids []int64, tokens []int32) (int64, error) {
+	tasks := scanned(func(rel string) bool { return rel == "tasks" })
+	var n int64
+	for _, s := range leased(c, ids, tokens) {
+		plan, err := analyze(ctx, c, true, "", s.sql, s.args...)
+		if err != nil {
+			return 0, err
+		}
+		n += planSum(plan, func(node map[string]any) float64 {
+			rejected, _ := node["Rows Removed by Join Filter"].(float64)
+			return tasks(node) + rejected
+		})
+	}
+	return n, nil
+}
+
+// LeasedFound runs the same statements in one transaction, in that order,
+// the completion last. It returns the IDs of the rows that each one
+// returned, sorted.
+func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (found [4][]int64, err error) {
+	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
+		for i, s := range leased(c, ids, tokens) {
+			r, err := tx.Query(ctx, s.sql, s.args...)
+			if err != nil {
+				return err
+			}
+			found[i], err = pgx.CollectRows(r, func(row pgx.CollectableRow) (int64, error) {
+				values, err := row.Values()
+				if err != nil {
+					return 0, err
+				}
+				id, _ := values[0].(int64)
+				return id, nil
+			})
+			if err != nil {
+				return err
+			}
+			slices.Sort(found[i])
+		}
+		return nil
+	})
+	return found, err
 }
 
 // explain returns the plan of sql, after settings if any, in a transaction

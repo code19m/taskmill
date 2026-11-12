@@ -179,6 +179,10 @@ func newStatements(schema string) *statements {
 		// state as text, so that the planner cannot read tasks_running_idx
 		// instead: statistics taken while few tasks ran make that index look
 		// small, but until vacuum it keeps an entry for every task that ran.
+		// Those that take a batch of attempts join from the attempts to the
+		// tasks, one lookup per attempt. The planner expects very few
+		// running tasks, so when the tasks are matched against the list of
+		// attempts instead, it compares every task with every attempt.
 		"{leased}", "state::text = 'running'",
 		// {utc} is the database's time in UTC, without a time zone. A
 		// retention period is subtracted from it, not from now(): there, a
@@ -314,9 +318,8 @@ SELECT ids.ord, ids.id, false FROM ids CROSS JOIN notified ORDER BY ids.ord`),
 		complete: q(`
 WITH done AS (
     DELETE FROM {s}.tasks
-    WHERE id = ANY($1::bigint[])
-      AND (id, lease_token) IN (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t))
-      AND {leased}
+    USING unnest($1::bigint[], $2::integer[]) AS u(i, t)
+    WHERE id = u.i AND lease_token = u.t AND {leased}
     RETURNING id, created_at, run_at, attempted_at, priority, attempt, max_attempts,
               queue, kind, group_key, attempted_by, payload, metadata, errors
 ), kept AS (
@@ -443,16 +446,16 @@ JOIN wanted w ON g.queue = w.queue AND g.group_key = w.group_key`),
 		// group rows.
 		lockLeased: q(`
 WITH attempts AS (
-    SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t)
+    SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
 ), locked AS (
-    SELECT id FROM {s}.tasks
-    WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}
-    FOR UPDATE SKIP LOCKED
+    SELECT t.id FROM attempts JOIN {s}.tasks t USING (id, lease_token)
+    WHERE {leased}
+    FOR UPDATE OF t SKIP LOCKED
 )
 SELECT id, true FROM locked
 UNION ALL
-SELECT id, false FROM {s}.tasks
-WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}`),
+SELECT t.id, false FROM attempts JOIN {s}.tasks t USING (id, lease_token)
+WHERE {leased}`),
 
 		// recountGroups adds $3, which is negative for tasks that left, to the
 		// counts of groups ($1, $2). The caller holds the groups' locks, and
@@ -711,11 +714,11 @@ SELECT coalesce((
 		// it does not return lost its lease.
 		renewLeases: q(`
 WITH attempts AS (
-    SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t)
+    SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
 ), locked AS (
-    SELECT id FROM {s}.tasks
-    WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}
-    FOR UPDATE SKIP LOCKED
+    SELECT t.id FROM attempts JOIN {s}.tasks t USING (id, lease_token)
+    WHERE {leased}
+    FOR UPDATE OF t SKIP LOCKED
 ), renewed AS (
     UPDATE {s}.tasks t
     SET lease_expires_at = now() + $3 * interval '1 microsecond'
@@ -725,15 +728,17 @@ WITH attempts AS (
 )
 SELECT id, true, cancel_requested FROM renewed
 UNION ALL
-SELECT id, false, cancel_requested_at IS NOT NULL FROM {s}.tasks
-WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}`),
+SELECT t.id, false, t.cancel_requested_at IS NOT NULL FROM attempts JOIN {s}.tasks t USING (id, lease_token)
+WHERE {leased}`),
 
 		// cancelRequest returns, of the tasks $1 that the attempts with the
 		// lease tokens $2 still own, those whose cancellation was requested.
 		cancelRequest: q(`
-SELECT id FROM {s}.tasks
-WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t))
-  AND {leased} AND cancel_requested_at IS NOT NULL`),
+WITH attempts AS (
+    SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
+)
+SELECT t.id FROM attempts JOIN {s}.tasks t USING (id, lease_token)
+WHERE {leased} AND t.cancel_requested_at IS NOT NULL`),
 
 		// fail records a failed attempt: retryable after a delay of $4
 		// microseconds, or dead. $5 is the error as a JSON object. A task

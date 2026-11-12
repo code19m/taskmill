@@ -2383,6 +2383,92 @@ func TestLeasedTasksAreFoundByID(t *testing.T) {
 	}
 }
 
+// The statements that find a batch of tasks by their attempts look each
+// attempt's task up once. Their work grows with the number of attempts, not
+// with its square, also with the generic plan that a worker's connection
+// keeps for them.
+func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	const attempts = 2000
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'default', 'email.send', 'available', now(), '{}', 1 FROM generate_series(1, 50000)`)
+	// The running tasks were all asked to stop, as after a bulk cancel.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+	                                 lease_expires_at, attempted_at, attempted_by, cancel_requested_at)
+	           SELECT 'default', 'email.send', 'running', now(), '{}', 1, 1, 1, now() + interval '1 minute', now(), 'w', now()
+	           FROM generate_series(1, $1)`, attempts)
+	e.exec(t, "ANALYZE {s}.tasks")
+	var ids []int64
+	var tokens []int32
+	running := replaceSchema("SELECT array_agg(id), array_agg(lease_token) FROM {s}.tasks WHERE state = 'running'", e.schema)
+	if err := e.pool.QueryRow(t.Context(), running).Scan(&ids, &tokens); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := taskmill.LeasedRowsRead(t.Context(), e.client, ids, tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The lock reads each task twice, the renewal three times and returns
+	// it, the read of cancel requests once, and the completion reads and
+	// returns it.
+	if n > 9*attempts {
+		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 9*attempts)
+	}
+}
+
+// The statements that find a batch of tasks by their attempts find a task
+// only for an attempt with its ID and its lease token, and only while it
+// runs.
+func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	task := func(state string, token int) int64 {
+		var lease any
+		if state == "running" {
+			lease = time.Now().Add(time.Minute)
+		}
+		return int64(e.count(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+		                                               lease_expires_at, attempted_at, attempted_by)
+		                         VALUES ('default', 'email.send', $1, now(), '{}', 5, 1, $2, $3, now(), 'w')
+		                         RETURNING id`, state, token, lease))
+	}
+	owned, alsoOwned := task("running", 3), task("running", 7)
+	takenOver := task("running", 5)   // its attempt holds token 4
+	released := task("available", 2)  // its attempt holds its token, but the task no longer runs
+	swapped := task("running", 1)     // its attempt holds the token of the next task,
+	swappedBack := task("running", 2) // and that task's attempt holds this one's
+	gone := swappedBack + 1           // no such task
+	// Someone asked to cancel one task of each sort.
+	e.exec(t, "UPDATE {s}.tasks SET cancel_requested_at = now() WHERE id = ANY($1)",
+		[]int64{alsoOwned, takenOver, released, swapped})
+
+	found, err := taskmill.LeasedFound(t.Context(), e.client,
+		[]int64{owned, takenOver, released, swapped, swappedBack, gone, alsoOwned, owned},
+		[]int32{3, 4, 2, 2, 1, 1, 7, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The lock and the renewal return each task they find twice: as locked
+	// or renewed, and as owned. The others return it once. An attempt
+	// listed twice changes none of this.
+	twice := []int64{owned, owned, alsoOwned, alsoOwned}
+	for i, want := range [][]int64{twice, twice, {alsoOwned}, {owned, alsoOwned}} {
+		if !slices.Equal(found[i], want) {
+			t.Errorf("%s found the tasks %v, want %v",
+				[]string{"the lock", "the renewal", "the read of cancel requests", "the completion"}[i], found[i], want)
+		}
+	}
+	for id, state := range map[int64]taskmill.State{
+		owned: taskmill.StateCompleted, alsoOwned: taskmill.StateCompleted,
+		takenOver: taskmill.StateRunning, released: taskmill.StateAvailable,
+		swapped: taskmill.StateRunning, swappedBack: taskmill.StateRunning,
+	} {
+		e.wantState(t, id, state)
+	}
+}
+
 func TestMiddlewareCannotRunAHandlerTwice(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
