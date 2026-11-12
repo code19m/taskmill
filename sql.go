@@ -224,7 +224,12 @@ SELECT coalesce(max(version), 0), current_setting('default_transaction_isolation
 
 		// enqueue inserts a batch of tasks in one round trip. It claims dedupe
 		// keys first, counts admitted tasks into their FIFO groups, places each
-		// task in its starting state, and notifies the listed queues.
+		// task in its starting state, and notifies the listed queues. For a
+		// duplicate, it returns the task that holds the key, or 0 if it cannot
+		// see that task: the holder committed while the statement waited for
+		// the key. A holder whose window ended is such a case: the statement
+		// would have claimed its key, had another enqueue not done so
+		// meanwhile. The client then reads the key again.
 		enqueue: q(`
 WITH input AS (
     SELECT queue, kind, priority, run_at, max_attempts, group_key,
@@ -285,7 +290,7 @@ WITH input AS (
 SELECT ids.ord, coalesce(i.id, d.task_id, 0), i.id IS NULL
 FROM ids
 LEFT JOIN inserted i ON i.id = ids.id
-LEFT JOIN {s}.dedupe_keys d ON i.id IS NULL AND d.key = ids.dedupe_key
+LEFT JOIN {s}.dedupe_keys d ON i.id IS NULL AND d.key = ids.dedupe_key AND d.expires_at > now()
 CROSS JOIN notified
 ORDER BY ids.ord`),
 

@@ -218,6 +218,10 @@ All notable changes to taskmill are recorded here. The format follows
   and lock in the other order if it changed. For a task of a FIFO group,
   they use a savepoint for this, named `taskmill_take_task`; `CancelTx`
   sets it in your transaction and releases it.
+- When two producers enqueued the same dedupe key just after its window
+  ended, one created the task, as it should, but the other's
+  `EnqueueResult.ID` named the old task that held the key before. Now it
+  names the task that the first producer created.
 
 ### Security
 

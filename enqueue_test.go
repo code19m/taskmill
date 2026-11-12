@@ -641,30 +641,41 @@ func TestEnqueueNotifiesListeners(t *testing.T) {
 
 func TestEnqueueFindsADuplicateCommittedWhileItWaited(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
-	opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
-	tx := e.begin(t)
-	first, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{To: "first"}, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, held := range []string{"a new key", "a key whose window ended"} {
+		t.Run(held, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
+			if held != "a new key" {
+				// An earlier task held the key, and the maintainer has not
+				// deleted the key yet.
+				e.enqueue(t, sendEmail{To: "earlier"}, opts)
+				e.exec(t, "UPDATE {s}.dedupe_keys SET expires_at = now() - interval '1 second'")
+			}
+			tx := e.begin(t)
+			first, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{To: "first"}, opts)
+			if err != nil || first.Duplicate {
+				t.Fatalf("the first enqueue: got %+v, %v; want a new task", first, err)
+			}
 
-	// A second enqueue of the key waits for the first one's transaction.
-	type result struct {
-		res taskmill.EnqueueResult
-		err error
-	}
-	second := make(chan result, 1)
-	go func() {
-		res, err := e.client.Enqueue(t.Context(), sendEmail{To: "second"}, opts)
-		second <- result{res, err}
-	}()
-	e.waitBlocked(t, "{s}.dedupe_keys")
-	if err := tx.Commit(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	got := recv(t, second, "the second enqueue")
-	if got.err != nil || !got.res.Duplicate || got.res.ID != first.ID {
-		t.Fatalf("got %+v, %v; want a duplicate of task %d", got.res, got.err, first.ID)
+			// A second enqueue of the key waits for the first one's transaction.
+			type result struct {
+				res taskmill.EnqueueResult
+				err error
+			}
+			second := make(chan result, 1)
+			go func() {
+				res, err := e.client.Enqueue(t.Context(), sendEmail{To: "second"}, opts)
+				second <- result{res, err}
+			}()
+			e.waitBlocked(t, "{s}.dedupe_keys")
+			if err := tx.Commit(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			got := recv(t, second, "the second enqueue")
+			if got.err != nil || !got.res.Duplicate || got.res.ID != first.ID {
+				t.Fatalf("got %+v, %v; want a duplicate of task %d", got.res, got.err, first.ID)
+			}
+		})
 	}
 }

@@ -556,7 +556,9 @@ key finds no key row, which leaves the key without its task.
 A duplicate's row reports the task that holds the key, found in the same
 statement. If that task's transaction committed while the statement waited
 for the key, the statement cannot see it, and the client reads the key again
-in a second statement. Two concurrent enqueues of the same key cannot both
+in a second statement. It does the same when the holder it sees is one
+whose window ended: the statement did not get that key, so another enqueue
+claimed it meanwhile, and its task is the one to report. Two concurrent enqueues of the same key cannot both
 succeed: the second waits on the first's key and then finds it taken. A
 duplicate wastes one sequence value, which is harmless.
 
