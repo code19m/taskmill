@@ -3,6 +3,7 @@ package otel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 
@@ -22,14 +23,16 @@ import (
 // the message, from [outbox.Delivery.Metadata], and its context is added to
 // the message's headers, replacing any already there, so that consumers
 // continue the trace. system names the broker as the conventions do for
-// messaging.system, such as "kafka" or "rabbitmq". A nil pub returns nil,
-// which [outbox.Outbox.AddRelay] reports.
+// messaging.system, such as "kafka" or "rabbitmq". If pub panics, the spans
+// of its deliveries end with the panic as their error, of the error.type
+// "panic", and the panic goes on to the worker, which records it. A nil pub
+// returns nil, which [outbox.Outbox.AddRelay] reports.
 func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox.Publisher { //nolint:ireturn // it wraps the interface it returns
 	if pub == nil {
 		return nil
 	}
 	broker := messagingconv.SystemAttr(system)
-	return outbox.PublisherFunc(func(ctx context.Context, deliveries []outbox.Delivery) []error {
+	return outbox.PublisherFunc(func(ctx context.Context, deliveries []outbox.Delivery) (errs []error) {
 		sent := make([]outbox.Delivery, len(deliveries))
 		spans := make([]trace.Span, len(deliveries))
 		for i, d := range deliveries {
@@ -50,29 +53,53 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 			sent[i], spans[i] = d, span
 		}
 
-		errs := pub.Publish(ctx, sent)
-		for i, span := range spans {
-			attrs := []attribute.KeyValue{semconv.MessagingDestinationName(deliveries[i].Topic)}
-			err := errMissingResult
-			if i < len(errs) {
-				err = errs[i]
+		// The spans end when the publisher returns, and also when it panics:
+		// the panic then fails every delivery, and goes on.
+		defer func() {
+			panicked := recover()
+			for i, span := range spans {
+				attrs := []attribute.KeyValue{semconv.MessagingDestinationName(deliveries[i].Topic)}
+				err := errMissingResult
+				switch {
+				case panicked != nil:
+					err = panicError{value: panicked}
+				case i < len(errs):
+					err = errs[i]
+				}
+				if err != nil {
+					errType := semconv.ErrorType(err)
+					span.SetAttributes(errType)
+					span.SetStatus(codes.Error, err.Error())
+					attrs = append(attrs, errType)
+				}
+				span.End()
+				in.sent.Add(ctx, 1, "send", broker, attrs...)
 			}
-			if err != nil {
-				errType := semconv.ErrorType(err)
-				span.SetAttributes(errType)
-				span.SetStatus(codes.Error, err.Error())
-				attrs = append(attrs, errType)
+			if panicked != nil {
+				panic(panicked) // for the worker to record, as it does without this wrapper
 			}
-			span.End()
-			in.sent.Add(ctx, 1, "send", broker, attrs...)
-		}
-		return errs
+		}()
+		return pub.Publish(ctx, sent)
 	})
 }
 
 // errMissingResult fails a delivery for which the publisher returned no
 // result, as the relay does.
 var errMissingResult = errors.New("the publisher returned no result for this delivery")
+
+// panicError is the error of the deliveries of a publisher that panicked.
+// Its class is "panic", as that of taskmill's error for a handler that
+// panicked.
+type panicError struct {
+	value any
+}
+
+// Error implements the error interface.
+func (e panicError) Error() string { return fmt.Sprintf("panic: %v", e.value) }
+
+// ErrorType returns the error's class, which semconv.ErrorType reports as
+// error.type.
+func (panicError) ErrorType() string { return "panic" }
 
 // headerCarrier carries trace context in a message's headers.
 type headerCarrier map[string][]byte
