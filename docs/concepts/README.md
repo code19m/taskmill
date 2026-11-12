@@ -1,7 +1,7 @@
 # Concepts
 
 These pages explain how taskmill works and what it promises. Read them after
-the [quickstart](../start/quickstart.md), before you build on taskmill.
+the [tutorial](../tutorial/README.md), before you build on taskmill.
 
 | Page | Read this when… |
 |---|---|
