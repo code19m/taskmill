@@ -134,6 +134,7 @@ sequenceDiagram
     participant DB as PostgreSQL
     P->>W: SIGTERM
     Note over W: Stop taking new tasks
+    W->>DB: Give up the maintainer role if it has it
     alt The handler returns within DrainTimeout
         H-->>W: The result
         W->>DB: Save the result
@@ -144,11 +145,13 @@ sequenceDiagram
     else Still running 5 seconds later
         W->>DB: Give the task back
     end
-    W->>DB: Give up the maintainer role if it has it and sign off
+    W->>DB: Sign off
     W-->>P: Run returns
 ```
 
 - `DrainTimeout` is 20 seconds by default.
+- The worker gives up the maintainer role first, so another worker does the
+  shared work while this one finishes its tasks.
 - A task given back uses no attempt. Another worker runs it again from the
   start. Tasks that the worker fetched but did not start go back too.
 - Give the process a grace period of at least `DrainTimeout` plus 10
@@ -167,8 +170,9 @@ running. Use it in [tests](testing.md) and in admin tools.
 ## Which worker does the shared work?
 
 Every worker takes part in choosing the maintainer, unless it sets
-`NoMaintainer`. If the maintainer stops, another worker takes over right
-after its drain. If it crashes, another takes over within about 12 seconds.
+`NoMaintainer`. If the maintainer stops, another worker takes over at once,
+while the first finishes its tasks. If it crashes, another takes over within
+about 12 seconds.
 `client.Workers` and the dashboard show which worker is the maintainer.
 
 Leave `NoMaintainer` off, except in these cases:

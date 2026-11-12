@@ -12,6 +12,9 @@ the rest back to the queue
 
 - It stops fetching, and waits up to `DrainTimeout` (20 s by default) for
   its running tasks.
+- If it is the [maintainer](../concepts/glossary.md#maintainer), it gives
+  that role up as soon as it stops fetching, so another worker takes over
+  at once.
 - Then it cancels the tasks that still run. A task that returns nil
   completes. Every other task goes back to its queue without using an
   attempt, and another worker runs it.

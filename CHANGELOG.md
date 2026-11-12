@@ -7,6 +7,15 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A worker that stops gives up the maintainer role when it starts to stop,
+  not after its drain. Another worker takes over at once, and does the
+  shared work while the first finishes its running tasks. So a new
+  version's schedules start as soon as a deploy stops the old maintainer,
+  and a process that is killed during its drain leaves no gap in which
+  delayed tasks, retries, and schedules wait.
+
 ## [0.4.0] - 2026-10-29
 
 ### Added

@@ -400,12 +400,13 @@ func (w *Worker) prepareHistory(ctx context.Context) {
 	}
 }
 
-// Run fetches and runs tasks until ctx is canceled. It then stops fetching,
-// waits up to DrainTimeout for running tasks, cancels and releases those
-// still running, and returns nil. If ctx ends before the worker registered,
-// it returns nil at once. It returns an error only if the worker cannot
-// start: it is already running, which is [ErrInvalidState], or it cannot
-// register in the database.
+// Run fetches and runs tasks until ctx is canceled. It then stops fetching
+// and, if it is the maintainer, resigns, so that another worker takes over
+// at once. It waits up to DrainTimeout for running tasks, cancels and
+// releases those still running, and returns nil. If ctx ends before the
+// worker registered, it returns nil at once. It returns an error only if the
+// worker cannot start: it is already running, which is [ErrInvalidState], or
+// it cannot register in the database.
 //
 // Before it fetches, Run creates the history partitions that the next week
 // lacks, as [Migrate] does, so that a schema applied with [Migrations] keeps
@@ -452,7 +453,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	loops.Go(func() { w.activityLoop(loopsCtx) })
 	loops.Go(func() { w.settingsLoop(loopsCtx) })
 	if !w.cfg.NoMaintainer {
-		loops.Go(func() { newMaintainer(w).run(loopsCtx) })
+		// The maintainer stops with ctx, as the fetches do: a worker that
+		// drains resigns, so that one that stays leads meanwhile.
+		loops.Go(func() { newMaintainer(w).run(ctx) })
 	}
 
 	attemptCtx, stopAttempts := context.WithCancelCause(base)
