@@ -84,4 +84,4 @@ on purpose.
 - [The shop example](../../examples/shop/README.md): a halted group to try in the dashboard
 - [`EnqueueOptions.GroupKey`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions) on pkg.go.dev
 
-**Next:** [Consume from a broker](consume-from-a-broker.md)
+**Next:** [Share a queue fairly between customers](share-a-queue-between-customers.md)
