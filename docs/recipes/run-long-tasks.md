@@ -1,13 +1,14 @@
 # Run long tasks
 
 **Situation.** "Our report task takes 5 to 10 minutes. With the defaults, it
-fails after a minute, and every deploy seems to start it over."
+fails after a minute, and every deploy seems to start it again from the
+beginning."
 
 ## Which should I use?
 
 | Your tasks take | What to set | Why |
 |---|---|---|
-| Up to a minute | Nothing: the defaults fit | A deploy waits about 20 seconds for running tasks. A task cut off then starts over, which is cheap for short tasks |
+| Up to a minute | Nothing: the defaults fit | A deploy waits about 20 seconds for running tasks. A task that still runs then is stopped, and runs again from the start. That is cheap for short tasks |
 | A few minutes | A longer `Timeout`, `DrainTimeout`, and grace period | Deploys and scale-downs wait for most tasks to finish |
 | Longer than you want a deploy to wait | Smaller tasks | A deploy then loses at most one small piece |
 
@@ -31,16 +32,18 @@ Kubernetes, that is `terminationGracePeriodSeconds: 310` for this worker.
 
 ## Why
 
-- **`Timeout` stops a stuck attempt,** and frees its place in the worker.
-  It is 1 minute by default, and you can't turn it off. When it passes, the
-  handler's context is canceled. A returned error is a failed attempt, and
-  `nil` still completes the task.
+- **`Timeout` stops a stuck attempt,** and frees its
+  [slot](../concepts/glossary.md#slot) in the worker. It is 1 minute by
+  default, and you can't turn it off. When it passes, the handler's context
+  is canceled. A returned error is a failed attempt, and `nil` still
+  completes the task.
 - **The lease doesn't limit how long a task runs.** The worker renews the
-  [lease](../concepts/glossary.md#lease) every few seconds while the task
-  runs.
+  [lease](../concepts/glossary.md#lease) while the task runs: every 10
+  seconds by default.
 - **A deploy and a scale-down stop a worker the same way.** It waits up to
   `DrainTimeout`, then cancels the tasks still running and gives them back.
-  A task given back uses no attempt, and starts over on another worker. See
+  A task given back uses no attempt, and runs again from the start on
+  another worker. See
   [Stop a worker cleanly](../guides/workers-and-queues.md#stop-a-worker-cleanly).
 
 ## Split work that takes hours
@@ -75,7 +78,7 @@ not the whole export. Make each page safe to run twice
 | A `DrainTimeout` as long as the longest run | Runs take up to half an hour, and you deploy rarely | Every deploy and scale-down waits that long |
 | Save progress when the context's cause is `ErrShutdown`, then return an error | The work can continue from saved progress | You store the progress yourself. The task goes back without using an attempt |
 | Accept restarts | The work is cheap to redo | Wasted work at each deploy |
-| A queue of its own for long tasks | Long tasks must not take the places that short tasks need | One more queue to run and watch |
+| A queue of its own for long tasks | Long tasks must not take the slots that short tasks need | One more queue to run and watch |
 
 ## Watch out
 
@@ -83,10 +86,11 @@ not the whole export. Make each page safe to run twice
   running after the worker gave its task back. Then another worker may run
   the same task at the same time.
 - **Keep the grace period at least `DrainTimeout` plus 10 seconds.** If the
-  platform kills the worker sooner, its tasks wait until their leases end,
-  and each counts as a failed attempt.
-- **Scale-downs drain too.** An autoscaler that removes a worker stops its
-  long tasks after `DrainTimeout` ([Autoscaling](../production/autoscaling.md)).
+  platform kills the worker sooner, its tasks wait until their leases run
+  out, and each counts as a failed attempt.
+- **Scale-downs [drain](../concepts/glossary.md#drain) too.** An autoscaler
+  that removes a worker stops its long tasks after `DrainTimeout`
+  ([Autoscaling](../production/autoscaling.md)).
 
 ## See also
 

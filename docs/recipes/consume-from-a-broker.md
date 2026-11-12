@@ -62,7 +62,7 @@ topic, partition, and offset together also work.
 | Option | When it fits | The cost |
 |---|---|---|
 | `EnqueueMany` for a batch of messages, then one commit | You read messages in batches | None: if the call fails, the broker sends the batch again |
-| A `GroupKey` per order as well | One order's events must apply in order | A dead event halts that order's later events ([Keep order per key](keep-order-per-key.md)) |
+| A `GroupKey` per order as well | One order's events must apply in order | A dead event [halts](../concepts/glossary.md#halted-group) that order's later events ([Keep order per key](keep-order-per-key.md)) |
 | Do the work in the consumer, with no task | The work is quick, and safe to repeat | No retries, no dead tasks, no dashboard. A slow message blocks the others |
 
 ## Watch out

@@ -76,10 +76,10 @@ step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
 - **Don't also call `Migrate`.** If it runs before your tool, it applies the
   change itself. Your tool then fails on the same change.
 - **The role that runs workers must own taskmill's tables.** Every day, the
-  maintainer adds and drops a partition of the history table, and
-  PostgreSQL allows that only to the owner. Run your tool as that role, or
-  change the owner afterwards.
-- **Your tool creates no history partitions. Workers do.** Each worker
+  [maintainer](../concepts/glossary.md#maintainer) adds and drops a
+  partition of the history table, and PostgreSQL allows that only to the
+  owner. Run your tool as that role, or change the owner afterwards.
+- **Workers create the history partitions, not your tool.** Each worker
   creates the partitions of the next 7 days when it starts, before it runs
   a task. So the first completed tasks keep their history too. If the
   worker's role may not create them, it logs `prepare history partitions
