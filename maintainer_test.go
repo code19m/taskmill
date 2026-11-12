@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -180,6 +182,26 @@ func TestMaintainerStoppedWhileRenewingResigns(t *testing.T) {
 	}
 }
 
+// A worker can hold the maintainer's lease without knowing it: a renewal
+// failed, as here, or the answer to its election was lost. When it stops, it
+// must give the lease up all the same.
+func TestWorkerThatForgotItLeadsStillResigns(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	stop := runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+
+	// From now on, every renewal fails, and the lease stays in the table.
+	e.exec(t, "ALTER TABLE {s}.leader ADD CONSTRAINT no_renewal CHECK (false) NOT VALID")
+	waitFor(t, "the worker to stop leading", func() bool { return logs.count("no longer maintainer") == 1 })
+
+	stop()
+	if n := e.count(t, "SELECT count(*) FROM {s}.leader"); n != 0 {
+		t.Fatal("the worker stopped without resigning; another worker waits for its lease to expire")
+	}
+}
+
 // TestStoppingWorkerHandsMaintenanceOverBeforeItDrains checks that a worker
 // resigns as maintainer when it starts to stop, not when its running tasks
 // end: another worker leads at once, and enqueues the runs of its schedules.
@@ -331,11 +353,7 @@ func TestMaintainerWakesQueuesWhoseTasksWait(t *testing.T) {
 func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	day := time.Now().UTC().AddDate(0, 0, -30).Truncate(24 * time.Hour)
-	part := "task_history_" + day.Format("20060102")
-	e.exec(t, fmt.Sprintf("CREATE TABLE {s}.%s (LIKE {s}.task_history INCLUDING DEFAULTS INCLUDING CONSTRAINTS)", part))
-	e.exec(t, fmt.Sprintf("ALTER TABLE {s}.task_history ATTACH PARTITION {s}.%s FOR VALUES FROM ('%s') TO ('%s')",
-		part, day.Format(time.RFC3339), day.AddDate(0, 0, 1).Format(time.RFC3339)))
+	part := e.attachHistory(t, time.Now().UTC().AddDate(0, 0, -30).Truncate(24*time.Hour))
 
 	// A transaction that reads history makes the detach wait, and a timeout
 	// interrupts it: the partition is left pending detach.
@@ -366,6 +384,149 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	waitFor(t, "the expired partition to be dropped", func() bool {
 		return e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = $2", e.schema, part) == 0
 	})
+}
+
+// attachHistory attaches a history partition for the UTC day that starts at
+// day, as the maintainer creates them, and returns its name.
+func (e *env) attachHistory(t *testing.T, day time.Time) string {
+	t.Helper()
+	part := "task_history_" + day.Format("20060102")
+	e.exec(t, fmt.Sprintf("CREATE TABLE {s}.%s (LIKE {s}.task_history INCLUDING DEFAULTS INCLUDING CONSTRAINTS)", part))
+	e.exec(t, fmt.Sprintf("ALTER TABLE {s}.task_history ATTACH PARTITION {s}.%s FOR VALUES FROM ('%s') TO ('%s')",
+		part, day.Format(time.RFC3339), day.AddDate(0, 0, 1).Format(time.RFC3339)))
+	return part
+}
+
+// newClockEnv returns an env on a database whose clock the test sets: its
+// pool's sessions find a now() of their own before PostgreSQL's, which
+// returns at until set changes it. Their time zone is zone.
+func newClockEnv(t *testing.T, at time.Time, zone string) (e *env, set func(time.Time)) {
+	t.Helper()
+	admin := testdb.Pool(t)
+	clock := testdb.Schema(t, admin)
+	for _, sql := range []string{
+		"CREATE SCHEMA " + clock,
+		"CREATE TABLE " + clock + ".clock (at timestamptz NOT NULL)",
+		"INSERT INTO " + clock + ".clock VALUES ('" + at.Format(time.RFC3339) + "')",
+		"CREATE FUNCTION " + clock + ".now() RETURNS timestamptz LANGUAGE sql STABLE AS $$ SELECT at FROM " + clock + ".clock $$",
+	} {
+		if _, err := admin.Exec(t.Context(), sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t)) // a proxy refuses the parameters
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["search_path"] = clock + ", pg_catalog"
+	cfg.ConnConfig.RuntimeParams["timezone"] = zone
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return newEnvWith(t, pool, nil), func(at time.Time) {
+		t.Helper()
+		if _, err := admin.Exec(t.Context(), "UPDATE "+clock+".clock SET at = $1", at); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A completed task's day is the database's, so the history partitions must
+// follow the database's clock too, wherever the application's clock stands:
+// here, 30 days ahead of the database's.
+func TestHistoryPartitionsFollowTheDatabaseClock(t *testing.T) {
+	t.Parallel()
+	e, _ := newClockEnv(t, time.Now().AddDate(0, 0, -30), "UTC")
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	if _, err := w.RunTask(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.client.Get(t.Context(), id); err != nil {
+		t.Fatalf("the history has no partition for the database's day: %v", err)
+	}
+	taskmill.RunRetention(t.Context(), w)
+	if _, err := e.client.Get(t.Context(), id); err != nil {
+		t.Fatalf("retention dropped the history of the database's day: %v", err)
+	}
+}
+
+// The default periods count days. For retention a day is 24 hours, whatever
+// the sessions' time zone: here one whose clocks went forward that week, so
+// that 7 of its days are 167 hours.
+func TestRetentionCountsDaysOf24Hours(t *testing.T) {
+	t.Parallel()
+	// In half an hour, at midnight UTC, the history of 25 March will be 7
+	// days old, and a task that died at midnight on 3 March 30 days.
+	at := time.Date(2026, time.April, 1, 23, 30, 0, 0, time.UTC)
+	e, setNow := newClockEnv(t, at, "Europe/Berlin")
+	w := newWorker(t, e, &taskmill.WorkerConfig{NoMaintainer: true})
+	part := e.attachHistory(t, time.Date(2026, time.March, 25, 0, 0, 0, 0, time.UTC))
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           VALUES ('default', 'email.send', 'dead', now(), '{}', 1, '2026-03-03 00:00:00+00')`)
+	kept := func() (history, dead int) {
+		return e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = $2", e.schema, part),
+			e.count(t, "SELECT count(*) FROM {s}.tasks")
+	}
+
+	taskmill.RunRetention(t.Context(), w)
+	if history, dead := kept(); history != 1 || dead != 1 {
+		t.Fatalf("half an hour early, retention kept %d of 1 day of history and %d of 1 dead task", history, dead)
+	}
+	setNow(at.Add(time.Hour))
+	taskmill.RunRetention(t.Context(), w)
+	if history, dead := kept(); history != 0 || dead != 0 {
+		t.Fatalf("half an hour late, retention kept %d day of history and %d dead task", history, dead)
+	}
+}
+
+// A period can be longer than any history: the longest duration is how Go
+// code says "for good", and SQL can store thousands of years.
+func TestLongestHistoryRetentionKeepsHistory(t *testing.T) {
+	t.Parallel()
+	longest := time.Duration(math.MaxInt64)
+	for _, tc := range []struct {
+		name string
+		set  func(t *testing.T, e *env)
+	}{
+		{"the longest duration", func(t *testing.T, e *env) {
+			t.Helper()
+			if err := e.client.UpdateSettings(t.Context(), func(s *taskmill.Settings) { s.HistoryRetention = longest }); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		// Its cutoff is a year before our era, which has the digits of a
+		// year long after today.
+		{"5,000 years, stored by hand", func(t *testing.T, e *env) {
+			t.Helper()
+			e.exec(t, "UPDATE {s}.settings SET history_retention = interval '5000 years'")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+			id := e.enqueue(t, sendEmail{}, nil)
+			if _, err := w.RunTask(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+			tc.set(t, e)
+
+			taskmill.RunRetention(t.Context(), w)
+			if _, err := e.client.Get(t.Context(), id); err != nil {
+				t.Fatalf("retention dropped history that is kept for good: %v", err)
+			}
+			// The database stores whole microseconds, and Go reads at most
+			// its longest duration.
+			s, err := e.client.Settings(t.Context())
+			if err != nil || s.HistoryRetention != longest.Truncate(time.Microsecond) {
+				t.Fatalf("got a history retention of %s, %v; want %s", s.HistoryRetention, err, longest.Truncate(time.Microsecond))
+			}
+		})
+	}
 }
 
 func TestRetentionDeletesOldFinishedTasks(t *testing.T) {

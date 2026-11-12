@@ -15,10 +15,12 @@ import (
 const notifyWindow = 50 * time.Millisecond
 
 // Notifications on an installation's channel, named after its schema, carry
-// "<kind>|<argument>".
+// "<kind>|<argument>". Any role in the database can send one, so a
+// notification is only a hint: before a worker changes anything, it reads
+// what the tables say.
 const (
 	notifyAvailable = "a" // tasks became available in queue <argument>
-	notifyCancel    = "c" // cancel the running task with ID <argument>
+	notifyCancel    = "c" // the cancellation of the running task with ID <argument> was requested
 	notifyQueue     = "q" // the settings of queue <argument> changed
 	notifyHeartbeat = "h" // the maintainer woke the queues whose tasks wait; no argument
 	notifyResigned  = "r" // the maintainer resigned; no argument

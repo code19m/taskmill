@@ -159,14 +159,49 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	mux.HandleFunc("POST /queues/{name}/{action}", s.queueAction)
 	mux.HandleFunc("POST /schedules/{name}/{action}", s.scheduleAction)
 
-	h := deadline(http.NewCrossOriginProtection().Handler(mux))
+	var h http.Handler = mux
 	if s.prefix != "" {
-		h = http.StripPrefix(s.prefix, h)
+		h = underPrefix(s.prefix, h)
 	}
+	h = deadline(http.NewCrossOriginProtection().Handler(h))
 	if cfg.BasicAuth != nil {
 		h = basicAuth(h, *cfg.BasicAuth)
 	}
 	return securityHeaders(h, ancestors), nil
+}
+
+// underPrefix serves h for the paths under prefix, with the prefix stripped,
+// as http.StripPrefix does, and answers itself the requests that h would send
+// out of the prefix. The prefix alone, and a path that is not clean, such as
+// one with a double slash, redirect to the clean path under the prefix: h's
+// mux would redirect them to that path at the host's root. A path that only
+// starts like the prefix, such as /taskmillx for /taskmill, is not found.
+func underPrefix(prefix string, h http.Handler) http.Handler {
+	escaped := (&url.URL{Path: prefix}).EscapedPath()
+	strip := http.StripPrefix(prefix, h)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The escaped path decides, as in the mux: an escaped slash or dot
+		// is part of a name, not of the path's shape.
+		rest, ok := strings.CutPrefix(r.URL.EscapedPath(), escaped)
+		if !ok || rest != "" && rest[0] != '/' {
+			http.NotFound(w, r)
+			return
+		}
+		clean := path.Clean("/" + rest)
+		if strings.HasSuffix(rest, "/") && clean != "/" {
+			clean += "/" // which path.Clean removes
+		}
+		if clean != rest {
+			target := escaped + clean
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			// The status keeps the request's method, as the mux's does.
+			http.Redirect(w, r, target, http.StatusTemporaryRedirect) //nolint:gosec // the request adds only a path and a query after the prefix
+			return
+		}
+		strip.ServeHTTP(w, r)
+	})
 }
 
 // checkConfig checks the configuration of the dashboard, and returns the
@@ -1301,16 +1336,17 @@ func timestamp(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04:05.000 UTC")
 }
 
-// number formats n with thousands separators.
+// number formats n with thousands separators. It works on the digits, not
+// on -n, which the smallest number does not have.
 func number(n int64) string {
-	s := strconv.FormatInt(n, 10)
+	sign, s := "", strconv.FormatInt(n, 10)
 	if n < 0 {
-		return "-" + number(-n)
+		sign, s = "-", s[1:]
 	}
 	for i := len(s) - 3; i > 0; i -= 3 {
 		s = s[:i] + "," + s[i:]
 	}
-	return s
+	return sign + s
 }
 
 // count formats a count of tasks, marking one that stopped at its cap.
