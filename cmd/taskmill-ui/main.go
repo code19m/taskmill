@@ -183,10 +183,10 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 		return err
 	}
 	server := &http.Server{
-		Handler:           h,
-		ReadHeaderTimeout: 10 * time.Second,
-		WriteTimeout:      30 * time.Second, // pages take at most 10 seconds to read
-		IdleTimeout:       2 * time.Minute,
+		Handler:      h,
+		ReadTimeout:  10 * time.Second, // for a whole request: its body is a small form at most
+		WriteTimeout: 30 * time.Second, // pages take at most 10 seconds to read
+		IdleTimeout:  2 * time.Minute,
 	}
 	if cfg.auth == nil {
 		logger.LogAttrs(ctx, slog.LevelWarn,

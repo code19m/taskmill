@@ -81,10 +81,10 @@ type statements struct {
 	lockQueue     string
 	countRunning  string
 	renewLeases   string
+	cancelRequest string
 	fail          string
 	snooze        string
 	release       string
-	cancelRunning string
 	queueSettings string
 	upsertWorker  string
 	checkInWorker string
@@ -96,8 +96,7 @@ type statements struct {
 	wakeQueues    string
 	rescue        string
 
-	pendingDetach   string
-	retention       string
+	expiredHistory  string
 	deleteFinished  string
 	pruneSchedules  string
 	loadSchedules   string
@@ -181,6 +180,11 @@ func newStatements(schema string) *statements {
 		// instead: statistics taken while few tasks ran make that index look
 		// small, but until vacuum it keeps an entry for every task that ran.
 		"{leased}", "state::text = 'running'",
+		// {utc} is the database's time in UTC, without a time zone. A
+		// retention period is subtracted from it, not from now(): there, a
+		// period's days are days of the session's time zone, which are 23 or
+		// 25 hours long when its clocks change.
+		"{utc}", "(now() AT TIME ZONE 'UTC')",
 	)
 	q := func(sql string) string { return r.Replace(sql) }
 	pick := func(cond, gates string) string {
@@ -724,6 +728,13 @@ UNION ALL
 SELECT id, false, cancel_requested_at IS NOT NULL FROM {s}.tasks
 WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM attempts) AND {leased}`),
 
+		// cancelRequest returns, of the tasks $1 that the attempts with the
+		// lease tokens $2 still own, those whose cancellation was requested.
+		cancelRequest: q(`
+SELECT id FROM {s}.tasks
+WHERE id = ANY($1::bigint[]) AND (id, lease_token) IN (SELECT i, t FROM unnest($1::bigint[], $2::integer[]) AS u(i, t))
+  AND {leased} AND cancel_requested_at IS NOT NULL`),
+
 		// fail records a failed attempt: retryable after a delay of $4
 		// microseconds, or dead. $5 is the error as a JSON object. A task
 		// whose cancellation was requested is canceled instead.
@@ -764,10 +775,14 @@ SET state = CASE
 WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
 
-		// release gives a task back during shutdown, attempt included. If $3
-		// is set, the worker has a handler for the task, and its errors lose
-		// the note of a wait for one, as in snooze. A task whose cancellation
-		// was requested is canceled instead.
+		// release ends an attempt that the worker stopped: it cancels the
+		// task if its cancellation was requested, and otherwise gives it
+		// back, attempt included. It records a shutdown, and an attempt that
+		// ended after the worker read a cancel request. So the task's row
+		// decides, as in fail and snooze: no statement cancels a running
+		// task whose row has no request. If $3 is set, the worker has a
+		// handler for the task, and its errors lose the note of a wait for
+		// one, as in snooze.
 		release: q(`
 UPDATE {s}.tasks
 SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'canceled' END::{s}.task_state,
@@ -777,12 +792,6 @@ SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'cancele
     errors = CASE WHEN $3 THEN {unnoted} ELSE errors END
 WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
-
-		cancelRunning: q(`
-UPDATE {s}.tasks
-SET state = 'canceled', finalized_at = now(), lease_expires_at = NULL
-WHERE id = $1 AND lease_token = $2 AND {leased}
-RETURNING queue, coalesce(group_key, '')`),
 
 		queueSettings: q(`SELECT name, paused_at IS NOT NULL, coalesce(max_running, 0) FROM {s}.queues WHERE name = ANY($1)`),
 
@@ -899,23 +908,36 @@ FROM expired
 WHERE t.id = expired.id
 RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`),
 
-		// pendingDetach lists the history partitions whose detach was
-		// interrupted, which must be finalized before they can be dropped.
-		pendingDetach: q(`
-SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
-WHERE i.inhparent = '{s}.task_history'::regclass AND i.inhdetachpending`),
+		// expiredHistory lists the history partitions whose whole UTC day is
+		// older than the history retention, oldest first, each with whether
+		// its detach was interrupted, which must be finalized before it can be
+		// dropped. The database applies the period to its own clock, so the
+		// application's clock and arithmetic cannot expire history. A
+		// partition's name ends in its day, so names sort by day, and the
+		// pattern keeps to names that are safe in the text of a statement.
+		//
+		// A period that only SQL can store, of thousands of years, has its
+		// cutoff before our era, whose year to_char prints without a sign,
+		// like a year after today. Such a cutoff counts as the year 1, so
+		// that nothing is older.
+		expiredHistory: q(`
+SELECT c.relname, i.inhdetachpending
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = '{s}.task_history'::regclass
+  AND c.relname ~ '^task_history_[0-9]{8}$'
+  AND c.relname < 'task_history_' || to_char(greatest(
+          {utc} - (SELECT history_retention FROM {s}.settings), timestamp '0001-01-01'), 'YYYYMMDD')
+ORDER BY c.relname`),
 
-		retention: q(`
-SELECT extract(epoch FROM history_retention)::bigint, extract(epoch FROM dead_retention)::bigint FROM {s}.settings`),
-
-		// deleteFinished deletes dead and canceled tasks older than $1
-		// seconds, except the dead heads that keep their groups halted. It
+		// deleteFinished deletes dead and canceled tasks older than the dead
+		// retention, except the dead heads that keep their groups halted. It
 		// locks the rows it picks and skips locked ones, so a task that an
 		// operator is retrying is never deleted.
 		deleteFinished: q(`
 WITH old AS (
     SELECT t.id FROM {s}.tasks t
-    WHERE t.state IN ('dead', 'canceled') AND t.finalized_at < now() - $1 * interval '1 second'
+    WHERE t.state IN ('dead', 'canceled')
+      AND t.finalized_at < ({utc} - (SELECT dead_retention FROM {s}.settings)) AT TIME ZONE 'UTC'
       AND NOT EXISTS (SELECT 1 FROM {s}.groups g WHERE g.halted_task_id = t.id)
     LIMIT {batch}
     FOR UPDATE SKIP LOCKED

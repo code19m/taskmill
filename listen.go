@@ -148,7 +148,7 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 		cancel()
 		switch {
 		case err == nil:
-			if w.handleNotification(ctx, n.Payload) {
+			if w.handleNotification(n.Payload) {
 				deadline = time.Now().Add(timeout)
 				if !w.notifying.Swap(true) {
 					w.silent.Store(false)
@@ -243,7 +243,12 @@ func (w *Worker) connectListener(ctx context.Context) (conn *pgx.Conn, err error
 
 // handleNotification acts on a notification. It reports whether it was the
 // maintainer's heartbeat.
-func (w *Worker) handleNotification(ctx context.Context, payload string) (heartbeat bool) {
+//
+// A notification is only a hint: any role in the database can send one, as
+// often as it likes, and one can arrive late. So this never waits, and never
+// reads the database: it wakes the loop that does, which serves every
+// notification that arrived meanwhile with one read.
+func (w *Worker) handleNotification(payload string) (heartbeat bool) {
 	kind, arg, ok := strings.Cut(payload, "|")
 	if !ok {
 		return false
@@ -254,27 +259,92 @@ func (w *Worker) handleNotification(ctx context.Context, payload string) (heartb
 			q.nudge()
 		}
 	case notifyCancel:
+		// Only an ID as a client writes it counts. PostgreSQL delivers equal
+		// notifications of one transaction once, and other ways to write
+		// the same number would get around that.
 		id, err := strconv.ParseInt(arg, 10, 64)
-		if err != nil {
+		if err != nil || strconv.FormatInt(id, 10) != arg {
 			return false
 		}
 		w.mu.Lock()
 		t := w.attempts[id]
 		w.mu.Unlock()
-		if t != nil {
-			t.requestCancel()
+		if t != nil && !t.cancelRequested.Load() && !t.hinted.Swap(true) {
+			signal(w.cancelHints)
 		}
 	case notifyQueue:
 		if w.queues[arg] != nil {
-			w.refreshQueueSettings(ctx)
+			signal(w.queueHints)
 		}
 	case notifyHeartbeat:
 		return true
 	case notifyResigned:
-		select {
-		case w.resigned <- struct{}{}:
-		default:
-		}
+		signal(w.resigned)
 	}
 	return false
+}
+
+// signal wakes the loop that receives from ch, unless a wake-up already
+// waits there.
+func signal(ch chan<- struct{}) {
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// followHints calls read each time hints says that notifications arrived,
+// until ctx ends. One call serves all that arrived since the last, and a
+// pause follows each call, so notifications wake a worker's reads but never
+// set their pace.
+func followHints(ctx context.Context, hints <-chan struct{}, read func(context.Context)) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hints:
+		}
+		read(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(hintCooldown):
+		}
+	}
+}
+
+// cancelHinted cancels the attempts that a notification named since the last
+// call, if their tasks' rows say that the cancellation was requested: one
+// read for all of them, by ID and lease token, so a notification that came
+// late, for an earlier run of a task, finds nothing. If the read fails, or
+// takes as long as a check-in may, the next check-in reads the requests.
+func (w *Worker) cancelHinted(ctx context.Context) {
+	hinted := map[int64]*tracked{}
+	var ids []int64
+	var tokens []int32
+	w.mu.Lock()
+	for id, t := range w.attempts {
+		// Cleared before the read: a notification that arrives during it
+		// asks for the next one.
+		if t.hinted.Swap(false) {
+			hinted[id], ids, tokens = t, append(ids, id), append(tokens, t.att.token)
+		}
+	}
+	w.mu.Unlock()
+	if len(ids) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, w.cfg.LeaseDuration/3)
+	defer cancel()
+	r, err := w.client.pool.Query(ctx, w.client.sql.cancelRequest, ids, tokens)
+	if err != nil {
+		return
+	}
+	requested, err := pgx.CollectRows(r, pgx.RowTo[int64])
+	if err != nil {
+		return
+	}
+	for _, id := range requested {
+		hinted[id].requestCancel()
+	}
 }

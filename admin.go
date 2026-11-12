@@ -102,7 +102,9 @@ type QueueInfo struct {
 }
 
 // Settings are the installation-wide settings, stored in the database and
-// applied by the maintainer. Zero fields mean their defaults.
+// applied by the maintainer. Zero fields mean their defaults. A period is
+// stored in whole microseconds, and the longest [time.Duration], about 292
+// years, keeps tasks for good.
 type Settings struct {
 	// HistoryRetention is how long completed tasks stay in history, at
 	// least: history is dropped a whole UTC day at a time, so a task stays
@@ -322,13 +324,17 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 // Settings returns the installation-wide settings.
 func (c *Client) Settings(ctx context.Context) (*Settings, error) {
 	var history, dead int64
-	if err := c.pool.QueryRow(ctx, c.sql.retention).Scan(&history, &dead); err != nil {
+	if err := c.pool.QueryRow(ctx, c.sql.readSettings).Scan(&history, &dead); err != nil {
 		return nil, fmt.Errorf("taskmill: read settings: %w", err)
 	}
-	return &Settings{
-		HistoryRetention: time.Duration(history) * time.Second,
-		DeadRetention:    time.Duration(dead) * time.Second,
-	}, nil
+	return &Settings{HistoryRetention: retention(history), DeadRetention: retention(dead)}, nil
+}
+
+// retention returns a retention period that the database stores as micros
+// microseconds. A period beyond the longest duration, which only SQL can
+// write, reads as the longest one.
+func retention(micros int64) time.Duration {
+	return time.Duration(min(micros, math.MaxInt64/int64(time.Microsecond))) * time.Microsecond
 }
 
 // UpdateSettings changes the installation-wide settings. update gets a copy
@@ -349,10 +355,7 @@ func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) err
 		if err := c.pool.QueryRow(ctx, c.sql.readSettings).Scan(&history, &dead); err != nil {
 			return false, fmt.Errorf("taskmill: update settings: %w", err)
 		}
-		s := Settings{
-			HistoryRetention: time.Duration(history) * time.Microsecond,
-			DeadRetention:    time.Duration(dead) * time.Microsecond,
-		}
+		s := Settings{HistoryRetention: retention(history), DeadRetention: retention(dead)}
 		update(&s)
 		s.HistoryRetention = cmp.Or(s.HistoryRetention, defaultHistoryRetention)
 		s.DeadRetention = cmp.Or(s.DeadRetention, defaultDeadRetention)

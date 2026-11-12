@@ -37,6 +37,7 @@ const (
 	heldRetryDelay     = 20 * time.Millisecond  // first wait before retrying completions whose rows were held
 	heldRetryMax       = time.Second            // longest wait before retrying them
 	emptyFetchCooldown = 20 * time.Millisecond  // pause after a notification that found nothing
+	hintCooldown       = 20 * time.Millisecond  // pause after a read of cancel requests or settings that notifications asked for
 	errorMessageLimit  = 4096                   // bytes of an error message that are kept
 )
 
@@ -111,6 +112,11 @@ type Worker struct {
 
 	mu       sync.Mutex
 	attempts map[int64]*tracked // attempts that Run and RunTask are running or recording
+
+	// What notifications said since the worker last read the database for
+	// them: the listener only signals here, and a loop of its own reads.
+	cancelHints chan struct{} // cancellations of attempts' tasks were requested: see tracked.hinted
+	queueHints  chan struct{} // settings of the worker's queues changed
 
 	completions   chan *tracked // successful attempts of Run, for the completer
 	completerDone chan struct{} // closed when the current Run's completer returns
@@ -247,6 +253,8 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		version:     moduleVersion(),
 		attempts:    make(map[int64]*tracked),
 		resigned:    make(chan struct{}, 1),
+		cancelHints: make(chan struct{}, 1),
+		queueHints:  make(chan struct{}, 1),
 		completions: make(chan *tracked, completionBatch),
 	}
 	if c.Handlers != nil {
@@ -373,7 +381,8 @@ type tracked struct {
 	renewedAt time.Time // last confirmation that the lease is held
 
 	lost            atomic.Bool // the lease is gone: the result must be discarded
-	cancelRequested atomic.Bool
+	cancelRequested atomic.Bool // the task's row said that its cancellation was requested
+	hinted          atomic.Bool // a notification said so, and the row is not read yet
 }
 
 type trackedState int
@@ -463,6 +472,8 @@ func (w *Worker) Run(ctx context.Context) error {
 	loopsCtx, stopLoops := context.WithCancel(base)
 	var loops sync.WaitGroup
 	loops.Go(func() { w.listenLoop(loopsCtx) })
+	loops.Go(func() { followHints(loopsCtx, w.cancelHints, w.cancelHinted) })
+	loops.Go(func() { followHints(loopsCtx, w.queueHints, w.refreshQueueSettings) })
 	loops.Go(func() { w.checkInLoop(loopsCtx) })
 	loops.Go(func() { w.activityLoop(loopsCtx) })
 	loops.Go(func() { w.settingsLoop(loopsCtx) })

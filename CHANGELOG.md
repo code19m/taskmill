@@ -84,6 +84,80 @@ All notable changes to taskmill are recorded here. The format follows
   `no_handler` note, the next worker without the handler made the retried
   task dead right away. A retry now removes that note, so the wait starts
   again, as documented.
+- `Migrate` called from several processes at the same time failed in the processes
+  that waited, with `schema ... already exists` or `relation ... already
+  exists`, when the pool's `default_transaction_isolation` was not
+  `read committed`. `Migrate` now works at any default level. A client
+  still needs `read committed`, as `NewClient` checks.
+- History partitions follow the database's clock. Workers created the daily
+  partitions, and the maintainer dropped the expired ones, by the clock of
+  their own machine. A maintainer whose clock was ahead by more than the
+  history retention dropped history that had not expired, and a machine
+  whose clock was days off created partitions for the wrong days, so
+  completed tasks skipped history. Both now use the database's clock, as
+  every other time that taskmill sets.
+- `HistoryRetention` set to the longest duration,
+  `time.Duration(math.MaxInt64)`, deleted all history: the period
+  overflowed when the maintainer read it, so it dropped every history
+  partition, each minute, and `Client.Settings` reported a negative period.
+  The database now applies the period itself, and `Settings` reads it
+  without overflow. The longest duration, about 292 years, keeps completed
+  tasks for good, and so does a longer period that only SQL can store,
+  which `Settings` reports as the longest duration.
+- A worker that held the maintainer's lease without knowing it kept the
+  lease when it stopped: after a renewal that failed, or an election whose
+  answer was lost while the worker stopped. No worker then led until the
+  lease expired, up to 10 seconds, so delayed tasks, retries, and schedules
+  waited. A stopping worker now gives up the lease whatever it knows.
+- `taskmill-ui` waited without a limit for the body of a request, so a
+  client that never sent it kept its connection for good, without a login.
+  Enough of them left the dashboard and its probes without connections. A
+  whole request now has 10 seconds to arrive.
+- A row of `queue_stats` whose count was the smallest 64-bit number ended
+  the process that served the dashboard, at the next page, with `fatal
+  error: stack overflow`: for a mounted dashboard, that process is your
+  application. No maintainer stores such a count, but the column can hold
+  it. The dashboard now shows every count that the column can hold.
+- A dashboard with a `Prefix`, or `taskmill-ui` with `TASKMILL_UI_PREFIX`,
+  redirected some requests out of the prefix, to the root of the host:
+  `/admin/jobs` without its last slash led to `/`, and behind a router that
+  passes paths on unchanged, a path with a double slash lost the prefix
+  too. These now lead to the clean path under the prefix. A path that only
+  starts like the prefix, such as `/admin/jobsx`, was redirected as well,
+  to `/x`, and is now not found.
+
+### Security
+
+- A notification alone no longer cancels a running task. PostgreSQL lets
+  every role of a database send notifications, also a role with no rights
+  on taskmill's tables, and a worker canceled the task that a cancel
+  notification named: the task ended as `canceled`, though nobody had
+  called `Cancel`. A worker now takes the notification as a hint and reads
+  the request from the task's row, and an attempt ends as `canceled` only
+  if that row has the request. `Cancel` still stops a running task right away:
+  the worker reads one row first. If other roles can connect to your
+  database, upgrade.
+- A role with no rights on taskmill's schema can no longer keep workers and
+  `Migrate` from starting. Both waited, without a limit, for advisory locks,
+  which PostgreSQL lets every role of a database take and hold: a worker
+  registered but never fetched a task, `Migrate` did not return, and the
+  maintainer stopped applying retention and refreshing statistics. They now
+  wait only for locks on taskmill's own tables, which a role needs rights
+  on those tables to take. Preparing history partitions takes no lock while
+  every partition is ready, and waits at most 5 seconds otherwise. `Migrate`
+  still waits while another process migrates. It now creates the schema and
+  the `migrations` table before the transaction that migrates, so a first
+  `Migrate` that fails leaves those two behind; run it again.
+- A flood of notifications can no longer block a worker. A worker read
+  the database once for each notification that a queue's settings changed,
+  one after the other, where it receives notifications, and every role of a
+  database can send thousands of them a second. Cancellations and wake-ups
+  then waited behind them, for seconds, and the worker logged that the
+  maintainer's heartbeats did not arrive and polled its queues. A worker
+  now only notes what a notification says. It reads the settings, and the
+  rows of the tasks to cancel, at most once every 20 milliseconds for all
+  the notifications that arrived, so `Cancel` still stops a running task
+  within that time.
 
 ## [0.5.0] - 2026-11-12
 

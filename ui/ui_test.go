@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -150,19 +151,34 @@ func TestPagesRender(t *testing.T) {
 	}
 }
 
-func TestNavMarksACappedDeadCount(t *testing.T) {
+func TestNavShowsTheStoredDeadCount(t *testing.T) {
 	t.Parallel()
-	client, pool, schema := setupDB(t)
-	// The maintainer stopped counting the dead tasks at the cap.
-	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.queue_stats (queue, state, tasks, capped, refreshed_at)
-	    VALUES ('mail', 'dead', 10000, true, now())`); err != nil {
-		t.Fatal(err)
-	}
-	h := handler(t, client, nil)
-	for _, path := range []string{"/", "/tasks?state=dead", "/workers"} {
-		if _, body, _ := get(t, h, path); !strings.Contains(body, `<span>Dead</span><span class="count mono">10,000&#43;</span>`) {
-			t.Errorf("%s: want the nav's dead count marked as capped\n%s", path, body)
-		}
+	for _, tc := range []struct {
+		name   string
+		tasks  int64
+		capped bool
+		want   string
+	}{
+		// The maintainer stopped counting the dead tasks at the cap.
+		{"capped", 10000, true, "10,000&#43;"},
+		// No maintainer stores this count, but the column holds it, and a
+		// page must show whatever the column holds.
+		{"smallest", math.MinInt64, false, "-9,223,372,036,854,775,808"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, pool, schema := setupDB(t)
+			if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.queue_stats (queue, state, tasks, capped, refreshed_at)
+			    VALUES ('mail', 'dead', $1, $2, now())`, tc.tasks, tc.capped); err != nil {
+				t.Fatal(err)
+			}
+			h := handler(t, client, nil)
+			for _, path := range []string{"/", "/tasks?state=dead", "/workers"} {
+				if _, body, _ := get(t, h, path); !strings.Contains(body, `<span>Dead</span><span class="count mono">`+tc.want+`</span>`) {
+					t.Errorf("%s: want the nav's dead count as %s\n%s", path, tc.want, body)
+				}
+			}
+		})
 	}
 }
 
@@ -671,6 +687,39 @@ func TestBasicAuth(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("logged in: got %d", rec.Code)
+	}
+}
+
+// A dashboard with a prefix answers only for the paths under it, and never
+// sends a client to a path outside it.
+func TestPrefixKeepsRequestsAndRedirects(t *testing.T) {
+	t.Parallel()
+	h := handler(t, setup(t), &ui.Config{Prefix: "/tm"})
+	for _, tc := range []struct {
+		method, target string
+		code           int
+		location       string // of a redirect that the test knows
+	}{
+		{http.MethodGet, "/tm/tasks?state=dead", http.StatusOK, ""},
+		// The prefix alone, and a path that is not clean, lead to the clean
+		// path under the prefix, with the same method.
+		{http.MethodGet, "/tm", http.StatusTemporaryRedirect, "/tm/"},
+		{http.MethodGet, "/tm//tasks?state=dead", http.StatusTemporaryRedirect, "/tm/tasks?state=dead"},
+		{http.MethodGet, "/tm//example.com/x", http.StatusTemporaryRedirect, "/tm/example.com/x"},
+		{http.MethodGet, "/tm/../tasks", http.StatusTemporaryRedirect, "/tm/tasks"},
+		{http.MethodPost, "/tm//tasks/1/retry", http.StatusTemporaryRedirect, "/tm/tasks/1/retry"},
+		// An escaped slash is part of a name, here of the queue "a//b".
+		{http.MethodPost, "/tm/queues/a%2F%2Fb/pause", http.StatusSeeOther, ""},
+		// A path that only starts like the prefix is not under it.
+		{http.MethodGet, "/tmx/tasks", http.StatusNotFound, ""},
+		{http.MethodGet, "/tasks", http.StatusNotFound, ""},
+	} {
+		req := httptest.NewRequestWithContext(t.Context(), tc.method, tc.target, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Location"); rec.Code != tc.code || tc.location != "" && got != tc.location {
+			t.Errorf("%s %s: got %d to %q, want %d to %q", tc.method, tc.target, rec.Code, got, tc.code, tc.location)
+		}
 	}
 }
 
