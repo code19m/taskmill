@@ -148,8 +148,8 @@ func TestTutorialShowsAllCode(t *testing.T) {
 
 // TestTutorialParts checks that every part of the tutorial has the shape of
 // the template in docs/design/writing-docs.md: the title "Part N: …", steps
-// numbered from 1, "What you learned", "Go deeper", and a Next line at the
-// end. The tutorial's README must link to every part.
+// numbered from 1, then "What you learned" and "Go deeper". TestNextChain
+// checks the part's Next line, and that the tutorial's README links to it.
 func TestTutorialParts(t *testing.T) {
 	t.Parallel()
 	repo := os.DirFS("../..")
@@ -157,18 +157,11 @@ func TestTutorialParts(t *testing.T) {
 	if err != nil || len(parts) == 0 {
 		t.Fatalf("docs/tutorial has no parts: %v", err)
 	}
-	index, err := fs.ReadFile(repo, "docs/tutorial/README.md")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for i, part := range parts {
 		text, err := fs.ReadFile(repo, part)
 		if err != nil {
 			t.Error(err)
 			continue
-		}
-		if name := path.Base(part); !strings.Contains(string(index), "]("+name+")") {
-			t.Errorf("docs/tutorial/README.md does not link to %s", name)
 		}
 		if why := partShape(path.Base(part), string(text), i+1); why != "" {
 			t.Errorf("%s: %s", part, why)
@@ -196,10 +189,6 @@ func partShape(name, text string, n int) string {
 	}
 	if rest := headings[steps+1:]; steps == 0 || !slices.Equal(rest, []string{"What you learned", "Go deeper"}) {
 		return fmt.Sprintf(`after the title come the steps, then "What you learned" and "Go deeper"; after %d steps come %q`, steps, rest)
-	}
-	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
-	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "**Next:** [") {
-		return fmt.Sprintf("the last line is %q, not a Next line", last)
 	}
 	return ""
 }

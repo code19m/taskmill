@@ -135,8 +135,8 @@ status lives in one place: [Compatibility](../reference/compatibility.md).
   a shop: orders, emails, receipts.
 - **Links:** relative, with `.md`. Link to another page's anchor only when
   its heading is unlikely to change. `go test ./internal/docs/` fails on a
-  broken link, on a missing anchor, and on code in the quickstart or the
-  tutorial that is not in the page's example program.
+  broken link or anchor, on code in the quickstart or the tutorial that is
+  not in the page's example program, and on the rules that a machine checks.
 - **End:** `## See also` with 2 to 4 links (related pages and pkg.go.dev),
   then, as the last line, `**Next:** [Page title](page.md)`:
   - Within a section, follow the order of the section's `README.md`. The
@@ -247,4 +247,4 @@ A section's `README.md`. Its table may use "I want to…" rows instead:
 - [Glossary](../concepts/glossary.md): every term the docs use
 - [How taskmill is built](README.md): the design pages
 
-**Next:** [Documentation home](../README.md)
+**Next:** [Documentation](../README.md)

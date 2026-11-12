@@ -1,4 +1,6 @@
-// Package docs checks the links between the repository's Markdown files.
+// Package docs checks the repository's Markdown files: their links, the code
+// that the quickstart and the tutorial show, and the rules of the style guide
+// that a machine can check.
 package docs
 
 import (
@@ -204,6 +206,23 @@ func linksOf(prose string) []link {
 	return links
 }
 
+// resolve returns the path that target, a link without a scheme in file,
+// points to, and the link's fragment.
+func resolve(file, target string) (dest, fragment string, err error) {
+	ref, fragment, _ := strings.Cut(target, "#")
+	ref, _, _ = strings.Cut(ref, "?")
+	if ref, err = url.PathUnescape(ref); err != nil {
+		return "", "", err
+	}
+	switch {
+	case strings.HasPrefix(ref, "/"): // GitHub reads it from the repository's root
+		return path.Clean(ref[1:]), fragment, nil
+	case ref != "":
+		return path.Join(path.Dir(file), ref), fragment, nil
+	}
+	return file, fragment, nil
+}
+
 // checker checks the links of the Markdown files in repo.
 type checker struct {
 	repo    fs.FS
@@ -215,18 +234,9 @@ func (c *checker) check(file, target string) error {
 	if external.MatchString(target) {
 		return nil
 	}
-	ref, fragment, _ := strings.Cut(target, "#")
-	ref, _, _ = strings.Cut(ref, "?")
-	ref, err := url.PathUnescape(ref)
+	dest, fragment, err := resolve(file, target)
 	if err != nil {
 		return err
-	}
-	dest := file
-	switch {
-	case strings.HasPrefix(ref, "/"): // GitHub reads it from the repository's root
-		dest = path.Clean(ref[1:])
-	case ref != "":
-		dest = path.Join(path.Dir(file), ref)
 	}
 	if dest == ".." || strings.HasPrefix(dest, "../") {
 		return errors.New("it points outside the repository")
