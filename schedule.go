@@ -22,8 +22,10 @@ import (
 //
 // Runs that are missed while no maintainer runs, or while the schedule is
 // paused, collapse into one run. The expression is read on the wall clock of
-// Location, so daylight saving time behaves as in classic cron. The task's
-// RunAt is the time it was scheduled for.
+// Location, so daylight saving time behaves as in classic cron: a time that
+// the clocks skip when they go forward runs right after the jump, and a time
+// that repeats when they go back runs once. The task's RunAt is the time it
+// was scheduled for.
 type Schedule struct {
 	// Name identifies the schedule, in 1 to 128 characters. Schedules are
 	// kept in the database by name, so renaming one creates a new schedule.
