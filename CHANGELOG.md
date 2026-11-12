@@ -233,8 +233,9 @@ All notable changes to taskmill are recorded here. The format follows
   group's, from a state that could change before they held the lock. Now
   they check the state again under the lock, and lock in the other order if
   it changed. For a task of a FIFO group, and for one whose enqueue they do
-  not see yet, they use a savepoint for this, named `taskmill_take_task`;
-  `CancelTx` sets it in your transaction and releases it.
+  not see yet, they use a savepoint for this, named `taskmill_take_task`.
+  `CancelTx` sets it in your transaction and leaves it there until the
+  transaction ends, or until you roll back to a savepoint of your own.
 - When two producers enqueued the same dedupe key just after its window
   ended, one created the task, as it should, but the other's
   `EnqueueResult.ID` named the old task that held the key before. Now it

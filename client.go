@@ -143,8 +143,9 @@ func (c *Client) Cancel(ctx context.Context, id int64) error {
 }
 
 // CancelTx is [Client.Cancel] in the caller's transaction. For a task of a
-// FIFO group, it sets a savepoint named taskmill_take_task in the
-// transaction, and releases it before it returns.
+// FIFO group, and for a task that it does not see yet, it sets a savepoint
+// named taskmill_take_task in the transaction, and leaves it there: the end
+// of the transaction removes it, or a rollback to a savepoint of your own.
 func (c *Client) CancelTx(ctx context.Context, tx Executor, id int64) error {
 	q, err := txQuerier(tx)
 	if err != nil {
@@ -335,6 +336,13 @@ const takeTries = 5
 // If the task changed sides meanwhile, takeTask gives back what it holds, by
 // rolling back to a savepoint, and locks again in the other order.
 //
+// It never releases the savepoint, which stays until the transaction ends.
+// Once a savepoint is released, PostgreSQL makes those who wait for a row
+// that it locked wait for the whole transaction. In a caller's transaction
+// that goes on after it rolled back to a savepoint of its own, which frees
+// the row, they would wait for nothing, and the transaction would wait for
+// them when it comes for the row again.
+//
 // A task that it sees, and that is in no FIFO group or is completed, needs
 // none of this, and no savepoint. A task that it does not see does: its
 // enqueue may commit before the next statement, and make it pending.
@@ -363,8 +371,7 @@ func (c *Client) takeTask(ctx context.Context, q querier, id int64, take string,
 			return false, err
 		}
 		if pending := found && State(*state) == StatePending; pending == groupHeld || last {
-			_, err = q.exec(ctx, "RELEASE SAVEPOINT taskmill_take_task")
-			return found, err
+			return found, nil
 		}
 		if _, err := q.exec(ctx, "ROLLBACK TO SAVEPOINT taskmill_take_task"); err != nil {
 			return false, err

@@ -514,6 +514,13 @@ deadlock detection is the last resort. A task that they see needs no
 savepoint if it has no group, or is completed. A task that they do not see
 does: its enqueue may commit before their next statement.
 
+The savepoint is never released: it stays until the transaction ends. Once
+a savepoint is released, PostgreSQL makes whoever waits for a row that it
+locked wait for the whole transaction. A caller of `CancelTx` may roll back
+to a savepoint of its own, which frees the rows, and go on. The waiters
+would then wait for nothing, and the caller's transaction would wait for
+them, in a deadlock, when it comes for the same row again.
+
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the
 dead head, which resumes the group, or deletes it, which promotes the next

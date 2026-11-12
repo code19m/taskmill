@@ -608,6 +608,60 @@ func TestTxMethodsAcceptWrappedSQLTransactions(t *testing.T) {
 	e.wantState(t, id, taskmill.StateCanceled)
 }
 
+// A transaction cancels a task of a FIFO group under a savepoint of its own,
+// and rolls back to it. That frees the rows of the task and of its group, so
+// whoever waits for them must go on then, not when the transaction ends: the
+// transaction may need those rows again, and would wait for the waiter.
+func TestCancelTxRolledBackToASavepointLetsWaitersGoOn(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	group := &taskmill.EnqueueOptions{GroupKey: "g"}
+	e.enqueue(t, sendEmail{To: "head"}, group)
+	id := e.enqueue(t, sendEmail{To: "next"}, &taskmill.EnqueueOptions{GroupKey: "g", DedupeKey: "k"})
+
+	// The cancel has locked the rows of the group and of the task, and
+	// stops at the task's dedupe key.
+	keyTx := e.begin(t)
+	e.txExec(t, keyTx, "SELECT FROM {s}.dedupe_keys FOR UPDATE")
+	tx := e.begin(t)
+	savepoint, err := tx.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled := make(chan error, 1)
+	go func() { canceled <- e.client.CancelTx(ctx, taskmill.Pgx(savepoint), id) }()
+	e.waitBlocked(t, "DELETE FROM {s}.dedupe_keys")
+	// An enqueue into the group starts to wait for the group's row.
+	enqueued := make(chan error, 1)
+	go func() {
+		_, err := e.client.Enqueue(ctx, sendEmail{To: "last"}, group)
+		enqueued <- err
+	}()
+	e.waitBlockedCount(t, 2)
+	if err := keyTx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, canceled, "the cancel"); err != nil {
+		t.Fatal(err)
+	}
+	if err := savepoint.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, enqueued, "the enqueue, once the savepoint is rolled back"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The transaction goes on, and cancels the task after all.
+	if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), id); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.wantState(t, id, taskmill.StateCanceled)
+}
+
 func TestCancelWhileTheWorkerRecordsAResult(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
