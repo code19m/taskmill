@@ -1378,6 +1378,8 @@ func TestScheduleDoesNotWaitForAHeldGroup(t *testing.T) {
 	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 		{Name: "ledger", Cron: "@hourly", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
 	}})
+	// The run gives up on the held group after 50 ms, not after a second.
+	taskmill.SetTiming(w, taskmill.Timing{LockWait: 50 * time.Millisecond})
 	ctx := t.Context()
 	taskmill.RunSchedules(ctx, w)
 	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")

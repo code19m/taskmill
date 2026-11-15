@@ -374,7 +374,8 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		// An enqueue into a FIFO group waits for the group's row. The election
 		// runs in the same loop, so give up after a moment, and try again in
 		// the next cycle.
-		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+maintenanceLockTimeout+"'"); err != nil {
+		wait := strconv.FormatInt(m.w.timing.lockWait.Milliseconds(), 10) + "ms"
+		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+wait+"'"); err != nil {
 			return err
 		}
 		tag, err := tx.Exec(ctx, m.c.sql.advanceSchedule, s.Name, next, due)

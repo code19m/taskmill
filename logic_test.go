@@ -242,6 +242,7 @@ func TestDefaultTiming(t *testing.T) {
 		{"failureReport", d.failureReport, time.Minute},
 		{"idlePoll", d.idlePoll, time.Minute},
 		{"listen", d.listen, 10 * time.Second},
+		{"lockWait", d.lockWait, time.Second},
 	}
 	for _, tt := range intervals {
 		if tt.got != tt.want {

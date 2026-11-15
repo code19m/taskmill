@@ -158,6 +158,8 @@ func TestMaintainerWorkStartsCleanInANewTerm(t *testing.T) {
 	w := newWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 		{Name: "ledger", Cron: "@hourly", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
 	}})
+	// A run gives up on a held group after 50 ms, not after a second.
+	taskmill.SetTiming(w, taskmill.Timing{LockWait: 50 * time.Millisecond})
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 	startWorker(t, w)
 	waitFor(t, "the schedule to be stored", func() bool { return e.count(t, "SELECT count(*) FROM {s}.schedules") == 1 })
