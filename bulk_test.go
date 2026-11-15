@@ -764,7 +764,7 @@ func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", oldest)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	sent.atPick(2, cancel)
+	sent.atBatch(2, cancel)
 	first, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: all})
 	if !errors.Is(err, context.Canceled) || first.Changed != 1999 || first.Next == "" {
 		t.Fatalf("first run: %+v, %v; want it to stop after two batches, with a cursor", first, err)
@@ -838,16 +838,26 @@ type bulkStatements struct {
 	mu   sync.Mutex
 	sent []byte
 	// Each is called once: before the next transaction begins, and before
-	// the next pick.
-	onBegin, onPick atomic.Pointer[func()]
+	// the pick of the next batch.
+	onBegin, onBatch atomic.Pointer[func()]
+	// again is set while the action runs a batch again: its transaction was
+	// rolled back, and its next pick is of the same batch.
+	again atomic.Bool
 }
 
 func (s *bulkStatements) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
 	on := &s.onBegin
-	if strings.Contains(d.SQL, "WITH candidates AS") {
+	switch {
+	case strings.Contains(d.SQL, "WITH candidates AS"):
 		s.add('p')
-		on = &s.onPick
-	} else if d.SQL != "begin" {
+		if s.again.Swap(false) {
+			return ctx
+		}
+		on = &s.onBatch
+	case d.SQL == "rollback":
+		s.again.Store(true)
+		return ctx
+	case d.SQL != "begin":
 		return ctx
 	}
 	if f := on.Swap(nil); f != nil {
@@ -876,17 +886,21 @@ func (s *bulkStatements) add(statement byte) {
 
 func (*bulkStatements) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
 
-// atPick calls f once, when the nth pick from now starts.
-func (s *bulkStatements) atPick(n int, f func()) {
+// atBatch calls f once, when the nth batch from now picks its tasks. A batch
+// that the action runs again counts once: on a slow database, a statement of
+// a batch without a window may not end within its second, and the action
+// then runs the batch again in a window, with a second pick.
+func (s *bulkStatements) atBatch(n int, f func()) {
 	var next func()
 	next = func() {
 		if n--; n > 0 {
-			s.onPick.Store(&next)
+			s.onBatch.Store(&next)
 			return
 		}
 		f()
 	}
-	s.onPick.Store(&next)
+	s.again.Store(false)
+	s.onBatch.Store(&next)
 }
 
 // reset returns the statements since the last reset.
@@ -1063,8 +1077,7 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 	// rest.
 	stopped, stop := context.WithCancel(ctx)
 	defer stop()
-	atPick := func() { stop() }
-	sent.onPick.Store(&atPick)
+	sent.atBatch(1, stop)
 	got, err = e.client.DeleteMatching(stopped, &taskmill.BulkParams{Filter: rare})
 	if !errors.Is(err, context.Canceled) || got.Changed != 200 || got.Next == "" {
 		t.Fatalf("delete: %+v, %v; want 200 tasks deleted in one window after the context ended", got, err)
@@ -1103,7 +1116,7 @@ func TestBulkActionsStopMidway(t *testing.T) {
 	// batch.
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	sent.atPick(2, cancel)
+	sent.atBatch(2, cancel)
 	all := &taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
 	res, err := e.client.CancelMatching(ctx, bulk(all))
 	if !errors.Is(err, context.Canceled) || res.Changed == 0 || res.Changed >= 3000 || res.Next == "" {
