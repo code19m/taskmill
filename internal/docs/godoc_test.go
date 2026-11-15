@@ -20,9 +20,10 @@ import (
 // the API, and the links between them and the pages. They read the packages
 // from their source, so none of them uses the network.
 
-// godocGuide is the page with the rules for doc comments, in its section
-// "Where content lives".
-const godocGuide = guide
+// godocGuide is the page with the rules for doc comments. Its section "What
+// the tests check" names the tests of this file: change a rule there and
+// here together.
+const godocGuide = "docs/design/writing-godoc.md"
 
 // module is the module's import path. Every link to its API on pkg.go.dev
 // starts with it.

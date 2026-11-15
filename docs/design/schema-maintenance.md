@@ -194,6 +194,6 @@ All other traffic works through such poolers.
 
 - [Storage schema](schema.md): the tables `queue_stats`, `activity`, and `leader`
 - [ADR 0006](../adr/0006-health-and-scaling-read-paths.md) and [ADR 0007](../adr/0007-count-stuck-work-with-the-queue-statistics.md): why the statistics look like this
-- [Defaults and limits](../reference/defaults-and-limits.md#the-maintainer): the maintainer's timings
+- [Fixed timings and limits](../reference/defaults-and-limits.md#the-maintainer): the maintainer's timings
 
 **Next:** [Benchmarks](benchmarks.md)

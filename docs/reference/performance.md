@@ -102,7 +102,7 @@ Every fault test passed. Each one fails on a single lost or repeated task:
 ## See also
 
 - [Full benchmark results](../design/benchmarks.md): targets, method, and how to run them
-- [Defaults and limits](defaults-and-limits.md): the exact limits
+- [Fixed timings and limits](defaults-and-limits.md): the exact timings of the workers and the maintainer
 - [Autoscaling](../production/autoscaling.md): when to add workers
 
 **Next:** [How taskmill is built](../design/README.md)

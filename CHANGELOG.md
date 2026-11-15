@@ -24,6 +24,25 @@ All notable changes to taskmill are recorded here. The format follows
   `go doc`. The package comments say where to start, `Client` groups its
   methods by what you want to do, and the main types link to the page that
   teaches them. No behavior changes.
+- The pages no longer repeat the doc comments. In the
+  [reference](docs/reference/README.md),
+  [Configuration](docs/reference/configuration.md) and
+  [Errors](docs/reference/errors.md) are now indexes: they name the type of
+  each setting, and the identifier of each error, error class, and error
+  history code, and link to pkg.go.dev. The page
+  `docs/reference/defaults-and-limits.md` is now
+  [Fixed timings and limits](docs/reference/defaults-and-limits.md): it
+  keeps the timings of the workers, the maintainer, and the dashboard, which
+  no identifier owns. Its sections about tasks, handlers, retention, the
+  operations API, and the outbox are gone, like the sections of the old
+  Configuration page: links to their anchors now open the top of the page.
+- What to do about each error history code is now in
+  [Retries and errors](docs/guides/retries-and-errors.md). The guides
+  [Enqueue tasks](docs/guides/enqueue.md) and
+  [Handle tasks](docs/guides/handle-tasks.md) no longer list every option
+  with its default: they link to the type.
+- The reference section has a new order: the three indexes come first, then
+  the pages about what has no Go identifier.
 
 ## [0.6.0] - 2026-11-13
 

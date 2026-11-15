@@ -191,9 +191,21 @@ has:
 
 - the `Attempt`, and the time (`At`);
 - the error's `Message`;
-- a `Code`, which is empty for an error that your handler returned in time.
-  Otherwise it says what happened, such as `timeout`, `panic`, or
-  `lease_lost`. [Errors](../reference/errors.md) lists every code.
+- a `Code`, which is empty for an error that your handler returned in time:
+  then read the message. Otherwise the code says what happened.
+
+| Code | What to do |
+|---|---|
+| [`timeout`](https://pkg.go.dev/github.com/code19m/taskmill#CodeTimeout) | Make the handler faster, split the work, or raise `Timeout` |
+| [`lease_lost`](https://pkg.go.dev/github.com/code19m/taskmill#CodeLeaseLost) | Usually nothing: the task is retried. If you see it often, check for crashed workers, the pool size, and the database |
+| [`panic`](https://pkg.go.dev/github.com/code19m/taskmill#CodePanic) | Fix the bug, then retry the task. The message holds the stack trace |
+| [`invalid_payload`](https://pkg.go.dev/github.com/code19m/taskmill#CodeInvalidPayload) | Usually a payload change that old tasks don't fit. Fix the type, then retry or delete the tasks: see [Change a task safely](../recipes/change-a-task-safely.md) |
+| [`unknown_kind`](https://pkg.go.dev/github.com/code19m/taskmill#CodeUnknownKind) | Run a worker that handles the kind, then retry the task, or delete it |
+| [`no_handler`](https://pkg.go.dev/github.com/code19m/taskmill#CodeNoHandler) | Usually a rolling deploy: wait. If it lasts, check that every worker of the queue has the same handlers |
+
+Each code links to its doc comment, which says when taskmill records it.
+[Errors](../reference/errors.md) maps every code and error class to its
+identifier.
 
 ## See also
 
