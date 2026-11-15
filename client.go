@@ -216,11 +216,8 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64, check bool) er
 	if s == StateRunning || group == "" {
 		return nil
 	}
-	how := leftHead
-	if s == StatePending {
-		how = leftWaiting
-	}
-	if err := c.leaveGroup(ctx, c.logger, q, queue, group, id, how); err != nil {
+	left := []groupLeave{{queue: queue, group: group, head: s != StatePending}}
+	if err := c.leaveGroups(ctx, c.logger, q, left); err != nil {
 		return fail(err)
 	}
 	return nil
@@ -339,14 +336,11 @@ func (c *Client) takeKeys(ctx context.Context, q querier, ids []int64) (refused 
 
 // rejoinGroup counts a retried task back into its FIFO group, and reports
 // whether it must wait behind the group's other tasks. A dead head that halts
-// its group is still counted: retrying it resumes the group.
+// its group is still counted: retrying it resumes the group. The caller
+// holds the task's lock.
 func (c *Client) rejoinGroup(ctx context.Context, q querier, queue, group string, id int64) (pending bool, err error) {
-	halting, err := c.haltedBy(ctx, q, queue, group, id)
-	if err != nil {
-		return false, err
-	}
-	if halting {
-		_, err = q.exec(ctx, c.sql.resumeHaltedHead, queue, group, id)
+	resumed, err := q.exec(ctx, c.sql.resumeHaltedHead, queue, group, id)
+	if err != nil || resumed == 1 {
 		return false, err
 	}
 	var tasks int
@@ -354,14 +348,6 @@ func (c *Client) rejoinGroup(ctx context.Context, q querier, queue, group string
 		return false, err
 	}
 	return tasks > 1, nil
-}
-
-// haltedBy reports whether task id halts its group. The caller must hold the
-// task's lock.
-func (c *Client) haltedBy(ctx context.Context, q querier, queue, group string, id int64) (bool, error) {
-	var halting bool
-	_, err := queryRow(ctx, q, c.sql.haltedBy, []any{queue, group, id}, &halting)
-	return halting, err
 }
 
 // Delete deletes a task that is not running, including a completed task in
@@ -376,44 +362,44 @@ func (c *Client) Delete(ctx context.Context, id int64) error {
 
 // delete deletes task id on q. check is for takeTask.
 func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) error {
+	fail := func(err error) error { return fmt.Errorf("taskmill: delete task %d: %w", id, err) }
 	var state, queue, group string
 	found, err := c.takeTask(ctx, q, id, c.sql.deleteTask, check, &state, &queue, &group)
 	if err != nil {
-		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+		return fail(err)
 	}
 	if !found {
-		n, herr := q.exec(ctx, c.sql.deleteHistory, id)
-		if herr != nil {
-			return fmt.Errorf("taskmill: delete task %d: %w", id, herr)
+		n, err := q.exec(ctx, c.sql.deleteHistory, id)
+		if err != nil {
+			return fail(err)
 		}
 		if n == 0 {
 			return c.stateError(ctx, q, id, "delete")
 		}
 	}
 	if _, err := q.exec(ctx, c.sql.releaseKeys, []int64{id}); err != nil {
-		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+		return fail(err)
 	}
 	if !found || group == "" {
 		return nil
 	}
 	// Unfinished tasks are counted in their group, and so is a dead head that
-	// halts it.
+	// halts it: its halt ends here.
 	s := State(state)
 	counted := !s.Finished()
 	if !counted {
-		if counted, err = c.haltedBy(ctx, q, queue, group, id); err != nil {
-			return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+		resumed, err := q.exec(ctx, c.sql.resumeHaltedHead, queue, group, id)
+		if err != nil {
+			return fail(err)
 		}
+		counted = resumed == 1
 	}
 	if !counted {
 		return nil
 	}
-	how := leftHead
-	if s == StatePending {
-		how = leftWaiting
-	}
-	if err := c.leaveGroup(ctx, c.logger, q, queue, group, id, how); err != nil {
-		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+	left := []groupLeave{{queue: queue, group: group, head: s != StatePending}}
+	if err := c.leaveGroups(ctx, c.logger, q, left); err != nil {
+		return fail(err)
 	}
 	return nil
 }
@@ -508,14 +494,12 @@ func (c *Client) stateError(ctx context.Context, q querier, id int64, op string)
 type leaving int
 
 const (
-	leftWaiting  leaving = iota // a pending task left: the head stays
-	leftHead                    // the head finished or was removed: the next task becomes the head
+	leftHead     leaving = iota // the head finished: the next task becomes the head
 	leftDeadHead                // the head became dead: the group halts behind it
 )
 
-// leaveGroup updates a FIFO group after one of its counted tasks finished or
-// was removed. Callers run it in the same transaction as the change to the
-// task, and pass their logger: a worker's names it.
+// leaveGroup is leaveGroups and haltGroup for the one caller that has not
+// moved to them, the rescue.
 func (c *Client) leaveGroup(ctx context.Context, logger *slog.Logger, q querier, queue, group string, id int64, how leaving) error {
 	if how == leftDeadHead {
 		halted, err := q.exec(ctx, c.sql.haltGroup, queue, group, id)
@@ -538,7 +522,7 @@ func (c *Client) leaveGroup(ctx context.Context, logger *slog.Logger, q querier,
 	case remaining == 0:
 		_, err = q.exec(ctx, c.sql.deleteEmptyGroup, queue, group)
 		return err
-	case how != leftWaiting && !halted:
+	case !halted:
 		_, err = q.exec(ctx, c.sql.promoteGroup, queue, group, c.schema, c.notifier.allow(ctx, queue))
 		return err
 	default:
@@ -552,10 +536,18 @@ type groupLeave struct {
 	head         bool // it was the group's head, not a pending task behind it
 }
 
-// leaveGroups is leaveGroup for many tasks, each an entry of left, with a
-// few statements for all of them. The caller holds the groups' locks, and
-// has ended the halts of the halting heads that left. Like leaveGroup, it
-// logs a group that has no row, to the caller's logger.
+// leaveGroups updates FIFO groups after counted tasks of theirs finished or
+// were removed: one task or many, each an entry of left. It takes the tasks
+// off their groups' counts, deletes a group that has none left, and makes
+// the oldest pending task the head of a group whose head left, unless a dead
+// head halts the group. A group that has no row, which should never happen,
+// is logged.
+//
+// Callers run it in the transaction that changed the tasks, after they ended
+// the halt of a halting head that left (resumeHaltedHead, releaseHalts), and
+// pass their logger: a worker's names it. It waits for a group's row that
+// another transaction holds. A caller that must not wait locks the rows
+// first and skips the held ones: lockGroups, the pick statements, rescue.
 func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier, left []groupLeave) error {
 	if len(left) == 0 {
 		return nil
@@ -621,6 +613,19 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 		return nil
 	}
 	return c.promoteGroups(ctx, q, next)
+}
+
+// haltGroup halts a FIFO group behind its head, task id, which became dead
+// and stays counted. Callers run it in the transaction that made the task
+// dead, with their logger. A group that has no row is logged, as in
+// leaveGroups.
+func (c *Client) haltGroup(ctx context.Context, logger *slog.Logger, q querier, queue, group string, id int64) error {
+	halted, err := q.exec(ctx, c.sql.haltGroup, queue, group, id)
+	if err == nil && halted == 0 {
+		logger.LogAttrs(ctx, slog.LevelError, "fifo group missing",
+			slog.String(logKeyQueue, queue), slog.String(logKeyGroup, group))
+	}
+	return err
 }
 
 // groupSet holds groups as two parallel slices, as statements take them.
