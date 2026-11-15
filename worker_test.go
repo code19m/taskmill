@@ -656,10 +656,9 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 }
 
 // A notification that tasks are available is a hint too. A worker whose
-// fetch found nothing lets 20 ms pass before it acts on the next one. Its
-// own tasks do not wait for that, and they let no notification through: a
-// FIFO group that runs during a flood takes its two fetches for each task,
-// and the flood adds one per 20 ms.
+// fetch found nothing lets 20 ms pass before it acts on the next one, also
+// while its own tasks end: a FIFO group that runs during a flood takes its
+// two fetches for each task, and the flood adds one per 20 ms.
 func TestFloodOfNotificationsAddsOneFetchPer20Milliseconds(t *testing.T) {
 	t.Parallel()
 	const flood, tasks = 20000, 100
@@ -702,6 +701,66 @@ func TestFloodOfNotificationsAddsOneFetchPer20Milliseconds(t *testing.T) {
 	n, most := fetches.n.Load()-before, int64(2*tasks+tasks/10)+int64(time.Since(flooded)/(20*time.Millisecond))
 	if n > most {
 		t.Errorf("the worker fetched %d times for %d tasks and %d notifications, want at most %d", n, tasks, flood, most)
+	}
+}
+
+// The moment for which a queue leaves notifications waiting, after one found
+// nothing, holds back notifications only. The worker's own tasks do not wait
+// for its end: here it never ends, and the tasks of a FIFO group still
+// follow each other, with two fetches each. A flood of notifications adds
+// no fetch.
+func TestQuietQueueHoldsBackNotificationsOnly(t *testing.T) {
+	t.Parallel()
+	const flood, tasks = 20000, 20
+	e, fetches := newCountedEnv(t)
+	params := make([]taskmill.EnqueueParams, tasks)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}, Options: &taskmill.EnqueueOptions{GroupKey: "account-7"}}
+	}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
+	}
+	started, release := make(chan int64, tasks), make(chan struct{})
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			started <- task.Args.UserID
+			<-release
+			return nil
+		}, nil),
+		Queues:       defaultQueue(2),
+		PollInterval: time.Hour,
+		NoMaintainer: true,
+	})
+	taskmill.SetTiming(w, taskmill.Timing{EmptyFetch: time.Hour})
+	startWorker(t, w)
+
+	// The group's first task runs, so a notification's fetch finds nothing:
+	// from that second fetch on, the queue hears no notification.
+	recv(t, started, "the group's first task to start")
+	e.waitListening(t)
+	e.exec(t, "SELECT pg_notify($1, 'a|' || $2)", e.schema, taskmill.DefaultQueue)
+	waitFor(t, "a notification's fetch to find nothing", func() bool { return fetches.n.Load() >= 2 })
+
+	before := fetches.n.Load()
+	ended := make(chan error, 1)
+	go func() {
+		_, err := e.pool.Exec(context.Background(), "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(flood)+" LOOP PERFORM pg_notify('"+
+			e.schema+"', 'a|"+taskmill.DefaultQueue+"'); COMMIT; END LOOP; END $$")
+		ended <- err
+	}()
+	close(release)
+	for i := 1; i < tasks; i++ {
+		if got := recv(t, started, "the group's next task to start"); got != int64(i) {
+			t.Fatalf("task %d of the group ran in place %d", got, i)
+		}
+	}
+	if err := recv(t, ended, "the flood to end"); err != nil {
+		t.Fatal(err)
+	}
+	// One fetch when a task frees its slot, and one when its completion is
+	// recorded.
+	if n := fetches.n.Load() - before; n > 2*tasks {
+		t.Errorf("the worker fetched %d times for %d tasks, want at most %d: notifications got through", n, tasks, 2*tasks)
 	}
 }
 

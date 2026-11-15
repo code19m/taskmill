@@ -46,7 +46,7 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 		// A notification wakes every worker of the queue, and most find
 		// nothing: those let a moment pass before they act on the next one.
 		if err == nil && notified && len(tasks) == 0 {
-			quiet = time.Now().Add(emptyFetchCooldown)
+			quiet = time.Now().Add(w.timing.emptyFetch)
 		}
 		if (err != nil || !more) && !wait() {
 			return

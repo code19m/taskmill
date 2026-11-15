@@ -26,23 +26,22 @@ const (
 	defaultDrainTimeout  = 20 * time.Second
 	defaultConcurrency   = 10
 
-	minLeaseDuration   = 100 * time.Millisecond
-	recordTimeout      = 30 * time.Second       // bound on one try to record a result
-	recordRetryFirst   = 100 * time.Millisecond // first wait before trying to record a result again
-	recordRetryMax     = 2 * time.Second        // longest wait between those tries
-	cleanupTimeout     = 5 * time.Second        // bound on best-effort cleanup, such as closing a connection
-	maxFetch           = 1000                   // most tasks one fetch leases
-	completionBatch    = 500                    // most completions recorded in one statement
-	completionLinger   = 2 * time.Millisecond   // wait for more completions to batch with
-	heldRetryDelay     = 20 * time.Millisecond  // first wait before retrying completions whose rows were held
-	heldRetryMax       = time.Second            // longest wait before retrying them
-	emptyFetchCooldown = 20 * time.Millisecond  // pause after a notification that found nothing
-	hintCooldown       = 20 * time.Millisecond  // pause after a read of cancel requests or settings that notifications asked for
-	errorMessageLimit  = 4096                   // bytes of an error message that are kept
+	minLeaseDuration  = 100 * time.Millisecond
+	recordTimeout     = 30 * time.Second       // bound on one try to record a result
+	recordRetryFirst  = 100 * time.Millisecond // first wait before trying to record a result again
+	recordRetryMax    = 2 * time.Second        // longest wait between those tries
+	cleanupTimeout    = 5 * time.Second        // bound on best-effort cleanup, such as closing a connection
+	maxFetch          = 1000                   // most tasks one fetch leases
+	completionBatch   = 500                    // most completions recorded in one statement
+	completionLinger  = 2 * time.Millisecond   // wait for more completions to batch with
+	heldRetryDelay    = 20 * time.Millisecond  // first wait before retrying completions whose rows were held
+	heldRetryMax      = time.Second            // longest wait before retrying them
+	hintCooldown      = 20 * time.Millisecond  // pause after a read of cancel requests or settings that notifications asked for
+	errorMessageLimit = 4096                   // bytes of an error message that are kept
 )
 
 // timing holds a worker's fixed intervals. They are not configurable, but
-// tests shorten them.
+// tests change them.
 type timing struct {
 	maintainer      time.Duration // how often the maintainer works, at most
 	heartbeat       time.Duration // how often the maintainer sends its heartbeat
@@ -59,6 +58,7 @@ type timing struct {
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
 	failureReport   time.Duration // how often an operation that keeps failing logs, at most
 	idlePoll        time.Duration // how often idle queues poll while the maintainer's heartbeats arrive
+	emptyFetch      time.Duration // how long a queue leaves notifications waiting after one found nothing
 	listen          time.Duration // bound on opening the notification connection, and on its answer when heartbeats stop
 }
 
@@ -78,6 +78,7 @@ var defaultTiming = timing{
 	reconnectMax:    30 * time.Second,
 	failureReport:   time.Minute,
 	idlePoll:        time.Minute,
+	emptyFetch:      20 * time.Millisecond,
 	listen:          10 * time.Second,
 }
 

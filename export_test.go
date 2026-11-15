@@ -17,8 +17,9 @@ const BatchTimeout = batchTimeout
 // HistoryDrops is the most history partitions that one retention pass drops.
 const HistoryDrops = historyDrops
 
-// Timing shortens a worker's fixed intervals in tests. Zero fields keep
-// their defaults.
+// Timing changes a worker's fixed intervals in tests: most tests shorten
+// them, and one makes an interval so long that it does not end. Zero fields
+// keep their defaults.
 type Timing struct {
 	Maintainer    time.Duration
 	Heartbeat     time.Duration
@@ -31,6 +32,7 @@ type Timing struct {
 	NoHandlerWait time.Duration
 	FailureReport time.Duration
 	IdlePoll      time.Duration
+	EmptyFetch    time.Duration
 	Listen        time.Duration
 }
 
@@ -53,6 +55,7 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.noHandlerWait, t.NoHandlerWait)
 	set(&w.timing.failureReport, t.FailureReport)
 	set(&w.timing.idlePoll, t.IdlePoll)
+	set(&w.timing.emptyFetch, t.EmptyFetch)
 	set(&w.timing.listen, t.Listen)
 }
 
