@@ -58,11 +58,16 @@ func TestIdleWorkerFetchesRarelyWhileHeartbeatsArrive(t *testing.T) {
 	// fetches against the maintainer's heartbeats, not against the clock:
 	// polling every 20 ms would fetch some 40 times per heartbeat. The
 	// fetches of the start, of the listener's start, and of the polls that
-	// were already waiting end first, and so does a stretch in which a busy
-	// machine held the heartbeats up.
-	waitFor(t, "five heartbeats in a row without a fetch", func() bool {
-		fetched, sent := fetches.n.Load(), fetches.heartbeats.Load()
-		waitFor(t, "five more heartbeats", func() bool { return fetches.heartbeats.Load() >= sent+5 })
+	// were already waiting end by the next heartbeat. A stretch in which a
+	// busy machine held the heartbeats up does not count either.
+	heartbeats := func(n int64) {
+		sent := fetches.heartbeats.Load()
+		waitFor(t, "more heartbeats", func() bool { return fetches.heartbeats.Load() >= sent+n })
+	}
+	waitFor(t, "three heartbeats in a row without a fetch", func() bool {
+		heartbeats(1)
+		fetched := fetches.n.Load()
+		heartbeats(3)
 		return fetches.n.Load() == fetched
 	})
 
@@ -250,13 +255,26 @@ func TestIdleWorkerKeepsAListenerThatAnswers(t *testing.T) {
 	missing := logs.count(heartbeatsMissing)
 	stopMaintainer()
 	pid := e.listenerPID(t)
+	// Without heartbeats, the worker asks the listener each 600 ms whether
+	// it still answers, with a statement of its own. A listener that it
+	// replaced after an answer would not get a second such statement.
+	statements := map[time.Time]bool{} // of the listener, by when they started
+	seen := func() int {
+		if got := e.listenerPID(t); got != pid {
+			t.Fatalf("the worker replaced a listener that answers: pid %d, then %d", pid, got)
+		}
+		var at time.Time
+		if err := e.pool.QueryRow(t.Context(), "SELECT query_start FROM pg_stat_activity WHERE pid = $1", pid).Scan(&at); err != nil {
+			t.Fatal(err)
+		}
+		statements[at] = true
+		return len(statements)
+	}
+	seen() // its last statement from while heartbeats arrived
 	waitFor(t, "the worker to find that heartbeats do not arrive", func() bool {
 		return logs.count(heartbeatsMissing) == missing+1 && !taskmill.Notifying(w)
 	})
-	time.Sleep(2 * time.Second) // the worker checks the listener each 600 ms
-	if got := e.listenerPID(t); got != pid {
-		t.Fatalf("the worker replaced a listener that answers: pid %d, then %d", pid, got)
-	}
+	waitFor(t, "the listener to be asked twice", func() bool { return seen() > 2 })
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "a"})
 	recv(t, started, "the task to start")
 }
@@ -266,7 +284,7 @@ func TestIdleWorkerKeepsAListenerThatAnswers(t *testing.T) {
 // workers that do not lead try to take over only once an hour here.
 func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 	t.Parallel()
-	e, _ := newCountedEnv(t)
+	e, fetches := newCountedEnv(t)
 	logs := &logRecorder{}
 	eligible := func() (stop func()) {
 		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: map[string]taskmill.QueueOptions{"m": {}}})
@@ -306,21 +324,14 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 		return len(listeners) == 5
 	})
 
-	var fellBack atomic.Bool
-	watched := make(chan struct{})
-	go func() {
-		defer close(watched)
-		// Longer than the workers wait for a heartbeat.
-		for end := time.Now().Add(4 * time.Second); time.Now().Before(end); time.Sleep(5 * time.Millisecond) {
-			if !notifying() {
-				fellBack.Store(true)
-			}
-		}
-	}()
+	// The handover is over once the next maintainer has sent heartbeats of
+	// its own. A worker that waited its three seconds for one meanwhile has
+	// said so, and has stopped counting on notifications.
 	leader := e.count(t, "SELECT count(*) FROM {s}.leader")
 	stopLeader()
-	<-watched
-	if fellBack.Load() || logs.count(heartbeatsMissing) > 0 {
+	sent := fetches.heartbeats.Load()
+	waitFor(t, "the next maintainer to send two heartbeats", func() bool { return fetches.heartbeats.Load() >= sent+2 })
+	if !notifying() || logs.count(heartbeatsMissing) > 0 {
 		t.Fatal("workers stopped counting on notifications while the maintainer changed")
 	}
 	if n := e.count(t, "SELECT count(*) FROM {s}.leader"); n != leader {
