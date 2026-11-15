@@ -55,6 +55,9 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) {
 	if err != nil {
 		return
 	}
+	// Settled comes first: no queue fetches before the worker says that it
+	// has read the settings.
+	w.settled.Store(true)
 	// A queue without a row has the default settings: running, no limit.
 	for name, q := range w.queues {
 		s := settings[name]
@@ -63,7 +66,6 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) {
 			q.nudge()
 		}
 	}
-	w.settled.Store(true)
 }
 
 // queueSetting is the part of a queue's settings that its worker applies.
