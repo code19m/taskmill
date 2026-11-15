@@ -105,6 +105,43 @@ func enqueueWithSQL(ctx context.Context, db *sql.DB, client *taskmill.Client) er
 	return tx.Commit()
 }
 
+// This example enqueues a task in the transaction that saves its order: the
+// task exists only if the order does.
+func ExampleClient_EnqueueTx() {
+	ctx := context.Background()
+	var pool *pgxpool.Pool      // the application's pool
+	var client *taskmill.Client // from taskmill.NewClient
+
+	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		var orderID int64
+		err := tx.QueryRow(ctx, "INSERT INTO orders (email) VALUES ($1) RETURNING id", "a@example.com").Scan(&orderID)
+		if err != nil {
+			return err
+		}
+		// If the enqueue fails, the order rolls back too.
+		_, err = client.EnqueueTx(ctx, taskmill.Pgx(tx), SendReceipt{OrderID: orderID, Email: "a@example.com"}, nil)
+		return err
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+// This example enqueues a task that starts in 10 minutes at the earliest,
+// and then before the other waiting tasks of its queue.
+func ExampleClient_Enqueue() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+	res, err := client.Enqueue(ctx, SendReceipt{OrderID: 7, Email: "a@example.com"}, &taskmill.EnqueueOptions{
+		RunAt:    time.Now().Add(10 * time.Minute),
+		Priority: taskmill.PriorityHigh,
+	})
+	if err != nil {
+		log.Fatal(err) // such as ErrInvalidArgument for an option outside its limits
+	}
+	log.Printf("enqueued task %d", res.ID)
+}
+
 // This example deduplicates an enqueue: enqueueing the same key again within
 // the window reports the existing task instead of creating another.
 func ExampleClient_Enqueue_deduplicated() {
@@ -187,11 +224,6 @@ func ExampleSchedule() {
 			// The night the run is for, in Berlin time. It is the same on
 			// every attempt, unlike t.RunAt, which a retry moves.
 			night := t.ScheduledFor()
-			if night.IsZero() {
-				// No schedule enqueued the task, or a maintainer of an
-				// older release did, which stored no such time.
-				night = t.RunAt
-			}
 			log.Printf("sending the receipts of %s", night.Format(time.DateOnly))
 			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
 		},
@@ -503,4 +535,160 @@ func ExampleRetryPolicy() {
 			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
 		},
 	), &taskmill.HandlerOptions{Retry: fixedDelay(30 * time.Second)})
+}
+
+// mailer is the part of a mail service that the receipt handler uses.
+type mailer interface {
+	Send(ctx context.Context, to, subject string) error
+}
+
+// receiptHandler sends receipts. A handler that is a struct holds what it
+// needs, such as the client of another service.
+type receiptHandler struct {
+	mail mailer
+}
+
+// Handle implements taskmill.Handler.
+func (h receiptHandler) Handle(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
+	return h.mail.Send(ctx, t.Args.Email, fmt.Sprintf("Your receipt for order %d", t.Args.OrderID))
+}
+
+// This example registers a handler that is a struct with its dependencies,
+// and gives its kind a timeout of its own.
+func ExampleAddHandler() {
+	var mail mailer // the application's mail service
+	var handlers taskmill.Handlers
+	taskmill.AddHandler[SendReceipt](&handlers, receiptHandler{mail: mail}, &taskmill.HandlerOptions{
+		Timeout: 30 * time.Second,
+	})
+	// NewWorker reports a mistake in the registrations, such as a kind
+	// registered twice.
+	_ = taskmill.WorkerConfig{Handlers: &handlers}
+}
+
+// This example runs a worker that reads two queues: 20 emails and 2 reports
+// at the same time. When it stops, running tasks get 50 seconds to finish.
+func ExampleWorkerConfig() {
+	var client *taskmill.Client    // from taskmill.NewClient
+	var handlers taskmill.Handlers // with a handler for each kind of both queues
+	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
+		Handlers: &handlers,
+		Queues: map[string]taskmill.QueueOptions{
+			"emails":  {Concurrency: 20},
+			"reports": {Concurrency: 2},
+		},
+		// At least 10 seconds below the time that the platform gives a
+		// stopping process: here, 60 seconds.
+		DrainTimeout: 50 * time.Second,
+	})
+	if err != nil {
+		log.Fatal(err) // ErrInvalidArgument: the configuration is not valid
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := worker.Run(ctx); err != nil {
+		log.Print(err)
+	}
+}
+
+// This example reads one task: where it is, and why its attempts failed.
+func ExampleClient_Get() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+	var id int64                // from EnqueueResult.ID
+	task, err := client.Get(ctx, id)
+	if errors.Is(err, taskmill.ErrNotFound) {
+		log.Print("the task is gone: deleted, or past its retention")
+		return
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("task %d (%s) is %s after %d of %d attempts", task.ID, task.Kind, task.State, task.Attempt, task.MaxAttempts)
+	// The history holds the latest errors, oldest first. Code is empty for
+	// an error that the handler returned in time.
+	for _, e := range task.Errors {
+		log.Printf("attempt %d at %s: %s %s", e.Attempt, e.At.Format(time.RFC3339), e.Code, e.Message)
+	}
+}
+
+// This example shows what Permanent returns: an error that keeps its cause,
+// and nil for a nil error.
+func ExamplePermanent() {
+	errNoEmail := errors.New("no email address")
+	err := taskmill.Permanent(errNoEmail)
+	fmt.Println(err)
+
+	_, ok := errors.AsType[*taskmill.PermanentError](err)
+	fmt.Println("a *PermanentError:", ok)
+	fmt.Println("still the cause:", errors.Is(err, errNoEmail))
+	fmt.Println("nil for nil:", taskmill.Permanent(nil) == nil)
+	// Output:
+	// permanent: no email address
+	// a *PermanentError: true
+	// still the cause: true
+	// nil for nil: true
+}
+
+// This example shows what Snooze returns: an error that holds the delay.
+func ExampleSnooze() {
+	err := taskmill.Snooze(90 * time.Second)
+	fmt.Println(err)
+
+	if snooze, ok := errors.AsType[*taskmill.SnoozeError](err); ok {
+		fmt.Println("delay:", snooze.Delay)
+	}
+	// Output:
+	// snooze for 1m30s
+	// delay: 1m30s
+}
+
+// This example prints what each state allows: the task lifecycle as a table.
+func ExampleState_CanRetry() {
+	states := []taskmill.State{
+		taskmill.StateScheduled, taskmill.StatePending, taskmill.StateAvailable, taskmill.StateRunning,
+		taskmill.StateRetryable, taskmill.StateCompleted, taskmill.StateDead, taskmill.StateCanceled,
+	}
+	fmt.Println("state      finished  retry  cancel  delete")
+	for _, s := range states {
+		fmt.Printf("%-10s %-9t %-6t %-7t %t\n", s, s.Finished(), s.CanRetry(), s.CanCancel(), s.CanDelete())
+	}
+	// Output:
+	// state      finished  retry  cancel  delete
+	// scheduled  false     false  true    true
+	// pending    false     false  true    true
+	// available  false     false  true    true
+	// running    false     false  true    false
+	// retryable  false     false  true    true
+	// completed  true      false  false   true
+	// dead       true      true   false   true
+	// canceled   true      true   false   true
+}
+
+// This example reads the time that a schedule's run is for. A task that no
+// schedule enqueued has none: a handler can fall back to RunAt then.
+func ExampleTaskInfo_ScheduledFor() {
+	run := taskmill.TaskInfo{Metadata: map[string]string{
+		taskmill.MetadataSchedule:     "nightly-receipts",
+		taskmill.MetadataScheduledFor: "2026-11-16T03:00:00+01:00", // 03:00 in Berlin
+	}}
+	fmt.Println(run.ScheduledFor().Format(time.RFC3339))
+
+	var other taskmill.TaskInfo // enqueued by the application, not by a schedule
+	fmt.Println(other.ScheduledFor().IsZero())
+	// Output:
+	// 2026-11-16T03:00:00+01:00
+	// true
+}
+
+// This example tests one of taskmill's errors with errors.Is. The message
+// says what is wrong, but it may change in any release: never compare
+// messages.
+func Example_errors() {
+	_, err := taskmill.Migrations("My Schema")
+	fmt.Println(errors.Is(err, taskmill.ErrInvalidArgument))
+	fmt.Println(err)
+	// Output:
+	// true
+	// taskmill: invalid argument: schema "My Schema" must match ^[a-z_][a-z0-9_]{0,62}$
 }

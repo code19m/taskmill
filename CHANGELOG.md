@@ -7,6 +7,14 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- More examples on pkg.go.dev: `Client.Enqueue`, `Client.EnqueueTx`,
+  `Client.Get`, `WorkerConfig`, `AddHandler` with a handler that is a
+  struct, and `outbox.PublisherFunc`. The examples of `Permanent`, `Snooze`,
+  `State.CanRetry`, `TaskInfo.ScheduledFor`, and of testing an error now
+  show their output.
+
 ### Changed
 
 - The doc comments are now the complete reference of the API. The comment of
