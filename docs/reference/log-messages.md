@@ -113,7 +113,7 @@ backticks.
 | Message | Level | What it means | What to do |
 |---|---|---|---|
 | `worker started` | Info | `Run` started, and reads the queues in `queues`. | Nothing. |
-| `the worker does not serve the default queue of these registered kinds` | Warn | The worker has handlers for `kinds`, but does not read their default queues. Their tasks wait for another worker. | Add the queues to `WorkerConfig.Queues`, or run a worker that reads them. |
+| `the worker does not read the default queue of these registered kinds` | Warn | The worker has handlers for `kinds`, but does not read their default queues. Their tasks wait for another worker. | Add the queues to `WorkerConfig.Queues`, or run a worker that reads them. |
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended while `tasks` tasks ran. It waits up to `timeout` for them. A worker that runs no task does not log this line. | Nothing. |
 | `handler ignored shutdown; releasing its task` | Warn | A handler did not return within 5 seconds after its context was canceled. Its task goes back to the queue and runs again. The handler may still be running. | Make the handler return when its context ends. |
 | `worker stopped` | Info | `Run` returned. `released` tasks went back to their queues. | Nothing. |
@@ -131,8 +131,8 @@ backticks.
 | `attempt lost its lease; canceling it` | Warn | The worker could not renew the lease in time. The task may already run on another worker. The worker also logs it when it fetches a task again while its own older attempt still runs: the task was rescued meanwhile, and the older attempt is canceled. | Check the database and the pool size. |
 | `fetch gave up waiting for the queue's row` | Debug | A fetch from `queue`, which has a `MaxRunning` limit, waited 1 second for the queue's row, and gave up. The worker fetches again when the queue is next woken or polled. This is not a failed operation: the queue's fetches take the row in turn, and with many workers the turns alone can take that long. | Nothing. |
 | `result discarded: the attempt lost its lease` | Debug | An attempt ended after it lost its lease. Its result does not count. | Nothing. |
-| `record attempt failed; the task is rescued when its lease expires` | Warn | The result of the attempt could not be saved in time. Once the lease runs out, the maintainer rescues the task. | Check the database. |
-| `complete tasks failed; they are rescued when their leases expire` | Warn | `tasks` successful attempts could not be saved. Those tasks run again. | Check the database. |
+| `record attempt failed; the task is rescued when its lease runs out` | Warn | The result of the attempt could not be saved in time. Once the lease runs out, the maintainer rescues the task. | Check the database. |
+| `complete tasks failed; they are rescued when their leases run out` | Warn | `tasks` successful attempts could not be saved. Those tasks run again. | Check the database. |
 | `handler failed after completing its task; it stays completed` | Warn | The handler returned an error after its `CompleteTx` transaction committed. | Return nil once the transaction has committed. |
 | `enqueue middleware failed after the tasks were enqueued` | Warn | An enqueue middleware returned `error` after `tasks` tasks committed. The enqueue succeeded, but the middleware's work, such as a span, may be missing. | Fix the middleware. |
 | `fifo group missing` | Error | A task left its FIFO group in `queue` and `group`, or halted it, and the group has no row. `task_id` names the task, unless several tasks left the group together. The task still ended as it should. This should never happen. | Please [report it](https://github.com/code19m/taskmill/issues). |
@@ -143,7 +143,7 @@ backticks.
 |---|---|---|---|
 | `elected maintainer` | Info | This worker now does the shared work. | Nothing. |
 | `no longer maintainer` | Info | Another worker took over, or the election failed. Incidents of the maintainer's operations end here, without `operation recovered`. | Nothing. |
-| `resign maintainer failed; another worker leads when the lease expires` | Warn | A stopping maintainer could not hand over. The next one starts within about 12 seconds. | Nothing, unless it repeats. |
+| `resign maintainer failed; another worker takes over when the lease runs out` | Warn | A stopping maintainer could not hand over. The next one starts within about 12 seconds. | Nothing, unless it repeats. |
 | `rescued tasks whose workers lost their leases` | Warn | `tasks` attempts failed because their workers stopped renewing their leases: a worker crashed, was killed, or lost the database. The tasks are retried. Those with no attempts left become dead. | If it repeats, look for crashed or killed workers, and check the grace period at shutdown and the pool size. |
 | `dropped expired history` | Info | Retention dropped the history `partition`. | Nothing. |
 

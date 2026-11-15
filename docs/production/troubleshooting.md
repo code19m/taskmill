@@ -20,7 +20,7 @@ shows many available tasks.
 | Likely cause | Check | Do |
 |---|---|---|
 | The queue is paused | The queues on the dashboard's Overview, or `QueueInfo.Paused` | Resume it |
-| No worker reads the queue | `QueueInfo.Workers` is 0, or a worker logs `the worker does not serve the default queue of these registered kinds` | Add the queue to `WorkerConfig.Queues`, or run a worker for it |
+| No worker reads the queue | `QueueInfo.Workers` is 0, or a worker logs `the worker does not read the default queue of these registered kinds` | Add the queue to `WorkerConfig.Queues`, or run a worker for it |
 | The workers are full | Running tasks are about replicas × `Concurrency` | Add replicas, or raise `Concurrency` and the pool with it |
 | A queue limit (`MaxRunning`) blocks tasks | `QueueInfo.Settings.MaxRunning` is set, and running tasks equal it | Raise or remove it with `Client.UpdateQueue` |
 | The workers crash | Pod restarts | See [Worker pods restart again and again](#worker-pods-restart-again-and-again) |
@@ -110,7 +110,7 @@ are expected ([Guarantees](../concepts/guarantees.md)), so
 | A pod was killed before it drained | `terminationGracePeriodSeconds` below `DrainTimeout` plus 10, or pods killed because they used too much memory (`OOMKilled`) | Raise the grace period, or the memory limit |
 | A handler ignores its context | The log `handler ignored shutdown; releasing its task` | Make the handler return when `ctx` ends |
 | A failover or network outage of more than about 20 s | `operation still failing` during the incident | Expected: [When the database fails](database.md#when-the-database-fails) |
-| The handler finished, but its result was not saved | The log `complete tasks failed; they are rescued when their leases expire` | Expected after a database outage |
+| The handler finished, but its result was not saved | The log `complete tasks failed; they are rescued when their leases run out` | Expected after a database outage |
 
 ### Worker pods restart again and again
 
