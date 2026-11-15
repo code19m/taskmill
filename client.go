@@ -278,7 +278,7 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	}
 	// The statement of a bulk retry, with one task: it also notifies the
 	// queue of a task that is available again.
-	waiting := []int64{} // not nil: the statement compares with every element
+	waiting := []int64{} // the tasks that become pending: this one, or none
 	var notify []string
 	if pending {
 		waiting = append(waiting, id)
@@ -530,8 +530,9 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	// Each group goes to the recount once, with all its tasks that left: an
 	// UPDATE changes a row once.
 	type leave struct {
-		ids  []int64 // the group's tasks that left
-		head bool    // its head was among them: the next task becomes the head
+		tasks int   // how many of the group's tasks left
+		id    int64 // one of them: the task, if only one left
+		head  bool  // its head was among them: the next task becomes the head
 	}
 	var asked groupSet
 	ids := make([]int64, len(left))
@@ -543,11 +544,11 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 		if !seen {
 			asked.add(l.queue, l.group)
 		}
-		leaves[key] = leave{ids: append(g.ids, l.id), head: g.head || l.head}
+		leaves[key] = leave{tasks: g.tasks + 1, id: l.id, head: g.head || l.head}
 	}
 	counts := make([]int, len(asked.queues))
 	for i := range counts {
-		counts[i] = -len(leaves[[2]string{asked.queues[i], asked.groups[i]}].ids)
+		counts[i] = -leaves[[2]string{asked.queues[i], asked.groups[i]}].tasks
 	}
 	r, err := q.query(ctx, c.sql.recountGroups, asked.queues, asked.groups, counts, ids)
 	if err != nil {
@@ -577,7 +578,7 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 		return err
 	}
 	for key, g := range leaves { // not read back: the group has no row
-		groupMissing(ctx, logger, key[0], key[1], g.ids...)
+		groupMissing(ctx, logger, key[0], key[1], g.tasks, g.id)
 	}
 	if len(empty.queues) > 0 {
 		if _, err := q.exec(ctx, c.sql.deleteEmptyGroups, empty.queues, empty.groups); err != nil {
@@ -597,18 +598,18 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 func (c *Client) haltGroup(ctx context.Context, logger *slog.Logger, q querier, queue, group string, id int64) error {
 	halted, err := q.exec(ctx, c.sql.haltGroup, queue, group, id)
 	if err == nil && halted == 0 {
-		groupMissing(ctx, logger, queue, group, id)
+		groupMissing(ctx, logger, queue, group, 1, id)
 	}
 	return err
 }
 
 // groupMissing logs a FIFO group that has no row, which should never happen,
-// for the tasks that left it or halted it. The line names the task if it is
-// one.
-func groupMissing(ctx context.Context, logger *slog.Logger, queue, group string, tasks ...int64) {
+// for the tasks that left it or halted it. The line names the task, id, if
+// it is the only one.
+func groupMissing(ctx context.Context, logger *slog.Logger, queue, group string, tasks int, id int64) {
 	attrs := []slog.Attr{slog.String(logKeyQueue, queue), slog.String(logKeyGroup, group)}
-	if len(tasks) == 1 {
-		attrs = append(attrs, slog.Int64(logKeyTaskID, tasks[0]))
+	if tasks == 1 {
+		attrs = append(attrs, slog.Int64(logKeyTaskID, id))
 	}
 	logger.LogAttrs(ctx, slog.LevelError, "fifo group missing", attrs...)
 }

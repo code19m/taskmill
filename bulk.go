@@ -711,7 +711,7 @@ func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (re
 	if err != nil {
 		return nil, nil, err
 	}
-	pending = []int64{} // not nil: the statement compares with every element
+	pending = []int64{} // the tasks that become pending, or none
 	for _, t := range ts {
 		if t.group == "" || resumed[t.id] {
 			retried = append(retried, t)
