@@ -459,7 +459,8 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 //     partitions, and not a detached table that can be dropped.
 //   - Once the views are gone, retention drops what it detached. Two
 //     maintainers that do so at the same moment both succeed.
-//   - A table that retention did not detach stays, whatever its name.
+//   - A table that retention did not detach stays, whatever its name. So
+//     does one that it detached, until its day expires.
 func TestRetentionFinishesTheDropsItBegan(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -479,6 +480,11 @@ func TestRetentionFinishesTheDropsItBegan(t *testing.T) {
 	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+kept)
 	copied := "task_history_" + today.AddDate(0, 0, -41).Format("20060102")
 	e.exec(t, "CREATE TABLE {s}."+copied+" AS TABLE {s}.task_history")
+	// Retention detached a third table, as its comment says. The retention
+	// grew since, so its day is not expired any more.
+	recent := e.attachHistory(t, today.AddDate(0, 0, -2))
+	e.exec(t, "COMMENT ON TABLE {s}."+recent+" IS 'taskmill drops this expired history partition'")
+	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+recent)
 	expired := slices.Concat(stuck, free)
 
 	// The first pass takes the oldest partitions, as many as it may: the
@@ -556,10 +562,10 @@ func TestRetentionFinishesTheDropsItBegan(t *testing.T) {
 			t.Errorf("worker %d reported a failure for tables that the other one dropped first: %s", i+1, recordText(lines[0]))
 		}
 	}
-	// A last pass has only the operator's tables to find, and leaves them.
+	// A last pass has only the three other tables to find, and leaves them.
 	taskmill.RunRetention(t.Context(), w)
-	if n := e.historyTables(t, kept, copied); n != 2 {
-		t.Errorf("retention dropped %d of 2 tables that it did not detach", 2-n)
+	if n := e.historyTables(t, kept, copied, recent); n != 3 {
+		t.Errorf("retention dropped %d of 3 tables that are not its to drop", 3-n)
 	}
 }
 
