@@ -134,8 +134,8 @@ or deleted. The index on `expires_at` serves retention, and the index on
   worker that becomes the maintainer applies the same retention.
 - `schedules` holds each schedule's definition, next run time, and pause
   state. The maintainer loads the schedules that it defines by name, and
-  checks in Go which are due. No statement uses the partial index on
-  `next_run_at` today.
+  checks in Go which are due. So the table has no index but its primary key,
+  and PostgreSQL can update a schedule's row in place when it runs.
 - `workers` gets a check-in from every worker process; `fillfactor = 50`
   keeps those updates HOT. A check-in sets `heartbeat_at`, which keeps its
   name: a rename would fail an older release's workers in a rolling deploy.

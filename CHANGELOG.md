@@ -56,6 +56,9 @@ All notable changes to taskmill are recorded here. The format follows
   locks `tasks`. It waits at most 5 seconds for each of its locks. The
   previous release's code keeps working on the new schema, so a rolling
   deploy is safe, as always.
+- The migration also drops the index `schedules_due_idx`. No statement read
+  it: each one finds its schedules by name. Every run of a schedule had to
+  update it.
 
 ### Fixed
 

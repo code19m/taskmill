@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -323,6 +324,42 @@ func upgradeWithRows(t *testing.T, pending int) {
 	id := e.enqueue(t, sendEmail{}, nil)
 	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
 	e.waitState(t, id, taskmill.StateCompleted)
+}
+
+// Every statement finds its schedules by name: the maintainer loads the ones
+// that it defines, and checks in Go which are due. An index on the next run
+// time served no statement, and made each run of a schedule write an index
+// entry. A migration drops it, also from a schema where an operator already
+// did.
+func TestSchedulesAreIndexedByNameOnly(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		before string // what ran on the schema of the previous release
+	}{
+		{"a schema of the previous release", "SELECT 1"},
+		{"a schema whose index an operator dropped", "DROP INDEX {s}.schedules_due_idx"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool := testdb.Pool(t)
+			e := &env{pool: pool, schema: testdb.Schema(t, pool)}
+			applyWithoutMigrate(t, pool, e.schema, 1)
+			e.exec(t, tt.before)
+			if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema}); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+			r, err := pool.Query(t.Context(),
+				"SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'schedules'", e.schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			indexes, err := pgx.CollectRows(r, pgx.RowTo[string])
+			if err != nil || !slices.Equal(indexes, []string{"schedules_pkey"}) {
+				t.Errorf("schedules has the indexes %v, %v; want its primary key alone", indexes, err)
+			}
+		})
+	}
 }
 
 // Migrate runs before NewClient checks the pool's isolation level. A process
