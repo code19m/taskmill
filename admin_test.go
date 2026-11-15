@@ -1267,6 +1267,9 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 		e.exec(t, "UPDATE {s}.tasks SET lease_expires_at = now() - interval '1 second' WHERE state = 'running' AND attempt = 2")
 		return slices.ContainsFunc(e.get(t, id).Errors, func(a taskmill.AttemptError) bool { return a.Code == taskmill.CodeLeaseLost })
 	})
+	// A rescued task waits the default backoff, 2 seconds here, which says
+	// nothing about its times: the test makes it due now.
+	e.exec(t, "UPDATE {s}.tasks SET run_at = now() WHERE id = $1 AND state = 'retryable'", id)
 	close(leaseLost)
 	got = append(got, recv(t, calls, "the attempt after the rescue"))
 
