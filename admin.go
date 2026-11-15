@@ -57,7 +57,8 @@ type QueueInfo struct {
 
 	// Workers counts the workers registered to read the queue. A worker
 	// that stopped without unregistering, such as after a crash, counts
-	// until it is removed, 5 minutes after its last check-in.
+	// until the maintainer removes it: 5 minutes after its last check-in,
+	// or twice its LeaseDuration after it if that is longer.
 	Workers int
 
 	// Counts holds the number of tasks per state, except completed tasks.
@@ -142,6 +143,14 @@ type WorkerInfo struct {
 	StartedAt   time.Time
 	CheckedInAt time.Time // its last check-in, which it makes every third of its LeaseDuration
 	Maintainer  bool      // the worker is the elected maintainer
+
+	// Stale reports that the worker made no check-in for its whole
+	// [WorkerConfig.LeaseDuration], by the database's clock. It stopped
+	// without unregistering, or it cannot reach the database: the leases of
+	// its tasks have run out, and its [Worker.Health] fails. A worker of a
+	// release that does not store its LeaseDuration is stale after 30
+	// seconds without a check-in.
+	Stale bool
 }
 
 // ListParams filters and pages [Client.List]. A field outside its limits is
@@ -386,11 +395,17 @@ func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) err
 	})
 }
 
+// staleWithoutLease is how long a worker that stored no lease may make no
+// check-in before it is stale: the workers of releases without the column.
+const staleWithoutLease = 30 * time.Second
+
 // Workers returns the registered worker processes, ordered by ID. A worker
-// that stopped without unregistering disappears 5 minutes after its last
-// check-in.
+// that stopped without unregistering is stale once it made no check-in for
+// its LeaseDuration: see [WorkerInfo.Stale]. It disappears once it made
+// none for 5 minutes, or for twice its LeaseDuration if that is longer: the
+// maintainer removes it.
 func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
-	r, err := c.pool.Query(ctx, c.sql.listWorkers)
+	r, err := c.pool.Query(ctx, c.sql.listWorkers, staleWithoutLease.Microseconds())
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: list workers: %w", err)
 	}
@@ -398,7 +413,8 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	var out []WorkerInfo
 	for r.Next() {
 		var w WorkerInfo
-		if err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.StartedAt, &w.CheckedInAt, &w.Maintainer); err != nil {
+		err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.StartedAt, &w.CheckedInAt, &w.Maintainer, &w.Stale)
+		if err != nil {
 			return nil, fmt.Errorf("taskmill: list workers: %w", err)
 		}
 		out = append(out, w)

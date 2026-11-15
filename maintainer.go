@@ -18,7 +18,7 @@ import (
 const (
 	maintenanceBatch   = 1000                  // most tasks one maintenance statement changes
 	minMaintainerSleep = 50 * time.Millisecond // shortest wait for the next due task: at most 20 promotions a second
-	staleWorkerAge     = 5 * time.Minute       // a worker that has not checked in this long is removed
+	staleWorkerAge     = 5 * time.Minute       // a worker that has not checked in this long, and for two of its leases, is removed
 	detachTimeout      = 30 * time.Second      // bound on detaching one history partition
 
 	// maintenanceLockTimeout bounds the wait for a row that an application

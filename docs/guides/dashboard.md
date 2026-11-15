@@ -135,7 +135,9 @@ To match your app's theme, add `?theme=light`, `?theme=dark`, or
 On the **Workers** page, the **Kinds** column counts the kinds that the
 worker has handlers for: click the count to list them. The **Checked in**
 column shows the worker's last
-[check-in](../concepts/glossary.md#check-in).
+[check-in](../concepts/glossary.md#check-in). A yellow dot marks a worker as
+stale: it made no check-in for longer than its `LeaseDuration`, so it has
+stopped, or it cannot reach the database.
 
 Before an action on many tasks, the dashboard shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,

@@ -175,14 +175,14 @@ provider's failover time.
 
 A longer lease has costs, because other timings follow it:
 
-| `LeaseDuration` | What it costs |
-|---|---|
-| Any longer value | When a worker crashes, its tasks wait that long before another worker runs them. `Worker.Health` also fails that much later |
-| 90 seconds or more | The dashboard marks healthy workers as stale. It expects a check-in every 30 seconds, and a worker checks in every third of its lease |
-| 15 minutes or more | The maintainer removes healthy workers from the list after 5 minutes without a check-in. Each one logs `worker was removed as stale; registering again` |
+- When a worker crashes, its tasks wait that long before another worker runs
+  them.
+- `Worker.Health` fails that much later, and the dashboard marks the worker
+  as stale that much later.
+- A crashed worker stays in the list of workers for twice its lease, and for
+  at least 5 minutes.
 
-So keep `LeaseDuration` under 90 seconds if you can, and always under 15
-minutes.
+So keep `LeaseDuration` as short as your failover allows.
 
 ## Keep clocks in sync
 

@@ -10,7 +10,7 @@ queues, and how notifications and polling wake the workers.
 |---|---|
 | Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
 | Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
-| Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that have not checked in for 5 minutes, and schedules that the maintainer does not define and that did not run or change for a day. |
+| Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that made no check-in for 5 minutes, or for twice their `LeaseDuration` if that is longer, and schedules that the maintainer does not define and that did not run or change for a day. |
 | History | Keeps partitions for today and the next 6 days, and drops a partition once its whole day is older than the retention period (see [Operational notes](schema.md#operational-notes)). |
 | Statistics | Every 10 seconds, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
@@ -26,6 +26,12 @@ queues, and how notifications and polling wake the workers.
   and make every try of every other worker a write.
 - **A worker that stops deletes its lease,** also when it does not know that
   it holds one, as after a renewal whose answer was lost.
+- **A worker's silence is judged by its own lease.** A worker checks in
+  every third of its `LeaseDuration`, and stores the lease in its row. After
+  one lease without a check-in it is stale: its tasks' leases have run out.
+  `Client.Workers` works that out by the database's clock. Retention deletes
+  it after two leases, but not before 5 minutes. A worker of a release that
+  stores no lease is stale after 30 seconds, and deleted after 5 minutes.
 
 ### Statistics
 
@@ -91,6 +97,46 @@ largest lag, are always read.
   task it counted, so the scheduled tasks after it cost nothing. Measured on
   PostgreSQL 18 with JIT off and 1.7 million tasks, 150,000 of them
   retryable: the count took about 15 ms longer.
+
+## Rows that taskmill did not write
+
+A role that enqueues has `INSERT` on `tasks`, and an operator can change a
+row by hand. So a row can hold what the code never writes. Such a row must
+fail alone: one statement fetches, counts, or rescues the tasks of many
+queues, and must not fail for all of them.
+
+| A row with | What the code does |
+|---|---|
+| `metadata` that is not an object of strings | The worker that fetches the task makes it dead, with the code `invalid_row`. A list shows it without metadata |
+| `errors` that are not an array of entries | They count as none, and the next failure replaces them. A list shows the entries that decode |
+| An infinite `created_at` or `run_at` | As for metadata. A list shows no time. The statistics count the task, and take no lag from it |
+| A `lease_token` at the largest integer | The fetch counts no further, and the worker makes the task dead with `invalid_row` |
+| No attempt left, while it waits in a queue | The fetch counts the attempt up to the maximum, so the task runs once more |
+| A `workers` row with a lease that no worker writes | It counts as a row without a lease |
+| A `groups` row that counts fewer tasks than its group holds | The statements that take a task out of the group count down to zero, not below, so they succeed for the other groups of their batch. This group can lose its order, or keep tasks pending |
+
+- **A fetched row always becomes an attempt.** If one row failed the read,
+  the worker would lose every task that the statement leased with it. An
+  attempt whose row does not decode runs no code of the application: not
+  the handler, and not the middleware, whose result would decide what
+  becomes of the task.
+- **A bad row can wait for good,** in a queue that no worker reads. Every
+  refresh of the statistics meets it there, so the statements that the
+  maintainer runs for all queues survive it too.
+- **No `CHECK` constraint refuses these rows.** A constraint cannot refuse
+  an object with a value that is no string, or tell a lease token that was
+  counted from one that was written: the code must survive such rows
+  anyway. And a constraint on `tasks` costs more than it gives. The
+  migration that adds it locks the busiest table. PostgreSQL then checks an
+  old row whenever a statement updates it, so until every old row is
+  validated, one that breaks the rule fails each fetch, promotion, and
+  rescue that touches it.
+- **What a role may write is a matter of grants.** A role that only
+  enqueues gets `INSERT` on the columns that an enqueue writes
+  ([Split work across services](../recipes/split-across-services.md)), so it
+  cannot write a lease. A role with `INSERT` on the whole table can write a
+  row that looks leased, which holds a place under `MaxRunning` until its
+  lease ends. Such a role is trusted.
 
 ## Notifications
 

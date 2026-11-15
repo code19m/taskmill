@@ -117,15 +117,15 @@ backticks.
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended. It waits up to `timeout` for `tasks` running tasks. | Nothing. |
 | `handler ignored shutdown; releasing its task` | Warn | A handler did not return within 5 seconds after its context was canceled. Its task goes back to the queue and runs again. The handler may still be running. | Make the handler return when its context ends. |
 | `worker stopped` | Info | `Run` returned. `released` tasks went back to their queues. | Nothing. |
-| `unregister worker failed` | Warn | The stopped worker could not remove itself from the list of workers. It stays listed for 5 minutes. | Nothing, unless it repeats: then check the database. |
-| `worker was removed as stale; registering again` | Warn | The worker made no check-in for 5 minutes, for example while its machine slept, so the maintainer removed it. It registers again and continues. | Find out what paused the process. |
+| `unregister worker failed` | Warn | The stopped worker could not remove itself from the list of workers. It stays listed, as stale, until the maintainer removes it: after 5 minutes, or twice its `LeaseDuration` if that is longer. | Nothing, unless it repeats: then check the database. |
+| `worker was removed as stale; registering again` | Warn | The worker made no check-in for 5 minutes, and for twice its `LeaseDuration`, for example while its machine slept, so the maintainer removed it. It registers again and continues. | Find out what paused the process. |
 
 ### Tasks and attempts
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
 | `attempt failed; retrying` | Debug | The handler failed. The task runs again in `retry_in`. Also has `attempt`, `error`, and `duration`. | Nothing. |
-| `attempt failed; the task is dead` | Error | The task failed permanently: no attempts left, `Permanent`, a payload that did not decode, or no handler for an hour. Also logged when the last attempt's worker lost its lease. | Fix the cause. Then retry the task, or delete it. A dead task [halts its FIFO group](../concepts/glossary.md#halted-group). |
+| `attempt failed; the task is dead` | Error | The task failed permanently: no attempts left, `Permanent`, a payload or a row that did not decode, or no handler for an hour. Also logged when the last attempt's worker lost its lease. | Fix the cause. Then retry the task, or delete it. A dead task [halts its FIFO group](../concepts/glossary.md#halted-group). |
 | `no handler for task kind; snoozing` | Warn | This worker has no handler for `kind`. The task waits up to an hour for a worker that has one, without using attempts. Later snoozes of the same task log at Debug. | Normal during a rolling deploy. Otherwise, give every worker of the queue the same handlers. |
 | `the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own` | Warn | All `max_conns` connections of the pool were in use, so renewing leases waited `duration` for one. Usually handlers that share the pool hold them. If renewals keep waiting, leases run out and tasks run twice. | Raise the pool's `MaxConns`, for example with `pool_max_conns` in the URL. Or give handlers a pool of their own. See [Database](../production/database.md#size-the-connection-pool). |
 | `attempt lost its lease; canceling it` | Warn | The worker could not renew the lease in time. The task may already run on another worker. The worker also logs it when it fetches a task again while its own older attempt still runs: the task was rescued meanwhile, and the older attempt is canceled. | Check the database and the pool size. |

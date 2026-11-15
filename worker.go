@@ -169,10 +169,12 @@ type WorkerConfig struct {
 	// starts when the task is taken, by the database's clock, not when the
 	// fetch began. Minimum: 100 milliseconds. Default: 30 seconds.
 	//
-	// A long lease makes the check-ins rare, so a healthy worker can look
-	// lost between two of them. Above 90 seconds, the dashboard shows it as
-	// stale. Above 15 minutes, the maintainer removes it from the list of
-	// workers, and it registers again at its next check-in.
+	// The worker stores it when it registers, and the installation judges
+	// by it how long the worker may make no check-in. After one
+	// LeaseDuration, [Client.Workers] and the dashboard show the worker as
+	// stale. After two, but not before 5 minutes, the maintainer removes it
+	// from the list of workers. If it still runs, it registers again at its
+	// next check-in.
 	LeaseDuration time.Duration
 
 	// PollInterval is how often the worker checks an idle queue while the
@@ -244,7 +246,9 @@ type QueueOptions struct {
 // error from its next.
 // A handler's panic reaches middleware as an error. For a batch handler,
 // middleware runs once per task, but the context it passes to next does not
-// reach the handler.
+// reach the handler. Middleware does not run for a task that the worker ends
+// without a handler: one of a kind that it has no handler for, or one whose
+// row is invalid, which becomes dead with [CodeInvalidRow].
 //
 // Add middleware in [WorkerConfig.Middleware]. The [middleware guide] has
 // examples.
@@ -398,10 +402,11 @@ func (q *queueState) nudge() {
 
 // tracked is an attempt the worker is running or recording.
 type tracked struct {
-	att    *attempt
-	info   *TaskInfo
-	reg    *registration // nil if no handler knows the kind
-	direct bool          // run by RunTask, which records its completion right away
+	att     *attempt
+	info    *TaskInfo
+	reg     *registration // nil if no handler knows the kind, or the task is invalid
+	invalid error         // why the task's row cannot run: it holds what taskmill never writes
+	direct  bool          // run by RunTask, which records its completion right away
 
 	// completedDirectly is set once RunTask recorded the completion.
 	completedDirectly bool
@@ -440,7 +445,8 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 	if kinds == nil {
 		kinds = []string{} // the column holds an array
 	}
-	_, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, names, w.host, w.version, kinds)
+	_, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker,
+		w.id, names, w.host, w.version, kinds, w.cfg.LeaseDuration.Microseconds())
 	return names, err
 }
 

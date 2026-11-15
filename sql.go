@@ -1,6 +1,7 @@
 package taskmill
 
 import (
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -169,8 +170,29 @@ func newStatements(schema string) *statements {
 		"{heartbeat}", notifyHeartbeat+"|",
 		"{resigned}", notifyResigned+"|",
 		// {trimmed} is a task's errors without the oldest entry once it holds
-		// keptErrors, so that appending one keeps at most keptErrors.
-		"{trimmed}", "(CASE WHEN jsonb_array_length(errors) >= "+strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
+		// keptErrors, so that appending one keeps at most keptErrors. Errors
+		// that are not an array count as none, and appending replaces them:
+		// their length is an error, which in the statement that rescues
+		// expired leases would keep every task of its batch from being
+		// rescued.
+		"{trimmed}", "(CASE WHEN jsonb_typeof(errors) <> 'array' THEN '[]' WHEN jsonb_array_length(errors) >= "+
+			strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
+		// {attempt} and {token} are what a fetch counts a task's attempt and
+		// lease token up to. Both stay in the range of their columns for any
+		// row, so that one row cannot fail the fetch of every task taken with
+		// it. The attempt stops at the task's maximum: a row can wait in a
+		// queue with no attempt left, such as a dead task that an UPDATE by
+		// hand made available, and then runs once more. The token stops at
+		// the largest integer, where the worker makes the task dead: a token
+		// that cannot grow cannot tell the next attempt from this one.
+		"{attempt}", "least(t.attempt + 1, t.max_attempts)",
+		"{token}", "least(t.lease_token, "+strconv.Itoa(math.MaxInt32-1)+") + 1",
+		// {lease} is a worker's lease, or NULL if its row holds none, as a
+		// worker of a release without the column leaves it. A lease that no
+		// worker writes is none either: a Go duration ends below 300 years,
+		// and a row written by hand can hold more than a time can be moved
+		// by, which would fail the statement for every worker.
+		"{lease}", "(CASE WHEN lease_duration BETWEEN interval '0' AND interval '300 years' THEN lease_duration END)",
 		// {unnoted} is a task's errors without a no_handler note at their
 		// end. The note says that the task waits for a worker with a handler
 		// for its kind: the wait is over once such a worker has the task, or
@@ -417,10 +439,14 @@ UPDATE {s}.groups SET halted_task_id = $3, halted_at = now(), updated_at = now()
 WHERE queue = $1 AND group_key = $2`),
 
 		// decrementGroup removes one task from a group's count, locking the
-		// group's row; if that task was the halting head, the halt ends.
+		// group's row; if that task was the halting head, the halt ends. The
+		// count stops at zero. Only a row that taskmill did not write counts
+		// fewer tasks than its group holds, and a count below zero breaks the
+		// table's rule: the error would fail the caller's transaction, which
+		// in a rescue ends the expired leases of every queue.
 		decrementGroup: q(`
 UPDATE {s}.groups
-SET tasks = tasks - 1,
+SET tasks = greatest(tasks - 1, 0),
     halted_task_id = CASE WHEN halted_task_id = $3 THEN NULL ELSE halted_task_id END,
     halted_at = CASE WHEN halted_task_id = $3 THEN NULL ELSE halted_at END,
     updated_at = now()
@@ -487,10 +513,12 @@ WHERE {leased}`),
 
 		// recountGroups adds $3, which is negative for tasks that left, to the
 		// counts of groups ($1, $2). The caller holds the groups' locks, and
-		// has ended the halts of halting heads that left.
+		// has ended the halts of halting heads that left. A count stops at
+		// zero, as in decrementGroup: here the error would fail the
+		// completion of the tasks of every other group in the batch.
 		recountGroups: q(`
 UPDATE {s}.groups g
-SET tasks = g.tasks + u.n, updated_at = now()
+SET tasks = greatest(g.tasks + u.n, 0), updated_at = now()
 FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
 WHERE g.queue = u.queue AND g.group_key = u.group_key
 RETURNING g.queue, g.group_key, g.tasks, g.halted_task_id IS NOT NULL`),
@@ -678,8 +706,8 @@ WITH picked AS (
 )
 UPDATE {s}.tasks t
 SET state = 'running',
-    attempt = t.attempt + 1,
-    lease_token = t.lease_token + 1,
+    attempt = {attempt},
+    lease_token = {token},
     lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $4
@@ -709,8 +737,8 @@ WITH candidates AS (
 )
 UPDATE {s}.tasks t
 SET state = 'running',
-    attempt = t.attempt + 1,
-    lease_token = t.lease_token + 1,
+    attempt = {attempt},
+    lease_token = {token},
     lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $4
@@ -730,8 +758,8 @@ WITH picked AS (
 )
 UPDATE {s}.tasks t
 SET state = 'running',
-    attempt = t.attempt + 1,
-    lease_token = t.lease_token + 1,
+    attempt = {attempt},
+    lease_token = {token},
     lease_expires_at = clock_timestamp() + $2 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $3
@@ -847,11 +875,15 @@ RETURNING queue, coalesce(group_key, ''), state::text`),
 
 		queueSettings: q(`SELECT name, paused_at IS NOT NULL, coalesce(max_running, 0) FROM {s}.queues WHERE name = ANY($1)`),
 
+		// upsertWorker registers worker $1, with its lease of $6 microseconds:
+		// the worker checks in every third of it, so listWorkers and
+		// deleteWorkers judge by it how long the worker may be silent.
 		upsertWorker: q(`
-INSERT INTO {s}.workers (id, queues, kinds, hostname, version) VALUES ($1, $2, $5, $3, $4)
+INSERT INTO {s}.workers (id, queues, kinds, hostname, version, lease_duration)
+VALUES ($1, $2, $5, $3, $4, $6 * interval '1 microsecond')
 ON CONFLICT (id) DO UPDATE
 SET queues = EXCLUDED.queues, kinds = EXCLUDED.kinds, hostname = EXCLUDED.hostname, version = EXCLUDED.version,
-    started_at = now(), heartbeat_at = now()`),
+    lease_duration = EXCLUDED.lease_duration, started_at = now(), heartbeat_at = now()`),
 		// The column heartbeat_at holds the worker's last check-in. It keeps
 		// its name: renaming it needs a migration, and the workers of an older
 		// release would fail on the renamed column during a rolling deploy.
@@ -1034,7 +1066,14 @@ WITH expired AS (
 )
 DELETE FROM {s}.dedupe_keys d USING expired WHERE d.key = expired.key`),
 
-		deleteWorkers: q(`DELETE FROM {s}.workers WHERE heartbeat_at < now() - $1 * interval '1 second'`),
+		// deleteWorkers deletes the workers that stopped without
+		// unregistering: those that made no check-in for $1 seconds, or for
+		// twice their lease if that is longer. A worker checks in every third
+		// of its lease, so one with a long lease is silent for long while it
+		// is healthy. A worker of a release that stores no lease has only
+		// the $1 seconds.
+		deleteWorkers: q(`
+DELETE FROM {s}.workers WHERE heartbeat_at < now() - greatest($1 * interval '1 second', 2 * {lease})`),
 
 		// pruneSchedules deletes the schedules that are not among $1 and did
 		// not run or change for a day: they were removed from the code. The day
@@ -1130,8 +1169,13 @@ SET history_retention = $3 * interval '1 microsecond', dead_retention = $4 * int
 WHERE (extract(epoch FROM history_retention) * 1000000)::bigint = $1
   AND (extract(epoch FROM dead_retention) * 1000000)::bigint = $2`),
 
+		// listWorkers lists the workers, each with whether it is stale: it
+		// made no check-in for its whole lease, by the database's clock. A
+		// worker of a release that stores no lease is stale after $1
+		// microseconds.
 		listWorkers: q(`
-SELECT w.id, w.hostname, w.version, w.queues, w.kinds, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL
+SELECT w.id, w.hostname, w.version, w.queues, w.kinds, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL,
+       w.heartbeat_at < now() - coalesce({lease}, $1 * interval '1 microsecond')
 FROM {s}.workers w
 LEFT JOIN {s}.leader l ON l.name = 'maintainer' AND l.worker_id = w.id AND l.expires_at > now()
 ORDER BY w.id`),
@@ -1213,6 +1257,11 @@ LIMIT $2`),
 		// retry last. They are found by reading the same index again,
 		// backward from the last retryable task counted, so no task past the
 		// counted ones, and no scheduled task after them, is read.
+		//
+		// A run time that is infinite is no oldest task. Only a row that
+		// taskmill did not write has one, Go cannot read it as a time, and one
+		// such row must not fail the counts of every queue. The conditions
+		// that leave it out are ranges of the indexes that the probes read.
 		countStats: q(`
 WITH RECURSIVE available AS (
     (SELECT queue FROM {s}.tasks WHERE state = 'available' ORDER BY queue LIMIT 1)
@@ -1235,7 +1284,8 @@ WITH RECURSIVE available AS (
     SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state IN ('dead', 'canceled') AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
     FROM finished x WHERE x.queue IS NOT NULL
 ), due AS (
-    SELECT state, queue, count(*) AS tasks, min(run_at) FILTER (WHERE run_at <= now()) AS oldest, max(run_at) AS last
+    SELECT state, queue, count(*) AS tasks,
+           min(run_at) FILTER (WHERE run_at <= now() AND run_at > '-infinity') AS oldest, max(run_at) AS last
     FROM (
         SELECT state, queue, run_at FROM {s}.tasks WHERE state IN ('scheduled', 'retryable') ORDER BY run_at LIMIT $2
     ) d GROUP BY state, queue
@@ -1255,6 +1305,7 @@ SELECT 'available', x.queue,
        (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue LIMIT $1) c),
        (SELECT min(o.run_at) FROM unnest('{1,2,3,4}'::smallint[]) AS p, -- every priority
         LATERAL (SELECT t.run_at FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue AND t.priority = p
+                   AND t.run_at > '-infinity' AND t.run_at < 'infinity'
                  ORDER BY t.run_at LIMIT 1) o),
        NULL::bigint, NULL::integer
 FROM available x WHERE x.queue IS NOT NULL

@@ -18,7 +18,7 @@ token.
 | `running` | Leased by an attempt. | |
 | `retryable` | An attempt failed; waiting for its backoff to pass. | |
 | `completed` | The handler succeeded. | Yes |
-| `dead` | Will not run again: its attempts are used up, it failed with a permanent error, its payload does not decode, or no worker with a handler for its kind appeared in time. Dead tasks are kept for operators to inspect and retry. | Yes |
+| `dead` | Will not run again: its attempts are used up, it failed with a permanent error, its payload or its row does not decode, or no worker with a handler for its kind appeared in time. Dead tasks are kept for operators to inspect and retry. | Yes |
 | `canceled` | Canceled on request. | Yes |
 
 A finished task stays finished unless an operator retries it. Finished tasks
@@ -88,7 +88,7 @@ statements in one transaction (see
 | 7 | `running` | `running` | The worker renews the lease, every third of it. | Worker |
 | 8 | `running` | `completed` | The handler returned no error. | Worker |
 | 9 | `running` | `retryable` | The handler failed and attempts remain. The run time becomes now plus a backoff. | Worker |
-| 10 | `running` | `dead` | The handler failed with no attempts left, or returned a permanent error; the payload did not decode; or no worker with a handler for the kind appeared within 1 hour. | Worker |
+| 10 | `running` | `dead` | The handler failed with no attempts left, or returned a permanent error; the payload did not decode, or the row ([Rows that taskmill did not write](schema-maintenance.md#rows-that-taskmill-did-not-write)); or no worker with a handler for the kind appeared within 1 hour. | Worker |
 | 11 | `running` | `scheduled`, or `available` for a snooze of zero or less | The handler snoozed, or the worker has no handler for the kind and waits for one that has. Gives the attempt back. | Worker |
 | 12 | `running` | `available` | The worker released the task during graceful shutdown. Gives the attempt back. | Worker |
 | 13 | `running` | `retryable`, `dead`, or `canceled` | The lease expired: the worker crashed or lost the database. Counts as a failed attempt. | Maintainer |
@@ -147,9 +147,9 @@ them, and every test checks the FIFO group invariants when it ends.
    `running`. The one exception is transition 13, which applies only after the
    lease has expired.
 3. A task in `running` always has a lease expiry time, and a task in any other
-   state has none. A task's lease token only grows, so it never repeats.
-4. Attempts used never exceed the maximum attempts, and the maximum is at
-   least 1.
+   state has none. A task's lease token only grows, so it never repeats: once
+   it is at its largest value, the task becomes dead at its next fetch.
+4. Attempts used never exceed the maximum, and the maximum is at least 1.
 5. Every time taskmill sets itself, such as an attempt's start, a lease's
    end, or a retry's run time, comes from the database clock, never from an
    application server's clock. A lease counts from the moment its task is
@@ -169,10 +169,10 @@ Each guarantee names the mechanism that provides it.
    transaction.*
 2. **No task is silently dropped.** A committed task keeps being run, at least
    once, until it completes or becomes dead, unless it is canceled or deleted
-   first. A task ends without its handler running only when its payload does
-   not decode, or when no worker with a handler for its kind appears in time.
-   It then becomes dead, where operators can see it. *Mechanism: leases,
-   rescue of expired leases (transition 13), and retries.*
+   first. A task ends without its handler running only when its payload or its
+   row does not decode, or when no worker with a handler for its kind appears
+   in time. It then becomes dead, where operators can see it. *Mechanism:
+   leases, rescue of expired leases (transition 13), and retries.*
 3. **A lost worker does not lose tasks.** If a worker crashes or loses its
    connection, its tasks are rescued within one lease duration plus about one
    second, and then retried like any failed attempt. If the lost worker was the

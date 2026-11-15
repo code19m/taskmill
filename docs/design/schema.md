@@ -1,8 +1,7 @@
 # Storage schema
 
 This page maps the [task lifecycle](task-lifecycle.md) onto PostgreSQL: the
-tables and the indexes, with the reasoning behind each choice. Three more
-pages cover the rest:
+tables and indexes, and why each was chosen. Three more pages cover the rest:
 
 | Page | What it covers |
 |---|---|
@@ -35,15 +34,15 @@ configurable, so several schemas can share a database. It must match
    all of them work inside the caller's transaction and behind poolers in
    transaction mode, such as PgBouncer.
 4. **The database enforces the lifecycle's invariants** with `CHECK`
-   constraints, as a second line of defense behind the code.
+   constraints, as a second line of defense behind the code. The code, in
+   turn, survives [a row that it did not write](schema-maintenance.md#rows-that-taskmill-did-not-write).
 5. **Frequent updates touch no indexed column.** Lease renewals change only
    `lease_expires_at`, which no index contains, so PostgreSQL can update the
    row in place (a HOT update) without writing to any index.
 6. **Every timestamp that taskmill sets comes from the database clock:**
    `now()`, or `clock_timestamp()` for a lease, which counts from the moment
    the task is taken. The days of the history partitions come from it too.
-   Only a run time that the application passes in comes from the
-   application's clock.
+   Only a run time that the application passes in comes from its own clock.
 
 ## Tables
 
@@ -73,7 +72,8 @@ configurable, so several schemas can share a database. It must match
 - **`lease_token` is a counter, not a random value.** It grows on every fetch
   and is never reset, not even by an operator retry, so a stale attempt's
   token can never match again. Unlike `attempt`, it never goes down, so
-  snoozes and releases, which give attempts back, are safe.
+  snoozes and releases, which give attempts back, are safe. At the largest
+  integer it stops, and the task becomes dead at its next fetch.
 - **`errors` is bounded.** Each failure appends an entry with the attempt
   number, the time, the message, and, for failures that taskmill detects
   itself, a code such as `lease_lost`. Beyond 20 entries the oldest is
@@ -82,9 +82,8 @@ configurable, so several schemas can share a database. It must match
   so lease renewals can be HOT updates. Measured: renewing 5,000 leases on
   densely packed pages was 25% HOT in the first round, limited by the free
   space, and 97% HOT after PostgreSQL pruned old row versions.
-- **Autovacuum is aggressive on `tasks`:** a scale factor of 1%, a threshold
-  of 1,000 rows, and no cost delay. Every fetch and result leaves a dead row
-  version.
+- **Autovacuum is aggressive on `tasks`:** a 1% scale factor, a 1,000-row
+  threshold, no cost delay. Every fetch and result leaves a dead row version.
 - **`queue` and `kind` are stored as text,** not as IDs into lookup tables.
   The rows are slightly larger, but there are no joins, no lookups, and no
   registration step before the first enqueue.
@@ -135,12 +134,13 @@ or deleted. The index on `expires_at` serves retention, and the index on
   worker that becomes the maintainer applies the same retention.
 - `schedules` holds each schedule's definition, next run time, and pause
   state. The maintainer loads the schedules that it defines by name, and
-  checks in Go which are due. No statement uses the partial index on
-  `next_run_at` today.
+  checks in Go which are due. So the table has no index but its primary key,
+  and PostgreSQL can update a schedule's row in place when it runs.
 - `workers` gets a check-in from every worker process; `fillfactor = 50`
-  keeps those updates HOT. A check-in sets the column `heartbeat_at`. The
-  column keeps that name: renaming it needs a migration, and the workers of
-  an older release would fail on it during a rolling deploy.
+  keeps those updates HOT. A check-in sets `heartbeat_at`, which keeps its
+  name: a rename would fail an older release's workers in a rolling deploy.
+  `lease_duration` holds the worker's `LeaseDuration`, which says
+  [how long it may be silent](schema-maintenance.md#maintenance).
 - `leader` elects the maintainer with a lease row rather than an advisory
   lock. Session advisory locks need a dedicated connection and do not work
   behind poolers in transaction mode. A lease row works everywhere.

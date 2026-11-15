@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -196,6 +197,168 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 	}
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		t.Fatalf("migrate again: %v", err)
+	}
+}
+
+// The transactions of a running fleet take the locks of several tables in an
+// order of their own: a statistics refresh reads tasks and then workers, and
+// a run of a schedule writes schedules and then tasks. A migration that
+// locks two of their tables in the other order deadlocks with them, and
+// PostgreSQL ends one of the two. So a migration locks no two tables that a
+// transaction of the fleet holds together, and it locks workers, which every
+// check-in writes, last: while it waits for schedules, it holds nothing.
+func TestMigrateDoesNotDeadlockWithTheFleet(t *testing.T) {
+	t.Parallel()
+	t.Run("a statistics refresh", func(t *testing.T) {
+		t.Parallel()
+		migrateBesideTheFleet(t, "SELECT count(*) FROM {s}.tasks", "SELECT count(*) FROM {s}.workers")
+	})
+	t.Run("a run of a schedule", func(t *testing.T) {
+		t.Parallel()
+		migrateBesideTheFleet(t, "UPDATE {s}.schedules SET last_run_at = now()",
+			"INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts) VALUES ('q', 'k', 'available', now(), '{}', 1)")
+	})
+}
+
+// migrateBesideTheFleet migrates a schema of the previous release while a
+// transaction of the fleet is between its statements first and then. The
+// migration must end without an error, and must hold up neither the fleet's
+// next statement nor a worker's check-in.
+func migrateBesideTheFleet(t *testing.T, first, then string) {
+	t.Helper()
+	pool := testdb.Pool(t)
+	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
+	applyWithoutMigrate(t, pool, e.schema, 1)
+
+	fleet := e.begin(t)
+	e.txExec(t, fleet, first)
+	migrated := make(chan error, 1)
+	go func() {
+		migrated <- taskmill.Migrate(context.Background(), pool, &taskmill.MigrateConfig{Schema: e.schema})
+	}()
+	const waiting = `SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+	                 WHERE NOT l.granted AND c.relnamespace = $1::regnamespace`
+	waitFor(t, "the migration to end, or to wait for a lock", func() bool {
+		return len(migrated) == 1 || e.count(t, waiting, e.schema) > 0
+	})
+
+	// A statement that waited for the migration would time out here.
+	worker := e.begin(t)
+	for _, tx := range []pgx.Tx{fleet, worker} {
+		e.txExec(t, tx, "SET LOCAL lock_timeout = '2s'")
+	}
+	e.txExec(t, fleet, then)
+	e.txExec(t, worker, "UPDATE {s}.workers SET heartbeat_at = now() WHERE id = 'worker'")
+	for _, tx := range []pgx.Tx{worker, fleet} {
+		if err := tx.Commit(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := recv(t, migrated, "the migration to end"); err != nil {
+		t.Fatalf("migrate beside the fleet: %v", err)
+	}
+}
+
+// A schema that any earlier release left upgrades in one call, with the
+// rows of a running fleet in the tables that its migrations change, and the
+// fleet's statements work on those rows afterwards.
+func TestMigrateUpgradesEveryEarlierVersion(t *testing.T) {
+	t.Parallel()
+	all, err := taskmill.Migrations("taskmill")
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := len(all) - 1 // without the bootstrap
+	for from := 1; from < latest; from++ {
+		t.Run(fmt.Sprintf("from version %d", from), func(t *testing.T) {
+			t.Parallel()
+			upgradeWithRows(t, latest-from)
+		})
+	}
+}
+
+// upgradeWithRows migrates a schema that lacks the newest pending
+// migrations and holds what a fleet of its release left: a worker, a
+// schedule, statistics, and a FIFO group that a dead task halts. Then the
+// current code must read those rows, and run a task beside them.
+func upgradeWithRows(t *testing.T, pending int) {
+	t.Helper()
+	pool := testdb.Pool(t)
+	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
+	applyWithoutMigrate(t, pool, e.schema, pending)
+	e.exec(t, `INSERT INTO {s}.workers (id, queues, kinds, hostname, version)
+	           VALUES ('old-worker', '{default}', '{email.send}', 'host', 'v0.1.0')`)
+	e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at)
+	           VALUES ('nightly', 'default', 'email.send', '0 3 * * *', now() + interval '1 day')`)
+	e.exec(t, `INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at)
+	           VALUES ('default', 'scheduled', 1, false, now())`)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key, finalized_at)
+	           VALUES ('default', 'email.send', 'dead', now(), '{}', 1, 'customer', now())`)
+	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
+	           SELECT queue, group_key, 1, id, now() FROM {s}.tasks`)
+
+	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema}); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	e = e.withLogger(t, testLogger(t))
+	ctx := t.Context()
+	workers, errWorkers := e.client.Workers(ctx)
+	schedules, errSchedules := e.client.Schedules(ctx)
+	queues, errQueues := e.client.Queues(ctx)
+	groups, errGroups := e.client.Groups(ctx, &taskmill.GroupParams{Halted: true})
+	if err := errors.Join(errWorkers, errSchedules, errQueues, errGroups); err != nil {
+		t.Fatalf("read what the old release left: %v", err)
+	}
+	for what, ok := range map[string]bool{
+		"worker":       len(workers) == 1 && workers[0].ID == "old-worker" && !workers[0].Stale,
+		"schedule":     len(schedules) == 1 && schedules[0].Name == "nightly" && !schedules[0].NextRunAt.IsZero(),
+		"statistics":   len(queues) == 1 && queues[0].Counts[taskmill.StateScheduled].N == 1,
+		"halted group": len(groups.Groups) == 1,
+	} {
+		if !ok {
+			t.Errorf("the %s from before the upgrade: %+v, %+v, %+v, %+v", what, workers, schedules, queues, groups)
+		}
+	}
+
+	// The new code runs beside what the old release left.
+	id := e.enqueue(t, sendEmail{}, nil)
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+	e.waitState(t, id, taskmill.StateCompleted)
+}
+
+// Every statement finds its schedules by name: the maintainer loads the ones
+// that it defines, and checks in Go which are due. An index on the next run
+// time served no statement, and made each run of a schedule write an index
+// entry. A migration drops it, also from a schema where an operator already
+// did.
+func TestSchedulesAreIndexedByNameOnly(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		before string // what ran on the schema of the previous release
+	}{
+		{"a schema of the previous release", "SELECT 1"},
+		{"a schema whose index an operator dropped", "DROP INDEX {s}.schedules_due_idx"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool := testdb.Pool(t)
+			e := &env{pool: pool, schema: testdb.Schema(t, pool)}
+			applyWithoutMigrate(t, pool, e.schema, 1)
+			e.exec(t, tt.before)
+			if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema}); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+			r, err := pool.Query(t.Context(),
+				"SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'schedules'", e.schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			indexes, err := pgx.CollectRows(r, pgx.RowTo[string])
+			if err != nil || !slices.Equal(indexes, []string{"schedules_pkey"}) {
+				t.Errorf("schedules has the indexes %v, %v; want its primary key alone", indexes, err)
+			}
+		})
 	}
 }
 

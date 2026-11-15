@@ -54,6 +54,7 @@ and its `Code` is empty when your handler returned the error in time.
 | `lease_lost` | [`CodeLeaseLost`](https://pkg.go.dev/github.com/code19m/taskmill#CodeLeaseLost) |
 | `panic` | [`CodePanic`](https://pkg.go.dev/github.com/code19m/taskmill#CodePanic) |
 | `invalid_payload` | [`CodeInvalidPayload`](https://pkg.go.dev/github.com/code19m/taskmill#CodeInvalidPayload) |
+| `invalid_row` | [`CodeInvalidRow`](https://pkg.go.dev/github.com/code19m/taskmill#CodeInvalidRow) |
 | `unknown_kind` | [`CodeUnknownKind`](https://pkg.go.dev/github.com/code19m/taskmill#CodeUnknownKind) |
 | `no_handler` | [`CodeNoHandler`](https://pkg.go.dev/github.com/code19m/taskmill#CodeNoHandler) |
 

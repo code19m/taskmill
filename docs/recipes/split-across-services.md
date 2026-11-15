@@ -80,18 +80,38 @@ first.
   ```sql
   GRANT USAGE ON SCHEMA billing TO orders;
   GRANT SELECT ON billing.migrations TO orders;
-  GRANT INSERT, SELECT (id) ON billing.tasks TO orders;
+  GRANT INSERT (id, queue, kind, state, priority, run_at, group_key, payload, metadata, max_attempts),
+      SELECT (id) ON billing.tasks TO orders;
   GRANT SELECT, INSERT, UPDATE ON billing.groups, billing.dedupe_keys TO orders;
   GRANT USAGE ON SEQUENCE billing.tasks_id_seq TO orders;
   ```
 
-  This is the smallest set that works for every enqueue call and option.
-  With `SELECT (id)`, the orders role reads only the `id` column. It can add
-  tasks, but it can't read a payload, and it can't change, cancel, or delete
-  a task. Billing still trusts the orders service: it can enqueue any task.
+  This is the smallest set that works for every enqueue call and option:
+  a test of taskmill applies it from this page. The orders role can add
+  tasks. It can't read a payload, and it can't change, cancel, or delete a
+  task. It writes only the columns that an enqueue writes, so it can't write
+  a task's lease, attempts, or errors: no task of its making looks leased or
+  finished.
 
-  These tables are internal, so a later release may need more. The error
-  `permission denied for table …` then names the table.
+  Billing still trusts the orders service. With these grants, the role can:
+
+  - **Enqueue any task,** in any number, into any queue.
+  - **Write a row with SQL of its own,** past what the client checks: any
+    priority, any `max_attempts`, a payload over the size limit, or a task
+    of a FIFO group that the group's row does not count. Such a task runs
+    beside the group's head.
+  - **Choose a task's ID.** Rows with IDs ahead of the sequence make later
+    enqueues fail with a duplicate key, for every producer, until the
+    sequence has passed them. The grant needs the column: an enqueue
+    reserves each ID before it inserts the task, so that its result and a
+    dedupe key can name the task.
+  - **Change the rows of `groups` and `dedupe_keys`.** A wrong count stops
+    that FIFO group, or breaks its order: the other groups run as before. A
+    changed key blocks a dedupe key, or admits a duplicate.
+
+  These tables are internal, so a later release may need more: a table, or a
+  column of `tasks`. The error `permission denied for table …` then names
+  the table.
 
 ## Other options
 

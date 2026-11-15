@@ -1,9 +1,8 @@
 # Key statements
 
 This page explains the statements that move tasks between states, and why
-each is written the way it is. [Storage schema](schema.md) has the tables
-and indexes that they use, and [`sql.go`](../../sql.go) has their exact
-text.
+each is written the way it is. [Storage schema](schema.md) has the tables and
+indexes that they use, and [`sql.go`](../../sql.go) has their exact text.
 
 The statements send batches as arrays and use `unnest`, so a batch, up to the
 10,000 tasks that one enqueue call takes, is one round trip with fixed SQL
@@ -20,7 +19,8 @@ other batches go through a lean one. Both reserve IDs from the
 
 ## Fetch
 
-The fetch statement, with its list of returned columns shortened:
+The fetch statement, with its list of returned columns shortened. The `least`
+calls keep [one malformed row](schema-maintenance.md#rows-that-taskmill-did-not-write) from failing it:
 
 ```sql
 WITH picked AS (
@@ -33,8 +33,8 @@ WITH picked AS (
 )
 UPDATE taskmill.tasks t
 SET state            = 'running',
-    attempt          = t.attempt + 1,
-    lease_token      = t.lease_token + 1,
+    attempt          = least(t.attempt + 1, t.max_attempts),
+    lease_token      = least(t.lease_token, 2147483646) + 1,
     lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at     = now(),
     attempted_by     = $4
