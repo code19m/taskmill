@@ -28,7 +28,8 @@ func validateSchema(schema string) (string, error) {
 // statements holds the statements of the task lifecycle and of the
 // operations API, with the schema name filled in, so each has fixed text and
 // can be prepared once per connection. Statements that build names at run
-// time, such as those for history partitions, live with their callers.
+// time, such as those for history partitions, live with their callers, and so
+// do the session settings that start a transaction, such as bulkSettings.
 type statements struct {
 	schemaVersion string
 
@@ -150,10 +151,6 @@ const groupFree = `(t.group_key IS NULL
 // waits for them.
 const keyFree = `(NOT EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id)
        OR EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id FOR UPDATE SKIP LOCKED))`
-
-// taskColumns are the columns that scanTaskInfo reads, in its order.
-const taskColumns = `id, queue, kind, state::text, priority, attempt, max_attempts, coalesce(group_key, ''),
-       metadata, payload, errors, created_at, run_at, attempted_at, finalized_at`
 
 func newStatements(schema string) *statements {
 	r := strings.NewReplacer(
@@ -408,10 +405,9 @@ WITH held AS (
 SELECT id, queue, coalesce(group_key, '') FROM done`),
 
 		getTask: q(`
-SELECT ` + taskColumns + ` FROM {s}.tasks WHERE id = $1
+SELECT ` + taskColumns(`state::text`) + ` FROM {s}.tasks WHERE id = $1
 UNION ALL
-SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(group_key, ''),
-       metadata, payload, errors, created_at, run_at, attempted_at, finalized_at
+SELECT ` + taskColumns(`'completed'`) + `
 FROM {s}.task_history WHERE id = $1
 LIMIT 1`),
 
@@ -763,12 +759,7 @@ WITH picked AS (
     FOR UPDATE SKIP LOCKED
 )
 UPDATE {s}.tasks t
-SET state = 'running',
-    attempt = {attempt},
-    lease_token = {token},
-    lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
-    attempted_at = now(),
-    attempted_by = $4
+SET ` + leaseSet(`$3`, `$4`) + `
 WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
 RETURNING ` + leasedColumns),
 
@@ -794,12 +785,7 @@ WITH candidates AS (
     LIMIT $2
 )
 UPDATE {s}.tasks t
-SET state = 'running',
-    attempt = {attempt},
-    lease_token = {token},
-    lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
-    attempted_at = now(),
-    attempted_by = $4
+SET ` + leaseSet(`$3`, `$4`) + `
 WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
 RETURNING ` + leasedColumns),
 
@@ -815,12 +801,7 @@ WITH picked AS (
     FOR UPDATE
 )
 UPDATE {s}.tasks t
-SET state = 'running',
-    attempt = {attempt},
-    lease_token = {token},
-    lease_expires_at = clock_timestamp() + $2 * interval '1 microsecond',
-    attempted_at = now(),
-    attempted_by = $3
+SET ` + leaseSet(`$2`, `$3`) + `
 WHERE t.id = (SELECT id FROM picked)
 RETURNING ` + leasedColumns),
 
@@ -1021,12 +1002,7 @@ SELECT extract(epoch FROM min(run_at) - now()) FROM {s}.tasks WHERE state IN ('s
 		// are found with one index probe each. It reads the woken CTE, so that
 		// it runs.
 		wakeQueues: q(`
-WITH RECURSIVE available AS (
-    (SELECT queue FROM {s}.tasks WHERE state = 'available' ORDER BY queue LIMIT 1)
-    UNION ALL
-    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state = 'available' AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
-    FROM available x WHERE x.queue IS NOT NULL
-), woken AS (
+WITH RECURSIVE ` + queuesWith(`available`, `= 'available'`) + `, woken AS (
     SELECT count(pg_notify($1, '{available}' || x.queue)) FROM available x
     WHERE x.queue IS NOT NULL
       AND (SELECT t.run_at FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue
@@ -1134,12 +1110,7 @@ LIMIT $1`),
 		// halted group for each queue, or every old task before it deletes
 		// the first.
 		deleteFinished: q(`
-WITH RECURSIVE finished AS (
-    (SELECT queue FROM {s}.tasks WHERE state IN ('dead', 'canceled') ORDER BY queue LIMIT 1)
-    UNION ALL
-    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state IN ('dead', 'canceled') AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
-    FROM finished x WHERE x.queue IS NOT NULL
-), old AS (
+WITH RECURSIVE ` + queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, old AS (
     SELECT o.id FROM finished x
     CROSS JOIN LATERAL (
         SELECT t.id FROM {s}.tasks t
@@ -1286,7 +1257,7 @@ ORDER BY w.id`),
 		// queue or group and the selected states: see inList and inStates.
 		// If $9, it returns a summary of each task: see listColumns.
 		listTasks: q(`
-SELECT ` + taskColumns + ` FROM (
+SELECT ` + taskColumns(`state::text`) + ` FROM (
     (SELECT ` + listColumns(`state::text`, `$9`) + ` FROM {s}.tasks
      WHERE $6 AND ` + inList(`queue`, `$1::text[]`) + `
        AND (cardinality($2::text[]) = 0 OR ` + inStates(`$2::text[]`) + `)
@@ -1331,17 +1302,12 @@ ORDER BY id DESC LIMIT $5`),
 		// Each row ends with the task's finish time once more, as the column
 		// holds it: see finishRows. If $8, the rows are summaries.
 		listFinished: q(`
-WITH RECURSIVE finished AS (
-    (SELECT queue FROM {s}.tasks WHERE state IN ('dead', 'canceled') ORDER BY queue LIMIT 1)
-    UNION ALL
-    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state IN ('dead', 'canceled') AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
-    FROM finished x WHERE x.queue IS NOT NULL
-), listed AS (
+WITH RECURSIVE ` + queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, listed AS (
     SELECT queue FROM finished WHERE cardinality($1::text[]) = 0 AND queue IS NOT NULL
     UNION ALL
     SELECT DISTINCT q FROM unnest($1::text[]) AS q
 )
-SELECT ` + taskColumns + `, finalized_at
+SELECT ` + taskColumns(`state::text`) + `, finalized_at
 FROM listed AS l(name)
 CROSS JOIN unnest($2::text[]) AS selected
 CROSS JOIN LATERAL (
@@ -1414,27 +1380,10 @@ LIMIT $2`),
 		// such row must not fail the counts of every queue. The conditions
 		// that leave it out are ranges of the indexes that the probes read.
 		countStats: q(`
-WITH RECURSIVE available AS (
-    (SELECT queue FROM {s}.tasks WHERE state = 'available' ORDER BY queue LIMIT 1)
-    UNION ALL
-    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state = 'available' AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
-    FROM available x WHERE x.queue IS NOT NULL
-), running AS (
-    (SELECT queue FROM {s}.tasks WHERE state = 'running' ORDER BY queue LIMIT 1)
-    UNION ALL
-    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state = 'running' AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
-    FROM running x WHERE x.queue IS NOT NULL
-), pending AS (
-    (SELECT queue FROM {s}.tasks WHERE state = 'pending' ORDER BY queue LIMIT 1)
-    UNION ALL
-    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state = 'pending' AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
-    FROM pending x WHERE x.queue IS NOT NULL
-), finished AS (
-    (SELECT queue FROM {s}.tasks WHERE state IN ('dead', 'canceled') ORDER BY queue LIMIT 1)
-    UNION ALL
-    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state IN ('dead', 'canceled') AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
-    FROM finished x WHERE x.queue IS NOT NULL
-), due AS (
+WITH RECURSIVE ` + queuesWith(`available`, `= 'available'`) + `, ` +
+			queuesWith(`running`, `= 'running'`) + `, ` +
+			queuesWith(`pending`, `= 'pending'`) + `, ` +
+			queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, due AS (
     SELECT state, queue, count(*) AS tasks,
            min(run_at) FILTER (WHERE run_at <= now() AND run_at > '-infinity') AS oldest, max(run_at) AS last
     FROM (
@@ -1591,6 +1540,50 @@ SELECT paused FROM s`),
 UPDATE {s}.schedules SET paused_at = CASE WHEN $2 THEN coalesce(paused_at, now()) END, updated_at = now()
 WHERE name = $1`),
 	}
+}
+
+// leaseSet is what taking a task writes: worker by runs the task, its attempt
+// and its lease token count up, and its lease lasts us microseconds from the
+// moment it is taken. us and by are parameters, such as "$3".
+//
+// Every statement that takes a task writes this text. The statements that
+// renew a lease, end an attempt, or rescue an expired lease read what it
+// wrote, and cannot know which statement took the task.
+func leaseSet(us, by string) string {
+	return `state = 'running',
+    attempt = {attempt},
+    lease_token = {token},
+    lease_expires_at = clock_timestamp() + ` + us + ` * interval '1 microsecond',
+    attempted_at = now(),
+    attempted_by = ` + by
+}
+
+// queuesWith is a recursive CTE called name: the queues that have a task
+// whose state meets cond, in the order of their names. cond is the condition
+// of the state's index, such as "= 'available'". That index leads with the
+// queue, so each queue is found with one probe of it, however many tasks the
+// queue has. The last row is NULL: a statement leaves it out with
+// "queue IS NOT NULL".
+//
+// Every statement that needs the queues of a state finds them with this
+// text. A copy written in other words would return the same queues, but
+// could read every task of the state to find them.
+func queuesWith(name, cond string) string {
+	return name + ` AS (
+    (SELECT queue FROM {s}.tasks WHERE state ` + cond + ` ORDER BY queue LIMIT 1)
+    UNION ALL
+    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state ` + cond + ` AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
+    FROM ` + name + ` x WHERE x.queue IS NOT NULL
+)`
+}
+
+// taskColumns are the columns that scanTaskInfo reads, in its order. state is
+// the expression for the task's state: the history has no such column, so a
+// statement that reads it passes "'completed'". Tasks and history are read
+// through this one list, because scanTaskInfo reads both by position.
+func taskColumns(state string) string {
+	return `id, queue, kind, ` + state + `, priority, attempt, max_attempts, coalesce(group_key, ''),
+       metadata, payload, errors, created_at, run_at, attempted_at, finalized_at`
 }
 
 // listColumns are taskColumns as a list reads them from a table of tasks in
