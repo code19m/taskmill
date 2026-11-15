@@ -28,10 +28,6 @@ const (
 	// detached or copied, to keep it, has none. Databases store the text,
 	// so it never changes.
 	historyDropMark = "taskmill drops this expired history partition"
-
-	// maintenanceLockTimeout bounds the wait for a row that an application
-	// transaction holds, such as a FIFO group's.
-	maintenanceLockTimeout = "1s"
 )
 
 // maintainer does the installation-wide work of one elected worker. Its main

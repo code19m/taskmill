@@ -158,8 +158,13 @@ func TestRoleWithoutRightsCannotHoldUpMigrateOrWorkers(t *testing.T) {
 
 // A migration changes tables that workers use all the time, and while it
 // waits for a table's lock, every later statement on that table waits behind
-// it. So Migrate gives up after 5 seconds, and changes nothing: the next try
-// migrates.
+// it. So a migration gives up after 5 seconds, and changes nothing: the next
+// try migrates.
+//
+// The 5 seconds are in the text of each migration, which a test of
+// internal/migrations holds: its first statement sets them. This test does
+// not wait them out. It ends the migration's wait as PostgreSQL would at the
+// timeout, by canceling the statement that waits.
 func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Pool(t)
@@ -170,6 +175,10 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 
 	// A transaction that writes the tables of the tasks stays open.
 	busy := e.begin(t)
+	var holder int
+	if err := busy.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&holder); err != nil {
+		t.Fatal(err)
+	}
 	r, err := pool.Query(t.Context(), "SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename <> 'migrations'", schema)
 	if err != nil {
 		t.Fatal(err)
@@ -182,11 +191,14 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 		e.txExec(t, busy, "LOCK TABLE {s}."+table+" IN ROW EXCLUSIVE MODE")
 	}
 
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	err = taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Schema: schema})
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "55P03" { // lock_not_available
-		t.Fatalf("migrate with busy tables: got %v, want a lock timeout", err)
+	gaveUp := make(chan error, 1)
+	go func() { gaveUp <- taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}) }()
+	waitFor(t, "the migration to wait for a busy table", func() bool {
+		return e.count(t, "SELECT count(pg_cancel_backend(pid)) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", holder) > 0
+	})
+	err = recv(t, gaveUp, "Migrate to give up")
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "57014" { // query_canceled
+		t.Fatalf("migrate with busy tables: got %v, want the error of its canceled statement", err)
 	}
 	if got := e.count(t, "SELECT max(version) FROM {s}.migrations"); got != version {
 		t.Fatalf("a migration that gave up left version %d, want %d", got, version)

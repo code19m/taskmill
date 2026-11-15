@@ -26,7 +26,9 @@ func TestAllRendersEveryMigrationInOrder(t *testing.T) {
 
 // Every migration after the first changes tables that may be busy. A lock
 // timeout makes one that waits for a lock fail, instead of blocking the
-// statements that queue up behind it (CONTRIBUTING.md).
+// statements that queue up behind it (CONTRIBUTING.md). It is the migration's
+// first statement, so that it holds for every lock the migration waits for,
+// and it is the 5 seconds that docs/production/deploys.md promises.
 func TestMigrationsAfterTheFirstSetALockTimeout(t *testing.T) {
 	t.Parallel()
 	all, err := All("billing")
@@ -34,8 +36,16 @@ func TestMigrationsAfterTheFirstSetALockTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range all[1:] {
-		if !strings.Contains(m.SQL, "SET LOCAL lock_timeout") {
-			t.Errorf("migration %04d_%s sets no lock timeout", m.Version, m.Name)
+		first := ""
+		for line := range strings.Lines(m.SQL) {
+			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "--") {
+				first = line
+				break
+			}
+		}
+		if first != "SET LOCAL lock_timeout = '5s';" {
+			t.Errorf("migration %04d_%s starts with %q, want a lock timeout of 5 seconds before any other statement",
+				m.Version, m.Name, first)
 		}
 	}
 }

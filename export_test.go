@@ -34,6 +34,7 @@ type Timing struct {
 	IdlePoll      time.Duration
 	Quiet         time.Duration
 	Listen        time.Duration
+	LockWait      time.Duration
 }
 
 // SetTiming applies t to w before it runs.
@@ -57,6 +58,7 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.idlePoll, t.IdlePoll)
 	set(&w.timing.quiet, t.Quiet)
 	set(&w.timing.listen, t.Listen)
+	set(&w.timing.lockWait, t.LockWait)
 }
 
 // Notifying reports whether the maintainer's heartbeats reach w.

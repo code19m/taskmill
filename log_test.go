@@ -45,23 +45,14 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	logs := &logRecorder{}
 	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
 
-	// Two tasks run across the outage: one succeeds and one fails, while the
-	// database is gone. Their next attempts take long enough for a check-in.
-	started, release := make(chan struct{}, 2), make(chan struct{})
+	// Three tasks run across the outage. Two end while the database is gone,
+	// one with success and one with a failure, so their results cannot be
+	// recorded. The third runs on until the test has seen a lease renewed
+	// again: the worker renews leases only while an attempt runs.
+	started, release, renewed := make(chan struct{}, 3), make(chan struct{}), make(chan struct{})
 	w := newWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
-			if task.Attempt > 1 {
-				time.Sleep(500 * time.Millisecond)
-				return nil
-			}
-			started <- struct{}{}
-			<-release
-			if task.Args.UserID == 2 {
-				return errors.New("try again")
-			}
-			return nil
-		}, nil),
-		Queues:        defaultQueue(2),
+		Handlers:      outageTasks(started, release, renewed),
+		Queues:        defaultQueue(3),
 		PollInterval:  20 * time.Millisecond,
 		LeaseDuration: 600 * time.Millisecond,
 		ListenConfig:  listen,
@@ -70,35 +61,55 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	timing.FailureReport = time.Second
 	taskmill.SetTiming(w, timing)
 	startWorker(t, w)
+	// If the test fails first, the third task still ends before the worker
+	// stops: cleanups run last first.
+	sawRenewal := sync.OnceFunc(func() { close(renewed) })
+	t.Cleanup(sawRenewal)
 	e.waitListening(t)
-	ids := []int64{e.enqueue(t, sendEmail{UserID: 1}, nil), e.enqueue(t, sendEmail{UserID: 2}, nil)}
-	recv(t, started, "the first task to start")
-	recv(t, started, "the second task to start")
+	ids := []int64{
+		e.enqueue(t, sendEmail{UserID: 1}, nil), e.enqueue(t, sendEmail{UserID: 2}, nil), e.enqueue(t, sendEmail{UserID: 3}, nil),
+	}
+	for range ids {
+		recv(t, started, "the tasks to start")
+	}
 
+	// The database stays away until every operation that the worker repeats
+	// has failed, the fetches have failed 25 times and logged an error, and
+	// the worker has given up on the two results, which it says once each.
+	repeated := []string{
+		"fetch tasks", "listen for notifications", "record check-in", "elect maintainer", "renew leases", "record results",
+	}
+	gaveUp := []string{
+		"complete tasks failed; they are rescued when their leases expire",
+		"record attempt failed; the task is rescued when its lease expires",
+	}
 	down := time.Now()
 	db.cut(true)
 	direct.cut(true)
 	close(release)
-	time.Sleep(3 * time.Second)
+	waitFor(t, "every operation to fail, the fetches to escalate, and the results to be given up", func() bool {
+		ops := operationLines(logs.all())
+		return failed(ops, repeated...) && escalated(ops["fetch tasks"], 25) &&
+			logs.count(gaveUp[0]) > 0 && logs.count(gaveUp[1]) > 0
+	})
 	db.cut(false)
 	direct.cut(false)
 
 	// The tasks run again, and the operations that the worker repeats log
 	// their recovery. Others, such as retention, recover at their next try.
+	waitFor(t, "the lease renewals to recover", func() bool {
+		return recovered(operationLines(logs.all()), "renew leases")
+	})
+	sawRenewal()
 	for _, id := range ids {
 		e.waitState(t, id, taskmill.StateCompleted)
 	}
 	var ops map[string][]slog.Record
 	waitFor(t, "the worker's operations to recover", func() bool {
 		ops = operationLines(logs.all())
-		return recovered(ops, "fetch tasks", "listen for notifications", "record check-in", "elect maintainer",
-			"renew leases", "record results")
+		return recovered(ops, repeated...)
 	})
-	// The results that could not be recorded say so, once each.
-	for _, msg := range []string{
-		"complete tasks failed; they are rescued when their leases expire",
-		"record attempt failed; the task is rescued when its lease expires",
-	} {
+	for _, msg := range gaveUp {
 		if n := logs.count(msg); n != 1 {
 			t.Errorf("%q was logged %d times, want once", msg, n)
 		}
@@ -110,16 +121,34 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	for op, lines := range ops {
 		checkIncident(t, op, lines, limit)
 	}
-	fetches := ops["fetch tasks"]
-	escalated := slices.ContainsFunc(fetches, func(r slog.Record) bool { return r.Level == slog.LevelError })
-	if n, _ := strconv.Atoi(attr(fetches[len(fetches)-1], "failures")); n < 25 || !escalated {
-		t.Errorf("fetch tasks failed %d times, escalated %v; want at least 25 failures and an error", n, escalated)
-	}
 	for _, r := range logs.all() {
 		if line := recordText(r); strings.Contains(line, testdb.URL(t)) || strings.Contains(line, "password") {
 			t.Errorf("a log line shows the connection string: %s", line)
 		}
 	}
+}
+
+// outageTasks returns the handler of the tasks that run across the outage.
+// Each tells started when its first attempt starts. The tasks of users 1 and
+// 2 then wait for release, and end, the first with success and the second
+// with a failure; their next attempts succeed right away. The task of user 3
+// waits for renewed, in each of its attempts, and succeeds.
+func outageTasks(started chan<- struct{}, release, renewed <-chan struct{}) *taskmill.Handlers {
+	return handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+		if task.Attempt == 1 {
+			started <- struct{}{}
+		}
+		switch {
+		case task.Args.UserID == 3:
+			<-renewed
+		case task.Attempt == 1:
+			<-release
+			if task.Args.UserID == 2 {
+				return errors.New("try again")
+			}
+		}
+		return nil
+	}, nil)
 }
 
 func TestMaintainerWorkStartsCleanInANewTerm(t *testing.T) {
@@ -129,6 +158,8 @@ func TestMaintainerWorkStartsCleanInANewTerm(t *testing.T) {
 	w := newWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 		{Name: "ledger", Cron: "@hourly", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
 	}})
+	// A run gives up on a held group after 50 ms, not after a second.
+	taskmill.SetTiming(w, taskmill.Timing{LockWait: 50 * time.Millisecond})
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 	startWorker(t, w)
 	waitFor(t, "the schedule to be stored", func() bool { return e.count(t, "SELECT count(*) FROM {s}.schedules") == 1 })
@@ -231,14 +262,31 @@ func checkIncident(t *testing.T, op string, lines []slog.Record, limit int) {
 	}
 }
 
-// recovered reports whether each of the operations logged a recovery last.
+// failed reports whether each of the operations logged a failure.
+func failed(ops map[string][]slog.Record, names ...string) bool {
+	return !slices.ContainsFunc(names, func(op string) bool { return len(ops[op]) == 0 })
+}
+
+// recovered reports whether each of the operations logged a recovery. It
+// need not be the operation's last line: on a slow machine a call can fail
+// once more after the database came back, and an operation that the worker
+// then stops trying, such as the renewal of leases, says no more.
 func recovered(ops map[string][]slog.Record, names ...string) bool {
 	for _, op := range names {
-		if lines := ops[op]; len(lines) == 0 || lines[len(lines)-1].Message != "operation recovered" {
+		if !slices.ContainsFunc(ops[op], func(r slog.Record) bool { return r.Message == "operation recovered" }) {
 			return false
 		}
 	}
 	return true
+}
+
+// escalated reports whether an operation logged an error after it had failed
+// at least n times.
+func escalated(lines []slog.Record, n int) bool {
+	return slices.ContainsFunc(lines, func(r slog.Record) bool {
+		failures, _ := strconv.Atoi(attr(r, "failures"))
+		return r.Level == slog.LevelError && failures >= n
+	})
 }
 
 // operationLines returns the lines that each operation logged about its

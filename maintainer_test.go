@@ -414,7 +414,8 @@ func TestMaintainerWakesQueuesWhoseTasksWait(t *testing.T) {
 
 func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
 	part := e.attachHistory(t, time.Now().UTC().AddDate(0, 0, -30).Truncate(24*time.Hour))
 
 	// A transaction that reads history makes the detach wait, and a timeout
@@ -442,10 +443,28 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 		t.Fatal("partition is not pending detach")
 	}
 
-	runWorker(t, e, &taskmill.WorkerConfig{}) // retention runs in the first cycle
-	waitFor(t, "the expired partition to be dropped", func() bool {
-		return e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = $2", e.schema, part) == 0
+	// Retention finishes that detach. It does not start another: PostgreSQL
+	// refuses one while a detach is pending. The test does not wait for the
+	// partition to go. To finish a detach, PostgreSQL waits for every older
+	// snapshot in the database, those of other tests too, which took this
+	// test seconds, and at times more than it waited. So it ends retention
+	// once the statement is on its way: TestRetentionCountsDaysOf24Hours
+	// shows that retention drops the partition that it detached.
+	w := newWorker(t, e, &taskmill.WorkerConfig{})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		taskmill.RunRetention(ctx, w)
+	}()
+	waitFor(t, "retention to finish the detach", func() bool {
+		if sent.count("DETACH PARTITION", part, "CONCURRENTLY") > 0 {
+			t.Fatal("retention started another detach of a partition that is pending detach")
+		}
+		return sent.count("DETACH PARTITION", part, "FINALIZE") > 0
 	})
+	cancel()
+	<-done
 }
 
 // Retention detaches a history partition before it drops it, and a later

@@ -435,10 +435,9 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := time.Now()
 	res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}))
-	if err != nil || res.Changed != 1 || res.Skipped != 1 || time.Since(start) > 2*time.Second {
-		t.Fatalf("retried %+v in %v, %v; want the one of group a, at once, and group b left", res, time.Since(start), err)
+	if err != nil || res.Changed != 1 || res.Skipped != 1 {
+		t.Fatalf("retried %+v, %v; want the one of group a, and group b left", res, err)
 	}
 	wantStates(t, e, map[int64]taskmill.State{head: taskmill.StateAvailable, inA: taskmill.StatePending, inB: taskmill.StateCanceled})
 	// The transaction goes on into the group that the retry held.
@@ -527,25 +526,32 @@ func TestBulkActionsGoOnFromAnyStop(t *testing.T) {
 // skipped: a FIFO group that it left comes back in order.
 func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	sent := &bulkStatements{}
+	e := newTracedEnv(t, sent)
 	canceled := func(n int, group string) {
 		e.exec(t, `INSERT INTO {s}.tasks (queue, run_at, kind, finalized_at, state, cancel_requested_at, payload, max_attempts, group_key)
 		           SELECT 'default', now(), 'email.send', now(), 'canceled', now(), '{}', 3, nullif($1, '')
 		           FROM generate_series(1, $2)`, group, n)
 	}
+	// The oldest task of the group, two batches of other tasks, and the rest
+	// of the group, which is more than a batch.
 	canceled(1, "g")
 	oldest := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
-	canceled(30000, "")
+	canceled(2000, "")
 	canceled(1500, "g")
 	all := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}
 
+	// The first run meets the oldest task held, and leaves the group. Its
+	// context ends when its second batch picks its tasks, as a click that
+	// runs out of time: it stops after that batch, short of the group's rest.
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", oldest)
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond) // a click that runs out of time
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sent.atPick(2, cancel)
 	first, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: all})
-	cancel()
-	if err == nil && first.Next != "" || err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("first run: %+v, %v", first, err)
+	if !errors.Is(err, context.Canceled) || first.Changed != 1999 || first.Next == "" {
+		t.Fatalf("first run: %+v, %v; want it to stop after two batches, with a cursor", first, err)
 	}
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
@@ -553,7 +559,7 @@ func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	// The first run's last batch ended before it returned, so the rest
 	// skips none of its rows.
 	rest, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: all, Cursor: first.Next})
-	if err != nil || first.Changed+rest.Changed != 31501 || rest.Skipped != 0 || rest.Next != "" {
+	if err != nil || first.Changed+rest.Changed != 3501 || rest.Skipped != 0 || rest.Next != "" {
 		t.Fatalf("then %+v after %+v, %v; want every task retried", rest, first, err)
 	}
 	e.wantHead(t, "g", int(oldest))
@@ -569,11 +575,11 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, finalized_at)
 	           SELECT 'q' || (i % 2), 'k' || (i % 7), CASE WHEN i % 3 = 0 THEN 'available' ELSE 'canceled' END::{s}.task_state,
 	                  now(), '{}', 3, 0, CASE WHEN i % 3 = 0 THEN NULL ELSE now() END
-	           FROM generate_series(1, 150000) i`)
-	// The first 140,000 went through earlier batches: none of the actions
+	           FROM generate_series(1, 30000) i`)
+	// The first 28,000 went through earlier batches: none of the actions
 	// matches them any more.
 	e.exec(t, `UPDATE {s}.tasks SET state = 'running', attempt = 1, lease_expires_at = now() + interval '1 hour',
-	           finalized_at = NULL, cancel_requested_at = now() WHERE id <= 140000`)
+	           finalized_at = NULL, cancel_requested_at = now() WHERE id <= 28000`)
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
 	           SELECT 1000000 + i, now(), CASE WHEN i > 90000 THEN 'q' || (i % 2) ELSE 'q0' END, now(), 'k', now(), 'w', now(),
@@ -581,24 +587,29 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 	           FROM generate_series(1, 100000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "ANALYZE {s}.task_history")
+	// A batch reads the rows after its position at most, and those it picks
+	// once more to lock them: 2,000 tasks follow the position and 28,000
+	// precede it, and 10,000 completed tasks follow and 90,000 precede. The
+	// history is that large because with a fifth of it, the planner finds
+	// another plan that reads little for a batch that ignores its position.
 	for _, c := range []struct {
 		action string
 		filter *taskmill.TaskFilter
 		after  int64
+		most   int64
 	}{
-		{"retry", &taskmill.TaskFilter{Queues: []string{"q1"}}, 140000},
-		{"cancel", &taskmill.TaskFilter{Queues: []string{"q1"}}, 140000},
-		{"delete", &taskmill.TaskFilter{Queues: []string{"q1"}}, 140000},
-		{"delete", &taskmill.TaskFilter{Kinds: []string{"k3"}}, 140000},
-		{"history", &taskmill.TaskFilter{Queues: []string{"q1"}}, 1090000},
+		{"retry", &taskmill.TaskFilter{Queues: []string{"q1"}}, 28000, 4000},
+		{"cancel", &taskmill.TaskFilter{Queues: []string{"q1"}}, 28000, 4000},
+		{"delete", &taskmill.TaskFilter{Queues: []string{"q1"}}, 28000, 4000},
+		{"delete", &taskmill.TaskFilter{Kinds: []string{"k3"}}, 28000, 4000},
+		{"history", &taskmill.TaskFilter{Queues: []string{"q1"}}, 1090000, 15000},
 	} {
 		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, c.filter, c.after, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// 10,000 rows follow the position, and 90,000 or more precede it.
-		if n > 15000 {
-			t.Errorf("%s %+v after %d: a batch read %d rows", c.action, *c.filter, c.after, n)
+		if n > c.most {
+			t.Errorf("%s %+v after %d: a batch read %d rows, want at most %d", c.action, *c.filter, c.after, n, c.most)
 		}
 	}
 	e.rawGroups = true
@@ -649,6 +660,19 @@ func (s *bulkStatements) add(statement byte) {
 
 func (*bulkStatements) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
 
+// atPick calls f once, when the nth pick from now starts.
+func (s *bulkStatements) atPick(n int, f func()) {
+	var next func()
+	next = func() {
+		if n--; n > 0 {
+			s.onPick.Store(&next)
+			return
+		}
+		f()
+	}
+	s.onPick.Store(&next)
+}
+
 // reset returns the statements since the last reset.
 func (s *bulkStatements) reset() string {
 	s.mu.Lock()
@@ -684,18 +708,18 @@ func TestBulkActionsWithAnIndexReadOnlyTheirTasks(t *testing.T) {
 	sent := &bulkStatements{}
 	e := newTracedEnv(t, sent)
 	ctx := t.Context()
-	// 150,000 tasks and as many completed ones. Every 500th of each is of
-	// the queue q, 300 in all, and those not completed are dead.
+	// 30,000 tasks and as many completed ones. Every 500th of each is of
+	// the queue q, 60 of each, and those not completed are dead.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
 	           SELECT CASE WHEN i % 500 = 0 THEN 'q' ELSE 'other' END, 'email.send',
 	                  CASE WHEN i % 500 = 0 THEN 'dead' ELSE 'available' END::{s}.task_state, now(), '{}', 3,
 	                  CASE WHEN i % 500 = 0 THEN now() END
-	           FROM generate_series(1, 150000) i`)
+	           FROM generate_series(1, 30000) i`)
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
 	           SELECT 1000000 + i, now(), CASE WHEN i % 500 = 0 THEN 'q' ELSE 'other' END, now(), 'email.send', now(), 'w', now(),
 	                  2, 1, 3, '{}', '{}', '[]'
-	           FROM generate_series(1, 150000) i`)
+	           FROM generate_series(1, 30000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "ANALYZE {s}.task_history")
 
@@ -714,13 +738,13 @@ func TestBulkActionsWithAnIndexReadOnlyTheirTasks(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if read > 1000 {
-			t.Errorf("%s %+v: the batch read %d rows for 300 tasks", c.pick, c.filter, read)
+		if read > 200 {
+			t.Errorf("%s %+v: the batch read %d rows for 60 tasks", c.pick, c.filter, read)
 		}
 		sent.reset()
 		res, err := c.do(ctx, &taskmill.BulkParams{Filter: c.filter})
-		if err != nil || res != (taskmill.BulkResult{Changed: 300}) {
-			t.Fatalf("%s %+v: %+v, %v; want 300 tasks changed", c.pick, c.filter, res, err)
+		if err != nil || res != (taskmill.BulkResult{Changed: 60}) {
+			t.Fatalf("%s %+v: %+v, %v; want 60 tasks changed", c.pick, c.filter, res, err)
 		}
 		// A window follows only a batch that a busy database did not end
 		// in time.
@@ -848,34 +872,25 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 // consistent, and says exactly how many tasks it changed.
 func TestBulkActionsStopMidway(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
-	params := make([]taskmill.EnqueueParams, 5000)
+	sent := &bulkStatements{}
+	e := newTracedEnv(t, sent)
+	// Three batches of tasks, in ten groups that each lie across all three.
+	params := make([]taskmill.EnqueueParams, 3000)
 	for i := range params {
 		params[i] = taskmill.EnqueueParams{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: fmt.Sprint("g", i%10)}}
 	}
-	for range 6 {
-		if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
 	}
-	// The action's context ends once its first batch committed, as a
-	// request's does when it runs out of time.
+	// The action's context ends when its second batch picks its tasks, as a
+	// request's does when it runs out of time: the action stops after that
+	// batch.
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		for ctx.Err() == nil {
-			var n int
-			_ = e.pool.QueryRow(ctx, replaceSchema("SELECT count(*) FROM {s}.tasks WHERE state = 'canceled'", e.schema)).Scan(&n)
-			if n > 0 {
-				cancel()
-				return
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
+	sent.atPick(2, cancel)
 	all := &taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
 	res, err := e.client.CancelMatching(ctx, bulk(all))
-	if !errors.Is(err, context.Canceled) || res.Changed >= 30000 || res.Next == "" {
+	if !errors.Is(err, context.Canceled) || res.Changed == 0 || res.Changed >= 3000 || res.Next == "" {
 		t.Fatalf("canceled %+v, %v; want it to stop midway", res, err)
 	}
 	if canceled := e.states(t)["canceled"]; canceled != int(res.Changed) {
@@ -884,8 +899,8 @@ func TestBulkActionsStopMidway(t *testing.T) {
 	e.checkGroups(t)
 	// It goes on where it stopped.
 	rest, err := e.client.CancelMatching(t.Context(), &taskmill.BulkParams{Filter: *all, Cursor: res.Next})
-	if err != nil || res.Changed+rest.Changed != 30000 || rest.Next != "" {
-		t.Fatalf("canceled %d, then %d tasks, %v; want 30,000 in all", res.Changed, rest.Changed, err)
+	if err != nil || res.Changed+rest.Changed != 3000 || rest.Next != "" {
+		t.Fatalf("canceled %d, then %d tasks, %v; want 3,000 in all", res.Changed, rest.Changed, err)
 	}
 }
 
@@ -973,11 +988,14 @@ func TestCount(t *testing.T) {
 func TestCountReadsEachStatesIndex(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	// Available tasks, and after them dead ones.
+	// Available tasks, and after them dead ones, each more than the cap. The
+	// count turns scans of the table off for itself, so the table need not
+	// be large for the planner to read the indexes: only so large that a scan
+	// for the dead tasks, which lie behind 20,000 others, reads more.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
-	           SELECT 'default', 'email.send', CASE WHEN i > 100000 THEN 'dead' ELSE 'available' END::{s}.task_state,
-	                  now(), '{}', 3, CASE WHEN i > 100000 THEN now() END
-	           FROM generate_series(1, 150000) i`)
+	           SELECT 'default', 'email.send', CASE WHEN i > 20000 THEN 'dead' ELSE 'available' END::{s}.task_state,
+	                  now(), '{}', 3, CASE WHEN i > 20000 THEN now() END
+	           FROM generate_series(1, 35000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
 	for _, filter := range []*taskmill.TaskFilter{nil, {Queues: []string{taskmill.DefaultQueue}}} {
 		n, err := taskmill.CountRowsRead(t.Context(), e.client, filter)

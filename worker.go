@@ -60,6 +60,7 @@ type timing struct {
 	idlePoll        time.Duration // how often idle queues poll while the maintainer's heartbeats arrive
 	quiet           time.Duration // how long a queue leaves notifications waiting after the fetch for one found nothing
 	listen          time.Duration // bound on opening the notification connection, and on its answer when heartbeats stop
+	lockWait        time.Duration // how long a schedule's run waits for a row that another transaction holds, such as a FIFO group's
 }
 
 var defaultTiming = timing{
@@ -80,6 +81,7 @@ var defaultTiming = timing{
 	idlePoll:        time.Minute,
 	quiet:           20 * time.Millisecond,
 	listen:          10 * time.Second,
+	lockWait:        time.Second,
 }
 
 // errListenConfig reports a ListenConfig that pgx cannot connect with.

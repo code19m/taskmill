@@ -44,8 +44,7 @@ const (
 type failures struct {
 	w         *Worker
 	operation string
-	attrs     []slog.Attr      // more about the operation, such as its queue
-	now       func() time.Time // the clock, which tests set
+	attrs     []slog.Attr // more about the operation, such as its queue
 
 	mu      sync.Mutex
 	count   int       // failures of the current incident; 0 if none
@@ -58,7 +57,7 @@ type failures struct {
 }
 
 func newFailures(w *Worker, operation string, attrs ...slog.Attr) *failures {
-	return &failures{w: w, operation: operation, attrs: attrs, now: time.Now}
+	return &failures{w: w, operation: operation, attrs: attrs}
 }
 
 // observe takes the outcome of one try: err is nil if it succeeded. A
@@ -69,7 +68,7 @@ func (f *failures) observe(ctx context.Context, err error) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	now := f.now()
+	now := time.Now()
 	every := f.w.timing.failureReport
 	quiet := now.Sub(f.logged) < every
 	if err == nil {

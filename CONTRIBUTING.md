@@ -97,7 +97,7 @@ Every change meets the same bar:
 | Rule | Details |
 |---|---|
 | Use the standard `testing` package. | Prefer table-driven tests when they make the cases easier to read. |
-| Test behavior against a real PostgreSQL. | Each test migrates its own schema through `internal/testdb`, so tests run in parallel. CI starts PostgreSQL with `make db`, as you do locally, once for each supported version. |
+| Test behavior against a real PostgreSQL. | Each test migrates its own schema through `internal/testdb`, so tests run in parallel. CI starts PostgreSQL with `make db`, as you do locally, once for each supported version. `make test` tells the tests where the database is. A plain `go test ./...` does not, so it skips them, and still prints `ok`. In CI, where the `CI` variable is set, a test without its database fails. |
 | Pass with `-race` and `-shuffle=on`. | Never rely on lucky timing. To wait for a result, poll with a deadline (`waitFor`, `waitState`, `recv`). Never sleep a fixed time and hope the result is ready. |
 | Shorten timers instead of waiting for them. | A test that waits for the worker's internal timers, such as the maintainer's interval, may shorten them with `taskmill.SetTiming` from `export_test.go`. |
 | Fix a bug with a test. | The test fails without the fix. |

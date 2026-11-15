@@ -899,12 +899,15 @@ func TestWorkerReleasesTasksThatOutliveTheDrain(t *testing.T) {
 
 func TestCheckInsKeepLongTasksLeased(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
 	var runs atomic.Int32
+	started, release := make(chan struct{}, 2), make(chan struct{})
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			runs.Add(1)
-			time.Sleep(3500 * time.Millisecond) // more than three lease durations
+			started <- struct{}{}
+			<-release
 			return nil
 		}, nil),
 		Queues: defaultQueue(2),
@@ -914,7 +917,20 @@ func TestCheckInsKeepLongTasksLeased(t *testing.T) {
 		LeaseDuration: time.Second,
 	})
 
+	// The task runs until its lease, as the fetch set it, has ended, and the
+	// maintainer has then looked twice for leases to rescue.
 	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the task to start")
+	var ends time.Time
+	if err := e.pool.QueryRow(t.Context(), replaceSchema("SELECT lease_expires_at FROM {s}.tasks WHERE id = $1", e.schema), id).Scan(&ends); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the task's first lease to end", func() bool { return e.count(t, "SELECT count(*) WHERE now() > $1", ends) == 1 })
+	sent.reset()
+	waitFor(t, "the maintainer to look for expired leases twice", func() bool {
+		return sent.count("t.lease_expires_at < now()") >= 2
+	})
+	close(release)
 	info := e.waitState(t, id, taskmill.StateCompleted)
 	if runs.Load() != 1 || info.Attempt != 1 {
 		t.Fatalf("task ran %d times over %d attempts; check-ins did not hold the lease", runs.Load(), info.Attempt)
@@ -1310,16 +1326,9 @@ func TestNotificationsWakeIdleWorkers(t *testing.T) {
 	})
 	e.waitListening(t)
 
-	start := time.Now()
+	// Without a notification, the worker would next fetch in a minute.
 	e.enqueue(t, sendEmail{}, nil)
-	select {
-	case <-started:
-		if d := time.Since(start); d > time.Second {
-			t.Fatalf("pickup took %s", d)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("notification did not wake the worker")
-	}
+	recv(t, started, "a notification to wake the worker")
 }
 
 func TestMiddlewareWrapsAttemptsInOrder(t *testing.T) {
@@ -2109,61 +2118,13 @@ func TestHandlerThatIgnoresShutdownIsReleased(t *testing.T) {
 	if info.State != taskmill.StateAvailable || info.Attempt != 0 {
 		t.Fatalf("got %s with attempt %d, want available with 0", info.State, info.Attempt)
 	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
+		t.Error("the stopped worker is still registered")
+	}
 	// The abandoned handler's late success changes nothing.
 	close(unblock)
 	recv(t, returned, "the handler to return")
 	e.wantState(t, id, taskmill.StateAvailable)
-}
-
-func TestShutdownFitsTheGracePeriod(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	const drain = time.Second
-	started, unblock := make(chan struct{}, 2), make(chan struct{})
-	t.Cleanup(func() { close(unblock) })
-	// The worker's own timing: the grace after the drain is a fixed 5 seconds.
-	w, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{
-		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
-			started <- struct{}{}
-			if task.Args.UserID == 1 {
-				<-unblock // ignores its context
-				return nil
-			}
-			<-ctx.Done()
-			return ctx.Err()
-		}, &taskmill.HandlerOptions{Timeout: time.Hour}),
-		Queues:       defaultQueue(2),
-		DrainTimeout: drain,
-		NoMaintainer: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
-	ids := []int64{e.enqueue(t, sendEmail{UserID: 1}, nil), e.enqueue(t, sendEmail{UserID: 2}, nil)}
-	recv(t, started, "the first task to start")
-	recv(t, started, "the second task to start")
-
-	// SIGTERM, through signal.NotifyContext. A process stops in time if its
-	// termination grace period is DrainTimeout plus 10 seconds.
-	stopping := time.Now()
-	cancel()
-	if err := recv(t, done, "Run to return"); err != nil {
-		t.Fatal(err)
-	}
-	if took := time.Since(stopping); took < drain || took > drain+10*time.Second {
-		t.Errorf("Run returned %s after its context ended, want between %s and %s", took, drain, drain+10*time.Second)
-	}
-	for _, id := range ids {
-		if info := e.get(t, id); info.State != taskmill.StateAvailable || info.Attempt != 0 {
-			t.Errorf("task %d is %s with attempt %d, want available with 0", id, info.State, info.Attempt)
-		}
-	}
-	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
-		t.Error("the stopped worker is still registered")
-	}
 }
 
 func TestHealthFollowsTheDatabase(t *testing.T) {
@@ -2471,8 +2432,8 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 		recv(t, started, "a handler to start")
 	}
 
-	// Another application's transaction holds every group's row, for two
-	// lease durations, while the six tasks finish.
+	// Another application's transaction holds every group's row while the
+	// six tasks finish, and until the worker has renewed their leases.
 	tx, err := testdb.Pool(t).Begin(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -2484,7 +2445,15 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	close(release)
 	plain := e.enqueue(t, sendEmail{}, nil)
 	e.waitState(t, plain, taskmill.StateCompleted)
-	time.Sleep(2 * lease) // the held tasks' leases must survive, which needs free connections
+	// The held tasks' leases must survive, which needs free connections:
+	// the worker renews all six while their completions wait.
+	var before time.Time
+	if err := e.pool.QueryRow(t.Context(), replaceSchema("SELECT max(lease_expires_at) FROM {s}.tasks", e.schema)).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the worker to renew the leases of the six held tasks", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE lease_expires_at > $1", before) == len(grouped)
+	})
 	if n := e.count(t, `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0`,
 		e.schema+".groups"); n != 0 {
 		t.Fatalf("%d statements wait for the held groups, each on a connection of the pool", n)

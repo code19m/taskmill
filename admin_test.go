@@ -691,17 +691,19 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	e := newEnv(t)
 	e.rawGroups = true // pending tasks are written by hand, without their groups
 	// The oldest tasks are those of the queue "rare": pending ones of two
-	// groups, and completed ones. The others are newer.
+	// groups, and completed ones. The others are newer, and many: here the
+	// planner's choice depends on the size, and with 5,000 tasks in each
+	// table it reads the history without its index.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key)
 	           SELECT CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, 'email.send',
 	                  CASE WHEN i <= 400 THEN 'pending' ELSE 'available' END::{s}.task_state, now(), '{}', 1,
 	                  CASE WHEN i <= 400 THEN 'g' || i % 2 END
-	           FROM generate_series(1, 100000) i`)
+	           FROM generate_series(1, 40000) i`)
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
 	           SELECT 1000000 + i, now(), CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, now(), 'email.send', now(), 'w', now(),
 	                  2, 1, 1, '{}', '{}', '[]'
-	           FROM generate_series(1, 100000) i`)
+	           FROM generate_series(1, 40000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "ANALYZE {s}.task_history")
 
@@ -1265,6 +1267,9 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 		e.exec(t, "UPDATE {s}.tasks SET lease_expires_at = now() - interval '1 second' WHERE state = 'running' AND attempt = 2")
 		return slices.ContainsFunc(e.get(t, id).Errors, func(a taskmill.AttemptError) bool { return a.Code == taskmill.CodeLeaseLost })
 	})
+	// A rescued task waits the default backoff, 2 seconds here, which says
+	// nothing about its times: the test makes it due now.
+	e.exec(t, "UPDATE {s}.tasks SET run_at = now() WHERE id = $1 AND state = 'retryable'", id)
 	close(leaseLost)
 	got = append(got, recv(t, calls, "the attempt after the rescue"))
 
@@ -1373,6 +1378,8 @@ func TestScheduleDoesNotWaitForAHeldGroup(t *testing.T) {
 	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 		{Name: "ledger", Cron: "@hourly", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
 	}})
+	// The run gives up on the held group after 50 ms, not after a second.
+	taskmill.SetTiming(w, taskmill.Timing{LockWait: 50 * time.Millisecond})
 	ctx := t.Context()
 	taskmill.RunSchedules(ctx, w)
 	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
