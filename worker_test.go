@@ -867,47 +867,62 @@ func TestWorkerDrainsRunningTasksOnShutdown(t *testing.T) {
 }
 
 // A worker that stops says that it waits for running tasks, and for how
-// many, only when it does.
+// many, only when it does. It counts the tasks whose handlers run: not those
+// whose handlers returned, and whose results it has yet to record.
 func TestStoppingWorkerSaysThatItWaitsOnlyWhenTasksRun(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
-		running int
-		said    []string // the tasks of each line that says that the worker waits
+		running, recording int      // tasks whose handlers run, and tasks whose results wait
+		said               []string // the tasks of each line that says that the worker waits
 	}{
-		"an idle worker":                  {0, nil},
-		"a worker with two running tasks": {2, []string{"2"}},
+		"an idle worker":                  {0, 0, nil},
+		"a worker with two running tasks": {2, 0, []string{"2"}},
+		"a worker with two running tasks, and one whose result waits": {2, 1, []string{"2"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			if said := stopWhileRunning(t, tc.running); !slices.Equal(said, tc.said) {
+			if said := stopWhileRunning(t, tc.running, tc.recording); !slices.Equal(said, tc.said) {
 				t.Fatalf("the worker said that it waits for %v tasks, want %v", said, tc.said)
 			}
 		})
 	}
 }
 
-// stopWhileRunning stops a worker while its handlers run the given number of
-// tasks, and lets them return once the worker said that it waits for them.
-// It returns the number of tasks that each such line names.
-func stopWhileRunning(t *testing.T, running int) (said []string) {
+// stopWhileRunning stops a worker while its handlers run `running` tasks,
+// and while the results of `recording` more tasks, whose handlers returned,
+// wait to be recorded: a transaction holds the rows of their FIFO groups. It
+// lets the handlers return, and ends that transaction, once the worker said
+// that it waits. It returns the number of tasks that each such line names.
+func stopWhileRunning(t *testing.T, running, recording int) (said []string) {
 	t.Helper()
 	const waiting = "worker stopping; waiting for running tasks"
 	logs := &logRecorder{}
 	e := newEnv(t).withLogger(t, slog.New(logs))
-	started, release := make(chan struct{}, running), make(chan struct{})
-	stop := runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
-			started <- struct{}{}
-			<-release
-			return nil
-		}, nil),
-		Queues:       defaultQueue(2),
-		NoMaintainer: true,
-	})
+	// The grouped tasks come first, and their handlers return right away.
+	// The worker has one slot for each task that keeps running, so the last
+	// of those start in the slots that the grouped tasks gave back: once
+	// every task has started, the handler of every grouped task is through.
+	for i := range recording {
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "held-" + strconv.Itoa(i)})
+	}
 	for range running {
 		e.enqueue(t, sendEmail{}, nil)
 	}
-	for range running {
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.groups FOR UPDATE")
+	started, release := make(chan struct{}, running+recording), make(chan struct{})
+	stop := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			if task.GroupKey == "" {
+				<-release
+			}
+			return nil
+		}, nil),
+		Queues:       defaultQueue(max(running, 1)),
+		NoMaintainer: true,
+	})
+	for range running + recording {
 		recv(t, started, "a handler to start")
 	}
 	waitFor(t, "the worker to start", func() bool { return logs.count("worker started") == 1 })
@@ -921,6 +936,9 @@ func stopWhileRunning(t *testing.T, running int) (said []string) {
 		waitFor(t, "the worker to say that it waits", func() bool { return logs.count(waiting) > 0 })
 	}
 	close(release)
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	recv(t, stopped, "the worker to stop")
 	for _, r := range logs.all() {
 		if r.Message == waiting {
