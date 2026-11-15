@@ -172,6 +172,14 @@ All notable changes to taskmill are recorded here. The format follows
   seconds could then fire although a maintainer ran, and an autoscaler
   read an old lag. Statistics now have a loop of their own, and are
   refreshed every 10 seconds whatever retention does.
+- `AddHandler` and `AddBatchHandler` panicked, which ends a process as it
+  starts, when the `Kind` method of the args panicked with a value that
+  panics again when it is formatted, such as an error whose `Error` method
+  panics with its own receiver. `NewWorker` now reports such a `Kind` as
+  an error, as it reports every other panic there, and the error names the
+  value's type. For a handler that panicked with such a value,
+  `taskmilltest.Run` returned a nil error, so a test that checked only the
+  error passed. It now returns an error for that panic too.
 
 ## [0.6.0] - 2026-11-13
 

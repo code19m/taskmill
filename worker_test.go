@@ -1806,16 +1806,46 @@ func TestHandlerForPointerArgs(t *testing.T) {
 	}
 }
 
-func TestHandlerForInterfaceArgsIsRejected(t *testing.T) {
+// stubbornArgs are args whose Kind method panics with a value that panics
+// again when it is formatted.
+type stubbornArgs struct{}
+
+func (stubbornArgs) Kind() string { panic(&stubbornError{}) }
+
+// A kind is read from a zero value of the args when a handler is added. A
+// Kind method that panics there is an error of NewWorker, whatever the
+// panic's value: adding a handler must not end the process.
+func TestHandlerWhoseKindPanicsIsRejected(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
-	var hs taskmill.Handlers
-	taskmill.AddHandler(&hs, taskmill.HandlerFunc[taskmill.Args](func(context.Context, *taskmill.Task[taskmill.Args]) error {
-		return nil
-	}), nil)
-	_, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
-	if !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	for name, add := range map[string]func(*taskmill.Handlers){
+		"args of an interface type, whose zero value is nil": func(hs *taskmill.Handlers) {
+			taskmill.AddHandler(hs, taskmill.HandlerFunc[taskmill.Args](func(context.Context, *taskmill.Task[taskmill.Args]) error {
+				return nil
+			}), nil)
+		},
+		"a panic whose value panics again when it is formatted": func(hs *taskmill.Handlers) {
+			taskmill.AddHandler(hs, taskmill.HandlerFunc[stubbornArgs](func(context.Context, *taskmill.Task[stubbornArgs]) error {
+				return nil
+			}), nil)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			var hs taskmill.Handlers
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("AddHandler panicked with a %T", r)
+					}
+				}()
+				add(&hs)
+			}()
+			_, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+			if !errors.Is(err, taskmill.ErrInvalidArgument) || !strings.Contains(err.Error(), "Kind panicked") {
+				t.Fatalf("got %v, want ErrInvalidArgument for a Kind method that panicked", err)
+			}
+		})
 	}
 }
 

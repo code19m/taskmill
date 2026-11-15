@@ -119,13 +119,27 @@ func TestWorkProcessesEverything(t *testing.T) {
 	}
 }
 
+// stubbornError is an error whose Error method panics with the error itself,
+// so that the panic's value panics again when it is formatted.
+type stubbornError struct{}
+
+func (e *stubbornError) Error() string { panic(e) }
+
 func TestRunReportsPanics(t *testing.T) {
 	t.Parallel()
-	client := taskmilltest.NewClient(t, testdb.Pool(t), nil)
-	h := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { panic("boom") })
-	info, err := taskmilltest.Run(t, client, h, greet{})
-	if err == nil || info.State != taskmill.StateRetryable || info.Errors[0].Code != taskmill.CodePanic {
-		t.Fatalf("got %s with %+v, %v", info.State, info.Errors, err)
+	for name, value := range map[string]any{
+		"a string": "boom",
+		"a value that panics when it is formatted": &stubbornError{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			client := taskmilltest.NewClient(t, testdb.Pool(t), nil)
+			h := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { panic(value) })
+			info, err := taskmilltest.Run(t, client, h, greet{})
+			if err == nil || info.State != taskmill.StateRetryable || info.Errors[0].Code != taskmill.CodePanic {
+				t.Fatalf("got %s with %+v, %v", info.State, info.Errors, err)
+			}
+		})
 	}
 }
 
