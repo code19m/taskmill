@@ -16,9 +16,12 @@ const (
 	countCap = 10_000 // most tasks that Client.Count counts in one state
 
 	// batchTimeout bounds a batch of a bulk action, which continues when ctx
-	// ends meanwhile: a batch that began ends whole, so that the count of
-	// changed tasks is exact, and no batch is left behind, on a connection
-	// that ctx closed, to hold its rows after the action returns.
+	// ends meanwhile: a batch that began ends whole, so that the action
+	// counts it, and no batch is left behind, on a connection that ctx
+	// closed, to hold its rows after the action returns. The bound is the
+	// client's: past it, the action gives the batch up and closes its
+	// connection. If that happens while the batch commits, the database may
+	// still commit it, and the action returns an error without its count.
 	batchTimeout = 5 * time.Second
 
 	// openTimeout bounds each statement of a batch that reads without a
@@ -109,7 +112,9 @@ type BulkParams struct {
 
 // BulkResult reports what a bulk action did.
 type BulkResult struct {
-	// Changed is how many tasks it changed.
+	// Changed is how many tasks it changed. If the action returns an error,
+	// the batch it was in may have committed all the same, and is not
+	// counted: at most 1,000 tasks more.
 	Changed int64
 
 	// Skipped is how many matching tasks it left as they were, because other
@@ -270,6 +275,12 @@ func (c *TaskCount) plus(other TaskCount) {
 // ctx ends first, it finishes the batch it is in, for at most 5 seconds, and
 // returns what it did, with an error and [BulkResult.Next] to continue; each
 // batch commits whole or not at all.
+//
+// A call that returns an error may have done one batch more than it
+// reports: if the commit of its last batch does not answer in those 5
+// seconds, or the connection breaks, the database may still commit it.
+// Running the action again, or continuing from Next, is safe: the tasks
+// that it changed no longer match.
 func (c *Client) RetryMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
 	m, err := checkBulk(params, retryStates)
 	if err != nil {
@@ -345,7 +356,7 @@ type batchFunc func(ctx context.Context, q querier, m *matching) (step, error)
 
 // inBatches runs batch, each time in a transaction of its own, until it goes
 // through the last task. A batch that began continues if ctx ends meanwhile,
-// for at most batchTimeout, so that the result is exact.
+// for at most batchTimeout, so that the result counts it.
 func (c *Client) inBatches(ctx context.Context, m *matching, batch batchFunc) (BulkResult, error) {
 	var res BulkResult
 	var firstSkipped int64

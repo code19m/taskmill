@@ -150,9 +150,13 @@ makes that step wait.
     the wait for the standby. Under the timeout, a batch whose work was
     done failed there. A schedule's run, which waits at most a second for
     a group's row, lifts its timeout the same way.
-  - **Exact counts, and continuing.** A batch whose statements ran commits
-    even if the caller's context ends meanwhile, so the number of changed
-    tasks is exact. An action that stops early returns a cursor to continue:
+  - **Counts, and continuing.** A batch whose statements ran commits even
+    if the caller's context ends meanwhile, so the action counts it. The
+    count is exact for a call that returns no error. A commit is bounded by
+    the batch's 5 seconds in the client only: past them, the client closes
+    the connection, and the database may still commit that batch. So a call
+    that returns an error may have changed up to 1,000 tasks more than it
+    reports. An action that stops early returns a cursor to continue:
     at the first task it skipped, if any, or else after the last task it went
     through. Continuing at the first skipped task keeps no state between
     calls, and still brings a group that the action left back in order: the

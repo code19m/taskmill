@@ -154,6 +154,9 @@ log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
 - **If your context ends,** they stop after the current batch. They return
   what they did, an error, and `Next`: pass it as `BulkParams.Cursor` to
   continue from there.
+- **After an error, the count can be one batch short.** If the database
+  does not confirm the last batch in time, it may still commit it. Running
+  the action again is safe: the tasks that it changed no longer match.
 
 > [!TIP]
 > Call `Count` with the same filter first: `TaskCounts.Retry`, `Cancel`,
