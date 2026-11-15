@@ -48,6 +48,41 @@ All notable changes to taskmill are recorded here. The format follows
 - The reference section has a new order: the three indexes come first, then
   the pages about what has no Go identifier.
 
+### Security
+
+- One malformed row no longer stops a queue or the maintainer. A role with
+  `INSERT` on `tasks`, or an `UPDATE` by hand, can write a row that taskmill
+  never writes. Such rows did harm far beyond their own task:
+  - **Metadata that is not a JSON object of strings, or a time of creation
+    or a run time of `infinity`.** Every fetch that took the row lost all
+    the tasks that it leased with it. They ran only after their leases
+    expired, with one attempt used. In a queue with `MaxRunning`, no task
+    started again. In a queue that no worker reads, an infinite run time
+    failed every refresh of the statistics, for all queues.
+  - **Errors that are not a JSON array.** The maintainer stopped rescuing
+    expired leases, in every queue.
+  - **A lease token at the largest integer, or a waiting task with no
+    attempt left,** such as a dead task that an `UPDATE` made `available`.
+    Every fetch from the queue failed, and no task started again.
+
+  Now only that task fails. A worker makes it dead with the new error code
+  `invalid_row` (`CodeInvalidRow`), and runs the tasks around it. Neither
+  its handler nor the middleware runs for it. Errors that are not an array
+  count as none, and a task with no attempt left runs once more.
+  `Client.Get` and `Client.List`, and so the dashboard, show such a task
+  without the value that does not decode: before, they failed, and a list
+  failed for its whole page. If other roles can write to taskmill's tables,
+  upgrade.
+- The grants for a role that only enqueues, in
+  [Split work across services](docs/recipes/split-across-services.md), now
+  give `INSERT` on the columns that an enqueue writes, not on all of
+  `tasks`. With the old grant, the role could write a task that looks
+  leased, with a lease that never ends: such a row holds a place under its
+  queue's `MaxRunning` for good. If you use the old grant, run
+  `REVOKE INSERT ON billing.tasks FROM orders`, with your names, and then
+  the new `GRANT` of the recipe. A role with `INSERT` on the whole table
+  stays trusted, as [Security](docs/production/security.md) now says.
+
 ## [0.6.0] - 2026-11-13
 
 ### Added

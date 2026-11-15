@@ -35,15 +35,15 @@ configurable, so several schemas can share a database. It must match
    all of them work inside the caller's transaction and behind poolers in
    transaction mode, such as PgBouncer.
 4. **The database enforces the lifecycle's invariants** with `CHECK`
-   constraints, as a second line of defense behind the code.
+   constraints, as a second line of defense behind the code. The code, in
+   turn, survives [a row that it did not write](schema-maintenance.md#rows-that-taskmill-did-not-write).
 5. **Frequent updates touch no indexed column.** Lease renewals change only
    `lease_expires_at`, which no index contains, so PostgreSQL can update the
    row in place (a HOT update) without writing to any index.
 6. **Every timestamp that taskmill sets comes from the database clock:**
    `now()`, or `clock_timestamp()` for a lease, which counts from the moment
    the task is taken. The days of the history partitions come from it too.
-   Only a run time that the application passes in comes from the
-   application's clock.
+   Only a run time that the application passes in comes from its own clock.
 
 ## Tables
 
@@ -73,7 +73,8 @@ configurable, so several schemas can share a database. It must match
 - **`lease_token` is a counter, not a random value.** It grows on every fetch
   and is never reset, not even by an operator retry, so a stale attempt's
   token can never match again. Unlike `attempt`, it never goes down, so
-  snoozes and releases, which give attempts back, are safe.
+  snoozes and releases, which give attempts back, are safe. At the largest
+  integer it stops, and the task becomes dead at its next fetch.
 - **`errors` is bounded.** Each failure appends an entry with the attempt
   number, the time, the message, and, for failures that taskmill detects
   itself, a code such as `lease_lost`. Beyond 20 entries the oldest is
@@ -82,9 +83,8 @@ configurable, so several schemas can share a database. It must match
   so lease renewals can be HOT updates. Measured: renewing 5,000 leases on
   densely packed pages was 25% HOT in the first round, limited by the free
   space, and 97% HOT after PostgreSQL pruned old row versions.
-- **Autovacuum is aggressive on `tasks`:** a scale factor of 1%, a threshold
-  of 1,000 rows, and no cost delay. Every fetch and result leaves a dead row
-  version.
+- **Autovacuum is aggressive on `tasks`:** a 1% scale factor, a 1,000-row
+  threshold, no cost delay. Every fetch and result leaves a dead row version.
 - **`queue` and `kind` are stored as text,** not as IDs into lookup tables.
   The rows are slightly larger, but there are no joins, no lookups, and no
   registration step before the first enqueue.

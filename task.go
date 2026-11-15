@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // Priority orders tasks within a queue: higher priorities start first.
@@ -112,7 +114,9 @@ type TaskInfo struct {
 
 	// Metadata holds the tags from [EnqueueOptions.Metadata] and
 	// [EnqueueMiddleware], and for a task that a [Schedule] enqueued,
-	// taskmill's own: [MetadataSchedule] and [MetadataScheduledFor].
+	// taskmill's own: [MetadataSchedule] and [MetadataScheduledFor]. It is
+	// empty for a task whose row holds metadata that taskmill did not write
+	// and cannot read: see [CodeInvalidRow].
 	Metadata map[string]string
 
 	// Payload is the task's Args as stored, in JSON.
@@ -189,6 +193,16 @@ const (
 	// dead.
 	CodeUnknownKind ErrorCode = "unknown_kind"
 
+	// CodeInvalidRow means the task's row holds a value that taskmill never
+	// writes, so the task became dead right away: metadata that is not a
+	// JSON object of strings, a time of creation or a run time that is
+	// infinite, or a lease token at its largest value. Neither the handler
+	// nor the middleware ran. Another database role wrote such a row, or an
+	// UPDATE by hand; only the lease token gets there by itself, after two
+	// billion fetches of one task. A retry of the task ends the same way
+	// until the row is corrected.
+	CodeInvalidRow ErrorCode = "invalid_row"
+
 	// CodeNoHandler marks a note, not a failure: a worker fetched the task
 	// without a handler for its kind, and the task began to wait for one,
 	// without using attempts. Such a worker snoozes the task 1 minute at a
@@ -260,17 +274,22 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	return nil
 }
 
-// scanTaskInfo reads one row of taskColumns.
+// scanTaskInfo reads one row of taskColumns. It reads what does not decode
+// as empty: metadata that is not an object of strings, an entry of the
+// errors that is not one, and a time that is infinite. Such a row comes from
+// another database role or an UPDATE by hand, and a list must still show it,
+// with the tasks around it. A worker that takes the task makes it dead (see
+// scanLeased).
 func scanTaskInfo(r rows) (*TaskInfo, error) {
 	var (
-		info                           TaskInfo
-		state                          string
-		priority, attempt, maxAttempts int16
-		metadata, payload, errs        []byte
-		attemptedAt, finalizedAt       *time.Time
+		info                                       TaskInfo
+		state                                      string
+		priority, attempt, maxAttempts             int16
+		metadata, payload, errs                    []byte
+		createdAt, runAt, attemptedAt, finalizedAt pgtype.Timestamptz
 	)
 	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
-		&metadata, &payload, &errs, &info.CreatedAt, &info.RunAt, &attemptedAt, &finalizedAt)
+		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt, &finalizedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -279,24 +298,56 @@ func scanTaskInfo(r rows) (*TaskInfo, error) {
 	info.Attempt = int(attempt)
 	info.MaxAttempts = int(maxAttempts)
 	info.Payload = payload
-	info.AttemptedAt = deref(attemptedAt)
-	info.FinalizedAt = deref(finalizedAt)
-	return &info, decodeJSONColumns(&info, metadata, errs)
+	info.Metadata, _ = decodeMetadata(metadata)
+	info.Errors = decodeErrors(errs)
+	info.CreatedAt, _ = finite(createdAt)
+	info.RunAt, _ = finite(runAt)
+	info.AttemptedAt, _ = finite(attemptedAt)
+	info.FinalizedAt, _ = finite(finalizedAt)
+	return &info, nil
 }
 
-// decodeJSONColumns decodes a task's metadata and errors columns into info.
-func decodeJSONColumns(info *TaskInfo, metadata, errs []byte) error {
+// decodeMetadata decodes a task's metadata column. taskmill writes an object
+// of strings, but the column holds any JSON.
+func decodeMetadata(metadata []byte) (map[string]string, error) {
+	var m map[string]string
 	if len(metadata) > 0 && string(metadata) != "{}" {
-		if err := json.Unmarshal(metadata, &info.Metadata); err != nil {
-			return fmt.Errorf("decode metadata: %w", err)
+		if err := json.Unmarshal(metadata, &m); err != nil {
+			return nil, fmt.Errorf("the metadata is not a JSON object of strings: %w", err)
 		}
 	}
-	if len(errs) > 0 && string(errs) != "[]" {
-		if err := json.Unmarshal(errs, &info.Errors); err != nil {
-			return fmt.Errorf("decode errors: %w", err)
+	return m, nil
+}
+
+// decodeErrors decodes a task's errors column. taskmill writes an array of
+// entries, but the column holds any JSON. The errors are a history that no
+// attempt depends on, so the entries that decode are kept, and the rest is
+// left out.
+func decodeErrors(errs []byte) []AttemptError {
+	if len(errs) == 0 || string(errs) == "[]" {
+		return nil
+	}
+	var all []AttemptError
+	if json.Unmarshal(errs, &all) == nil {
+		return all
+	}
+	var entries []json.RawMessage
+	_ = json.Unmarshal(errs, &entries) // no entries if the column holds no array
+	var kept []AttemptError
+	for _, entry := range entries {
+		var e AttemptError
+		if json.Unmarshal(entry, &e) == nil {
+			kept = append(kept, e)
 		}
 	}
-	return nil
+	return kept
+}
+
+// finite returns a stored time. It reports false, with the zero time, if the
+// time is infinite: a timestamp of PostgreSQL can be, and a time.Time
+// cannot. NULL is the zero time.
+func finite(ts pgtype.Timestamptz) (time.Time, bool) {
+	return ts.Time, ts.InfinityModifier == pgtype.Finite
 }
 
 func deref(t *time.Time) time.Time {

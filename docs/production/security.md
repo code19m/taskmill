@@ -98,6 +98,14 @@ ALTER DEFAULT PRIVILEGES FOR ROLE shop IN SCHEMA taskmill
   internal, and a minor release can add one. A service that only enqueues
   into another service's schema can use a shorter list, at that risk:
   [Split work across services](../recipes/split-across-services.md#check-versions-and-privileges).
+- **Trust every role that can write to `tasks`.** It can enqueue any task,
+  in any number. With `INSERT` on the whole table, as `shop_web` has, it can
+  also write a row with SQL of its own that looks leased, and such a row
+  holds a place under its queue's `MaxRunning` for as long as its lease
+  says. The shorter list of that recipe names the columns that an enqueue
+  writes, so its role cannot write a lease. A task whose row a worker cannot
+  read fails alone, with the code
+  [`invalid_row`](https://pkg.go.dev/github.com/code19m/taskmill#CodeInvalidRow).
 
 ## Keep secrets out of tasks and errors
 

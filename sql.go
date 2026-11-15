@@ -1,6 +1,7 @@
 package taskmill
 
 import (
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -169,8 +170,23 @@ func newStatements(schema string) *statements {
 		"{heartbeat}", notifyHeartbeat+"|",
 		"{resigned}", notifyResigned+"|",
 		// {trimmed} is a task's errors without the oldest entry once it holds
-		// keptErrors, so that appending one keeps at most keptErrors.
-		"{trimmed}", "(CASE WHEN jsonb_array_length(errors) >= "+strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
+		// keptErrors, so that appending one keeps at most keptErrors. Errors
+		// that are not an array count as none, and appending replaces them:
+		// their length is an error, which in the statement that rescues
+		// expired leases would keep every task of its batch from being
+		// rescued.
+		"{trimmed}", "(CASE WHEN jsonb_typeof(errors) <> 'array' THEN '[]' WHEN jsonb_array_length(errors) >= "+
+			strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
+		// {attempt} and {token} are what a fetch counts a task's attempt and
+		// lease token up to. Both stay in the range of their columns for any
+		// row, so that one row cannot fail the fetch of every task taken with
+		// it. The attempt stops at the task's maximum: a row can wait in a
+		// queue with no attempt left, such as a dead task that an UPDATE by
+		// hand made available, and then runs once more. The token stops at
+		// the largest integer, where the worker makes the task dead: a token
+		// that cannot grow cannot tell the next attempt from this one.
+		"{attempt}", "least(t.attempt + 1, t.max_attempts)",
+		"{token}", "least(t.lease_token, "+strconv.Itoa(math.MaxInt32-1)+") + 1",
 		// {unnoted} is a task's errors without a no_handler note at their
 		// end. The note says that the task waits for a worker with a handler
 		// for its kind: the wait is over once such a worker has the task, or
@@ -678,8 +694,8 @@ WITH picked AS (
 )
 UPDATE {s}.tasks t
 SET state = 'running',
-    attempt = t.attempt + 1,
-    lease_token = t.lease_token + 1,
+    attempt = {attempt},
+    lease_token = {token},
     lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $4
@@ -709,8 +725,8 @@ WITH candidates AS (
 )
 UPDATE {s}.tasks t
 SET state = 'running',
-    attempt = t.attempt + 1,
-    lease_token = t.lease_token + 1,
+    attempt = {attempt},
+    lease_token = {token},
     lease_expires_at = clock_timestamp() + $3 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $4
@@ -730,8 +746,8 @@ WITH picked AS (
 )
 UPDATE {s}.tasks t
 SET state = 'running',
-    attempt = t.attempt + 1,
-    lease_token = t.lease_token + 1,
+    attempt = {attempt},
+    lease_token = {token},
     lease_expires_at = clock_timestamp() + $2 * interval '1 microsecond',
     attempted_at = now(),
     attempted_by = $3
@@ -1213,6 +1229,11 @@ LIMIT $2`),
 		// retry last. They are found by reading the same index again,
 		// backward from the last retryable task counted, so no task past the
 		// counted ones, and no scheduled task after them, is read.
+		//
+		// A run time that is infinite is no oldest task. Only a row that
+		// taskmill did not write has one, Go cannot read it as a time, and one
+		// such row must not fail the counts of every queue. The conditions
+		// that leave it out are ranges of the indexes that the probes read.
 		countStats: q(`
 WITH RECURSIVE available AS (
     (SELECT queue FROM {s}.tasks WHERE state = 'available' ORDER BY queue LIMIT 1)
@@ -1235,7 +1256,8 @@ WITH RECURSIVE available AS (
     SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state IN ('dead', 'canceled') AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
     FROM finished x WHERE x.queue IS NOT NULL
 ), due AS (
-    SELECT state, queue, count(*) AS tasks, min(run_at) FILTER (WHERE run_at <= now()) AS oldest, max(run_at) AS last
+    SELECT state, queue, count(*) AS tasks,
+           min(run_at) FILTER (WHERE run_at <= now() AND run_at > '-infinity') AS oldest, max(run_at) AS last
     FROM (
         SELECT state, queue, run_at FROM {s}.tasks WHERE state IN ('scheduled', 'retryable') ORDER BY run_at LIMIT $2
     ) d GROUP BY state, queue
@@ -1255,6 +1277,7 @@ SELECT 'available', x.queue,
        (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue LIMIT $1) c),
        (SELECT min(o.run_at) FROM unnest('{1,2,3,4}'::smallint[]) AS p, -- every priority
         LATERAL (SELECT t.run_at FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue AND t.priority = p
+                   AND t.run_at > '-infinity' AND t.run_at < 'infinity'
                  ORDER BY t.run_at LIMIT 1) o),
        NULL::bigint, NULL::integer
 FROM available x WHERE x.queue IS NOT NULL

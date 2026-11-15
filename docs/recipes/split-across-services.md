@@ -80,18 +80,26 @@ first.
   ```sql
   GRANT USAGE ON SCHEMA billing TO orders;
   GRANT SELECT ON billing.migrations TO orders;
-  GRANT INSERT, SELECT (id) ON billing.tasks TO orders;
+  GRANT INSERT (id, queue, kind, state, priority, run_at, group_key, payload, metadata, max_attempts),
+      SELECT (id) ON billing.tasks TO orders;
   GRANT SELECT, INSERT, UPDATE ON billing.groups, billing.dedupe_keys TO orders;
   GRANT USAGE ON SEQUENCE billing.tasks_id_seq TO orders;
   ```
 
-  This is the smallest set that works for every enqueue call and option.
-  With `SELECT (id)`, the orders role reads only the `id` column. It can add
-  tasks, but it can't read a payload, and it can't change, cancel, or delete
-  a task. Billing still trusts the orders service: it can enqueue any task.
+  This is the smallest set that works for every enqueue call and option:
+  a test of taskmill applies it from this page. The orders role can add
+  tasks. It can't read a payload, and it can't change, cancel, or delete a
+  task. It writes only the columns that an enqueue writes, so it can't write
+  a task's lease, attempts, or errors: no task of its making looks leased or
+  finished.
 
-  These tables are internal, so a later release may need more. The error
-  `permission denied for table …` then names the table.
+  Billing still trusts the orders service. The role can enqueue any task, in
+  any number, into any queue and FIFO group. It can also change the rows of
+  `groups` and `dedupe_keys`, and so stop a FIFO group or block a dedupe key.
+
+  These tables are internal, so a later release may need more: a table, or a
+  column of `tasks`. The error `permission denied for table …` then names
+  the table.
 
 ## Other options
 

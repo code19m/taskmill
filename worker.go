@@ -244,7 +244,9 @@ type QueueOptions struct {
 // error from its next.
 // A handler's panic reaches middleware as an error. For a batch handler,
 // middleware runs once per task, but the context it passes to next does not
-// reach the handler.
+// reach the handler. Middleware does not run for a task that the worker ends
+// without a handler: one of a kind that it has no handler for, or one whose
+// row is invalid, which becomes dead with [CodeInvalidRow].
 //
 // Add middleware in [WorkerConfig.Middleware]. The [middleware guide] has
 // examples.
@@ -398,10 +400,11 @@ func (q *queueState) nudge() {
 
 // tracked is an attempt the worker is running or recording.
 type tracked struct {
-	att    *attempt
-	info   *TaskInfo
-	reg    *registration // nil if no handler knows the kind
-	direct bool          // run by RunTask, which records its completion right away
+	att     *attempt
+	info    *TaskInfo
+	reg     *registration // nil if no handler knows the kind, or the task is invalid
+	invalid error         // why the task's row cannot run: it holds what taskmill never writes
+	direct  bool          // run by RunTask, which records its completion right away
 
 	// completedDirectly is set once RunTask recorded the completion.
 	completedDirectly bool

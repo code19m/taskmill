@@ -4,13 +4,16 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math"
 	"math/rand/v2"
 	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // fetchLoop fetches tasks for one queue whenever it has free capacity, until
@@ -351,17 +354,22 @@ func batchCounts(ts []*tracked) map[string]int {
 	return counts
 }
 
-// scanLeased reads one row of leasedColumns.
+// scanLeased reads one row of leasedColumns. A row that holds what taskmill
+// never writes, as another database role or an UPDATE by hand can leave it,
+// is no error: an error would lose every task that the statement leased
+// with it. Such a task is tracked as invalid, without a handler, and runOne
+// makes it dead, alone.
 func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 	var (
 		info                    TaskInfo
 		priority, att, maxAtt   int16
 		token                   int32
 		metadata, payload, errs []byte
+		createdAt, runAt        pgtype.Timestamptz
 		attemptedAt             *time.Time
 	)
 	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &priority, &att, &maxAtt, &token, &info.GroupKey,
-		&metadata, &payload, &errs, &info.CreatedAt, &info.RunAt, &attemptedAt)
+		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -371,16 +379,31 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 	info.MaxAttempts = int(maxAtt)
 	info.Payload = payload
 	info.AttemptedAt = deref(attemptedAt)
-	if err := decodeJSONColumns(&info, metadata, errs); err != nil {
-		return nil, err
+	info.Errors = decodeErrors(errs)
+	var created, due bool
+	info.CreatedAt, created = finite(createdAt)
+	info.RunAt, due = finite(runAt)
+	var invalid error
+	info.Metadata, invalid = decodeMetadata(metadata)
+	if invalid == nil && (!created || !due) {
+		invalid = errors.New("the time of creation or the run time is infinite")
+	}
+	if invalid == nil && token == math.MaxInt32 {
+		// The fetch statements count no further, so another attempt would
+		// have this token too, and could record this attempt's result.
+		invalid = errors.New("the lease token is at its largest value, so the task cannot run again")
 	}
 	reg := w.handlers[info.Kind]
+	if invalid != nil {
+		invalid, reg = fmt.Errorf("invalid row: %w", invalid), nil
+	}
 	return &tracked{
 		att: &attempt{
 			client: w.client, logger: w.logger, id: info.ID, token: token, discard: reg != nil && reg.opts.DiscardCompleted,
 		},
 		info:      &info,
 		reg:       reg,
+		invalid:   invalid,
 		renewedAt: now,
 	}, nil
 }

@@ -28,6 +28,13 @@ func (w *Worker) runOne(parent context.Context, t *tracked) {
 	if t.lost.Load() {
 		cancel(ErrLeaseLost)
 	}
+	if t.invalid != nil {
+		// No code of the application sees a task whose row the worker cannot
+		// trust: not its handler, and not the middleware, whose result would
+		// decide what becomes of the task.
+		w.finish(ctx, t, outcome{kind: outcomeDead, err: t.invalid, msg: t.invalid.Error(), code: CodeInvalidRow}, time.Time{})
+		return
+	}
 	if t.reg == nil {
 		w.finish(ctx, t, w.unknownKind(ctx, t), time.Time{})
 		return
