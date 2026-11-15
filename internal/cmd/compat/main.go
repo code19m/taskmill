@@ -71,5 +71,11 @@ func run(args []string) error {
 	if !res.Duplicate {
 		return errors.New("the second deduplicated task is not a duplicate")
 	}
-	return nil
+	// A canceled task stores the dedupe key that its cancel freed, in
+	// columns that the release does not know. The release retries it.
+	canceled, err := client.Enqueue(ctx, job{What: "current: canceled"}, &taskmill.EnqueueOptions{DedupeKey: "compat-canceled"})
+	if err != nil {
+		return err
+	}
+	return client.Cancel(ctx, canceled.ID)
 }
