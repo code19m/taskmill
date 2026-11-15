@@ -119,20 +119,30 @@ func TestStoredErrorNamesNeverChange(t *testing.T) {
 			got, at, breaks)
 	}
 
-	// As this release stores it: an entry that taskmill records has a code.
+	// As this release stores it. Three statements write an entry, and an
+	// entry that taskmill records has a code.
 	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()})
-	failed := e.enqueue(t, textEmail{UserID: "not a number"}, nil)
-	if _, err := w.RunTask(t.Context(), failed); err != nil {
-		t.Fatal(err)
+	failed := e.enqueue(t, textEmail{UserID: "not a number"}, nil) // its payload does not decode
+	snoozed := e.enqueue(t, report{}, nil)                         // the worker has no handler for its kind
+	for _, id := range []int64{failed, snoozed} {
+		if _, err := w.RunTask(t.Context(), id); err != nil {
+			t.Fatal(err)
+		}
 	}
-	var names []string
-	err := e.pool.QueryRow(t.Context(),
-		"SELECT array(SELECT jsonb_object_keys(errors -> 0) ORDER BY 1) FROM "+e.schema+".tasks WHERE id = $1", failed).Scan(&names)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"at", "attempt", "code", "message"}; !slices.Equal(names, want) {
-		t.Errorf("a failed attempt is stored under the names %q, want %q. %s", names, want, breaks)
+	rescued := e.enqueue(t, sendEmail{}, nil)
+	e.exec(t, `UPDATE {s}.tasks SET state = 'running', attempt = 1, lease_token = 1, attempted_at = now(), attempted_by = 'gone',
+	           lease_expires_at = now() - interval '1 second' WHERE id = $1`, rescued)
+	taskmill.Rescue(t.Context(), w)
+	for what, id := range map[string]int64{"a failed attempt": failed, "the note of a snooze": snoozed, "a rescued attempt": rescued} {
+		var names []string
+		err := e.pool.QueryRow(t.Context(),
+			"SELECT array(SELECT jsonb_object_keys(errors -> -1) ORDER BY 1) FROM "+e.schema+".tasks WHERE id = $1", id).Scan(&names)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"at", "attempt", "code", "message"}; !slices.Equal(names, want) {
+			t.Errorf("%s is stored under the names %q, want %q. %s", what, names, want, breaks)
+		}
 	}
 }
 
