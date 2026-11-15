@@ -30,9 +30,9 @@ const (
 // maintainer does the installation-wide work of one elected worker. Its main
 // loop elects the leader, then rescues expired leases and enqueues schedules
 // once per interval. Queues whose tasks wait are woken in a loop of their
-// own, which also sends the heartbeat that workers count on, due tasks are
-// promoted in another, as they come due, and statistics and retention in a
-// third, so that slow work in one never delays the others.
+// own, which also sends the heartbeat that workers count on, and due tasks
+// are promoted in another, as they come due. Statistics and retention have
+// a loop each too, so that slow work in one never delays the others.
 type maintainer struct {
 	w      *Worker
 	c      *Client
@@ -65,7 +65,13 @@ func (m *maintainer) run(ctx context.Context) {
 	var loops sync.WaitGroup
 	loops.Go(func() { m.wakeLoop(ctx) })
 	loops.Go(func() { m.promoteLoop(ctx) })
-	loops.Go(func() { m.housekeep(ctx) })
+	loops.Go(func() { m.every(ctx, m.w.timing.stats, m.refreshStats) })
+	loops.Go(func() {
+		m.every(ctx, m.w.timing.retention, func(ctx context.Context) {
+			m.retain(ctx)
+			m.pruneSchedules(ctx)
+		})
+	})
 	defer loops.Wait()
 
 	tick := time.NewTicker(m.w.timing.maintainer)
@@ -145,29 +151,24 @@ func (m *maintainer) promoteLoop(ctx context.Context) {
 	}
 }
 
-// housekeep refreshes statistics and applies retention while this worker
-// leads.
-func (m *maintainer) housekeep(ctx context.Context) {
+// every calls work once per interval while this worker leads, until ctx
+// ends. Statistics and retention each run in such a loop of their own:
+// retention can take long, when a detach waits for a transaction that reads
+// the history, or a backlog of old tasks takes many batches, and the
+// statistics, which lag is read from, must stay fresh meanwhile.
+func (m *maintainer) every(ctx context.Context, interval time.Duration, work func(context.Context)) {
 	tick := time.NewTicker(m.w.timing.maintainer)
 	defer tick.Stop()
-	var lastStats, lastRetention time.Time
+	var last time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		}
-		if !m.leader.Load() {
-			continue
-		}
-		if time.Since(lastStats) >= m.w.timing.stats {
-			m.refreshStats(ctx)
-			lastStats = time.Now()
-		}
-		if time.Since(lastRetention) >= m.w.timing.retention {
-			m.retain(ctx)
-			m.pruneSchedules(ctx)
-			lastRetention = time.Now()
+		if m.leader.Load() && time.Since(last) >= interval {
+			work(ctx)
+			last = time.Now()
 		}
 	}
 }

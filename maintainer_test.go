@@ -858,6 +858,39 @@ func countedQueues(t *testing.T, e *env, names ...string) map[string]taskmill.Qu
 	return out
 }
 
+// Retention can take long: a detach waits for a transaction that reads the
+// history, and a backlog of old tasks takes many batches. The statistics,
+// which Lag and autoscalers read, are refreshed meanwhile.
+func TestSlowRetentionDoesNotDelayStatistics(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.attachHistory(t, time.Now().UTC().AddDate(0, 0, -30).Truncate(24*time.Hour))
+	// A long reader of history, such as a report, makes the detach of the
+	// expired partition wait.
+	reader := e.begin(t)
+	e.txExec(t, reader, "SELECT count(*) FROM {s}.task_history")
+	runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	e.waitBlocked(t, "DETACH PARTITION")
+
+	// A task that arrives while retention waits shows in the statistics.
+	e.enqueue(t, sendEmail{}, nil)
+	waitFor(t, "the statistics to count a task that arrived while retention waited", func() bool {
+		queues, err := e.client.Queues(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range queues {
+			if q.Name == taskmill.DefaultQueue {
+				return q.Counts[taskmill.StateAvailable].N == 1
+			}
+		}
+		return false
+	})
+	if err := reader.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSlowRetentionDoesNotDelayPromotion(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

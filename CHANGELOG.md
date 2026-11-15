@@ -163,6 +163,15 @@ All notable changes to taskmill are recorded here. The format follows
   `HistoryRetention`: rename a partition that you detached to keep it. A
   pass drops at most 10 partitions, the oldest first, and the next pass, a
   minute later, continues.
+- Queue statistics went stale while retention had much to do. The
+  maintainer refreshed them in the loop that also applies retention. So
+  the counts, `QueueInfo.Lag`, and `QueueInfo.RefreshedAt` stood still
+  while it deleted a large backlog of old dead or canceled tasks, or while
+  the drop of old history waited for a long transaction such as a backup,
+  up to 30 seconds in each minute. An alert on statistics older than 60
+  seconds could then fire although a maintainer ran, and an autoscaler
+  read an old lag. Statistics now have a loop of their own, and are
+  refreshed every 10 seconds whatever retention does.
 
 ## [0.6.0] - 2026-11-13
 
