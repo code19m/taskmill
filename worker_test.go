@@ -676,12 +676,7 @@ func TestFloodOfNotificationsAddsOneFetchPer20Milliseconds(t *testing.T) {
 	e.waitListening(t)
 
 	before, flooded := fetches.n.Load(), time.Now()
-	ended := make(chan error, 1)
-	go func() {
-		_, err := e.pool.Exec(context.Background(), "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(flood)+" LOOP PERFORM pg_notify('"+
-			e.schema+"', 'a|"+taskmill.DefaultQueue+"'); COMMIT; END LOOP; END $$")
-		ended <- err
-	}()
+	stopFlood := e.flood(t, flood)
 	params := make([]taskmill.EnqueueParams, tasks)
 	for i := range params {
 		params[i] = taskmill.EnqueueParams{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "account-7"}}
@@ -692,9 +687,7 @@ func TestFloodOfNotificationsAddsOneFetchPer20Milliseconds(t *testing.T) {
 	for range tasks {
 		recv(t, ran, "the group's next task to start during the flood")
 	}
-	if err := recv(t, ended, "the flood to end"); err != nil {
-		t.Fatal(err)
-	}
+	stopFlood()
 	// Now and then a notification's fetch takes a task just before the
 	// worker's own fetch for it, which then finds nothing: a tenth more
 	// fetches allows for that.
@@ -742,25 +735,50 @@ func TestQuietQueueHoldsBackNotificationsOnly(t *testing.T) {
 	waitFor(t, "a notification's fetch to find nothing", func() bool { return fetches.n.Load() >= 2 })
 
 	before := fetches.n.Load()
-	ended := make(chan error, 1)
-	go func() {
-		_, err := e.pool.Exec(context.Background(), "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(flood)+" LOOP PERFORM pg_notify('"+
-			e.schema+"', 'a|"+taskmill.DefaultQueue+"'); COMMIT; END LOOP; END $$")
-		ended <- err
-	}()
+	stopFlood := e.flood(t, flood)
 	close(release)
 	for i := 1; i < tasks; i++ {
 		if got := recv(t, started, "the group's next task to start"); got != int64(i) {
 			t.Fatalf("task %d of the group ran in place %d", got, i)
 		}
 	}
-	if err := recv(t, ended, "the flood to end"); err != nil {
-		t.Fatal(err)
-	}
+	stopFlood()
 	// One fetch when a task frees its slot, and one when its completion is
 	// recorded.
 	if n := fetches.n.Load() - before; n > 2*tasks {
 		t.Errorf("the worker fetched %d times for %d tasks, want at most %d: notifications got through", n, tasks, 2*tasks)
+	}
+}
+
+// flood sends n notifications that tasks are available in the default queue,
+// each in a transaction of its own: PostgreSQL delivers equal notifications
+// of one transaction once. It returns at once. stop ends a flood that still
+// runs, since on a busy database it can take long, and fails the test if the
+// flood failed.
+func (e *env) flood(t *testing.T, n int) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	var failed error
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		_, failed = e.pool.Exec(ctx, "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(n)+" LOOP PERFORM pg_notify('"+
+			e.schema+"', 'a|"+taskmill.DefaultQueue+"'); COMMIT; END LOOP; END $$")
+	}()
+	return func() {
+		t.Helper()
+		defer cancel()
+		select {
+		case <-ended:
+			if failed != nil {
+				t.Fatalf("flood of notifications: %v", failed)
+			}
+		default:
+			// It still runs: the error with which it ends now is the
+			// test's own doing.
+			cancel()
+			<-ended
+		}
 	}
 }
 
