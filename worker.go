@@ -429,9 +429,9 @@ type tracked struct {
 type trackedState int
 
 const (
-	stateRunning   trackedState = iota // the handler is running
-	stateRecording                     // the handler returned; its result is being recorded
-	stateAbandoned                     // released at shutdown, or its task was leased again; the result is ignored
+	attemptRunning   trackedState = iota // the handler is running
+	attemptRecording                     // the handler returned; its result is being recorded
+	attemptAbandoned                     // released at shutdown, or its task was leased again; the result is ignored
 )
 
 // run is the state of one call to [Worker.Run].
@@ -599,8 +599,8 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 	var abandoned []*tracked
 	for _, t := range w.attempts {
 		t.mu.Lock()
-		if t.state == stateRunning && !t.direct {
-			t.state = stateAbandoned
+		if t.state == attemptRunning && !t.direct {
+			t.state = attemptAbandoned
 			abandoned = append(abandoned, t)
 		}
 		t.mu.Unlock()
@@ -620,7 +620,7 @@ func (w *Worker) runningTasks() int {
 	n := 0
 	for _, t := range w.attempts {
 		t.mu.Lock()
-		if t.state == stateRunning && !t.direct {
+		if t.state == attemptRunning && !t.direct {
 			n++
 		}
 		t.mu.Unlock()

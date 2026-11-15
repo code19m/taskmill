@@ -315,11 +315,11 @@ func (w *Worker) unknownKind(ctx context.Context, t *tracked) outcome {
 // task. start is when the handler started, or zero if none ran.
 func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.Time) {
 	t.mu.Lock()
-	if t.state != stateRunning {
+	if t.state != attemptRunning {
 		t.mu.Unlock()
 		return
 	}
-	t.state = stateRecording
+	t.state = attemptRecording
 	if !t.direct {
 		// Under t.mu, so that shutdown either abandons the attempt or waits
 		// for its result.

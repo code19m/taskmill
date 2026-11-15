@@ -192,7 +192,7 @@ func (w *Worker) acquireForRenewal(ctx context.Context) (*pgxpool.Conn, error) {
 
 func (w *Worker) loseLease(ctx context.Context, t *tracked) {
 	t.mu.Lock()
-	running := t.state == stateRunning
+	running := t.state == attemptRunning
 	t.mu.Unlock()
 	// An attempt that completed its task in its own transaction owns nothing
 	// more: its row stays locked until that transaction commits.

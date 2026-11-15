@@ -337,8 +337,8 @@ func (w *Worker) track(ctx context.Context, t *tracked) {
 		// Under w.mu, so that a shutdown either still finds the older
 		// attempt and abandons it, or finds it abandoned here.
 		old.mu.Lock()
-		if old.state == stateRunning {
-			old.state, replaced = stateAbandoned, true
+		if old.state == attemptRunning {
+			old.state, replaced = attemptAbandoned, true
 		}
 		old.mu.Unlock()
 	}

@@ -280,23 +280,22 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 // right away if they receive notifications. It never returns [ErrNotFound]:
 // it creates the queue's settings if the queue has none.
 func (c *Client) PauseQueue(ctx context.Context, name string) error {
-	return c.changeQueue(ctx, name, c.sql.pauseQueue, true)
+	return c.setQueuePaused(ctx, name, true)
 }
 
 // ResumeQueue undoes [Client.PauseQueue]. Workers apply it as fast as a
 // pause, and like PauseQueue it never returns [ErrNotFound].
 func (c *Client) ResumeQueue(ctx context.Context, name string) error {
-	return c.changeQueue(ctx, name, c.sql.pauseQueue, false)
+	return c.setQueuePaused(ctx, name, false)
 }
 
-// changeQueue runs a statement that changes a queue's row, and tells the
-// workers.
-func (c *Client) changeQueue(ctx context.Context, name, sql string, args ...any) error {
+// setQueuePaused pauses or resumes a queue, and tells the workers.
+func (c *Client) setQueuePaused(ctx context.Context, name string, paused bool) error {
 	if err := checkName("queue", name, maxNameLength); err != nil {
 		return err
 	}
 	err := pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, sql, append([]any{name}, args...)...); err != nil {
+		if _, err := tx.Exec(ctx, c.sql.pauseQueue, name, paused); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, notifySQL, c.schema, notifyQueue+"|"+name)
