@@ -3,13 +3,10 @@ package taskmill
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // completer records successful attempts in batches: it gathers the results
@@ -372,10 +369,6 @@ type completedTask struct {
 	group string
 }
 
-// historyGap is how long completions skip history after one found no history
-// partition for its day.
-const historyGap = time.Minute
-
 // complete records successful attempts: it moves their tasks to history, or
 // deletes those whose kind keeps none, and advances their FIFO groups. It
 // returns the tasks it completed; an attempt that lost its lease is left
@@ -424,23 +417,6 @@ func (c *Client) completeTasks(ctx context.Context, q querier, ids []int64, toke
 		done = append(done, t)
 	}
 	return done, r.Err()
-}
-
-// noteMissingHistory makes completions skip history for a while if err says
-// that the history has no partition for today: the maintainer could not
-// create it, typically because the worker's role does not own the table.
-// Completions keep working, and a retry of the failed one succeeds. The
-// history table has no CHECK constraint, so a check violation on it can only
-// mean a missing partition; the message is not read, as it may be
-// translated.
-func (c *Client) noteMissingHistory(ctx context.Context, logger *slog.Logger, err error) {
-	pgErr, ok := errors.AsType[*pgconn.PgError](err)
-	if !ok || pgErr.Code != "23514" || pgErr.TableName != "task_history" || pgErr.SchemaName != c.schema { // check_violation
-		return
-	}
-	c.historyGapUntil.Store(time.Now().Add(historyGap).UnixNano())
-	logger.LogAttrs(ctx, slog.LevelError, "task history has no partition for today; completed tasks skip history",
-		slog.Any(logKeyError, err))
 }
 
 // sortedByGroup returns the grouped tasks in the order of queue and group in

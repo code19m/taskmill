@@ -455,16 +455,6 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 	return names, err
 }
 
-// prepareHistory creates the history partitions that the next week lacks,
-// and logs a failure. Each worker does it when it starts, because a schema
-// applied with Migrations has none, and completions may come before the
-// maintainer's first pass, or from workers that never lead.
-func (w *Worker) prepareHistory(ctx context.Context) {
-	if err := ensureHistoryPartitions(ctx, w.client.pool, w.client.schema); err != nil && ctx.Err() == nil {
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "prepare history partitions failed", slog.Any(logKeyError, err))
-	}
-}
-
 // Run fetches and runs tasks until ctx is canceled. It then stops fetching
 // and, if it is the maintainer, resigns, so that another worker takes over
 // right away. It waits up to DrainTimeout for running tasks, cancels and

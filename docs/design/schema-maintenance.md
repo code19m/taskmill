@@ -24,7 +24,7 @@ queues, and how notifications and polling wake the workers.
 - **Retention drops only the history that it detached.** A pass marks a
   partition with a comment before it detaches it. It drops a table that is
   no partition only with that mark, so one that an operator detached stays.
-  A later pass finishes what failed: see [`maintainer.go`](../../maintainer.go).
+  A later pass finishes what failed: see [`history.go`](../../history.go).
 - **A failed election try writes nothing.** The upsert proposes its row only
   if no other worker's lease lasts. A conflict would lock the leader's row,
   and make every try of every other worker a write.

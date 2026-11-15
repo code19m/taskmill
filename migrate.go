@@ -14,15 +14,6 @@ import (
 	"github.com/code19m/taskmill/internal/migrations"
 )
 
-// historyDaysAhead is how many days of history partitions are kept ready, so
-// that completions never wait for a partition.
-const historyDaysAhead = 7
-
-// partitionLockTimeout bounds the wait for the history table's lock while
-// attaching a partition, so that a long transaction cannot stall completions
-// behind it.
-const partitionLockTimeout = "5s"
-
 // MigrateConfig configures [Migrate]. The zero value is valid. Migrate
 // reports a Schema that is not valid as an error that wraps
 // [ErrInvalidArgument].
@@ -243,81 +234,4 @@ func Migrations(schema string) ([]Migration, error) {
 		out = append(out, Migration{Version: m.Version, Name: m.Name, SQL: m.SQL})
 	}
 	return out, nil
-}
-
-// ensureHistoryPartitions creates the daily history partitions of the next
-// historyDaysAhead days, today's first, skipping those that exist. Each
-// partition is created detached and then attached, which does not block
-// completions the way CREATE TABLE ... PARTITION OF would. An error for a
-// missing privilege names the fix.
-//
-// A call that finds every partition ready takes no lock. Otherwise it first
-// takes the lock on the history table that attaching takes anyway, so that
-// processes that do this at the same time wait for each other, for at most
-// partitionLockTimeout. Only a role that may change the table can take this
-// lock, so a role without rights on the schema cannot keep workers from
-// starting, as it could with an advisory lock, which any role may take.
-func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema string) error {
-	err := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
-		days, err := missingHistoryDays(ctx, tx, schema)
-		if err != nil || len(days) == 0 {
-			return err
-		}
-		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+partitionLockTimeout+"'"); err != nil {
-			return err
-		}
-		// ONLY: the partitions stay free for autovacuum.
-		lock := fmt.Sprintf("LOCK TABLE ONLY %s.task_history IN SHARE UPDATE EXCLUSIVE MODE", schema)
-		if _, err := tx.Exec(ctx, lock); err != nil {
-			return err
-		}
-		// Another process may have created them while this one waited.
-		if days, err = missingHistoryDays(ctx, tx, schema); err != nil {
-			return err
-		}
-		for _, from := range days {
-			name := historyPartition(from)
-			create := fmt.Sprintf("CREATE TABLE %[1]s.%[2]s (LIKE %[1]s.task_history INCLUDING DEFAULTS INCLUDING CONSTRAINTS)",
-				schema, name)
-			attach := fmt.Sprintf("ALTER TABLE %[1]s.task_history ATTACH PARTITION %[1]s.%[2]s FOR VALUES FROM ('%[3]s') TO ('%[4]s')",
-				schema, name, from.Format(time.RFC3339), from.AddDate(0, 0, 1).Format(time.RFC3339))
-			if _, err := tx.Exec(ctx, create); err != nil {
-				return fmt.Errorf("create %s: %w", name, err)
-			}
-			if _, err := tx.Exec(ctx, attach); err != nil {
-				return fmt.Errorf("attach %s: %w", name, err)
-			}
-		}
-		return nil
-	})
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42501" { // insufficient_privilege
-		return fmt.Errorf("prepare history partitions: %w; the role that runs workers must own the taskmill tables", err)
-	}
-	if err != nil {
-		return fmt.Errorf("prepare history partitions: %w", err)
-	}
-	return nil
-}
-
-// missingHistoryDays returns the days among the next historyDaysAhead, from
-// today, that have no history partition, in order. Today is the database's:
-// its clock sets the day of a completed task.
-func missingHistoryDays(ctx context.Context, tx pgx.Tx, schema string) ([]time.Time, error) {
-	r, err := tx.Query(ctx, `
-SELECT d.day
-FROM (SELECT (now() AT TIME ZONE 'UTC')::date + i AS day FROM generate_series(0, $2::integer - 1) AS i) d
-WHERE NOT EXISTS (
-    SELECT FROM pg_inherits h JOIN pg_class c ON c.oid = h.inhrelid
-    WHERE h.inhparent = $1::regclass AND c.relname = 'task_history_' || to_char(d.day, 'YYYYMMDD'))
-ORDER BY d.day`, schema+".task_history", historyDaysAhead)
-	if err != nil {
-		return nil, err
-	}
-	return pgx.CollectRows(r, pgx.RowTo[time.Time])
-}
-
-// historyPartition names the history partition of the UTC day that starts at
-// day.
-func historyPartition(day time.Time) string {
-	return "task_history_" + day.UTC().Format("20060102")
 }
