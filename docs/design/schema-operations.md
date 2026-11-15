@@ -104,7 +104,8 @@ makes that step wait.
   `attempt = 0`, keeping its error history, or to `pending` if its group has
   other unfinished tasks. Before that, it takes back the dedupe key that the
   task's cancel released, or stops with `ErrConflict` if another task holds
-  it (see [below](#a-retry-takes-its-dedupe-key-back)).
+  it (see [below](#a-retry-takes-its-dedupe-key-back)). One statement writes
+  the retry of one task and of a batch, and notifies the queue.
 - **Cancel and Delete** release the task's dedupe key in the same
   transaction. A cancel stores the key with the task, in the statement
   that cancels it: one statement for a waiting and for a running task.

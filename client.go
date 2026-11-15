@@ -244,10 +244,11 @@ func (c *Client) Retry(ctx context.Context, id int64) error {
 }
 
 func (c *Client) retry(ctx context.Context, q querier, id int64) error {
+	fail := func(err error) error { return fmt.Errorf("taskmill: retry task %d: %w", id, err) }
 	var state, queue, group string
 	found, err := queryRow(ctx, q, c.sql.lockTask, []any{id, false}, &state, &queue, &group)
 	if err != nil {
-		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+		return fail(err)
 	}
 	if !found {
 		return c.stateError(ctx, q, id, "retry")
@@ -259,12 +260,12 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	// The key comes before the group, as in an enqueue.
 	refused, err := c.takeKeys(ctx, q, []int64{id})
 	if err != nil {
-		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+		return fail(err)
 	}
 	if refused[id] {
 		held, err := c.keyHolder(ctx, q, id)
 		if err != nil {
-			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+			return fail(err)
 		}
 		return fmt.Errorf("%w: cannot retry task %d: %s", ErrConflict, id, held)
 	}
@@ -272,16 +273,20 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	pending := false
 	if group != "" {
 		if pending, err = c.rejoinGroup(ctx, q, queue, group, id); err != nil {
-			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+			return fail(err)
 		}
 	}
-	if _, err := q.exec(ctx, c.sql.retry, id, pending); err != nil {
-		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+	// The statement of a bulk retry, with one task: it also notifies the
+	// queue of a task that is available again.
+	waiting := []int64{} // not nil: the statement compares with every element
+	var notify []string
+	if pending {
+		waiting = append(waiting, id)
+	} else {
+		notify = c.notifiable(ctx, []string{queue})
 	}
-	if !pending {
-		if err := c.notifyAvailable(ctx, c.logger, q, queue); err != nil {
-			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
-		}
+	if _, err := q.exec(ctx, c.sql.retryTasks, []int64{id}, waiting, c.schema, notify); err != nil {
+		return fail(err)
 	}
 	return nil
 }

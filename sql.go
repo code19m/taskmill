@@ -40,7 +40,6 @@ type statements struct {
 
 	getTask       string
 	lockTask      string
-	retry         string
 	takeKeys      string
 	keyHolder     string
 	releaseKeys   string
@@ -424,16 +423,6 @@ LIMIT 1`),
 SELECT state::text, queue, coalesce(group_key, '')
 FROM {s}.tasks WHERE id = $1 AND (NOT $2 OR state = 'pending') FOR UPDATE`),
 
-		// retry makes task $1 run again, as pending if $2. It forgets the
-		// dedupe key that the task's cancel freed: takeKeys ran before.
-		retry: q(`
-UPDATE {s}.tasks
-SET state = CASE WHEN $2 THEN 'pending' ELSE 'available' END::{s}.task_state,
-    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted},
-    freed_key = NULL, freed_key_expires_at = NULL
-WHERE id = $1 AND state IN ('dead', 'canceled')
-RETURNING queue`),
-
 		// takeKeys gives the tasks $1, which a retry holds, the dedupe keys
 		// that their cancels freed, for the rest of each key's window. It
 		// claims a key as an enqueue does: only if no task holds it, or its
@@ -661,9 +650,11 @@ ORDER BY queue COLLATE "C", group_key COLLATE "C"
 ON CONFLICT DO NOTHING
 RETURNING queue, group_key`),
 
-		// retryTasks retries the picked tasks $1, those of $2 into pending,
-		// and notifies channel $3 of queues $4. Like retry, it runs after
-		// takeKeys.
+		// retryTasks makes the tasks $1 run again, one task or a batch, those
+		// of $2 as pending, and notifies channel $3 of queues $4. The caller
+		// holds the tasks' rows, and has seen that they are dead or canceled.
+		// It forgets the dedupe keys that the tasks' cancels freed: takeKeys
+		// ran before.
 		retryTasks: q(`
 WITH retried AS (
     UPDATE {s}.tasks
