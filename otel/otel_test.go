@@ -472,22 +472,22 @@ func TestObserveQueuesReportsStuckWork(t *testing.T) {
 	taskmill.AddHandler(&failing, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error {
 		return errors.New("broker unreachable")
 	}), &taskmill.HandlerOptions{Retry: retryUntil(3)})
-	stop := run(t, e.client, &taskmill.WorkerConfig{
-		Handlers: &failing, Queues: map[string]taskmill.QueueOptions{"relay": {}, "orders": {}},
-	})
-	eventually(t, "the first tasks to fail", func() bool {
-		relay, err := e.client.Get(t.Context(), ids[0])
+	// Three attempts of the first message and the one attempt of the other
+	// task run here, one after another: a worker would wait between them.
+	w := e.worker(t, &failing)
+	var relayed, ordered *taskmill.TaskInfo
+	for _, id := range []int64{ids[0], ids[0], ids[0], ids[1]} {
+		info, err := w.RunTask(t.Context(), id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		orders, err := e.client.Get(t.Context(), ids[1])
-		if err != nil {
-			t.Fatal(err)
-		}
-		return relay.Attempt == 3 && relay.State == taskmill.StateRetryable && orders.State == taskmill.StateDead
-	})
-	// A new maintainer counts at once, rather than at the next refresh.
-	stop()
+		relayed, ordered = ordered, info
+	}
+	if relayed.Attempt != 3 || relayed.State != taskmill.StateRetryable || ordered.State != taskmill.StateDead {
+		t.Fatalf("the first message is %s after %d attempts, and the other task %s; want retryable after 3, and dead",
+			relayed.State, relayed.Attempt, ordered.State)
+	}
+	// A maintainer counts when it starts.
 	run(t, e.client, &taskmill.WorkerConfig{Handlers: &failing, Queues: map[string]taskmill.QueueOptions{"other": {}}})
 
 	const relay, orders, other = "messaging.destination.name=relay", "messaging.destination.name=orders",
