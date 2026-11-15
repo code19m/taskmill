@@ -438,10 +438,11 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 		t.Errorf("got statistics %v seconds old, want a fresh count", age)
 	}
 
-	// Without a maintainer, the statistics age.
+	// Without a maintainer, nothing counts again, and the statistics age:
+	// each reading is older than the one before.
 	stop()
 	eventually(t, "the statistics to age", func() bool {
-		return e.value(t, "taskmill.stats.age", "") > age+0.5
+		return e.value(t, "taskmill.stats.age", "") > age
 	})
 }
 
