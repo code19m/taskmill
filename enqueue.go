@@ -9,10 +9,8 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
-	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -303,11 +301,7 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 		views[i] = &EnqueueTask{Queue: t.queue, Kind: t.kind, Metadata: meta}
 	}
 	var results []EnqueueResult
-	var called atomic.Bool
-	next := func(ctx context.Context) error {
-		if called.Swap(true) {
-			return errors.New("taskmill: enqueue middleware called next twice")
-		}
+	err := through(ctx, c.enqueueMiddleware, views, func(ctx context.Context) error {
 		for i, v := range views {
 			tasks[i].meta = v.Metadata
 		}
@@ -320,26 +314,9 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 		}
 		results = res
 		return nil
-	}
-	// A middleware that returns nil without calling its next fails right away,
-	// so that the middleware outside it sees the failure too.
-	for _, m := range slices.Backward(c.enqueueMiddleware) {
-		inner := next
-		next = func(ctx context.Context) error {
-			var reached atomic.Bool
-			err := m(ctx, views, func(ctx context.Context) error {
-				reached.Store(true)
-				return inner(ctx)
-			})
-			if err == nil && !reached.Load() {
-				return errNotEnqueued
-			}
-			return err
-		}
-	}
-	err := next(ctx)
+	}, errEnqueueNextTwice, errNotEnqueued)
 	switch {
-	case results == nil && err == nil: // a middleware hid the error of its next
+	case results == nil && err == nil: // a middleware hid the error of the store
 		return nil, errNotEnqueued
 	case results == nil || err == nil:
 		return results, err
@@ -350,6 +327,9 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 		slog.Int(logKeyTasks, len(results)), slog.Any(logKeyError, err))
 	return results, nil
 }
+
+// errEnqueueNextTwice fails the second call of next in an enqueue middleware.
+var errEnqueueNextTwice = errors.New("taskmill: enqueue middleware called next twice")
 
 // errNotEnqueued fails an enqueue whose middleware returned nil, although
 // the tasks were not stored.

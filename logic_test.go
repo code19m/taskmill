@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"slices"
@@ -169,6 +170,58 @@ func TestPriorityString(t *testing.T) {
 	t.Parallel()
 	if got := PriorityCritical.String() + " " + Priority(9).String(); got != "critical Priority(9)" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// The rules of a middleware chain, which attempts and enqueues share. A
+// broken rule loses a task: its attempt completes although the handler never
+// ran, or its enqueue reports a task that nothing stored.
+func TestMiddlewareChain(t *testing.T) {
+	t.Parallel()
+	errTwice, errSkipped, errCall := errors.New("twice"), errors.New("skipped"), errors.New("failed")
+	type middleware func(ctx context.Context, trace *[]string, next func(context.Context) error) error
+	// see keeps the rules. It records its start, and what its next returned.
+	see := func(name string) middleware {
+		return func(ctx context.Context, trace *[]string, next func(context.Context) error) error {
+			*trace = append(*trace, name)
+			err := next(ctx)
+			*trace = append(*trace, fmt.Sprintf("%s got %v", name, err))
+			return err
+		}
+	}
+	skip := middleware(func(context.Context, *[]string, func(context.Context) error) error { return nil })
+	hide := middleware(func(ctx context.Context, _ *[]string, next func(context.Context) error) error {
+		_ = next(ctx)
+		return nil
+	})
+	twice := middleware(func(ctx context.Context, _ *[]string, next func(context.Context) error) error {
+		_ = next(ctx)
+		return next(ctx)
+	})
+
+	for _, tt := range []struct {
+		name    string
+		chain   []middleware
+		callErr error
+		want    error
+		trace   string
+	}{
+		{"no middleware", nil, errCall, errCall, "call"},
+		{"the first middleware is the outermost", []middleware{see("a"), see("b")}, nil, nil, "a, b, call, b got <nil>, a got <nil>"},
+		{"the error of call passes out", []middleware{see("a")}, errCall, errCall, "a, call, a got failed"},
+		{"a middleware may hide the error of call", []middleware{hide}, errCall, nil, "call"},
+		{"a second call of next fails, and call runs once", []middleware{see("a"), twice}, nil, errTwice, "a, call, a got twice"},
+		{"the middleware outside sees a skip", []middleware{see("a"), skip}, nil, errSkipped, "a, a got skipped"},
+		{"a skip that the middleware outside hides still fails", []middleware{hide, skip}, nil, errSkipped, ""},
+	} {
+		var trace []string
+		err := through(t.Context(), tt.chain, &trace, func(context.Context) error {
+			trace = append(trace, "call")
+			return tt.callErr
+		}, errTwice, errSkipped)
+		if got := strings.Join(trace, ", "); !errors.Is(err, tt.want) || got != tt.trace {
+			t.Errorf("%s: got %v after %q, want %v after %q", tt.name, err, got, tt.want, tt.trace)
+		}
 	}
 }
 
