@@ -490,46 +490,6 @@ func (c *Client) stateError(ctx context.Context, q querier, id int64, op string)
 	return fmt.Errorf("%w: cannot %s task %d in state %s", ErrInvalidState, op, id, state)
 }
 
-// leaving says how a counted task left its FIFO group.
-type leaving int
-
-const (
-	leftHead     leaving = iota // the head finished: the next task becomes the head
-	leftDeadHead                // the head became dead: the group halts behind it
-)
-
-// leaveGroup is leaveGroups and haltGroup for the one caller that has not
-// moved to them, the rescue.
-func (c *Client) leaveGroup(ctx context.Context, logger *slog.Logger, q querier, queue, group string, id int64, how leaving) error {
-	if how == leftDeadHead {
-		halted, err := q.exec(ctx, c.sql.haltGroup, queue, group, id)
-		if err != nil || halted == 1 {
-			return err
-		}
-	}
-
-	var remaining int
-	var halted bool
-	found, err := queryRow(ctx, q, c.sql.decrementGroup, []any{queue, group, id}, &remaining, &halted)
-	if err != nil {
-		return err
-	}
-	switch {
-	case !found:
-		logger.LogAttrs(ctx, slog.LevelError, "fifo group missing",
-			slog.String(logKeyQueue, queue), slog.String(logKeyGroup, group), slog.Int64(logKeyTaskID, id))
-		return nil
-	case remaining == 0:
-		_, err = q.exec(ctx, c.sql.deleteEmptyGroup, queue, group)
-		return err
-	case !halted:
-		_, err = q.exec(ctx, c.sql.promoteGroup, queue, group, c.schema, c.notifier.allow(ctx, queue))
-		return err
-	default:
-		return nil
-	}
-}
-
 // groupLeave is a counted task that left its FIFO group.
 type groupLeave struct {
 	queue, group string

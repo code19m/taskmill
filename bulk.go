@@ -702,6 +702,10 @@ func briefly(ctx context.Context, q querier, fn func() error) (done bool, err er
 // The other tasks of a group that has a row wait behind its head. A group
 // that has no row gets one, and its oldest task becomes its head; if it
 // cannot get one now, its tasks are left out.
+//
+// The two are not one function, as leaveGroups is for the way out of a
+// group: one task waits for its group's row and joins, and a batch never
+// waits.
 func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (retried []bulkTask, pending []int64, err error) {
 	resumed, err := c.releaseHalts(ctx, q, ts)
 	if err != nil {
