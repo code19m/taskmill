@@ -755,6 +755,17 @@ func TestEnqueueMiddlewareThatMisusesNext(t *testing.T) {
 			fails: false,
 			tasks: 1,
 		},
+		{
+			// The store refuses the metadata, and the middleware hides it.
+			name: "hides the error of next",
+			mw: func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+				tasks[0].Metadata["blob"] = strings.Repeat("x", 64<<10)
+				_ = next(ctx)
+				return nil
+			},
+			fails: true,
+			tasks: 0,
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()

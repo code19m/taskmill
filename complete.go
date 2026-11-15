@@ -243,7 +243,7 @@ func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedT
 		w.madeRoom(done)
 	}
 	if err != nil {
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "complete tasks failed; they are rescued when their leases expire",
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "complete tasks failed; they are rescued when their leases run out",
 			slog.Int(logKeyTasks, len(ts)), slog.Any(logKeyError, err))
 	}
 }

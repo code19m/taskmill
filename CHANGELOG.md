@@ -102,6 +102,28 @@ All notable changes to taskmill are recorded here. The format follows
   before the upgrade has, the page links to the first page of the same
   list. Before, it was titled "Invalid filter", and offered only to clear
   the filters.
+- Four warnings in the log now use the words of the
+  [glossary](docs/concepts/glossary.md): a lease runs out, another worker
+  takes over, and a worker reads a queue. Their levels and attributes stay
+  the same. If an alert rule, a saved search, or a metric made from logs
+  matches the text of one of them, change the match when you upgrade:
+  nothing reports a rule that stopped matching. Three of the four keep
+  their first clause, so a match on `resign maintainer failed`,
+  `record attempt failed`, or `complete tasks failed` keeps working. The
+  line about the default queue has no such clause. While a rolling deploy
+  runs, workers log both texts.
+  - `resign maintainer failed; another worker leads when the lease expires`
+    is now
+    `resign maintainer failed; another worker takes over when the lease runs out`
+  - `the worker does not serve the default queue of these registered kinds`
+    is now
+    `the worker does not read the default queue of these registered kinds`
+  - `record attempt failed; the task is rescued when its lease expires`
+    is now
+    `record attempt failed; the task is rescued when its lease runs out`
+  - `complete tasks failed; they are rescued when their leases expire`
+    is now
+    `complete tasks failed; they are rescued when their leases run out`
 
 ### Removed
 

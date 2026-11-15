@@ -385,7 +385,7 @@ func (w *Worker) warnUnservedKinds(ctx context.Context) {
 	}
 	slices.Sort(kinds)
 	w.logger.LogAttrs(ctx, slog.LevelWarn,
-		"the worker does not serve the default queue of these registered kinds", slog.Any(logKeyKinds, kinds))
+		"the worker does not read the default queue of these registered kinds", slog.Any(logKeyKinds, kinds))
 }
 
 // queueState is one queue that the worker serves.
