@@ -63,11 +63,17 @@ func setup(t *testing.T) *env {
 }
 
 // testPool connects to the database named by TASKMILL_TEST_DATABASE_URL, as
-// the core's tests do, or skips the test if it is unset.
+// the core's tests do. If it is unset, it skips the test, or fails it in CI,
+// where the CI variable is set: a run that tested nothing must not pass.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("TASKMILL_TEST_DATABASE_URL")
-	if url == "" {
+	switch {
+	case url != "":
+	case os.Getenv("CI") != "":
+		t.Fatal("TASKMILL_TEST_DATABASE_URL is not set, and in CI the database tests must not skip: " +
+			"set it to the URL of a test database, as `make db` and `make test` do")
+	default:
 		t.Skip("TASKMILL_TEST_DATABASE_URL is not set; run `make db` and `make test`")
 	}
 	pool, err := pgxpool.New(t.Context(), url)
