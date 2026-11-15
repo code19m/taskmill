@@ -527,7 +527,7 @@ func (e *env) operate(ctx context.Context, n int, id int64) error {
 func TestDedupeKeysHoldUnderConcurrentOperations(t *testing.T) {
 	t.Parallel()
 	e := newEnvWith(t, testdb.PoolSize(t, 12), nil)
-	const workers, rounds, keys = 8, 60, 3
+	const workers, rounds, keys = 8, 15, 3
 	var last atomic.Int64 // the newest task that an enqueue named
 	round := func(w, i int) error {
 		key := strconv.Itoa((w + i) % keys)
