@@ -22,9 +22,10 @@ const settingsRetry = 100 * time.Millisecond
 // after settingsRetry, then waiting twice as long each time, up to the
 // interval.
 func (w *Worker) settingsLoop(ctx context.Context) {
-	known, wait := false, settingsRetry
+	wait := settingsRetry
 	for {
-		if known = w.refreshQueueSettings(ctx) || known; known {
+		w.refreshQueueSettings(ctx)
+		if w.settled.Load() {
 			wait = w.timing.settings
 		}
 		select {
@@ -37,12 +38,11 @@ func (w *Worker) settingsLoop(ctx context.Context) {
 }
 
 // refreshQueueSettings reads the settings of the worker's queues and applies
-// them. It reports whether it could: if not, the queues keep what they had.
-// The read may take as long as the settings interval, after which the next
-// one is due.
-func (w *Worker) refreshQueueSettings(ctx context.Context) bool {
+// them. If it cannot, the queues keep what they had. The read may take as
+// long as the settings interval, after which the next one is due.
+func (w *Worker) refreshQueueSettings(ctx context.Context) {
 	if len(w.queues) == 0 {
-		return true
+		return
 	}
 	names := make([]string, 0, len(w.queues))
 	for name := range w.queues {
@@ -53,7 +53,7 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) bool {
 	cancel()
 	w.settingsFailures.observe(ctx, err)
 	if err != nil {
-		return false
+		return
 	}
 	// A queue without a row has the default settings: running, no limit.
 	for name, q := range w.queues {
@@ -63,7 +63,7 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) bool {
 			q.nudge()
 		}
 	}
-	return true
+	w.settled.Store(true)
 }
 
 // queueSetting is the part of a queue's settings that its worker applies.

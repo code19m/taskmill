@@ -219,12 +219,12 @@ Later, maybe `task history has no partition for today`.
 ### Kubernetes marks workers as not ready
 
 **You see:** worker pods are not ready, and a rollout stops. `/healthz`
-returns 503, with `the worker has not reached the database for …` or
-`the worker is not running`.
+returns 503, with `the worker has not reached the database for …`, `the
+worker has not read the settings of its queues`, or `the worker is not running`.
 
 | Likely cause | Check | Do |
 |---|---|---|
-| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases` | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
+| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases`, or for `load queue settings` in a new worker | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
 | Handlers hold every connection of the pool | The warning `the pool was full, so renewing leases waited` | Raise `pool_max_conns`, or give handlers their own pool |
 | `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix that error: see [the errors at start](#errors-at-start-and-in-calls) |
 

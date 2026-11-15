@@ -147,12 +147,14 @@ All notable changes to taskmill are recorded here. The format follows
 - A worker that could not read the settings of its queues when it started
   ran the tasks of paused queues, and ignored `MaxRunning`, for up to 10
   seconds: until its next read. A worker now takes no task before it has
-  read those settings. If the read fails, the worker logs `operation
-  failed` for `load queue settings`, and reads again after 0.1 seconds,
-  then waiting twice as long each time, up to 10 seconds. That read had no
-  time limit either, so a database that did not answer it kept the worker
-  from starting: no check-in, no maintainer, no fetch. Each read now ends
-  after 10 seconds, and it no longer delays the rest of the start.
+  read those settings, and until then `Worker.Health` returns an error, so
+  a readiness probe shows the worker as not ready. If the read fails, the
+  worker logs `operation failed` for `load queue settings`, and reads
+  again after 0.1 seconds, then waiting twice as long each time, up to 10
+  seconds. That read had no time limit either, so a database that did not
+  answer it kept the worker from starting: no check-in, no maintainer, no
+  fetch. Each read now ends after 10 seconds, and it no longer delays the
+  rest of the start.
 - A history partition that the maintainer had detached but could not drop
   stayed in the schema for good, with a day of completed tasks on disk:
   for example when the worker stopped, or lost the database, between the

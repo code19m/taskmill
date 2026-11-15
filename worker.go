@@ -113,6 +113,7 @@ type Worker struct {
 
 	running   atomic.Bool
 	reached   atomic.Pointer[time.Time] // when Run last reached the database; nil while it does not run
+	settled   atomic.Bool               // Run has read the settings of its queues: until then, they fetch nothing
 	released  atomic.Int64              // tasks given back during the current Run's shutdown
 	notifying atomic.Bool               // the maintainer's heartbeats arrive, so notifications reach the worker
 	resigned  chan struct{}             // the maintainer resigned: this worker's maintainer tries to take over now
@@ -498,18 +499,20 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
+	// No queue fetches before the worker knows its settings, which the
+	// settings loop reads first: a paused queue stays paused, and a limit
+	// holds, also when that read fails or takes long. Health says so until
+	// then. A worker without queues has nothing to read.
+	w.settled.Store(len(w.queues) == 0)
+	for _, q := range w.queues {
+		q.paused.Store(true)
+	}
 	now := time.Now()
 	w.reached.Store(&now)
 	w.checkInFailures = newFailures(w, "record check-in")
 	w.settingsFailures = newFailures(w, "load queue settings")
 	w.activityFailures = newFailures(w, "record activity")
 	w.listenFailures = newFailures(w, "listen for notifications")
-	// No queue fetches before the worker knows its settings, which the
-	// settings loop reads first: a paused queue stays paused, and a limit
-	// holds, also when that read fails or takes long.
-	for _, q := range w.queues {
-		q.paused.Store(true)
-	}
 	w.prepareHistory(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
@@ -523,7 +526,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	var loops sync.WaitGroup
 	loops.Go(func() { w.listenLoop(loopsCtx) })
 	loops.Go(func() { followHints(loopsCtx, w.cancelHints, w.cancelHinted) })
-	loops.Go(func() { followHints(loopsCtx, w.queueHints, func(ctx context.Context) { w.refreshQueueSettings(ctx) }) })
+	loops.Go(func() { followHints(loopsCtx, w.queueHints, w.refreshQueueSettings) })
 	loops.Go(func() { w.checkInLoop(loopsCtx) })
 	loops.Go(func() { w.activityLoop(loopsCtx) })
 	loops.Go(func() { w.settingsLoop(loopsCtx) })
