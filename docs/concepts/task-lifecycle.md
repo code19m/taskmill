@@ -86,9 +86,10 @@ that matches a filter, use `CancelMatching`, `RetryMatching`, or
   other unfinished tasks. If a dead task
   [halts its group](glossary.md#halted-group), retry or delete it, and the
   group continues.
-- **A cancel or a delete frees the task's dedupe key.** Read
-  [When is a key free again?](../guides/deduplication.md#when-is-a-key-free-again)
-  before you retry a canceled task that has one.
+- **A cancel or a delete frees the task's dedupe key.** A retry of the
+  canceled task takes the key back, and is refused if another task took it
+  meanwhile
+  ([Avoid duplicate tasks](../guides/deduplication.md#retry-a-canceled-task-that-has-a-key)).
 
 ## Cancel a running task
 

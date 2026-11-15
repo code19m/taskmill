@@ -380,13 +380,13 @@ func TestBulkActionsSkipHeldRows(t *testing.T) {
 	}
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", held)
-	// An open enqueue into the group holds the group's row, and a duplicate
-	// one holds the dedupe key.
-	for _, opts := range []*taskmill.EnqueueOptions{{GroupKey: "g"}, {DedupeKey: "k"}} {
-		if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, opts); err != nil {
-			t.Fatal(err)
-		}
+	// An open enqueue into the group holds the group's row. The transaction
+	// also holds the row of the dedupe key, as an enqueue does that claims a
+	// key whose window has ended.
+	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
+		t.Fatal(err)
 	}
+	e.txExec(t, tx, "SELECT FROM {s}.dedupe_keys FOR UPDATE")
 
 	if res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})); err != nil || res.Changed != 1 {
 		t.Fatalf("retried %d tasks, %v; want only the one not held", res.Changed, err)
@@ -411,6 +411,173 @@ func TestBulkActionsSkipHeldRows(t *testing.T) {
 	}
 	if res, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}})); err != nil || res.Changed != 5 {
 		t.Fatalf("canceled %d tasks once released, %v; want 5", res.Changed, err)
+	}
+}
+
+// A bulk retry gives canceled tasks their dedupe keys back, as Retry does. It
+// leaves the tasks whose keys other tasks hold, and counts them apart from
+// the tasks that it skipped: running the action again does not help them.
+func TestRetryMatchingLeavesTasksWhoseDedupeKeyIsTaken(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	key := func(k, group string) *taskmill.EnqueueOptions {
+		return &taskmill.EnqueueOptions{DedupeKey: k, GroupKey: group}
+	}
+	free := e.keyed(t, key("free", "")).ID
+	e.cancel(t, free)
+	plain := e.enqueue(t, sendEmail{}, nil)
+	e.cancel(t, plain)
+	taken := e.keyed(t, key("taken", "")).ID
+	e.cancel(t, taken)
+	holder := e.keyed(t, key("taken", "")).ID
+	// Two canceled tasks gave the same key away: the older one gets it back.
+	older := e.keyed(t, key("twice", "")).ID
+	e.cancel(t, older)
+	newer := e.keyed(t, key("twice", "")).ID
+	e.cancel(t, newer)
+	// A task that is left for its key does not keep its group's later tasks
+	// from their retry: it is not waiting for another run.
+	head := e.keyed(t, key("in-group", "g")).ID
+	e.cancel(t, head)
+	inGroup := e.keyed(t, key("in-group", "")).ID
+	later := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	e.cancel(t, later)
+
+	canceled := bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})
+	want := taskmill.BulkResult{Changed: 4, Conflicts: 3}
+	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res != want {
+		t.Fatalf("retried %+v, %v; want %+v", res, err, want)
+	}
+	wantStates(t, e, map[int64]taskmill.State{
+		free: taskmill.StateAvailable, plain: taskmill.StateAvailable, older: taskmill.StateAvailable,
+		later: taskmill.StateAvailable, taken: taskmill.StateCanceled, newer: taskmill.StateCanceled,
+		head: taskmill.StateCanceled, holder: taskmill.StateAvailable, inGroup: taskmill.StateAvailable,
+	})
+	for k, id := range map[string]int64{"free": free, "taken": holder, "twice": older, "in-group": inGroup} {
+		if dup := e.keyed(t, key(k, "")); !dup.Duplicate || dup.ID != id {
+			t.Errorf("key %q: got %+v, want a duplicate of task %d", k, dup, id)
+		}
+	}
+
+	// The next run leaves them again, until the keys are free.
+	want = taskmill.BulkResult{Conflicts: 3}
+	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res != want {
+		t.Fatalf("second run: %+v, %v; want %+v", res, err, want)
+	}
+	for _, id := range []int64{holder, older, inGroup} {
+		if err := e.client.Delete(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want = taskmill.BulkResult{Changed: 3}
+	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res != want {
+		t.Fatalf("once the keys are free: %+v, %v; want %+v", res, err, want)
+	}
+}
+
+// A retry that must take a dedupe key back, while an open transaction claims
+// the same key, waits for it only briefly, as it does for a new group, and
+// leaves the tasks that need keys for a later run. It never deadlocks with
+// the transaction.
+func TestRetryWaitsBrieflyForADedupeKey(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a long wait would end it
+	defer cancel()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "k"}
+	keyed := e.keyed(t, opts).ID
+	e.cancel(t, keyed)
+	plain := e.enqueue(t, sendEmail{}, nil)
+	e.cancel(t, plain)
+	tx := e.begin(t)
+	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, opts); err != nil {
+		t.Fatal(err)
+	}
+
+	canceled := bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})
+	res, err := e.client.RetryMatching(ctx, canceled)
+	if err != nil || res.Changed != 1 || res.Skipped != 1 || res.Conflicts != 0 {
+		t.Fatalf("retried %+v, %v; want the task without a key, and the other left", res, err)
+	}
+	wantStates(t, e, map[int64]taskmill.State{plain: taskmill.StateAvailable, keyed: taskmill.StateCanceled})
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res.Changed != 1 {
+		t.Fatalf("retried %+v once released, %v; want 1 task", res, err)
+	}
+	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != keyed {
+		t.Fatalf("after the retry: got %+v, want a duplicate of task %d", dup, keyed)
+	}
+}
+
+// A retry that leaves a task of a group leaves the group's later tasks, not
+// the earlier ones. An earlier task that takes its dedupe key back is
+// retried with it: no task is left canceled with a key.
+func TestRetryTakesTheKeyOfATaskAheadOfOneItLeaves(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "k", GroupKey: "g"}
+	ahead := e.keyed(t, opts).ID
+	held := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	behind := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	for _, id := range []int64{behind, held, ahead} {
+		e.cancel(t, id)
+	}
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", held)
+
+	canceled := bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})
+	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res.Changed != 1 || res.Skipped != 2 {
+		t.Fatalf("retried %+v, %v; want the task ahead retried, and the held task and the one behind it left", res, err)
+	}
+	wantStates(t, e, map[int64]taskmill.State{
+		ahead: taskmill.StateAvailable, held: taskmill.StateCanceled, behind: taskmill.StateCanceled,
+	})
+	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != ahead {
+		t.Fatalf("after the retry: got %+v, want a duplicate of task %d", dup, ahead)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A task that a retry leaves after all, because it cannot join its group
+// now, stays canceled, so it must not keep the key that the retry took back
+// for it: a canceled task holds no key.
+func TestRetryLeavesNoKeyWithATaskItLeaves(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "k"}
+	left := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "k", GroupKey: "g"}).ID
+	e.cancel(t, left)
+	// An open enqueue into the group creates the group's row.
+	tx := e.begin(t)
+	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
+		t.Fatal(err)
+	}
+	canceled := bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})
+	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res.Changed != 0 || res.Skipped != 1 {
+		t.Fatalf("retried %+v, %v; want the task left", res, err)
+	}
+	e.wantState(t, left, taskmill.StateCanceled)
+	other := e.keyed(t, opts)
+	if other.Duplicate {
+		t.Fatalf("the task that the retry left holds its key: %+v", other)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The task still knows its key: its retry is refused while the new task
+	// holds it.
+	want := taskmill.BulkResult{Conflicts: 1}
+	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res != want {
+		t.Fatalf("while another task holds the key: %+v, %v; want %+v", res, err, want)
 	}
 }
 

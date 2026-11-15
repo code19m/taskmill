@@ -105,8 +105,10 @@ client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logg
   `Migrate` leaves something behind: the schema and its empty `migrations`
   table, which it creates before that transaction.
 - A migration waits at most 5 seconds for a lock on a busy taskmill table,
-  so it never blocks your workers for long. If it gives up, a pod restart or
-  the Job's next try runs it again.
+  and at most 1 second once it needs `tasks`, the table that every enqueue
+  and every worker uses. So it never blocks your workers for long. If it
+  gives up, it has changed nothing: a pod restart or the Job's next try
+  runs it again.
 - While one process migrates, the others wait for its lock on the
   `migrations` table, as long as their context allows: the 5 seconds do not
   apply here. Pass `Migrate` a context with a deadline, such as one minute.

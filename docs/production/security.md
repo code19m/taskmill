@@ -133,7 +133,7 @@ taskmill keeps a task's data, and for how long:
 | A dead or canceled task | 30 days (`DeadRetention`). A dead task that halts its FIFO group stays until someone retries or deletes it |
 | A task's errors | The last 20, with up to 4 KiB of each message |
 | A FIFO group's key | As plain text, with each task of the group |
-| A dedupe key | Only as a SHA-256 hash, until its window ends at the latest |
+| A dedupe key | Only as a SHA-256 hash, until its window ends. A canceled task keeps the hash of the key that it gave away, until someone retries or deletes it, or its 30 days end |
 | The charts' activity | Counts per queue only, for 24 hours |
 
 - **To keep data for a shorter time,** change the retention:

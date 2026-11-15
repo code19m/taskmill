@@ -84,9 +84,8 @@ configurable, so several schemas can share a database. It must match
   space, and 97% HOT after PostgreSQL pruned old row versions.
 - **Autovacuum is aggressive on `tasks`:** a 1% scale factor, a 1,000-row
   threshold, no cost delay. Every fetch and result leaves a dead row version.
-- **`queue` and `kind` are stored as text,** not as IDs into lookup tables.
-  The rows are slightly larger, but there are no joins, no lookups, and no
-  registration step before the first enqueue.
+- **`queue` and `kind` are stored as text,** not as IDs into lookup tables:
+  slightly larger rows, but no joins and no registration before an enqueue.
 
 ### `task_history`
 
@@ -121,10 +120,11 @@ Two partial indexes cover the halted groups only, so they stay small:
 ### `dedupe_keys`
 
 The key is a SHA-256 hash, computed in Go, of the queue, the kind, and the
-caller's key, so index entries stay small whatever the caller's key looks
-like. A key blocks duplicates until `expires_at`, unless its task is canceled
-or deleted. The index on `expires_at` serves retention, and the index on
-`task_id` lets `Cancel` and `Delete` release a task's key.
+caller's key, so index entries stay small. A key blocks duplicates until
+`expires_at`, unless its task is canceled or deleted. The index on
+`expires_at` serves retention, and the one on `task_id` lets `Cancel` and
+`Delete` release a task's key, which a cancel stores in `tasks.freed_key`
+and `freed_key_expires_at` for a [retry](schema-groups.md#deduplication).
 
 ### Settings, coordination, and bookkeeping
 

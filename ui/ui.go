@@ -408,7 +408,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	offered := s.filterChoices(r)
 	newest := maps.Clone(q)
-	for _, key := range []string{"cursor", "done", "count"} {
+	for _, key := range []string{"cursor", "done", "count", "conflicts"} {
 		newest.Del(key)
 	}
 	next := ""
@@ -527,7 +527,7 @@ type bulkAction struct {
 var bulkActions = map[string]bulkAction{
 	"retry": {
 		Verb: "Retry", Icon: "retry",
-		Explain: "They run again with a fresh set of attempts. A dead task that halts its FIFO group resumes the group.",
+		Explain: "They run again with a fresh set of attempts. A dead task that halts its FIFO group resumes the group. A canceled task stays canceled if another task holds its dedupe key.",
 		None:    "Retry applies to dead and canceled tasks.",
 		path:    "/tasks/bulk/retry",
 		do:      (*taskmill.Client).RetryMatching,
@@ -888,6 +888,7 @@ var notices = map[string]string{
 	"retry-all":       "{tasks} retried. They run again with fresh attempts.",
 	"retry-more":      "{tasks} retried so far; more remain.",
 	"retry-skipped":   "{tasks} retried; other work held {skipped}. Try again for those.",
+	"retry-conflicts": "{tasks} retried; {conflicts} not, because another task holds the same dedupe key.",
 	"cancel-all":      "{tasks} canceled. Running tasks stop when their handlers return.",
 	"cancel-more":     "{tasks} canceled so far; more remain.",
 	"cancel-skipped":  "{tasks} canceled; other work held {skipped}. Try again for those.",
@@ -897,7 +898,8 @@ var notices = map[string]string{
 }
 
 // notice returns the notice that a query asks for, with the numbers of
-// tasks in its "count" and "skipped" parameters for a bulk action.
+// tasks in its "count", "skipped", and "conflicts" parameters for a bulk
+// action.
 func notice(q url.Values) string {
 	text := notices[q.Get("done")]
 	if !strings.Contains(text, "{tasks}") {
@@ -908,7 +910,10 @@ func notice(q url.Values) string {
 		return ""
 	}
 	text = strings.Replace(text, "{tasks}", tasks(taskmill.TaskCount{N: n}), 1)
-	return strings.Replace(text, "{skipped}", tasks(taskmill.TaskCount{N: queryNumber(q, "skipped")}), 1)
+	for _, key := range []string{"skipped", "conflicts"} {
+		text = strings.Replace(text, "{"+key+"}", tasks(taskmill.TaskCount{N: queryNumber(q, key)}), 1)
+	}
+	return text
 }
 
 func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
@@ -989,12 +994,14 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 	http.Redirect(w, r, s.path(target+"?done="+notice), http.StatusSeeOther)
 }
 
-// actionFailed explains why an action did not apply.
+// actionFailed explains why an action did not apply: the error says it, as
+// for a retry that another task's dedupe key refuses.
 func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error, back string) {
 	switch {
 	case errors.Is(err, taskmill.ErrNotFound):
 		s.notFound(w, r)
-	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrInvalidArgument):
+	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrInvalidArgument),
+		errors.Is(err, taskmill.ErrConflict):
 		s.render(w, r, http.StatusConflict, "error.html", page{Title: "Not possible", Data: problem{err.Error(), back, "Go back"}})
 	default:
 		s.fail(w, r, err)
@@ -1006,9 +1013,10 @@ func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error,
 // deadline, so that it answers in time. If more tasks remain, it leads back
 // to its page, whose form continues where it stopped. If it left tasks that
 // other work held, it leads back to its page, which offers to try those
-// again. Otherwise it leads to the task list. Only its page carries where a
-// run continues: the task list always shows every task that the filters
-// select.
+// again. Otherwise it leads to the task list, and says how many tasks a
+// retry left because other tasks hold their dedupe keys: trying again does
+// not help those. Only its page carries where a run continues: the task
+// list always shows every task that the filters select.
 func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
 		return
@@ -1046,6 +1054,9 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		target = a.path + "?"
 		query.Set("done", name+"-skipped")
 		query.Set("skipped", strconv.FormatInt(res.Skipped, 10))
+	case res.Conflicts > 0:
+		query.Set("done", name+"-conflicts")
+		query.Set("conflicts", strconv.FormatInt(res.Conflicts, 10))
 	default:
 		query.Set("done", name+"-all")
 	}

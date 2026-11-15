@@ -87,8 +87,9 @@ type EnqueueOptions struct {
 	// DedupeKey makes the enqueue idempotent: while the key's window lasts,
 	// enqueueing the same kind with the same key in the same queue creates no
 	// new task, and reports the existing one. Canceling or deleting the task
-	// frees the key right away. The key may have any length: taskmill stores
-	// a SHA-256 hash of the queue, the kind, and the key. Default: none.
+	// frees the key right away, and [Client.Retry] of the canceled task
+	// takes it back. The key may have any length: taskmill stores a SHA-256
+	// hash of the queue, the kind, and the key. Default: none.
 	DedupeKey string
 
 	// DedupeWindow is how long DedupeKey blocks duplicates, counted from the

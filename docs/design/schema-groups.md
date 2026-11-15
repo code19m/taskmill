@@ -85,6 +85,12 @@ locked before its group's row, as a worker that records a failure and a
 transaction that holds a group's row never waits for the row of a task that
 is not pending.
 
+A dedupe key's row comes before a group's row. An enqueue claims its keys
+first and counts its groups after, in one statement. A `Retry` locks its
+task, then takes the task's key back, and only then takes the group's row.
+So a retry that waits for a transaction that claims the same key holds no
+group, and that transaction can continue into the group.
+
 `Cancel` and `Delete` cannot know which order applies before they hold a
 lock: a `Retry`, a promotion, or the task's own enqueue may commit between
 the read of the task's state and the lock. So they check again under the
@@ -170,6 +176,42 @@ keeps its key until the window ends: an inbox relies on that, so that a
 redelivered message does not run again after its task failed. Uniqueness
 among unfinished tasks only ("at most one queued refresh per product") can be
 added later as a new option, without a disruptive migration.
+
+**A retry takes the key back.** Without that, a cancel, an enqueue of the
+same key, and a retry of the canceled task would leave two unfinished tasks
+for one key. `dedupe_keys` holds one row per key, so a canceled task cannot
+keep a row there. The statement that cancels a task and deletes its key
+therefore stores the key and the end of its window in the task's own row:
+`freed_key` and `freed_key_expires_at`. A running task that is asked to
+stop gets them then, with the key's release.
+
+A retry claims the stored key as an enqueue does, with the window's old
+end: it gets the key if no row has it, or if the row's window has ended.
+Then it clears the two columns. If another task holds the key, a `Retry`
+rolls back and returns `ErrConflict`, and a bulk retry leaves the task and
+counts it. A stored key whose window has ended claims nothing: the window
+is fixed at the enqueue, and a task past it has no claim, canceled or not.
+
+| Decision | Why |
+|---|---|
+| Two columns, not the task's metadata | Producers write metadata, and handlers and tools copy it. A key there could be forged, or travel to another task. Only a role with `UPDATE` on `tasks` writes the columns: the grants of a role that only enqueues leave them out |
+| The retry is refused whatever state the holder is in | A completed or dead holder still stands for the work until its window ends, as it does for an enqueue |
+| The refusal names the holder only if that task exists | A completed task keeps its key for its window, also when no history is kept of it. Nobody can cancel or delete a task that is gone, so the error gives the end of the window |
+| A stored key that is not 32 bytes counts as none | `dedupe_keys` would refuse it, and one such row would fail every batch of a bulk retry |
+| The columns are not copied to the history | A task that completes after its cancel was requested needs no key back |
+
+Two things follow from the claim. A transaction of the caller that enqueues
+a key and then calls `CancelTx` for a task, while a `Retry` of that task
+waits for the key, makes the two wait for each other: the retry runs again,
+or the caller's transaction gets the deadlock error. And while a
+transaction that claimed a key stays open, a bulk retry leaves the tasks of
+a batch that need a key, and counts them as skipped.
+
+The previous release names the columns that it writes, so it works on the
+new schema as before: its cancel stores no key, and a retry of that task
+takes none. Its retry leaves what a cancel of this release stored: the next
+retry of this release, after another cancel, takes that key back if it is
+free.
 
 ## See also
 

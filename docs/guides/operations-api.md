@@ -24,9 +24,9 @@ if err := client.Retry(ctx, taskID); err != nil {
 | Remove tasks with no record: test data, a mistake | `Delete`, or `DeleteMatching` for many | It can't be undone |
 
 Prefer cancel to delete: a canceled task stays visible, and you can retry
-it. One limit: a cancel frees the task's dedupe key, and a retry does not
-take the key back. See
-[When is a key free again?](deduplication.md#when-is-a-key-free-again).
+it. A cancel frees the task's dedupe key, and a retry takes the key back,
+unless another task took it meanwhile. See
+[Retry a canceled task that has a key](deduplication.md#retry-a-canceled-task-that-has-a-key).
 
 The `Client` also reads and changes queues (`Queues`, `UpdateQueue`),
 schedules (`Schedules`, `PauseSchedule`), settings (`UpdateSettings`), and
@@ -89,6 +89,9 @@ case err != nil:
   [Task lifecycle](../concepts/task-lifecycle.md#what-you-can-do-in-each-state)
   has the table. In another state, the action returns `ErrInvalidState`.
 - **An unknown ID returns `ErrNotFound`.**
+- **A retry returns `ErrConflict`** when another task holds the dedupe key
+  that the canceled task had. Nothing changes: that task stands for the
+  same work.
 - **A running task is only asked to stop.** What its handler returns then
   decides if it becomes `canceled` or `completed`. See
   [Cancel a running task](../concepts/task-lifecycle.md#cancel-a-running-task).
@@ -131,7 +134,12 @@ log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
   reach its tasks within a second, the action continues in batches that
   read at most 100,000 tasks each.
 - **`Skipped` counts the tasks that were busy** in another transaction at
-  that moment. Run the action again to act on them.
+  that moment. Run the action again to act on them. While a transaction
+  that enqueued a dedupe key stays open, a retry can skip every task of a
+  batch that needs a key back.
+- **`Conflicts` counts the canceled tasks that a retry left,** because
+  another task holds their dedupe key. Running the action again does not
+  change them.
 - **If your context ends,** they stop after the current batch. They return
   what they did, an error, and `Next`: pass it as `BulkParams.Cursor` to
   continue from there.

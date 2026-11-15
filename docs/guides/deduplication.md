@@ -83,14 +83,38 @@ _, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), RemindCustomer{OrderID: id}, &
 | Waiting, running, completed, or dead | When the window ends, even if the task has not run yet |
 | Canceled or deleted | Right away |
 
-> [!WARNING]
-> A canceled task gave its key away, and a retry does not take the key
-> back. So if you cancel a task, enqueue its key again, and then retry the
-> canceled task, both tasks run. To run canceled work again, enqueue it
-> again with the same key, and leave the canceled task alone. `Duplicate`
-> then tells you if another task already took the key.
+## Retry a canceled task that has a key
 
-The same can happen when you retry a dead task after its window ended.
+A retry gives the canceled task its key back, for the rest of the window.
+So one key never stands for two unfinished tasks while its window lasts:
+
+| When you retry, the key… | The retry… |
+|---|---|
+| Is free | Takes the key back. An enqueue of the key is a duplicate again |
+| Belongs to another task | Is refused, and nothing changes: `Retry` returns `ErrConflict` |
+| Is past its window | Runs the task without a key |
+
+```go
+err := client.Retry(ctx, canceledID)
+if errors.Is(err, taskmill.ErrConflict) {
+    // Another task took the key after the cancel: it stands for this work.
+}
+```
+
+- **A refused retry is not a failure of your system.** Another task already
+  does this work, or did it. Leave the canceled task as it is.
+- **To run it anyway, free the key first.** Cancel or delete the task that
+  the error names. If the error names no task, that task is gone: it
+  completed, and taskmill no longer keeps it. Its key stays taken until its
+  window ends, and the error says when. Wait until then, or enqueue the
+  work again with another key.
+- **`RetryMatching` leaves such tasks,** and counts them in
+  `BulkResult.Conflicts`. The dashboard's **Retry** button says which task
+  holds the key.
+- **The window does not start again.** It still counts from the enqueue. A
+  task that you retry after its window, canceled or dead, runs without a
+  key, like any task that waits longer than its window. Then a new enqueue
+  of the key makes a second task.
 
 ## Replace a waiting task
 

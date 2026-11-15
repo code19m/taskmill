@@ -52,8 +52,11 @@ All notable changes to taskmill are recorded here. The format follows
 - The reference section has a new order: the three indexes come first, then
   the pages about what has no Go identifier.
 - This release has a schema migration, `0005_worker_leases`. It adds a
-  column to `workers`, changes only the catalog, reads no row, and never
-  locks `tasks`. It waits at most 5 seconds for each of its locks. The
+  column to `workers` and two to `tasks`, changes only the catalog, and
+  reads no row. It waits at most 5 seconds for its first lock, and at most
+  1 second for the lock on `tasks` and the one after it: every enqueue and
+  every worker waits behind a migration that waits for `tasks`. A migration
+  that gives up has changed nothing, and the next try runs it again. The
   previous release's code keeps working on the new schema, so a rolling
   deploy is safe, as always.
 - The migration also drops the index `schedules_due_idx`. No statement read
@@ -80,6 +83,23 @@ All notable changes to taskmill are recorded here. The format follows
   fixed times still apply to the workers of the previous release, and to
   every worker while a maintainer or a dashboard of the previous release
   runs.
+- A retry of a canceled task takes the task's dedupe key back. A cancel
+  frees the key, and a retry did not take it back. So after a cancel, an
+  enqueue of the same key, and a retry of the canceled task, two unfinished
+  tasks stood for one key, and both ran. Now the retried task holds its key
+  again, for the rest of the key's window, and an enqueue of the key is a
+  duplicate again. If another task holds the key by then, the retry changes
+  nothing. `Retry` returns `ErrConflict`, which only `UpdateQueue` and
+  `UpdateSettings` returned so far, so check for it where you retry
+  canceled tasks. `RetryMatching` leaves such a task, and counts it in the
+  new `BulkResult.Conflicts`. The dashboard's Retry button says which task
+  holds the key, and a retry of many tasks says how many it left. A task
+  that is retried after its window ended takes no key, as before. The
+  cancel stores the key with the task, in two columns that the migration
+  adds to `tasks`, so the task looks as before. If the task that holds the
+  key is gone, the error names none, and says when the key's window ends.
+  During a rolling deploy, a task that the previous release cancels has no
+  stored key, so its retry takes no key, as before.
 
 ### Security
 

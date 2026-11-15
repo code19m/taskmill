@@ -550,6 +550,49 @@ func TestBulkActionTellsWhatItLeft(t *testing.T) {
 	}
 }
 
+// A retry that another task's dedupe key refuses says which task holds the
+// key, on the page of a refused action. A bulk retry says how many tasks it
+// left for that reason, and leads to the task list: trying again does not
+// help them.
+func TestRetryRefusedByADedupeKey(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	ctx := t.Context()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
+	first, err := client.Enqueue(ctx, greet{Name: "x"}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Cancel(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.Enqueue(ctx, greet{Name: "x"}, opts)
+	if err != nil || second.Duplicate {
+		t.Fatalf("enqueue after the cancel: %+v, %v", second, err)
+	}
+	h := handler(t, client, nil)
+	id, holder := strconv.FormatInt(first.ID, 10), strconv.FormatInt(second.ID, 10)
+
+	rec := post(t, h, "/tasks/"+id+"/retry", "same-origin")
+	if body := rec.Body.String(); rec.Code != http.StatusConflict ||
+		!strings.Contains(body, "cannot retry task "+id+": task "+holder+" holds its dedupe key") ||
+		!strings.Contains(body, `href="/tasks/`+id+`"`) {
+		t.Fatalf("refused retry: %d\n%s", rec.Code, body)
+	}
+	if info, _ := client.Get(ctx, first.ID); info.State != taskmill.StateCanceled {
+		t.Fatalf("task is %s after the refused retry", info.State)
+	}
+
+	rec = post(t, h, "/tasks/bulk/retry?state=canceled", "same-origin")
+	if loc := rec.Header().Get("Location"); loc != "/tasks?conflicts=1&count=0&done=retry-conflicts&state=canceled" {
+		t.Fatalf("bulk retry of a task whose key is taken: %d to %q", rec.Code, loc)
+	}
+	_, body, _ := get(t, h, rec.Header().Get("Location"))
+	if !strings.Contains(body, "0 tasks retried; 1 task not, because another task holds the same dedupe key.") {
+		t.Fatalf("the page after a retry that left a task:\n%s", body)
+	}
+}
+
 // number formats n as the interface does.
 func number(n int) string {
 	s := strconv.Itoa(n)

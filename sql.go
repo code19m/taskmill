@@ -40,10 +40,9 @@ type statements struct {
 
 	getTask       string
 	lockTask      string
-	flagCancel    string
-	cancelWaiting string
 	retry         string
-	releaseKey    string
+	takeKeys      string
+	releaseKeys   string
 	deleteTask    string
 	deleteHistory string
 	taskExists    string
@@ -208,6 +207,12 @@ func newStatements(schema string) *statements {
 		// running tasks, so when the tasks are matched against the list of
 		// attempts instead, it compares every task with every attempt.
 		"{leased}", "state::text = 'running'",
+		// {keyed} matches the tasks t that must take a dedupe key back when
+		// they are retried: their cancel freed a key, and stored it with
+		// them, and the key's window still lasts. A stored key that is not
+		// one, which only a write by hand leaves, counts as none: the table
+		// of the keys would refuse it, and fail the retry.
+		"{keyed}", `(t.freed_key_expires_at > now() AND octet_length(t.freed_key) = 32)`,
 		// {utc} is the database's time in UTC, without a time zone. A
 		// retention period is subtracted from it, not from now(): there, a
 		// period's days are days of the session's time zone, which are 23 or
@@ -225,7 +230,8 @@ WITH candidates AS (
     LIMIT {batch}
 ), picked AS (
     SELECT t.id, t.state::text AS state,
-           EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key) AS in_group
+           EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key) AS in_group,
+           coalesce({keyed}, false) AS keyed
     FROM {s}.tasks t
     WHERE t.id = ANY(ARRAY(SELECT id FROM candidates)) AND ` + cond + `
       AND t.state = ANY($4::text[]::{s}.task_state[])
@@ -234,7 +240,8 @@ WITH candidates AS (
       AND ` + groupFree + gates + `
     FOR UPDATE OF t SKIP LOCKED
 )
-SELECT c.id, c.queue, c.group_key, p.id IS NOT NULL, coalesce(p.state, ''), coalesce(p.in_group, false)
+SELECT c.id, c.queue, c.group_key, p.id IS NOT NULL, coalesce(p.state, ''), coalesce(p.in_group, false),
+       coalesce(p.keyed, false)
 FROM candidates c LEFT JOIN picked p ON p.id = c.id
 ORDER BY c.id`)
 	}
@@ -392,23 +399,58 @@ LIMIT 1`),
 SELECT state::text, queue, coalesce(group_key, '')
 FROM {s}.tasks WHERE id = $1 AND (NOT $2 OR state = 'pending') FOR UPDATE`),
 
-		// flagCancel asks the worker running task $1 to cancel it.
-		flagCancel: q(`UPDATE {s}.tasks SET cancel_requested_at = now() WHERE id = $1`),
-
-		// cancelWaiting cancels task $1, which is not running.
-		cancelWaiting: q(`
-UPDATE {s}.tasks SET state = 'canceled', finalized_at = now(), cancel_requested_at = now() WHERE id = $1`),
-
+		// retry makes task $1 run again, as pending if $2. It forgets the
+		// dedupe key that the task's cancel freed: takeKeys ran before.
 		retry: q(`
 UPDATE {s}.tasks
 SET state = CASE WHEN $2 THEN 'pending' ELSE 'available' END::{s}.task_state,
-    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted}
+    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted},
+    freed_key = NULL, freed_key_expires_at = NULL
 WHERE id = $1 AND state IN ('dead', 'canceled')
 RETURNING queue`),
 
-		// releaseKey frees the dedupe key that task $1 holds, so that the key
-		// can be enqueued again.
-		releaseKey: q(`DELETE FROM {s}.dedupe_keys WHERE task_id = $1`),
+		// takeKeys gives the tasks $1, which a retry holds, the dedupe keys
+		// that their cancels freed, for the rest of each key's window. It
+		// claims a key as an enqueue does: only if no task holds it, or its
+		// holder's window has ended. A task whose key's window has ended
+		// asks for no key.
+		//
+		// It returns the tasks that did not get their key, each with the
+		// task that holds it and the end of that task's window. The task is 0
+		// if it no longer exists: a completed task keeps its key for its
+		// window, also after its history is gone. Both are unknown if the
+		// statement cannot see the holder: it took the key while the
+		// statement ran, or it is an older task of $1 with the same key.
+		//
+		// Like an enqueue, it waits for a transaction that claims or holds
+		// the same key, so a retry runs it before it takes a FIFO group's
+		// row, the order of an enqueue.
+		takeKeys: q(`
+WITH wanted AS (
+    SELECT t.id, t.freed_key AS key, t.freed_key_expires_at AS expires_at
+    FROM {s}.tasks t
+    WHERE t.id = ANY($1::bigint[]) AND {keyed}
+), taken AS (
+    INSERT INTO {s}.dedupe_keys AS d (key, task_id, expires_at)
+    SELECT DISTINCT ON (key) key, id, expires_at FROM wanted ORDER BY key, id
+    ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
+        WHERE d.expires_at <= now()
+    RETURNING d.task_id
+)
+SELECT w.id, coalesce(h.id, 0), CASE WHEN isfinite(d.expires_at) THEN d.expires_at END
+FROM wanted w
+LEFT JOIN {s}.dedupe_keys d ON d.key = w.key AND d.expires_at > now()
+LEFT JOIN LATERAL (
+    SELECT id FROM {s}.tasks WHERE id = d.task_id
+    UNION ALL
+    SELECT id FROM {s}.task_history WHERE id = d.task_id
+    LIMIT 1
+) h ON true
+WHERE w.id NOT IN (SELECT task_id FROM taken)`),
+
+		// releaseKeys frees the dedupe keys that tasks $1 hold, so that the
+		// keys can be enqueued again.
+		releaseKeys: q(`DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])`),
 
 		// deleteTask deletes task $1 unless it is running, and returns the
 		// state it was in; if $2, only if the task is pending, as lockTask
@@ -593,7 +635,8 @@ SELECT least($2::bigint,
 		// keys that other transactions hold, the groups ($7, $8) that the
 		// action left before, and tasks that changed meanwhile. They report
 		// whether each task's group had a row, which they then hold. A
-		// cancel skips running tasks already asked to stop.
+		// cancel skips running tasks already asked to stop. They also report
+		// the tasks that must take a dedupe key back if they are retried.
 		pickRetry: pick(`t.state IN ('dead', 'canceled')`, ``),
 		pickCancel: pick(`t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
       AND t.cancel_requested_at IS NULL`, ` AND `+keyFree),
@@ -622,33 +665,42 @@ ON CONFLICT DO NOTHING
 RETURNING queue, group_key`),
 
 		// retryTasks retries the picked tasks $1, those of $2 into pending,
-		// and notifies channel $3 of queues $4.
+		// and notifies channel $3 of queues $4. Like retry, it runs after
+		// takeKeys.
 		retryTasks: q(`
 WITH retried AS (
     UPDATE {s}.tasks
     SET state = CASE WHEN id = ANY($2::bigint[]) THEN 'pending' ELSE 'available' END::{s}.task_state,
-        attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted}
+        attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted},
+        freed_key = NULL, freed_key_expires_at = NULL
     WHERE id = ANY($1::bigint[])
 ), notified AS (
     SELECT count(pg_notify($3, '{available}' || q)) AS n FROM unnest($4::text[]) AS q
 )
 SELECT n FROM notified`),
 
-		// cancelTasks cancels the picked tasks $1 and releases their dedupe
-		// keys. It flags the running ones, and asks their workers on channel
-		// $2 to stop them.
+		// cancelTasks cancels the tasks $1, whose rows the caller holds, and
+		// frees their dedupe keys, so that the keys can be enqueued again. It
+		// stores each freed key with its task, and the end of the key's
+		// window, so that a retry can take the key back: see takeKeys. It
+		// flags the running tasks, and asks their workers on channel $2 to
+		// stop them. A task that holds no key keeps what an earlier cancel
+		// stored: a running task can be flagged twice.
 		cancelTasks: q(`
 WITH released AS (
-    DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])
+    DELETE FROM {s}.dedupe_keys d WHERE d.task_id = ANY($1::bigint[]) RETURNING d.task_id, d.key, d.expires_at
 ), canceled AS (
-    UPDATE {s}.tasks SET state = 'canceled', finalized_at = now(), cancel_requested_at = now()
-    WHERE id = ANY($1::bigint[]) AND state <> 'running'
-), flagged AS (
-    UPDATE {s}.tasks SET cancel_requested_at = now()
-    WHERE id = ANY($1::bigint[]) AND state = 'running'
-    RETURNING id
+    UPDATE {s}.tasks t
+    SET state = CASE WHEN t.state = 'running' THEN t.state ELSE 'canceled' END,
+        finalized_at = CASE WHEN t.state = 'running' THEN NULL ELSE now() END,
+        cancel_requested_at = now(),
+        freed_key = coalesce(r.key, t.freed_key),
+        freed_key_expires_at = coalesce(r.expires_at, t.freed_key_expires_at)
+    FROM unnest($1::bigint[]) AS u(id) LEFT JOIN released r ON r.task_id = u.id
+    WHERE t.id = u.id
+    RETURNING t.id, t.state
 )
-SELECT count(pg_notify($2, '{cancel}' || id)) FROM flagged`),
+SELECT count(pg_notify($2, '{cancel}' || id)) FROM canceled WHERE state = 'running'`),
 
 		// deleteTasks deletes the picked tasks $1 and releases their dedupe
 		// keys.

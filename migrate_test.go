@@ -204,9 +204,9 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 // order of their own: a statistics refresh reads tasks and then workers, and
 // a run of a schedule writes schedules and then tasks. A migration that
 // locks two of their tables in the other order deadlocks with them, and
-// PostgreSQL ends one of the two. So a migration locks no two tables that a
-// transaction of the fleet holds together, and it locks workers, which every
-// check-in writes, last: while it waits for schedules, it holds nothing.
+// PostgreSQL ends one of the two. So a migration locks the tables that a
+// transaction of the fleet holds together in the fleet's order: schedules,
+// then tasks, then workers, which every check-in writes.
 func TestMigrateDoesNotDeadlockWithTheFleet(t *testing.T) {
 	t.Parallel()
 	t.Run("a statistics refresh", func(t *testing.T) {
@@ -254,8 +254,65 @@ func migrateBesideTheFleet(t *testing.T, first, then string) {
 			t.Fatal(err)
 		}
 	}
-	if err := recv(t, migrated, "the migration to end"); err != nil {
+	err := recv(t, migrated, "the migration to end")
+	// On a slow machine, the fleet's transaction may have held tasks for the
+	// second that the migration waits for it. A migration that gave up is
+	// run again, as a deploy does, and finds the table free.
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "55P03" { // lock_not_available
+		err = taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema})
+	}
+	if err != nil {
 		t.Fatalf("migrate beside the fleet: %v", err)
+	}
+}
+
+// Every statement on a table queues behind a migration that waits for that
+// table. So a migration waits only a second for tasks, which every enqueue,
+// fetch, and completion uses: behind a transaction that holds the table for
+// long, it gives up, changes nothing, and an enqueue that queued behind it
+// continues. The next try, once the table is free, migrates.
+func TestMigrateWaitsBrieflyForTasks(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
+	applyWithoutMigrate(t, pool, e.schema, 1)
+	migrate := func() error {
+		return taskmill.Migrate(context.Background(), pool, &taskmill.MigrateConfig{Schema: e.schema})
+	}
+
+	reader := e.begin(t)
+	e.txExec(t, reader, "SELECT count(*) FROM {s}.tasks")
+	migrated := make(chan error, 1)
+	go func() { migrated <- migrate() }()
+	const waiting = `SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+	                 WHERE NOT l.granted AND c.relnamespace = $1::regnamespace`
+	waitFor(t, "the migration to wait for a lock", func() bool {
+		return len(migrated) == 1 || e.count(t, waiting, e.schema) > 0
+	})
+	// The enqueue waits behind the migration. With a wait of 5 seconds, as
+	// for the other tables, it would run out of its own 3 seconds.
+	producer := e.begin(t)
+	e.txExec(t, producer, "SET LOCAL lock_timeout = '3s'")
+	e.txExec(t, producer, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	                       VALUES ('q', 'k', 'available', now(), '{}', 1)`)
+	if err := producer.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	err := recv(t, migrated, "the migration to give up")
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "55P03" { // lock_not_available
+		t.Fatalf("migrate behind a long reader of tasks: got %v, want a lock timeout", err)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.migrations WHERE version = (SELECT max(version) FROM {s}.migrations)"); n != 1 {
+		t.Fatal("no version of the schema is recorded")
+	}
+	if err := reader.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(); err != nil {
+		t.Fatalf("migrate once tasks is free: %v", err)
+	}
+	if _, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema}); err != nil {
+		t.Fatalf("new client after the migration: %v", err)
 	}
 }
 

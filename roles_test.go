@@ -57,6 +57,7 @@ func TestRoleThatOnlyEnqueues(t *testing.T) {
 		"write a task's lease":    {insert + ", lease_expires_at" + values + ", 'infinity')", "42501"},
 		"write a task's attempts": {insert + ", attempt, lease_token" + values + ", 1, 2147483647)", "42501"},
 		"write a task's errors":   {insert + ", errors" + values + ", '{}')", "42501"},
+		"write a freed key":       {insert + ", freed_key, freed_key_expires_at" + values + ", sha256('k'), 'infinity')", "42501"},
 		"write a task that runs":  {insert + values + ")", "23514"}, // the table's rule: only a leased task runs
 	} {
 		_, err := pool.Exec(t.Context(), replaceSchema(tt.sql, schema))

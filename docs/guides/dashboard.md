@@ -144,6 +144,12 @@ tasks will change, and you confirm. With very many tasks, it works in steps,
 and offers to continue where it stopped. If some tasks were busy at that
 moment, it says how many, and offers to try them again.
 
+A retry of a canceled task takes the task's
+[dedupe key](../concepts/glossary.md#dedupe-key) back. If another task holds
+that key now, the dashboard does not retry the task, and says which task
+holds the key. A retry of many tasks says how many it left for that reason
+([Avoid duplicate tasks](deduplication.md#retry-a-canceled-task-that-has-a-key)).
+
 The dashboard has light and dark themes, works on phones, and works without
 JavaScript. It can't change a queue's `MaxRunning` or the retention times:
 do that [from code](operations-api.md).

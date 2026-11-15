@@ -94,7 +94,7 @@ statements in one transaction (see
 | 13 | `running` | `retryable`, `dead`, or `canceled` | The lease expired: the worker crashed or lost the database. Counts as a failed attempt. | Maintainer |
 | 14 | `scheduled`, `pending`, `available`, `retryable` | `canceled` | Cancellation was requested. | Client |
 | 15 | `running` | `canceled` | Cancellation was requested. The attempt's context is canceled, and the task becomes `canceled` when the attempt ends, however it ends, unless the handler completed it. | Worker |
-| 16 | `dead`, `canceled` | `available` or `pending` | An operator retried the task. It gets a fresh set of attempts, and waits in `pending` if other tasks of its group are unfinished. | Client |
+| 16 | `dead`, `canceled` | `available` or `pending` | An operator retried the task. It gets a fresh set of attempts, and waits in `pending` if other tasks of its group are unfinished. A canceled task takes its dedupe key back, or the retry is refused. | Client |
 | 17 | Any finished state | Deleted | The retention period ended. A dead head that halts its group is kept. | Maintainer |
 | 18 | Any state except `running` | Deleted | An operator deleted the task. | Client |
 
@@ -132,10 +132,10 @@ Notes on specific transitions:
   `canceled` otherwise.
 - **16.** Only `dead` and `canceled` tasks can be retried. To run completed
   work again, enqueue a new task, so that re-running work is always an
-  explicit choice.
+  explicit choice. A canceled task takes back the dedupe key that its
+  cancel released, or the retry is refused while another task holds it.
 - **14, 16, and 18.** Bulk actions apply these transitions to every task
-  that matches a filter, with the same rules, in batches that each commit
-  whole.
+  that matches a filter, by the same rules, in batches that commit whole.
 
 ## Invariants
 
@@ -202,7 +202,7 @@ Each guarantee names the mechanism that provides it.
    state, the group's row lock, and halting.*
 9. **A dedupe key admits one task per window.** Concurrent producers that
    enqueue the same key create one task; the others get a duplicate result.
-   *Mechanism: the key is claimed in the enqueue statement.*
+   *Mechanism: the key is claimed in the enqueue statement, and in a retry.*
 10. **Delayed tasks start on time, within limits.** While a maintainer runs, a
     task becomes available within about one second after its run time, and
     starts as soon as a worker has a free slot. A schedule's run starts with

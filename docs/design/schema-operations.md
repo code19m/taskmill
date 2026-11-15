@@ -38,9 +38,12 @@ count by kind or FIFO group alone still reads every task of each state.
   `cancel_requested_at`. A `pending` task's group row is locked first.
 - **Retry** moves a `dead` or `canceled` task back to `available` with
   `attempt = 0`, keeping its error history, or to `pending` if its group has
-  other unfinished tasks.
+  other unfinished tasks. Before that, it takes back the dedupe key that the
+  task's cancel released, or stops with `ErrConflict` if another task holds
+  it (see [Deduplication](schema-groups.md#deduplication)).
 - **Cancel and Delete** release the task's dedupe key in the same
-  transaction.
+  transaction. A cancel stores the key with the task, in the statement
+  that cancels it: one statement for a waiting and for a running task.
 - **Bulk actions** (`RetryMatching`, `CancelMatching`, `DeleteMatching`) do
   the same to every task that matches a filter, in batches of 1,000, each in
   a transaction of its own.
@@ -73,13 +76,24 @@ count by kind or FIFO group alone still reads every task of each state.
   - **Groups stay in order.** Once a retry skips a task of a group, it skips
     the group's later tasks too, until it ends, and counts them as skipped.
     A later run then retries the group's tasks oldest first.
-  - **Two bounded waits.** A retry into a group that has no row creates the
-    row. A concurrent enqueue may be creating the same row, uncommitted, and
-    an insert must wait for it to decide. The batch inserts under a
-    savepoint with a lock timeout of 100 ms, far below the deadlock timeout
-    of 1 s, and on timeout leaves those groups' tasks for a later run. So it
-    never stalls an application transaction for long, and never makes one
-    fail with a deadlock. A transaction per new group would avoid the wait
+  - **Keys come back with their tasks.** A retry takes back the dedupe
+    keys of the canceled tasks in its batch, with one statement, before it
+    counts the tasks into their groups. It leaves a task whose key another
+    task holds, and counts it in `BulkResult.Conflicts`, apart from the
+    skipped tasks: a later run leaves it again. Such a task does not make
+    the action leave its group. If the batch then leaves a task after all,
+    because its group has no row yet, it gives that task's key away again:
+    a canceled task holds no key.
+  - **Three bounded waits.** A retry that takes a key back inserts the
+    key's row, or changes it. An enqueue that claims the same key, or a
+    transaction that holds its row, makes that statement wait. A retry
+    into a group that has no row creates the row. A concurrent enqueue may
+    be creating the same row, uncommitted, and an insert must wait for it
+    to decide. The batch runs each of the two under a savepoint with a
+    lock timeout of 100 ms, far below the deadlock timeout of 1 s. On
+    timeout it takes no key, or creates no group, and leaves those tasks
+    for a later run. So it never stalls an application transaction for
+    long, and never makes one fail with a deadlock. A transaction per new group would avoid the wait
     too, but cost a transaction per group when every group is new, as after
     canceling a whole queue. The promotion of a group's next task waits for
     that task's row, under the same lock timeout. The batch holds the

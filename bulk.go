@@ -117,6 +117,12 @@ type BulkResult struct {
 	// tasks of a group it left. Run the action again to act on them.
 	Skipped int64
 
+	// Conflicts is how many canceled tasks a retry left as they were,
+	// because another task holds their dedupe key: see [Client.Retry]. A
+	// later run leaves them again while that task holds the key. Zero for
+	// the other actions.
+	Conflicts int64
+
 	// Next continues the action, as [BulkParams.Cursor], if it stopped
 	// before it went through every task: at the first task it skipped, if it
 	// skipped any, so that a group it left comes back in order. Empty if it
@@ -266,9 +272,12 @@ func (c *TaskCount) plus(other TaskCount) {
 // lie before them, the action continues in batches that read at most 100,000
 // tasks each, and so gets past those. It skips the tasks, the FIFO groups,
 // and the dedupe keys that other transactions hold at that moment, never
-// waiting while it holds rows. If ctx ends first, it finishes the batch it
-// is in, for at most 5 seconds, and returns what it did, with an error and
-// [BulkResult.Next] to continue; each batch commits whole or not at all.
+// waiting while it holds rows. Like [Client.Retry], it gives a canceled task
+// its dedupe key back, and leaves a task whose key another task holds: it
+// counts those in [BulkResult.Conflicts], and returns no error for them. If
+// ctx ends first, it finishes the batch it is in, for at most 5 seconds, and
+// returns what it did, with an error and [BulkResult.Next] to continue; each
+// batch commits whole or not at all.
 func (c *Client) RetryMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
 	m, err := checkBulk(params, retryStates)
 	if err != nil {
@@ -333,6 +342,7 @@ func checkBulk(params *BulkParams, states []State) (*matching, error) {
 type step struct {
 	end              int64    // the batch went through the tasks up to this one
 	changed, skipped int      // tasks
+	conflicts        int      // tasks that a retry left because other tasks hold their dedupe keys
 	firstSkipped     int64    // the first task it skipped, or 0
 	left             groupSet // groups that a retry left
 }
@@ -374,6 +384,7 @@ func (c *Client) inBatches(ctx context.Context, m *matching, batch batchFunc) (B
 		m.left.queues, m.left.groups = append(m.left.queues, s.left.queues...), append(m.left.groups, s.left.groups...)
 		res.Changed += int64(s.changed)
 		res.Skipped += int64(s.skipped)
+		res.Conflicts += int64(s.conflicts)
 		if firstSkipped == 0 {
 			firstSkipped = s.firstSkipped
 		}
@@ -477,6 +488,7 @@ type bulkTask struct {
 	held         bool  // the action holds its lock, and it still matches
 	state        State // if held
 	inGroup      bool  // if held: its group has a row, which the action holds
+	keyed        bool  // if held: its cancel freed a dedupe key whose window still lasts
 }
 
 // pick reads the next batch of the tasks that match m, with one of the pick
@@ -491,7 +503,7 @@ func pick(ctx context.Context, q querier, sql string, m *matching) ([]bulkTask, 
 	for r.Next() {
 		var t bulkTask
 		var state string
-		if err := r.Scan(&t.id, &t.queue, &t.group, &t.held, &state, &t.inGroup); err != nil {
+		if err := r.Scan(&t.id, &t.queue, &t.group, &t.held, &state, &t.inGroup, &t.keyed); err != nil {
 			return nil, err
 		}
 		t.state = State(state)
@@ -568,6 +580,11 @@ func (c *Client) retryBatch(ctx context.Context, q querier, m *matching) (step, 
 			s.skip(t, left)
 		}
 	}
+	// The keys come before the groups' counts, which cannot be undone for
+	// a task that does not get its key.
+	if held, err = c.takeKeysBack(ctx, q, held, &s, left); err != nil {
+		return step{}, err
+	}
 	if len(held) == 0 {
 		return s, nil
 	}
@@ -575,10 +592,8 @@ func (c *Client) retryBatch(ctx context.Context, q querier, m *matching) (step, 
 	if err != nil {
 		return step{}, err
 	}
-	for _, t := range held {
-		if !slices.ContainsFunc(retried, func(r bulkTask) bool { return r.id == t.id }) {
-			s.skip(t, left)
-		}
+	if err := c.leaveOut(ctx, q, held, retried, &s, left); err != nil {
+		return step{}, err
 	}
 	var available []string
 	for _, t := range retried {
@@ -589,6 +604,91 @@ func (c *Client) retryBatch(ctx context.Context, q querier, m *matching) (step, 
 	_, err = q.exec(ctx, c.sql.retryTasks, idsOf(retried), pending, c.schema, c.notifiable(ctx, available))
 	s.changed = len(retried)
 	return s, err
+}
+
+// leaveOut skips the tasks of held that are not among retried: those that
+// rejoinGroups left out. Such a task stays canceled, so it gives away again
+// the dedupe key that it took back.
+func (c *Client) leaveOut(ctx context.Context, q querier, held, retried []bulkTask, s *step, left map[[2]string]bool) error {
+	var keyed []int64
+	for _, t := range held {
+		if slices.ContainsFunc(retried, func(r bulkTask) bool { return r.id == t.id }) {
+			continue
+		}
+		s.skip(t, left)
+		if t.keyed {
+			keyed = append(keyed, t.id)
+		}
+	}
+	if len(keyed) == 0 {
+		return nil
+	}
+	_, err := q.exec(ctx, c.sql.releaseKeys, keyed)
+	return err
+}
+
+// takeKeysBack gives their dedupe keys back to the tasks of ts whose cancels
+// freed them, and returns the tasks to retry. It leaves out a task whose key
+// another task holds, and counts it as a conflict. A concurrent enqueue
+// may be claiming one of the keys, or hold its row: the batch then waits for
+// it for at most its lock timeout, takes no key, and leaves those tasks for
+// a later run, with the later tasks of their groups. The tasks of ts have
+// passed the groups that the action left before: a task ahead of one that
+// was left is still retried, and so keeps the key that it takes here.
+func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *step, left map[[2]string]bool) ([]bulkTask, error) {
+	var keyed []int64
+	for _, t := range ts {
+		if t.keyed {
+			keyed = append(keyed, t.id)
+		}
+	}
+	if len(keyed) == 0 {
+		return ts, nil
+	}
+	var refused map[int64]heldKey
+	taken, err := briefly(ctx, q, func() (err error) {
+		refused, err = c.takeKeys(ctx, q, keyed)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []bulkTask
+	leftNow := make(map[[2]string]bool) // the groups of the tasks that are left here
+	for _, t := range ts {
+		group := [2]string{t.queue, t.group}
+		_, conflict := refused[t.id]
+		switch {
+		case t.keyed && !taken, t.group != "" && leftNow[group]:
+			s.skip(t, left)
+			leftNow[group] = true
+		case conflict:
+			s.conflicts++
+		default:
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+// briefly runs fn, a step of a batch that may wait for a row that another
+// transaction is writing, under a savepoint. If fn gives up the wait, at
+// the batch's lock timeout, briefly undoes what fn did and reports false:
+// the batch continues without that step.
+func briefly(ctx context.Context, q querier, fn func() error) (done bool, err error) {
+	if _, err := q.exec(ctx, "SAVEPOINT brief"); err != nil {
+		return false, err
+	}
+	err = fn()
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "55P03" { // lock_not_available
+		_, err = q.exec(ctx, "ROLLBACK TO SAVEPOINT brief")
+		return false, err
+	}
+	if err != nil {
+		return false, err
+	}
+	_, err = q.exec(ctx, "RELEASE SAVEPOINT brief")
+	return true, err
 }
 
 // rejoinGroups is rejoinGroup for a batch of tasks to retry, with a few
@@ -662,32 +762,25 @@ func groupTasks(ts []bulkTask, skip map[int64]bool) (counted, missing groupSet, 
 // those it created. A concurrent enqueue may be creating the same row: the
 // batch then waits for it for at most its lock timeout, and creates none.
 func (c *Client) createGroups(ctx context.Context, q querier, s groupSet, byGroup map[[2]string][]bulkTask) ([][2]string, error) {
-	if _, err := q.exec(ctx, "SAVEPOINT create_groups"); err != nil {
-		return nil, err
-	}
 	var created [][2]string
-	r, err := q.query(ctx, c.sql.createGroups, s.queues, s.groups, s.sizes(byGroup))
-	if err == nil {
+	done, err := briefly(ctx, q, func() error {
+		r, err := q.query(ctx, c.sql.createGroups, s.queues, s.groups, s.sizes(byGroup))
+		if err != nil {
+			return err
+		}
+		defer r.Close()
 		for r.Next() {
 			var key [2]string
-			if err = r.Scan(&key[0], &key[1]); err != nil {
-				break
+			if err := r.Scan(&key[0], &key[1]); err != nil {
+				return err
 			}
 			created = append(created, key)
 		}
-		r.Close()
-		if err == nil {
-			err = r.Err()
-		}
-	}
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "55P03" { // lock_not_available
-		_, err = q.exec(ctx, "ROLLBACK TO SAVEPOINT create_groups")
+		return r.Err()
+	})
+	if !done {
 		return nil, err
 	}
-	if err != nil {
-		return nil, err
-	}
-	_, err = q.exec(ctx, "RELEASE SAVEPOINT create_groups")
 	return created, err
 }
 
