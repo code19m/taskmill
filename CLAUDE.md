@@ -20,3 +20,4 @@ however small, to these goals:
   and check UI changes in a browser, in both themes and at phone width.
 
 [CONTRIBUTING.md](CONTRIBUTING.md) covers setup, commits, and pull requests.
+[llms.txt](llms.txt) lists every package and docs page in one line each.
