@@ -326,8 +326,8 @@ var keyCancels = map[string]func(t *testing.T, e *env, id int64){
 	},
 }
 
-// keyRetries are the ways to retry a canceled task, which all take its
-// dedupe key back.
+// keyRetries are the ways to retry a canceled or a dead task. A canceled
+// task takes its dedupe key back.
 var keyRetries = map[string]func(t *testing.T, e *env, id int64){
 	"Retry": func(t *testing.T, e *env, id int64) {
 		t.Helper()
@@ -337,8 +337,8 @@ var keyRetries = map[string]func(t *testing.T, e *env, id int64){
 	},
 	"RetryMatching": func(t *testing.T, e *env, _ int64) {
 		t.Helper()
-		canceled := &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}
-		if res, err := e.client.RetryMatching(t.Context(), bulk(canceled)); err != nil || res.Changed != 1 || res.Conflicts != 0 {
+		finished := &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled, taskmill.StateDead}}
+		if res, err := e.client.RetryMatching(t.Context(), bulk(finished)); err != nil || res.Changed != 1 || res.Conflicts != 0 {
 			t.Fatalf("retried %+v, %v; want 1 task", res, err)
 		}
 	},
@@ -359,8 +359,10 @@ func TestRetryTakesTheDedupeKeyBack(t *testing.T) {
 
 // cancelThenRetry cancels a task with a dedupe key and retries it. The key
 // must be free in between, and the task's again afterwards. The task shows
-// nothing of the key, canceled or retried: its metadata is its own. In the
-// end it deletes the task, and so leaves e as it found it.
+// nothing of the key, canceled or retried: its metadata is its own. The
+// retry leaves nothing stored of the key that the cancel freed: the task
+// holds its key again, so when it is dead later, a retry asks for none. In
+// the end it deletes the task, and so leaves e as it found it.
 func cancelThenRetry(t *testing.T, e *env, name string, cancel, retry func(t *testing.T, e *env, id int64)) {
 	t.Helper()
 	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42", Metadata: map[string]string{"tenant": "7"}}
@@ -384,6 +386,15 @@ func cancelThenRetry(t *testing.T, e *env, name string, cancel, retry func(t *te
 	}
 	if got := e.get(t, first.ID).Metadata; !maps.Equal(got, opts.Metadata) {
 		t.Fatalf("%s: metadata after the retry: got %v, want %v", name, got, opts.Metadata)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE freed_key IS NOT NULL OR freed_key_expires_at IS NOT NULL"); n != 0 {
+		t.Fatalf("%s: the retried task still stores the key that its cancel freed", name)
+	}
+	e.die(t, first.ID)
+	retry(t, e, first.ID)
+	e.wantState(t, first.ID, taskmill.StateAvailable)
+	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != first.ID {
+		t.Fatalf("%s: after the retry of the dead task: got %+v, want a duplicate of task %d", name, dup, first.ID)
 	}
 	if err := e.client.Delete(t.Context(), first.ID); err != nil {
 		t.Fatal(err)
