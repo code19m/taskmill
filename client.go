@@ -264,7 +264,11 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	if err != nil {
 		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
 	}
-	if held, ok := refused[id]; ok {
+	if refused[id] {
+		held, err := c.keyHolder(ctx, q, id)
+		if err != nil {
+			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+		}
 		return fmt.Errorf("%w: cannot retry task %d: %s", ErrConflict, id, held)
 	}
 
@@ -287,8 +291,8 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 
 // heldKey says who holds the dedupe key that a retried task did not get.
 type heldKey struct {
-	by    int64     // the task that holds it; 0 if that task no longer exists, or is not known
-	until time.Time // the end of that task's window; zero if not known
+	by    int64     // the task that holds it; 0 if that task no longer exists, or no task holds the key now
+	until time.Time // the end of that task's window; zero if it has no end, or no task holds the key now
 }
 
 // String says it as the reason of a refused retry. It names the holder only
@@ -303,25 +307,32 @@ func (h heldKey) String() string {
 	return "another task holds its dedupe key"
 }
 
+// keyHolder reads who holds the dedupe key that the canceled task id did not
+// get back.
+func (c *Client) keyHolder(ctx context.Context, q querier, id int64) (heldKey, error) {
+	var held heldKey
+	var until *time.Time
+	_, err := queryRow(ctx, q, c.sql.keyHolder, []any{id}, &held.by, &until)
+	held.until = deref(until)
+	return held, err
+}
+
 // takeKeys gives the tasks ids, which a retry holds, the dedupe keys that
 // their cancels freed. It returns the tasks that did not get theirs, because
-// another task holds the key, each with what is known of that task.
-func (c *Client) takeKeys(ctx context.Context, q querier, ids []int64) (refused map[int64]heldKey, err error) {
+// another task holds the key.
+func (c *Client) takeKeys(ctx context.Context, q querier, ids []int64) (refused map[int64]bool, err error) {
 	r, err := q.query(ctx, c.sql.takeKeys, ids)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	refused = make(map[int64]heldKey)
+	refused = make(map[int64]bool)
 	for r.Next() {
 		var id int64
-		var held heldKey
-		var until *time.Time
-		if err := r.Scan(&id, &held.by, &until); err != nil {
+		if err := r.Scan(&id); err != nil {
 			return nil, err
 		}
-		held.until = deref(until)
-		refused[id] = held
+		refused[id] = true
 	}
 	return refused, r.Err()
 }

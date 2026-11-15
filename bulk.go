@@ -651,7 +651,7 @@ func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *
 	if len(keyed) == 0 {
 		return ts, nil
 	}
-	var refused map[int64]heldKey
+	var refused map[int64]bool
 	taken, err := briefly(ctx, q, func() (err error) {
 		refused, err = c.takeKeys(ctx, q, keyed)
 		return err
@@ -663,12 +663,11 @@ func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *
 	leftNow := make(map[[2]string]bool) // the groups of the tasks that are left here
 	for _, t := range ts {
 		group := [2]string{t.queue, t.group}
-		_, conflict := refused[t.id]
 		switch {
 		case t.keyed && !taken, t.group != "" && leftNow[group]:
 			s.skip(t, left)
 			leftNow[group] = true
-		case conflict:
+		case refused[t.id]:
 			s.conflicts++
 		default:
 			out = append(out, t)

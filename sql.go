@@ -42,6 +42,7 @@ type statements struct {
 	lockTask      string
 	retry         string
 	takeKeys      string
+	keyHolder     string
 	releaseKeys   string
 	deleteTask    string
 	deleteHistory string
@@ -446,14 +447,8 @@ RETURNING queue`),
 		// that their cancels freed, for the rest of each key's window. It
 		// claims a key as an enqueue does: only if no task holds it, or its
 		// holder's window has ended. A task whose key's window has ended
-		// asks for no key.
-		//
-		// It returns the tasks that did not get their key, each with the
-		// task that holds it and the end of that task's window. The task is 0
-		// if it no longer exists: a completed task keeps its key for its
-		// window, also after its history is gone. Both are unknown if the
-		// statement cannot see the holder: it took the key while the
-		// statement ran, or it is an older task of $1 with the same key.
+		// asks for no key. It returns the tasks that did not get their key:
+		// another task holds it, which may be an older task of $1.
 		//
 		// Like an enqueue, it waits for a transaction that claims or holds
 		// the same key, so a retry runs it before it takes a FIFO group's
@@ -470,16 +465,25 @@ WITH wanted AS (
         WHERE d.expires_at <= now()
     RETURNING d.task_id
 )
-SELECT w.id, coalesce(h.id, 0), CASE WHEN isfinite(d.expires_at) THEN d.expires_at END
-FROM wanted w
-LEFT JOIN {s}.dedupe_keys d ON d.key = w.key AND d.expires_at > now()
+SELECT id FROM wanted WHERE id NOT IN (SELECT task_id FROM taken)`),
+
+		// keyHolder reads who holds the dedupe key that task $1 stores, for
+		// the error of a retry that takeKeys refused: the task that holds
+		// it, and the end of that task's window, if it ends. The task is 0
+		// if it no longer exists: a completed task keeps its key for its
+		// window, also after its history is gone. It returns no row if no
+		// task holds the key any more.
+		keyHolder: q(`
+SELECT coalesce(h.id, 0), CASE WHEN isfinite(d.expires_at) THEN d.expires_at END
+FROM {s}.tasks t
+JOIN {s}.dedupe_keys d ON d.key = t.freed_key AND d.expires_at > now()
 LEFT JOIN LATERAL (
     SELECT id FROM {s}.tasks WHERE id = d.task_id
     UNION ALL
     SELECT id FROM {s}.task_history WHERE id = d.task_id
     LIMIT 1
 ) h ON true
-WHERE w.id NOT IN (SELECT task_id FROM taken)`),
+WHERE t.id = $1`),
 
 		// releaseKeys frees the dedupe keys that tasks $1 hold, so that the
 		// keys can be enqueued again.
