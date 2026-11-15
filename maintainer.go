@@ -258,44 +258,56 @@ func (m *maintainer) wake(ctx context.Context, heartbeat bool) bool {
 // leaseExpired is the error that a rescue records for the attempt it fails.
 const leaseExpired = "the worker lost its lease: it crashed, stopped, or lost the database"
 
-// rescue fails the attempts whose leases expired and updates their groups. It
-// skips tasks whose groups other transactions hold; a later cycle rescues
-// them. Each failed attempt counts in the activity, and is logged, once its
-// batch commits.
+// rescue fails the attempts whose leases expired and updates their groups,
+// one batch in a transaction, until a batch is not full. It skips tasks
+// whose groups other transactions hold; a later cycle rescues them. Each
+// failed attempt counts in the activity, and is logged, once its batch
+// commits.
 func (m *maintainer) rescue(ctx context.Context) {
-	var batch []swept
-	committed := func() { m.rescued(ctx, batch) }
-	err := m.sweep(ctx, committed, func(ctx context.Context, q querier) (int, error) {
+	for {
+		batch, err := m.rescueBatch(ctx)
+		if err == nil {
+			m.rescued(ctx, batch)
+		}
+		if err != nil || len(batch) < maintenanceBatch {
+			m.rescues.observe(ctx, err)
+			return
+		}
+	}
+}
+
+// rescueBatch fails a batch of the attempts whose leases expired, in one
+// transaction, and returns their tasks. A task that became dead halts its
+// FIFO group, and one that became canceled leaves it.
+func (m *maintainer) rescueBatch(ctx context.Context) (batch []rescuedTask, err error) {
+	err = m.c.inTx(ctx, func(q querier) error {
 		r, err := q.query(ctx, m.c.sql.rescue,
 			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds(), leaseExpired)
 		if err != nil {
-			return 0, err
+			return err
 		}
-		rows, err := collectSwept(r)
-		if err != nil {
-			return 0, err
+		if batch, err = collectRescued(r); err != nil {
+			return err
 		}
-		batch = rows
-		for _, x := range rows {
-			s := State(x.state)
-			if x.group == "" || !s.Finished() {
-				continue
-			}
-			how := leftHead
-			if s == StateDead {
-				how = leftDeadHead
-			}
-			if err := m.c.leaveGroup(ctx, m.w.logger, q, x.queue, x.group, x.id, how); err != nil {
-				return 0, err
+		var left []groupLeave
+		for _, x := range batch {
+			switch s := State(x.state); {
+			case x.group == "":
+			case s == StateDead:
+				if err := m.c.haltGroup(ctx, m.w.logger, q, x.queue, x.group, x.id); err != nil {
+					return err
+				}
+			case s.Finished():
+				left = append(left, groupLeave{queue: x.queue, group: x.group, head: true})
 			}
 		}
-		return len(rows), nil
+		return m.c.leaveGroups(ctx, m.w.logger, q, left)
 	})
-	m.rescues.observe(ctx, err)
+	return batch, err
 }
 
 // rescued counts and logs the failed attempts of a committed rescue batch.
-func (m *maintainer) rescued(ctx context.Context, batch []swept) {
+func (m *maintainer) rescued(ctx context.Context, batch []rescuedTask) {
 	if len(batch) > 0 {
 		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "rescued tasks whose workers lost their leases",
 			slog.Int(logKeyTasks, len(batch)))
@@ -310,47 +322,27 @@ func (m *maintainer) rescued(ctx context.Context, batch []swept) {
 	}
 }
 
-// sweep runs fn in transactions until a run handles less than a full batch,
-// and calls committed after each transaction commits.
-func (m *maintainer) sweep(ctx context.Context, committed func(), fn func(context.Context, querier) (int, error)) error {
-	for {
-		var n int
-		err := m.c.inTx(ctx, func(q querier) error {
-			var err error
-			n, err = fn(ctx, q)
-			return err
-		})
-		if err != nil {
-			return err
-		}
-		committed()
-		if n < maintenanceBatch {
-			return nil
-		}
-	}
-}
-
-// swept is a task that a maintenance sweep changed.
-type swept struct {
+// rescuedTask is a task whose expired lease a rescue ended.
+type rescuedTask struct {
 	id                        int64
 	queue, group, state, kind string
 	attempt                   int
 }
 
-// collectSwept reads the tasks that a sweep changed, in a fixed order of queue
-// and group: updating their groups in that order cannot deadlock with
+// collectRescued reads the tasks that a rescue changed, in a fixed order of
+// queue and group: updating their groups in that order cannot deadlock with
 // completions, which use the same order.
-func collectSwept(r rows) ([]swept, error) {
+func collectRescued(r rows) ([]rescuedTask, error) {
 	defer r.Close()
-	var out []swept
+	var out []rescuedTask
 	for r.Next() {
-		var x swept
+		var x rescuedTask
 		if err := r.Scan(&x.id, &x.queue, &x.group, &x.state, &x.kind, &x.attempt); err != nil {
 			return nil, err
 		}
 		out = append(out, x)
 	}
-	slices.SortFunc(out, func(a, b swept) int {
+	slices.SortFunc(out, func(a, b rescuedTask) int {
 		return cmp.Or(cmp.Compare(a.queue, b.queue), cmp.Compare(a.group, b.group), cmp.Compare(a.id, b.id))
 	})
 	return out, r.Err()
