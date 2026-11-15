@@ -555,17 +555,17 @@ type groupLeave struct {
 
 // leaveGroups is leaveGroup for many groups, with a few statements for all
 // of them. The caller holds the groups' locks, and has ended the halts of
-// the halting heads that left.
-func (c *Client) leaveGroups(ctx context.Context, q querier, left []groupLeave) error {
+// the halting heads that left. Like leaveGroup, it logs a group that has no
+// row, to the caller's logger.
+func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier, left []groupLeave) error {
 	queues := make([]string, len(left))
 	groups := make([]string, len(left))
 	counts := make([]int, len(left))
-	heads := make(map[[2]string]bool)
+	heads := make(map[[2]string]bool, len(left)) // by group, until its row is read: whether its head left
 	for i, l := range left {
 		queues[i], groups[i], counts[i] = l.queue, l.group, -l.tasks
-		if l.head {
-			heads[[2]string{l.queue, l.group}] = true
-		}
+		key := [2]string{l.queue, l.group}
+		heads[key] = heads[key] || l.head
 	}
 	r, err := q.query(ctx, c.sql.recountGroups, queues, groups, counts)
 	if err != nil {
@@ -580,16 +580,23 @@ func (c *Client) leaveGroups(ctx context.Context, q querier, left []groupLeave) 
 			r.Close()
 			return err
 		}
+		key := [2]string{queue, group}
+		head := heads[key]
+		delete(heads, key)
 		switch {
 		case remaining == 0:
 			empty.add(queue, group)
-		case !halted && heads[[2]string{queue, group}]:
+		case head && !halted:
 			next.add(queue, group)
 		}
 	}
 	r.Close()
 	if err := r.Err(); err != nil {
 		return err
+	}
+	for key := range heads { // not read: the group has no row
+		logger.LogAttrs(ctx, slog.LevelError, "fifo group missing",
+			slog.String(logKeyQueue, key[0]), slog.String(logKeyGroup, key[1]))
 	}
 	if len(empty.queues) > 0 {
 		if _, err := q.exec(ctx, c.sql.deleteEmptyGroups, empty.queues, empty.groups); err != nil {

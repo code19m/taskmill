@@ -380,6 +380,14 @@ All notable changes to taskmill are recorded here. The format follows
   FIFO group listed up to 100 of the tasks behind it, in full, only to
   count them. It now counts them, so it shows the number up to 10,000,
   where it showed "100+".
+- A FIFO group that has no row is now reported by every operation that
+  takes a task out of it. A group's row is missing only if something broke
+  the group, such as a `DELETE` by hand, and taskmill logs `fifo group
+  missing` at Error when it meets one. But only `Cancel`, `Delete`, a
+  failed attempt, and a rescue did. A completion, `CancelMatching`, and
+  `DeleteMatching`, which end most tasks, logged nothing. They now log the
+  line too, with the `queue` and the `group`. The tasks end as before. If
+  you see the line, please report it.
 
 ### Security
 

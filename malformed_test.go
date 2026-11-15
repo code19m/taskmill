@@ -3,6 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"math"
 	"slices"
 	"sync/atomic"
@@ -274,6 +275,56 @@ func TestGroupCountThatIsTooLowFailsNoOtherGroup(t *testing.T) {
 			return e.get(t, lost).State != taskmill.StateRunning
 		})
 	})
+}
+
+// A group's row that is gone, which only a DELETE by hand gives, must not go
+// unseen: every way in which a task leaves its group, or halts it, reports it.
+func TestMissingGroupRowIsReported(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	ctx := t.Context()
+	ids := make(map[string]int64)
+	for _, group := range []string{"completed", "dead", "canceled"} {
+		ids[group] = e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: group})
+	}
+	ids["bulk"] = e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "bulk", Queue: "other"})
+	e.exec(t, "DELETE FROM {s}.groups")
+
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			if task.GroupKey == "dead" {
+				return taskmill.Permanent(errors.New("bad address"))
+			}
+			return nil
+		}, nil),
+	})
+	for group, want := range map[string]taskmill.State{"completed": taskmill.StateCompleted, "dead": taskmill.StateDead} {
+		if info, err := w.RunTask(ctx, ids[group]); err != nil || info.State != want {
+			t.Fatalf("the task of the group %q: %v, %+v, want it %s", group, err, info, want)
+		}
+	}
+	if err := e.client.Cancel(ctx, ids["canceled"]); err != nil {
+		t.Fatal(err)
+	}
+	res, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{Queues: []string{"other"}}))
+	if err != nil || res.Changed != 1 {
+		t.Fatalf("the bulk cancel: %v, %+v", err, res)
+	}
+	e.wantState(t, ids["canceled"], taskmill.StateCanceled)
+	e.wantState(t, ids["bulk"], taskmill.StateCanceled)
+
+	var reported []string
+	for _, r := range logs.all() {
+		if r.Message == "fifo group missing" {
+			reported = append(reported, attr(r, "queue")+"/"+attr(r, "group"))
+		}
+	}
+	slices.Sort(reported)
+	want := []string{"default/canceled", "default/completed", "default/dead", "other/bulk"}
+	if !slices.Equal(reported, want) {
+		t.Fatalf("groups reported as missing: %q, want %q", reported, want)
+	}
 }
 
 // expiredLease is the SET clause that makes a task of insertTask one whose

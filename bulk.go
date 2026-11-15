@@ -944,5 +944,5 @@ func (c *Client) leaveAll(ctx context.Context, q querier, ts []bulkTask, leaves 
 	if len(left) == 0 {
 		return nil
 	}
-	return c.leaveGroups(ctx, q, left)
+	return c.leaveGroups(ctx, c.logger, q, left)
 }

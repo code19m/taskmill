@@ -146,7 +146,8 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 // completeLocked completes, in q's transaction, the grouped tasks whose
 // group rows and task rows it can lock without waiting. It returns the
 // others, which other transactions hold, and the tasks it completed. A task
-// whose group has no row, which should not happen, completes all the same.
+// whose group has no row, which should not happen, completes all the same,
+// and leaveGroups reports it.
 func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (held []*tracked, done []completedTask, err error) {
 	queues := make([]string, len(ts))
 	groups := make([]string, len(ts))
@@ -403,7 +404,7 @@ func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, c
 		heads = append(heads, groupLeave{queue: t.queue, group: t.group, tasks: 1, head: true})
 	}
 	if len(heads) > 0 {
-		if err := c.leaveGroups(ctx, q, heads); err != nil {
+		if err := c.leaveGroups(ctx, logger, q, heads); err != nil {
 			return nil, fmt.Errorf("taskmill: complete: %w", err)
 		}
 	}
