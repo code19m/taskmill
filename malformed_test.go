@@ -3,17 +3,21 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/code19m/taskmill"
 )
 
 // The tests in this file write rows that taskmill never writes, as a role
-// with INSERT on tasks can, or an UPDATE by hand. Such a row must fail
+// with INSERT on tasks can, or an UPDATE by hand. Such a task must fail
 // alone: the tasks fetched, counted, or rescued with it are not its business.
+// The small tables refuse such a row instead.
 
 // insertTask writes an available task of the default queue by hand, first
 // in line, changes it with the SET clause set, and returns its ID.
@@ -303,4 +307,88 @@ func tasksOf(q taskmill.QueueInfo) int64 {
 		n += c.N
 	}
 	return n
+}
+
+// The tables of the workers, the schedules, and the settings are small, and
+// every value in them is taskmill's own. So they refuse a value that no
+// release writes, where it is written, with the name of the rule that it
+// breaks: the statements that read these tables for every worker, schedule,
+// and queue count on it. What a release writes, they accept to its limits.
+func TestSmallTablesRefuseWhatNoReleaseWrites(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	e.oldWorker(t)
+	e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at)
+	           VALUES ('nightly', 'default', 'email.send', '0 3 * * *', now())`)
+
+	type write struct{ value, table, set, constraint string }
+	refused := []write{
+		{"a check-in without end", "workers", "heartbeat_at = 'infinity'", "workers_times_check"},
+		{"a start before all time", "workers", "started_at = '-infinity'", "workers_times_check"},
+		{"a queue that is NULL", "workers", "queues = '{default,NULL}'", "workers_names_check"},
+		{"a kind that is NULL", "workers", "kinds = '{NULL}'", "workers_names_check"},
+		{"queues in two dimensions", "workers", "queues = '{{a,b},{c,d}}'", "workers_names_check"},
+		{"kinds in two dimensions, with a NULL", "workers", "kinds = '{{a,b},{c,NULL}}'", "workers_names_check"},
+		{"a lease below zero", "workers", "lease_duration = '-1 microsecond'", "workers_lease_check"},
+		{"a lease above 300 years", "workers", "lease_duration = '1000000 years'", "workers_lease_check"},
+		{"a next run without end", "schedules", "next_run_at = 'infinity'", "schedules_times_check"},
+		{"a last run before all time", "schedules", "last_run_at = '-infinity'", "schedules_times_check"},
+		{"a retention below zero", "settings", "dead_retention = '-1 day'", "settings_retention_check"},
+		{"a retention under 1 hour", "settings", "history_retention = '59 minutes'", "settings_retention_check"},
+		{"a retention above 300 years", "settings", "history_retention = '1000000 years'", "settings_retention_check"},
+		// PostgreSQL stores a period as months, days, and microseconds, each
+		// with a sign of its own, and compares periods by their totals. These
+		// two count as 1 hour and as nothing. But a month is not 30 days on
+		// the calendar, so a time moved back by one of them is thousands of
+		// years ahead: a retention that deletes what just finished, and a
+		// lease that no time can be moved by.
+		{
+			"a retention of 1 hour in all, with months below zero", "settings",
+			"dead_retention = '-3000000 mons 90000000 days 1 hour'", "settings_retention_check",
+		},
+		{
+			"a lease of nothing in all, with months below zero", "workers",
+			"lease_duration = '-4000000 mons 120000000 days'", "workers_lease_check",
+		},
+	}
+	// So no field of a period may be negative: not its months, not its days,
+	// and not the rest. Each of these is inside its range in all.
+	for _, period := range []struct{ table, column, constraint string }{
+		{"settings", "history_retention", "settings_retention_check"},
+		{"settings", "dead_retention", "settings_retention_check"},
+		{"workers", "lease_duration", "workers_lease_check"},
+	} {
+		for _, p := range []string{"-1 mon 40 days", "2 mons -20 days", "7 days -1 hour"} {
+			refused = append(refused, write{
+				"the period " + p + " as " + period.column, period.table, period.column + " = '" + p + "'", period.constraint,
+			})
+		}
+	}
+	if e.infinitePeriods(t) {
+		refused = append(refused,
+			write{"a lease without end", "workers", "lease_duration = 'infinity'", "workers_lease_check"},
+			write{"a retention without end", "settings", "dead_retention = 'infinity'", "settings_retention_check"})
+	}
+	for _, tt := range refused {
+		_, err := e.pool.Exec(ctx, replaceSchema("UPDATE {s}."+tt.table+" SET "+tt.set, e.schema))
+		pgErr, ok := errors.AsType[*pgconn.PgError](err)
+		if !ok || pgErr.Code != "23514" || pgErr.ConstraintName != tt.constraint { // check_violation
+			t.Errorf("%s: got %v, want a violation of the check %s", tt.value, err, tt.constraint)
+		}
+	}
+
+	// The limits of what a release writes: the longest lease of a worker,
+	// and the shortest and the longest retention, which keeps tasks for good.
+	// Both are microseconds alone. The schema's own retention periods are
+	// days alone.
+	longest := time.Duration(math.MaxInt64)
+	e.exec(t, "UPDATE {s}.workers SET lease_duration = $1 * interval '1 microsecond'", longest.Microseconds())
+	e.exec(t, "UPDATE {s}.settings SET history_retention = DEFAULT, dead_retention = DEFAULT")
+	for _, d := range []time.Duration{time.Hour, longest} {
+		err := e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention, s.DeadRetention = d, d })
+		if err != nil {
+			t.Errorf("a retention of %s, which UpdateSettings accepts: %v", d, err)
+		}
+	}
 }

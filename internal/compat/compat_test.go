@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,6 +44,7 @@ func TestReleaseOnCurrentSchema(t *testing.T) {
 	r := newRelease(t)
 	r.enqueue(t)
 	r.retryCanceled(t)
+	r.updateSettings(t)
 	r.work(t)
 	r.runSchedule(t)
 	r.checkRuns(t)
@@ -142,6 +144,19 @@ func (r *release) retryCanceled(t *testing.T) {
 	}
 	if err := r.client.Retry(ctx, id); err != nil {
 		t.Fatalf("the release's Retry of a task that stores a key: %v", err)
+	}
+}
+
+// updateSettings stores the shortest and the longest retention period that
+// the release accepts. The schema refuses a period that no release writes,
+// so it must accept both.
+func (r *release) updateSettings(t *testing.T) {
+	t.Helper()
+	for _, d := range []time.Duration{math.MaxInt64, time.Hour} {
+		err := r.client.UpdateSettings(t.Context(), func(s *taskmill.Settings) { s.HistoryRetention, s.DeadRetention = d, d })
+		if err != nil {
+			t.Fatalf("the release's UpdateSettings to %s: %v", d, err)
+		}
 	}
 }
 

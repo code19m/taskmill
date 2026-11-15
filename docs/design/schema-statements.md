@@ -23,7 +23,7 @@ other batches go through a lean one. Both reserve IDs from the
 ## Fetch
 
 The fetch statement, with its list of returned columns shortened. The `least`
-calls keep [one malformed row](schema-maintenance.md#rows-that-taskmill-did-not-write) from failing it:
+calls keep [one malformed row](schema-rows.md) from failing it:
 
 ```sql
 WITH picked AS (

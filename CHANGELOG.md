@@ -40,6 +40,28 @@ All notable changes to taskmill are recorded here. The format follows
   `http.Handler`, a batch result that is missing keeps failing its task,
   and `Middleware`, `AttemptError`, `QueueInfo.Counts`, `Activity.Counts`,
   and `GroupParams` keep their names.
+- A schema migration, `0006_refused_rows`, adds `CHECK` constraints to the
+  tables `workers`, `schedules`, and `settings`. They refuse the values
+  that taskmill never writes and cannot read: an infinite time, a `NULL`
+  among a worker's queues or kinds, a worker's lease below zero or above
+  300 years, and a retention period below 1 hour or above 300 years. No
+  field of a lease or of a retention period may be negative either:
+  `6 days 23 hours` is valid, and `7 days -1 hour` is not. If SQL of your
+  own writes such a value, it now gets a check violation (SQLSTATE 23514)
+  that names the constraint. `UpdateSettings` always refused a period
+  below 1 hour, so nothing changes for code that uses `Client`. The tables
+  are internal: see [Compatibility](docs/reference/compatibility.md).
+- The migration first repairs the rows that break the new rules, which
+  only SQL by hand can have written. It deletes such a row of `workers`,
+  and a worker that still runs registers again at its next check-in. It
+  pauses a schedule whose next run time is infinite: resume it on the
+  dashboard. It changes a retention period outside the range to the
+  nearest one inside, so a period that you set below 1 hour with SQL
+  becomes 1 hour. [Upgrading](docs/production/upgrading.md#what-a-migration-repairs)
+  has the list, and a query that shows what an upgrade repaired. The
+  migration locks each of the three tables for a moment, waits at most 5
+  seconds for each lock, and reads a few pages. The previous release's
+  code keeps working on the new schema.
 
 ### Removed
 
@@ -61,6 +83,37 @@ All notable changes to taskmill are recorded here. The format follows
   generates for pgx, whose `DBTX` has `QueryRow`. To migrate, pass the
   `pgx.Tx` or the pool itself there, or give the value an interface of
   your own that has the method, such as that `DBTX`.
+
+### Security
+
+- One value that taskmill never writes, in a small table, no longer takes a
+  page of the dashboard or the maintainer down, or deletes tasks. A role
+  that can write taskmill's tables, or an `UPDATE` by hand, could leave
+  such a value:
+  - **An infinite start or check-in time of a worker.** `Client.Workers`
+    failed, and the dashboard's Overview and Workers pages answered 500. A
+    check-in time of `infinity` did so for good: the maintainer never
+    removed the row.
+  - **A `NULL` among a worker's queues.** Every refresh of the queue
+    statistics failed, for all queues, and `Client.Queues` failed.
+  - **An infinite next run time of a schedule.** `Client.Schedules` failed,
+    and no schedule of a maintainer that defines this one ran.
+  - **A retention period of a million years, or of `infinity`.**
+    `Client.Settings` and `UpdateSettings` failed, and so did the
+    dashboard's Overview.
+  - **A negative retention period.** The maintainer obeyed it. It deleted
+    dead and canceled tasks as soon as they finished, or dropped the
+    history, today's included. A period with a negative part did the same
+    when its months and its days had different signs, though it counts as
+    positive in all, such as `-3000000 mons 90000000 days`.
+  - **A lease of the maintainer that ends far in the future.** No worker
+    became the maintainer until then: no retries, no delayed tasks, no
+    schedules, no rescue of lost tasks.
+
+  Now the tables refuse these values, as the migration above says. No
+  constraint can refuse the lease, so the election ignores one that ends
+  later than a worker can write: more than 20 seconds from now. Such a row
+  stops the maintainer for 20 seconds at most.
 
 ## [0.7.0] - 2026-11-15
 

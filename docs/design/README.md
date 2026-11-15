@@ -17,10 +17,11 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | 4 | [Lists and operator actions](schema-operations.md) | The statements that list and count tasks, and that retry, cancel, and delete them |
 | 5 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
 | 6 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, how it counts the queues, and how workers are woken |
-| 7 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
-| 8 | [Releasing](releasing.md) | How the project team publishes a version |
-| 9 | [Writing docs](writing-docs.md) | The style guide and the page templates |
-| 10 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
+| 7 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
+| 8 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
+| 9 | [Releasing](releasing.md) | How the project team publishes a version |
+| 10 | [Writing docs](writing-docs.md) | The style guide and the page templates |
+| 11 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
 
 The [Architecture Decision Records](../adr/README.md) (ADRs) explain the big
 choices: the dependency policy, the supported Go and PostgreSQL versions, the

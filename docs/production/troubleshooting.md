@@ -40,7 +40,7 @@ need the maintainer, which another worker replaces within about 12 seconds.
 | Workers restart again and again | Pod restarts, and [the errors at start](#errors-at-start-and-in-calls) | Fix the error |
 | The database is out of reach | `operation still failing` for `elect maintainer` | Fix the database or the network |
 | Only schedules: the maintainer does not define them | Dashboard › Workers shows the maintainer. Check its `Schedules` | Define the same `Schedules` on every worker that can become the maintainer |
-| Only one schedule: it is paused | Dashboard › Schedules | Resume it |
+| Only one schedule: it is paused, by you or by [an upgrade that repaired it](upgrading.md#what-a-migration-repairs) | Dashboard › Schedules | Resume it |
 
 ### Tasks start seconds late
 

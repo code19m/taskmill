@@ -114,7 +114,9 @@ type QueueInfo struct {
 // them with [Client.UpdateSettings]. Zero fields mean their defaults. A
 // period shorter than its minimum is an error that wraps
 // [ErrInvalidArgument]. A period is stored in whole microseconds, and the
-// longest [time.Duration], about 292 years, keeps tasks for good.
+// longest [time.Duration], about 292 years, keeps tasks for good. The
+// database refuses a period below the minimum or above 300 years, so SQL
+// cannot store one either.
 type Settings struct {
 	// HistoryRetention is how long completed tasks stay in history, at
 	// least: history is dropped a whole UTC day at a time, so a task stays

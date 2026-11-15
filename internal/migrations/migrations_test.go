@@ -50,6 +50,57 @@ func TestMigrationsAfterTheFirstSetALockTimeout(t *testing.T) {
 	}
 }
 
+// A migration that changes rows of a table, and then alters the table, asks
+// for the table's strongest lock while it holds the rows that it changed. A
+// writer that waits for one of those rows holds the table against that lock:
+// the two deadlock, and PostgreSQL ends one of them. Between the two
+// statements, a writer can also add a row that the alteration refuses. So
+// such a migration locks the table before it changes a row, in the mode that
+// ALTER TABLE takes. The tests that migrate a schema pass without the lock:
+// only a writer at the wrong moment shows that it is missing.
+func TestMigrationsLockATableBeforeTheyChangeItsRowsAndAlterIt(t *testing.T) {
+	t.Parallel()
+	all, err := All("billing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range all[1:] {
+		locked := make(map[string]bool)  // tables that the migration holds in ACCESS EXCLUSIVE mode
+		changed := make(map[string]bool) // tables whose rows it changed without that lock
+		for _, words := range statements(m.SQL) {
+			switch sql := strings.Join(words, " "); {
+			case strings.HasPrefix(sql, "LOCK TABLE ") && strings.HasSuffix(sql, " IN ACCESS EXCLUSIVE MODE"):
+				locked[words[2]] = true
+			case strings.HasPrefix(sql, "UPDATE "):
+				changed[words[1]] = changed[words[1]] || !locked[words[1]]
+			case strings.HasPrefix(sql, "DELETE FROM "), strings.HasPrefix(sql, "INSERT INTO "):
+				changed[words[2]] = changed[words[2]] || !locked[words[2]]
+			case strings.HasPrefix(sql, "ALTER TABLE ") && changed[words[2]]:
+				t.Errorf("migration %04d_%s changes rows of %s and then alters it: "+
+					"lock the table first, with LOCK TABLE %[3]s IN ACCESS EXCLUSIVE MODE", m.Version, m.Name, words[2])
+			}
+		}
+	}
+}
+
+// statements returns the words of each statement of a migration, without
+// its comments.
+func statements(sql string) [][]string {
+	var code strings.Builder
+	for line := range strings.Lines(sql) {
+		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
+			code.WriteString(line)
+		}
+	}
+	var out [][]string
+	for stmt := range strings.SplitSeq(code.String(), ";") {
+		if words := strings.Fields(stmt); len(words) > 0 {
+			out = append(out, words)
+		}
+	}
+	return out
+}
+
 func TestParseName(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

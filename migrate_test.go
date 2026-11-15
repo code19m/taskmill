@@ -219,28 +219,34 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 // PostgreSQL ends one of the two. So a migration locks the tables that a
 // transaction of the fleet holds together in the fleet's order: schedules,
 // then tasks, then workers, which every check-in writes.
+//
+// Migrations 5 and 6 lock these tables. A fleet of the release before them
+// runs on version 4, where both are pending and run in one transaction, and
+// a fleet of the release between them on version 5.
 func TestMigrateDoesNotDeadlockWithTheFleet(t *testing.T) {
 	t.Parallel()
-	t.Run("a statistics refresh", func(t *testing.T) {
-		t.Parallel()
-		migrateBesideTheFleet(t, "SELECT count(*) FROM {s}.tasks", "SELECT count(*) FROM {s}.workers")
-	})
-	t.Run("a run of a schedule", func(t *testing.T) {
-		t.Parallel()
-		migrateBesideTheFleet(t, "UPDATE {s}.schedules SET last_run_at = now()",
-			"INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts) VALUES ('q', 'k', 'available', now(), '{}', 1)")
-	})
+	for _, version := range []int{4, 5} {
+		t.Run(fmt.Sprintf("from version %d, a statistics refresh", version), func(t *testing.T) {
+			t.Parallel()
+			migrateBesideTheFleet(t, version, "SELECT count(*) FROM {s}.tasks", "SELECT count(*) FROM {s}.workers")
+		})
+		t.Run(fmt.Sprintf("from version %d, a run of a schedule", version), func(t *testing.T) {
+			t.Parallel()
+			migrateBesideTheFleet(t, version, "UPDATE {s}.schedules SET last_run_at = now()",
+				"INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts) VALUES ('q', 'k', 'available', now(), '{}', 1)")
+		})
+	}
 }
 
-// migrateBesideTheFleet migrates a schema of the previous release while a
-// transaction of the fleet is between its statements first and then. The
-// migration must end without an error, and must hold up neither the fleet's
-// next statement nor a worker's check-in.
-func migrateBesideTheFleet(t *testing.T, first, then string) {
+// migrateBesideTheFleet migrates a schema at version while a transaction of
+// the fleet is between its statements first and then. The migration must
+// end without an error, and must hold up neither the fleet's next statement
+// nor a worker's check-in.
+func migrateBesideTheFleet(t *testing.T, version int, first, then string) {
 	t.Helper()
 	pool := testdb.Pool(t)
 	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
-	applyWithoutMigrate(t, pool, e.schema, 1)
+	applyUpTo(t, pool, e.schema, version)
 
 	fleet := e.begin(t)
 	e.txExec(t, fleet, first)
@@ -273,7 +279,8 @@ func migrateBesideTheFleet(t *testing.T, first, then string) {
 
 // A schema that any earlier release left upgrades in one call, with the
 // rows of a running fleet in the tables that its migrations change, and the
-// fleet's statements work on those rows afterwards.
+// fleet's statements work on those rows afterwards. Rows that hold what no
+// release writes, as an UPDATE by hand leaves them, are repaired.
 func TestMigrateUpgradesEveryEarlierVersion(t *testing.T) {
 	t.Parallel()
 	all, err := taskmill.Migrations("taskmill")
@@ -284,16 +291,53 @@ func TestMigrateUpgradesEveryEarlierVersion(t *testing.T) {
 	for from := 1; from < latest; from++ {
 		t.Run(fmt.Sprintf("from version %d", from), func(t *testing.T) {
 			t.Parallel()
-			upgradeWithRows(t, latest-from)
+			// The one row of the settings holds one pair of periods, so the
+			// versions take turns with the pairs.
+			upgradeWithRows(t, latest-from, brokenRetentions[from%len(brokenRetentions)])
 		})
 	}
 }
 
+// brokenRetention is a pair of retention periods as SQL by hand can leave
+// them, written as its SET clause, and what an upgrade makes of them, as a
+// condition on the row. PostgreSQL compares periods by their totals.
+type brokenRetention struct{ set, repaired string }
+
+var brokenRetentions = []brokenRetention{
+	// Outside the range: the nearest periods inside it.
+	{
+		"history_retention = '-30 days', dead_retention = '1000000 years'",
+		"history_retention = interval '1 hour' AND dead_retention = interval '300 years'",
+	},
+	// In the range, with a negative field: the same periods without one.
+	// The first moves a time 3,600 years ahead, not 1 hour back.
+	{
+		"history_retention = '-3000000 mons 90000000 days 1 hour', dead_retention = '7 days -1 hour'",
+		"history_retention = interval '1 hour' AND dead_retention = interval '6 days 23 hours'",
+	},
+	// A good period beside a bad one stays as it is stored: 30 days, not
+	// the month that equals them.
+	{
+		"history_retention = '2 mons -20 days'",
+		"history_retention = interval '40 days' AND extract(day FROM dead_retention) = 30",
+	},
+}
+
+// noNegativeField is the condition that the period in column has no
+// negative field: PostgreSQL stores its months, its days, and the rest
+// apart, each with a sign of its own.
+func noNegativeField(column string) string {
+	return fmt.Sprintf(`least(extract(year FROM %[1]s), extract(month FROM %[1]s), extract(day FROM %[1]s),
+		extract(hour FROM %[1]s), extract(minute FROM %[1]s), extract(second FROM %[1]s)) >= 0`, column)
+}
+
 // upgradeWithRows migrates a schema that lacks the newest pending
 // migrations and holds what a fleet of its release left: a worker, a
-// schedule, statistics, and a FIFO group that a dead task halts. Then the
-// current code must read those rows, and run a task beside them.
-func upgradeWithRows(t *testing.T, pending int) {
+// schedule, statistics, and a FIFO group that a dead task halts. It also
+// holds every kind of row that the tables refuse afterwards. Then the
+// current code must read the fleet's rows, find the others repaired, and
+// run a task beside them.
+func upgradeWithRows(t *testing.T, pending int, retention brokenRetention) {
 	t.Helper()
 	pool := testdb.Pool(t)
 	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
@@ -308,6 +352,7 @@ func upgradeWithRows(t *testing.T, pending int) {
 	           VALUES ('default', 'email.send', 'dead', now(), '{}', 1, 'customer', now())`)
 	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
 	           SELECT queue, group_key, 1, id, now() FROM {s}.tasks`)
+	e.writeRefusedRows(t, retention.set)
 
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema}); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -318,12 +363,15 @@ func upgradeWithRows(t *testing.T, pending int) {
 	schedules, errSchedules := e.client.Schedules(ctx)
 	queues, errQueues := e.client.Queues(ctx)
 	groups, errGroups := e.client.Groups(ctx, &taskmill.GroupParams{Halted: true})
-	if err := errors.Join(errWorkers, errSchedules, errQueues, errGroups); err != nil {
+	_, errSettings := e.client.Settings(ctx)
+	if err := errors.Join(errWorkers, errSchedules, errQueues, errGroups, errSettings); err != nil {
 		t.Fatalf("read what the old release left: %v", err)
 	}
+	// The schedules come in the order of their names: two that were
+	// repaired, the fleet's, and a third that was repaired.
 	for what, ok := range map[string]bool{
 		"worker":       len(workers) == 1 && workers[0].ID == "old-worker" && !workers[0].Stale,
-		"schedule":     len(schedules) == 1 && schedules[0].Name == "nightly" && !schedules[0].NextRunAt.IsZero(),
+		"schedule":     len(schedules) == 4 && schedules[2].Name == "nightly" && !schedules[2].Paused && !schedules[2].NextRunAt.IsZero(),
 		"statistics":   len(queues) == 1 && queues[0].Counts[taskmill.StateScheduled].N == 1,
 		"halted group": len(groups.Groups) == 1,
 	} {
@@ -331,11 +379,69 @@ func upgradeWithRows(t *testing.T, pending int) {
 			t.Errorf("the %s from before the upgrade: %+v, %+v, %+v, %+v", what, workers, schedules, queues, groups)
 		}
 	}
+	// The workers that the tables refuse are gone: the list above holds the
+	// fleet's worker alone. The other rows are repaired.
+	for what, repaired := range map[string]string{
+		"a schedule whose next run had no end is paused, and due": `
+			SELECT count(*) FROM {s}.schedules WHERE name = 'never' AND paused_at IS NOT NULL AND next_run_at <= now()`,
+		"a paused schedule whose next run had no end keeps its pause": `
+			SELECT count(*) FROM {s}.schedules WHERE name = 'never-paused' AND paused_at = '2026-01-01' AND next_run_at <= now()`,
+		"a schedule whose last run had no end has none, and still runs": `
+			SELECT count(*) FROM {s}.schedules WHERE name = 'ran-forever' AND last_run_at IS NULL AND paused_at IS NULL AND next_run_at > now()`,
+		"the retention periods are repaired, to " + retention.repaired: `
+			SELECT count(*) FROM {s}.settings WHERE ` + retention.repaired + `
+			AND ` + noNegativeField("history_retention") + ` AND ` + noNegativeField("dead_retention"),
+	} {
+		if e.count(t, repaired) != 1 {
+			t.Errorf("after the upgrade, want that %s", what)
+		}
+	}
 
 	// The new code runs beside what the old release left.
 	id := e.enqueue(t, sendEmail{}, nil)
 	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
 	e.waitState(t, id, taskmill.StateCompleted)
+}
+
+// writeRefusedRows writes by hand, into a schema of an earlier release, a
+// row of every kind that the tables refuse once they are migrated: times
+// without end, names that are NULL or in two dimensions, leases that no
+// worker has, and the retention periods of the SET clause retention.
+func (e *env) writeRefusedRows(t *testing.T, retention string) {
+	t.Helper()
+	e.exec(t, `INSERT INTO {s}.workers (id, queues, kinds, hostname, version, started_at, heartbeat_at) VALUES
+	           ('check-in-without-end', '{default}', '{}', 'host', 'v', now(), 'infinity'),
+	           ('start-before-all-time', '{default}', '{}', 'host', 'v', '-infinity', now()),
+	           ('null-queue', '{default,NULL}', '{}', 'host', 'v', now(), now()),
+	           ('null-kind', '{default}', '{NULL}', 'host', 'v', now(), now()),
+	           ('queues-in-two-dimensions', '{{a,b},{c,d}}', '{}', 'host', 'v', now(), now()),
+	           ('kinds-in-two-dimensions', '{}', '{{a,b},{c,NULL}}', 'host', 'v', now(), now())`)
+	// The lease's column came with migration 5.
+	if e.count(t, "SELECT max(version) FROM {s}.migrations") >= 5 {
+		e.exec(t, `INSERT INTO {s}.workers (id, queues, hostname, version, lease_duration) VALUES
+		           ('lease-too-long', '{}', 'host', 'v', '1000000 years'),
+		           ('lease-below-zero', '{}', 'host', 'v', '-1 second'),
+		           ('lease-of-nothing-with-negative-months', '{}', 'host', 'v', '-4000000 mons 120000000 days'),
+		           ('lease-with-negative-days', '{}', 'host', 'v', '2 mons -20 days'),
+		           ('lease-with-negative-time', '{}', 'host', 'v', '7 days -1 hour')`)
+	}
+	e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at, last_run_at, paused_at) VALUES
+	           ('never', 'default', 'email.send', '0 3 * * *', 'infinity', NULL, NULL),
+	           ('never-paused', 'default', 'email.send', '0 3 * * *', '-infinity', NULL, '2026-01-01'),
+	           ('ran-forever', 'default', 'email.send', '0 3 * * *', now() + interval '1 day', 'infinity', NULL)`)
+	// Where the database stores a period without end, the period that is
+	// too long has none.
+	if e.infinitePeriods(t) {
+		retention = strings.ReplaceAll(retention, "1000000 years", "infinity")
+	}
+	e.exec(t, "UPDATE {s}.settings SET "+retention)
+}
+
+// infinitePeriods reports whether the database stores a period without end,
+// as PostgreSQL does from version 17.
+func (e *env) infinitePeriods(t *testing.T) bool {
+	t.Helper()
+	return e.count(t, "SELECT current_setting('server_version_num')::integer") >= 170000
 }
 
 // Every statement finds its schedules by name: the maintainer loads the ones
@@ -347,16 +453,16 @@ func TestSchedulesAreIndexedByNameOnly(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name   string
-		before string // what ran on the schema of the previous release
+		before string // what ran on the schema that has the index
 	}{
-		{"a schema of the previous release", "SELECT 1"},
+		{"a schema with the index", "SELECT 1"},
 		{"a schema whose index an operator dropped", "DROP INDEX {s}.schedules_due_idx"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pool := testdb.Pool(t)
 			e := &env{pool: pool, schema: testdb.Schema(t, pool)}
-			applyWithoutMigrate(t, pool, e.schema, 1)
+			applyUpTo(t, pool, e.schema, 4) // migration 5 drops the index
 			e.exec(t, tt.before)
 			if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema}); err != nil {
 				t.Fatalf("migrate: %v", err)
@@ -509,6 +615,17 @@ func applyWithoutMigrate(t *testing.T, pool *pgxpool.Pool, schema string, pendin
 			t.Fatalf("apply migration %d: %v", m.Version, err)
 		}
 	}
+}
+
+// applyUpTo applies the schema as applyWithoutMigrate does, up to the
+// migration version: the schema that the release with that migration left.
+func applyUpTo(t *testing.T, pool *pgxpool.Pool, schema string, version int) {
+	t.Helper()
+	ms, err := taskmill.Migrations(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyWithoutMigrate(t, pool, schema, len(ms)-1-version) // without the bootstrap
 }
 
 // newRole creates a login role, runs setup as admin, and returns a pool that
