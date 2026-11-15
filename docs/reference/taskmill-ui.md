@@ -110,7 +110,7 @@ queue `emails`.
 | 303 | An action worked. The redirect leads to a page that says so |
 | 304 | The page did not change since the browser's copy |
 | 307 | With a prefix: the prefix without its last slash, such as `/admin/tasks`, or a path that is not clean, such as one with a double slash. The redirect leads to the clean path under the prefix |
-| 400 | A filter value is not valid, such as an unknown state. Or the page of a bulk action got no filter |
+| 400 | A filter value is not valid, such as an unknown state. Or the `cursor` is not one that this list made, as in a bookmark from before an upgrade. Or the page of a bulk action got no filter |
 | 401 | The login is missing or wrong, when basic authentication is on |
 | 403 | An action in read-only mode, or a `POST` from another site |
 | 404 | No such page, task, or schedule. With a prefix, also a path that only starts like it, such as `/admin/tasksx` |

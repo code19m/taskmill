@@ -13,6 +13,7 @@ the way it does.
 | [0005](0005-opentelemetry-in-a-module-of-its-own.md) | OpenTelemetry in a module of its own | Accepted |
 | [0006](0006-health-and-scaling-read-paths.md) | Health and scaling read paths | Accepted |
 | [0007](0007-count-stuck-work-with-the-queue-statistics.md) | Count stuck work with the queue statistics | Accepted |
+| [0008](0008-list-dead-and-canceled-tasks-by-when-they-finished.md) | List dead and canceled tasks by when they finished | Proposed |
 | [0009](0009-the-apis-shape-for-v1.md) | The API's shape for v1.0.0 | Accepted |
 
 ## Writing an ADR

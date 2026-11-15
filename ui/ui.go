@@ -395,9 +395,20 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	// The list shows no payload, no metadata, and only each task's last error.
 	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: pageSize, Summary: true}
 	res, err := s.client.List(r.Context(), params)
+	first := maps.Clone(q) // the list's first page
+	for _, key := range []string{"cursor", "done", "count", "conflicts"} {
+		first.Del(key)
+	}
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
-		s.render(w, r, http.StatusBadRequest, "error.html",
-			page{Title: "Invalid filter", Data: problem{err.Error(), "/tasks", "Clear the filters"}})
+		// The error names what the client refused: the filter, or the
+		// cursor. With a cursor in the address, the filter may be fine, so
+		// the way back is the first page of the same list. If the filter is
+		// what is wrong, that page says so again, and offers to clear it.
+		back := problem{err.Error(), "/tasks", "Clear the filters"}
+		if params.Cursor != "" {
+			back = problem{err.Error() + cursorHint, listPath(first), "Back to the first page"}
+		}
+		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
 		return
 	}
 	filtered := len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
@@ -419,13 +430,9 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		names = append(names, kq.Name)
 	}
 	offered := s.filterChoices(r)
-	newest := maps.Clone(q)
-	for _, key := range []string{"cursor", "done", "count", "conflicts"} {
-		newest.Del(key)
-	}
 	next := ""
 	if res.Next != "" {
-		v := maps.Clone(newest)
+		v := maps.Clone(first)
 		v.Set("cursor", res.Next)
 		next = s.path("/tasks?" + v.Encode())
 	}
@@ -448,20 +455,52 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
 		Tasks                         []taskmill.TaskInfo
+		Order                         listOrder
 		States, Queues, Kinds, Groups filter
 		Filtered, Paged               bool
-		Newest, Next                  string
+		First, Next                   string
 		Bulk                          *bulkLinks
 	}{
 		res.Tasks,
+		orderOf(f),
 		newFilter("state", "State", "states", stateNames, states),
 		newFilter("queue", "Queue", "queues", names, f.Queues).searchable(),
 		newFilter("kind", "Kind", "kinds", offered.kinds, f.Kinds).searchable(),
 		groupFilter,
 		filtered, params.Cursor != "",
-		s.path("/tasks?" + newest.Encode()), next,
+		s.path(listPath(first)), next,
 		bulk,
 	}})
+}
+
+// listPath returns the path of the task list with the query q, if it has
+// one.
+func listPath(q url.Values) string {
+	if len(q) == 0 {
+		return "/tasks"
+	}
+	return "/tasks?" + q.Encode()
+}
+
+// listOrder is how a task list names its order: what its first page and
+// its later pages say beside the title, and the links to the first and to
+// the next page.
+type listOrder struct {
+	Start, Later, First, Next string
+	ByFinish                  bool // the list shows when each task finished, not when it runs
+}
+
+// orderOf returns the order in which Client.List returns the tasks of f: a
+// list of only dead tasks, only canceled tasks, or both comes by when the
+// tasks finished, the latest first, and every other list by ID, the newest
+// first. A list by ID shows its order in its first column, so its first
+// page does not name it.
+func orderOf(f taskmill.TaskFilter) listOrder {
+	unfinished := func(s taskmill.State) bool { return s != taskmill.StateDead && s != taskmill.StateCanceled }
+	if len(f.States) > 0 && !slices.ContainsFunc(f.States, unfinished) {
+		return listOrder{Start: "latest first", Later: "earlier", First: "Latest", Next: "Earlier", ByFinish: true}
+	}
+	return listOrder{Later: "older", First: "Newest", Next: "Older"}
 }
 
 // taskFilter reads the task list's filters from a query.
@@ -1091,6 +1130,11 @@ func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
 		"Nothing exists at this address. The task may have been deleted.", "/tasks", "Back to the tasks",
 	}})
 }
+
+// cursorHint tells the reader of a task list that the client refused, at an
+// address with a cursor, where such a cursor comes from: each release makes
+// its own, and so does each of a list's two orders.
+const cursorHint = ". A link or a bookmark from before an upgrade can hold a cursor that this list no longer takes."
 
 // filtersHint tells the reader of a task list that ran out of time what may
 // help. A list by state, kind, or FIFO group can read many tasks that it does
