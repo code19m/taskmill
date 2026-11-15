@@ -27,6 +27,27 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// The other tests run with the short backoff of FastRetry, so this one holds
+// the backoff that Publisher documents: a short one in the tests cannot hide
+// a changed one.
+func TestRelayBackoff(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		failures int
+		want     time.Duration
+	}{
+		{1, time.Second},
+		{2, 2 * time.Second},
+		{9, 256 * time.Second},
+		{10, 5 * time.Minute},
+		{10_000, 5 * time.Minute},
+	} {
+		if got := outbox.RelayRetry.Backoff(tt.failures); got < tt.want*9/10 || got > tt.want*11/10 {
+			t.Errorf("after %d failed tries, a delivery is retried in %s, want within 10%% of %s", tt.failures, got, tt.want)
+		}
+	}
+}
+
 func setup(t *testing.T) (*taskmill.Client, *outbox.Outbox, *pgxpool.Pool) {
 	t.Helper()
 	pool := testdb.Pool(t)
@@ -152,7 +173,9 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 	b := newBroker(true)
 	ctx := t.Context()
 
-	const keys, perKey = 3, 15
+	// The fourth message of each key fails once. A second failure would
+	// prove no more, and costs a second: a retry waits for the maintainer.
+	const keys, perKey = 3, 10
 	for i := range perKey {
 		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 			msgs := make([]outbox.Message, keys)

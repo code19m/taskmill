@@ -46,7 +46,7 @@ func runTests(m *testing.M) (int, error) {
 	// A pooler in transaction mode refuses a search path: connect without it.
 	dsn := cmp.Or(os.Getenv(testdb.EnvListenURL), os.Getenv(testdb.EnvURL))
 	if dsn == "" {
-		return m.Run(), nil // the tests skip
+		return m.Run(), nil // the tests skip, and in CI, TestShop fails
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -84,7 +84,9 @@ func runTests(m *testing.M) (int, error) {
 func TestShop(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
-		t.Skip("set TEST_DATABASE_URL to run this test")
+		// Without the repository's test database, the test is skipped, or
+		// fails in CI: the tutorial's own tests skip there without a word.
+		testdb.URL(t)
 	}
 	t.Setenv("DATABASE_URL", dsn)         // connect reads it
 	pool, err := connect(t.Context(), 17) // the worker's pool, as runWorker sizes it

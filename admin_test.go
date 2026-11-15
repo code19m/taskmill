@@ -748,7 +748,7 @@ func TestListSomeStatesAndKinds(t *testing.T) {
 // takes the index only where it expects few matches: it multiplies the
 // queue's share of all tasks by the share of dead and canceled ones. So this
 // test pins that list for a queue with a small share of the tasks, here
-// 0.4%, beside a queue full of dead tasks. It does not pin it for a queue
+// 1%, beside a queue full of dead tasks. It does not pin it for a queue
 // with a large share: at 6% of 341,000 tasks, with no dead task of its own
 // and 15% dead elsewhere, such a list read the whole table. A list of one
 // finished state across all queues is not pinned either.
@@ -757,18 +757,20 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	e := newEnv(t)
 	e.rawGroups = true // pending tasks are written by hand, without their groups
 	// The oldest tasks are those of the queue "rare": pending ones of two
-	// groups, and completed ones. The others are newer, and every fifth of
-	// them is dead.
+	// groups, and completed ones. The others are newer, and many, and every
+	// fifth of them is dead: here the planner's choice depends on the size,
+	// and with 5,000 tasks in each table it reads the history without its
+	// index.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key, finalized_at)
 	           SELECT CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, 'email.send',
 	                  CASE WHEN i <= 400 THEN 'pending' WHEN i % 5 = 0 THEN 'dead' ELSE 'available' END::{s}.task_state,
 	                  now(), '{}', 1, CASE WHEN i <= 400 THEN 'g' || i % 2 END, CASE WHEN i > 400 AND i % 5 = 0 THEN now() END
-	           FROM generate_series(1, 100000) i`)
+	           FROM generate_series(1, 40000) i`)
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
 	           SELECT 1000000 + i, now(), CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, now(), 'email.send', now(), 'w', now(),
 	                  2, 1, 1, '{}', '{}', '[]'
-	           FROM generate_series(1, 100000) i`)
+	           FROM generate_series(1, 40000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "ANALYZE {s}.task_history")
 
@@ -1418,6 +1420,9 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 		e.exec(t, "UPDATE {s}.tasks SET lease_expires_at = now() - interval '1 second' WHERE state = 'running' AND attempt = 2")
 		return slices.ContainsFunc(e.get(t, id).Errors, func(a taskmill.AttemptError) bool { return a.Code == taskmill.CodeLeaseLost })
 	})
+	// A rescued task waits the default backoff, 2 seconds here, which says
+	// nothing about its times: the test makes it due now.
+	e.exec(t, "UPDATE {s}.tasks SET run_at = now() WHERE id = $1 AND state = 'retryable'", id)
 	close(leaseLost)
 	got = append(got, recv(t, calls, "the attempt after the rescue"))
 
@@ -1526,6 +1531,8 @@ func TestScheduleDoesNotWaitForAHeldGroup(t *testing.T) {
 	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 		{Name: "ledger", Cron: "@hourly", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
 	}})
+	// The run gives up on the held group after 50 ms, not after a second.
+	taskmill.SetTiming(w, taskmill.Timing{LockWait: 50 * time.Millisecond})
 	ctx := t.Context()
 	taskmill.RunSchedules(ctx, w)
 	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")

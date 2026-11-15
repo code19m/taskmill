@@ -376,7 +376,8 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		// An enqueue into a FIFO group waits for the group's row. The election
 		// runs in the same loop, so give up after a moment, and try again in
 		// the next cycle.
-		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+maintenanceLockTimeout+"'"); err != nil {
+		wait := strconv.FormatInt(m.w.timing.lockWait.Milliseconds(), 10) + "ms"
+		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+wait+"'"); err != nil {
 			return err
 		}
 		tag, err := tx.Exec(ctx, m.c.sql.advanceSchedule, s.Name, next, due)
@@ -399,8 +400,8 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		}
 		// The timeout was for the group's row. At the commit, it would keep
 		// the schedule from running for as long as notifying transactions
-		// queue there for over a second, while every other enqueue only
-		// waits its turn.
+		// queue there for longer than that wait, while every other enqueue
+		// only waits its turn.
 		_, err = tx.Exec(ctx, liftLockTimeout)
 		return err
 	})

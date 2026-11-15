@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -212,129 +213,185 @@ func TestWorkerServesTheDefaultQueuesOfItsKinds(t *testing.T) {
 	}
 }
 
+// Tests shorten a worker's fixed intervals with SetTiming, so a changed
+// default would pass them all. This test holds the defaults that
+// docs/reference/defaults-and-limits.md and the doc comments name. One of
+// them is a promise about stopping: a worker releases the tasks that ignore
+// their context 5 seconds after DrainTimeout, so a process stops in time if
+// its platform gives it DrainTimeout plus 10 seconds.
+func TestDefaultTiming(t *testing.T) {
+	t.Parallel()
+	d := defaultTiming
+	intervals := []struct {
+		name      string
+		got, want time.Duration
+	}{
+		{"maintainer", d.maintainer, time.Second},
+		{"heartbeat", d.heartbeat, 5 * time.Second},
+		{"election", d.election, 2 * time.Second},
+		{"leaderLease", d.leaderLease, 10 * time.Second},
+		{"retention", d.retention, time.Minute},
+		{"stats", d.stats, 10 * time.Second},
+		{"activity", d.activity, 10 * time.Second},
+		{"settings", d.settings, 10 * time.Second},
+		{"shutdownGrace", d.shutdownGrace, 5 * time.Second},
+		{"noHandlerSnooze", d.noHandlerSnooze, time.Minute},
+		{"noHandlerWait", d.noHandlerWait, time.Hour},
+		{"reconnectMin", d.reconnectMin, time.Second},
+		{"reconnectMax", d.reconnectMax, 30 * time.Second},
+		{"failureReport", d.failureReport, time.Minute},
+		{"idlePoll", d.idlePoll, time.Minute},
+		{"quiet", d.quiet, 20 * time.Millisecond},
+		{"listen", d.listen, 10 * time.Second},
+		{"lockWait", d.lockWait, time.Second},
+	}
+	for _, tt := range intervals {
+		if tt.got != tt.want {
+			t.Errorf("the worker's %s interval is %s, want %s: the docs name it, and the tests that shorten it cannot see a change",
+				tt.name, tt.got, tt.want)
+		}
+	}
+	if fields := reflect.TypeFor[timing]().NumField(); fields != len(intervals) {
+		t.Errorf("timing has %d intervals, and this test holds %d: add the new one", fields, len(intervals))
+	}
+}
+
 func TestWhileLeased(t *testing.T) {
 	t.Parallel()
-	w := &Worker{cfg: WorkerConfig{LeaseDuration: 400 * time.Millisecond}, logger: slog.New(slog.DiscardHandler)}
-	w.resultFailures = newFailures(w, "record results")
-	ts := []*tracked{{renewedAt: time.Now()}}
+	// In the bubble, the clock moves only while whileLeased waits for its
+	// next try, so the test measures its waits exactly.
+	synctest.Test(t, func(t *testing.T) {
+		w := &Worker{cfg: WorkerConfig{LeaseDuration: 400 * time.Millisecond}, logger: slog.New(slog.DiscardHandler)}
+		w.resultFailures = newFailures(w, "record results")
+		ts := []*tracked{{renewedAt: time.Now()}}
 
-	calls := 0
-	err := w.whileLeased(t.Context(), ts, func(context.Context) error {
-		if calls++; calls < 3 {
-			return errors.New("connection refused")
+		calls := 0
+		err := w.whileLeased(t.Context(), ts, func(context.Context) error {
+			if calls++; calls < 3 {
+				return errors.New("connection refused")
+			}
+			return nil
+		})
+		if err != nil || calls != 3 {
+			t.Fatalf("got %v after %d tries, want success on the third", err, calls)
 		}
-		return nil
-	})
-	if err != nil || calls != 3 {
-		t.Fatalf("got %v after %d tries, want success on the third", err, calls)
-	}
 
-	// Renewals keep extending the lease while the tries go on; an error
-	// that persists still ends them.
-	start, calls := time.Now(), 0
-	ts = []*tracked{{renewedAt: start}}
-	err = w.whileLeased(t.Context(), ts, func(context.Context) error {
-		calls++
-		ts[0].mu.Lock()
-		ts[0].renewedAt = time.Now()
-		ts[0].mu.Unlock()
-		return errors.New("connection refused")
+		// Renewals keep extending the lease while the tries go on; an error
+		// that persists still ends them. Tries that followed the renewals
+		// would never end: the tenth succeeds, which fails the test.
+		start, calls := time.Now(), 0
+		ts = []*tracked{{renewedAt: start}}
+		err = w.whileLeased(t.Context(), ts, func(context.Context) error {
+			if calls++; calls == 10 {
+				return nil
+			}
+			ts[0].mu.Lock()
+			ts[0].renewedAt = time.Now()
+			ts[0].mu.Unlock()
+			return errors.New("connection refused")
+		})
+		if err == nil || time.Since(start) > w.cfg.LeaseDuration || calls < 2 {
+			t.Fatalf("got %v after %d tries in %s; it should give up once the lease may have expired",
+				err, calls, time.Since(start))
+		}
 	})
-	if err == nil || time.Since(start) > time.Second || calls < 2 {
-		t.Fatalf("got %v after %d tries in %s; it should give up once the lease may have expired",
-			err, calls, time.Since(start))
-	}
 }
 
 func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
 	t.Parallel()
-	every := time.Second
-	f, l, clock := newFailureLines(every)
-	ctx, boom := t.Context(), errors.New("timeout")
+	synctest.Test(t, func(t *testing.T) {
+		every := time.Second
+		f, l := newFailureLines(every)
+		ctx, boom := t.Context(), errors.New("timeout")
 
-	f.observe(ctx, boom)
-	f.observe(ctx, nil)
-	// A failure soon after the recovery belongs to the same incident, and
-	// waits for the next line.
-	f.observe(ctx, boom)
-	f.observe(ctx, nil)
-	// Much later, a failure reports that incident's recovery, then starts
-	// another.
-	clock.advance(2 * every)
-	f.observe(ctx, boom)
+		f.observe(ctx, boom)
+		f.observe(ctx, nil)
+		// A failure soon after the recovery belongs to the same incident, and
+		// waits for the next line.
+		f.observe(ctx, boom)
+		f.observe(ctx, nil)
+		// Much later, a failure reports that incident's recovery, then starts
+		// another.
+		time.Sleep(2 * every)
+		f.observe(ctx, boom)
 
-	want := []string{
-		"WARN operation failed", "INFO operation recovered failures=1",
-		"INFO operation recovered failures=2", "WARN operation failed",
-	}
-	if !slices.Equal(l.lines, want) {
-		t.Errorf("got lines %q, want %q", l.lines, want)
-	}
+		want := []string{
+			"WARN operation failed", "INFO operation recovered failures=1",
+			"INFO operation recovered failures=2", "WARN operation failed",
+		}
+		if !slices.Equal(l.lines, want) {
+			t.Errorf("got lines %q, want %q", l.lines, want)
+		}
+	})
 }
 
 func TestFailuresOfWorkThatRunsNowAndThen(t *testing.T) {
 	t.Parallel()
-	every := time.Second
-	for _, c := range []struct {
-		pause time.Duration
-		want  []string
-	}{
-		// A job that fails at every run, a little over an interval apart,
-		// is one incident that escalates.
-		{3 * every / 2, []string{"WARN operation failed", "ERROR operation still failing failures=2"}},
-		// Failures two intervals apart, with no try between, are incidents
-		// of their own.
-		{3 * every, []string{"WARN operation failed", "WARN operation failed"}},
-	} {
-		f, l, clock := newFailureLines(every)
-		f.observe(t.Context(), errors.New("timeout"))
-		clock.advance(c.pause)
-		f.observe(t.Context(), errors.New("timeout"))
-		if !slices.Equal(l.lines, c.want) {
-			t.Errorf("failures %s apart: got lines %q, want %q", c.pause, l.lines, c.want)
+	synctest.Test(t, func(t *testing.T) {
+		every := time.Second
+		for _, c := range []struct {
+			pause time.Duration
+			want  []string
+		}{
+			// A job that fails at every run, a little over an interval apart,
+			// is one incident that escalates.
+			{3 * every / 2, []string{"WARN operation failed", "ERROR operation still failing failures=2"}},
+			// Failures two intervals apart, with no try between, are incidents
+			// of their own.
+			{3 * every, []string{"WARN operation failed", "WARN operation failed"}},
+		} {
+			f, l := newFailureLines(every)
+			f.observe(t.Context(), errors.New("timeout"))
+			time.Sleep(c.pause)
+			f.observe(t.Context(), errors.New("timeout"))
+			if !slices.Equal(l.lines, c.want) {
+				t.Errorf("failures %s apart: got lines %q, want %q", c.pause, l.lines, c.want)
+			}
 		}
-	}
+	})
 }
 
 func TestFailuresOfAFlappingOperationEscalateAndStayRare(t *testing.T) {
 	t.Parallel()
-	every := time.Second
-	f, l, clock := newFailureLines(every)
-	ctx, boom := t.Context(), errors.New("timeout")
+	synctest.Test(t, func(t *testing.T) {
+		every := time.Second
+		f, l := newFailureLines(every)
+		ctx, boom := t.Context(), errors.New("timeout")
 
-	// The operation fails at every other try for ten report intervals, then
-	// works again.
-	elapsed, tries := 10*every, 0
-	for ; tries < int(elapsed/(20*time.Millisecond)); tries++ {
-		f.observe(ctx, boom)
-		f.observe(ctx, nil)
-		clock.advance(20 * time.Millisecond)
-	}
-	clock.advance(every)
-	f.observe(ctx, nil)
-
-	if limit := 2 * (1 + int(elapsed/every)); len(l.lines) > limit {
-		t.Errorf("%d tries logged %d lines, want at most %d: %q", tries, len(l.lines), limit, l.lines)
-	}
-	// It is one incident: a warning, errors as it lasts, and a last line that
-	// counts every failure.
-	escalated := false
-	for i, line := range l.lines {
-		switch {
-		case i == 0 && line != "WARN operation failed":
-			t.Errorf("the first line is %q, want a warning", line)
-		case i > 0 && strings.HasPrefix(line, "WARN"):
-			t.Errorf("line %d warns again: %q", i, line)
-		case strings.HasPrefix(line, "ERROR operation still failing"):
-			escalated = true
+		// The operation fails at every other try for ten report intervals,
+		// then works again.
+		elapsed, tries := 10*every, 0
+		for ; tries < int(elapsed/(20*time.Millisecond)); tries++ {
+			f.observe(ctx, boom)
+			f.observe(ctx, nil)
+			time.Sleep(20 * time.Millisecond)
 		}
-	}
-	if !escalated {
-		t.Errorf("failures for %s logged no error: %q", elapsed, l.lines)
-	}
-	if last, want := l.lines[len(l.lines)-1], "INFO operation recovered failures="+strconv.Itoa(tries); last != want {
-		t.Errorf("the last line is %q, want %q", last, want)
-	}
+		time.Sleep(every)
+		f.observe(ctx, nil)
+
+		if limit := 2 * (1 + int(elapsed/every)); len(l.lines) > limit {
+			t.Errorf("%d tries logged %d lines, want at most %d: %q", tries, len(l.lines), limit, l.lines)
+		}
+		// It is one incident: a warning, errors as it lasts, and a last line
+		// that counts every failure.
+		escalated := false
+		for i, line := range l.lines {
+			switch {
+			case i == 0 && line != "WARN operation failed":
+				t.Errorf("the first line is %q, want a warning", line)
+			case i > 0 && strings.HasPrefix(line, "WARN"):
+				t.Errorf("line %d warns again: %q", i, line)
+			case strings.HasPrefix(line, "ERROR operation still failing"):
+				escalated = true
+			}
+		}
+		if !escalated {
+			t.Errorf("failures for %s logged no error: %q", elapsed, l.lines)
+		}
+		if last, want := l.lines[len(l.lines)-1], "INFO operation recovered failures="+strconv.Itoa(tries); last != want {
+			t.Errorf("the last line is %q, want %q", last, want)
+		}
+	})
 }
 
 // A notifier forgets a queue once its window has passed, so that a client
@@ -363,19 +420,13 @@ func TestNotifierForgetsQueuesAfterTheirWindow(t *testing.T) {
 }
 
 // newFailureLines returns the failures of an operation with a report
-// interval of every, the lines it logs, and its clock.
-func newFailureLines(every time.Duration) (*failures, *lineLog, *testClock) {
-	l, clock := &lineLog{}, &testClock{now: time.Unix(1_700_000_000, 0)}
+// interval of every, and the lines it logs. Its tests run in a synctest
+// bubble, where the clock moves only when they sleep.
+func newFailureLines(every time.Duration) (*failures, *lineLog) {
+	l := &lineLog{}
 	w := &Worker{logger: slog.New(l), timing: timing{failureReport: every}}
-	f := newFailures(w, "fetch tasks")
-	f.now = func() time.Time { return clock.now }
-	return f, l, clock
+	return newFailures(w, "fetch tasks"), l
 }
-
-// testClock is a clock that moves only when a test advances it.
-type testClock struct{ now time.Time }
-
-func (c *testClock) advance(d time.Duration) { c.now = c.now.Add(d) }
 
 // lineLog is a slog handler that keeps each line's level, message, and
 // failure count, for tests that log from one goroutine.

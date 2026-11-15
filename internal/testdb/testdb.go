@@ -2,8 +2,9 @@
 //
 // Tests that need a database call [Pool]. They are skipped when the
 // TASKMILL_TEST_DATABASE_URL environment variable is unset; `make test` sets
-// it to the database that `make db` starts. Each test gets its own schema, so
-// tests can run in parallel and leave nothing behind.
+// it to the database that `make db` starts. In CI they fail instead, so that
+// a run that tested nothing cannot pass: see [URL]. Each test gets its own
+// schema, so tests can run in parallel and leave nothing behind.
 //
 // To run the tests through a transaction-pooling proxy such as PgBouncer,
 // point TASKMILL_TEST_DATABASE_URL at the proxy and TASKMILL_TEST_LISTEN_URL
@@ -30,11 +31,18 @@ const (
 	EnvListenURL = "TASKMILL_TEST_LISTEN_URL"   // a direct URL, if EnvURL goes through a proxy
 )
 
-// URL returns the test database URL, or skips the test if none is set.
+// URL returns the test database URL. If none is set, it skips the test, so
+// that `go test ./...` works on a machine without a database. In CI, which
+// sets the CI environment variable to any value, it fails the test instead.
 func URL(tb testing.TB) string {
 	tb.Helper()
 	url := os.Getenv(EnvURL)
-	if url == "" {
+	switch {
+	case url != "":
+	case os.Getenv("CI") != "":
+		tb.Fatalf("%s is not set, and in CI (the CI variable is set) the database tests must not skip: "+
+			"set it to the URL of a test database, as `make db` and `make test` do", EnvURL)
+	default:
 		tb.Skipf("%s is not set; run `make db` and `make test`", EnvURL)
 	}
 	return url

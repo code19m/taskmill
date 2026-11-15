@@ -152,7 +152,8 @@ func start(t *testing.T, vars map[string]string) (addr string, logs *jsonLog, st
 }
 
 func TestRunAnswersProbesAndLogsJSON(t *testing.T) {
-	t.Parallel()
+	// /readyz then asks the database again at once, not a second later.
+	shorten(t, &readyReuse, time.Second, 50*time.Millisecond)
 	db := newProxy(t) // taskmill-ui reaches the database through it, and the test cuts it
 	addr, logs, stop := start(t, map[string]string{"TASKMILL_DATABASE_URL": db.url, "TASKMILL_UI_PREFIX": "/admin/jobs"})
 	base := "http://" + addr
@@ -184,9 +185,10 @@ func TestRunAnswersProbesAndLogsJSON(t *testing.T) {
 }
 
 // A client needs no login to announce a request body and never send it. The
-// server must not wait for that body for good.
+// server must not wait for that body for good: a request has 10 seconds to
+// arrive, and here a fifth of one.
 func TestRunGivesUpOnARequestBodyThatNeverComes(t *testing.T) {
-	t.Parallel()
+	shorten(t, &readTimeout, 10*time.Second, 200*time.Millisecond)
 	addr, _, _ := start(t, nil)
 	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
 	if err != nil {
@@ -198,8 +200,8 @@ func TestRunGivesUpOnARequestBodyThatNeverComes(t *testing.T) {
 	}
 
 	// The server answers once it gives up on the body, and closes the
-	// connection. The test waits twice as long as the server may.
-	if err := conn.SetReadDeadline(time.Now().Add(20 * time.Second)); err != nil {
+	// connection. The test waits far longer than the server may.
+	if err := conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	answer, err := io.ReadAll(conn)
@@ -225,6 +227,20 @@ func TestRunLogsWhyItStoppedInItsFormat(t *testing.T) {
 	if err == nil || !strings.HasPrefix(out.String(), "time=") || !strings.Contains(out.String(), "TASKMILL_UI_LOG_FORMAT") {
 		t.Fatalf("an unknown format: got %v, logged %q", err, out.String())
 	}
+}
+
+// shorten sets one of the command's fixed times to d until the test and its
+// server have ended. It first checks that the time is what
+// docs/reference/taskmill-ui.md says, so that a short time in a test cannot
+// hide a changed one. A test that shortens a time must not run in parallel:
+// the parallel tests start only after it has put the time back.
+func shorten(t *testing.T, fixed *time.Duration, documented, d time.Duration) {
+	t.Helper()
+	if *fixed != documented {
+		t.Errorf("the time is %s, want %s, as docs/reference/taskmill-ui.md says", *fixed, documented)
+	}
+	t.Cleanup(func() { *fixed = documented })
+	*fixed = d
 }
 
 // waitStatus gets url until it answers with the status want, and returns the

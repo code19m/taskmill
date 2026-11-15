@@ -63,11 +63,17 @@ func setup(t *testing.T) *env {
 }
 
 // testPool connects to the database named by TASKMILL_TEST_DATABASE_URL, as
-// the core's tests do, or skips the test if it is unset.
+// the core's tests do. If it is unset, it skips the test, or fails it in CI,
+// where the CI variable is set: a run that tested nothing must not pass.
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("TASKMILL_TEST_DATABASE_URL")
-	if url == "" {
+	switch {
+	case url != "":
+	case os.Getenv("CI") != "":
+		t.Fatal("TASKMILL_TEST_DATABASE_URL is not set, and in CI the database tests must not skip: " +
+			"set it to the URL of a test database, as `make db` and `make test` do")
+	default:
 		t.Skip("TASKMILL_TEST_DATABASE_URL is not set; run `make db` and `make test`")
 	}
 	pool, err := pgxpool.New(t.Context(), url)
@@ -432,10 +438,11 @@ func TestObserveQueuesReportsCountsAndLag(t *testing.T) {
 		t.Errorf("got statistics %v seconds old, want a fresh count", age)
 	}
 
-	// Without a maintainer, the statistics age.
+	// Without a maintainer, nothing counts again, and the statistics age:
+	// each reading is older than the one before.
 	stop()
 	eventually(t, "the statistics to age", func() bool {
-		return e.value(t, "taskmill.stats.age", "") > age+0.5
+		return e.value(t, "taskmill.stats.age", "") > age
 	})
 }
 
@@ -466,22 +473,22 @@ func TestObserveQueuesReportsStuckWork(t *testing.T) {
 	taskmill.AddHandler(&failing, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error {
 		return errors.New("broker unreachable")
 	}), &taskmill.HandlerOptions{Retry: retryUntil(3)})
-	stop := run(t, e.client, &taskmill.WorkerConfig{
-		Handlers: &failing, Queues: map[string]taskmill.QueueOptions{"relay": {}, "orders": {}},
-	})
-	eventually(t, "the first tasks to fail", func() bool {
-		relay, err := e.client.Get(t.Context(), ids[0])
+	// Three attempts of the first message and the one attempt of the other
+	// task run here, one after another: a worker would wait between them.
+	w := e.worker(t, &failing)
+	var relayed, ordered *taskmill.TaskInfo
+	for _, id := range []int64{ids[0], ids[0], ids[0], ids[1]} {
+		info, err := w.RunTask(t.Context(), id)
 		if err != nil {
 			t.Fatal(err)
 		}
-		orders, err := e.client.Get(t.Context(), ids[1])
-		if err != nil {
-			t.Fatal(err)
-		}
-		return relay.Attempt == 3 && relay.State == taskmill.StateRetryable && orders.State == taskmill.StateDead
-	})
-	// A new maintainer counts at once, rather than at the next refresh.
-	stop()
+		relayed, ordered = ordered, info
+	}
+	if relayed.Attempt != 3 || relayed.State != taskmill.StateRetryable || ordered.State != taskmill.StateDead {
+		t.Fatalf("the first message is %s after %d attempts, and the other task %s; want retryable after 3, and dead",
+			relayed.State, relayed.Attempt, ordered.State)
+	}
+	// A maintainer counts when it starts.
 	run(t, e.client, &taskmill.WorkerConfig{Handlers: &failing, Queues: map[string]taskmill.QueueOptions{"other": {}}})
 
 	const relay, orders, other = "messaging.destination.name=relay", "messaging.destination.name=orders",
