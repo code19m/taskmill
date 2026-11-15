@@ -14,6 +14,9 @@ import (
 // BatchTimeout is the time that a batch of a bulk action has.
 const BatchTimeout = batchTimeout
 
+// HistoryDrops is the most history partitions that one retention pass drops.
+const HistoryDrops = historyDrops
+
 // Timing shortens a worker's fixed intervals in tests. Zero fields keep
 // their defaults.
 type Timing struct {

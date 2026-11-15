@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -445,6 +446,46 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	waitFor(t, "the expired partition to be dropped", func() bool {
 		return e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = $2", e.schema, part) == 0
 	})
+}
+
+// A drop that fails after its detach leaves a table that is no partition any
+// more, so the history's partitions no longer name it. Retention finds such a
+// table by its name, and drops it once its day has expired: the oldest
+// first, and no more tables in a pass than a pass may drop.
+func TestRetentionDropsPartitionsThatWereOnlyDetached(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{})
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	detached := func(daysAgo int) string {
+		part := e.attachHistory(t, today.AddDate(0, 0, -daysAgo))
+		e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+part)
+		return part
+	}
+	// One table more than a pass drops, the newest first, and one whose day
+	// has not expired.
+	var expired []string
+	for i := range taskmill.HistoryDrops + 1 {
+		expired = append(expired, detached(30+i))
+	}
+	recent := detached(2)
+	left := func() (names []string) {
+		for _, part := range slices.Concat(expired, []string{recent}) {
+			if e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = $2", e.schema, part) == 1 {
+				names = append(names, part)
+			}
+		}
+		return names
+	}
+
+	taskmill.RunRetention(t.Context(), w)
+	if got, want := left(), []string{expired[0], recent}; !slices.Equal(got, want) {
+		t.Fatalf("after one pass, the detached tables %v are left, want %v", got, want)
+	}
+	taskmill.RunRetention(t.Context(), w)
+	if got, want := left(), []string{recent}; !slices.Equal(got, want) {
+		t.Fatalf("after two passes, the detached tables %v are left, want %v", got, want)
+	}
 }
 
 // attachHistory attaches a history partition for the UTC day that starts at

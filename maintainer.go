@@ -19,7 +19,8 @@ const (
 	maintenanceBatch   = 1000                  // most tasks one maintenance statement changes
 	minMaintainerSleep = 50 * time.Millisecond // shortest wait for the next due task: at most 20 promotions a second
 	staleWorkerAge     = 5 * time.Minute       // a worker that has not checked in this long, and for two of its leases, is removed
-	detachTimeout      = 30 * time.Second      // bound on detaching one history partition
+	detachTimeout      = 30 * time.Second      // bound on detaching and dropping one history partition
+	historyDrops       = 10                    // most history partitions one retention pass drops
 
 	// maintenanceLockTimeout bounds the wait for a row that an application
 	// transaction holds, such as a FIFO group's.
@@ -384,28 +385,34 @@ func (m *maintainer) applyRetention(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// expiredPartition is a history partition whose day is older than the
+// retention period.
+type expiredPartition struct {
+	name     string
+	attached bool // false if an earlier pass detached it, and could not drop it
+	pending  bool // its detach was interrupted
+}
+
 // dropHistory detaches and drops the history partitions whose whole day is
-// older than the retention period. The database says which ones, by its own
-// clock.
+// older than the retention period, the oldest first and at most historyDrops
+// in a pass. The database says which ones, by its own clock. The first
+// failure ends the pass: what keeps one partition, such as a long
+// transaction that reads the history, keeps the others too.
 func (m *maintainer) dropHistory(ctx context.Context) error {
-	type partition struct {
-		name    string
-		pending bool // its detach was interrupted
-	}
-	r, err := m.c.pool.Query(ctx, m.c.sql.expiredHistory)
+	r, err := m.c.pool.Query(ctx, m.c.sql.expiredHistory, historyDrops)
 	if err != nil {
 		return err
 	}
-	expired, err := pgx.CollectRows(r, func(row pgx.CollectableRow) (partition, error) {
-		var p partition
-		err := row.Scan(&p.name, &p.pending)
+	expired, err := pgx.CollectRows(r, func(row pgx.CollectableRow) (expiredPartition, error) {
+		var p expiredPartition
+		err := row.Scan(&p.name, &p.attached, &p.pending)
 		return p, err
 	})
 	if err != nil {
 		return err
 	}
 	for _, p := range expired {
-		if err := m.dropPartition(ctx, p.name, p.pending); err != nil {
+		if err := m.dropPartition(ctx, p); err != nil {
 			return err
 		}
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "dropped expired history", slog.String(logKeyPartition, p.name))
@@ -416,21 +423,25 @@ func (m *maintainer) dropHistory(ctx context.Context) error {
 // dropPartition detaches and drops one history partition. DETACH ...
 // CONCURRENTLY does not block completions, and must run outside a
 // transaction. It waits for transactions that use the history, so it is
-// bounded by a timeout; if it is interrupted, the partition stays pending
-// detach, and a later run finalizes the detach instead.
-func (m *maintainer) dropPartition(ctx context.Context, name string, pending bool) error {
+// bounded by a timeout. Each step that fails is finished by a later pass: a
+// partition whose detach was interrupted stays pending detach, and the
+// detach is finalized instead, and one that was detached but not dropped is
+// only dropped.
+func (m *maintainer) dropPartition(ctx context.Context, p expiredPartition) error {
 	ctx, cancel := context.WithTimeout(ctx, detachTimeout)
 	defer cancel()
-	mode := "CONCURRENTLY"
-	if pending {
-		mode = "FINALIZE"
+	if p.attached {
+		mode := "CONCURRENTLY"
+		if p.pending {
+			mode = "FINALIZE"
+		}
+		detach := fmt.Sprintf("ALTER TABLE %[1]s.task_history DETACH PARTITION %[1]s.%[2]s %[3]s", m.c.schema, p.name, mode)
+		if _, err := m.c.pool.Exec(ctx, detach); err != nil {
+			return fmt.Errorf("detach %s: %w", p.name, err)
+		}
 	}
-	detach := fmt.Sprintf("ALTER TABLE %[1]s.task_history DETACH PARTITION %[1]s.%[2]s %[3]s", m.c.schema, name, mode)
-	if _, err := m.c.pool.Exec(ctx, detach); err != nil {
-		return fmt.Errorf("detach %s: %w", name, err)
-	}
-	if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE %s.%s", m.c.schema, name)); err != nil {
-		return fmt.Errorf("drop %s: %w", name, err)
+	if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE %s.%s", m.c.schema, p.name)); err != nil {
+		return fmt.Errorf("drop %s: %w", p.name, err)
 	}
 	return nil
 }

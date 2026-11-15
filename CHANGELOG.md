@@ -153,6 +153,16 @@ All notable changes to taskmill are recorded here. The format follows
   time limit either, so a database that did not answer it kept the worker
   from starting: no check-in, no maintainer, no fetch. Each read now ends
   after 10 seconds, and it no longer delays the rest of the start.
+- A history partition that the maintainer had detached but could not drop
+  stayed in the schema for good, with a day of completed tasks on disk:
+  for example when the worker stopped, or lost the database, between the
+  two steps. No later pass found the table, because it was no partition
+  any more. Retention now finds such a table by its name, and drops it.
+  So it drops every table of taskmill's schema that is named
+  `task_history_` and a day, once that day is older than
+  `HistoryRetention`: rename a partition that you detached to keep it. A
+  pass drops at most 10 partitions, the oldest first, and the next pass, a
+  minute later, continues.
 
 ## [0.6.0] - 2026-11-13
 

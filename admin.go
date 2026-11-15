@@ -118,7 +118,9 @@ type QueueInfo struct {
 type Settings struct {
 	// HistoryRetention is how long completed tasks stay in history, at
 	// least: history is dropped a whole UTC day at a time, so a task stays
-	// up to a day longer. Minimum: 1 hour. Default: 7 days.
+	// up to a day longer. The maintainer drops at most 10 expired days a
+	// minute, so a much shorter period takes a while to free its disk space.
+	// Minimum: 1 hour. Default: 7 days.
 	HistoryRetention time.Duration
 
 	// DeadRetention is how long dead and canceled tasks are kept for
