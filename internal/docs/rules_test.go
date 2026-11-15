@@ -242,17 +242,22 @@ func readingOrder(t *testing.T) []string {
 	return order
 }
 
+// title returns the title of a page: its first line, without the "# ".
+func title(t *testing.T, name string) string {
+	t.Helper()
+	first, _, _ := strings.Cut(read(t, name), "\n")
+	return strings.TrimPrefix(first, "# ")
+}
+
 // linkTo returns the link from one page to another, with the other page's
-// title as its text. The title is the page's first line, without the "# ".
+// title as its text.
 func linkTo(t *testing.T, from, to string) string {
 	t.Helper()
-	first, _, _ := strings.Cut(read(t, to), "\n")
-	title, _ := strings.CutPrefix(first, "# ")
 	a, b := strings.Split(path.Dir(from), "/"), strings.Split(to, "/")
 	for len(a) > 0 && len(b) > 1 && a[0] == b[0] {
 		a, b = a[1:], b[1:]
 	}
-	return "[" + title + "](" + strings.Repeat("../", len(a)) + strings.Join(b, "/") + ")"
+	return "[" + title(t, to) + "](" + strings.Repeat("../", len(a)) + strings.Join(b, "/") + ")"
 }
 
 // TestNextChain checks that the Next lines make one chain. Every page of

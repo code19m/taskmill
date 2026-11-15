@@ -21,7 +21,8 @@
 // These comments are the reference: the comment of each identifier states
 // its contract, its defaults, its limits, and its errors. The [docs] teach
 // how to use them, from a [quickstart] to running in production. They ship
-// with the module, in its docs directory, at the version in use.
+// with the module, in its docs directory, at the version in use, and
+// llms.txt in the module's root lists every page in one line.
 //
 // # Defining tasks
 //

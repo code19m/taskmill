@@ -224,6 +224,15 @@ comment names no default, on a page that copies a struct's fields into a
 table, and on a link between a page and pkg.go.dev, or between a comment and
 a page, that leads nowhere.
 
+[llms.txt](llms.txt) lists every package and every page in one line each,
+for tools and AI agents. It is generated from the package comments and from
+the tables of each section's `README.md`. After you add a page, or change
+one of those lines, write it again:
+
+```sh
+go test ./internal/docs/ -run TestLLMs -update
+```
+
 ## Releasing
 
 The project team releases from a green `main`. The steps are in

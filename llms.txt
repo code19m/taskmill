@@ -1,0 +1,116 @@
+# taskmill
+
+> taskmill runs background tasks for Go from your PostgreSQL database. Tasks commit with your data, run at least once, and survive a crashed worker.
+
+The Go doc comments are the API reference: the comment of each identifier
+states its default, its limits, and its errors. Run `go doc <package>` for the
+map of a package, and `go doc <package>.<Name>` for one identifier. The pages
+teach, and hold what has no identifier. Their paths start at the module's root.
+
+## Packages
+
+- `github.com/code19m/taskmill`: Package taskmill is a task queue and transactional outbox for Go, on PostgreSQL.
+- `github.com/code19m/taskmill/outbox`: Package outbox publishes messages to a message broker reliably, with the transactional outbox pattern.
+- `github.com/code19m/taskmill/ui`: Package ui serves taskmill's dashboard as an HTTP handler.
+- `github.com/code19m/taskmill/cmd/taskmill-ui`: Command taskmill-ui serves taskmill's dashboard as a program of its own, apart from the applications that use the installation.
+- `github.com/code19m/taskmill/taskmilltest`: Package taskmilltest helps test code that uses taskmill.
+- `github.com/code19m/taskmill/otel`: Package otel instruments taskmill with OpenTelemetry traces and metrics, following OpenTelemetry's semantic conventions for messaging.
+
+## Get started
+
+- [Why taskmill](docs/start/why-taskmill.md): you want to know if taskmill fits your project, and what it does not do
+- [Quickstart](docs/start/quickstart.md): you want to run your first task and see it in the dashboard, in about 15 minutes
+
+## Tutorial
+
+- [Part 1: Your first task](docs/tutorial/1-first-task.md): A program of your own: a task, a handler, and a worker
+- [Part 2: Tasks with your data](docs/tutorial/2-tasks-with-your-data.md): Orders that are saved together with their tasks
+- [Part 3: When a task fails](docs/tutorial/3-when-a-task-fails.md): Retries, a dead task, and the dashboard
+- [Part 4: Queues, delays, and schedules](docs/tutorial/4-queues-delays-schedules.md): A second queue, a reminder that runs later, and a report every minute
+- [Part 5: The outbox](docs/tutorial/5-outbox.md): Events for a message broker. This part is optional
+- [Part 6: Test it](docs/tutorial/6-test-it.md): Tests against a real PostgreSQL
+- [Part 7: Ready to ship](docs/tutorial/7-ready-to-ship.md): One binary with a web role and a worker role
+
+## Concepts
+
+- [How it works](docs/concepts/how-it-works.md): you want the big picture: who runs your tasks, and what happens when a worker crashes
+- [Task lifecycle](docs/concepts/task-lifecycle.md): you want to know what a task's state means, and what you can do in each state
+- [Guarantees](docs/concepts/guarantees.md): you want to know what taskmill promises, and why your handler may run twice
+- [Glossary](docs/concepts/glossary.md): a word is new to you
+
+## Guides
+
+- [Set up the database and client](docs/guides/setup.md): Create taskmill's tables, and connect to them
+- [Define tasks](docs/guides/define-tasks.md): Write a task type, and choose what goes in it
+- [Enqueue tasks](docs/guides/enqueue.md): Run a task now, later, or before others
+- [Use your own transactions](docs/guides/transactions.md): Send an email only if the order was saved
+- [Handle tasks](docs/guides/handle-tasks.md): Write the code that does the work
+- [Retries and errors](docs/guides/retries-and-errors.md): Know how often a failing task is retried, and what a dead task is
+- [Handle tasks in batches](docs/guides/batch-handlers.md): Do work that is cheaper in bulk, such as a bulk insert
+- [Add middleware](docs/guides/middleware.md): Run your own code around every task: metrics, a log line, a tenant
+- [Workers and queues](docs/guides/workers-and-queues.md): Run workers, limit how many tasks run, or pause a queue
+- [Task order and FIFO groups](docs/guides/ordering.md): Run one account's tasks one at a time, in order
+- [Avoid duplicate tasks](docs/guides/deduplication.md): Never enqueue the same task twice
+- [Run tasks on a schedule](docs/guides/schedules.md): Run a report every night at 03:00
+- [Publish events with the outbox](docs/guides/outbox.md): Publish events to Kafka, NATS, or RabbitMQ only after a commit
+- [The dashboard](docs/guides/dashboard.md): See and fix tasks in a browser
+- [Manage tasks from code](docs/guides/operations-api.md): Retry, cancel, or delete thousands of tasks from code
+- [Logs, traces, and metrics](docs/guides/observability.md): Get logs, traces, metrics, and queue depth
+- [Test your code](docs/guides/testing.md): Test code that enqueues and handles tasks
+
+## How do I…?
+
+- [Do work once](docs/recipes/do-work-once.md): Charge a card once, although a task may run twice. An idempotency key from the task ID, and `Task.CompleteTx` for your own data
+- [Call a rate-limited API](docs/recipes/call-a-rate-limited-api.md): Respect a partner's limit: 4 calls at the same time, or 600 a minute. Its own queue with `MaxRunning`, one row that spaces the calls, and `Snooze` on HTTP 429
+- [Keep order per key](docs/recipes/keep-order-per-key.md): Apply one account's events in order. A `GroupKey` per account
+- [Share a queue fairly between customers](docs/recipes/share-a-queue-between-customers.md): Stop one customer's big batch from delaying all the others. A queue for batch work, and a `GroupKey` per customer
+- [Keep at most one waiting task per key](docs/recipes/one-waiting-task-per-key.md): Run one refresh for 50 changes to the same product. A flag in your own row, set in the transaction that enqueues
+- [Cancel or replace a delayed task](docs/recipes/cancel-a-delayed-task.md): Stop a reminder when the customer pays, or move it to another day. `CancelTx` in the transaction that changes your data, and a check in the handler
+- [Run a task at each customer's local time](docs/recipes/run-at-each-customers-local-time.md): Send each customer a summary at 09:00 local time. A due time per customer in your own table, and one schedule that enqueues what is due
+- [Move a cron job to a schedule](docs/recipes/move-a-cron-job-to-a-schedule.md): Replace a crontab line. A `Schedule` with the same five fields, and a `Location`
+- [Consume from a broker](docs/recipes/consume-from-a-broker.md): Act on Kafka messages without doing the work twice. Enqueue with the message ID as `DedupeKey`
+- [Change a task safely](docs/recipes/change-a-task-safely.md): Change a payload, rename a kind, or move it to another queue. A new kind, in three deploys
+- [Run long tasks](docs/recipes/run-long-tasks.md): Run tasks that take 10 minutes or more. A longer `Timeout` and `DrainTimeout`. Split work that takes hours
+- [Recover from an incident](docs/recipes/recover-from-an-incident.md): Retry 5,000 dead tasks after a fix. Pause the queue, `RetryMatching`, then resume
+- [Split work across services](docs/recipes/split-across-services.md): Run several services, or give work to another one. One schema per service, and a `Client` for the other's schema
+- [One dashboard for many services](docs/recipes/one-dashboard-for-many-services.md): See every service in one admin app. A dashboard in each service. The admin app forwards a path to each
+- [Use your own migration tool](docs/recipes/use-your-migration-tool.md): Use goose, Atlas, or Flyway. Apply `taskmill.Migrations` with your tool
+
+## Run in production
+
+- [Production checklist](docs/production/checklist.md): you prepare to go live
+- [Database](docs/production/database.md): you set up PostgreSQL: roles, isolation level, connections, vacuum, and what happens when it fails
+- [Connection poolers](docs/production/connection-poolers.md): you use PgBouncer, RDS Proxy, Supabase, or Neon
+- [Backups, failover, and replicas](docs/production/backups-and-failover.md): you plan backups, restore one, or fail over to another server
+- [Deploys](docs/production/deploys.md): you ship a new version of your app, or change a task
+- [Kubernetes](docs/production/kubernetes.md): you want manifests to copy
+- [Autoscaling](docs/production/autoscaling.md): you want KEDA to add and remove workers
+- [Capacity planning](docs/production/capacity.md): you estimate workers, connections, and disk
+- [Monitoring](docs/production/monitoring.md): you set up alerts
+- [Security](docs/production/security.md): you protect the dashboard, the database, and the data in your tasks
+- [Troubleshooting](docs/production/troubleshooting.md): something is wrong right now
+- [Upgrading](docs/production/upgrading.md): a new taskmill release is out
+
+## Reference
+
+- [Packages](docs/reference/packages.md): you wonder which package to import
+- [Configuration](docs/reference/configuration.md): you look for the type that holds a setting
+- [Errors](docs/reference/errors.md): you see an error, an `error.type`, or a code in a task's history, and want the identifier that explains it
+- [The `taskmill-ui` command](docs/reference/taskmill-ui.md): you set up the dashboard command or a proxy in front of it, or you link to a dashboard page
+- [Log messages](docs/reference/log-messages.md): you see a log line and want to know what it means and what to do
+- [Metrics and traces](docs/reference/metrics.md): you build a dashboard on taskmill's spans, metrics, and gauges
+- [Fixed timings and limits](docs/reference/defaults-and-limits.md): you need a timing of the workers, the maintainer, or the dashboard that no setting changes
+- [Compatibility](docs/reference/compatibility.md): you want to know what an upgrade may change, which Go and PostgreSQL versions work, or which releases get fixes
+- [Performance](docs/reference/performance.md): you want to know how fast and how light taskmill is, and the limits of those numbers
+
+## How taskmill is built
+
+- [Task lifecycle and guarantees](docs/design/task-lifecycle.md): The contract: every state change, the invariants, and how each guarantee is kept
+- [Storage schema](docs/design/schema.md): The tables and indexes, and the reasoning behind them
+- [Key statements](docs/design/schema-statements.md): The statements that enqueue, fetch, complete, list, and change tasks
+- [FIFO groups and deduplication](docs/design/schema-groups.md): How a group keeps its order, and how a dedupe key admits one task
+- [Maintenance and notifications](docs/design/schema-maintenance.md): What the maintainer runs, how it counts the queues, and how workers are woken
+- [Benchmarks](docs/design/benchmarks.md): The performance targets, how we measure them, and the latest results
+- [Releasing](docs/design/releasing.md): How the project team publishes a version
+- [Writing docs](docs/design/writing-docs.md): The style guide and the page templates
+- [Writing doc comments](docs/design/writing-godoc.md): What a doc comment holds, and how godoc and the pages share the work

@@ -158,7 +158,7 @@ Each fact has one home; other places summarize it in a line and link.
 | Learning, how-to, choices, production | `docs/`, which links to the identifiers on pkg.go.dev |
 | Steps that build one program, with what the reader sees | `docs/tutorial/`. The reasons stay in the guides and concepts |
 | What has no identifier: log lines, metric names, fixed timings, the `taskmill-ui` command, compatibility, performance | `docs/reference/` |
-| Names and links that lead to an identifier or a page | An index: a section's `README.md`, and in `docs/reference/`, Packages, Configuration, and Errors |
+| Names and links that lead to an identifier or a page | An index: a section's `README.md`, `llms.txt`, and in `docs/reference/`, Packages, Configuration, and Errors |
 | What changed, and how to migrate | `CHANGELOG.md` |
 | Why taskmill is built this way | `docs/design/`, `docs/adr/` |
 
@@ -230,7 +230,7 @@ bullets **Cause:**, **Check:**, and **Do:** instead of the table:
 | <The most likely cause> | <Where to look> | <The fix, with a link> |
 ```
 
-A section's `README.md`. Its table may use "I want to…" rows instead:
+A section's `README.md`. "I want to…" rows work too. `llms.txt` is made from the rows:
 
 ```markdown
 # <Section name>

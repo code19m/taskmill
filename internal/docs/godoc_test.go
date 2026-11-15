@@ -38,6 +38,7 @@ var apiDirs = []string{".", "outbox", "ui", "cmd/taskmill-ui", "taskmilltest", "
 type apiPackage struct {
 	dir      string             // its directory in the repository
 	doc      string             // its package comment
+	synopsis string             // the first sentence of the package comment
 	docFile  string             // the file with the package comment
 	names    map[string]bool    // what a link can name after "#": "Client", "Client.Enqueue", "EnqueueOptions.Queue", "example-Client.Cancel"
 	structs  map[string][]field // its exported structs, each with its exported fields
@@ -130,7 +131,7 @@ func parsePackage(repo fs.FS, dir string) (*apiPackage, error) {
 	if err != nil {
 		return nil, err
 	}
-	p.doc = d.Doc
+	p.doc, p.synopsis = d.Doc, d.Synopsis(d.Doc)
 	p.readNames(fset, d)
 	return p, nil
 }

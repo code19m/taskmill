@@ -147,5 +147,6 @@ These pages are for contributors.
 - [API reference](https://pkg.go.dev/github.com/code19m/taskmill) on pkg.go.dev
 - [Shop example](../examples/shop/README.md): most features in one small program
 - [Changelog](../CHANGELOG.md): what changed in each release
+- [llms.txt](../llms.txt): every package and every page in one line each, for tools and AI agents
 
 **Next:** [Get started](start/README.md)

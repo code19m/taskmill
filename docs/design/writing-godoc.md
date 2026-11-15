@@ -86,6 +86,9 @@ A package comment is a map, not a manual. It holds three things:
 2. The five or so identifiers to start from, each with a few words.
 3. Where to read more: the guide, and the documentation home.
 
+The first sentence is also the package's line in `llms.txt`, the index of
+all packages and pages for tools.
+
 A type with many methods maps them the same way. `Client` groups its methods
 by what the caller wants to do: enqueue, read, change tasks, change queues
 and schedules, and change settings.
@@ -115,6 +118,7 @@ when:
 | Field tables | A page has a table of a struct's fields with a column for their type, default, or limits |
 | Indexes | [Configuration](../reference/configuration.md) misses a config struct, or [Errors](../reference/errors.md) misses an error or a code |
 | The command | [The `taskmill-ui` command](../reference/taskmill-ui.md) misses an environment variable that the command reads, or lists one that it does not read |
+| `llms.txt` | The file differs from what the package comments and the rows of the sections' `README.md` files give. It is generated: `go test ./internal/docs/ -run TestLLMs -update` writes it |
 
 The linters check that every exported name has a comment that starts with
 the name and ends with a period.

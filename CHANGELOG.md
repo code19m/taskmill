@@ -14,6 +14,10 @@ All notable changes to taskmill are recorded here. The format follows
   struct, and `outbox.PublisherFunc`. The examples of `Permanent`, `Snooze`,
   `State.CanRetry`, `TaskInfo.ScheduledFor`, and of testing an error now
   show their output.
+- [llms.txt](llms.txt), at the module's root: every package and every page
+  of the docs in one line each, for tools and AI agents. It ships with the
+  module, like the docs, so its paths lead to the pages of the version that
+  you use.
 
 ### Changed
 
