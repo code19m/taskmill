@@ -180,6 +180,10 @@ All notable changes to taskmill are recorded here. The format follows
   value's type. For a handler that panicked with such a value,
   `taskmilltest.Run` returned a nil error, so a test that checked only the
   error passed. It now returns an error for that panic too.
+- A worker that ran no task logged `worker stopping; waiting for running
+  tasks` with `tasks=0` each time it stopped. It now logs that line only
+  when it waits. And `tasks` counts the tasks whose handlers still run: it
+  also counted the finished ones whose results were not recorded yet.
 
 ## [0.6.0] - 2026-11-13
 

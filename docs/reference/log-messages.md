@@ -114,7 +114,7 @@ backticks.
 |---|---|---|---|
 | `worker started` | Info | `Run` started, and reads the queues in `queues`. | Nothing. |
 | `the worker does not serve the default queue of these registered kinds` | Warn | The worker has handlers for `kinds`, but does not read their default queues. Their tasks wait for another worker. | Add the queues to `WorkerConfig.Queues`, or run a worker that reads them. |
-| `worker stopping; waiting for running tasks` | Info | `Run`'s context ended. It waits up to `timeout` for `tasks` running tasks. | Nothing. |
+| `worker stopping; waiting for running tasks` | Info | `Run`'s context ended while `tasks` tasks ran. It waits up to `timeout` for them. A worker that runs no task does not log this line. | Nothing. |
 | `handler ignored shutdown; releasing its task` | Warn | A handler did not return within 5 seconds after its context was canceled. Its task goes back to the queue and runs again. The handler may still be running. | Make the handler return when its context ends. |
 | `worker stopped` | Info | `Run` returned. `released` tasks went back to their queues. | Nothing. |
 | `unregister worker failed` | Warn | The stopped worker could not remove itself from the list of workers. It stays listed, as stale, until the maintainer removes it: after 5 minutes, or twice its `LeaseDuration` if that is longer. | Nothing, unless it repeats: then check the database. |

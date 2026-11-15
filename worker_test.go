@@ -807,6 +807,70 @@ func TestWorkerDrainsRunningTasksOnShutdown(t *testing.T) {
 	}
 }
 
+// A worker that stops says that it waits for running tasks, and for how
+// many, only when it does.
+func TestStoppingWorkerSaysThatItWaitsOnlyWhenTasksRun(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		running int
+		said    []string // the tasks of each line that says that the worker waits
+	}{
+		"an idle worker":                  {0, nil},
+		"a worker with two running tasks": {2, []string{"2"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if said := stopWhileRunning(t, tc.running); !slices.Equal(said, tc.said) {
+				t.Fatalf("the worker said that it waits for %v tasks, want %v", said, tc.said)
+			}
+		})
+	}
+}
+
+// stopWhileRunning stops a worker while its handlers run the given number of
+// tasks, and lets them return once the worker said that it waits for them.
+// It returns the number of tasks that each such line names.
+func stopWhileRunning(t *testing.T, running int) (said []string) {
+	t.Helper()
+	const waiting = "worker stopping; waiting for running tasks"
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	started, release := make(chan struct{}, running), make(chan struct{})
+	stop := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-release
+			return nil
+		}, nil),
+		Queues:       defaultQueue(2),
+		NoMaintainer: true,
+	})
+	for range running {
+		e.enqueue(t, sendEmail{}, nil)
+	}
+	for range running {
+		recv(t, started, "a handler to start")
+	}
+	waitFor(t, "the worker to start", func() bool { return logs.count("worker started") == 1 })
+
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	if running > 0 {
+		waitFor(t, "the worker to say that it waits", func() bool { return logs.count(waiting) > 0 })
+	}
+	close(release)
+	recv(t, stopped, "the worker to stop")
+	for _, r := range logs.all() {
+		if r.Message == waiting {
+			said = append(said, attr(r, "tasks"))
+		}
+	}
+	return said
+}
+
 func TestWorkerReleasesTasksThatOutliveTheDrain(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

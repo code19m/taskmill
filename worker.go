@@ -569,13 +569,10 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 		r.inflight.Wait()
 		close(done)
 	}()
-	select {
-	case <-done:
-		return
-	default:
+	if n := w.runningTasks(); n > 0 {
+		w.logger.LogAttrs(ctx, slog.LevelInfo, "worker stopping; waiting for running tasks",
+			slog.Int(logKeyTasks, n), slog.Duration(logKeyTimeout, w.cfg.DrainTimeout))
 	}
-	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker stopping; waiting for running tasks",
-		slog.Int(logKeyTasks, w.tracking()), slog.Duration(logKeyTimeout, w.cfg.DrainTimeout))
 
 	select {
 	case <-done:
@@ -610,11 +607,19 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 	}
 }
 
-// tracking returns how many attempts the worker tracks.
-func (w *Worker) tracking() int {
+// runningTasks returns how many tasks the handlers of Run are running.
+func (w *Worker) runningTasks() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return len(w.attempts)
+	n := 0
+	for _, t := range w.attempts {
+		t.mu.Lock()
+		if t.state == stateRunning && !t.direct {
+			n++
+		}
+		t.mu.Unlock()
+	}
+	return n
 }
 
 // RunTask runs one task now, in the calling goroutine, the way [Worker.Run]
