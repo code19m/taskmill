@@ -21,29 +21,10 @@ queues, and how notifications and polling wake the workers.
   looks up each old task's halt by its group's key.
 - **The database's clock decides the history's days:** which days need a
   partition, and which partitions have expired, in UTC.
-- **A later pass finishes a drop that failed.** A detach that was
-  interrupted is finished with `DETACH PARTITION ... FINALIZE`. A partition
-  that was detached but not dropped is a table of its own, which the history
-  no longer names. So a pass reads the schema's tables by name.
-- **Retention drops only what it detached itself.** Before a pass detaches a
-  partition, it marks it with `COMMENT ON TABLE`. Of the tables that are no
-  partition, a pass drops only those with that mark. So a partition that an
-  operator detached to keep it, or a copy with such a name, stays. The mark
-  comes first because a crash after it changes nothing, while a table
-  detached without it would stay for good. The comment takes the lock on
-  the partition that the detach takes next anyway (`SHARE UPDATE
-  EXCLUSIVE`), which blocks neither reads nor writes.
-- **A table that cannot be dropped does not stop a pass.** A view may depend
-  on a detached table, or the table may have another owner. The pass keeps
-  the error and continues. It takes its 10 tables in random order, with an
-  interrupted detach first: no state says which tables are stuck, and in a
-  fixed order enough of them would fill every pass. Only a detach that
-  times out ends the detaching of a pass. It waited for the transactions
-  that use the history, which keep every other detach waiting too, and
-  PostgreSQL allows a table one unfinished detach.
-- **A table that is gone is no failure.** While the maintainer's role
-  changes hands, two workers can drop the same detached tables, and one of
-  them comes second. So the drop is `DROP TABLE IF EXISTS`.
+- **Retention drops only the history that it detached.** A pass marks a
+  partition with a comment before it detaches it. It drops a table that is
+  no partition only with that mark, so one that an operator detached stays.
+  A later pass finishes what failed: see [`maintainer.go`](../../maintainer.go).
 - **A failed election try writes nothing.** The upsert proposes its row only
   if no other worker's lease lasts. A conflict would lock the leader's row,
   and make every try of every other worker a write.
@@ -181,9 +162,8 @@ send one, as often as it likes, also a role with no rights on taskmill's
 tables. So a worker changes nothing because of a notification alone, and
 never reads the database where it receives them:
 
-- **`a|` only wakes a fetch,** which reads the tables. A worker whose fetch
-  found nothing lets 20 ms pass before it acts on the next one. The fetches
-  that its own tasks cause do not wait for that, and do not end the wait.
+- **`a|` only wakes a fetch,** which reads the tables. After a fetch that
+  found nothing, the next `a|` waits 20 ms. A worker's own tasks do not.
 - **`c|` and `q|` only mark what they name.** One loop for each then reads
   the truth: the cancel requests in the rows of the marked tasks, by ID and
   lease token, in one statement for all of them, and the queues' settings.
@@ -231,15 +211,6 @@ heartbeats:
 | No heartbeat came for 15 seconds, three missed | Every `PollInterval`, starting right away | About 16 seconds after the last heartbeat. From then on, `PollInterval` |
 | A `MaxRunning` limit blocked the queue's last fetch | Every `PollInterval` | `PollInterval`, when another worker's task made the room: finishing a task sends no notification |
 
-- **A worker's own completions wake its fetch.** A slot is free as soon as
-  its handler returns, but the completer records the result a few
-  milliseconds later, in a batch. A fetch in between still counts the task
-  as running, so a queue at its `MaxRunning` limit looks full, and it finds
-  the next task of a FIFO group still `pending`. So each committed batch
-  wakes the fetch of such a queue once more. The queue runs at its limit
-  without a poll, and a group's tasks follow each other without waiting for
-  a notification
-  ([FIFO groups](schema-groups.md#fifo-groups)).
 - **While heartbeats arrive,** notifications reach the worker, and the
   maintainer wakes every queue whose task waits. The poll once a minute only
   bounds the harm of a fault in either. So idle workers cost little, however
@@ -252,8 +223,7 @@ heartbeats:
   `r|`, and another worker takes over and sends its heartbeat.
 - **A new connection makes every queue fetch right away,** since
   notifications may have been missed meanwhile. The worker also reads its
-  queues' settings again then: a pause may have come while it did not
-  listen, as when it starts or reconnects.
+  queues' settings again then: it may have missed a pause.
 
 ### The notification connection
 
