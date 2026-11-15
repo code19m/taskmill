@@ -1,12 +1,10 @@
 package taskmill
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -329,9 +327,8 @@ type rescuedTask struct {
 	attempt                   int
 }
 
-// collectRescued reads the tasks that a rescue changed, in a fixed order of
-// queue and group: updating their groups in that order cannot deadlock with
-// completions, which use the same order.
+// collectRescued reads the tasks that a rescue changed. The rescue statement
+// holds their groups' rows, so their order does not matter.
 func collectRescued(r rows) ([]rescuedTask, error) {
 	defer r.Close()
 	var out []rescuedTask
@@ -342,9 +339,6 @@ func collectRescued(r rows) ([]rescuedTask, error) {
 		}
 		out = append(out, x)
 	}
-	slices.SortFunc(out, func(a, b rescuedTask) int {
-		return cmp.Or(cmp.Compare(a.queue, b.queue), cmp.Compare(a.group, b.group), cmp.Compare(a.id, b.id))
-	})
 	return out, r.Err()
 }
 

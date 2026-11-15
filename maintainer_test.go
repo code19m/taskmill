@@ -108,7 +108,7 @@ func TestMaintenanceDoesNotWaitForHeldGroups(t *testing.T) {
 // A rescue ends the attempts of a lost worker for many groups in one
 // transaction. A head that ends dead halts its group, and one that ends
 // canceled leaves it to the next task.
-func TestRescueKeepsGroupsInOrder(t *testing.T) {
+func TestRescueHaltsOrLeavesTheGroupsOfItsTasks(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	// Two groups whose heads ran on a worker that is gone: one head on its
@@ -130,13 +130,13 @@ func TestRescueKeepsGroupsInOrder(t *testing.T) {
 	behindBoth := e.insertTask(t, `state = 'pending', group_key = 'both'`)
 	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
 	           VALUES ('default', 'both', 3, $1, now())`, named)
-	runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	taskmill.Rescue(t.Context(), newWorker(t, e, &taskmill.WorkerConfig{}))
 
-	e.waitState(t, deadHead, taskmill.StateDead)
-	e.waitState(t, canceledHead, taskmill.StateCanceled)
-	e.waitState(t, behindCanceled, taskmill.StateAvailable)
-	e.waitState(t, behindBoth, taskmill.StateAvailable)
-	e.wantState(t, behindDead, taskmill.StatePending)
+	wantStates(t, e, map[int64]taskmill.State{
+		deadHead: taskmill.StateDead, behindDead: taskmill.StatePending,
+		canceledHead: taskmill.StateCanceled, behindCanceled: taskmill.StateAvailable,
+		named: taskmill.StateCanceled, behindBoth: taskmill.StateAvailable,
+	})
 	if n := e.count(t, "SELECT count(*) FROM {s}.groups WHERE group_key = 'dies' AND halted_task_id = $1", deadHead); n != 1 {
 		t.Error("the dead head does not halt its group")
 	}
