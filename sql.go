@@ -439,10 +439,14 @@ UPDATE {s}.groups SET halted_task_id = $3, halted_at = now(), updated_at = now()
 WHERE queue = $1 AND group_key = $2`),
 
 		// decrementGroup removes one task from a group's count, locking the
-		// group's row; if that task was the halting head, the halt ends.
+		// group's row; if that task was the halting head, the halt ends. The
+		// count stops at zero. Only a row that taskmill did not write counts
+		// fewer tasks than its group holds, and a count below zero breaks the
+		// table's rule: the error would fail the caller's transaction, which
+		// in a rescue ends the expired leases of every queue.
 		decrementGroup: q(`
 UPDATE {s}.groups
-SET tasks = tasks - 1,
+SET tasks = greatest(tasks - 1, 0),
     halted_task_id = CASE WHEN halted_task_id = $3 THEN NULL ELSE halted_task_id END,
     halted_at = CASE WHEN halted_task_id = $3 THEN NULL ELSE halted_at END,
     updated_at = now()
@@ -509,10 +513,12 @@ WHERE {leased}`),
 
 		// recountGroups adds $3, which is negative for tasks that left, to the
 		// counts of groups ($1, $2). The caller holds the groups' locks, and
-		// has ended the halts of halting heads that left.
+		// has ended the halts of halting heads that left. A count stops at
+		// zero, as in decrementGroup: here the error would fail the
+		// completion of the tasks of every other group in the batch.
 		recountGroups: q(`
 UPDATE {s}.groups g
-SET tasks = g.tasks + u.n, updated_at = now()
+SET tasks = greatest(g.tasks + u.n, 0), updated_at = now()
 FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
 WHERE g.queue = u.queue AND g.group_key = u.group_key
 RETURNING g.queue, g.group_key, g.tasks, g.halted_task_id IS NOT NULL`),

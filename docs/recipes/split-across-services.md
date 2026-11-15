@@ -95,7 +95,9 @@ first.
 
   Billing still trusts the orders service. The role can enqueue any task, in
   any number, into any queue and FIFO group. It can also change the rows of
-  `groups` and `dedupe_keys`, and so stop a FIFO group or block a dedupe key.
+  `groups` and `dedupe_keys`. A wrong count stops that FIFO group, or breaks
+  its order: the other groups run as before. A changed key blocks a dedupe
+  key, or admits a duplicate.
 
   These tables are internal, so a later release may need more: a table, or a
   column of `tasks`. The error `permission denied for table …` then names

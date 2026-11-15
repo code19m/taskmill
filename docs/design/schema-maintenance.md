@@ -113,6 +113,7 @@ queues, and must not fail for all of them.
 | A `lease_token` at the largest integer | The fetch counts no further, and the worker makes the task dead with `invalid_row` |
 | No attempt left, while it waits in a queue | The fetch counts the attempt up to the maximum, so the task runs once more |
 | A `workers` row with a lease that no worker writes | It counts as a row without a lease |
+| A `groups` row that counts fewer tasks than its group holds | The statements that take a task out of the group count down to zero, not below, so they succeed for the other groups of their batch. This group can lose its order, or keep tasks pending |
 
 - **A fetched row always becomes an attempt.** If one row failed the read,
   the worker would lose every task that the statement leased with it. An

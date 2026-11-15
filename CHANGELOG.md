@@ -115,6 +115,14 @@ All notable changes to taskmill are recorded here. The format follows
   `REVOKE INSERT ON billing.tasks FROM orders`, with your names, and then
   the new `GRANT` of the recipe. A role with `INSERT` on the whole table
   stays trusted, as [Security](docs/production/security.md) now says.
+- A FIFO group whose row counts fewer tasks than the group holds no longer
+  fails the work of other groups. A role with `UPDATE` on `groups`, which a
+  role that only enqueues has, can write such a count. When a task then
+  left the group, its count fell below zero, which the table refuses. So
+  the completion of every grouped task in the same batch failed, and those
+  tasks ran again after their leases expired. If the maintainer's rescue
+  ended such a task, the rescue failed for every queue. The count now stops
+  at zero, and only that group can lose its order.
 
 ## [0.6.0] - 2026-11-13
 

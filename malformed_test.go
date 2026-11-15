@@ -134,10 +134,8 @@ func TestErrorsThatAreNotAnArrayCountAsNone(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	failing := e.insertTask(t, `errors = '{}', max_attempts = 1`)
-	const leased = `state = 'running', attempt = 1, lease_token = 1, attempted_at = now(),
-	                lease_expires_at = now() - interval '1 second', queue = `
-	lost := e.insertTask(t, leased+`'billing', errors = '"gone"'`)
-	other := e.insertTask(t, leased+`'reports'`)
+	lost := e.insertTask(t, expiredLease+`, queue = 'billing', errors = '"gone"'`)
+	other := e.insertTask(t, expiredLease+`, queue = 'reports'`)
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return errors.New("no") }, nil),
 		Queues:   defaultQueue(10),
@@ -215,6 +213,69 @@ func TestStatisticsCountBesideAnInfiniteRunTime(t *testing.T) {
 		})
 	}
 }
+
+// A role that only enqueues may change the rows of groups. A count that it
+// set too low must fail no statement that takes a task out of its group: a
+// completion ends the tasks of many groups in one transaction, and a rescue
+// the expired leases of every queue.
+func TestGroupCountThatIsTooLowFailsNoOtherGroup(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a completion", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t)
+		e.rawGroups = true // one group's count is wrong on purpose
+		var ids []int64
+		for _, group := range []string{"spoiled", "a", "b", "c", "d", "e"} {
+			ids = append(ids, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: group}))
+		}
+		e.exec(t, "UPDATE {s}.groups SET tasks = 0 WHERE group_key = 'spoiled'")
+
+		// The handlers return together, so that one transaction completes
+		// the tasks of every group.
+		var runs atomic.Int64
+		together := make(chan struct{})
+		runWorker(t, e, &taskmill.WorkerConfig{
+			Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+				if runs.Add(1) == int64(len(ids)) {
+					close(together)
+				}
+				<-together
+				return nil
+			}, nil),
+			Queues:        defaultQueue(10),
+			LeaseDuration: 2 * time.Second,
+		})
+		for _, id := range ids {
+			e.waitState(t, id, taskmill.StateCompleted)
+		}
+		if n := runs.Load(); n != int64(len(ids)) {
+			t.Errorf("the handler ran %d times for %d tasks", n, len(ids))
+		}
+	})
+
+	t.Run("a rescue", func(t *testing.T) {
+		t.Parallel()
+		e := newEnv(t)
+		e.rawGroups = true
+		// A canceled task of the group, whose worker is gone: the rescue
+		// ends it, which takes it out of its group.
+		canceled := e.insertTask(t, expiredLease+`, group_key = 'spoiled', cancel_requested_at = now()`)
+		e.exec(t, "INSERT INTO {s}.groups (queue, group_key, tasks) VALUES ('default', 'spoiled', 0)")
+		lost := e.insertTask(t, expiredLease+`, queue = 'reports'`)
+		runWorker(t, e, &taskmill.WorkerConfig{})
+
+		e.waitState(t, canceled, taskmill.StateCanceled)
+		waitFor(t, "the expired lease of another queue to be rescued", func() bool {
+			return e.get(t, lost).State != taskmill.StateRunning
+		})
+	})
+}
+
+// expiredLease is the SET clause that makes a task of insertTask one whose
+// worker is gone: it runs, and its lease has expired.
+const expiredLease = `state = 'running', attempt = 1, lease_token = 1, attempted_at = now(),
+	lease_expires_at = now() - interval '1 second'`
 
 // countedQueue waits until the maintainer has counted the queue, and returns
 // it with its statistics.
