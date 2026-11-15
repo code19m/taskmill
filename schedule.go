@@ -206,11 +206,17 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 	}
 	opts.Queue = cmp.Or(opts.Queue, DefaultQueue)
 	c := compiledSchedule{Schedule: s, expr: expr, opts: opts}
-	// Check the task as a run enqueues it: with taskmill's own metadata, at
-	// its longest.
-	run := resolvedTask{meta: opts.Metadata, own: c.ownMetadata(longestScheduledFor)}
-	opts.Metadata = run.metadata()
-	if err := checkScheduledTask(s.Args, opts); err != nil {
+	// Check the task as a run enqueues it, so that a mistake fails NewWorker
+	// and not every run. A run sets its own run time and dedupe window over
+	// those of the kind's defaults, so the check sets valid ones too. And a
+	// run stores taskmill's own metadata, which is checked at its longest.
+	opts.RunAt, opts.DedupeWindow = time.Now(), defaultDedupeWindow
+	run, err := resolve(EnqueueParams{Args: s.Args, Options: &opts})
+	if err == nil {
+		run.own = c.ownMetadata(longestScheduledFor)
+		_, err = encodeMetadata(run.metadata())
+	}
+	if err != nil {
 		return compiledSchedule{}, fmt.Errorf("%w (schedule %q)", err, s.Name)
 	}
 	return c, nil
@@ -234,30 +240,6 @@ func (s *compiledSchedule) scheduledFor(at time.Time) string {
 // over the metadata of the schedule's task.
 func (s *compiledSchedule) ownMetadata(scheduledFor string) map[string]string {
 	return map[string]string{MetadataSchedule: s.Name, MetadataScheduledFor: scheduledFor}
-}
-
-// checkScheduledTask validates the task that a schedule enqueues, so that a
-// mistake fails NewWorker instead of every run.
-func checkScheduledTask(args Args, opts EnqueueOptions) error {
-	kind := args.Kind()
-	if err := checkName("kind", kind, maxNameLength); err != nil {
-		return err
-	}
-	t := resolvedTask{
-		queue:       opts.Queue,
-		kind:        kind,
-		group:       opts.GroupKey,
-		priority:    cmp.Or(opts.Priority, PriorityNormal),
-		maxAttempts: cmp.Or(opts.MaxAttempts, defaultMaxAttempts),
-	}
-	if err := t.validate(); err != nil {
-		return err
-	}
-	if _, err := encodeMetadata(opts.Metadata); err != nil {
-		return err
-	}
-	_, err := encodePayload(kind, args)
-	return err
 }
 
 // scheduleState is a schedule's row in the database.
