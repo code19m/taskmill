@@ -64,29 +64,23 @@ func (c *Client) Activity(ctx context.Context, params *ActivityParams) ([]Activi
 		return nil, err
 	}
 	var out []Activity
-	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
-			return err
-		}
-		r, err := tx.Query(ctx, c.sql.activity, p.Since, time.Now().Add(time.Minute), int64(p.Step/time.Second), queues)
+	args := []any{p.Since, time.Now().Add(time.Minute), int64(p.Step / time.Second), queues}
+	err = c.readAlone(ctx, activitySettings, c.sql.activity, args, func(r pgx.Rows) error {
+		a, err := scanActivity(r)
 		if err != nil {
 			return err
 		}
-		defer r.Close()
-		for r.Next() {
-			a, err := scanActivity(r)
-			if err != nil {
-				return err
-			}
-			out = append(out, a)
-		}
-		return r.Err()
+		out = append(out, a)
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: activity: %w", err)
 	}
 	return out, nil
 }
+
+// activitySettings start the read of the activity, and bound it.
+const activitySettings = `SELECT set_config('statement_timeout', '` + listTimeout + `', true)`
 
 // activityParams applies the defaults to params and checks them. It returns
 // the queues as a slice that is never nil: NULL would match nothing.

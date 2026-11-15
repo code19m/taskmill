@@ -213,24 +213,15 @@ func (c *Client) Count(ctx context.Context, filter *TaskFilter) (*TaskCounts, er
 		states = append(states, string(StateCompleted))
 	}
 	out := &TaskCounts{States: make(map[State]TaskCount, len(states))}
-	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, countSettings); err != nil {
+	args := []any{m.queues, m.kinds, m.groups, states}
+	err = c.readAlone(ctx, countSettings, c.sql.countTasks, args, func(r pgx.Rows) error {
+		var state string
+		var n, unflagged int64
+		if err := r.Scan(&state, &n, &unflagged); err != nil {
 			return err
 		}
-		r, err := tx.Query(ctx, c.sql.countTasks, m.queues, m.kinds, m.groups, states)
-		if err != nil {
-			return err
-		}
-		defer r.Close()
-		for r.Next() {
-			var state string
-			var n, unflagged int64
-			if err := r.Scan(&state, &n, &unflagged); err != nil {
-				return err
-			}
-			out.add(State(state), n, unflagged)
-		}
-		return r.Err()
+		out.add(State(state), n, unflagged)
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: count tasks: %w", err)

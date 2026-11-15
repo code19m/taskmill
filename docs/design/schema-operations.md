@@ -42,6 +42,17 @@ branches of the states not counted. Sequential and bitmap scans are off for
 it, so each branch reads the index of its state and stops at its cap. A
 count by kind or FIFO group alone still reads every task of each state.
 
+**Each read is one round trip.** `List`, `Count`, `Groups`, and `Activity`
+send their settings and their statement as one batch. PostgreSQL runs a
+batch as one transaction, so the time limit and the plan settings end with
+it. The batch has no `BEGIN`: with one, a read that runs out of time would
+leave a failed transaction open, and the pool closes such a connection.
+`Queues` sends its two statements the same way. A dashboard page makes one
+round trip for each thing it shows: the overview 5, and the task list 2. A
+connection that sends a statement for the first time prepares it in a round
+trip before the batch, outside the time limit: only a lock on a whole table
+makes that step wait.
+
 ## Operator actions
 
 - **Cancel** cancels a waiting task right away, and flags a running one with

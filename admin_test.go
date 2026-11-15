@@ -16,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
 )
@@ -772,6 +775,86 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	}
 }
 
+// Each read of the operations API is one round trip to the database, also
+// those that run in a transaction of their own, with a time limit and plan
+// settings: a dashboard far from its database makes several per page.
+func TestReadsTakeOneRoundTrip(t *testing.T) {
+	t.Parallel()
+	trips := &roundTrips{}
+	e := newTracedEnv(t, trips)
+	ctx := t.Context()
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	for name, read := range map[string]func() error{
+		"Get":       func() error { _, err := e.client.Get(ctx, id); return err },
+		"List":      func() error { _, err := e.client.List(ctx, nil); return err },
+		"Count":     func() error { _, err := e.client.Count(ctx, nil); return err },
+		"Groups":    func() error { _, err := e.client.Groups(ctx, nil); return err },
+		"Queues":    func() error { _, err := e.client.Queues(ctx); return err },
+		"Activity":  func() error { _, err := e.client.Activity(ctx, nil); return err },
+		"Settings":  func() error { _, err := e.client.Settings(ctx); return err },
+		"Workers":   func() error { _, err := e.client.Workers(ctx); return err },
+		"Schedules": func() error { _, err := e.client.Schedules(ctx); return err },
+	} {
+		before := trips.n.Load()
+		if err := read(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if n := trips.n.Load() - before; n != 1 {
+			t.Errorf("%s made %d round trips to the database, want 1", name, n)
+		}
+	}
+}
+
+// A read with a time limit sets it in the round trip that carries its
+// statement. The limit must hold for that statement, and end with it: the
+// connection goes back to the pool for statements that have no limit, also
+// after a read that ran out of time. A pool that had to replace the
+// connection of each such read would open a new one for every slow page of
+// the dashboard.
+func TestReadSettingsHoldForTheReadOnly(t *testing.T) {
+	t.Parallel()
+	trips := &roundTrips{}
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = trips
+	cfg.MaxConns = 1 // every statement of the test uses the one connection
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	e := newEnvWith(t, pool, nil)
+	ctx := t.Context()
+	const brief = "SELECT set_config('statement_timeout', '50ms', true)"
+
+	before := trips.n.Load()
+	got, err := taskmill.ReadAlone(ctx, e.client, brief, "SELECT current_setting('statement_timeout')")
+	if err != nil || !slices.Equal(got, []string{"50ms"}) {
+		t.Fatalf("the statement ran with a time limit of %v, %v; want 50ms", got, err)
+	}
+	if n := trips.n.Load() - before; n != 1 {
+		t.Errorf("the read made %d round trips, want 1", n)
+	}
+	unlimited := func(after string) {
+		t.Helper()
+		if n := e.count(t, "SELECT count(*) FROM pg_sleep(0.1)"); n != 1 {
+			t.Fatalf("a statement %s did not run", after)
+		}
+	}
+	unlimited("after the read")
+	opened := pool.Stat().NewConnsCount()
+	_, err = taskmill.ReadAlone(ctx, e.client, brief, "SELECT pg_sleep(30)::text")
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "57014" { // query_canceled
+		t.Fatalf("a statement past its time limit: got %v, want it canceled", err)
+	}
+	unlimited("after the read that was canceled")
+	if n := pool.Stat().NewConnsCount() - opened; n != 0 {
+		t.Errorf("the pool opened %d connections after the canceled read, want it to use the same one again", n)
+	}
+}
+
 func ids(tasks []taskmill.TaskInfo) []int64 {
 	out := make([]int64, len(tasks))
 	for i, t := range tasks {
@@ -835,6 +918,12 @@ func TestGroups(t *testing.T) {
 		if !slices.Equal(got, c.want) {
 			t.Fatalf("%+v: got %+v, want %+v", c.params, got, c.want)
 		}
+	}
+	// A page without groups is an empty list, not nil: a caller that encodes
+	// it as JSON has always got [] for it.
+	none, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Search: "no-such-group"})
+	if err != nil || none.Groups == nil || len(none.Groups) != 0 || none.Next != "" {
+		t.Fatalf("no groups: got %#v, %v; want an empty list that is not nil", none, err)
 	}
 	for _, params := range []taskmill.GroupParams{{Limit: -1}, {Cursor: "%%%"}, {Cursor: "b25seS1vbmU"}} { // "only-one"
 		if _, err := e.client.Groups(t.Context(), &params); !errors.Is(err, taskmill.ErrInvalidArgument) {

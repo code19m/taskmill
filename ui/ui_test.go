@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -607,15 +608,39 @@ func (c countingConn) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// roundTrips counts the round trips that a pool's connections make to the
+// database: each statement sent alone, and each batch. It leaves out the
+// round trip in which a connection first prepares the statements of a batch.
+type roundTrips struct {
+	n atomic.Int64
+}
+
+func (r *roundTrips) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	r.n.Add(1)
+	return ctx
+}
+
+func (*roundTrips) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (r *roundTrips) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	r.n.Add(1)
+	return ctx
+}
+
+func (*roundTrips) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+
+func (*roundTrips) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
+
 // setupCounting is setupDB with a pool of its own, which counts the bytes
-// that its connections read from the database.
-func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, schema string, read *atomic.Int64) {
+// that its connections read from the database, and their round trips.
+func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, schema string, read *atomic.Int64, trips *roundTrips) {
 	t.Helper()
 	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	read = new(atomic.Int64)
+	read, trips = new(atomic.Int64), &roundTrips{}
+	cfg.ConnConfig.Tracer = trips
 	cfg.ConnConfig.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
 		return countingConn{Conn: conn, read: read}, err
@@ -631,7 +656,7 @@ func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, s
 	if client, err = taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema}); err != nil {
 		t.Fatal(err)
 	}
-	return client, pool, schema, read
+	return client, pool, schema, read, trips
 }
 
 // The task list shows no payload and no metadata, and one line of each
@@ -642,7 +667,7 @@ func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, s
 // not read those tasks in full either.
 func TestTaskPagesReadNoPayloadsTheyDoNotShow(t *testing.T) {
 	t.Parallel()
-	client, pool, schema, read := setupCounting(t)
+	client, pool, schema, read, _ := setupCounting(t)
 	ctx := t.Context()
 	const page, payload = 50, 100 << 10
 	params := make([]taskmill.EnqueueParams, page)
@@ -691,6 +716,53 @@ func TestTaskPagesReadNoPayloadsTheyDoNotShow(t *testing.T) {
 		t.Logf("%s read %d bytes from the database beyond the task it shows in full", tt.target, got)
 		if got > limit {
 			t.Errorf("%s read %d bytes from the database, want at most %d: it reads what it does not show", tt.target, got, limit)
+		}
+	}
+}
+
+// A page asks the database as few times as it has things to show: each read
+// of the client is one round trip, also those with a time limit of their
+// own. It matters for a dashboard far from its database, whose pages
+// refresh every 5 seconds.
+func TestPagesMakeFewRoundTrips(t *testing.T) {
+	t.Parallel()
+	client, pool, schema, _, trips := setupCounting(t)
+	ctx := t.Context()
+	// One enqueue for the three tasks: the client sends a later notification
+	// for enqueues that follow each other closely, and that would count.
+	grouped := taskmill.EnqueueParams{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}}
+	res, err := client.EnqueueMany(ctx, []taskmill.EnqueueParams{grouped, grouped, grouped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []int64{res[0].ID, res[1].ID, res[2].ID}
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.groups SET halted_task_id = $1, halted_at = now()`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+	get(t, h, "/tasks") // reads the filters' choices, which the next pages reuse
+
+	for _, tt := range []struct {
+		target string
+		want   int64
+		reads  string
+	}{
+		{"/", 5, "the queues, the workers, the schedules, the settings, and the activity"},
+		{"/tasks", 2, "the tasks, and the queues"},
+		{"/tasks/" + strconv.FormatInt(ids[0], 10), 3, "the task, the count of the tasks behind it, and the queues"},
+		{"/tasks/" + strconv.FormatInt(ids[1], 10), 3, "the task, the task ahead of it, and the queues"},
+		{"/tasks/bulk/retry?state=dead", 2, "the count, and the queues"},
+		{"/schedules", 2, "the schedules, and the queues"},
+	} {
+		before := trips.n.Load()
+		if code, _, _ := get(t, h, tt.target); code != http.StatusOK {
+			t.Fatalf("%s: %d", tt.target, code)
+		}
+		if n := trips.n.Load() - before; n > tt.want {
+			t.Errorf("%s made %d round trips to the database, want at most %d: %s", tt.target, n, tt.want, tt.reads)
 		}
 	}
 }

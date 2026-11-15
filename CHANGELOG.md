@@ -68,6 +68,14 @@ All notable changes to taskmill are recorded here. The format follows
 - The migration also drops the index `schedules_due_idx`. No statement read
   it: each one finds its schedules by name. Every run of a schedule had to
   update it.
+- Each read of the operations API is one round trip to the database.
+  `List` made 5, `Count`, `Groups`, and `Activity` 4 each, and `Queues` 2:
+  they sent `BEGIN`, their settings, the statement, and `COMMIT` one by
+  one. Now they send the settings and the statement as one batch, which
+  PostgreSQL runs as one transaction. The results are the same. A
+  dashboard far from its database gains most: its overview makes 5 round
+  trips where it made 9, its task list 2 where it made 7, and a task's page
+  3 at most where it made 8.
 
 ### Fixed
 
