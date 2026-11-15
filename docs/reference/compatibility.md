@@ -38,6 +38,11 @@ From v1.0.0 on, this is the promise:
   `EnqueueMiddleware`, and `outbox.PublisherFunc`.
 - **Config structs only get new fields whose zero value keeps the old
   behavior.**
+- **Result types have no JSON tags, and get none.** `TaskInfo`, `QueueInfo`,
+  and the other types that `Client` returns are Go values, not a format for
+  the network. `encoding/json` writes them with their field names as keys
+  and a duration in nanoseconds, and a new field adds a key. To send a
+  result to another program, encode a type of your own.
 - **Names that are stored, or that your code compares, never change:**
   - the `State` values, such as `available` and `dead`, and no state is added
     within v1;

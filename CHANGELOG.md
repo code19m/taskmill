@@ -7,6 +7,23 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `AttemptError` has no JSON tags any more, like every other
+  type that `Client` returns. If you encode a `TaskInfo` with
+  `encoding/json`, the keys of each entry of its `Errors` change:
+  `attempt`, `at`, `message`, and `code` are now `Attempt`, `At`,
+  `Message`, and `Code`, and `Code` is written when it is empty too. No
+  build fails, so look for each place where a task leaves your program as
+  JSON, such as an admin endpoint that a page or a script reads. To
+  migrate, encode a type of your own there, with the keys that your readers
+  expect, as the recipe
+  [One dashboard for many services](docs/recipes/one-dashboard-for-many-services.md)
+  now does. Go code that decodes that JSON into `AttemptError` needs no
+  change. The result types are Go values, not a format for the network, and
+  get no JSON tags: see [Compatibility](docs/reference/compatibility.md).
+  The stored tasks do not change.
+
 ### Removed
 
 - **Breaking:** `PgxQuerier` no longer has `QueryRow`, and `SQLQuerier` no

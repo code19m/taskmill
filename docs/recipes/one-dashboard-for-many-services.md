@@ -85,6 +85,14 @@ For one page of key numbers, let each service report its queues, and show
 them together in the admin app:
 
 ```go
+// queueReport is the JSON that the admin app reads: your names, your units.
+type queueReport struct {
+    Queue      string  `json:"queue"`
+    Available  int64   `json:"available"`
+    Dead       int64   `json:"dead"`
+    LagSeconds float64 `json:"lag_seconds"`
+}
+
 // In each service, on its internal address.
 mux.HandleFunc("GET /internal/queues", func(w http.ResponseWriter, r *http.Request) {
     queues, err := client.Queues(r.Context())
@@ -92,9 +100,25 @@ mux.HandleFunc("GET /internal/queues", func(w http.ResponseWriter, r *http.Reque
         http.Error(w, "list queues failed", http.StatusServiceUnavailable)
         return
     }
-    _ = json.NewEncoder(w).Encode(queues) // counts per state, and lag
+    report := make([]queueReport, len(queues))
+    for i, q := range queues {
+        report[i] = queueReport{
+            Queue:      q.Name,
+            Available:  q.Counts[taskmill.StateAvailable].N,
+            Dead:       q.Counts[taskmill.StateDead].N,
+            LagSeconds: q.Lag.Seconds(),
+        }
+    }
+    _ = json.NewEncoder(w).Encode(report)
 })
 ```
+
+Send a type of your own, as `queueReport` here, and not the `QueueInfo`
+values themselves. taskmill's types are Go values, with
+[no JSON tags](../reference/compatibility.md). Encoded as they are, `Lag` is
+a number of nanoseconds, and a later release adds a key with each new field.
+With your own type, the admin app reads the same JSON from every service,
+whatever taskmill version the service runs.
 
 ## Other options
 

@@ -2,16 +2,18 @@ package taskmill_test
 
 // Tests of what docs/reference/compatibility.md promises never to change:
 // the names that the database stores, or that the code of applications
-// compares, and the interfaces that applications implement. Each test writes
-// the values out, because a test that compares a constant with itself passes
-// after any rename. A failure here is a breaking change: it needs a new major
-// version, not a new value in the test.
+// compares, the interfaces that applications implement, and the keys that
+// results have when applications encode them. Each test writes the values
+// out, because a test that compares a constant with itself passes after any
+// rename. A failure here is a breaking change: it needs a new major version,
+// not a new value in the test.
 
 import (
 	"context"
 	"database/sql"
 	"errors"
 	"maps"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -94,6 +96,77 @@ type textEmail struct {
 }
 
 func (textEmail) Kind() string { return sendEmail{}.Kind() }
+
+// An entry of a task's error history is stored as a JSON object. No type of
+// the API carries its names: taskmill reads them into a type of its own.
+func TestStoredErrorNamesNeverChange(t *testing.T) {
+	t.Parallel()
+	const breaks = promised + "the previous release's code works on this release's schema: the tasks of every release " +
+		"store their error history under these names, so TaskInfo.Errors would lose what earlier releases recorded, " +
+		"and the previous release would not read this one's entries during a rolling deploy"
+	e := newEnv(t)
+
+	// As every release so far stored it.
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	stored := e.insertTask(t, `errors = '[{"attempt": 3, "at": "2026-01-02T03:04:05Z", "message": "smtp is down", "code": "timeout"}]'`)
+	if got := e.get(t, stored).Errors; len(got) != 1 || got[0].Attempt != 3 || !got[0].At.Equal(at) ||
+		got[0].Message != "smtp is down" || got[0].Code != taskmill.CodeTimeout {
+		t.Errorf(`the stored entry reads as %+v, want attempt 3 at %s with the message "smtp is down" and the code "timeout". %s`,
+			got, at, breaks)
+	}
+
+	// As this release stores it: an entry that taskmill records has a code.
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()})
+	failed := e.enqueue(t, textEmail{UserID: "not a number"}, nil)
+	if _, err := w.RunTask(t.Context(), failed); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	err := e.pool.QueryRow(t.Context(),
+		"SELECT array(SELECT jsonb_object_keys(errors -> 0) ORDER BY 1) FROM "+e.schema+".tasks WHERE id = $1", failed).Scan(&names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"at", "attempt", "code", "message"}; !slices.Equal(names, want) {
+		t.Errorf("a failed attempt is stored under the names %q, want %q. %s", names, want, breaks)
+	}
+}
+
+// What encoding/json makes of a result is Go's default, for good. gorelease
+// does not see a struct tag, so this test does.
+func TestResultTypesGetNoStructTags(t *testing.T) {
+	t.Parallel()
+	client := reflect.TypeFor[*taskmill.Client]()
+	seen := make(map[reflect.Type]bool)
+	var walk func(typ reflect.Type)
+	walk = func(typ reflect.Type) {
+		for slices.Contains([]reflect.Kind{reflect.Pointer, reflect.Slice, reflect.Map}, typ.Kind()) {
+			typ = typ.Elem()
+		}
+		if typ.Kind() != reflect.Struct || typ.PkgPath() != client.Elem().PkgPath() || seen[typ] {
+			return
+		}
+		seen[typ] = true
+		for f := range typ.Fields() {
+			// No encoder reads a field that is not exported.
+			if f.IsExported() && f.Tag != "" {
+				t.Errorf("%s.%s has the struct tag %q. %sthe types that Client returns have no JSON tags, and get none: "+
+					"a tag renames a key for every application that encodes the type", typ.Name(), f.Name, f.Tag, promised)
+			}
+			walk(f.Type)
+		}
+	}
+	// The result types are those that a method of Client returns, and the
+	// types of their fields.
+	for method := range client.Methods() {
+		for result := range method.Type.Outs() {
+			walk(result)
+		}
+	}
+	if !seen[reflect.TypeFor[taskmill.AttemptError]()] {
+		t.Fatal("the walk did not reach AttemptError, which Client.Get returns in TaskInfo.Errors: it checks nothing")
+	}
+}
 
 func TestErrorClassesNeverChange(t *testing.T) {
 	t.Parallel()
