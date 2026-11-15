@@ -144,6 +144,15 @@ All notable changes to taskmill are recorded here. The format follows
   A worker whose fetch after a notification found nothing still lets 20
   milliseconds pass before it acts on the next notification, but the
   fetches that its own tasks cause no longer wait for that.
+- A worker that could not read the settings of its queues when it started
+  ran the tasks of paused queues, and ignored `MaxRunning`, for up to 10
+  seconds: until its next read. A worker now takes no task before it has
+  read those settings. If the read fails, the worker logs `operation
+  failed` for `load queue settings`, and reads again after 0.1 seconds,
+  then waiting twice as long each time, up to 10 seconds. That read had no
+  time limit either, so a database that did not answer it kept the worker
+  from starting: no check-in, no maintainer, no fetch. Each read now ends
+  after 10 seconds, and it no longer delays the rest of the start.
 
 ## [0.6.0] - 2026-11-13
 

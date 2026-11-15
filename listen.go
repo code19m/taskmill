@@ -12,32 +12,48 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// settingsLoop reloads the installation-wide settings of the worker's queues.
+// settingsRetry is the first wait before the worker reads the settings of
+// its queues again while it knows none.
+const settingsRetry = 100 * time.Millisecond
+
+// settingsLoop loads the installation-wide settings of the worker's queues
+// when the worker starts, and again every settings interval. Until a load
+// succeeds, the queues fetch nothing (see Run), so it tries again sooner:
+// after settingsRetry, then waiting twice as long each time, up to the
+// interval.
 func (w *Worker) settingsLoop(ctx context.Context) {
-	tick := time.NewTicker(w.timing.settings)
-	defer tick.Stop()
+	known, wait := false, settingsRetry
 	for {
+		if known = w.refreshQueueSettings(ctx) || known; known {
+			wait = w.timing.settings
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
-			w.refreshQueueSettings(ctx)
+		case <-time.After(wait):
 		}
+		wait = min(2*wait, w.timing.settings)
 	}
 }
 
-func (w *Worker) refreshQueueSettings(ctx context.Context) {
+// refreshQueueSettings reads the settings of the worker's queues and applies
+// them. It reports whether it could: if not, the queues keep what they had.
+// The read may take as long as the settings interval, after which the next
+// one is due.
+func (w *Worker) refreshQueueSettings(ctx context.Context) bool {
 	if len(w.queues) == 0 {
-		return
+		return true
 	}
 	names := make([]string, 0, len(w.queues))
 	for name := range w.queues {
 		names = append(names, name)
 	}
-	settings, err := w.loadQueueSettings(ctx, names)
+	readCtx, cancel := context.WithTimeout(ctx, w.timing.settings)
+	settings, err := w.loadQueueSettings(readCtx, names)
+	cancel()
 	w.settingsFailures.observe(ctx, err)
 	if err != nil {
-		return
+		return false
 	}
 	// A queue without a row has the default settings: running, no limit.
 	for name, q := range w.queues {
@@ -47,6 +63,7 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) {
 			q.nudge()
 		}
 	}
+	return true
 }
 
 // queueSetting is the part of a queue's settings that its worker applies.

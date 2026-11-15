@@ -390,8 +390,8 @@ type queueState struct {
 	slots      chan struct{} // one per running attempt or batch
 	wake       chan struct{} // nudges the fetch loop: tasks may be available
 	freed      chan struct{} // nudges the fetch loop: a slot was freed, or a recorded completion made room
-	paused     atomic.Bool
-	maxRunning atomic.Int32 // installation-wide limit; 0 means none
+	paused     atomic.Bool   // the queue is paused, or Run has not read its settings yet
+	maxRunning atomic.Int32  // installation-wide limit; 0 means none
 }
 
 func (q *queueState) nudge() {
@@ -473,6 +473,12 @@ func (w *Worker) prepareHistory(ctx context.Context) {
 // lacks, as [Migrate] does, so that a schema applied with [Migrations] keeps
 // the history of its first completed tasks. A failure is only logged: the
 // maintainer tries again.
+//
+// Run fetches from no queue before it has read the queues' settings, so a
+// paused queue stays paused and a [QueueSettings.MaxRunning] limit holds
+// from the first fetch. If that read fails, Run logs it and reads again:
+// 100 milliseconds later, then waiting twice as long each time, up to 10
+// seconds. Each read is given up after 10 seconds.
 func (w *Worker) Run(ctx context.Context) error {
 	if !w.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: the worker is already running", ErrInvalidState)
@@ -497,7 +503,12 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.settingsFailures = newFailures(w, "load queue settings")
 	w.activityFailures = newFailures(w, "record activity")
 	w.listenFailures = newFailures(w, "listen for notifications")
-	w.refreshQueueSettings(ctx)
+	// No queue fetches before the worker knows its settings, which the
+	// settings loop reads first: a paused queue stays paused, and a limit
+	// holds, also when that read fails or takes long.
+	for _, q := range w.queues {
+		q.paused.Store(true)
+	}
 	w.prepareHistory(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
@@ -511,7 +522,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	var loops sync.WaitGroup
 	loops.Go(func() { w.listenLoop(loopsCtx) })
 	loops.Go(func() { followHints(loopsCtx, w.cancelHints, w.cancelHinted) })
-	loops.Go(func() { followHints(loopsCtx, w.queueHints, w.refreshQueueSettings) })
+	loops.Go(func() { followHints(loopsCtx, w.queueHints, func(ctx context.Context) { w.refreshQueueSettings(ctx) }) })
 	loops.Go(func() { w.checkInLoop(loopsCtx) })
 	loops.Go(func() { w.activityLoop(loopsCtx) })
 	loops.Go(func() { w.settingsLoop(loopsCtx) })

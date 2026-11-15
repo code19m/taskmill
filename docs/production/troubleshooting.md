@@ -24,6 +24,7 @@ shows many available tasks.
 | The workers are full | Running tasks are about replicas × `Concurrency` | Add replicas, or raise `Concurrency` and the pool with it |
 | A queue limit (`MaxRunning`) blocks tasks | `QueueInfo.Settings.MaxRunning` is set, and running tasks equal it | Raise or remove it with `Client.UpdateQueue` |
 | The workers crash | Pod restarts | See [Worker pods restart again and again](#worker-pods-restart-again-and-again) |
+| New workers cannot read the queues' pauses and limits, so they take no task | `operation failed` or `operation still failing` for `load queue settings`, since the worker started | Fix what the error names: the database, or the role's right to read `queues` |
 | No maintainer runs | `taskmill_stats_age_seconds` is over 60 | See [the next entry](#retries-delayed-tasks-or-schedules-dont-run) |
 | Fetches got slow | A transaction has been open for a long time | See [Throughput falls over hours](#throughput-falls-over-hours) |
 

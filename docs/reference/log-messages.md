@@ -80,7 +80,7 @@ successes between them.
 | `renew leases` | Renews the [leases](../concepts/glossary.md#lease) of running tasks | Every third of `LeaseDuration` | The database, and the pool size |
 | `record check-in` | Notes in the database that the worker is alive, at its [check-in](../concepts/glossary.md#check-in) | Every third of `LeaseDuration` | The database |
 | `record results` | Saves the results of finished attempts | After each attempt | The database |
-| `load queue settings` | Reads pauses and limits of the queues | Every 10 seconds | The database |
+| `load queue settings` | Reads pauses and limits of the queues. A worker fetches no tasks before its first read worked | When the worker starts, then every 10 seconds. While the first read fails, again after 0.1 to 10 seconds | The database, and the role's right to read `queues` |
 | `record activity` | Writes the counts for the charts | Every 10 seconds | The database |
 | `listen for notifications` | Keeps the connection that receives notifications. Idle queues poll every `PollInterval` meanwhile | On failure, again after 1 to 30 seconds | `ListenConfig`, and any proxy in between |
 | `elect maintainer` | Takes or keeps the maintainer role | Every second on the maintainer, and every 2 to 3 seconds on the other workers | The database |

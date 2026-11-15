@@ -34,6 +34,7 @@ It is in the doc comment of that identifier.
 | What | Value |
 |---|---|
 | A fetch from a queue with `MaxRunning` waits for the queue's row | At most 1 second. Then the worker fetches again when the queue is next woken or polled |
+| A worker's first read of its queues' pauses and limits | Before its first fetch. If it fails: again after 0.1 seconds, then twice as long each time, up to 10 seconds. A read ends after 10 seconds |
 | Reads that notifications ask for: cancel requests, and queue settings | At most one of each kind per 20 ms |
 | Warning that the pool is full | Logged when the pool is full, and a lease renewal waits 1 second or longer for a connection (`LeaseDuration` / 30). At most once a minute |
 | A result that the worker cannot record | Tried again after 0.1 to 2 seconds, until the task's lease would run out |

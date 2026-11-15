@@ -22,6 +22,7 @@ type Timing struct {
 	Election      time.Duration
 	LeaderLease   time.Duration
 	Stats         time.Duration
+	Settings      time.Duration
 	ShutdownGrace time.Duration
 	Reconnect     time.Duration
 	NoHandlerWait time.Duration
@@ -42,6 +43,7 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.election, t.Election)
 	set(&w.timing.leaderLease, t.LeaderLease)
 	set(&w.timing.stats, t.Stats)
+	set(&w.timing.settings, t.Settings)
 	set(&w.timing.shutdownGrace, t.ShutdownGrace)
 	set(&w.timing.reconnectMin, t.Reconnect)
 	set(&w.timing.reconnectMax, t.Reconnect)

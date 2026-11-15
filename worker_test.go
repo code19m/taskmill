@@ -1861,6 +1861,73 @@ func TestFailedSettingsRefreshKeepsQueuesPaused(t *testing.T) {
 	e.wantState(t, id, taskmill.StateAvailable)
 }
 
+// Pause is a tool for incidents: a worker must not fetch from a queue before
+// it knows the queue's settings. A worker whose first read of them fails, or
+// does not end, fetches nothing, and reads them again by itself.
+func TestWorkerDoesNotFetchBeforeItKnowsItsQueuesSettings(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		settings time.Duration // the worker's interval for reading settings; 0 keeps the default
+		// lost waits until the first read, which waits for a lock, is lost.
+		lost func(t *testing.T, e *env, logs *logRecorder)
+	}{
+		{"the read fails", 0, func(t *testing.T, e *env, _ *logRecorder) {
+			t.Helper()
+			e.exec(t, "SELECT pg_cancel_backend($1)", e.waitBlocked(t, "{s}.queues WHERE name = ANY"))
+		}},
+		{"the read does not end", 300 * time.Millisecond, func(t *testing.T, _ *env, logs *logRecorder) {
+			t.Helper()
+			waitFor(t, "the worker to give the read up", func() bool {
+				return len(operationLines(logs.all())["load queue settings"]) > 0
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			logs := &logRecorder{}
+			e := newEnv(t).withLogger(t, slog.New(logs))
+			if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
+				t.Fatal(err)
+			}
+			paused := e.enqueue(t, sendEmail{}, nil)
+			ran := make(chan string, 2)
+			w := newWorker(t, e, &taskmill.WorkerConfig{
+				Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+					ran <- task.Queue
+					return nil
+				}, nil),
+				Queues:       map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}, "canary": {}},
+				NoMaintainer: true,
+			})
+			taskmill.SetTiming(w, taskmill.Timing{Settings: tc.settings})
+
+			// The worker starts while its read of the settings cannot end.
+			tx := e.begin(t)
+			e.txExec(t, tx, "LOCK TABLE {s}.queues IN ACCESS EXCLUSIVE MODE")
+			stop := startWorker(t, w)
+			tc.lost(t, e, logs)
+			if err := tx.Rollback(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+
+			// The canary's queue is not paused: its task shows that the
+			// worker read the settings again, and fetches.
+			e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "canary"})
+			if queue := recv(t, ran, "the canary's task to run"); queue != "canary" {
+				t.Fatalf("a task of the paused queue %q ran: the worker fetched before it knew the queue's settings", queue)
+			}
+			// A worker that stops gives back a task that it fetched and did
+			// not start, so the task's state alone does not show a fetch.
+			stop()
+			if info := e.get(t, paused); info.State != taskmill.StateAvailable || !info.AttemptedAt.IsZero() {
+				t.Fatalf("the worker fetched a task of the paused queue before it knew the queue's settings: it is %s, fetched at %s",
+					info.State, info.AttemptedAt)
+			}
+		})
+	}
+}
+
 func TestAttemptThatLostItsLeaseIsCanceledAndDiscarded(t *testing.T) {
 	t.Parallel()
 	t.Run("taken over", func(t *testing.T) {
