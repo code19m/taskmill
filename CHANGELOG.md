@@ -23,6 +23,12 @@ All notable changes to taskmill are recorded here. The format follows
   change. The result types are Go values, not a format for the network, and
   get no JSON tags: see [Compatibility](docs/reference/compatibility.md).
   The stored tasks do not change.
+- The doc comments of `BatchHandler` and `outbox.Publisher` now say plainly
+  what a nil or short result does: a task or a delivery without an entry
+  fails, and is retried. Nil never means that all succeeded. So a publisher
+  that ends in `return nil` after it sent its deliveries sends them again
+  at each retry: return `make([]error, len(deliveries))`. The behavior is
+  the same as before.
 
 ### Removed
 

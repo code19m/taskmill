@@ -99,6 +99,12 @@ type Delivery struct {
 // [RelayOptions.Timeout]: then its context is canceled, and the deliveries
 // without a nil result are retried.
 //
+// A delivery without a result is retried, as after an error: Publish
+// returned nil, or fewer errors than deliveries. Nil never means that all
+// were published. So a publisher that ends in "return nil" after it sent
+// its deliveries sends them all again at each retry, until they are dead.
+// When all were published, return make([]error, len(deliveries)).
+//
 // A failed delivery is retried after 1 second, then after twice as long each
 // time, up to every 5 minutes, with ±10% jitter. After 10,000 tries, about a
 // month, the message is dead.
