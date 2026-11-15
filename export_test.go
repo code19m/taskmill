@@ -32,7 +32,7 @@ type Timing struct {
 	NoHandlerWait time.Duration
 	FailureReport time.Duration
 	IdlePoll      time.Duration
-	EmptyFetch    time.Duration
+	Quiet         time.Duration
 	Listen        time.Duration
 }
 
@@ -55,7 +55,7 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.noHandlerWait, t.NoHandlerWait)
 	set(&w.timing.failureReport, t.FailureReport)
 	set(&w.timing.idlePoll, t.IdlePoll)
-	set(&w.timing.emptyFetch, t.EmptyFetch)
+	set(&w.timing.quiet, t.Quiet)
 	set(&w.timing.listen, t.Listen)
 }
 

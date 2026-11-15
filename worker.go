@@ -58,7 +58,7 @@ type timing struct {
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
 	failureReport   time.Duration // how often an operation that keeps failing logs, at most
 	idlePoll        time.Duration // how often idle queues poll while the maintainer's heartbeats arrive
-	emptyFetch      time.Duration // how long a queue leaves notifications waiting after one found nothing
+	quiet           time.Duration // how long a queue leaves notifications waiting after the fetch for one found nothing
 	listen          time.Duration // bound on opening the notification connection, and on its answer when heartbeats stop
 }
 
@@ -78,7 +78,7 @@ var defaultTiming = timing{
 	reconnectMax:    30 * time.Second,
 	failureReport:   time.Minute,
 	idlePoll:        time.Minute,
-	emptyFetch:      20 * time.Millisecond,
+	quiet:           20 * time.Millisecond,
 	listen:          10 * time.Second,
 }
 

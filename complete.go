@@ -253,22 +253,19 @@ func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedT
 // head's place. The fetch that follows a freed slot cannot see either. A
 // slot is free as soon as its handler returns, before the completer records
 // the result, so that fetch still counts the task as running, and finds the
-// group's next task pending. A batch of completions wakes each queue once,
-// for one fetch.
+// group's next task pending. The signals of a batch of completions gather in
+// the loop's buffer of one: a batch costs a fetch or two, not one per task.
 //
 // Only this worker wakes, so a group's tasks follow each other without the
 // notification of each promotion, which the client's throttle holds back
 // for up to notifyWindow, and no other worker fetches more often for it. A
 // group whose last task completed costs one fetch that finds nothing.
 func (w *Worker) madeRoom(done []completedTask) {
-	woken := map[*queueState]bool{}
 	for _, t := range done {
-		q := w.queues[t.queue] // nil for a task of RunTask in a queue that Run does not serve
-		if q == nil || woken[q] || t.group == "" && q.maxRunning.Load() == 0 {
-			continue
+		// A task of RunTask may be of a queue that Run does not serve.
+		if q := w.queues[t.queue]; q != nil && (t.group != "" || q.maxRunning.Load() > 0) {
+			signal(q.freed)
 		}
-		woken[q] = true
-		signal(q.freed)
 	}
 }
 

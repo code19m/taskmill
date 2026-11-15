@@ -22,12 +22,12 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 	fetches := newFailures(w, "fetch tasks", slog.String(logKeyQueue, q.name))
 
 	// notified reports that a notification caused the last fetch, and held
-	// that the queue's MaxRunning limit blocked tasks. Until quiet, the
+	// that the queue's MaxRunning limit blocked tasks. Until quietUntil, the
 	// loop leaves notifications waiting.
 	notified, held := false, false
-	var quiet time.Time
+	var quietUntil time.Time
 	wait := func() (ok bool) {
-		ok, notified = waitForWork(ctx, q, w.pollWait(held), quiet)
+		ok, notified = waitForWork(ctx, q, w.pollWait(held), quietUntil)
 		return ok
 	}
 
@@ -46,7 +46,7 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 		// A notification wakes every worker of the queue, and most find
 		// nothing: those let a moment pass before they act on the next one.
 		if err == nil && notified && len(tasks) == 0 {
-			quiet = time.Now().Add(w.timing.emptyFetch)
+			quietUntil = time.Now().Add(w.timing.quiet)
 		}
 		if (err != nil || !more) && !wait() {
 			return
@@ -76,31 +76,33 @@ func (w *Worker) pollWait(held bool) time.Duration {
 }
 
 // waitForWork waits for a nudge, a freed slot, or the poll. It reports false
-// if ctx ends first, and whether a nudge woke it. Until quiet, it leaves
-// nudges waiting, which gathers those that arrive meanwhile into one fetch.
-// A freed slot wakes it at any time: that is the worker's own news, not a
-// hint, and it comes no more often than the worker's tasks end.
-func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quiet time.Time) (ok, nudged bool) {
+// if ctx ends first, and whether a nudge woke it. Until quietUntil, it
+// leaves nudges waiting, which gathers those that arrive meanwhile into one
+// fetch. A freed slot wakes it at any time: that is the worker's own news,
+// not a hint, and it comes no more often than the worker's tasks end.
+func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUntil time.Time) (ok, nudged bool) {
 	timer := time.NewTimer(poll)
 	defer timer.Stop()
-	wake := q.wake
-	var listen <-chan time.Time // when to hear nudges again
-	if d := time.Until(quiet); d > 0 {
-		wake, listen = nil, time.After(d)
-	}
-	for {
+	if quiet := time.Until(quietUntil); quiet > 0 {
 		select {
 		case <-ctx.Done():
 			return false, false
-		case <-listen:
-			wake, listen = q.wake, nil
-		case <-wake:
-			return true, true
 		case <-q.freed:
 			return true, false
 		case <-timer.C:
 			return true, false
+		case <-time.After(quiet):
 		}
+	}
+	select {
+	case <-ctx.Done():
+		return false, false
+	case <-q.wake:
+		return true, true
+	case <-q.freed:
+		return true, false
+	case <-timer.C:
+		return true, false
 	}
 }
 

@@ -724,7 +724,7 @@ func TestQuietQueueHoldsBackNotificationsOnly(t *testing.T) {
 		PollInterval: time.Hour,
 		NoMaintainer: true,
 	})
-	taskmill.SetTiming(w, taskmill.Timing{EmptyFetch: time.Hour})
+	taskmill.SetTiming(w, taskmill.Timing{Quiet: time.Hour})
 	startWorker(t, w)
 
 	// The group's first task runs, so a notification's fetch finds nothing:
