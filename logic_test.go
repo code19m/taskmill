@@ -241,6 +241,7 @@ func TestDefaultTiming(t *testing.T) {
 		{"reconnectMax", d.reconnectMax, 30 * time.Second},
 		{"failureReport", d.failureReport, time.Minute},
 		{"idlePoll", d.idlePoll, time.Minute},
+		{"quiet", d.quiet, 20 * time.Millisecond},
 		{"listen", d.listen, 10 * time.Second},
 		{"lockWait", d.lockWait, time.Second},
 	}
