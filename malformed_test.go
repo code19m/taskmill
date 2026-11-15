@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -277,6 +278,72 @@ func TestGroupCountThatIsTooLowFailsNoOtherGroup(t *testing.T) {
 	})
 }
 
+// A group's row names an unfinished task as the one that halts it only
+// after a write by hand. When that task leaves the group, its halt must end
+// with it. A halt that stays names a task that is no longer counted, or no
+// longer exists: nothing ends it, or a retry of the task ends it and takes
+// the task for one that is still counted, so the count is one short and the
+// group's last task waits in pending for good.
+func TestHaltEndsWhenTheTaskItNamesLeaves(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	c := e.client
+	type op = func(context.Context, int64) error
+	// A bulk action finds the head by its group and its state.
+	inBulk := func(group string) op {
+		return func(ctx context.Context, _ int64) error {
+			_, err := c.CancelMatching(ctx, bulk(&taskmill.TaskFilter{
+				GroupKeys: []string{group}, States: []taskmill.State{taskmill.StateAvailable},
+			}))
+			return err
+		}
+	}
+	for _, tt := range []struct {
+		group string
+		ops   []op
+		tasks int // what the group counts afterwards
+	}{
+		{"deleted", []op{c.Delete}, 2},
+		{"canceled, then retried", []op{c.Cancel, c.Retry}, 3},
+		{"canceled, then deleted", []op{c.Cancel, c.Delete}, 2},
+		{"canceled in bulk", []op{inBulk("canceled in bulk")}, 2},
+	} {
+		// A head that waits, which the group's row names, and two tasks
+		// behind it.
+		head := e.insertTask(t, `group_key = '`+tt.group+`'`)
+		next := e.insertTask(t, `state = 'pending', group_key = '`+tt.group+`'`)
+		e.insertTask(t, `state = 'pending', group_key = '`+tt.group+`'`)
+		e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
+		           VALUES ('default', $1, 3, $2, now())`, tt.group, head)
+		for _, do := range tt.ops {
+			if err := do(ctx, head); err != nil {
+				t.Fatalf("the head that is %s: %v", tt.group, err)
+			}
+		}
+		if got := e.get(t, next).State; got != taskmill.StateAvailable {
+			t.Errorf("the head was %s: the next task is %s, want it available", tt.group, got)
+		}
+		if n := e.count(t, "SELECT count(*) FROM {s}.groups WHERE group_key = $1 AND tasks = $2 AND halted_task_id IS NULL",
+			tt.group, tt.tasks); n != 1 {
+			t.Errorf("the head was %s: its group is still halted, or does not count %d tasks", tt.group, tt.tasks)
+		}
+	}
+
+	// A halt that names another task stays. Only a write by hand puts a
+	// second task that is not pending beside a dead head.
+	dead := e.insertTask(t, `state = 'dead', finalized_at = now(), group_key = 'halted'`)
+	beside := e.insertTask(t, `group_key = 'halted'`)
+	behind := e.insertTask(t, `state = 'pending', group_key = 'halted'`)
+	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
+	           VALUES ('default', 'halted', 3, $1, now())`, dead)
+	e.cancel(t, beside)
+	e.wantState(t, behind, taskmill.StatePending)
+	if n := e.count(t, "SELECT count(*) FROM {s}.groups WHERE group_key = 'halted' AND tasks = 2 AND halted_task_id = $1", dead); n != 1 {
+		t.Error("the group of the dead head lost its halt, or does not count 2 tasks")
+	}
+}
+
 // A group has two tasks that run only after a write by hand, such as an
 // UPDATE that makes a pending task available. A transaction that completes
 // both must take both off the group's count: a row that still counts one
@@ -327,22 +394,34 @@ func TestMissingGroupRowIsReported(t *testing.T) {
 	logs := &logRecorder{}
 	e := newEnv(t).withLogger(t, slog.New(logs))
 	ctx := t.Context()
+	// One task in each group, named after the way in which it leaves, and
+	// two in the group that a bulk action empties.
 	ids := make(map[string]int64)
-	for _, group := range []string{"completed", "dead", "canceled"} {
+	for _, group := range []string{"completed", "dead", "stopped", "canceled"} {
 		ids[group] = e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: group})
 	}
-	ids["bulk"] = e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "bulk", Queue: "other"})
+	for range 2 {
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "bulk", Queue: "other"})
+	}
 	e.exec(t, "DELETE FROM {s}.groups")
 
 	w := newWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
-			if task.GroupKey == "dead" {
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			switch task.GroupKey {
+			case "dead":
 				return taskmill.Permanent(errors.New("bad address"))
+			case "stopped": // canceled while it runs: the worker records the cancel
+				if err := e.client.Cancel(ctx, task.ID); err != nil {
+					return err
+				}
+				return errors.New("stopped")
 			}
 			return nil
 		}, nil),
 	})
-	for group, want := range map[string]taskmill.State{"completed": taskmill.StateCompleted, "dead": taskmill.StateDead} {
+	for group, want := range map[string]taskmill.State{
+		"completed": taskmill.StateCompleted, "dead": taskmill.StateDead, "stopped": taskmill.StateCanceled,
+	} {
 		if info, err := w.RunTask(ctx, ids[group]); err != nil || info.State != want {
 			t.Fatalf("the task of the group %q: %v, %+v, want it %s", group, err, info, want)
 		}
@@ -351,20 +430,24 @@ func TestMissingGroupRowIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{Queues: []string{"other"}}))
-	if err != nil || res.Changed != 1 {
+	if err != nil || res.Changed != 2 {
 		t.Fatalf("the bulk cancel: %v, %+v", err, res)
 	}
 	e.wantState(t, ids["canceled"], taskmill.StateCanceled)
-	e.wantState(t, ids["bulk"], taskmill.StateCanceled)
 
+	// A line names its task if one task left the group.
+	want := []string{"other/bulk task_id="}
+	for group, id := range ids {
+		want = append(want, "default/"+group+" task_id="+strconv.FormatInt(id, 10))
+	}
 	var reported []string
 	for _, r := range logs.all() {
 		if r.Message == "fifo group missing" {
-			reported = append(reported, attr(r, "queue")+"/"+attr(r, "group"))
+			reported = append(reported, attr(r, "queue")+"/"+attr(r, "group")+" task_id="+attr(r, "task_id"))
 		}
 	}
+	slices.Sort(want)
 	slices.Sort(reported)
-	want := []string{"default/canceled", "default/completed", "default/dead", "other/bulk"}
 	if !slices.Equal(reported, want) {
 		t.Fatalf("groups reported as missing: %q, want %q", reported, want)
 	}

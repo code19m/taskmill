@@ -50,10 +50,11 @@ This is one reason taskmill's own transactions require READ COMMITTED.
 **One way out.** A counted task leaves its group when it completes, is
 canceled, or is deleted, alone or in a batch. Every such change runs the
 same three statements, in one function (`leaveGroups`): the decrement, the
-delete of the empty groups, and the promotion. A `pending` task that leaves
-was not the head, so nothing is promoted for it. A group that has no row,
-which should never happen, is logged as `fifo group missing`, and the task
-still ends.
+delete of the empty groups, and the promotion. The decrement also ends a
+halt that names a task that leaves, so no halt outlives its task. A
+`pending` task that leaves was not the head, so nothing is promoted for it.
+A group that has no row, which should never happen, is logged as
+`fifo group missing`, and the task still ends.
 
 **Completing a batch.** A worker completes the grouped tasks of a batch in one
 transaction, with a few statements for the whole batch rather than a few per

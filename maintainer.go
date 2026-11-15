@@ -298,7 +298,7 @@ func (m *maintainer) rescueBatch(ctx context.Context) (batch []rescuedTask, err 
 					return err
 				}
 			case s.Finished():
-				left = append(left, groupLeave{queue: x.queue, group: x.group, head: true})
+				left = append(left, groupLeave{id: x.id, queue: x.queue, group: x.group, head: true})
 			}
 		}
 		return m.c.leaveGroups(ctx, m.w.logger, q, left)

@@ -124,6 +124,34 @@ All notable changes to taskmill are recorded here. The format follows
   `pgx.Tx` or the pool itself there, or give the value an interface of
   your own that has the method, such as that `DBTX`.
 
+### Fixed
+
+- A FIFO group that has no row is now reported by every operation that
+  takes a task out of it. A group's row is missing only if something broke
+  the group, such as a `DELETE` by hand, and taskmill then logs
+  `fifo group missing` at Error. But only `Cancel`, `Delete`, an attempt
+  that ended dead or canceled, and a rescue did. A completion,
+  `CancelMatching`, and `DeleteMatching`, which end most tasks, logged
+  nothing. They now log the line too, with the `queue`, the `group`, and
+  the `task_id`. A bulk action that takes several tasks out of one such
+  group logs one line for them, without `task_id`. The tasks end as
+  before. If you see the line, please report it.
+- Two fixes for a FIFO group whose rows were changed by hand. Both come
+  from one change: every operation that takes tasks out of a group now
+  runs the same statements.
+  - **Two tasks of one group that complete in the same batch** are both
+    taken off the group's count. One stayed counted. The group's row then
+    never went away, and a task enqueued into the group later waited in
+    `pending` for good, behind a head that did not exist. A group has two
+    running tasks only after an `UPDATE` by hand, such as one that made a
+    pending task available.
+  - **`CancelMatching` and `DeleteMatching` end a group's halt** when they
+    take out the task that the halt names, as `Cancel` and `Delete` do. The
+    halt stayed: after a delete nothing could end it, and after a cancel a
+    `Retry` of the task ended it, but counted the group wrong. taskmill
+    halts a group only by its dead head, which a bulk delete already
+    handled: only a row written by hand names another task.
+
 ### Security
 
 - One value that taskmill never writes, in a small table, no longer takes a
@@ -380,22 +408,6 @@ All notable changes to taskmill are recorded here. The format follows
   FIFO group listed up to 100 of the tasks behind it, in full, only to
   count them. It now counts them, so it shows the number up to 10,000,
   where it showed "100+".
-- A FIFO group that has no row is now reported by every operation that
-  takes a task out of it. A group's row is missing only if something broke
-  the group, such as a `DELETE` by hand, and taskmill then logs
-  `fifo group missing` at Error. But only `Cancel`, `Delete`, an attempt
-  that ended dead or canceled, and a rescue did. A completion,
-  `CancelMatching`, and `DeleteMatching`, which end most tasks, logged
-  nothing. They now log the line too. The line names the `queue` and the
-  `group`, and no longer has `task_id`: one line can stand for several
-  tasks of a batch. The tasks end as before. If you see the line, please
-  report it.
-- Two tasks of one FIFO group that complete in the same batch are now both
-  taken off the group's count. One stayed counted. The group's row then
-  never went away, and a task enqueued into the group later waited in
-  `pending` for good, behind a head that did not exist. A group has two
-  running tasks only after its rows were changed by hand, for example by an
-  `UPDATE` that made a pending task available.
 
 ### Security
 

@@ -719,7 +719,8 @@ func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (re
 	}
 	counted, missing, byGroup := groupTasks(ts, resumed)
 	if len(counted.queues) > 0 {
-		if _, err := q.exec(ctx, c.sql.recountGroups, counted.queues, counted.groups, counted.sizes(byGroup)); err != nil {
+		left := []int64{} // the tasks join their groups: none leaves
+		if _, err := q.exec(ctx, c.sql.recountGroups, counted.queues, counted.groups, counted.sizes(byGroup), left); err != nil {
 			return nil, nil, err
 		}
 		for _, t := range counted.tasks(byGroup) {
@@ -932,7 +933,7 @@ func (c *Client) leaveAll(ctx context.Context, q querier, ts []bulkTask, leaves 
 	var left []groupLeave
 	for _, t := range ts {
 		if t.group != "" && leaves(t) {
-			left = append(left, groupLeave{queue: t.queue, group: t.group, head: t.state != StatePending})
+			left = append(left, groupLeave{id: t.id, queue: t.queue, group: t.group, head: t.state != StatePending})
 		}
 	}
 	return c.leaveGroups(ctx, c.logger, q, left)

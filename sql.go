@@ -527,18 +527,36 @@ SELECT t.id, false FROM attempts JOIN {s}.tasks t USING (id, lease_token)
 WHERE {leased}`),
 
 		// recountGroups adds $3, which is negative for tasks that left, to the
-		// counts of groups ($1, $2), and returns each group that has a row. A
-		// group is named once: an UPDATE changes a row once. It locks the
-		// rows, and waits for one that another transaction holds. The caller
-		// has ended the halts of halting heads that left. A count stops at
-		// zero. Only a row that taskmill did not write counts fewer tasks
-		// than its group holds, and a count below zero breaks the table's
-		// rule: the error would fail the caller's transaction, which in a
-		// rescue ends the expired leases of every queue, and in a completion
-		// the tasks of every other group in the batch.
+		// counts of groups ($1, $2), and returns each group that has a row,
+		// with its count and whether it is still halted. A group is named
+		// once: an UPDATE changes a row once.
+		//
+		// $4 are the tasks that left, or none. If one of them halts its
+		// group, the halt ends here, with the task's place in the count. A
+		// halt that stayed would name a task that is no longer counted, or
+		// no longer exists: a retry of that task would end the halt and
+		// count the task as still there, and nothing could end the halt of
+		// a task that is gone. A task that taskmill halted a group by is
+		// dead, and leaves only when it is deleted, but a row written by
+		// hand can name any task.
+		//
+		// It locks the rows, and waits for one that another transaction
+		// holds. The plan decides in which order it takes the rows of
+		// several groups: a nested loop takes them in the order of the
+		// arrays, and a hash join as they lie in the table.
+		//
+		// A count stops at zero. Only a row that taskmill did not write
+		// counts fewer tasks than its group holds, and a count below zero
+		// breaks the table's rule: the error would fail the caller's
+		// transaction, which in a rescue ends the expired leases of every
+		// queue, and in a completion the tasks of every other group in the
+		// batch.
 		recountGroups: q(`
 UPDATE {s}.groups g
-SET tasks = greatest(g.tasks + u.n, 0), updated_at = now()
+SET tasks = greatest(g.tasks + u.n, 0),
+    halted_task_id = CASE WHEN g.halted_task_id = ANY($4::bigint[]) THEN NULL ELSE g.halted_task_id END,
+    halted_at = CASE WHEN g.halted_task_id = ANY($4::bigint[]) THEN NULL ELSE g.halted_at END,
+    updated_at = now()
 FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
 WHERE g.queue = u.queue AND g.group_key = u.group_key
 RETURNING g.queue, g.group_key, g.tasks, g.halted_task_id IS NOT NULL`),

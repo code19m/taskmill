@@ -468,7 +468,7 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 	case s == StateDead && group != "":
 		return ended, w.client.haltGroup(ctx, w.logger, q, queue, group, id)
 	case s.Finished() && group != "":
-		return ended, w.client.leaveGroups(ctx, w.logger, q, []groupLeave{{queue: queue, group: group, head: true}})
+		return ended, w.client.leaveGroups(ctx, w.logger, q, []groupLeave{{id: id, queue: queue, group: group, head: true}})
 	case s == StateAvailable:
 		return ended, w.client.notifyAvailable(ctx, w.logger, q, queue)
 	}

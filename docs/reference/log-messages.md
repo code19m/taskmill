@@ -135,7 +135,7 @@ backticks.
 | `complete tasks failed; they are rescued when their leases expire` | Warn | `tasks` successful attempts could not be saved. Those tasks run again. | Check the database. |
 | `handler failed after completing its task; it stays completed` | Warn | The handler returned an error after its `CompleteTx` transaction committed. | Return nil once the transaction has committed. |
 | `enqueue middleware failed after the tasks were enqueued` | Warn | An enqueue middleware returned `error` after `tasks` tasks committed. The enqueue succeeded, but the middleware's work, such as a span, may be missing. | Fix the middleware. |
-| `fifo group missing` | Error | A task left its FIFO group in `queue` and `group`, or halted it, and the group has no row. The task still ended as it should. This should never happen. | Please [report it](https://github.com/code19m/taskmill/issues). |
+| `fifo group missing` | Error | A task left its FIFO group in `queue` and `group`, or halted it, and the group has no row. `task_id` names the task, unless several tasks left the group together. The task still ended as it should. This should never happen. | Please [report it](https://github.com/code19m/taskmill/issues). |
 
 ### The maintainer
 

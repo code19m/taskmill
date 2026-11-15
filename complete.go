@@ -401,7 +401,7 @@ func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, c
 
 	var heads []groupLeave
 	for _, t := range sortedByGroup(done) {
-		heads = append(heads, groupLeave{queue: t.queue, group: t.group, head: true})
+		heads = append(heads, groupLeave{id: t.id, queue: t.queue, group: t.group, head: true})
 	}
 	if err := c.leaveGroups(ctx, logger, q, heads); err != nil {
 		return nil, fmt.Errorf("taskmill: complete: %w", err)
@@ -443,9 +443,10 @@ func (c *Client) noteMissingHistory(ctx context.Context, logger *slog.Logger, er
 		slog.Any(logKeyError, err))
 }
 
-// sortedByGroup returns the grouped tasks in a fixed order of queue and group,
-// so that concurrent transactions lock group rows in the same order and cannot
-// deadlock.
+// sortedByGroup returns the grouped tasks in a fixed order of queue and
+// group, the lock order of group rows. The order alone prevents no deadlock:
+// the statement that takes the rows follows it only under some plans. See
+// leaveGroups for the callers that wait for these rows.
 func sortedByGroup(ts []completedTask) []completedTask {
 	var grouped []completedTask
 	for _, t := range ts {

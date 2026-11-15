@@ -216,7 +216,7 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64, check bool) er
 	if s == StateRunning || group == "" {
 		return nil
 	}
-	left := []groupLeave{{queue: queue, group: group, head: s != StatePending}}
+	left := []groupLeave{{id: id, queue: queue, group: group, head: s != StatePending}}
 	if err := c.leaveGroups(ctx, c.logger, q, left); err != nil {
 		return fail(err)
 	}
@@ -402,7 +402,7 @@ func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) er
 	if !counted {
 		return nil
 	}
-	left := []groupLeave{{queue: queue, group: group, head: s != StatePending}}
+	left := []groupLeave{{id: id, queue: queue, group: group, head: s != StatePending}}
 	if err := c.leaveGroups(ctx, c.logger, q, left); err != nil {
 		return fail(err)
 	}
@@ -497,48 +497,59 @@ func (c *Client) stateError(ctx context.Context, q querier, id int64, op string)
 
 // groupLeave is a counted task that left its FIFO group.
 type groupLeave struct {
+	id           int64
 	queue, group string
 	head         bool // it was the group's head, not a pending task behind it
 }
 
 // leaveGroups updates FIFO groups after counted tasks of theirs finished or
 // were removed: one task or many, each an entry of left. It takes the tasks
-// off their groups' counts, deletes a group that has none left, and makes
-// the oldest pending task the head of a group whose head left, unless a dead
-// head halts the group. A group that has no row, which should never happen,
-// is logged.
+// off their groups' counts, and ends a halt that names one of them: a halt
+// must not outlive the place of its task in the count. It deletes a group
+// that has no task left, and makes the oldest pending task the head of a
+// group whose head left, unless another task halts the group. A group that
+// has no row, which should never happen, is logged.
 //
-// Callers run it in the transaction that changed the tasks, after they ended
-// the halt of a halting head that left (resumeHaltedHead, releaseHalts), and
-// pass their logger: a worker's names it. It waits for a group's row that
-// another transaction holds. A caller that must not wait locks the rows
-// first and skips the held ones: lockGroups, the pick statements, rescue.
+// Callers run it in the transaction that changed the tasks, and pass their
+// logger: a worker's names it. It waits for a group's row that another
+// transaction holds. It takes the rows of several groups in the order that
+// the plan of its statement gives, which is not always the order of left:
+// a caller cannot choose a lock order here. The callers with more than one
+// group hold the rows before they call: lockGroups, the pick statements,
+// and the rescue took them, and only rows that were free.
+//
+// The exception is completeWaiting, the last completions of a worker that
+// stops, for the groups whose rows were held until then. It can meet a
+// transaction that takes the same rows in another order, such as one of
+// the application that enqueues into several groups. PostgreSQL then ends
+// one of the two, and a completion that it ended runs again (whileLeased).
 func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier, left []groupLeave) error {
 	if len(left) == 0 {
 		return nil
 	}
 	// Each group goes to the recount once, with all its tasks that left: an
-	// UPDATE changes a row once. The groups keep the order of left, which
-	// is the lock order where the caller sorted them.
+	// UPDATE changes a row once.
 	type leave struct {
-		tasks int  // how many of the group's tasks left
-		head  bool // its head was among them: the next task becomes the head
+		ids  []int64 // the group's tasks that left
+		head bool    // its head was among them: the next task becomes the head
 	}
 	var asked groupSet
+	ids := make([]int64, len(left))
 	leaves := make(map[[2]string]leave, len(left)) // by group, until its row is read back
-	for _, l := range left {
+	for i, l := range left {
+		ids[i] = l.id
 		key := [2]string{l.queue, l.group}
 		g, seen := leaves[key]
 		if !seen {
 			asked.add(l.queue, l.group)
 		}
-		leaves[key] = leave{tasks: g.tasks + 1, head: g.head || l.head}
+		leaves[key] = leave{ids: append(g.ids, l.id), head: g.head || l.head}
 	}
 	counts := make([]int, len(asked.queues))
 	for i := range counts {
-		counts[i] = -leaves[[2]string{asked.queues[i], asked.groups[i]}].tasks
+		counts[i] = -len(leaves[[2]string{asked.queues[i], asked.groups[i]}].ids)
 	}
-	r, err := q.query(ctx, c.sql.recountGroups, asked.queues, asked.groups, counts)
+	r, err := q.query(ctx, c.sql.recountGroups, asked.queues, asked.groups, counts, ids)
 	if err != nil {
 		return err
 	}
@@ -565,9 +576,8 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	if err := r.Err(); err != nil {
 		return err
 	}
-	for key := range leaves { // not read back: the group has no row
-		logger.LogAttrs(ctx, slog.LevelError, "fifo group missing",
-			slog.String(logKeyQueue, key[0]), slog.String(logKeyGroup, key[1]))
+	for key, g := range leaves { // not read back: the group has no row
+		groupMissing(ctx, logger, key[0], key[1], g.ids...)
 	}
 	if len(empty.queues) > 0 {
 		if _, err := q.exec(ctx, c.sql.deleteEmptyGroups, empty.queues, empty.groups); err != nil {
@@ -587,10 +597,20 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 func (c *Client) haltGroup(ctx context.Context, logger *slog.Logger, q querier, queue, group string, id int64) error {
 	halted, err := q.exec(ctx, c.sql.haltGroup, queue, group, id)
 	if err == nil && halted == 0 {
-		logger.LogAttrs(ctx, slog.LevelError, "fifo group missing",
-			slog.String(logKeyQueue, queue), slog.String(logKeyGroup, group))
+		groupMissing(ctx, logger, queue, group, id)
 	}
 	return err
+}
+
+// groupMissing logs a FIFO group that has no row, which should never happen,
+// for the tasks that left it or halted it. The line names the task if it is
+// one.
+func groupMissing(ctx context.Context, logger *slog.Logger, queue, group string, tasks ...int64) {
+	attrs := []slog.Attr{slog.String(logKeyQueue, queue), slog.String(logKeyGroup, group)}
+	if len(tasks) == 1 {
+		attrs = append(attrs, slog.Int64(logKeyTaskID, tasks[0]))
+	}
+	logger.LogAttrs(ctx, slog.LevelError, "fifo group missing", attrs...)
 }
 
 // groupSet holds groups as two parallel slices, as statements take them.
