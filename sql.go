@@ -586,7 +586,8 @@ SELECT t.id, false FROM attempts JOIN {s}.tasks t USING (id, lease_token)
 WHERE {leased}`),
 
 		// recountGroups adds $3, which is negative for tasks that left, to the
-		// counts of groups ($1, $2). The caller holds the groups' locks, and
+		// counts of groups ($1, $2), each named once: an UPDATE changes a row
+		// once. The caller holds the groups' locks, and
 		// has ended the halts of halting heads that left. A count stops at
 		// zero, as in decrementGroup: here the error would fail the
 		// completion of the tasks of every other group in the batch.

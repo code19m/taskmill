@@ -546,28 +546,42 @@ func (c *Client) leaveGroup(ctx context.Context, logger *slog.Logger, q querier,
 	}
 }
 
-// groupLeave is a FIFO group that some of its counted tasks left.
+// groupLeave is a counted task that left its FIFO group.
 type groupLeave struct {
 	queue, group string
-	tasks        int  // how many left
-	head         bool // its head was among them: the next task becomes the head
+	head         bool // it was the group's head, not a pending task behind it
 }
 
-// leaveGroups is leaveGroup for many groups, with a few statements for all
-// of them. The caller holds the groups' locks, and has ended the halts of
-// the halting heads that left. Like leaveGroup, it logs a group that has no
-// row, to the caller's logger.
+// leaveGroups is leaveGroup for many tasks, each an entry of left, with a
+// few statements for all of them. The caller holds the groups' locks, and
+// has ended the halts of the halting heads that left. Like leaveGroup, it
+// logs a group that has no row, to the caller's logger.
 func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier, left []groupLeave) error {
-	queues := make([]string, len(left))
-	groups := make([]string, len(left))
-	counts := make([]int, len(left))
-	heads := make(map[[2]string]bool, len(left)) // by group, until its row is read: whether its head left
-	for i, l := range left {
-		queues[i], groups[i], counts[i] = l.queue, l.group, -l.tasks
-		key := [2]string{l.queue, l.group}
-		heads[key] = heads[key] || l.head
+	if len(left) == 0 {
+		return nil
 	}
-	r, err := q.query(ctx, c.sql.recountGroups, queues, groups, counts)
+	// Each group goes to the recount once, with all its tasks that left: an
+	// UPDATE changes a row once. The groups keep the order of left, which
+	// is the lock order where the caller sorted them.
+	type leave struct {
+		tasks int  // how many of the group's tasks left
+		head  bool // its head was among them: the next task becomes the head
+	}
+	var asked groupSet
+	leaves := make(map[[2]string]leave, len(left)) // by group, until its row is read back
+	for _, l := range left {
+		key := [2]string{l.queue, l.group}
+		g, seen := leaves[key]
+		if !seen {
+			asked.add(l.queue, l.group)
+		}
+		leaves[key] = leave{tasks: g.tasks + 1, head: g.head || l.head}
+	}
+	counts := make([]int, len(asked.queues))
+	for i := range counts {
+		counts[i] = -leaves[[2]string{asked.queues[i], asked.groups[i]}].tasks
+	}
+	r, err := q.query(ctx, c.sql.recountGroups, asked.queues, asked.groups, counts)
 	if err != nil {
 		return err
 	}
@@ -581,8 +595,8 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 			return err
 		}
 		key := [2]string{queue, group}
-		head := heads[key]
-		delete(heads, key)
+		head := leaves[key].head
+		delete(leaves, key)
 		switch {
 		case remaining == 0:
 			empty.add(queue, group)
@@ -594,7 +608,7 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	if err := r.Err(); err != nil {
 		return err
 	}
-	for key := range heads { // not read: the group has no row
+	for key := range leaves { // not read back: the group has no row
 		logger.LogAttrs(ctx, slog.LevelError, "fifo group missing",
 			slog.String(logKeyQueue, key[0]), slog.String(logKeyGroup, key[1]))
 	}

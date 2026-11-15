@@ -401,12 +401,10 @@ func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, c
 
 	var heads []groupLeave
 	for _, t := range sortedByGroup(done) {
-		heads = append(heads, groupLeave{queue: t.queue, group: t.group, tasks: 1, head: true})
+		heads = append(heads, groupLeave{queue: t.queue, group: t.group, head: true})
 	}
-	if len(heads) > 0 {
-		if err := c.leaveGroups(ctx, logger, q, heads); err != nil {
-			return nil, fmt.Errorf("taskmill: complete: %w", err)
-		}
+	if err := c.leaveGroups(ctx, logger, q, heads); err != nil {
+		return nil, fmt.Errorf("taskmill: complete: %w", err)
 	}
 	return done, nil
 }

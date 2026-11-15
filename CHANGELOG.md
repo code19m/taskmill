@@ -388,6 +388,12 @@ All notable changes to taskmill are recorded here. The format follows
   `DeleteMatching`, which end most tasks, logged nothing. They now log the
   line too, with the `queue` and the `group`. The tasks end as before. If
   you see the line, please report it.
+- Two tasks of one FIFO group that complete in the same batch are now both
+  taken off the group's count. One stayed counted. The group's row then
+  never went away, and a task enqueued into the group later waited in
+  `pending` for good, behind a head that did not exist. A group has two
+  running tasks only after its rows were changed by hand, for example by an
+  `UPDATE` that made a pending task available.
 
 ### Security
 

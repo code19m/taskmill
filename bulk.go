@@ -926,23 +926,10 @@ func (c *Client) releaseHalts(ctx context.Context, q querier, ts []bulkTask) (ma
 // those for which leaves is true, after the tasks changed.
 func (c *Client) leaveAll(ctx context.Context, q querier, ts []bulkTask, leaves func(bulkTask) bool) error {
 	var left []groupLeave
-	index := make(map[[2]string]int)
 	for _, t := range ts {
-		if t.group == "" || !leaves(t) {
-			continue
+		if t.group != "" && leaves(t) {
+			left = append(left, groupLeave{queue: t.queue, group: t.group, head: t.state != StatePending})
 		}
-		key := [2]string{t.queue, t.group}
-		i, ok := index[key]
-		if !ok {
-			i = len(left)
-			index[key] = i
-			left = append(left, groupLeave{queue: t.queue, group: t.group})
-		}
-		left[i].tasks++
-		left[i].head = left[i].head || t.state != StatePending
-	}
-	if len(left) == 0 {
-		return nil
 	}
 	return c.leaveGroups(ctx, c.logger, q, left)
 }

@@ -277,6 +277,49 @@ func TestGroupCountThatIsTooLowFailsNoOtherGroup(t *testing.T) {
 	})
 }
 
+// A group has two tasks that run only after a write by hand, such as an
+// UPDATE that makes a pending task available. A transaction that completes
+// both must take both off the group's count: a row that still counts one
+// stays for good, and every task enqueued into the group later waits behind
+// a head that does not exist.
+func TestCompletionCountsEveryTaskOfAGroup(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	first := e.insertTask(t, `group_key = 'both'`)
+	second := e.insertTask(t, `group_key = 'both'`)
+	e.exec(t, "INSERT INTO {s}.groups (queue, group_key, tasks) VALUES ('default', 'both', 2)")
+
+	// While a transaction holds the group's row, the worker keeps both
+	// completions. A worker that stops records what it kept in one
+	// transaction, which waits for the row.
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'both' FOR UPDATE")
+	ran := make(chan struct{}, 2)
+	stop := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			ran <- struct{}{}
+			return nil
+		}, nil),
+		Queues: defaultQueue(2),
+	})
+	recv(t, ran, "the first task to run")
+	recv(t, ran, "the second task to run")
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	e.waitBlocked(t, "UPDATE {s}.groups")
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, stopped, "the worker to stop")
+
+	e.wantState(t, first, taskmill.StateCompleted)
+	e.wantState(t, second, taskmill.StateCompleted)
+	// The check of the groups at the end of the test fails on a row that stays.
+}
+
 // A group's row that is gone, which only a DELETE by hand gives, must not go
 // unseen: every way in which a task leaves its group, or halts it, reports it.
 func TestMissingGroupRowIsReported(t *testing.T) {
