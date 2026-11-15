@@ -63,7 +63,7 @@ by election, that does the shared work.
 | Other workers try to take over | Every 2 to 3 seconds, with a statement that writes nothing while the maintainer's lease lasts |
 | A new maintainer after a crash | Within about 12 seconds (the maintainer's lease is 10 seconds) |
 | A new maintainer after a clean stop | Right away, when the old one starts to stop. It gives the role up before it waits for its running tasks |
-| Remove a worker that stopped checking in | After 5 minutes without a [check-in](../concepts/glossary.md#check-in) |
+| Remove a worker that stopped checking in | After 5 minutes without a [check-in](../concepts/glossary.md#check-in), or after twice its `LeaseDuration` if that is longer |
 
 ## Dashboard
 
@@ -73,7 +73,7 @@ by election, that does the shared work.
 | Live updates | About every 5 seconds while the browser tab is visible. Up to 1 minute apart while the server is out of reach |
 | Tasks per page of the task list | 50 |
 | One bulk action request | Works for about 5 seconds, then offers to continue |
-| The dashboard marks a worker as stale | After 30 seconds without a check-in. So with a `LeaseDuration` above 90 seconds, a healthy worker shows as stale between check-ins |
+| The dashboard marks a worker as stale | After one `LeaseDuration` of that worker without a check-in: 30 seconds by default |
 | Values per filter | Up to 100 |
 | FIFO groups that a filter lists | The first 100. Its search finds the others |
 | Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds |

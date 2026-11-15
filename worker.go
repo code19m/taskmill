@@ -169,10 +169,12 @@ type WorkerConfig struct {
 	// starts when the task is taken, by the database's clock, not when the
 	// fetch began. Minimum: 100 milliseconds. Default: 30 seconds.
 	//
-	// A long lease makes the check-ins rare, so a healthy worker can look
-	// lost between two of them. Above 90 seconds, the dashboard shows it as
-	// stale. Above 15 minutes, the maintainer removes it from the list of
-	// workers, and it registers again at its next check-in.
+	// The worker stores it when it registers, and the installation judges
+	// by it how long the worker may make no check-in. After one
+	// LeaseDuration, [Client.Workers] and the dashboard show the worker as
+	// stale. After two, but not before 5 minutes, the maintainer removes it
+	// from the list of workers. If it still runs, it registers again at its
+	// next check-in.
 	LeaseDuration time.Duration
 
 	// PollInterval is how often the worker checks an idle queue while the
@@ -443,7 +445,8 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 	if kinds == nil {
 		kinds = []string{} // the column holds an array
 	}
-	_, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker, w.id, names, w.host, w.version, kinds)
+	_, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker,
+		w.id, names, w.host, w.version, kinds, w.cfg.LeaseDuration.Microseconds())
 	return names, err
 }
 

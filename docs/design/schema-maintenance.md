@@ -10,7 +10,7 @@ queues, and how notifications and polling wake the workers.
 |---|---|
 | Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
 | Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
-| Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that have not checked in for 5 minutes, and schedules that the maintainer does not define and that did not run or change for a day. |
+| Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that made no check-in for 5 minutes, or for twice their `LeaseDuration` if that is longer, and schedules that the maintainer does not define and that did not run or change for a day. |
 | History | Keeps partitions for today and the next 6 days, and drops a partition once its whole day is older than the retention period (see [Operational notes](schema.md#operational-notes)). |
 | Statistics | Every 10 seconds, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
@@ -26,6 +26,12 @@ queues, and how notifications and polling wake the workers.
   and make every try of every other worker a write.
 - **A worker that stops deletes its lease,** also when it does not know that
   it holds one, as after a renewal whose answer was lost.
+- **A worker's silence is judged by its own lease.** A worker checks in
+  every third of its `LeaseDuration`, and stores the lease in its row. After
+  one lease without a check-in it is stale: its tasks' leases have run out.
+  `Client.Workers` works that out by the database's clock. Retention deletes
+  it after two leases, but not before 5 minutes. A worker of a release that
+  stores no lease is stale after 30 seconds, and deleted after 5 minutes.
 
 ### Statistics
 
@@ -106,6 +112,7 @@ queues, and must not fail for all of them.
 | An infinite `created_at` or `run_at` | As for metadata. A list shows no time. The statistics count the task, and take no lag from it |
 | A `lease_token` at the largest integer | The fetch counts no further, and the worker makes the task dead with `invalid_row` |
 | No attempt left, while it waits in a queue | The fetch counts the attempt up to the maximum, so the task runs once more |
+| A `workers` row with a lease that no worker writes | It counts as a row without a lease |
 
 - **A fetched row always becomes an attempt.** If one row failed the read,
   the worker would lose every task that the statement leased with it. An

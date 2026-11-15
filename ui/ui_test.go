@@ -203,6 +203,65 @@ func TestWorkersShowTheirKinds(t *testing.T) {
 	}
 }
 
+// A worker checks in every third of its lease: with a lease of 10 minutes,
+// it is silent for more than 3 minutes while it is healthy. The page marks a
+// worker as stale by the worker's own lease, not after a fixed time.
+func TestWorkersAreStaleByTheirOwnLease(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{LeaseDuration: 10 * time.Minute, NoMaintainer: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	t.Cleanup(func() {
+		stop()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+
+	// stale sets the last check-in of the workers to ago before now, and
+	// returns how many of them the page then marks as stale. It first waits
+	// for all of them to be registered.
+	h := handler(t, client, nil)
+	stale := func(workers int64, ago string) int {
+		t.Helper()
+		for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+			tag, err := pool.Exec(t.Context(), "UPDATE "+schema+".workers SET heartbeat_at = now() - interval '"+ago+"'")
+			if err != nil || time.Now().After(deadline) {
+				t.Fatalf("%d of %d workers are registered: %v", tag.RowsAffected(), workers, err)
+			}
+			if tag.RowsAffected() == workers {
+				break
+			}
+		}
+		_, body, _ := get(t, h, "/workers")
+		return strings.Count(body, `class="health stale"`)
+	}
+	if n := stale(1, "5 minutes"); n != 0 {
+		t.Error("a worker that checked in within its lease of 10 minutes shows as stale")
+	}
+	if n := stale(1, "11 minutes"); n != 1 {
+		t.Error("a worker that made no check-in for longer than its lease shows as healthy")
+	}
+
+	// A worker of the previous release stores no lease: it is stale after 30
+	// seconds, as before.
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, hostname, version)
+	    VALUES ('old', '{}', 'h', 'v')`); err != nil {
+		t.Fatal(err)
+	}
+	if n := stale(2, "20 seconds"); n != 0 {
+		t.Errorf("%d workers that checked in 20 seconds ago show as stale", n)
+	}
+	if n := stale(2, "40 seconds"); n != 1 {
+		t.Errorf("%d workers show as stale 40 seconds after their check-ins, want the one without a lease", n)
+	}
+}
+
 func TestOverviewPeriods(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)

@@ -187,6 +187,12 @@ func newStatements(schema string) *statements {
 		// that cannot grow cannot tell the next attempt from this one.
 		"{attempt}", "least(t.attempt + 1, t.max_attempts)",
 		"{token}", "least(t.lease_token, "+strconv.Itoa(math.MaxInt32-1)+") + 1",
+		// {lease} is a worker's lease, or NULL if its row holds none, as a
+		// worker of a release without the column leaves it. A lease that no
+		// worker writes is none either: a Go duration ends below 300 years,
+		// and a row written by hand can hold more than a time can be moved
+		// by, which would fail the statement for every worker.
+		"{lease}", "(CASE WHEN lease_duration BETWEEN interval '0' AND interval '300 years' THEN lease_duration END)",
 		// {unnoted} is a task's errors without a no_handler note at their
 		// end. The note says that the task waits for a worker with a handler
 		// for its kind: the wait is over once such a worker has the task, or
@@ -863,11 +869,15 @@ RETURNING queue, coalesce(group_key, ''), state::text`),
 
 		queueSettings: q(`SELECT name, paused_at IS NOT NULL, coalesce(max_running, 0) FROM {s}.queues WHERE name = ANY($1)`),
 
+		// upsertWorker registers worker $1, with its lease of $6 microseconds:
+		// the worker checks in every third of it, so listWorkers and
+		// deleteWorkers judge by it how long the worker may be silent.
 		upsertWorker: q(`
-INSERT INTO {s}.workers (id, queues, kinds, hostname, version) VALUES ($1, $2, $5, $3, $4)
+INSERT INTO {s}.workers (id, queues, kinds, hostname, version, lease_duration)
+VALUES ($1, $2, $5, $3, $4, $6 * interval '1 microsecond')
 ON CONFLICT (id) DO UPDATE
 SET queues = EXCLUDED.queues, kinds = EXCLUDED.kinds, hostname = EXCLUDED.hostname, version = EXCLUDED.version,
-    started_at = now(), heartbeat_at = now()`),
+    lease_duration = EXCLUDED.lease_duration, started_at = now(), heartbeat_at = now()`),
 		// The column heartbeat_at holds the worker's last check-in. It keeps
 		// its name: renaming it needs a migration, and the workers of an older
 		// release would fail on the renamed column during a rolling deploy.
@@ -1050,7 +1060,14 @@ WITH expired AS (
 )
 DELETE FROM {s}.dedupe_keys d USING expired WHERE d.key = expired.key`),
 
-		deleteWorkers: q(`DELETE FROM {s}.workers WHERE heartbeat_at < now() - $1 * interval '1 second'`),
+		// deleteWorkers deletes the workers that stopped without
+		// unregistering: those that made no check-in for $1 seconds, or for
+		// twice their lease if that is longer. A worker checks in every third
+		// of its lease, so one with a long lease is silent for long while it
+		// is healthy. A worker of a release that stores no lease has only
+		// the $1 seconds.
+		deleteWorkers: q(`
+DELETE FROM {s}.workers WHERE heartbeat_at < now() - greatest($1 * interval '1 second', 2 * {lease})`),
 
 		// pruneSchedules deletes the schedules that are not among $1 and did
 		// not run or change for a day: they were removed from the code. The day
@@ -1146,8 +1163,13 @@ SET history_retention = $3 * interval '1 microsecond', dead_retention = $4 * int
 WHERE (extract(epoch FROM history_retention) * 1000000)::bigint = $1
   AND (extract(epoch FROM dead_retention) * 1000000)::bigint = $2`),
 
+		// listWorkers lists the workers, each with whether it is stale: it
+		// made no check-in for its whole lease, by the database's clock. A
+		// worker of a release that stores no lease is stale after $1
+		// microseconds.
 		listWorkers: q(`
-SELECT w.id, w.hostname, w.version, w.queues, w.kinds, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL
+SELECT w.id, w.hostname, w.version, w.queues, w.kinds, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL,
+       w.heartbeat_at < now() - coalesce({lease}, $1 * interval '1 microsecond')
 FROM {s}.workers w
 LEFT JOIN {s}.leader l ON l.name = 'maintainer' AND l.worker_id = w.id AND l.expires_at > now()
 ORDER BY w.id`),

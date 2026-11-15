@@ -18,6 +18,10 @@ All notable changes to taskmill are recorded here. The format follows
   of the docs in one line each, for tools and AI agents. It ships with the
   module, like the docs, so its paths lead to the pages of the version that
   you use.
+- `WorkerInfo.Stale`: `Client.Workers` says whether a worker made no
+  check-in for its whole `LeaseDuration`, by the database's clock. Such a
+  worker stopped without unregistering, or cannot reach the database. The
+  dashboard's Workers page marks the same workers.
 
 ### Changed
 
@@ -47,6 +51,32 @@ All notable changes to taskmill are recorded here. The format follows
   with its default: they link to the type.
 - The reference section has a new order: the three indexes come first, then
   the pages about what has no Go identifier.
+- This release has a schema migration, `0005_worker_leases`. It adds a
+  column to `workers`, changes only the catalog, reads no row, and never
+  locks `tasks`. It waits at most 5 seconds for each of its locks. The
+  previous release's code keeps working on the new schema, so a rolling
+  deploy is safe, as always.
+
+### Fixed
+
+- A healthy worker with a long `LeaseDuration` showed as stale in the
+  dashboard, and the maintainer could remove it from the list of workers. A
+  worker checks in every third of its `LeaseDuration`. But the dashboard
+  marked a worker as stale after a fixed 30 seconds without a check-in, and
+  the maintainer removed it after a fixed 5 minutes. So with a lease of 90
+  seconds or more, healthy workers showed as stale between check-ins. With
+  a lease above 15 minutes, the maintainer removed running workers, and
+  each one logged `worker was removed as stale; registering again`. A
+  worker now stores its `LeaseDuration` when it registers, in the column
+  that the migration adds. It is stale after one `LeaseDuration` without a
+  check-in, and the maintainer removes it after two, but not before 5
+  minutes. `QueueInfo.Workers` counts it until then. With the default lease
+  of 30 seconds, nothing changes. A worker with a shorter lease shows as
+  stale sooner than before: after its own lease. The dashboard now judges
+  by the database's clock, not by its own. During a rolling deploy, the
+  fixed times still apply to the workers of the previous release, and to
+  every worker while a maintainer or a dashboard of the previous release
+  runs.
 
 ### Security
 

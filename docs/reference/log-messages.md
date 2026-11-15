@@ -117,8 +117,8 @@ backticks.
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended. It waits up to `timeout` for `tasks` running tasks. | Nothing. |
 | `handler ignored shutdown; releasing its task` | Warn | A handler did not return within 5 seconds after its context was canceled. Its task goes back to the queue and runs again. The handler may still be running. | Make the handler return when its context ends. |
 | `worker stopped` | Info | `Run` returned. `released` tasks went back to their queues. | Nothing. |
-| `unregister worker failed` | Warn | The stopped worker could not remove itself from the list of workers. It stays listed for 5 minutes. | Nothing, unless it repeats: then check the database. |
-| `worker was removed as stale; registering again` | Warn | The worker made no check-in for 5 minutes, for example while its machine slept, so the maintainer removed it. It registers again and continues. | Find out what paused the process. |
+| `unregister worker failed` | Warn | The stopped worker could not remove itself from the list of workers. It stays listed, as stale, until the maintainer removes it: after 5 minutes, or twice its `LeaseDuration` if that is longer. | Nothing, unless it repeats: then check the database. |
+| `worker was removed as stale; registering again` | Warn | The worker made no check-in for 5 minutes, and for twice its `LeaseDuration`, for example while its machine slept, so the maintainer removed it. It registers again and continues. | Find out what paused the process. |
 
 ### Tasks and attempts
 

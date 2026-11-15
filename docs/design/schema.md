@@ -1,8 +1,7 @@
 # Storage schema
 
 This page maps the [task lifecycle](task-lifecycle.md) onto PostgreSQL: the
-tables and the indexes, with the reasoning behind each choice. Three more
-pages cover the rest:
+tables and indexes, and why each was chosen. Three more pages cover the rest:
 
 | Page | What it covers |
 |---|---|
@@ -138,9 +137,10 @@ or deleted. The index on `expires_at` serves retention, and the index on
   checks in Go which are due. No statement uses the partial index on
   `next_run_at` today.
 - `workers` gets a check-in from every worker process; `fillfactor = 50`
-  keeps those updates HOT. A check-in sets the column `heartbeat_at`. The
-  column keeps that name: renaming it needs a migration, and the workers of
-  an older release would fail on it during a rolling deploy.
+  keeps those updates HOT. A check-in sets `heartbeat_at`, which keeps its
+  name: a rename would fail an older release's workers in a rolling deploy.
+  `lease_duration` holds the worker's `LeaseDuration`, which says
+  [how long it may be silent](schema-maintenance.md#maintenance).
 - `leader` elects the maintainer with a lease row rather than an advisory
   lock. Session advisory locks need a dedicated connection and do not work
   behind poolers in transaction mode. A lease row works everywhere.

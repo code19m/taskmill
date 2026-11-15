@@ -84,7 +84,6 @@ const (
 const (
 	pageSize       = 50
 	groupPeek      = 100              // most waiting tasks of a group that a task page counts
-	staleCheckIn   = 30 * time.Second // a worker that has not checked in this long is shown as stale
 	requestTimeout = 10 * time.Second // bound on one request, so a slow database cannot hold it
 	maxChoices     = 100              // most values of one filter that a request may choose
 	gzipMin        = 1024             // smallest response worth compressing
@@ -1208,7 +1207,6 @@ func (s *server) funcs() template.FuncMap {
 		"num":       number,
 		"count":     count,
 		"short":     shortID,
-		"stale":     func(t time.Time) bool { return time.Since(t) > staleCheckIn },
 		"percent":   percent,
 		"period":    period,
 		"dict":      dict,
