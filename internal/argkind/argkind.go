@@ -4,6 +4,8 @@ package argkind
 import (
 	"fmt"
 	"reflect"
+
+	"github.com/code19m/taskmill/internal/recovered"
 )
 
 // Zero returns a value of A to call methods on: the zero value, or for a
@@ -18,11 +20,11 @@ func Zero[A any]() A {
 }
 
 // Of returns the kind of A, read from Zero. A Kind method that panics anyway
-// is reported as an error.
+// is reported as an error, whatever the panic's value.
 func Of[A interface{ Kind() string }]() (kind string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("%v.Kind panicked on a zero value: %v", reflect.TypeFor[A](), r)
+			err = fmt.Errorf("%v.Kind panicked on a zero value: %s", reflect.TypeFor[A](), recovered.Text(r))
 		}
 	}()
 	return Zero[A]().Kind(), nil

@@ -19,7 +19,15 @@ const (
 	maintenanceBatch   = 1000                  // most tasks one maintenance statement changes
 	minMaintainerSleep = 50 * time.Millisecond // shortest wait for the next due task: at most 20 promotions a second
 	staleWorkerAge     = 5 * time.Minute       // a worker that has not checked in this long, and for two of its leases, is removed
-	detachTimeout      = 30 * time.Second      // bound on detaching one history partition
+	detachTimeout      = 30 * time.Second      // bound on detaching one history partition, and on dropping it
+	historyDrops       = 10                    // most history partitions one retention pass drops
+
+	// historyDropMark is the comment that retention sets on a history
+	// partition before it detaches it. A table that is no partition is
+	// retention's to drop only with this comment: one that an operator
+	// detached or copied, to keep it, has none. Databases store the text,
+	// so it never changes.
+	historyDropMark = "taskmill drops this expired history partition"
 
 	// maintenanceLockTimeout bounds the wait for a row that an application
 	// transaction holds, such as a FIFO group's.
@@ -29,9 +37,9 @@ const (
 // maintainer does the installation-wide work of one elected worker. Its main
 // loop elects the leader, then rescues expired leases and enqueues schedules
 // once per interval. Queues whose tasks wait are woken in a loop of their
-// own, which also sends the heartbeat that workers count on, due tasks are
-// promoted in another, as they come due, and statistics and retention in a
-// third, so that slow work in one never delays the others.
+// own, which also sends the heartbeat that workers count on, and due tasks
+// are promoted in another, as they come due. Statistics and retention have
+// a loop each too, so that slow work in one never delays the others.
 type maintainer struct {
 	w      *Worker
 	c      *Client
@@ -64,7 +72,13 @@ func (m *maintainer) run(ctx context.Context) {
 	var loops sync.WaitGroup
 	loops.Go(func() { m.wakeLoop(ctx) })
 	loops.Go(func() { m.promoteLoop(ctx) })
-	loops.Go(func() { m.housekeep(ctx) })
+	loops.Go(func() { m.every(ctx, m.w.timing.stats, m.refreshStats) })
+	loops.Go(func() {
+		m.every(ctx, m.w.timing.retention, func(ctx context.Context) {
+			m.retain(ctx)
+			m.pruneSchedules(ctx)
+		})
+	})
 	defer loops.Wait()
 
 	tick := time.NewTicker(m.w.timing.maintainer)
@@ -144,29 +158,24 @@ func (m *maintainer) promoteLoop(ctx context.Context) {
 	}
 }
 
-// housekeep refreshes statistics and applies retention while this worker
-// leads.
-func (m *maintainer) housekeep(ctx context.Context) {
+// every calls work once per interval while this worker leads, until ctx
+// ends. Statistics and retention each run in such a loop of their own:
+// retention can take long, when a detach waits for a transaction that reads
+// the history, or a backlog of old tasks takes many batches, and the
+// statistics, which lag is read from, must stay fresh meanwhile.
+func (m *maintainer) every(ctx context.Context, interval time.Duration, work func(context.Context)) {
 	tick := time.NewTicker(m.w.timing.maintainer)
 	defer tick.Stop()
-	var lastStats, lastRetention time.Time
+	var last time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		}
-		if !m.leader.Load() {
-			continue
-		}
-		if time.Since(lastStats) >= m.w.timing.stats {
-			m.refreshStats(ctx)
-			lastStats = time.Now()
-		}
-		if time.Since(lastRetention) >= m.w.timing.retention {
-			m.retain(ctx)
-			m.pruneSchedules(ctx)
-			lastRetention = time.Now()
+		if m.leader.Load() && time.Since(last) >= interval {
+			work(ctx)
+			last = time.Now()
 		}
 	}
 }
@@ -384,52 +393,96 @@ func (m *maintainer) applyRetention(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// dropHistory detaches and drops the history partitions whose whole day is
-// older than the retention period. The database says which ones, by its own
-// clock.
+// expiredPartition is a history partition whose day is older than the
+// retention period.
+type expiredPartition struct {
+	name     string
+	attached bool // false if an earlier pass marked and detached it, and could not drop it
+	pending  bool // its detach was interrupted
+}
+
+// dropHistory detaches and drops history partitions whose whole day is older
+// than the retention period, at most historyDrops in a pass. The database
+// says which ones, by its own clock. It returns the errors of the partitions
+// that failed, and continues with the others: what keeps one table, such as a
+// view that depends on it, does not keep the next.
+//
+// A detach that times out is the exception. It waited for the transactions
+// that use the history, which keep every other detach waiting as long, and
+// PostgreSQL allows a table only one unfinished detach. So the pass detaches
+// no more, and still drops what is detached already.
 func (m *maintainer) dropHistory(ctx context.Context) error {
-	type partition struct {
-		name    string
-		pending bool // its detach was interrupted
-	}
-	r, err := m.c.pool.Query(ctx, m.c.sql.expiredHistory)
+	r, err := m.c.pool.Query(ctx, m.c.sql.expiredHistory, historyDrops, historyDropMark)
 	if err != nil {
 		return err
 	}
-	expired, err := pgx.CollectRows(r, func(row pgx.CollectableRow) (partition, error) {
-		var p partition
-		err := row.Scan(&p.name, &p.pending)
+	expired, err := pgx.CollectRows(r, func(row pgx.CollectableRow) (expiredPartition, error) {
+		var p expiredPartition
+		err := row.Scan(&p.name, &p.attached, &p.pending)
 		return p, err
 	})
 	if err != nil {
 		return err
 	}
+	var errs []error
+	busy := false // a detach timed out
 	for _, p := range expired {
-		if err := m.dropPartition(ctx, p.name, p.pending); err != nil {
-			return err
+		if p.attached {
+			if busy {
+				continue
+			}
+			if err := m.detachPartition(ctx, p); err != nil {
+				errs = append(errs, err)
+				busy = errors.Is(err, context.DeadlineExceeded)
+				continue
+			}
+		}
+		if err := m.dropDetached(ctx, p.name); err != nil {
+			errs = append(errs, err)
+			continue
 		}
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "dropped expired history", slog.String(logKeyPartition, p.name))
+	}
+	return errors.Join(errs...)
+}
+
+// detachPartition marks and detaches one history partition. DETACH ...
+// CONCURRENTLY does not block completions, and must run outside a
+// transaction. It waits for transactions that use the history, so it is
+// bounded by a timeout. If it is interrupted, the partition stays pending
+// detach, and a later pass finalizes the detach instead.
+//
+// The mark tells a later pass that the detached table is its own to drop,
+// should the drop fail. So it is set first: a crash after it leaves a
+// marked partition, which changes nothing. A comment needs the lock on the
+// partition that the detach takes next anyway, which blocks neither reads
+// nor writes.
+func (m *maintainer) detachPartition(ctx context.Context, p expiredPartition) error {
+	ctx, cancel := context.WithTimeout(ctx, detachTimeout)
+	defer cancel()
+	mark := fmt.Sprintf("COMMENT ON TABLE %s.%s IS '%s'", m.c.schema, p.name, historyDropMark)
+	if _, err := m.c.pool.Exec(ctx, mark); err != nil {
+		return fmt.Errorf("mark %s: %w", p.name, err)
+	}
+	mode := "CONCURRENTLY"
+	if p.pending {
+		mode = "FINALIZE"
+	}
+	detach := fmt.Sprintf("ALTER TABLE %[1]s.task_history DETACH PARTITION %[1]s.%[2]s %[3]s", m.c.schema, p.name, mode)
+	if _, err := m.c.pool.Exec(ctx, detach); err != nil {
+		return fmt.Errorf("detach %s: %w", p.name, err)
 	}
 	return nil
 }
 
-// dropPartition detaches and drops one history partition. DETACH ...
-// CONCURRENTLY does not block completions, and must run outside a
-// transaction. It waits for transactions that use the history, so it is
-// bounded by a timeout; if it is interrupted, the partition stays pending
-// detach, and a later run finalizes the detach instead.
-func (m *maintainer) dropPartition(ctx context.Context, name string, pending bool) error {
+// dropDetached drops a history partition that is detached. The drop waits
+// for whoever reads that table, so it is bounded by a timeout too. A table
+// that is gone is no failure: while the maintainer's role changes hands, two
+// workers can drop the same tables, and one of them comes second.
+func (m *maintainer) dropDetached(ctx context.Context, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, detachTimeout)
 	defer cancel()
-	mode := "CONCURRENTLY"
-	if pending {
-		mode = "FINALIZE"
-	}
-	detach := fmt.Sprintf("ALTER TABLE %[1]s.task_history DETACH PARTITION %[1]s.%[2]s %[3]s", m.c.schema, name, mode)
-	if _, err := m.c.pool.Exec(ctx, detach); err != nil {
-		return fmt.Errorf("detach %s: %w", name, err)
-	}
-	if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE %s.%s", m.c.schema, name)); err != nil {
+	if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", m.c.schema, name)); err != nil {
 		return fmt.Errorf("drop %s: %w", name, err)
 	}
 	return nil

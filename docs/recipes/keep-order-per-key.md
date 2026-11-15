@@ -70,9 +70,10 @@ on purpose.
   [lag](../concepts/glossary.md#lag). Alert when
   `taskmill_queue_halted_groups` is above 0
   ([Monitoring](../production/monitoring.md)).
-- **One group runs slowly.** Its tasks run one after the other. Even tasks
-  that take no time run at only about 20 a second with one worker. With
-  thousands of tasks waiting for one key, expect minutes, not seconds.
+- **One group runs slowly.** Its tasks run one after the other, so more
+  workers don't make it faster. Even tasks that take no time run at only
+  about 200 a second. With thousands of tasks of real work waiting for one
+  key, expect minutes, not seconds.
 - **Keep the transactions that enqueue into a group short.**
   [Producers](../concepts/glossary.md#producer) of one group wait for each
   other's transactions to commit.

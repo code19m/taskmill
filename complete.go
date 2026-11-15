@@ -231,17 +231,41 @@ func lockedRows[K comparable](ctx context.Context, q querier, sql string, scan f
 }
 
 // completed stops tracking completed attempts, counts the tasks that their
-// committed completion finished, and logs a failure to record them.
+// committed completion finished, wakes the fetches that those tasks kept
+// waiting, and logs a failure to record them.
 func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedTask, err error) {
 	for _, t := range ts {
 		w.untrack(t)
 	}
 	if err == nil {
 		w.countCompleted(done)
+		w.madeRoom(done)
 	}
 	if err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "complete tasks failed; they are rescued when their leases expire",
 			slog.Int(logKeyTasks, len(ts)), slog.Any(logKeyError, err))
+	}
+}
+
+// madeRoom wakes the fetch loops of the queues in which the completions
+// done, now committed, let a task start: a queue with a MaxRunning limit
+// runs fewer tasks than before, and the next task of a FIFO group took its
+// head's place. The fetch that follows a freed slot cannot see either. A
+// slot is free as soon as its handler returns, before the completer records
+// the result, so that fetch still counts the task as running, and finds the
+// group's next task pending. The signals of a batch of completions gather in
+// the loop's buffer of one: a batch costs a fetch or two, not one per task.
+//
+// Only this worker wakes, so a group's tasks follow each other without the
+// notification of each promotion, which the client's throttle holds back
+// for up to notifyWindow, and no other worker fetches more often for it. A
+// group whose last task completed costs one fetch that finds nothing.
+func (w *Worker) madeRoom(done []completedTask) {
+	for _, t := range done {
+		// A task of RunTask may be of a queue that Run does not serve.
+		if q := w.queues[t.queue]; q != nil && (t.group != "" || q.maxRunning.Load() > 0) {
+			signal(q.freed)
+		}
 	}
 }
 

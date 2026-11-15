@@ -12,20 +12,34 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// settingsLoop reloads the installation-wide settings of the worker's queues.
+// settingsRetry is the first wait before the worker reads the settings of
+// its queues again while it knows none.
+const settingsRetry = 100 * time.Millisecond
+
+// settingsLoop loads the installation-wide settings of the worker's queues
+// when the worker starts, and again every settings interval. Until a load
+// succeeds, the queues fetch nothing (see Run), so it tries again sooner:
+// after settingsRetry, then waiting twice as long each time, up to the
+// interval.
 func (w *Worker) settingsLoop(ctx context.Context) {
-	tick := time.NewTicker(w.timing.settings)
-	defer tick.Stop()
+	wait := settingsRetry
 	for {
+		w.refreshQueueSettings(ctx)
+		if w.settled.Load() {
+			wait = w.timing.settings
+		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
-			w.refreshQueueSettings(ctx)
+		case <-time.After(wait):
 		}
+		wait = min(2*wait, w.timing.settings)
 	}
 }
 
+// refreshQueueSettings reads the settings of the worker's queues and applies
+// them. If it cannot, the queues keep what they had. The read may take as
+// long as the settings interval, after which the next one is due.
 func (w *Worker) refreshQueueSettings(ctx context.Context) {
 	if len(w.queues) == 0 {
 		return
@@ -34,11 +48,16 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) {
 	for name := range w.queues {
 		names = append(names, name)
 	}
-	settings, err := w.loadQueueSettings(ctx, names)
+	readCtx, cancel := context.WithTimeout(ctx, w.timing.settings)
+	settings, err := w.loadQueueSettings(readCtx, names)
+	cancel()
 	w.settingsFailures.observe(ctx, err)
 	if err != nil {
 		return
 	}
+	// Settled comes first: no queue fetches before the worker says that it
+	// has read the settings.
+	w.settled.Store(true)
 	// A queue without a row has the default settings: running, no limit.
 	for name, q := range w.queues {
 		s := settings[name]
@@ -135,7 +154,9 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 		return false, err
 	}
 	w.listenFailures.observe(ctx, nil)
-	// Notifications may have been missed while disconnected.
+	// Notifications may have been missed while disconnected: of changed
+	// settings, such as a pause, and of tasks.
+	signal(w.queueHints)
 	for _, q := range w.queues {
 		q.nudge()
 	}

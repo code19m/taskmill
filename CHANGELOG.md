@@ -80,6 +80,72 @@ All notable changes to taskmill are recorded here. The format follows
   fixed times still apply to the workers of the previous release, and to
   every worker while a maintainer or a dashboard of the previous release
   runs.
+- A queue with `MaxRunning` ran fewer tasks than its limit. When a task
+  ended, its worker fetched right away, before the task's completion was
+  recorded. The queue still looked full, so the worker waited for its next
+  poll: `PollInterval`, 1 second by default. With a limit of 4, tasks of 1
+  second ran 2.8 at the same time on average, and tasks of 0.3 seconds
+  only 1.3. A worker now fetches again when the completion is recorded,
+  and both ran 3.9 at the same time. Room that another worker's task
+  leaves is still found by the poll.
+- The tasks of one FIFO group ran at about 20 a second in a quiet queue,
+  however short they were. When a task of the group completed, the next
+  one waited for a notification, and a client sends at most one per queue
+  in 50 milliseconds. The worker that completes a group's task now fetches
+  the next one right away: with one worker, 200 short tasks of one group
+  ran at about 220 a second. Other workers wake no more often than before.
+  A worker whose fetch after a notification found nothing still lets 20
+  milliseconds pass before it acts on the next notification, but the
+  fetches that its own tasks cause no longer wait for that.
+- A worker that could not read the settings of its queues when it started
+  ran the tasks of paused queues, and ignored `MaxRunning`, for up to 10
+  seconds: until its next read. A worker now takes no task before it has
+  read those settings, and until then `Worker.Health` returns an error, so
+  a readiness probe shows the worker as not ready. If the read fails, the
+  worker logs `operation failed` for `load queue settings`, and reads
+  again after 0.1 seconds, then waiting twice as long each time, up to 10
+  seconds. That read had no time limit either, so a database that did not
+  answer it kept the worker from starting: no check-in, no maintainer, no
+  fetch. Each read now ends after 10 seconds, and it no longer delays the
+  rest of the start.
+- A pause, a resume, or a new `MaxRunning` reached a worker up to 10
+  seconds late when it was set while the worker did not listen for
+  notifications: as the worker started, or while it reconnected. The
+  worker now reads the settings of its queues again as soon as it listens.
+- A history partition that the maintainer had detached but could not drop
+  stayed in the schema for good, with a day of completed tasks on disk:
+  for example when the worker stopped, or lost the database, between the
+  two steps. No later pass found the table, because it was no partition
+  any more. The maintainer now marks a partition with a comment before it
+  detaches it, and a later pass drops a detached table that has the mark.
+  A table without the mark stays: one that you detached or copied to keep
+  it, and one that an earlier release left behind, which you remove with
+  `DROP TABLE` ([Database](docs/production/database.md)). A pass drops at
+  most 10 partitions, and the next pass, a minute later, continues. A
+  table that cannot be dropped, for example because a view of yours
+  depends on it, does not keep the others: the log names it, and the pass
+  continues.
+- Queue statistics went stale while retention had much to do. The
+  maintainer refreshed them in the loop that also applies retention. So
+  the counts, `QueueInfo.Lag`, and `QueueInfo.RefreshedAt` stood still
+  while it deleted a large backlog of old dead or canceled tasks, or while
+  the drop of old history waited for a long transaction such as a backup,
+  up to 30 seconds in each minute. An alert on statistics older than 60
+  seconds could then fire although a maintainer ran, and an autoscaler
+  read an old lag. Statistics now have a loop of their own, and are
+  refreshed every 10 seconds whatever retention does.
+- `AddHandler` and `AddBatchHandler` panicked, which ends a process as it
+  starts, when the `Kind` method of the args panicked with a value that
+  panics again when it is formatted, such as an error whose `Error` method
+  panics with its own receiver. `NewWorker` now reports such a `Kind` as
+  an error, as it reports every other panic there, and the error names the
+  value's type. For a handler that panicked with such a value,
+  `taskmilltest.Run` returned a nil error, so a test that checked only the
+  error passed. It now returns an error for that panic too.
+- A worker that ran no task logged `worker stopping; waiting for running
+  tasks` with `tasks=0` each time it stopped. It now logs that line only
+  when it waits. And `tasks` counts the tasks whose handlers still run: it
+  also counted the finished ones whose results were not recorded yet.
 
 ### Security
 

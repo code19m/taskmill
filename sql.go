@@ -996,26 +996,51 @@ FROM expired
 WHERE t.id = expired.id
 RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`),
 
-		// expiredHistory lists the history partitions whose whole UTC day is
-		// older than the history retention, oldest first, each with whether
-		// its detach was interrupted, which must be finalized before it can be
-		// dropped. The database applies the period to its own clock, so the
-		// application's clock and arithmetic cannot expire history. A
-		// partition's name ends in its day, so names sort by day, and the
-		// pattern keeps to names that are safe in the text of a statement.
+		// expiredHistory lists $1 of the history partitions whose whole UTC
+		// day is older than the history retention. Each comes with whether it
+		// is still attached, and whether its detach was interrupted, which
+		// must be finalized before it can be dropped. The database applies
+		// the period to its own clock, so the application's clock and
+		// arithmetic cannot expire history. A partition's name ends in its
+		// day, so names compare as days do, and the pattern keeps to names
+		// that are safe in the text of a statement.
+		//
+		// An interrupted detach comes first: PostgreSQL allows a table one at
+		// a time, so no other partition can be detached before it. Then come
+		// the partitions, the oldest first, so an interrupted detach is always
+		// the oldest partition's. When the retention grows, it is then the
+		// last partition to leave the list. In another order it could leave
+		// while older partitions stay, and none of them could be detached.
+		//
+		// The detached tables come last, in random order. Some cannot be
+		// dropped, such as one that a view depends on, and no state says
+		// which: in a fixed order, enough of them would fill every pass, and
+		// keep the others for good.
+		//
+		// A partition that a pass detached and could not drop is a table of
+		// its own, which the history no longer names. So the statement reads
+		// the schema's tables by name. Of those that are no partition, it
+		// takes only the ones with the comment $2, which a pass sets before
+		// it detaches: a table that an operator detached or copied, to keep
+		// it, has none.
 		//
 		// A period that only SQL can store, of thousands of years, has its
 		// cutoff before our era, whose year to_char prints without a sign,
 		// like a year after today. Such a cutoff counts as the year 1, so
 		// that nothing is older.
 		expiredHistory: q(`
-SELECT c.relname, i.inhdetachpending
-FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
-WHERE i.inhparent = '{s}.task_history'::regclass
+SELECT c.relname, i.inhrelid IS NOT NULL, coalesce(i.inhdetachpending, false)
+FROM pg_class c
+LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND i.inhparent = '{s}.task_history'::regclass
+WHERE c.relnamespace = '{s}'::regnamespace
+  AND c.relkind = 'r'
+  AND (i.inhrelid IS NOT NULL OR NOT c.relispartition AND obj_description(c.oid, 'pg_class') = $2)
   AND c.relname ~ '^task_history_[0-9]{8}$'
   AND c.relname < 'task_history_' || to_char(greatest(
           {utc} - (SELECT history_retention FROM {s}.settings), timestamp '0001-01-01'), 'YYYYMMDD')
-ORDER BY c.relname`),
+ORDER BY coalesce(i.inhdetachpending, false) DESC, i.inhrelid IS NULL,
+         CASE WHEN i.inhrelid IS NOT NULL THEN c.relname END, random()
+LIMIT $1`),
 
 		// deleteFinished deletes dead and canceled tasks older than the dead
 		// retention, except the dead heads that keep their groups halted. It

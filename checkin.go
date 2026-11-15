@@ -64,7 +64,9 @@ func (w *Worker) checkIn(ctx context.Context) {
 // Health reports whether the worker runs and is in touch with the database:
 // nil while Run runs and its last check-in succeeded within LeaseDuration,
 // and otherwise an error that says why. A worker out of touch for that long
-// can no longer keep its tasks' leases. Health reads only memory, so a
+// can no longer keep its tasks' leases. It is also an error until Run has
+// read the settings of the worker's queues, which it does when it starts:
+// the worker fetches no task before that. Health reads only memory, so a
 // readiness probe may call it often. It fails while the database is out of
 // reach, which restarting the worker does not fix: do not base a liveness
 // probe on it. The error wraps none of taskmill's error values.
@@ -79,6 +81,9 @@ func (w *Worker) Health() error {
 	}
 	if since := time.Since(*at); since > w.cfg.LeaseDuration {
 		return fmt.Errorf("taskmill: the worker has not reached the database for %s", since.Round(time.Second))
+	}
+	if !w.settled.Load() {
+		return errors.New("taskmill: the worker has not read the settings of its queues")
 	}
 	return nil
 }

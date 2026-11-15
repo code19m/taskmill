@@ -74,6 +74,26 @@ database connection busy. Maintenance works the same way: it skips group rows
 that other transactions hold and retries them in its next cycle, so a long
 application transaction cannot stall it.
 
+**The next task starts without a notification.** The promotion notifies the
+queue, but a client sends at most one notification per queue per 50 ms (see
+[Notifications](schema-maintenance.md#notifications)). A group whose every
+task waited for one ran 20 tasks a second. So the worker that completed the
+head fetches the queue again when its batch commits. Only that worker does:
+the others still wake at the pace of the notifications. Measured with one
+worker and tasks that take no time, 200 tasks of one group ran at about 220
+a second. What remains is the 2 ms for which the completer gathers a batch,
+and the statements of the completion and of the fetch.
+
+The wake-up comes with the commit because the fetch that follows a freed
+slot comes too early. A slot is free as soon as its handler returns, and the
+completer records the result a few milliseconds later, in a batch. A fetch
+in between finds the group's next task still `pending`. It also still counts
+the task as running, so a queue at its `MaxRunning` limit looks full: a
+committed batch wakes the fetch of such a queue too, and the queue runs at
+its limit without a poll. The worker's own notification of the promotion
+comes back to it, and its fetch finds nothing. The 20 ms that follow hold
+back notifications only, not these wake-ups.
+
 **Lock order.** Group rows are always locked in bytewise order of queue and
 group key: `COLLATE "C"` in SQL, and Go's string order in code, which is the
 same. A `pending` task's row is locked only after its group's row: promotion

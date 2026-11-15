@@ -220,10 +220,10 @@ index-only scan).
   `task_history` alone, not its partitions, in `SHARE UPDATE EXCLUSIVE` mode,
   which attaching takes anyway, and waits for it at most 5 seconds. So
   processes that create partitions at the same time wait for each other.
-- **Old partitions are detached, then dropped.** The detach is
-  `DETACH PARTITION ... CONCURRENTLY`, bounded by 30 seconds. An interrupted
-  detach is finished next time with `DETACH PARTITION ... FINALIZE`. These
-  commands need ownership of `task_history`.
+- **Old partitions are detached, then dropped,** with
+  `DETACH PARTITION ... CONCURRENTLY`, bounded by 30 seconds. These commands
+  need ownership of `task_history`. A later pass finishes a step that failed
+  (see [Maintenance](schema-maintenance.md#maintenance)).
 - **There is no default partition.** Attaching a partition would then have to
   scan and lock it. If a day's partition is missing, completions skip history
   and the worker logs an error, so the gap shows up in alerts.

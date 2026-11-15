@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -447,6 +448,148 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	})
 }
 
+// Retention detaches a history partition before it drops it, and a later
+// pass finishes what a pass could not. Here a view depends on one more
+// expired partition than a pass handles, the oldest ones: retention detaches
+// them, and cannot drop them. One fixture shows what follows, step by step:
+//
+//   - A pass handles no more tables than it may, the oldest partitions
+//     first: so an interrupted detach is always the oldest one's.
+//   - Tables that cannot be dropped do not keep the others: not the
+//     partitions, and not a detached table that can be dropped.
+//   - Once the views are gone, retention drops what it detached. Two
+//     maintainers that do so at the same moment both succeed.
+//   - A table that retention did not detach stays, whatever its name. So
+//     does one that it detached, until its day expires.
+func TestRetentionFinishesTheDropsItBegan(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	var stuck, free []string // the newest first
+	for i := range taskmill.HistoryDrops + 1 {
+		part := e.attachHistory(t, today.AddDate(0, 0, -60-i))
+		e.exec(t, "CREATE VIEW {s}.report_"+strconv.Itoa(i)+" AS SELECT id FROM {s}."+part)
+		stuck = append(stuck, part)
+	}
+	for i := range 3 {
+		free = append(free, e.attachHistory(t, today.AddDate(0, 0, -30-i)))
+	}
+	// An operator detached one expired partition to keep it, and copied the
+	// history under the name of another expired day.
+	kept := e.attachHistory(t, today.AddDate(0, 0, -40))
+	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+kept)
+	copied := "task_history_" + today.AddDate(0, 0, -41).Format("20060102")
+	e.exec(t, "CREATE TABLE {s}."+copied+" AS TABLE {s}.task_history")
+	// Retention detached a third table, as its comment says. The retention
+	// grew since, so its day is not expired any more.
+	recent := e.attachHistory(t, today.AddDate(0, 0, -2))
+	e.exec(t, "COMMENT ON TABLE {s}."+recent+" IS 'taskmill drops this expired history partition'")
+	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+recent)
+	expired := slices.Concat(stuck, free)
+
+	// The first pass takes the oldest partitions, as many as it may: the
+	// newest of those that cannot be dropped, and the three that can, wait.
+	logs := &logRecorder{}
+	w := newWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{})
+	taskmill.RunRetention(t.Context(), w)
+	newest := []string{stuck[0], free[2], free[1], free[0]} // by name
+	if got := e.historyPartitions(t, expired); !slices.Equal(got, newest) {
+		t.Fatalf("after one pass, the expired partitions %v are attached, want the newest ones, %v: a pass handles the %d oldest",
+			got, newest, taskmill.HistoryDrops)
+	}
+
+	// The next pass takes the rest.
+	taskmill.RunRetention(t.Context(), w)
+	if n := e.historyTables(t, free...); n != 0 || len(e.historyPartitions(t, expired)) != 0 {
+		t.Fatalf("%d of %d expired partitions are left behind tables that retention cannot drop", n, len(free))
+	}
+	if n := e.historyTables(t, stuck...); n != len(stuck) {
+		t.Fatalf("%d of %d tables with a view that depends on them are left", n, len(stuck))
+	}
+	reported := slices.ContainsFunc(operationLines(logs.all())["apply retention"], func(r slog.Record) bool {
+		return strings.Contains(attr(r, "error"), "2BP01") // dependent_objects_still_exist
+	})
+	if !reported {
+		t.Error("no log line says that a table could not be dropped")
+	}
+
+	// One view goes, the one of the table that comes last by name. More
+	// tables wait than a pass handles, and the others still cannot be
+	// dropped: they do not keep this one, because a pass takes them in an
+	// order of its own. It may need a few passes: far fewer than these.
+	e.exec(t, "DROP VIEW {s}.report_0")
+	for range 50 {
+		if e.historyTables(t, stuck[0]) == 0 {
+			break
+		}
+		taskmill.RunRetention(t.Context(), w)
+	}
+	if e.historyTables(t, stuck[0]) != 0 {
+		t.Fatal("a detached table that can be dropped is left behind tables that cannot")
+	}
+
+	// The other views go. While the maintainer's role changes hands, two
+	// workers can apply retention at the same moment: both find the same
+	// detached tables, and for each table one of them comes second. A reader
+	// holds the tables here until both passes have found them, and wait to
+	// drop.
+	left := stuck[1:]
+	for i := range left {
+		e.exec(t, "DROP VIEW {s}.report_"+strconv.Itoa(i+1))
+	}
+	reader := e.begin(t)
+	e.txExec(t, reader, "LOCK TABLE {s}."+strings.Join(left, ", {s}.")+" IN ACCESS SHARE MODE")
+	var racing [2]*logRecorder
+	var passes sync.WaitGroup
+	for i := range racing {
+		racing[i] = &logRecorder{}
+		w := newWorker(t, e.withLogger(t, slog.New(racing[i])), &taskmill.WorkerConfig{})
+		passes.Go(func() { taskmill.RunRetention(t.Context(), w) })
+	}
+	waitFor(t, "both passes to wait for a table", func() bool {
+		return e.count(t, `SELECT count(*) FROM pg_stat_activity
+		                   WHERE wait_event_type = 'Lock' AND query LIKE 'DROP TABLE%' || $1 || '.%'`, e.schema) == 2
+	})
+	if err := reader.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	passes.Wait()
+	if n := e.historyTables(t, left...); n != 0 {
+		t.Errorf("%d of %d tables that retention had detached are left", n, len(left))
+	}
+	for i, l := range racing {
+		if lines := operationLines(l.all())["apply retention"]; len(lines) > 0 {
+			t.Errorf("worker %d reported a failure for tables that the other one dropped first: %s", i+1, recordText(lines[0]))
+		}
+	}
+	// A last pass has only the three other tables to find, and leaves them.
+	taskmill.RunRetention(t.Context(), w)
+	if n := e.historyTables(t, kept, copied, recent); n != 3 {
+		t.Errorf("retention dropped %d of 3 tables that are not its to drop", 3-n)
+	}
+}
+
+// historyPartitions returns which of the named tables are partitions of the
+// env's history, ordered by name.
+func (e *env) historyPartitions(t *testing.T, names []string) []string {
+	t.Helper()
+	var parts []string
+	err := e.pool.QueryRow(t.Context(), replaceSchema(`
+SELECT coalesce(array_agg(c.relname::text ORDER BY c.relname), '{}')
+FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+WHERE i.inhparent = '{s}.task_history'::regclass AND c.relname = ANY($1)`, e.schema), names).Scan(&parts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parts
+}
+
+// historyTables returns how many of the named tables the env's schema has.
+func (e *env) historyTables(t *testing.T, names ...string) int {
+	t.Helper()
+	return e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = ANY($2)", e.schema, names)
+}
+
 // attachHistory attaches a history partition for the UTC day that starts at
 // day, as the maintainer creates them, and returns its name.
 func (e *env) attachHistory(t *testing.T, day time.Time) string {
@@ -817,7 +960,11 @@ func countedQueues(t *testing.T, e *env, names ...string) map[string]taskmill.Qu
 	return out
 }
 
-func TestSlowRetentionDoesNotDelayPromotion(t *testing.T) {
+// Retention can take long: a detach waits for a transaction that reads the
+// history, and a backlog of old tasks takes many batches. Due tasks are
+// promoted meanwhile, and the statistics, which Lag and autoscalers read, are
+// refreshed.
+func TestSlowRetentionDelaysNeitherPromotionNorStatistics(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	day := time.Now().UTC().AddDate(0, 0, -30).Truncate(24 * time.Hour)
@@ -850,6 +997,17 @@ func TestSlowRetentionDoesNotDelayPromotion(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the scheduled task was not promoted while retention waited")
 	}
+	// A task that arrives now, in a queue that no worker reads, is counted.
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "unread"})
+	waitFor(t, "the statistics to count a task that arrived while retention waited", func() bool {
+		queues, err := e.client.Queues(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(queues, func(q taskmill.QueueInfo) bool {
+			return q.Name == "unread" && q.Counts[taskmill.StateAvailable].N == 1
+		})
+	})
 	if err := reader.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
