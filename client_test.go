@@ -524,32 +524,41 @@ func TestRetryTakesItsKeyBeforeItsGroup(t *testing.T) {
 
 // What taskmill stores of a freed key is in columns that only a trusted
 // role writes. A value there that is no key, as a write by hand may leave,
-// counts as none: a retry, of one task or of many, never fails on it.
+// counts as none: a retry, of one task or of many, never fails on it. So
+// does a key on a task that is not canceled. The retry of the previous
+// release leaves the columns as they are, on a task that runs on without its
+// key: if that task dies, its retry asks for no key, like any dead task's.
 func TestRetryIgnoresAStoredKeyThatIsNotOne(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
-	var ids []int64
+	var single, many []int64
 	for _, stored := range []string{
 		`freed_key = '\x01', freed_key_expires_at = 'infinity'`,
 		`freed_key = NULL, freed_key_expires_at = 'infinity'`,
 		`freed_key = sha256('k'), freed_key_expires_at = NULL`,
 		`freed_key = sha256('k'), freed_key_expires_at = '-infinity'`,
+		`freed_key = sha256('k'), freed_key_expires_at = 'infinity', state = 'dead'`,
 	} {
-		id := e.enqueue(t, sendEmail{}, nil)
-		e.cancel(t, id)
-		e.exec(t, "UPDATE {s}.tasks SET "+stored+" WHERE id = $1", id)
-		ids = append(ids, id)
+		for _, ids := range []*[]int64{&single, &many} {
+			id := e.enqueue(t, sendEmail{}, nil)
+			e.cancel(t, id)
+			e.exec(t, "UPDATE {s}.tasks SET "+stored+" WHERE id = $1", id)
+			*ids = append(*ids, id)
+		}
 	}
-	if err := e.client.Retry(ctx, ids[0]); err != nil {
-		t.Fatalf("retry: %v", err)
+	for _, id := range single {
+		if err := e.client.Retry(ctx, id); err != nil {
+			t.Fatalf("retry of task %d: %v", id, err)
+		}
 	}
-	res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}))
-	if err != nil || res.Changed != int64(len(ids)-1) || res.Conflicts != 0 {
-		t.Fatalf("retried %+v, %v; want the other %d tasks", res, err, len(ids)-1)
+	finished := &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled, taskmill.StateDead}}
+	res, err := e.client.RetryMatching(ctx, bulk(finished))
+	if err != nil || res.Changed != int64(len(many)) || res.Conflicts != 0 {
+		t.Fatalf("retried %+v, %v; want the other %d tasks", res, err, len(many))
 	}
 	if n := e.count(t, "SELECT count(*) FROM {s}.dedupe_keys"); n != 0 {
-		t.Fatalf("%d dedupe keys were claimed from values that are no keys", n)
+		t.Fatalf("%d dedupe keys were claimed from values that are no keys of canceled tasks", n)
 	}
 	// A key whose window never ends is a key: the task takes it back.
 	forever := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "forever"})

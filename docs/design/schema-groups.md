@@ -235,9 +235,10 @@ a batch that need a key, and counts them as skipped.
 
 The previous release names the columns that it writes, so it works on the
 new schema as before: its cancel stores no key, and a retry of that task
-takes none. Its retry leaves what a cancel of this release stored: the next
-retry of this release, after another cancel, takes that key back if it is
-free.
+takes none. Its retry leaves what a cancel of this release stored, on a
+task that runs on without its key. Only a canceled task takes a key back,
+so that task asks for none if it dies. After another cancel, a retry of
+this release takes the stored key back if it is free.
 
 ## See also
 

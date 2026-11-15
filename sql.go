@@ -209,11 +209,15 @@ func newStatements(schema string) *statements {
 		// attempts instead, it compares every task with every attempt.
 		"{leased}", "state::text = 'running'",
 		// {keyed} matches the tasks t that must take a dedupe key back when
-		// they are retried: their cancel freed a key, and stored it with
-		// them, and the key's window still lasts. A stored key that is not
-		// one, which only a write by hand leaves, counts as none: the table
-		// of the keys would refuse it, and fail the retry.
-		"{keyed}", `(t.freed_key_expires_at > now() AND octet_length(t.freed_key) = 32)`,
+		// they are retried: they are canceled, their cancel freed a key, and
+		// stored it with them, and the key's window still lasts. Only a
+		// canceled task gave its key away. A task in another state that
+		// stores one was retried by the previous release, which leaves the
+		// columns as they are: it ran on without its key, and so asks for
+		// none when it is dead. A stored key that is not one, which only a
+		// write by hand leaves, counts as none: the table of the keys would
+		// refuse it, and fail the retry.
+		"{keyed}", `(t.state = 'canceled' AND t.freed_key_expires_at > now() AND octet_length(t.freed_key) = 32)`,
 		// {utc} is the database's time in UTC, without a time zone. A
 		// retention period is subtracted from it, not from now(): there, a
 		// period's days are days of the session's time zone, which are 23 or
