@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -209,6 +210,47 @@ func TestWorkerServesTheDefaultQueuesOfItsKinds(t *testing.T) {
 	want := map[string]QueueOptions{DefaultQueue: {Concurrency: 10}, "routed": {Concurrency: 10}}
 	if len(cfg.Queues) != len(want) || cfg.Queues[DefaultQueue] != want[DefaultQueue] || cfg.Queues["routed"] != want["routed"] {
 		t.Fatalf("got queues %v, want %v", cfg.Queues, want)
+	}
+}
+
+// Tests shorten a worker's fixed intervals with SetTiming, so a changed
+// default would pass them all. This test holds the defaults that
+// docs/reference/defaults-and-limits.md and the doc comments name. One of
+// them is a promise about stopping: a worker releases the tasks that ignore
+// their context 5 seconds after DrainTimeout, so a process stops in time if
+// its platform gives it DrainTimeout plus 10 seconds.
+func TestDefaultTiming(t *testing.T) {
+	t.Parallel()
+	d := defaultTiming
+	intervals := []struct {
+		name      string
+		got, want time.Duration
+	}{
+		{"maintainer", d.maintainer, time.Second},
+		{"heartbeat", d.heartbeat, 5 * time.Second},
+		{"election", d.election, 2 * time.Second},
+		{"leaderLease", d.leaderLease, 10 * time.Second},
+		{"retention", d.retention, time.Minute},
+		{"stats", d.stats, 10 * time.Second},
+		{"activity", d.activity, 10 * time.Second},
+		{"settings", d.settings, 10 * time.Second},
+		{"shutdownGrace", d.shutdownGrace, 5 * time.Second},
+		{"noHandlerSnooze", d.noHandlerSnooze, time.Minute},
+		{"noHandlerWait", d.noHandlerWait, time.Hour},
+		{"reconnectMin", d.reconnectMin, time.Second},
+		{"reconnectMax", d.reconnectMax, 30 * time.Second},
+		{"failureReport", d.failureReport, time.Minute},
+		{"idlePoll", d.idlePoll, time.Minute},
+		{"listen", d.listen, 10 * time.Second},
+	}
+	for _, tt := range intervals {
+		if tt.got != tt.want {
+			t.Errorf("the worker's %s interval is %s, want %s: the docs name it, and the tests that shorten it cannot see a change",
+				tt.name, tt.got, tt.want)
+		}
+	}
+	if fields := reflect.TypeFor[timing]().NumField(); fields != len(intervals) {
+		t.Errorf("timing has %d intervals, and this test holds %d: add the new one", fields, len(intervals))
 	}
 }
 

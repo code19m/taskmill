@@ -2102,61 +2102,13 @@ func TestHandlerThatIgnoresShutdownIsReleased(t *testing.T) {
 	if info.State != taskmill.StateAvailable || info.Attempt != 0 {
 		t.Fatalf("got %s with attempt %d, want available with 0", info.State, info.Attempt)
 	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
+		t.Error("the stopped worker is still registered")
+	}
 	// The abandoned handler's late success changes nothing.
 	close(unblock)
 	recv(t, returned, "the handler to return")
 	e.wantState(t, id, taskmill.StateAvailable)
-}
-
-func TestShutdownFitsTheGracePeriod(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	const drain = time.Second
-	started, unblock := make(chan struct{}, 2), make(chan struct{})
-	t.Cleanup(func() { close(unblock) })
-	// The worker's own timing: the grace after the drain is a fixed 5 seconds.
-	w, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{
-		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
-			started <- struct{}{}
-			if task.Args.UserID == 1 {
-				<-unblock // ignores its context
-				return nil
-			}
-			<-ctx.Done()
-			return ctx.Err()
-		}, &taskmill.HandlerOptions{Timeout: time.Hour}),
-		Queues:       defaultQueue(2),
-		DrainTimeout: drain,
-		NoMaintainer: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- w.Run(ctx) }()
-	ids := []int64{e.enqueue(t, sendEmail{UserID: 1}, nil), e.enqueue(t, sendEmail{UserID: 2}, nil)}
-	recv(t, started, "the first task to start")
-	recv(t, started, "the second task to start")
-
-	// SIGTERM, through signal.NotifyContext. A process stops in time if its
-	// termination grace period is DrainTimeout plus 10 seconds.
-	stopping := time.Now()
-	cancel()
-	if err := recv(t, done, "Run to return"); err != nil {
-		t.Fatal(err)
-	}
-	if took := time.Since(stopping); took < drain || took > drain+10*time.Second {
-		t.Errorf("Run returned %s after its context ended, want between %s and %s", took, drain, drain+10*time.Second)
-	}
-	for _, id := range ids {
-		if info := e.get(t, id); info.State != taskmill.StateAvailable || info.Attempt != 0 {
-			t.Errorf("task %d is %s with attempt %d, want available with 0", id, info.State, info.Attempt)
-		}
-	}
-	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
-		t.Error("the stopped worker is still registered")
-	}
 }
 
 func TestHealthFollowsTheDatabase(t *testing.T) {
