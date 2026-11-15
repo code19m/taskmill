@@ -6,7 +6,7 @@ upgrade, see [Upgrading](../production/upgrading.md).
 
 ## Status
 
-- The latest release is **v0.7.0**.
+- The latest release is **v0.8.0**.
 - **The API is final for v1.0.0.** v1.0.0 is not tagged yet: it waits for
   more use in production.
   [ADR 0009](../adr/0009-the-apis-shape-for-v1.md) says why the API has

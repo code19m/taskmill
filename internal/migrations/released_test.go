@@ -16,6 +16,7 @@ var released = map[string]string{
 	"0003_halted_groups.sql":                "e9a804c9da62620bb3289aed8ddb488af9efcd21b7456272aa26cd8d6bbce179", // v0.3.0
 	"0004_stuck_work.sql":                   "08ee354a2c82b5e1d947993f2a00ea3c675daa7bebc5b95f6b03fc8192b30e3c", // v0.4.0
 	"0005_worker_leases_and_freed_keys.sql": "59aa9494bab43407bbb56f9d2781bd6b9af701cb689544b616c0beecb40be076", // v0.7.0
+	"0006_refused_rows.sql":                 "22ab57c76172bf16de16d23e28e8622985ba950899161acdc807efa03cbeb710", // v0.8.0
 }
 
 func TestReleasedMigrationsAreUnchanged(t *testing.T) {
