@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -584,6 +585,54 @@ func TestListPagesNewestFirst(t *testing.T) {
 	unknown := &taskmill.ListParams{Filter: taskmill.TaskFilter{States: []taskmill.State{"bogus"}}}
 	if _, err := e.client.List(t.Context(), unknown); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("unknown state: got %v", err)
+	}
+}
+
+// A summary is the same page of tasks without what makes a task large: no
+// payload, no metadata, and only the newest error. Everything else is as the
+// full list returns it, for unfinished tasks and for completed ones.
+func TestListSummary(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	opts := &taskmill.EnqueueOptions{Metadata: map[string]string{"tenant": "7"}}
+	failed := e.enqueue(t, sendEmail{To: "failed"}, opts)
+	e.exec(t, `UPDATE {s}.tasks SET errors = '[{"attempt": 1, "at": "2026-01-01T00:00:00Z", "message": "first"},
+	           {"attempt": 2, "at": "2026-01-02T00:00:00Z", "message": "last", "code": "timeout"}]' WHERE id = $1`, failed)
+	e.enqueue(t, sendEmail{To: "waiting"}, opts)
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: map[string]taskmill.QueueOptions{"done": {}}})
+	completed := e.enqueue(t, sendEmail{To: "completed"}, &taskmill.EnqueueOptions{Queue: "done", Metadata: opts.Metadata})
+	e.waitState(t, completed, taskmill.StateCompleted)
+
+	full, err := e.client.List(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief, err := e.client.List(ctx, &taskmill.ListParams{Summary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Tasks) != 3 || len(brief.Tasks) != 3 {
+		t.Fatalf("got %d tasks in full and %d in summary, want 3 of each", len(full.Tasks), len(brief.Tasks))
+	}
+	for i, want := range full.Tasks {
+		if len(want.Payload) == 0 || len(want.Metadata) == 0 {
+			t.Fatalf("the full list left out the payload or the metadata of task %d: %+v", want.ID, want)
+		}
+		got := brief.Tasks[i]
+		if got.Payload != nil || got.Metadata != nil {
+			t.Errorf("the summary of task %d has payload %q and metadata %v, want none", got.ID, got.Payload, got.Metadata)
+		}
+		want.Payload, want.Metadata = nil, nil
+		if n := len(want.Errors); n > 1 {
+			want.Errors = want.Errors[n-1:]
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("the summary of task %d:\n got %+v\nwant %+v", got.ID, got, want)
+		}
+	}
+	if last := brief.Tasks[2]; last.ID != failed || len(last.Errors) != 1 || last.Errors[0].Message != "last" {
+		t.Errorf("the summary of the failed task: %+v, want only its newest error", last)
 	}
 }
 

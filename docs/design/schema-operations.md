@@ -27,6 +27,16 @@ index that gives a page in ID order:
 A list of one state across all queues, such as every dead task, has no
 index in ID order: it still reads the newer tasks of other states first.
 
+**A summary leaves out what makes a task large.** With
+`ListParams.Summary`, the statement returns no payload and no metadata, and
+of each task's errors only the newest. The planner sees the parameter, so
+it drops those columns from the plan, and the database does not read their
+values from TOAST. The dashboard's lists ask for summaries: one page of 50
+tasks with payloads of 1 MiB took 54 MiB of memory to show 50 KB, at every
+refresh of every open tab. A task's own page reads the task in full, with
+`Get`. For a dead task that halts its group, that page counts the tasks
+behind it with `Count`, up to its cap, and does not list them.
+
 `Client.Count` has one branch per state, and custom plans leave out the
 branches of the states not counted. Sequential and bitmap scans are off for
 it, so each branch reads the index of its state and stops at its cap. A

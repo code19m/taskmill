@@ -83,7 +83,6 @@ const (
 
 const (
 	pageSize       = 50
-	groupPeek      = 100              // most waiting tasks of a group that a task page counts
 	requestTimeout = 10 * time.Second // bound on one request, so a slow database cannot hold it
 	maxChoices     = 100              // most values of one filter that a request may choose
 	gzipMin        = 1024             // smallest response worth compressing
@@ -386,7 +385,8 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := taskFilter(q)
-	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: pageSize}
+	// The list shows no payload, no metadata, and only each task's last error.
+	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: pageSize, Summary: true}
 	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		s.render(w, r, http.StatusBadRequest, "error.html",
@@ -780,9 +780,8 @@ func selected(values []string) []string {
 
 // group describes a task's place in its FIFO group.
 type group struct {
-	Waiting int  // tasks waiting behind a dead task, up to groupPeek
-	More    bool // more than groupPeek wait
-	Head    *taskmill.TaskInfo
+	Waiting taskmill.TaskCount // tasks waiting behind a dead task
+	Head    *taskmill.TaskInfo // the task that a pending task waits behind, in summary
 }
 
 func (s *server) task(w http.ResponseWriter, r *http.Request) {
@@ -821,19 +820,19 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 	}
 	switch t.State {
 	case taskmill.StateDead:
-		page, err := s.client.List(r.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{
+		counts, err := s.client.Count(r.Context(), &taskmill.TaskFilter{
 			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, States: []taskmill.State{taskmill.StatePending},
-		}, Limit: groupPeek})
+		})
 		if err != nil {
 			return g, err
 		}
-		g.Waiting, g.More = len(page.Tasks), page.Next != ""
+		g.Waiting = counts.States[taskmill.StatePending]
 	case taskmill.StatePending:
 		page, err := s.client.List(r.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{
 			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, States: []taskmill.State{
 				taskmill.StateScheduled, taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateRetryable, taskmill.StateDead,
 			},
-		}, Limit: 1})
+		}, Limit: 1, Summary: true})
 		if err != nil {
 			return g, err
 		}

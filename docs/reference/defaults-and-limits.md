@@ -77,7 +77,7 @@ by election, that does the shared work.
 | Values per filter | Up to 100 |
 | FIFO groups that a filter lists | The first 100. Its search finds the others |
 | Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds |
-| Page of a dead task in a FIFO group | Counts up to 100 tasks that wait behind it |
+| Page of a dead task in a FIFO group | Counts up to 10,000 tasks that wait behind it |
 | Charts | The last hour, 6 hours, or day, with one point per 1, 5, or 15 minutes |
 
 The values of the `taskmill-ui` command, such as its HTTP timeouts, are in

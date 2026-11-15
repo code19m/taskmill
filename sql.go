@@ -1237,17 +1237,17 @@ ORDER BY w.id`),
 		// with custom plans, so that the planner sees which filters are set,
 		// and its filters are written so that the planner also sees a single
 		// queue or group and the selected states: see inList and inStates.
+		// If $9, it returns a summary of each task: see listColumns.
 		listTasks: q(`
 SELECT ` + taskColumns + ` FROM (
-    (SELECT ` + taskColumns + ` FROM {s}.tasks
+    (SELECT ` + listColumns(`state::text`) + ` FROM {s}.tasks
      WHERE $6 AND ` + inList(`queue`, `$1::text[]`) + `
        AND (cardinality($2::text[]) = 0 OR ` + inStates(`$2::text[]`) + `)
        AND ` + inList(`kind`, `$3::text[]`) + `
        AND ` + inList(`group_key`, `$8::text[]`) + ` AND id < $4
      ORDER BY id DESC LIMIT $5)
     UNION ALL
-    (SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(group_key, ''),
-            metadata, payload, errors, created_at, run_at, attempted_at, finalized_at
+    (SELECT ` + listColumns(`'completed'`) + `
      FROM {s}.task_history
      WHERE $7 AND ` + inList(`queue`, `$1::text[]`) + `
        AND ` + inList(`kind`, `$3::text[]`) + `
@@ -1492,6 +1492,18 @@ SELECT paused FROM s`),
 UPDATE {s}.schedules SET paused_at = CASE WHEN $2 THEN coalesce(paused_at, now()) END, updated_at = now()
 WHERE name = $1`),
 	}
+}
+
+// listColumns are taskColumns as listTasks reads them from a table of tasks
+// in the given state. If $9, they leave out what a list of tasks rarely
+// shows, and what makes a task large: they have no metadata and no payload,
+// and of the errors only the newest. The planner sees $9, so a summary does
+// not read the values it leaves out.
+func listColumns(state string) string {
+	return `id, queue, kind, ` + state + `, priority, attempt, max_attempts, coalesce(group_key, ''),
+            CASE WHEN $9 THEN NULL ELSE metadata END, CASE WHEN $9 THEN NULL ELSE payload END,
+            CASE WHEN $9 THEN jsonb_path_query_array(errors, '$[last]') ELSE errors END,
+            created_at, run_at, attempted_at, finalized_at`
 }
 
 // inList matches the rows whose column is among the values of the text array

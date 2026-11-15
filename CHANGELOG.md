@@ -22,6 +22,12 @@ All notable changes to taskmill are recorded here. The format follows
   check-in for its whole `LeaseDuration`, by the database's clock. Such a
   worker stopped without unregistering, or cannot reach the database. The
   dashboard's Workers page marks the same workers.
+- `ListParams.Summary` makes `Client.List` return each task without its
+  payload and metadata, and with only the newest of its errors. The
+  database does not read or send what is left out, so a page costs about
+  the same whatever its tasks hold. Use it for a list that shows one line
+  per task. Without it, `List` returns every task in full, as before.
+
 
 ### Changed
 
@@ -100,6 +106,16 @@ All notable changes to taskmill are recorded here. The format follows
   key is gone, the error names none, and says when the key's window ends.
   During a rolling deploy, a task that the previous release cancels has no
   stored key, so its retry takes no key, as before.
+- The dashboard's task list no longer reads what it does not show. It read
+  every task of a page in full: the payload, up to 1 MiB, the metadata, and
+  all 20 errors, to show one line per task. One page of 50 tasks with large
+  payloads took 54 MiB of memory in the process that serves the dashboard,
+  and an open tab asked for it again every 5 seconds. The list now asks for
+  summaries: a page reads the columns it shows and the last error of each
+  task, whatever the payloads hold. The page of a dead task that halts its
+  FIFO group listed up to 100 of the tasks behind it, in full, only to
+  count them. It now counts them, so it shows the number up to 10,000,
+  where it showed "100+".
 
 ### Security
 

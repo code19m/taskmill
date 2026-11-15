@@ -333,7 +333,7 @@ func ListRowsRead(ctx context.Context, c *Client, params *ListParams) (int64, er
 	if err != nil {
 		return 0, err
 	}
-	args := []any{m.queues, m.states, m.kinds, before, limit + 1, len(m.states) > 0, m.history, m.groups}
+	args := []any{m.queues, m.states, m.kinds, before, limit + 1, len(m.states) > 0, m.history, m.groups, params.Summary}
 	return rowsRead(ctx, c, "SET LOCAL plan_cache_mode = force_custom_plan", c.sql.listTasks, args, taskTables)
 }
 

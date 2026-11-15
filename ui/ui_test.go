@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -590,6 +592,106 @@ func TestRetryRefusedByADedupeKey(t *testing.T) {
 	_, body, _ := get(t, h, rec.Header().Get("Location"))
 	if !strings.Contains(body, "0 tasks retried; 1 task not, because another task holds the same dedupe key.") {
 		t.Fatalf("the page after a retry that left a task:\n%s", body)
+	}
+}
+
+// countingConn counts the bytes that a connection reads.
+type countingConn struct {
+	net.Conn
+	read *atomic.Int64
+}
+
+func (c countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.read.Add(int64(n))
+	return n, err
+}
+
+// setupCounting is setupDB with a pool of its own, which counts the bytes
+// that its connections read from the database.
+func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, schema string, read *atomic.Int64) {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	read = new(atomic.Int64)
+	cfg.ConnConfig.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		return countingConn{Conn: conn, read: read}, err
+	}
+	if pool, err = pgxpool.NewWithConfig(t.Context(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	schema = testdb.Schema(t, pool)
+	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		t.Fatal(err)
+	}
+	if client, err = taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema}); err != nil {
+		t.Fatal(err)
+	}
+	return client, pool, schema, read
+}
+
+// The task list shows no payload and no metadata, and one line of each
+// task's last error. So a page must not read them from the database: a
+// payload can take 1 MiB, and an open page asks again every 5 seconds. The
+// page of a dead task that halts its FIFO group counts the tasks behind it,
+// and the page of a task that waits names the task ahead of it: they must
+// not read those tasks in full either.
+func TestTaskPagesReadNoPayloadsTheyDoNotShow(t *testing.T) {
+	t.Parallel()
+	client, pool, schema, read := setupCounting(t)
+	ctx := t.Context()
+	const page, payload = 50, 100 << 10
+	params := make([]taskmill.EnqueueParams, page)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: greet{Name: strings.Repeat("x", payload)}, Options: &taskmill.EnqueueOptions{
+			GroupKey: "g", Metadata: map[string]string{"trace": strings.Repeat("m", payload/10)},
+		}}
+	}
+	res, err := client.EnqueueMany(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every task has a full error history, and the group's head is dead.
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET errors = (
+	        SELECT jsonb_agg(jsonb_build_object('attempt', n, 'at', now(), 'message', repeat('e', 1000) || n))
+	        FROM generate_series(1, 20) n)`); err != nil {
+		t.Fatal(err)
+	}
+	head, next := strconv.FormatInt(res[0].ID, 10), strconv.FormatInt(res[1].ID, 10)
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, res[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.groups SET halted_task_id = $1, halted_at = now()`, res[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+
+	// What a page reads must not grow with what its tasks hold: the limit is
+	// far below one task's payload for each task.
+	const limit = page * payload / 20
+	for _, tt := range []struct{ target, want string }{
+		{"/tasks", `<span title="` + strings.Repeat("e", 300) + `">`}, // the last error of each task
+		{"/tasks/" + head, "49 tasks wait"},
+		{"/tasks/" + next, `Waits behind <a class="mono" href="/tasks/` + head + `">`},
+	} {
+		before := read.Load()
+		code, body, _ := get(t, h, tt.target)
+		got := read.Load() - before
+		if code != http.StatusOK || !strings.Contains(body, tt.want) {
+			t.Fatalf("%s: %d, without %q", tt.target, code, tt.want)
+		}
+		// A task's own page shows its payload, metadata, and errors.
+		if tt.target != "/tasks" {
+			got -= payload + payload/10 + 20*1000
+		}
+		t.Logf("%s read %d bytes from the database beyond the task it shows in full", tt.target, got)
+		if got > limit {
+			t.Errorf("%s read %d bytes from the database, want at most %d: it reads what it does not show", tt.target, got, limit)
+		}
 	}
 }
 

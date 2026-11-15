@@ -166,6 +166,15 @@ type ListParams struct {
 	// Cursor continues from a previous page's [ListResult.Next]. Empty means
 	// the first page.
 	Cursor string
+
+	// Summary leaves out what makes a task large, for a list that shows one
+	// line per task: each [TaskInfo] comes with a nil Payload, a nil
+	// Metadata, and only the newest entry of its Errors. The database does
+	// not read or send what is left out, so a page costs about the same
+	// whatever its tasks hold. [TaskInfo.ScheduledFor] reads the metadata,
+	// so it returns the zero time for such a task. Default: false, which
+	// returns every field, as [Client.Get] does.
+	Summary bool
 }
 
 // ListResult is one page of tasks, newest first.
@@ -429,7 +438,8 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 // params may be nil, for the first page of every task. Each page's query is
 // canceled after 5 seconds, so listing cannot overload the database; on a
 // very large table, a filter that matches few tasks can reach that limit and
-// return an error.
+// return an error. A page holds every task in full, payloads included,
+// unless [ListParams.Summary] is set.
 func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, error) {
 	if params == nil {
 		params = &ListParams{}
@@ -454,7 +464,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 			return err
 		}
 		r, err := tx.Query(ctx, c.sql.listTasks,
-			m.queues, m.states, m.kinds, before, limit+1, len(m.states) > 0, m.history, m.groups)
+			m.queues, m.states, m.kinds, before, limit+1, len(m.states) > 0, m.history, m.groups, params.Summary)
 		if err != nil {
 			return err
 		}

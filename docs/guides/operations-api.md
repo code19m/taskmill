@@ -67,8 +67,12 @@ for {
   such a list reads about the tasks it shows. A list of one state across all
   queues, such as every dead task, reads the newer tasks of other states
   first.
-- `Get` returns one task by ID. `Count` counts the matching tasks per
-  state, up to 10,000 per state.
+- Set `Summary: true` in `ListParams` when you show one line per task. A
+  page then comes without payloads and metadata, and with only the newest
+  error of each task. So it stays small, whatever the tasks hold: a full
+  page of 1,000 tasks can hold 1 GiB of payloads.
+- `Get` returns one task by ID, in full. `Count` counts the matching tasks
+  per state, up to 10,000 per state.
 
 ## Retry, cancel, or delete one task
 
