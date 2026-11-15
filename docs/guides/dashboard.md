@@ -144,6 +144,13 @@ tasks will change, and you confirm. With very many tasks, it works in steps,
 and offers to continue where it stopped. If some tasks were busy at that
 moment, it says how many, and offers to try them again.
 
+A task list has 5 seconds to read its page. Some lists can read many tasks
+that they do not show, such as the dead tasks of a very large table. If a
+list runs out of time, the page says "Taking too long", and what may help:
+a queue and a state in the filters, or fewer filters
+([Manage tasks from code](operations-api.md#find-tasks) says which lists
+are fast).
+
 A retry of a canceled task takes the task's
 [dedupe key](../concepts/glossary.md#dedupe-key) back. If another task holds
 that key now, the dashboard does not retry the task, and says which task

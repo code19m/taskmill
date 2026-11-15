@@ -61,12 +61,19 @@ for {
 
 - A filter can name queues, states, kinds, and FIFO group keys. A task
   matches when it matches every field you set. An empty field matches all.
-- Each page's query stops after 5 seconds, so listing never overloads the
-  database. On a very large table, a filter that matches few tasks can hit
-  that limit and return an error. Add a queue and a state to the filter:
-  such a list reads about the tasks it shows. A list of one state across all
-  queues, such as every dead task, reads the newer tasks of other states
-  first.
+- Each page's query stops after 5 seconds, so a list never loads the
+  database for longer. A list that needs more returns an error.
+- Three lists read about the tasks they show, on a table of any size: all
+  tasks, the completed tasks of one queue or of all, and the pending tasks
+  of one queue's FIFO group. An index holds their tasks newest first.
+- A list of dead or canceled tasks has no such index, for one queue or for
+  all. It is fast in two cases: the tasks that it shows are among the
+  newest of all tasks, or the database expects to find few of them, and
+  reads them all. It expects few when few tasks are dead, or when the queue
+  that you name holds a small part of all tasks. In other cases it reads
+  the newer tasks of every queue and state first, which can take the 5
+  seconds on a very large table. The same holds for a list by kind, or by
+  another state.
 - Set `Summary: true` in `ListParams` when you show one line per task. A
   page then comes without payloads and metadata, and with only the newest
   error of each task. So it stays small, whatever the tasks hold: a full

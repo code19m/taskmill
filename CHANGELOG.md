@@ -28,7 +28,6 @@ All notable changes to taskmill are recorded here. The format follows
   the same whatever its tasks hold. Use it for a list that shows one line
   per task. Without it, `List` returns every task in full, as before.
 
-
 ### Changed
 
 - The doc comments are now the complete reference of the API. The comment of
@@ -79,6 +78,14 @@ All notable changes to taskmill are recorded here. The format follows
   key, so the enqueue is a duplicate of it. Before, the enqueue waited, and
   created a task if the cancel committed. A new key costs one more index
   lookup.
+- The dashboard says "Taking too long" when a list of tasks reaches its
+  time limit of 5 seconds, with a way to try again, and for a list with
+  filters, what may help. It said "Something went wrong", as for any
+  failure, and answered 500 where it now answers 503. The docs now say
+  which lists read only the tasks they show. A list of dead or canceled
+  tasks is not always one of them, for one queue or for all: the notes of
+  0.6.0 said that the dead tasks of a queue that has few of them are, which
+  holds only for a queue with a small part of all tasks.
 - Each read of the operations API is one round trip to the database.
   `List` made 5, `Count`, `Groups`, and `Activity` 4 each, and `Queues` 2:
   they sent `BEGIN`, their settings, the statement, and `COMMIT` one by

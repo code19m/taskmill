@@ -767,6 +767,57 @@ func TestPagesMakeFewRoundTrips(t *testing.T) {
 	}
 }
 
+// A task list that the database does not finish within the list's time limit
+// says so, as a request that ran out of time does, with a way to try again.
+// A list with filters also says what may help: it can read many tasks that
+// it does not show.
+func TestTaskListThatRunsOutOfTime(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	ctx := t.Context()
+	h := handler(t, client, nil)
+	// The list waits for the table, and the database ends its statement, as
+	// it does at the time limit: here, because the test cancels it.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `LOCK TABLE `+schema+`.tasks IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	const hint = "A queue and a state in the filters, or fewer filters, may help."
+	for target, hinted := range map[string]bool{"/tasks?state=dead": true, "/tasks": false} {
+		type answer struct {
+			code   int
+			body   string
+			header http.Header
+		}
+		answered := make(chan answer, 1)
+		go func() {
+			code, body, header := get(t, h, target)
+			answered <- answer{code, body, header}
+		}()
+		var got answer
+		for waiting := true; waiting; {
+			select {
+			case got = <-answered:
+				waiting = false
+			case <-time.After(20 * time.Millisecond):
+				_, err := pool.Exec(ctx, `SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+				                          WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0 AND pid <> pg_backend_pid()`, schema)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if got.code != http.StatusServiceUnavailable || got.header.Get("Retry-After") == "" ||
+			!strings.Contains(got.body, "Taking too long") || strings.Contains(got.body, hint) != hinted {
+			t.Errorf("%s: %d, a hint about the filters: %t, want it: %t\n%s", target, got.code, strings.Contains(got.body, hint), hinted, got.body)
+		}
+	}
+}
+
 // number formats n as the interface does.
 func number(n int) string {
 	s := strconv.Itoa(n)

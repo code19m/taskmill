@@ -64,6 +64,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/code19m/taskmill"
 )
 
@@ -393,8 +395,13 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 			page{Title: "Invalid filter", Data: problem{err.Error(), "/tasks", "Clear the filters"}})
 		return
 	}
+	filtered := len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
 	if err != nil {
-		s.fail(w, r, err)
+		hint := ""
+		if filtered {
+			hint = filtersHint
+		}
+		s.failWith(w, r, err, hint)
 		return
 	}
 	known, err := s.client.Queues(r.Context())
@@ -430,7 +437,6 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	if offered.moreGroups {
 		groupFilter.Source = s.path("/choices/groups")
 	}
-	filtered := len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
 	var bulk *bulkLinks
 	if filtered && !s.readOnly {
 		bulk = s.bulkLinks(f)
@@ -1081,11 +1087,31 @@ func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
+// filtersHint tells the reader of a task list that ran out of time what may
+// help. A list by state, kind, or FIFO group can read many tasks that it does
+// not show: only some lists have an index that holds their tasks in the
+// list's order.
+const filtersHint = " A list with these filters can read many tasks that it does not show. " +
+	"A queue and a state in the filters, or fewer filters, may help."
+
+// timeLimit reports whether the database ended a read at its time limit: the
+// client's reads of tasks, groups, and activity set one of 5 seconds.
+func timeLimit(err error) bool {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && pgErr.Code == "57014" // query_canceled
+}
+
 // fail answers a request whose reads or action failed. A request whose
 // client went away gets no answer, and is not an error of the dashboard.
 func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
+	s.failWith(w, r, err, "")
+}
+
+// failWith is fail with a hint for the reader, shown if the request, or a
+// read of it, ran out of time.
+func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hint string) {
 	ctx := r.Context()
-	if errors.Is(context.Cause(ctx), errSlow) {
+	if errors.Is(context.Cause(ctx), errSlow) || timeLimit(err) {
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request timed out",
 			slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
 		again, label := r.URL.RequestURI(), "Try again"
@@ -1094,7 +1120,7 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		}
 		w.Header().Set("Retry-After", "5")
 		s.render(w, r, http.StatusServiceUnavailable, "error.html", page{Title: "Taking too long", Data: problem{
-			"The database did not answer in time. Try again in a moment.", again, label,
+			"The database did not answer in time. Try again in a moment." + hint, again, label,
 		}})
 		return
 	}

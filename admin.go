@@ -441,11 +441,18 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 }
 
 // List returns tasks that match params, newest first, one page at a time.
-// params may be nil, for the first page of every task. Each page's query is
-// canceled after 5 seconds, so listing cannot overload the database; on a
-// very large table, a filter that matches few tasks can reach that limit and
-// return an error. A page holds every task in full, payloads included,
-// unless [ListParams.Summary] is set.
+// params may be nil, for the first page of every task. A page holds every
+// task in full, payloads included, unless [ListParams.Summary] is set.
+//
+// Each page's query is canceled after 5 seconds, so listing cannot load the
+// database for longer: a list that needs more returns an error. A page
+// reads about the tasks it returns where an index holds them newest first:
+// with no filter, for the completed tasks of one queue or of all, and for
+// the pending tasks of one queue's FIFO group. Other lists, such as the
+// dead tasks of one queue or of all, are as fast when their tasks are among
+// the newest, or when the database expects few of them. Otherwise they read
+// the newer tasks of every queue and state first, which on a very large
+// table can reach the limit.
 func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, error) {
 	if params == nil {
 		params = &ListParams{}

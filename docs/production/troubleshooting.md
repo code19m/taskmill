@@ -234,10 +234,12 @@ dashboard shows "10,000+". To watch a backlog, use lag: it has no cap
 
 ### The dashboard says "Taking too long" or "Something went wrong"
 
-- **Cause:** the database did not answer a page within 10 seconds, or a task
-  filter read for more than 5 seconds (the log says `statement timeout`).
-- **Do:** try again. Add a queue or a state to the task filter: a filter by
-  kind or group alone reads more. Then check the database's load.
+- **Cause:** the database did not answer a page within 10 seconds, or a
+  list of tasks read for more than 5 seconds: both say "Taking too long".
+  Any other failure says "Something went wrong", and is in the log.
+- **Do:** try again. For a task list, choose a queue and a state, or fewer
+  filters ([which lists are fast](../guides/operations-api.md#find-tasks)).
+  Then check the database's load.
 
 ## See also
 

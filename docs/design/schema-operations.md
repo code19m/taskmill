@@ -24,8 +24,26 @@ index that gives a page in ID order:
 - **Each selected state is tested as a literal,** so the planner sees which
   states are left, and which partial indexes hold them.
 
-A list of one state across all queues, such as every dead task, has no
-index in ID order: it still reads the newer tasks of other states first.
+**Dead and canceled tasks have no index in ID order,** for one queue or for
+all: `tasks_finished_idx` holds them by queue, state, and the time they
+finished. So the planner has two ways to read such a page, and both can be
+far from the tasks it shows:
+
+| Way | It reads | Fast when |
+|---|---|---|
+| The primary key, backward | Every newer task of any queue and state, until the page is full | The page's tasks are among the newest |
+| `tasks_finished_idx`, then a sort | Every dead or canceled task of the queue, or of all queues | Those are few |
+
+The planner takes the index only where it expects few matches. For one
+queue, it multiplies the queue's part of all tasks by the part of all tasks
+that is dead. So a small queue gets the index, and a large queue with no
+dead task of its own does not: its page reads the whole table. Measured on
+341,000 tasks of which 50,000 were dead, older than 51,000 other tasks: the
+dead tasks of all queues, and of the queue with most of them, read 51,000
+tasks for a page of 50. Those of a queue with 6% of the tasks and none dead
+read all 341,000. The time limit bounds every such read. An index on `id`
+for dead tasks would give the page 51 rows, but a migration that builds it
+must read a busy table under a lock, which is a design of its own.
 
 **A summary leaves out what makes a task large.** With
 `ListParams.Summary`, the statement returns no payload and no metadata, and

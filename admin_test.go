@@ -738,16 +738,31 @@ func TestListSomeStatesAndKinds(t *testing.T) {
 // A page of tasks reads about its own rows where an index holds the rows of
 // its filters, or gives them in the order of their IDs: not the newer tasks
 // of other queues, however many they are.
+//
+// Two of the three lists below have an index in ID order, so they hold
+// whatever the planner expects: the completed tasks of one queue, and the
+// waiting tasks of one group. The third has none: no index holds dead or
+// canceled tasks in ID order. The planner chooses between the index of the
+// queue's finished tasks, which reads all of them and sorts, and the primary
+// key backward, which reads every newer task of any queue and state. It
+// takes the index only where it expects few matches: it multiplies the
+// queue's share of all tasks by the share of dead and canceled ones. So this
+// test pins that list for a queue with a small share of the tasks, here
+// 0.4%, beside a queue full of dead tasks. It does not pin it for a queue
+// with a large share: at 6% of 341,000 tasks, with no dead task of its own
+// and 15% dead elsewhere, such a list read the whole table. A list of one
+// finished state across all queues is not pinned either.
 func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	e.rawGroups = true // pending tasks are written by hand, without their groups
 	// The oldest tasks are those of the queue "rare": pending ones of two
-	// groups, and completed ones. The others are newer.
-	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key)
+	// groups, and completed ones. The others are newer, and every fifth of
+	// them is dead.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key, finalized_at)
 	           SELECT CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, 'email.send',
-	                  CASE WHEN i <= 400 THEN 'pending' ELSE 'available' END::{s}.task_state, now(), '{}', 1,
-	                  CASE WHEN i <= 400 THEN 'g' || i % 2 END
+	                  CASE WHEN i <= 400 THEN 'pending' WHEN i % 5 = 0 THEN 'dead' ELSE 'available' END::{s}.task_state,
+	                  now(), '{}', 1, CASE WHEN i <= 400 THEN 'g' || i % 2 END, CASE WHEN i > 400 AND i % 5 = 0 THEN now() END
 	           FROM generate_series(1, 100000) i`)
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
