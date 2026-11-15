@@ -77,10 +77,10 @@ func runTests(m *testing.M) (int, error) {
 	return code, err
 }
 
-// TestShop runs the shop's two roles on one schema: orders placed over HTTP
-// get their receipts and their events, the dashboard answers, the worker
-// reports that it is ready, and it stops cleanly when its context ends, as on
-// Ctrl-C.
+// TestShop runs the shop's two roles on one schema: of the orders placed over
+// HTTP, a receipt is sent and an event is published, the dashboard answers,
+// the worker reports that it is ready, and it stops cleanly when its context
+// ends, as on Ctrl-C.
 func TestShop(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URL")
 	if dsn == "" {
@@ -97,17 +97,19 @@ func TestShop(t *testing.T) {
 	if err := createTables(t.Context(), pool); err != nil {
 		t.Fatal(err)
 	}
-	client := taskmilltest.NewClient(t, pool, nil)
 
-	// The shop's log shows only if the test fails. It goes to a buffer, not
-	// to t's log: the client's trailing notification can log after t ends.
+	// The shop's log shows only if the test fails: at the debug level, as
+	// main logs, so with the worker's line for each retry. It goes to a
+	// buffer, not to t's log: the client's trailing notification can log
+	// after t ends.
 	var logs lockedBuffer
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("the shop's log:\n%s", logs.String())
 		}
 	})
-	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	client := taskmilltest.NewClient(t, pool, &taskmill.ClientConfig{Logger: logger})
 
 	// The worker role. Stopping it, as on Ctrl-C, must return nil in time.
 	worker, err := newWorker(client, logger)
@@ -139,23 +141,29 @@ func TestShop(t *testing.T) {
 	if status := request(t, http.MethodGet, web.URL+"/taskmill/", nil); status != http.StatusOK {
 		t.Fatalf("GET /taskmill/: got %d, want 200", status)
 	}
-	// Three orders: the mail server fails one attempt in three, and a receipt
-	// is dead after five, so one receipt alone could fail the test by chance.
-	for i := range 3 {
+	// Three orders, and the test waits for one receipt and one event of
+	// them, not for all: the shop's mail server fails one attempt in three,
+	// and its broker one in four, by chance. A receipt is dead after five
+	// failed attempts. The relay waits twice as long after each failed
+	// publish: five in a row hold an order's events for 31 seconds, longer
+	// than waitFor waits. One order alone, or every event of the three,
+	// would fail the test once in about 200 runs.
+	const orders = 3
+	for i := range orders {
 		form := url.Values{"email": {fmt.Sprintf("customer%d@example.com", i)}}
 		if status := request(t, http.MethodPost, web.URL+"/orders", form); status != http.StatusOK {
 			t.Fatalf("POST /orders: got %d, want 200", status)
 		}
 	}
 
-	// A receipt completes, and the relay publishes every event: a published
-	// message leaves the outbox's queue.
+	// A receipt completes, and the relay publishes an event: a published
+	// message leaves the outbox's queue, which got two of each order.
 	waitFor(t, client, "a receipt to complete", &taskmill.TaskFilter{
 		Kinds: []string{SendReceipt{}.Kind()}, States: []taskmill.State{taskmill.StateCompleted},
 	}, func(n int) bool { return n > 0 })
-	waitFor(t, client, "the outbox to empty", &taskmill.TaskFilter{
+	waitFor(t, client, "an event to leave the outbox", &taskmill.TaskFilter{
 		Queues: []string{outbox.Queue},
-	}, func(n int) bool { return n == 0 })
+	}, func(n int) bool { return n < 2*orders })
 
 	// The worker has checked in by now, so it is ready.
 	probe := httptest.NewServer(health(worker))
