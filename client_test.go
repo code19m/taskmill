@@ -226,6 +226,25 @@ func TestRetryResumesAHaltedGroup(t *testing.T) {
 	}
 }
 
+func TestDeleteOfAHaltingHeadResumesTheGroup(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	group := &taskmill.EnqueueOptions{GroupKey: "ledger"}
+	head := e.enqueue(t, sendEmail{To: "1"}, group)
+	next := e.enqueue(t, sendEmail{To: "2"}, group)
+	last := e.enqueue(t, sendEmail{To: "3"}, group)
+	e.die(t, head)
+
+	if err := e.client.Delete(t.Context(), head); err != nil {
+		t.Fatal(err)
+	}
+	e.wantState(t, next, taskmill.StateAvailable)
+	e.wantState(t, last, taskmill.StatePending)
+	if n := e.count(t, "SELECT count(*) FROM {s}.groups WHERE halted_at IS NULL AND tasks = 2"); n != 1 {
+		t.Fatal("group still halted or miscounted")
+	}
+}
+
 func TestDelete(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

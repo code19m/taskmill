@@ -105,6 +105,43 @@ func TestMaintenanceDoesNotWaitForHeldGroups(t *testing.T) {
 	e.waitState(t, grouped, taskmill.StateRetryable)
 }
 
+// A rescue ends the attempts of a lost worker for many groups in one
+// transaction. A head that ends dead halts its group, and one that ends
+// canceled leaves it to the next task.
+func TestRescueHaltsOrLeavesTheGroupsOfItsTasks(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// Two groups whose heads ran on a worker that is gone: one head on its
+	// last attempt, one asked to stop. Each has one more task behind it.
+	insert := func(group, set string) (head, next int64) {
+		head = e.insertTask(t, expiredLease+`, group_key = '`+group+`', `+set)
+		next = e.insertTask(t, `state = 'pending', group_key = '`+group+`'`)
+		e.exec(t, "INSERT INTO {s}.groups (queue, group_key, tasks) VALUES ('default', $1, 2)", group)
+		return head, next
+	}
+	deadHead, behindDead := insert("dies", "max_attempts = 1")
+	canceledHead, behindCanceled := insert("cancels", "cancel_requested_at = now()")
+	// Two tasks of one group in one batch, and a halt that names one of them,
+	// which only rows written by hand give. Each task is counted out, and
+	// the halt ends with its task, so the task behind them takes over. The
+	// check of the groups at the end of the test fails on a wrong count.
+	e.insertTask(t, expiredLease+`, group_key = 'both', cancel_requested_at = now()`)
+	named := e.insertTask(t, expiredLease+`, group_key = 'both', cancel_requested_at = now()`)
+	behindBoth := e.insertTask(t, `state = 'pending', group_key = 'both'`)
+	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
+	           VALUES ('default', 'both', 3, $1, now())`, named)
+	taskmill.Rescue(t.Context(), newWorker(t, e, &taskmill.WorkerConfig{}))
+
+	wantStates(t, e, map[int64]taskmill.State{
+		deadHead: taskmill.StateDead, behindDead: taskmill.StatePending,
+		canceledHead: taskmill.StateCanceled, behindCanceled: taskmill.StateAvailable,
+		named: taskmill.StateCanceled, behindBoth: taskmill.StateAvailable,
+	})
+	if n := e.count(t, "SELECT count(*) FROM {s}.groups WHERE group_key = 'dies' AND halted_task_id = $1", deadHead); n != 1 {
+		t.Error("the dead head does not halt its group")
+	}
+}
+
 func TestOneMaintainerLeadsAndAnotherTakesOver(t *testing.T) {
 	t.Parallel()
 	e := newEnvWith(t, testdb.PoolSize(t, 16), nil)

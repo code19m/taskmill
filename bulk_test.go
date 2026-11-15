@@ -161,6 +161,25 @@ func TestCancelMatching(t *testing.T) {
 	}
 }
 
+// A bulk action that takes only tasks from behind a group's head promotes
+// nothing: the head is still there.
+func TestBulkActionBehindAHeadPromotesNothing(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	group := &taskmill.EnqueueOptions{Queue: "mail", GroupKey: "g"}
+	head := e.enqueue(t, sendEmail{}, group)
+	behind := e.enqueue(t, report{}, group)
+	last := e.enqueue(t, sendEmail{}, group)
+
+	res, err := e.client.CancelMatching(t.Context(), bulk(&taskmill.TaskFilter{Kinds: []string{report{}.Kind()}}))
+	if err != nil || res.Changed != 1 {
+		t.Fatalf("canceled %d tasks, %v; want 1", res.Changed, err)
+	}
+	wantStates(t, e, map[int64]taskmill.State{
+		head: taskmill.StateAvailable, behind: taskmill.StateCanceled, last: taskmill.StatePending,
+	})
+}
+
 func TestDeleteMatching(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

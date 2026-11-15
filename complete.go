@@ -146,7 +146,8 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 // completeLocked completes, in q's transaction, the grouped tasks whose
 // group rows and task rows it can lock without waiting. It returns the
 // others, which other transactions hold, and the tasks it completed. A task
-// whose group has no row, which should not happen, completes all the same.
+// whose group has no row, which should not happen, completes all the same,
+// and leaveGroups reports it.
 func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (held []*tracked, done []completedTask, err error) {
 	queues := make([]string, len(ts))
 	groups := make([]string, len(ts))
@@ -400,12 +401,10 @@ func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, c
 
 	var heads []groupLeave
 	for _, t := range sortedByGroup(done) {
-		heads = append(heads, groupLeave{queue: t.queue, group: t.group, tasks: 1, head: true})
+		heads = append(heads, groupLeave{id: t.id, queue: t.queue, group: t.group, head: true})
 	}
-	if len(heads) > 0 {
-		if err := c.leaveGroups(ctx, q, heads); err != nil {
-			return nil, fmt.Errorf("taskmill: complete: %w", err)
-		}
+	if err := c.leaveGroups(ctx, logger, q, heads); err != nil {
+		return nil, fmt.Errorf("taskmill: complete: %w", err)
 	}
 	return done, nil
 }
@@ -444,9 +443,12 @@ func (c *Client) noteMissingHistory(ctx context.Context, logger *slog.Logger, er
 		slog.Any(logKeyError, err))
 }
 
-// sortedByGroup returns the grouped tasks in a fixed order of queue and group,
-// so that concurrent transactions lock group rows in the same order and cannot
-// deadlock.
+// sortedByGroup returns the grouped tasks in the order of queue and group in
+// which an enqueue takes the rows of several groups. It serves the one
+// caller that waits for such rows, completeWaiting. Where the plan of the
+// recount follows its arrays, as the nested loop over a large table does,
+// the rows are then taken in the order of an enqueue, and the two cannot
+// deadlock. No plan must follow them: see leaveGroups.
 func sortedByGroup(ts []completedTask) []completedTask {
 	var grouped []completedTask
 	for _, t := range ts {
