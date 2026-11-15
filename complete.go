@@ -151,10 +151,10 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 	for i, t := range ts {
 		queues[i], groups[i] = t.info.Queue, t.info.GroupKey
 	}
-	groupLocked, groupExists, err := lockedRows(ctx, q, w.client.sql.lockGroups, func(r rows) ([2]string, bool, error) {
-		var key [2]string
+	groupLocked, groupExists, err := lockedRows(ctx, q, w.client.sql.lockGroups, func(r rows) (groupKey, bool, error) {
+		var key groupKey
 		var locked bool
-		err := r.Scan(&key[0], &key[1], &locked)
+		err := r.Scan(&key.queue, &key.group, &locked)
 		return key, locked, err
 	}, queues, groups)
 	if err != nil {
@@ -162,7 +162,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 	}
 	var mine []*tracked
 	for _, t := range ts {
-		key := [2]string{t.info.Queue, t.info.GroupKey}
+		key := groupKey{t.info.Queue, t.info.GroupKey}
 		if groupExists[key] && !groupLocked[key] {
 			held = append(held, t)
 		} else {
