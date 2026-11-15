@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"path"
 	"regexp"
 	"slices"
@@ -17,8 +18,8 @@ import (
 )
 
 // The tests in this file check the doc comments, which are the reference of
-// the API, and the links between them and the pages. They read the packages
-// from their source, so none of them uses the network.
+// the API, and that the pages link to them and do not copy them. They read
+// the packages from their source, so none of them uses the network.
 
 // godocGuide is the page with the rules for doc comments. Its section "What
 // the tests check" names the tests of this file: change a rule there and
@@ -357,6 +358,218 @@ func TestPkgGoDevLinks(t *testing.T) {
 			t.Errorf("%s:%d: the link %s names %s, but %s has no such identifier, field, method, or example. "+
 				"Write the name as the source has it, such as #Client.Enqueue or #example-Client.Enqueue, or link to the package alone",
 				page.name, line, link, name, importPath(dir))
+		}
+	}
+}
+
+// table is a table of a page: its header, and the rows below the separator.
+type table struct {
+	line   int // of its header
+	header []string
+	rows   [][]string
+}
+
+// separator is a cell of the line between a table's header and its rows.
+var separator = regexp.MustCompile(`^:?-+:?$`)
+
+// tablesOf returns the tables of p. A line in a fenced code block is not
+// part of a table.
+func tablesOf(p page) []table {
+	var tables []table
+	text, prose := strings.Split(p.text, "\n"), strings.Split(p.prose, "\n")
+	for i := 0; i < len(text); i++ {
+		if !strings.HasPrefix(prose[i], "|") {
+			continue
+		}
+		t := table{line: i + 1, header: cells(text[i])}
+		for i++; i < len(text) && strings.HasPrefix(prose[i], "|"); i++ {
+			if row := cells(text[i]); !separator.MatchString(row[0]) {
+				t.rows = append(t.rows, row)
+			}
+		}
+		tables = append(tables, t)
+	}
+	return tables
+}
+
+// cells returns the cells of a line of a table, without the spaces around
+// them. There is always a first cell.
+func cells(line string) []string {
+	parts := strings.Split(strings.Trim(strings.TrimSpace(line), "|"), "|")
+	for i, part := range parts {
+		parts[i] = strings.TrimSpace(part)
+	}
+	return parts
+}
+
+// factColumn is the header of a column for what the doc comment of a field
+// holds.
+var factColumn = regexp.MustCompile(`(?i)^(?:types?|defaults?|limits?)$`)
+
+// fieldsOwner returns the package and the name of the struct whose fields
+// the first column of rows names, in code spans and with nothing else. Two
+// fields or more make a field table: one name can be anything.
+func fieldsOwner(packages []*apiPackage, rows [][]string) (*apiPackage, string) {
+	var names []string
+	for _, row := range rows {
+		spans := codeSpan.FindAllStringSubmatch(row[0], -1)
+		rest := strings.Trim(codeSpan.ReplaceAllString(row[0], ""), " ,")
+		if len(spans) == 0 || rest != "" && rest != "and" {
+			return nil, ""
+		}
+		for _, span := range spans {
+			names = append(names, span[1])
+		}
+	}
+	if len(names) < 2 {
+		return nil, ""
+	}
+	for _, p := range packages {
+		for _, name := range slices.Sorted(maps.Keys(p.structs)) {
+			owns := func(fieldName string) bool {
+				return slices.ContainsFunc(p.structs[name], func(f field) bool { return f.name == fieldName })
+			}
+			if !slices.ContainsFunc(names, func(n string) bool { return !owns(n) }) {
+				return p, name
+			}
+		}
+	}
+	return nil, ""
+}
+
+// TestNoFieldTables checks that no page copies the fields of a struct into
+// a table with a column for their type, default, or limits. Their doc
+// comments are the home of those, so a copy on a page would have to change
+// with every change of a comment. A guide names the options that it teaches
+// in its prose, and links to the type.
+func TestNoFieldTables(t *testing.T) {
+	t.Parallel()
+	packages := apiPackages(t)
+	for _, page := range boundPages(t) {
+		for _, tb := range tablesOf(page) {
+			column := slices.IndexFunc(tb.header, factColumn.MatchString)
+			if column < 0 {
+				continue
+			}
+			p, name := fieldsOwner(packages, tb.rows)
+			if p == nil {
+				continue
+			}
+			t.Errorf("%s:%d: the table lists the fields of %s, with the column %q. %s: docs never copy godoc. "+
+				"Name the options that the page teaches in its prose or its example, and link to https://pkg.go.dev/%s#%s for the rest",
+				page.name, tb.line, p.qualified(name), tb.header[column], godocGuide, importPath(p.dir), name)
+		}
+	}
+}
+
+// configIndex is the page that names the type of each setting.
+const configIndex = "docs/reference/configuration.md"
+
+// TestConfigurationIndex checks that the rows of the configuration index
+// link to every config struct on pkg.go.dev, and to nothing else. So a new
+// config type cannot be left out of the index.
+func TestConfigurationIndex(t *testing.T) {
+	t.Parallel()
+	linked := make(map[string]int) // the line of the row that links to "dir#Name"
+	for i, line := range strings.Split(read(t, configIndex), "\n") {
+		if !strings.HasPrefix(line, "|") {
+			continue
+		}
+		for _, m := range pkgLink.FindAllStringSubmatch(line, -1) {
+			if m[2] != "" {
+				linked[cmp.Or(strings.TrimPrefix(m[1], "/"), ".")+"#"+m[2]] = i + 1
+			}
+		}
+	}
+	for _, p := range apiPackages(t) {
+		for _, name := range p.configs() {
+			key := p.dir + "#" + name
+			if linked[key] == 0 {
+				t.Errorf("%s: no row links to the config struct %s. Add a row to the table of the place where it is set: "+
+					"what you set, [`%s`](https://pkg.go.dev/%s#%s), and what you pass it to",
+					configIndex, p.qualified(name), p.qualified(name), importPath(p.dir), name)
+			}
+			delete(linked, key)
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(linked)) {
+		t.Errorf("%s:%d: the row links to %s, which is not a config struct. The index names only the types that a caller fills in: "+
+			"remove the link, or if the type is one, add it to moreConfigs in internal/docs/godoc_test.go",
+			configIndex, linked[key], key)
+	}
+}
+
+// errorsIndex is the page that maps each error name to its identifier.
+const errorsIndex = "docs/reference/errors.md"
+
+// indexedError is the name of an error value, or of an error history code.
+var indexedError = regexp.MustCompile(`^(?:Err|Code)[A-Z][A-Za-z0-9]*$`)
+
+// TestErrorsIndex checks that the errors index links to every error value
+// and to every error history code of the main package on pkg.go.dev. So a
+// reader who sees a new error or code finds its identifier there.
+func TestErrorsIndex(t *testing.T) {
+	t.Parallel()
+	text := read(t, errorsIndex)
+	core := apiPackages(t)[0]
+	for _, name := range slices.Sorted(maps.Keys(core.names)) {
+		link := "https://pkg.go.dev/" + module + "#" + name
+		if indexedError.MatchString(name) && !strings.Contains(text, "("+link+")") {
+			t.Errorf("%s: no row links to %s. Add a row to its table, with the name as the reader sees it and [`%s`](%s)",
+				errorsIndex, name, name, link)
+		}
+	}
+}
+
+const (
+	// commandPage is the manual of the taskmill-ui command.
+	commandPage = "docs/reference/taskmill-ui.md"
+
+	// commandSource is the file in which the command reads its settings.
+	commandSource = "cmd/taskmill-ui/main.go"
+)
+
+var (
+	// readVariable is the read of an environment variable in commandSource.
+	readVariable = regexp.MustCompile(`getenv\("(TASKMILL_[A-Z0-9_]+)"\)`)
+
+	// listedVariable is the first cell of a row of the page's table of
+	// environment variables.
+	listedVariable = regexp.MustCompile("^`(TASKMILL_[A-Z0-9_]+)`$")
+)
+
+// TestCommandVariables checks that the manual of the taskmill-ui command
+// lists the environment variables that the command reads, and no other. The
+// command has no identifiers, so the page is the only place that names them.
+func TestCommandVariables(t *testing.T) {
+	t.Parallel()
+	var reads, lists []string
+	for _, m := range readVariable.FindAllStringSubmatch(read(t, commandSource), -1) {
+		reads = append(reads, m[1])
+	}
+	text := read(t, commandPage)
+	prose, _ := parse(text)
+	for _, tb := range tablesOf(page{name: commandPage, text: text, prose: prose}) {
+		for _, row := range tb.rows {
+			if m := listedVariable.FindStringSubmatch(row[0]); m != nil {
+				lists = append(lists, m[1])
+			}
+		}
+	}
+	if len(reads) == 0 || len(lists) == 0 {
+		t.Fatalf("found %d variables in %s and %d in the tables of %s: has the way to read or to list them changed?",
+			len(reads), commandSource, len(lists), commandPage)
+	}
+	for _, name := range reads {
+		if !slices.Contains(lists, name) {
+			t.Errorf("%s: no row for %s, which %s reads. Add a row to the table of environment variables: the variable, its default, its valid values, and what it does",
+				commandPage, name, commandSource)
+		}
+	}
+	for _, name := range lists {
+		if !slices.Contains(reads, name) {
+			t.Errorf("%s: the table of environment variables lists %s, which %s does not read. Remove the row, or write the name as the code has it",
+				commandPage, name, commandSource)
 		}
 	}
 }

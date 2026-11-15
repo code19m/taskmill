@@ -220,8 +220,9 @@ over the length limit, a page that no index lists, or a wrong Next line.
 The doc comments are the reference of the API, and the pages link to them:
 [Writing doc comments](docs/design/writing-godoc.md) has the rules. The same
 test reads the comments from the source. It fails on a config field whose
-comment names no default, and on a link between a page and pkg.go.dev, or
-between a comment and a page, that leads nowhere.
+comment names no default, on a page that copies a struct's fields into a
+table, and on a link between a page and pkg.go.dev, or between a comment and
+a page, that leads nowhere.
 
 ## Releasing
 

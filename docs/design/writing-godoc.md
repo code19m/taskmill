@@ -112,6 +112,9 @@ when:
 | Defaults | A field of a config struct has no comment, or its comment names no default |
 | Links from godoc | A comment links to a file that is not in the repository, or to an anchor. Or a package comment links to no page |
 | Links to godoc | A page links to a package, an identifier, a field, a method, or an example on pkg.go.dev that the source does not have |
+| Field tables | A page has a table of a struct's fields with a column for their type, default, or limits |
+| Indexes | [Configuration](../reference/configuration.md) misses a config struct, or [Errors](../reference/errors.md) misses an error or a code |
+| The command | [The `taskmill-ui` command](../reference/taskmill-ui.md) misses an environment variable that the command reads, or lists one that it does not read |
 
 The linters check that every exported name has a comment that starts with
 the name and ends with a period.
