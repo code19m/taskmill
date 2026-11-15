@@ -1016,6 +1016,29 @@ func TestFIFOGroupHaltsOnDeadHead(t *testing.T) {
 	e.waitState(t, second, taskmill.StateCompleted)
 }
 
+// A head that is canceled while it runs leaves its group when its worker
+// records the end of the attempt, and the next task takes over.
+func TestRecordedCancelOfAHeadPromotesTheNextTask(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	group := &taskmill.EnqueueOptions{GroupKey: "g"}
+	head := e.enqueue(t, sendEmail{}, group)
+	next := e.enqueue(t, sendEmail{}, group)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			if err := e.client.Cancel(ctx, task.ID); err != nil {
+				return err
+			}
+			return errors.New("stopped")
+		}, nil),
+	})
+
+	if info, err := w.RunTask(t.Context(), head); err != nil || info.State != taskmill.StateCanceled {
+		t.Fatalf("the head: %v, %+v, want it canceled", err, info)
+	}
+	e.wantState(t, next, taskmill.StateAvailable)
+}
+
 func TestWorkerConcurrency(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
