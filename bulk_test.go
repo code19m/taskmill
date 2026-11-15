@@ -526,25 +526,32 @@ func TestBulkActionsGoOnFromAnyStop(t *testing.T) {
 // skipped: a FIFO group that it left comes back in order.
 func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	sent := &bulkStatements{}
+	e := newTracedEnv(t, sent)
 	canceled := func(n int, group string) {
 		e.exec(t, `INSERT INTO {s}.tasks (queue, run_at, kind, finalized_at, state, cancel_requested_at, payload, max_attempts, group_key)
 		           SELECT 'default', now(), 'email.send', now(), 'canceled', now(), '{}', 3, nullif($1, '')
 		           FROM generate_series(1, $2)`, group, n)
 	}
+	// The oldest task of the group, two batches of other tasks, and the rest
+	// of the group, which is more than a batch.
 	canceled(1, "g")
 	oldest := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
-	canceled(30000, "")
+	canceled(2000, "")
 	canceled(1500, "g")
 	all := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}
 
+	// The first run meets the oldest task held, and leaves the group. Its
+	// context ends when its second batch picks its tasks, as a click that
+	// runs out of time: it stops after that batch, short of the group's rest.
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", oldest)
-	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond) // a click that runs out of time
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sent.atPick(2, cancel)
 	first, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: all})
-	cancel()
-	if err == nil && first.Next != "" || err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("first run: %+v, %v", first, err)
+	if !errors.Is(err, context.Canceled) || first.Changed != 1999 || first.Next == "" {
+		t.Fatalf("first run: %+v, %v; want it to stop after two batches, with a cursor", first, err)
 	}
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
@@ -552,7 +559,7 @@ func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	// The first run's last batch ended before it returned, so the rest
 	// skips none of its rows.
 	rest, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: all, Cursor: first.Next})
-	if err != nil || first.Changed+rest.Changed != 31501 || rest.Skipped != 0 || rest.Next != "" {
+	if err != nil || first.Changed+rest.Changed != 3501 || rest.Skipped != 0 || rest.Next != "" {
 		t.Fatalf("then %+v after %+v, %v; want every task retried", rest, first, err)
 	}
 	e.wantHead(t, "g", int(oldest))
@@ -647,6 +654,19 @@ func (s *bulkStatements) add(statement byte) {
 }
 
 func (*bulkStatements) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
+
+// atPick calls f once, when the nth pick from now starts.
+func (s *bulkStatements) atPick(n int, f func()) {
+	var next func()
+	next = func() {
+		if n--; n > 0 {
+			s.onPick.Store(&next)
+			return
+		}
+		f()
+	}
+	s.onPick.Store(&next)
+}
 
 // reset returns the statements since the last reset.
 func (s *bulkStatements) reset() string {
@@ -847,34 +867,25 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 // consistent, and says exactly how many tasks it changed.
 func TestBulkActionsStopMidway(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
-	params := make([]taskmill.EnqueueParams, 5000)
+	sent := &bulkStatements{}
+	e := newTracedEnv(t, sent)
+	// Three batches of tasks, in ten groups that each lie across all three.
+	params := make([]taskmill.EnqueueParams, 3000)
 	for i := range params {
 		params[i] = taskmill.EnqueueParams{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: fmt.Sprint("g", i%10)}}
 	}
-	for range 6 {
-		if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
 	}
-	// The action's context ends once its first batch committed, as a
-	// request's does when it runs out of time.
+	// The action's context ends when its second batch picks its tasks, as a
+	// request's does when it runs out of time: the action stops after that
+	// batch.
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	go func() {
-		for ctx.Err() == nil {
-			var n int
-			_ = e.pool.QueryRow(ctx, replaceSchema("SELECT count(*) FROM {s}.tasks WHERE state = 'canceled'", e.schema)).Scan(&n)
-			if n > 0 {
-				cancel()
-				return
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
+	sent.atPick(2, cancel)
 	all := &taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
 	res, err := e.client.CancelMatching(ctx, bulk(all))
-	if !errors.Is(err, context.Canceled) || res.Changed >= 30000 || res.Next == "" {
+	if !errors.Is(err, context.Canceled) || res.Changed == 0 || res.Changed >= 3000 || res.Next == "" {
 		t.Fatalf("canceled %+v, %v; want it to stop midway", res, err)
 	}
 	if canceled := e.states(t)["canceled"]; canceled != int(res.Changed) {
@@ -883,8 +894,8 @@ func TestBulkActionsStopMidway(t *testing.T) {
 	e.checkGroups(t)
 	// It goes on where it stopped.
 	rest, err := e.client.CancelMatching(t.Context(), &taskmill.BulkParams{Filter: *all, Cursor: res.Next})
-	if err != nil || res.Changed+rest.Changed != 30000 || rest.Next != "" {
-		t.Fatalf("canceled %d, then %d tasks, %v; want 30,000 in all", res.Changed, rest.Changed, err)
+	if err != nil || res.Changed+rest.Changed != 3000 || rest.Next != "" {
+		t.Fatalf("canceled %d, then %d tasks, %v; want 3,000 in all", res.Changed, rest.Changed, err)
 	}
 }
 
