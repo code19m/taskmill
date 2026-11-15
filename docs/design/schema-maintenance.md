@@ -159,7 +159,8 @@ tables. So a worker changes nothing because of a notification alone, and
 never reads the database where it receives them:
 
 - **`a|` only wakes a fetch,** which reads the tables. A worker whose fetch
-  found nothing pauses 20 ms before it acts on the next one.
+  found nothing lets 20 ms pass before it acts on the next one. The fetches
+  that its own tasks cause do not wait for that, and do not end the wait.
 - **`c|` and `q|` only mark what they name.** One loop for each then reads
   the truth: the cancel requests in the rows of the marked tasks, by ID and
   lease token, in one statement for all of them, and the queues' settings.
@@ -210,9 +211,12 @@ heartbeats:
 - **A worker's own completions wake its fetch.** A slot is free as soon as
   its handler returns, but the completer records the result a few
   milliseconds later, in a batch. A fetch in between still counts the task
-  as running, so a queue at its `MaxRunning` limit looks full. So each
-  committed batch wakes the fetch of such a queue once more, and the queue
-  runs at its limit without a poll.
+  as running, so a queue at its `MaxRunning` limit looks full, and it finds
+  the next task of a FIFO group still `pending`. So each committed batch
+  wakes the fetch of such a queue once more. The queue runs at its limit
+  without a poll, and a group's tasks follow each other without waiting for
+  a notification
+  ([FIFO groups](schema-groups.md#fifo-groups)).
 - **While heartbeats arrive,** notifications reach the worker, and the
   maintainer wakes every queue whose task waits. The poll once a minute only
   bounds the harm of a fault in either. So idle workers cost little, however

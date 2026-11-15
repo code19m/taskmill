@@ -135,6 +135,15 @@ All notable changes to taskmill are recorded here. The format follows
   only 1.3. A worker now fetches again when the completion is recorded,
   and both ran 3.9 at the same time. Room that another worker's task
   leaves is still found by the poll.
+- The tasks of one FIFO group ran at about 20 a second in a quiet queue,
+  however short they were. When a task of the group completed, the next
+  one waited for a notification, and a client sends at most one per queue
+  in 50 milliseconds. The worker that completes a group's task now fetches
+  the next one right away: with one worker, 200 short tasks of one group
+  ran at about 220 a second. Other workers wake no more often than before.
+  A worker whose fetch after a notification found nothing still lets 20
+  milliseconds pass before it acts on the next notification, but the
+  fetches that its own tasks cause no longer wait for that.
 
 ## [0.6.0] - 2026-11-13
 

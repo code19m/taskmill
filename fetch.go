@@ -22,17 +22,19 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 	fetches := newFailures(w, "fetch tasks", slog.String(logKeyQueue, q.name))
 
 	// notified reports that a notification caused the last fetch, and held
-	// that the queue's MaxRunning limit blocked tasks.
+	// that the queue's MaxRunning limit blocked tasks. Until quiet, the
+	// loop leaves notifications waiting.
 	notified, held := false, false
-	wait := func(pause bool) (ok bool) {
-		ok, notified = waitForWork(ctx, q, w.pollWait(held), pause)
+	var quiet time.Time
+	wait := func() (ok bool) {
+		ok, notified = waitForWork(ctx, q, w.pollWait(held), quiet)
 		return ok
 	}
 
 	for ctx.Err() == nil {
 		free := cap(q.slots) - len(q.slots)
 		if q.paused.Load() || free == 0 {
-			if !wait(false) {
+			if !wait() {
 				return
 			}
 			continue
@@ -41,15 +43,12 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 		held = limited
 		fetches.observe(ctx, err)
 		w.dispatch(ctx, r, q, tasks)
-		if err != nil {
-			if !wait(false) {
-				return
-			}
-			continue
-		}
 		// A notification wakes every worker of the queue, and most find
-		// nothing: those pause before acting on the next one.
-		if !more && !wait(notified && len(tasks) == 0) {
+		// nothing: those let a moment pass before they act on the next one.
+		if err == nil && notified && len(tasks) == 0 {
+			quiet = time.Now().Add(emptyFetchCooldown)
+		}
+		if (err != nil || !more) && !wait() {
 			return
 		}
 	}
@@ -77,28 +76,31 @@ func (w *Worker) pollWait(held bool) time.Duration {
 }
 
 // waitForWork waits for a nudge, a freed slot, or the poll. It reports false
-// if ctx ends first, and whether a nudge woke it. If pause is set, it first
-// lets a moment pass, which gathers the nudges that arrive meanwhile into one
-// fetch.
-func waitForWork(ctx context.Context, q *queueState, poll time.Duration, pause bool) (ok, nudged bool) {
-	if pause {
+// if ctx ends first, and whether a nudge woke it. Until quiet, it leaves
+// nudges waiting, which gathers those that arrive meanwhile into one fetch.
+// A freed slot wakes it at any time: that is the worker's own news, not a
+// hint, and it comes no more often than the worker's tasks end.
+func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quiet time.Time) (ok, nudged bool) {
+	timer := time.NewTimer(poll)
+	defer timer.Stop()
+	wake := q.wake
+	var listen <-chan time.Time // when to hear nudges again
+	if d := time.Until(quiet); d > 0 {
+		wake, listen = nil, time.After(d)
+	}
+	for {
 		select {
 		case <-ctx.Done():
 			return false, false
-		case <-time.After(emptyFetchCooldown):
+		case <-listen:
+			wake, listen = q.wake, nil
+		case <-wake:
+			return true, true
+		case <-q.freed:
+			return true, false
+		case <-timer.C:
+			return true, false
 		}
-	}
-	timer := time.NewTimer(poll)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false, false
-	case <-q.wake:
-		return true, true
-	case <-q.freed:
-		return true, false
-	case <-timer.C:
-		return true, false
 	}
 }
 

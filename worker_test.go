@@ -655,6 +655,56 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 	}
 }
 
+// A notification that tasks are available is a hint too. A worker whose
+// fetch found nothing lets 20 ms pass before it acts on the next one. Its
+// own tasks do not wait for that, and they let no notification through: a
+// FIFO group that runs during a flood takes its two fetches for each task,
+// and the flood adds one per 20 ms.
+func TestFloodOfNotificationsAddsOneFetchPer20Milliseconds(t *testing.T) {
+	t.Parallel()
+	const flood, tasks = 20000, 100
+	e, fetches := newCountedEnv(t)
+	ran := make(chan struct{}, tasks)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			ran <- struct{}{}
+			return nil
+		}, nil),
+		Queues:       defaultQueue(2),
+		PollInterval: time.Hour,
+		NoMaintainer: true,
+	})
+	e.waitListening(t)
+
+	before, flooded := fetches.n.Load(), time.Now()
+	ended := make(chan error, 1)
+	go func() {
+		_, err := e.pool.Exec(context.Background(), "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(flood)+" LOOP PERFORM pg_notify('"+
+			e.schema+"', 'a|"+taskmill.DefaultQueue+"'); COMMIT; END LOOP; END $$")
+		ended <- err
+	}()
+	params := make([]taskmill.EnqueueParams, tasks)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "account-7"}}
+	}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
+	}
+	for range tasks {
+		recv(t, ran, "the group's next task to start during the flood")
+	}
+	if err := recv(t, ended, "the flood to end"); err != nil {
+		t.Fatal(err)
+	}
+	// Now and then a notification's fetch takes a task just before the
+	// worker's own fetch for it, which then finds nothing: a tenth more
+	// fetches allows for that.
+	n, most := fetches.n.Load()-before, int64(2*tasks+tasks/10)+int64(time.Since(flooded)/(20*time.Millisecond))
+	if n > most {
+		t.Errorf("the worker fetched %d times for %d tasks and %d notifications, want at most %d", n, tasks, flood, most)
+	}
+}
+
 // The task's row decides whether an attempt ends in a cancellation, whatever
 // the worker believed while the handler ran.
 func TestAttemptEndsCanceledOnlyIfTheTaskSaysSo(t *testing.T) {
@@ -847,6 +897,53 @@ func TestFIFOGroupRunsOneAtATimeInOrder(t *testing.T) {
 	}
 	if !slices.IsSorted(order) || len(order) != n {
 		t.Fatalf("group ran out of order: %v", order)
+	}
+}
+
+// The worker that completes the head of a FIFO group knows that the group's
+// next task became available, and fetches it. It does not wait for the
+// notification, which a client sends for a queue at most once in 50 ms: here
+// no notification reaches the worker, and no poll comes.
+func TestFIFOGroupRunsWithoutNotifications(t *testing.T) {
+	t.Parallel()
+	const tasks = 20
+	e, fetches := newCountedEnv(t)
+	params := make([]taskmill.EnqueueParams, tasks)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}, Options: &taskmill.EnqueueOptions{GroupKey: "account-7"}}
+	}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
+	}
+	// A listener on another database connects, and receives nothing.
+	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen.Database = "postgres"
+	ran := make(chan int64, tasks)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			ran <- task.Args.UserID
+			return nil
+		}, nil),
+		Queues:       defaultQueue(4),
+		PollInterval: time.Hour,
+		NoMaintainer: true,
+		ListenConfig: listen,
+	})
+
+	for i := range tasks {
+		if got := recv(t, ran, "the group's next task to start"); got != int64(i) {
+			t.Fatalf("task %d of the group ran in place %d", got, i)
+		}
+	}
+	// Each task takes two fetches at most: one when its predecessor frees
+	// the slot, which comes too early to find it, and one when the
+	// predecessor's completion is recorded. Two more come at the start: the
+	// worker's first, and one when its listener connects.
+	if n := fetches.n.Load(); n > 2*tasks+2 {
+		t.Errorf("the worker fetched %d times to run %d tasks of one group", n, tasks)
 	}
 }
 
