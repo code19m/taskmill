@@ -19,7 +19,7 @@ const (
 	maintenanceBatch   = 1000                  // most tasks one maintenance statement changes
 	minMaintainerSleep = 50 * time.Millisecond // shortest wait for the next due task: at most 20 promotions a second
 	staleWorkerAge     = 5 * time.Minute       // a worker that has not checked in this long, and for two of its leases, is removed
-	detachTimeout      = 30 * time.Second      // bound on detaching and dropping one history partition
+	detachTimeout      = 30 * time.Second      // bound on detaching one history partition, and on dropping it
 	historyDrops       = 10                    // most history partitions one retention pass drops
 
 	// historyDropMark is the comment that retention sets on a history
@@ -401,11 +401,16 @@ type expiredPartition struct {
 	pending  bool // its detach was interrupted
 }
 
-// dropHistory detaches and drops the history partitions whose whole day is
-// older than the retention period, the oldest first and at most historyDrops
-// in a pass. The database says which ones, by its own clock. The first
-// failure ends the pass: what keeps one partition, such as a long
-// transaction that reads the history, keeps the others too.
+// dropHistory detaches and drops history partitions whose whole day is older
+// than the retention period, at most historyDrops in a pass. The database
+// says which ones, by its own clock. It returns the errors of the partitions
+// that failed, and continues with the others: what keeps one table, such as a
+// view that depends on it, does not keep the next.
+//
+// A detach that times out is the exception. It waited for the transactions
+// that use the history, which keep every other detach waiting as long, and
+// PostgreSQL allows a table only one unfinished detach. So the pass detaches
+// no more, and still drops what is detached already.
 func (m *maintainer) dropHistory(ctx context.Context) error {
 	r, err := m.c.pool.Query(ctx, m.c.sql.expiredHistory, historyDrops, historyDropMark)
 	if err != nil {
@@ -419,46 +424,64 @@ func (m *maintainer) dropHistory(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var errs []error
+	busy := false // a detach timed out
 	for _, p := range expired {
-		if err := m.dropPartition(ctx, p); err != nil {
-			return err
+		if p.attached {
+			if busy {
+				continue
+			}
+			if err := m.detachPartition(ctx, p); err != nil {
+				errs = append(errs, err)
+				busy = errors.Is(err, context.DeadlineExceeded)
+				continue
+			}
+		}
+		if err := m.dropDetached(ctx, p.name); err != nil {
+			errs = append(errs, err)
+			continue
 		}
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "dropped expired history", slog.String(logKeyPartition, p.name))
+	}
+	return errors.Join(errs...)
+}
+
+// detachPartition marks and detaches one history partition. DETACH ...
+// CONCURRENTLY does not block completions, and must run outside a
+// transaction. It waits for transactions that use the history, so it is
+// bounded by a timeout. If it is interrupted, the partition stays pending
+// detach, and a later pass finalizes the detach instead.
+//
+// The mark tells a later pass that the detached table is its own to drop,
+// should the drop fail. So it is set first: a crash after it leaves a
+// marked partition, which changes nothing. A comment needs the lock on the
+// partition that the detach takes next anyway, which blocks neither reads
+// nor writes.
+func (m *maintainer) detachPartition(ctx context.Context, p expiredPartition) error {
+	ctx, cancel := context.WithTimeout(ctx, detachTimeout)
+	defer cancel()
+	mark := fmt.Sprintf("COMMENT ON TABLE %s.%s IS '%s'", m.c.schema, p.name, historyDropMark)
+	if _, err := m.c.pool.Exec(ctx, mark); err != nil {
+		return fmt.Errorf("mark %s: %w", p.name, err)
+	}
+	mode := "CONCURRENTLY"
+	if p.pending {
+		mode = "FINALIZE"
+	}
+	detach := fmt.Sprintf("ALTER TABLE %[1]s.task_history DETACH PARTITION %[1]s.%[2]s %[3]s", m.c.schema, p.name, mode)
+	if _, err := m.c.pool.Exec(ctx, detach); err != nil {
+		return fmt.Errorf("detach %s: %w", p.name, err)
 	}
 	return nil
 }
 
-// dropPartition marks, detaches, and drops one history partition. DETACH ...
-// CONCURRENTLY does not block completions, and must run outside a
-// transaction. It waits for transactions that use the history, so it is
-// bounded by a timeout. Each step that fails is finished by a later pass: a
-// partition whose detach was interrupted stays pending detach, and the
-// detach is finalized instead, and one that was detached but not dropped is
-// only dropped.
-//
-// The mark is what tells that later pass that the detached table is its own
-// to drop, so it is set first: a crash after it leaves a marked partition,
-// which changes nothing. A comment needs the lock on the partition that the
-// detach takes next anyway, which blocks neither reads nor writes.
-func (m *maintainer) dropPartition(ctx context.Context, p expiredPartition) error {
+// dropDetached drops a history partition that is detached. The drop waits
+// for whoever reads that table, so it is bounded by a timeout too.
+func (m *maintainer) dropDetached(ctx context.Context, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, detachTimeout)
 	defer cancel()
-	if p.attached {
-		mark := fmt.Sprintf("COMMENT ON TABLE %s.%s IS '%s'", m.c.schema, p.name, historyDropMark)
-		if _, err := m.c.pool.Exec(ctx, mark); err != nil {
-			return fmt.Errorf("mark %s: %w", p.name, err)
-		}
-		mode := "CONCURRENTLY"
-		if p.pending {
-			mode = "FINALIZE"
-		}
-		detach := fmt.Sprintf("ALTER TABLE %[1]s.task_history DETACH PARTITION %[1]s.%[2]s %[3]s", m.c.schema, p.name, mode)
-		if _, err := m.c.pool.Exec(ctx, detach); err != nil {
-			return fmt.Errorf("detach %s: %w", p.name, err)
-		}
-	}
-	if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE %s.%s", m.c.schema, p.name)); err != nil {
-		return fmt.Errorf("drop %s: %w", p.name, err)
+	if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE %s.%s", m.c.schema, name)); err != nil {
+		return fmt.Errorf("drop %s: %w", name, err)
 	}
 	return nil
 }

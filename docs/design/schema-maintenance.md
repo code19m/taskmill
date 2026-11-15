@@ -11,7 +11,7 @@ queues, and how notifications and polling wake the workers.
 | Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
 | Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
 | Retention | Every minute, in a loop of its own, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that made no check-in for 5 minutes, or for twice their `LeaseDuration` if that is longer, and schedules that the maintainer does not define and that did not run or change for a day. |
-| History | Every minute, keeps partitions for today and the next 6 days, and drops up to 10 partitions whose whole day is older than the retention period, the oldest first (see [Operational notes](schema.md#operational-notes)). |
+| History | Every minute, keeps partitions for today and the next 6 days, and drops up to 10 partitions whose whole day is older than the retention period (see [Operational notes](schema.md#operational-notes)). |
 | Statistics | Every 10 seconds, in a loop of its own, so that a long retention pass never delays it, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
 
@@ -33,6 +33,14 @@ queues, and how notifications and polling wake the workers.
   detached without it would stay for good. The comment takes the lock on
   the partition that the detach takes next anyway (`SHARE UPDATE
   EXCLUSIVE`), which blocks neither reads nor writes.
+- **A table that cannot be dropped does not stop a pass.** A view may depend
+  on a detached table, or the table may have another owner. The pass keeps
+  the error and continues. It takes its 10 tables in random order, with an
+  interrupted detach first: no state says which tables are stuck, and in a
+  fixed order enough of them would fill every pass. Only a detach that
+  times out ends the detaching of a pass. It waited for the transactions
+  that use the history, which keep every other detach waiting too, and
+  PostgreSQL allows a table one unfinished detach.
 - **A failed election try writes nothing.** The upsert proposes its row only
   if no other worker's lease lasts. A conflict would lock the leader's row,
   and make every try of every other worker a write.

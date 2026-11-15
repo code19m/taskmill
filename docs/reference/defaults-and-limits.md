@@ -60,7 +60,7 @@ by election, that does the shared work.
 | Refresh queue statistics | Every 10 seconds |
 | Apply retention | Every minute |
 | Prepare history partitions | 7 days ahead: today and the next 6 days, by UTC day on the database's clock |
-| Drop an old history partition | Waits up to 30 seconds for transactions that use the history. Tried again every minute |
+| Drop old history partitions | At most 10 in a pass of retention, so 10 a minute: a much shorter `HistoryRetention` takes a while to free its disk space. A pass waits up to 30 seconds for transactions that use the history, and tries again a minute later |
 | Other workers try to take over | Every 2 to 3 seconds, with a statement that writes nothing while the maintainer's lease lasts |
 | A new maintainer after a crash | Within about 12 seconds (the maintainer's lease is 10 seconds) |
 | A new maintainer after a clean stop | Right away, when the old one starts to stop. It gives the role up before it waits for its running tasks |

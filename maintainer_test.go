@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -482,7 +483,49 @@ func TestRetentionDropsOnlyTheHistoryItDetached(t *testing.T) {
 	}
 }
 
-// A pass drops no more partitions than it may: the next pass goes on.
+// A table that retention cannot drop must not keep it from the others. Here
+// as many expired partitions as a pass handles, the oldest ones, each have a
+// view that depends on them: the newer expired partitions are dropped all
+// the same, and the log names what failed.
+func TestRetentionContinuesPastTablesItCannotDrop(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	w := newWorker(t, e, &taskmill.WorkerConfig{})
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	var stuck, free []string
+	for i := range taskmill.HistoryDrops {
+		part := e.attachHistory(t, today.AddDate(0, 0, -60-i))
+		e.exec(t, "CREATE VIEW {s}.report_"+strconv.Itoa(i)+" AS SELECT id FROM {s}."+part)
+		stuck = append(stuck, part)
+	}
+	for i := range 3 {
+		free = append(free, e.attachHistory(t, today.AddDate(0, 0, -30-i)))
+	}
+
+	// A pass takes the tables in an order of its own, so the three may need
+	// a few passes: far fewer than these.
+	for range 50 {
+		if e.historyTables(t, free...) == 0 {
+			break
+		}
+		taskmill.RunRetention(t.Context(), w)
+	}
+	if n := e.historyTables(t, free...); n != 0 {
+		t.Fatalf("%d of %d expired partitions are left behind tables that retention cannot drop", n, len(free))
+	}
+	if n := e.historyTables(t, stuck...); n != len(stuck) {
+		t.Fatalf("%d of %d tables with a view that depends on them are left", n, len(stuck))
+	}
+	reported := slices.ContainsFunc(operationLines(logs.all())["apply retention"], func(r slog.Record) bool {
+		return strings.Contains(attr(r, "error"), "2BP01") // dependent_objects_still_exist
+	})
+	if !reported {
+		t.Error("no log line says that a table could not be dropped")
+	}
+}
+
+// A pass drops no more partitions than it may: the next pass continues.
 func TestRetentionDropsAFewPartitionsInAPass(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

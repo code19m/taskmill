@@ -996,14 +996,20 @@ FROM expired
 WHERE t.id = expired.id
 RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`),
 
-		// expiredHistory lists the history partitions whose whole UTC day is
-		// older than the history retention, oldest first and $1 at most. Each
-		// comes with whether it is still attached, and whether its detach was
-		// interrupted, which must be finalized before it can be dropped. The
-		// database applies the period to its own clock, so the application's
-		// clock and arithmetic cannot expire history. A partition's name ends
-		// in its day, so names sort by day, and the pattern keeps to names
+		// expiredHistory lists $1 of the history partitions whose whole UTC
+		// day is older than the history retention. Each comes with whether it
+		// is still attached, and whether its detach was interrupted, which
+		// must be finalized before it can be dropped. The database applies
+		// the period to its own clock, so the application's clock and
+		// arithmetic cannot expire history. A partition's name ends in its
+		// day, so names compare as days do, and the pattern keeps to names
 		// that are safe in the text of a statement.
+		//
+		// An interrupted detach comes first: PostgreSQL allows a table one at
+		// a time, so no other partition can be detached before it. The rest
+		// come in random order. Some tables cannot be dropped, such as one
+		// that a view depends on, and no state says which: in a fixed order,
+		// enough of them would fill every pass, and keep the others for good.
 		//
 		// A partition that a pass detached and could not drop is a table of
 		// its own, which the history no longer names. So the statement reads
@@ -1026,7 +1032,7 @@ WHERE c.relnamespace = '{s}'::regnamespace
   AND c.relname ~ '^task_history_[0-9]{8}$'
   AND c.relname < 'task_history_' || to_char(greatest(
           {utc} - (SELECT history_retention FROM {s}.settings), timestamp '0001-01-01'), 'YYYYMMDD')
-ORDER BY c.relname
+ORDER BY coalesce(i.inhdetachpending, false) DESC, random()
 LIMIT $1`),
 
 		// deleteFinished deletes dead and canceled tasks older than the dead

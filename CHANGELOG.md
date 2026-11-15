@@ -162,7 +162,9 @@ All notable changes to taskmill are recorded here. The format follows
   A table without the mark stays: one that you detached or copied to keep
   it, and one that an earlier release left behind, which you remove with
   `DROP TABLE` ([Database](docs/production/database.md)). A pass drops at
-  most 10 partitions, the oldest first, and the next pass, a minute later,
+  most 10 partitions, and the next pass, a minute later, continues. A
+  table that cannot be dropped, for example because a view of yours
+  depends on it, does not keep the others: the log names it, and the pass
   continues.
 - Queue statistics went stale while retention had much to do. The
   maintainer refreshed them in the loop that also applies retention. So

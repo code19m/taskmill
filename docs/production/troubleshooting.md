@@ -213,6 +213,7 @@ Later, maybe `task history has no partition for today`.
 | Its `error` says | Cause | Do |
 |---|---|---|
 | `detach …: timeout` | A long transaction uses the history, such as `pg_dump`. The maintainer waits for it before it drops an old partition | Nothing: it ends with that transaction, and the log says `operation recovered` |
+| `drop task_history_…: cannot drop table` | Something of yours, such as a view, depends on an old partition that taskmill detached. Other old partitions are still dropped | Drop what the error names, or change it. The next pass drops the table |
 | `must own the taskmill tables`, or `must be owner of table` | The workers' role is not the owner. Tasks still complete, but soon without history. A worker also logs `prepare history partitions failed` when it starts | [Make that role the owner](database.md#run-workers-as-the-owner-of-taskmills-tables). The maintainer creates the missing partitions within a minute |
 
 ### Kubernetes marks workers as not ready
