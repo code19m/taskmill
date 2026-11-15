@@ -226,7 +226,12 @@ const sessionChecks = 3
 // has. Through a proxy that pools transactions, another client, here the
 // pool, often gets the process that conn just used, or conn gets another.
 func (w *Worker) checkSession(ctx context.Context, conn *pgx.Conn) error {
-	pid := func(q PgxQuerier) (n int32, err error) {
+	// The connection and the pool: this method is what the check needs of
+	// both.
+	type rowQuerier interface {
+		QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	}
+	pid := func(q rowQuerier) (n int32, err error) {
 		err = q.QueryRow(ctx, "SELECT pg_backend_pid()", pgx.QueryExecModeSimpleProtocol).Scan(&n)
 		return n, err
 	}

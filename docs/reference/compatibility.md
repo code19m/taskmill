@@ -29,8 +29,10 @@ From v1.0.0 on, this is the promise:
 - **Interfaces never grow.** The interfaces you implement keep their
   methods: `Args`, `ArgsWithDefaults`, `Handler`, `BatchHandler`,
   `RetryPolicy`, and `outbox.Publisher`. So do `PgxQuerier` and
-  `SQLQuerier`, which your transactions and pools satisfy. New features come
-  as new optional interfaces, the way `ArgsWithDefaults` extends `Args`.
+  `SQLQuerier`, which your transactions and pools satisfy. Each has only the
+  two methods that taskmill calls, so a wrapper of your own needs no more to
+  enqueue. New features come as new optional interfaces, the way
+  `ArgsWithDefaults` extends `Args`.
 - **`Executor` is sealed:** only taskmill implements it.
 - **Function types keep their signatures:** `HandlerFunc`, `Middleware`,
   `EnqueueMiddleware`, and `outbox.PublisherFunc`.

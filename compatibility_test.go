@@ -1,13 +1,15 @@
 package taskmill_test
 
-// Tests of the names that docs/reference/compatibility.md promises never to
-// change: the database stores them, or the code of applications compares
-// them. Each test writes the values out, because a test that compares a
-// constant with itself passes after any rename. A failure here is a breaking
-// change: it needs a new major version, not a new value in the test.
+// Tests of what docs/reference/compatibility.md promises never to change:
+// the names that the database stores, or that the code of applications
+// compares, and the interfaces that applications implement. Each test writes
+// the values out, because a test that compares a constant with itself passes
+// after any rename. A failure here is a breaking change: it needs a new major
+// version, not a new value in the test.
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"maps"
 	"slices"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -228,6 +231,61 @@ func TestScheduledRunMetadataNeverChanges(t *testing.T) {
 		if !maps.Equal(got[tt.name], want) {
 			t.Errorf("the run of schedule %q has the metadata %v, want %v. %s", tt.name, got[tt.name], want, breaks)
 		}
+	}
+}
+
+// execAndQuery is the smallest PgxQuerier, and execAndQueryContext the
+// smallest SQLQuerier: all that an application's own wrapper of a
+// transaction must have. If one of them is no longer an argument for
+// taskmill.Pgx or taskmill.SQL, its interface grew, and every such wrapper
+// stops building.
+type execAndQuery struct{ tx pgx.Tx }
+
+func (q execAndQuery) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	return q.tx.Exec(ctx, query, args...)
+}
+
+func (q execAndQuery) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) { //nolint:ireturn // pgx's rows type is an interface
+	return q.tx.Query(ctx, query, args...)
+}
+
+type execAndQueryContext struct{ tx *sql.Tx }
+
+func (q execAndQueryContext) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return q.tx.ExecContext(ctx, query, args...)
+}
+
+func (q execAndQueryContext) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return q.tx.QueryContext(ctx, query, args...)
+}
+
+func TestQuerierInterfacesNeverGrow(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	pgxTx := e.begin(t)
+	sqlTx, err := openSQL(t).BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sqlTx.Rollback() }()
+	for _, tt := range []struct {
+		name   string
+		tx     taskmill.Executor
+		commit func() error
+	}{
+		{"PgxQuerier", taskmill.Pgx(execAndQuery{pgxTx}), func() error { return pgxTx.Commit(ctx) }},
+		{"SQLQuerier", taskmill.SQL(execAndQueryContext{sqlTx}), sqlTx.Commit},
+	} {
+		res, err := e.client.EnqueueTx(ctx, tt.tx, sendEmail{}, nil)
+		if err == nil {
+			err = tt.commit()
+		}
+		if err != nil {
+			t.Fatalf("an enqueue through a type with only the methods of %s: %v. %sinterfaces never grow: "+
+				"an application's wrapper of its transaction has these methods and no other", tt.name, err, promised)
+		}
+		e.wantState(t, res.ID, taskmill.StateAvailable)
 	}
 }
 

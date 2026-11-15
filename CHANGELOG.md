@@ -7,6 +7,23 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** `PgxQuerier` no longer has `QueryRow`, and `SQLQuerier` no
+  longer has `QueryRowContext`. taskmill never called either of them on a
+  value that you passed, and from v1.0.0 on an interface keeps its methods
+  for good. Nothing changes for code that passes a pgx or `database/sql`
+  value to `taskmill.Pgx` or `taskmill.SQL`: a `pgx.Tx`, a `*pgx.Conn`, a
+  `*pgxpool.Pool`, a `*sql.Tx`, a `*sql.Conn`, a `*sql.DB`, or a type that
+  embeds one of them, such as `*sqlx.Tx`. A type of your own that
+  implements one of the interfaces, such as a wrapper that traces
+  statements, may now leave the method out: it needs `Exec` and `Query`, or
+  `ExecContext` and `QueryContext`. `CancelTx` and `CompleteTx` ask for a
+  transaction as before. Only code that calls `QueryRow` or
+  `QueryRowContext` on a variable of taskmill's interface type stops
+  building. To migrate, give that variable an interface of your own that
+  has the method.
+
 ## [0.7.0] - 2026-11-15
 
 ### Added
