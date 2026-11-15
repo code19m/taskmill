@@ -220,7 +220,7 @@ func (m *maintainer) resign(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
 	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignLeader, m.w.id, m.c.schema); err != nil && led {
-		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "resign maintainer failed; another worker leads when the lease expires",
+		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "resign maintainer failed; another worker takes over when the lease runs out",
 			slog.Any(logKeyError, err))
 	}
 }

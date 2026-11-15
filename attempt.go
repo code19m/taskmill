@@ -399,7 +399,7 @@ func (w *Worker) record(ctx context.Context, t *tracked, o outcome) {
 		w.tally.add(t.info.Queue, 1, 0)
 	}
 	if err != nil {
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "record attempt failed; the task is rescued when its lease expires",
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "record attempt failed; the task is rescued when its lease runs out",
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, err))
 	}
 }

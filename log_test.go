@@ -80,8 +80,8 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 		"fetch tasks", "listen for notifications", "record check-in", "elect maintainer", "renew leases", "record results",
 	}
 	gaveUp := []string{
-		"complete tasks failed; they are rescued when their leases expire",
-		"record attempt failed; the task is rescued when its lease expires",
+		"complete tasks failed; they are rescued when their leases run out",
+		"record attempt failed; the task is rescued when its lease runs out",
 	}
 	down := time.Now()
 	db.cut(true)

@@ -3002,7 +3002,7 @@ func TestWorkerWarnsAboutUnservedKinds(t *testing.T) {
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
 	runWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
 	waitFor(t, "a warning that the reports queue is not served", func() bool {
-		return logs.count("the worker does not serve the default queue of these registered kinds") == 1
+		return logs.count("the worker does not read the default queue of these registered kinds") == 1
 	})
 }
 
