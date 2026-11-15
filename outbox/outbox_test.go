@@ -407,6 +407,60 @@ func TestRelayHonorsItsTimeout(t *testing.T) {
 	}
 }
 
+// A publisher that returns nil, or too few errors, is a mistake that its
+// author must be able to read. The delivery fails with an error that names
+// the publisher, not the batch handler that the relay is to the worker, and
+// the next try sends it again.
+func TestDeliveryWithoutAResultFails(t *testing.T) {
+	t.Parallel()
+	client, ob, pool := setup(t)
+	ctx := t.Context()
+	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "events", Value: []byte("v")})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := client.List(ctx, nil)
+	if err != nil || len(page.Tasks) != 1 {
+		t.Fatalf("got %d tasks, %v; want the stored message", len(page.Tasks), err)
+	}
+
+	// What the publisher returns at each try: no result at all, then too
+	// few, then one for the delivery.
+	results := [][]error{nil, {}, {nil}}
+	var sent []string // the ID of the delivery of each call
+	var hs taskmill.Handlers
+	ob.AddRelay(&hs, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
+		sent = append(sent, ds[0].ID)
+		return results[len(sent)-1]
+	}), nil)
+	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for try, result := range results {
+		info, err := w.RunTask(ctx, page.Tasks[0].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result) == 1 {
+			if info.State != taskmill.StateCompleted {
+				t.Fatalf("try %d, with a result: the message is %s, want it published", try+1, info.State)
+			}
+			continue
+		}
+		const want = "the publisher returned no result for this delivery"
+		if n := len(info.Errors); info.State != taskmill.StateRetryable || n != try+1 || info.Errors[n-1].Message != want {
+			t.Fatalf("try %d, without a result: the message is %s with the errors %+v, want it retryable with the error %q",
+				try+1, info.State, info.Errors, want)
+		}
+	}
+	if len(sent) != 3 || sent[0] != sent[1] || sent[1] != sent[2] {
+		t.Fatalf("the publisher got the deliveries %q, want the same one at each of 3 tries", sent)
+	}
+}
+
 func TestBinaryKeysAndHeadersArriveIntact(t *testing.T) {
 	t.Parallel()
 	client, ob, pool := setup(t)

@@ -28,8 +28,12 @@ All notable changes to taskmill are recorded here. The format follows
   what a nil or short result does: a task or a delivery without an entry
   fails, and is retried. Nil never means that all succeeded. So a publisher
   that ends in `return nil` after it sent its deliveries sends them again
-  at each retry: return `make([]error, len(deliveries))`. The behavior is
-  the same as before.
+  at each retry: return `make([]error, len(deliveries))`. The rule is the
+  same as before.
+- A delivery for which a publisher returns no result now fails with the
+  error `the publisher returned no result for this delivery`. Its error
+  was `the batch handler returned no result for this task`, which names
+  the relay inside taskmill, and not the publisher that you wrote.
 - [ADR 0009](docs/adr/0009-the-apis-shape-for-v1.md) records the shape of
   the API for v1.0.0, with the reasons: the two breaking changes of this
   release, and what stays as it is. `ui.New` keeps returning
