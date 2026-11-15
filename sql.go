@@ -1006,10 +1006,16 @@ RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.att
 		// that are safe in the text of a statement.
 		//
 		// An interrupted detach comes first: PostgreSQL allows a table one at
-		// a time, so no other partition can be detached before it. The rest
-		// come in random order. Some tables cannot be dropped, such as one
-		// that a view depends on, and no state says which: in a fixed order,
-		// enough of them would fill every pass, and keep the others for good.
+		// a time, so no other partition can be detached before it. Then come
+		// the partitions, the oldest first, so an interrupted detach is always
+		// the oldest partition's. When the retention grows, it is then the
+		// last partition to leave the list. In another order it could leave
+		// while older partitions stay, and none of them could be detached.
+		//
+		// The detached tables come last, in random order. Some cannot be
+		// dropped, such as one that a view depends on, and no state says
+		// which: in a fixed order, enough of them would fill every pass, and
+		// keep the others for good.
 		//
 		// A partition that a pass detached and could not drop is a table of
 		// its own, which the history no longer names. So the statement reads
@@ -1032,7 +1038,8 @@ WHERE c.relnamespace = '{s}'::regnamespace
   AND c.relname ~ '^task_history_[0-9]{8}$'
   AND c.relname < 'task_history_' || to_char(greatest(
           {utc} - (SELECT history_retention FROM {s}.settings), timestamp '0001-01-01'), 'YYYYMMDD')
-ORDER BY coalesce(i.inhdetachpending, false) DESC, random()
+ORDER BY coalesce(i.inhdetachpending, false) DESC, i.inhrelid IS NULL,
+         CASE WHEN i.inhrelid IS NOT NULL THEN c.relname END, random()
 LIMIT $1`),
 
 		// deleteFinished deletes dead and canceled tasks older than the dead
