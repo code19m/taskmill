@@ -178,6 +178,12 @@ type EnqueueTask struct {
 // option outside its limits, and for a payload that cannot be stored: [Args]
 // and [EnqueueOptions] have the rules. To enqueue in the same transaction as
 // the application's own writes, use [Client.EnqueueTx].
+//
+// If PostgreSQL ends the transaction to end a deadlock, which other
+// transactions can open around a FIFO group's row or a dedupe key (SQLSTATE
+// 40P01), Enqueue runs again by itself, up to 5 times in all: nothing of
+// the try before was saved. [Client.EnqueueTx] cannot do that in the
+// caller's transaction, and returns the error.
 func (c *Client) Enqueue(ctx context.Context, args Args, opts *EnqueueOptions) (EnqueueResult, error) {
 	res, err := c.enqueue(ctx, pgxQuerier{q: c.pool}, []EnqueueParams{{Args: args, Options: opts}})
 	if err != nil {
@@ -215,6 +221,8 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 // A call over these limits, or with a task that is not valid, is an error
 // that wraps [ErrInvalidArgument]; for a task, the error says which one. A
 // call with no params does nothing, and returns nil.
+//
+// Like [Client.Enqueue], it runs again by itself after a deadlock.
 func (c *Client) EnqueueMany(ctx context.Context, params []EnqueueParams) ([]EnqueueResult, error) {
 	return c.enqueue(ctx, pgxQuerier{q: c.pool}, params)
 }
@@ -411,6 +419,36 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		}
 	}
 
+	var results []EnqueueResult
+	var missing [][]byte // duplicates whose existing task the statement could not see
+	var err error
+	for try := 1; ; try++ {
+		results, missing, err = c.insertTasks(ctx, q, b, notify)
+		// PostgreSQL may end the statement to end a deadlock that other
+		// transactions opened: the enqueue only waited between them, for a
+		// group's row or a dedupe key. On the client's own pool, the
+		// statement is a transaction of its own, so nothing of it stays,
+		// and it runs again, as Cancel does: see inLockOrder. In the
+		// caller's transaction it cannot: that transaction is over.
+		if try == lockOrderTries || !isDeadlock(err) || q != querier(pgxQuerier{q: c.pool}) {
+			break
+		}
+	}
+	if err != nil {
+		return nil, enqueueError(err)
+	}
+	if len(missing) > 0 {
+		if err := c.resolveDuplicates(ctx, q, b, results, missing); err != nil {
+			return nil, err
+		}
+	}
+	return results, nil
+}
+
+// insertTasks runs the enqueue statement on a batch, and returns its results
+// in the batch's order, with the dedupe keys of the duplicates whose
+// existing task the statement could not see.
+func (c *Client) insertTasks(ctx context.Context, q querier, b *enqueueBatch, notify []string) (results []EnqueueResult, missing [][]byte, err error) {
 	stmt := c.sql.enqueue
 	if b.plain {
 		stmt = c.sql.enqueuePlain
@@ -419,34 +457,23 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		b.queues, b.kinds, b.priorities, b.runAts, b.maxAttempts, nullable(b.groups),
 		b.dedupeKeys, b.dedupeWindows, b.payloads, b.metadata, c.schema, notify)
 	if err != nil {
-		return nil, enqueueError(err)
+		return nil, nil, err
 	}
 	defer r.Close()
 
-	results := make([]EnqueueResult, len(b.queues))
-	var missing [][]byte // duplicates whose existing task the statement could not see
+	results = make([]EnqueueResult, len(b.queues))
 	for r.Next() {
 		var ord, id int64
 		var duplicate bool
 		if err := r.Scan(&ord, &id, &duplicate); err != nil {
-			return nil, enqueueError(err)
+			return nil, nil, err
 		}
 		results[ord-1] = EnqueueResult{ID: id, Duplicate: duplicate}
 		if duplicate && id == 0 {
 			missing = append(missing, b.dedupeKeys[ord-1])
 		}
 	}
-	if err := r.Err(); err != nil {
-		return nil, enqueueError(err)
-	}
-	r.Close()
-
-	if len(missing) > 0 {
-		if err := c.resolveDuplicates(ctx, q, b, results, missing); err != nil {
-			return nil, err
-		}
-	}
-	return results, nil
+	return results, missing, r.Err()
 }
 
 // enqueueError wraps an error of the enqueue statement. A data exception

@@ -177,7 +177,9 @@ return nil when the reminder is no longer needed
 > [FIFO group](ordering.md), at the same moment as `CancelTx`: for example,
 > a retry of the task, or the end of the task ahead of it in its group.
 > Nothing was saved, so run your transaction again. `Cancel` does that by
-> itself, because the transaction is its own.
+> itself, because the transaction is its own. The error can also end a
+> transaction that only enqueues into that group: `Enqueue` runs again by
+> itself, and a transaction with `EnqueueTx` is yours to run again.
 
 ## Keep transactions short
 

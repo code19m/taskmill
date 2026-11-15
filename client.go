@@ -411,9 +411,10 @@ func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) er
 // the task changed between pending and another state while it took them.
 var errLockOrder = errors.New("taskmill: the task changed while its rows were locked")
 
-// lockOrderTries is how many times inLockOrder runs its transaction. Each new
-// try takes another transaction that changes the same task or its group
-// while the try before runs.
+// lockOrderTries is how many times inLockOrder runs its transaction, and an
+// enqueue on the client's pool its statement. Each new try takes another
+// transaction that changes the same task or its group while the try before
+// runs.
 const lockOrderTries = 5
 
 // inLockOrder runs fn in a transaction on the client's pool, as Cancel,

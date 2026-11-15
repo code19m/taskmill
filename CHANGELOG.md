@@ -114,6 +114,16 @@ All notable changes to taskmill are recorded here. The format follows
   key is gone, the error names none, and says when the key's window ends.
   During a rolling deploy, a task that the previous release cancels has no
   stored key, so its retry takes no key, as before.
+- `Enqueue` and `EnqueueMany` no longer fail with PostgreSQL's `deadlock
+  detected` (SQLSTATE 40P01) for a deadlock that other transactions opened.
+  A `CancelTx` in an application's transaction can take its locks in an
+  order that makes it wait for another transaction, and that one for it.
+  An enqueue into the same FIFO group that waits between the two is part
+  of the circle, and PostgreSQL may end the enqueue to end the wait. On
+  the client's pool, an enqueue is one statement in a transaction of its
+  own, so nothing of it was saved. It now runs again by itself, up to 5
+  times in all, as `Cancel`, `Delete`, and `Retry` do. `EnqueueTx` and
+  `EnqueueManyTx` cannot, because the transaction is yours: run it again.
 - The dashboard's task list no longer reads what it does not show. It read
   every task of a page in full: the payload, up to 1 MiB, the metadata, and
   all 20 errors, to show one line per task. One page of 50 tasks with large

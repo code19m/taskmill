@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
 
 	"github.com/code19m/taskmill"
@@ -636,6 +637,75 @@ func TestEnqueueNotifiesListeners(t *testing.T) {
 	}
 	if n, err = conn.WaitForNotification(ctx); err != nil || n.Payload != "a|mail" {
 		t.Fatalf("trailing notification: %v, %v", n, err)
+	}
+}
+
+// PostgreSQL ends one transaction of a deadlock, and it may be an enqueue
+// that did nothing wrong: it waited for a dedupe key, or for the row of a
+// FIFO group, between two transactions that wait for each other. On the
+// client's pool, the enqueue is one statement in a transaction of its own:
+// nothing of it stays, so it runs again, below its middleware, which sees one
+// enqueue. In a transaction of the caller it cannot run again: that
+// transaction is over, and the caller gets the deadlock.
+//
+// The test needs the error of a deadlock, not the deadlock: a trigger raises
+// it at the statement's last write, the task, after the key and the group.
+func TestEnqueueRunsAgainAfterADeadlock(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{
+		func(ctx context.Context, _ []*taskmill.EnqueueTask, next func(context.Context) error) error {
+			calls.Add(1)
+			return next(ctx)
+		},
+	}})
+	ctx := t.Context()
+	// The first insert of a task fails. A sequence counts the inserts: it
+	// keeps its count when the statement that failed rolls back.
+	e.exec(t, "CREATE SEQUENCE {s}.inserts")
+	e.exec(t, `
+CREATE FUNCTION {s}.deadlock_first() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF nextval('{s}.inserts') = 1 THEN
+        RAISE EXCEPTION 'deadlock detected' USING ERRCODE = 'deadlock_detected';
+    END IF;
+    RETURN NEW;
+END $$`)
+	e.exec(t, "CREATE TRIGGER deadlock_first BEFORE INSERT ON {s}.tasks FOR EACH ROW EXECUTE FUNCTION {s}.deadlock_first()")
+	opts := func(key string) *taskmill.EnqueueOptions {
+		return &taskmill.EnqueueOptions{GroupKey: "g", DedupeKey: key}
+	}
+
+	for name, enqueue := range map[string]func() (taskmill.EnqueueResult, error){
+		"Enqueue": func() (taskmill.EnqueueResult, error) {
+			return e.client.Enqueue(ctx, sendEmail{}, opts("one"))
+		},
+		"EnqueueMany": func() (taskmill.EnqueueResult, error) {
+			res, err := e.client.EnqueueMany(ctx, []taskmill.EnqueueParams{{Args: sendEmail{}, Options: opts("many")}})
+			return append(res, taskmill.EnqueueResult{})[0], err
+		},
+	} {
+		e.exec(t, "ALTER SEQUENCE {s}.inserts RESTART")
+		calls.Store(0)
+		if res, err := enqueue(); err != nil || res.Duplicate {
+			t.Fatalf("%s: got %+v, %v; want a new task", name, res, err)
+		}
+		if n := calls.Load(); n != 1 {
+			t.Errorf("%s: the enqueue middleware ran %d times, want 1", name, n)
+		}
+	}
+	// The statements that failed left no task, and no count in the group.
+	if n := e.count(t, "SELECT tasks FROM {s}.groups"); n != 2 || e.count(t, "SELECT count(*) FROM {s}.tasks") != 2 {
+		t.Errorf("the group counts %d tasks, want it and the tasks table to hold 2", n)
+	}
+
+	e.exec(t, "ALTER SEQUENCE {s}.inserts RESTART")
+	err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
+		_, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, opts("tx"))
+		return err
+	})
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "40P01" { // deadlock_detected
+		t.Fatalf("EnqueueTx: got %v, want the deadlock", err)
 	}
 }
 

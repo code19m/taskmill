@@ -114,9 +114,12 @@ group at the same moment: a retry of the task, the end of the group's head,
 which promotes the task while a cancel or a delete of it comes in, or an
 enqueue that commits between the two statements of `CancelTx`. PostgreSQL
 ends one of the transactions with a deadlock error (SQLSTATE 40P01), which
-may hit the other one. `Cancel`, `Delete`, and `Retry` run again when it
-hits them, within their five tries. Any other transaction that got the
-error can be run again by its caller.
+may hit the other one, or a third that only waits between the two, such
+as an enqueue into the group. `Cancel`, `Delete`, and `Retry` run again
+when it hits them, within their five tries. So do `Enqueue` and
+`EnqueueMany`: on the client's pool, the enqueue statement is a transaction
+of its own, so nothing of a try that PostgreSQL ended was saved. Any other
+transaction that got the error can be run again by its caller.
 
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the
