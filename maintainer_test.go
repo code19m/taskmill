@@ -543,6 +543,49 @@ func TestRetentionDropsAFewPartitionsInAPass(t *testing.T) {
 	}
 }
 
+// While the maintainer's role changes hands, two workers can apply retention
+// at the same moment. Both find the same detached tables, and for each table
+// one of them comes second. That is no failure: the table is gone.
+func TestTwoMaintainersDropTheSameHistory(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	// Tables that a pass detached and could not drop: a view depended on
+	// each of them.
+	var detached []string
+	for i := range taskmill.HistoryDrops {
+		part := e.attachHistory(t, today.AddDate(0, 0, -30-i))
+		e.exec(t, "CREATE VIEW {s}.report_"+strconv.Itoa(i)+" AS SELECT id FROM {s}."+part)
+		detached = append(detached, part)
+	}
+	taskmill.RunRetention(t.Context(), newWorker(t, e, &taskmill.WorkerConfig{}))
+	for i := range detached {
+		e.exec(t, "DROP VIEW {s}.report_"+strconv.Itoa(i))
+	}
+
+	var logs [2]*logRecorder
+	var passes sync.WaitGroup
+	start := make(chan struct{})
+	for i := range logs {
+		logs[i] = &logRecorder{}
+		w := newWorker(t, e.withLogger(t, slog.New(logs[i])), &taskmill.WorkerConfig{})
+		passes.Go(func() {
+			<-start
+			taskmill.RunRetention(t.Context(), w)
+		})
+	}
+	close(start)
+	passes.Wait()
+	if n := e.historyTables(t, detached...); n != 0 {
+		t.Fatalf("%d of %d detached tables are left", n, len(detached))
+	}
+	for i, l := range logs {
+		if lines := operationLines(l.all())["apply retention"]; len(lines) > 0 {
+			t.Errorf("worker %d reported a failure for tables that the other one dropped first: %s", i+1, recordText(lines[0]))
+		}
+	}
+}
+
 // historyTables returns how many of the named tables the env's schema has.
 func (e *env) historyTables(t *testing.T, names ...string) int {
 	t.Helper()

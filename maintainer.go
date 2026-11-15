@@ -476,11 +476,13 @@ func (m *maintainer) detachPartition(ctx context.Context, p expiredPartition) er
 }
 
 // dropDetached drops a history partition that is detached. The drop waits
-// for whoever reads that table, so it is bounded by a timeout too.
+// for whoever reads that table, so it is bounded by a timeout too. A table
+// that is gone is no failure: while the maintainer's role changes hands, two
+// workers can drop the same tables, and one of them comes second.
 func (m *maintainer) dropDetached(ctx context.Context, name string) error {
 	ctx, cancel := context.WithTimeout(ctx, detachTimeout)
 	defer cancel()
-	if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE %s.%s", m.c.schema, name)); err != nil {
+	if _, err := m.c.pool.Exec(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", m.c.schema, name)); err != nil {
 		return fmt.Errorf("drop %s: %w", name, err)
 	}
 	return nil

@@ -41,6 +41,9 @@ queues, and how notifications and polling wake the workers.
   times out ends the detaching of a pass. It waited for the transactions
   that use the history, which keep every other detach waiting too, and
   PostgreSQL allows a table one unfinished detach.
+- **A table that is gone is no failure.** While the maintainer's role
+  changes hands, two workers can drop the same detached tables, and one of
+  them comes second. So the drop is `DROP TABLE IF EXISTS`.
 - **A failed election try writes nothing.** The upsert proposes its row only
   if no other worker's lease lasts. A conflict would lock the leader's row,
   and make every try of every other worker a write.
