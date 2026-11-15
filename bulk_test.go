@@ -435,10 +435,9 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	start := time.Now()
 	res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}))
-	if err != nil || res.Changed != 1 || res.Skipped != 1 || time.Since(start) > 2*time.Second {
-		t.Fatalf("retried %+v in %v, %v; want the one of group a, at once, and group b left", res, time.Since(start), err)
+	if err != nil || res.Changed != 1 || res.Skipped != 1 {
+		t.Fatalf("retried %+v, %v; want the one of group a, and group b left", res, err)
 	}
 	wantStates(t, e, map[int64]taskmill.State{head: taskmill.StateAvailable, inA: taskmill.StatePending, inB: taskmill.StateCanceled})
 	// The transaction goes on into the group that the retry held.

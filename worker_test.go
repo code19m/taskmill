@@ -1310,16 +1310,9 @@ func TestNotificationsWakeIdleWorkers(t *testing.T) {
 	})
 	e.waitListening(t)
 
-	start := time.Now()
+	// Without a notification, the worker would next fetch in a minute.
 	e.enqueue(t, sendEmail{}, nil)
-	select {
-	case <-started:
-		if d := time.Since(start); d > time.Second {
-			t.Fatalf("pickup took %s", d)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("notification did not wake the worker")
-	}
+	recv(t, started, "a notification to wake the worker")
 }
 
 func TestMiddlewareWrapsAttemptsInOrder(t *testing.T) {

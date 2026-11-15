@@ -214,36 +214,43 @@ func TestWorkerServesTheDefaultQueuesOfItsKinds(t *testing.T) {
 
 func TestWhileLeased(t *testing.T) {
 	t.Parallel()
-	w := &Worker{cfg: WorkerConfig{LeaseDuration: 400 * time.Millisecond}, logger: slog.New(slog.DiscardHandler)}
-	w.resultFailures = newFailures(w, "record results")
-	ts := []*tracked{{renewedAt: time.Now()}}
+	// In the bubble, the clock moves only while whileLeased waits for its
+	// next try, so the test measures its waits exactly.
+	synctest.Test(t, func(t *testing.T) {
+		w := &Worker{cfg: WorkerConfig{LeaseDuration: 400 * time.Millisecond}, logger: slog.New(slog.DiscardHandler)}
+		w.resultFailures = newFailures(w, "record results")
+		ts := []*tracked{{renewedAt: time.Now()}}
 
-	calls := 0
-	err := w.whileLeased(t.Context(), ts, func(context.Context) error {
-		if calls++; calls < 3 {
-			return errors.New("connection refused")
+		calls := 0
+		err := w.whileLeased(t.Context(), ts, func(context.Context) error {
+			if calls++; calls < 3 {
+				return errors.New("connection refused")
+			}
+			return nil
+		})
+		if err != nil || calls != 3 {
+			t.Fatalf("got %v after %d tries, want success on the third", err, calls)
 		}
-		return nil
-	})
-	if err != nil || calls != 3 {
-		t.Fatalf("got %v after %d tries, want success on the third", err, calls)
-	}
 
-	// Renewals keep extending the lease while the tries go on; an error
-	// that persists still ends them.
-	start, calls := time.Now(), 0
-	ts = []*tracked{{renewedAt: start}}
-	err = w.whileLeased(t.Context(), ts, func(context.Context) error {
-		calls++
-		ts[0].mu.Lock()
-		ts[0].renewedAt = time.Now()
-		ts[0].mu.Unlock()
-		return errors.New("connection refused")
+		// Renewals keep extending the lease while the tries go on; an error
+		// that persists still ends them. Tries that followed the renewals
+		// would never end: the tenth succeeds, which fails the test.
+		start, calls := time.Now(), 0
+		ts = []*tracked{{renewedAt: start}}
+		err = w.whileLeased(t.Context(), ts, func(context.Context) error {
+			if calls++; calls == 10 {
+				return nil
+			}
+			ts[0].mu.Lock()
+			ts[0].renewedAt = time.Now()
+			ts[0].mu.Unlock()
+			return errors.New("connection refused")
+		})
+		if err == nil || time.Since(start) > w.cfg.LeaseDuration || calls < 2 {
+			t.Fatalf("got %v after %d tries in %s; it should give up once the lease may have expired",
+				err, calls, time.Since(start))
+		}
 	})
-	if err == nil || time.Since(start) > time.Second || calls < 2 {
-		t.Fatalf("got %v after %d tries in %s; it should give up once the lease may have expired",
-			err, calls, time.Since(start))
-	}
 }
 
 func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
