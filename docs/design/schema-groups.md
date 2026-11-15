@@ -173,7 +173,8 @@ added later as a new option, without a disruptive migration.
 
 ## See also
 
-- [Key statements](schema-statements.md): the Complete statement, and the bulk actions
+- [Key statements](schema-statements.md): the Complete statement
+- [Lists and operator actions](schema-operations.md): the bulk actions
 - [Task lifecycle and guarantees](task-lifecycle.md): invariant 6, and guarantees 8 and 9
 - [Task order and FIFO groups](../guides/ordering.md) and [Avoid duplicate tasks](../guides/deduplication.md): the user's view
 
