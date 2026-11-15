@@ -84,10 +84,19 @@ var defaultTiming = timing{
 // errListenConfig reports a ListenConfig that pgx cannot connect with.
 var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with pgx.ParseConfig")
 
-// Worker fetches tasks from its queues and runs their handlers. One worker per
-// process is typical; it also takes part in electing the maintainer, which
-// promotes due tasks, rescues expired leases, runs schedules, and applies
-// retention.
+// Worker fetches tasks from its queues and runs their handlers. Create one
+// with [NewWorker], and run it with [Worker.Run]. One worker per process is
+// typical; it also takes part in electing the maintainer, which promotes due
+// tasks, rescues expired leases, runs schedules, and applies retention.
+//
+// A worker uses the pool of its [Client], plus one connection of its own for
+// notifications. Run may be called again after it returned, but not while it
+// runs.
+//
+// The [guide to workers and queues] shows how to choose the queues, limit
+// how many tasks run, and stop a worker cleanly.
+//
+// [guide to workers and queues]: https://github.com/code19m/taskmill/blob/main/docs/guides/workers-and-queues.md
 type Worker struct {
 	client    *Client
 	cfg       WorkerConfig
@@ -134,9 +143,15 @@ type Worker struct {
 // WorkerConfig configures a [Worker]. The zero value is valid: a worker
 // without handlers only takes part in maintenance. A config that sets Queues
 // needs handlers too: without them, [NewWorker] returns an error that wraps
-// [ErrInvalidArgument].
+// [ErrInvalidArgument], as it does for a field outside its limits.
+//
+// The [guide to workers and queues] says which setting to use for which
+// limit.
+//
+// [guide to workers and queues]: https://github.com/code19m/taskmill/blob/main/docs/guides/workers-and-queues.md
 type WorkerConfig struct {
-	// Handlers runs the tasks this worker fetches.
+	// Handlers runs the tasks this worker fetches. Default: none, so the
+	// worker only takes part in maintenance. Required when Queues is set.
 	Handlers *Handlers
 
 	// Queues lists the queues to fetch from, with per-process options. A
@@ -149,9 +164,15 @@ type WorkerConfig struct {
 	Queues map[string]QueueOptions
 
 	// LeaseDuration is how long a fetched task stays owned without a
-	// renewal. The worker checks in every third of it, and renews the
-	// leases of its running tasks then. Minimum: 100 milliseconds. Default:
-	// 30 seconds.
+	// renewal. The worker checks in every third of it, 10 seconds by
+	// default, and renews the leases of its running tasks then. A lease
+	// starts when the task is taken, by the database's clock, not when the
+	// fetch began. Minimum: 100 milliseconds. Default: 30 seconds.
+	//
+	// A long lease makes the check-ins rare, so a healthy worker can look
+	// lost between two of them. Above 90 seconds, the dashboard shows it as
+	// stale. Above 15 minutes, the maintainer removes it from the list of
+	// workers, and it registers again at its next check-in.
 	LeaseDuration time.Duration
 
 	// PollInterval is how often the worker checks an idle queue while the
@@ -161,8 +182,8 @@ type WorkerConfig struct {
 	// The maintainer sends a heartbeat every 5 seconds. While heartbeats
 	// arrive, notifications wake the worker, and the maintainer wakes each
 	// queue whose next task waited more than a second. So the worker checks
-	// an idle queue only once a minute, or every PollInterval if that is
-	// longer, and a task whose notification came too early or was lost
+	// an idle queue only once a minute, ±10%, or every PollInterval if that
+	// is longer, and a task whose notification came too early or was lost
 	// starts within about 2 seconds.
 	//
 	// The worker uses PollInterval from its start until the first heartbeat,
@@ -185,9 +206,11 @@ type WorkerConfig struct {
 	DrainTimeout time.Duration
 
 	// Middleware wraps every attempt, in order: the first is the outermost.
+	// Default: none.
 	Middleware []Middleware
 
-	// Schedules are recurring tasks that the maintainer enqueues.
+	// Schedules are recurring tasks that the maintainer enqueues. Each name
+	// may appear once. Default: none.
 	Schedules []Schedule
 
 	// NoMaintainer keeps this worker out of the maintainer election. At least
@@ -199,6 +222,8 @@ type WorkerConfig struct {
 	// mode, which cannot deliver them: without it, the worker finds that
 	// out when it starts, logs an error, and polls every PollInterval.
 	// Create it with [pgx.ParseConfig]. Default: the pool's configuration.
+	// The setup for each pooler is in
+	// https://github.com/code19m/taskmill/blob/main/docs/production/connection-poolers.md.
 	ListenConfig *pgx.ConnConfig
 }
 
@@ -220,11 +245,17 @@ type QueueOptions struct {
 // A handler's panic reaches middleware as an error. For a batch handler,
 // middleware runs once per task, but the context it passes to next does not
 // reach the handler.
+//
+// Add middleware in [WorkerConfig.Middleware]. The [middleware guide] has
+// examples.
+//
+// [middleware guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/middleware.md
 type Middleware func(ctx context.Context, task *TaskInfo, next func(context.Context) error) error
 
-// NewWorker returns a worker that uses client to reach the database. It
-// reports invalid configuration, schedules, and handler registrations, such
-// as a kind registered twice, as errors that wrap [ErrInvalidArgument].
+// NewWorker returns a worker that uses client to reach the database. cfg may
+// be nil: the zero [WorkerConfig] is valid. It reports a nil client, and
+// invalid configuration, schedules, and handler registrations, such as a
+// kind registered twice, as errors that wrap [ErrInvalidArgument].
 func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 	if client == nil {
 		return nil, invalidArgument("client is nil")

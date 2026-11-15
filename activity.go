@@ -18,13 +18,14 @@ const (
 	tallyMaxAge       = time.Hour      // counts a worker could not write for this long are dropped
 )
 
-// ActivityParams selects the activity that [Client.Activity] returns.
+// ActivityParams selects the activity that [Client.Activity] returns. A
+// field outside its limits is an error that wraps [ErrInvalidArgument].
 type ActivityParams struct {
 	// Queues limits the activity to these queues. Empty means all queues.
 	Queues []string
 
 	// Since is when the period starts. Default: an hour ago. Activity is
-	// kept for 24 hours.
+	// kept for 24 hours, in points of one minute.
 	Since time.Time
 
 	// Step is how much time each point covers, in whole minutes. Default: a
@@ -47,13 +48,15 @@ type Activity struct {
 	// the step. Failed counts every failed attempt, whether its task is
 	// retried or dead, including attempts whose workers lost their leases.
 	// Workers write their counts every 10 seconds; a worker that crashes
-	// loses its last few seconds of them.
+	// loses its last few seconds of them, and a worker drops the counts
+	// that it could not write for 1 hour.
 	Completed, Failed int64
 }
 
 // Activity returns the activity of the selected queues, one point per step,
-// oldest first. A step in which nothing was recorded has no point, so a gap
-// between points means that no worker ran. The query is canceled after 5
+// oldest first. params may be nil, for the last hour of every queue, in
+// steps of a minute. A step in which nothing was recorded has no point, so a
+// gap between points means that no worker ran. The query is canceled after 5
 // seconds, like [Client.List].
 func (c *Client) Activity(ctx context.Context, params *ActivityParams) ([]Activity, error) {
 	p, queues, err := activityParams(params)

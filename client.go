@@ -18,8 +18,31 @@ import (
 
 const defaultSchema = "taskmill"
 
-// Client enqueues and manages tasks. It is safe for concurrent use, and an
-// application typically creates one per installation and shares it.
+// Client enqueues and manages tasks. Create one with [NewClient]. It is safe
+// for concurrent use, and an application typically creates one per
+// installation and shares it. It uses the pool it was given and never closes
+// it.
+//
+// Its methods, by what the caller wants to do:
+//
+//   - Enqueue: [Client.Enqueue] and [Client.EnqueueMany], and in the caller's
+//     transaction [Client.EnqueueTx] and [Client.EnqueueManyTx].
+//   - Read: [Client.Get], [Client.List], [Client.Count], [Client.Groups],
+//     [Client.Queues], [Client.Schedules], [Client.Workers],
+//     [Client.Activity], and [Client.Settings].
+//   - Change one task: [Client.Cancel], [Client.CancelTx], [Client.Retry],
+//     and [Client.Delete].
+//   - Change every task that a filter matches: [Client.RetryMatching],
+//     [Client.CancelMatching], and [Client.DeleteMatching].
+//   - Change a queue or a schedule: [Client.PauseQueue],
+//     [Client.ResumeQueue], [Client.UpdateQueue], [Client.PauseSchedule],
+//     [Client.ResumeSchedule], and [Client.RunSchedule].
+//   - Change what the installation keeps: [Client.UpdateSettings].
+//
+// The reads are bounded, so that a dashboard or a script cannot overload the
+// database. The [operations guide] shows them at work.
+//
+// [operations guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/operations-api.md
 type Client struct {
 	pool              *pgxpool.Pool
 	schema            string
@@ -33,7 +56,9 @@ type Client struct {
 	historyGapUntil atomic.Int64
 }
 
-// ClientConfig configures a [Client]. The zero value is valid.
+// ClientConfig configures a [Client]. The zero value is valid. [NewClient]
+// reports a Schema that is not valid as an error that wraps
+// [ErrInvalidArgument].
 type ClientConfig struct {
 	// Schema is the PostgreSQL schema that holds taskmill's tables. It must
 	// match ^[a-z_][a-z0-9_]{0,62}$. Default: "taskmill".
@@ -45,7 +70,7 @@ type ClientConfig struct {
 
 	// EnqueueMiddleware wraps every enqueue, in order: the first is the
 	// outermost. It can add metadata to tasks, for example to carry a trace
-	// context from the producer to the handler.
+	// context from the producer to the handler. Default: none.
 	EnqueueMiddleware []EnqueueMiddleware
 }
 
@@ -140,6 +165,11 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 // the batch completed it. Cancel frees the task's dedupe key. It returns
 // [ErrNotFound] if no task has the ID, and [ErrInvalidState] if the task
 // already finished.
+//
+// Cancel runs again by itself, up to 5 times in all, when another
+// transaction changes the task under its locks, or when PostgreSQL ends its
+// transaction to end a deadlock (SQLSTATE 40P01). So it returns that error
+// only if the fifth try meets it too.
 func (c *Client) Cancel(ctx context.Context, id int64) error {
 	return c.inLockOrder(ctx, func(q querier, check bool) error { return c.cancel(ctx, q, id, check) })
 }
@@ -210,7 +240,8 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64, check bool) er
 // group; another task of a group waits until the group's current head
 // finishes, and then runs before the group's tasks that were enqueued after
 // it. It returns [ErrNotFound] if no task has the ID, and [ErrInvalidState]
-// for tasks in other states.
+// for tasks in other states. Like [Client.Cancel], it runs again by itself,
+// up to 5 times in all, when it loses to another transaction.
 func (c *Client) Retry(ctx context.Context, id int64) error {
 	return c.inLockOrder(ctx, func(q querier, _ bool) error { return c.retry(ctx, q, id) })
 }
@@ -275,7 +306,9 @@ func (c *Client) haltedBy(ctx context.Context, q querier, queue, group string, i
 // Delete deletes a task that is not running, including a completed task in
 // history, and frees its dedupe key. Deleting the dead task that halts its
 // FIFO group resumes the group. It returns [ErrNotFound] if no task has the
-// ID, and [ErrInvalidState] for a running task; cancel it first.
+// ID, and [ErrInvalidState] for a running task; cancel it first. Like
+// [Client.Cancel], it runs again by itself, up to 5 times in all, when it
+// loses to another transaction.
 func (c *Client) Delete(ctx context.Context, id int64) error {
 	return c.inLockOrder(ctx, func(q querier, check bool) error { return c.delete(ctx, q, id, check) })
 }

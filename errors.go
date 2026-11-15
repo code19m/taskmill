@@ -5,42 +5,68 @@ import (
 	"time"
 )
 
-// Errors returned by taskmill. Test for them with [errors.Is], and for the
-// cause of a handler's canceled context with [context.Cause].
+// Errors returned by taskmill. Test for them with [errors.Is], never with ==
+// and never by their message: taskmill wraps them with details, such as the
+// task's ID, and a message may change in any release. Test for the cause of a
+// handler's canceled context with [context.Cause]. The packages outbox, ui,
+// and otel return the same errors.
+//
+// A database or network error is none of these, and has no class. taskmill
+// wraps it with what it was doing, so [errors.As] still finds pgx's error
+// types in it.
 //
 // Each error names its class through an ErrorType() string method, which
 // OpenTelemetry's semconv.ErrorType reports as error.type. The classes are
 // part of the API and do not change: "not_found", "lease_lost",
 // "invalid_state", "invalid_argument", "schema_outdated", "conflict",
-// "canceled", "timeout", and "shutdown", and for failures that taskmill
-// classifies itself, "panic", "invalid_payload", and "middleware", for
-// middleware that returned nil without calling its next.
+// "canceled", "timeout", and "shutdown". Failures that taskmill classifies
+// itself have a class, but no error value: "panic" for a handler or an
+// outbox publisher that panicked, "invalid_payload" for a payload that did
+// not decode into the kind's Args, and "middleware" for middleware that
+// returned nil without calling its next. A minor release may add a class:
+// treat one that is not named here like any other failure.
 var (
 	// ErrNotFound means the task or schedule does not exist, or no longer
-	// exists.
+	// exists: a task was deleted, or retention removed it. Treat it as gone.
 	ErrNotFound = classError("taskmill: not found", "not_found")
 
 	// ErrLeaseLost means the attempt no longer owns its task: its lease
-	// expired and the task was rescued, canceled, or fetched again. It is
-	// also the cause of the context of a handler whose attempt lost its
-	// lease.
+	// expired and the task was rescued, canceled, or fetched again.
+	// [Task.CompleteTx] returns it: return it from the handler, so that the
+	// handler's transaction rolls back.
+	//
+	// It is also the cause of the context of a handler whose attempt lost its
+	// lease. Either the worker could not renew the lease in time, so the task
+	// may already run on another worker. Or this worker fetched the task
+	// again after a rescue: then the older of its two attempts gets this
+	// cause. The result of the attempt is discarded: the maintainer rescues
+	// a task whose lease ran out as a failed attempt, with the code
+	// [CodeLeaseLost], so the task is retried.
 	ErrLeaseLost = classError("taskmill: lease lost", "lease_lost")
 
-	// ErrInvalidState means the operation does not apply to the task's
-	// current state, such as retrying a running task.
+	// ErrInvalidState means the operation does not fit the state of its
+	// target: a retry of a task that is not dead or canceled, a cancel of a
+	// finished task, a delete of a running one, a run of a paused schedule,
+	// or [Worker.Run] on a worker that already runs. To check a task first,
+	// use [State.CanRetry], [State.CanCancel], or [State.CanDelete].
 	ErrInvalidState = classError("taskmill: invalid state", "invalid_state")
 
-	// ErrInvalidArgument means an argument or option is invalid: out of
-	// range, too long, or text that PostgreSQL cannot store, such as a NUL
-	// character.
+	// ErrInvalidArgument means an argument, an option, or a configuration is
+	// invalid: out of range, too long, or text that PostgreSQL cannot store,
+	// such as a NUL character. Every call that takes arguments can return it.
+	// The message says what is wrong, and the same call fails again until
+	// the caller fixes it.
 	ErrInvalidArgument = classError("taskmill: invalid argument", "invalid_argument")
 
 	// ErrSchemaOutdated means the database schema is missing or older than
-	// this version of taskmill. Run [Migrate].
+	// this version of taskmill. [NewClient] returns it. Run [Migrate], or
+	// apply [Migrations] with the application's own tool, before the new
+	// version of the application starts.
 	ErrSchemaOutdated = classError("taskmill: database schema is missing or outdated", "schema_outdated")
 
-	// ErrConflict means an update lost to concurrent updates of the same
-	// settings every time it tried. Try again.
+	// ErrConflict means that [Client.UpdateQueue] or [Client.UpdateSettings]
+	// lost to concurrent updates of the same settings each of the 10 times
+	// it tried. Try again a little later.
 	ErrConflict = classError("taskmill: conflict", "conflict")
 
 	// ErrTaskCanceled is the cause of a handler's context when the task was
@@ -84,12 +110,14 @@ func invalidArgument(format string, args ...any) error {
 }
 
 // PermanentError marks a handler error that retrying cannot fix. The task
-// becomes dead right away, keeping its remaining attempts unused.
+// becomes dead right away, keeping its remaining attempts unused. Create one
+// with [Permanent].
 //
 // It names no error class of its own. OpenTelemetry's semconv.ErrorType
 // reports the class of the first error in Err's chain that has an
 // ErrorType() string method, and "*taskmill.PermanentError" if none has.
 type PermanentError struct {
+	// Err is the handler's error. [errors.Is] and [errors.As] still find it.
 	Err error
 }
 
@@ -116,15 +144,20 @@ func (e *PermanentError) Unwrap() error {
 }
 
 // SnoozeError asks taskmill to run the task again after a delay, without
-// counting the current attempt.
+// counting the current attempt. Create one with [Snooze]. A snooze is not a
+// failure, so it has no error class.
 type SnoozeError struct {
+	// Delay is how long the task waits before it runs again. Zero or less
+	// means right away.
 	Delay time.Duration
 }
 
 // Snooze returns an error that reschedules the task to run after d, without
 // using an attempt. Use it when the task cannot proceed yet, for example while
 // waiting for a rate limit to reset. A delay of zero or less makes the task
-// available right away. A task that always snoozes never becomes dead.
+// available right away. After a longer delay, the task becomes available
+// within about a second of its new run time, while a maintainer runs. A task
+// that always snoozes never becomes dead.
 func Snooze(d time.Duration) error {
 	return &SnoozeError{Delay: d}
 }

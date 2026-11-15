@@ -100,9 +100,14 @@ type TaskInfo struct {
 	// Attempt is the number of attempts used. In a handler, it is the
 	// current attempt, counting from 1. A snooze gives its attempt back, and
 	// [Client.Retry] starts over from 0.
-	Attempt     int
+	Attempt int
+
+	// MaxAttempts is how many times the task may run before it is dead, as
+	// [EnqueueOptions.MaxAttempts] set it.
 	MaxAttempts int
 
+	// GroupKey is the key of the task's FIFO group. It is empty for a task
+	// in no group.
 	GroupKey string
 
 	// Metadata holds the tags from [EnqueueOptions.Metadata] and
@@ -134,8 +139,12 @@ type TaskInfo struct {
 // AttemptError is one entry of a task's error history: why an attempt
 // failed, or a note that taskmill recorded.
 type AttemptError struct {
-	Attempt int       `json:"attempt"`
-	At      time.Time `json:"at"`
+	// Attempt is the attempt that failed, counting from 1. For a note, it is
+	// the number of attempts used so far, which may be 0.
+	Attempt int `json:"attempt"`
+
+	// At is when the entry was recorded, by the database's clock.
+	At time.Time `json:"at"`
 
 	// Message is the error's text, truncated to 4 KiB.
 	Message string `json:"message"`
@@ -147,7 +156,9 @@ type AttemptError struct {
 }
 
 // ErrorCode classifies an entry of a task's error history that taskmill
-// itself recorded.
+// itself recorded. The codes are part of the API and do not change. A minor
+// release may add a code: treat one that is not named here like any other
+// failure.
 type ErrorCode string
 
 // Error codes.
@@ -157,26 +168,35 @@ const (
 	// v0.3.0 have the code "lease_expired" instead.
 	CodeLeaseLost ErrorCode = "lease_lost"
 
-	// CodePanic means the handler panicked, or code that the worker ran
-	// after it returned: a method of its error, or its retry policy.
+	// CodePanic means the handler panicked, or code of the application that
+	// the worker ran after the handler returned: a method of the handler's
+	// error, such as Error on a nil pointer, or [RetryPolicy.Backoff]. After
+	// a panic in that later code, the task is retried with the default
+	// backoff, not with the kind's policy. The entry's Message holds the
+	// panic's value and the stack trace.
 	CodePanic ErrorCode = "panic"
 
-	// CodeTimeout means the attempt ran longer than [HandlerOptions.Timeout].
+	// CodeTimeout means the attempt ran longer than [HandlerOptions.Timeout],
+	// and the handler then returned an error.
 	CodeTimeout ErrorCode = "timeout"
 
 	// CodeInvalidPayload means the payload did not decode into the kind's
 	// Args, so the task became dead right away.
 	CodeInvalidPayload ErrorCode = "invalid_payload"
 
-	// CodeUnknownKind means no worker with a handler for the kind appeared
-	// within an hour, so the task became dead.
+	// CodeUnknownKind means no worker with a handler for the kind took the
+	// task within an hour of its [CodeNoHandler] note, so the task became
+	// dead.
 	CodeUnknownKind ErrorCode = "unknown_kind"
 
-	// CodeNoHandler marks a note, not a failure: a worker met the task
+	// CodeNoHandler marks a note, not a failure: a worker fetched the task
 	// without a handler for its kind, and the task began to wait for one,
-	// without using attempts. A worker with a handler that then snoozes the
-	// task, or gives it back when it stops, removes the note, and so does a
-	// retry of the task.
+	// without using attempts. Such a worker snoozes the task 1 minute at a
+	// time. If no worker with a handler takes it within 1 hour, the task
+	// becomes dead, with the code [CodeUnknownKind]. The hour counts only
+	// while this note is the last entry of the task's errors. A worker with
+	// a handler that then snoozes the task, or gives it back when it stops,
+	// removes the note, and so does a retry of the task.
 	CodeNoHandler ErrorCode = "no_handler"
 )
 

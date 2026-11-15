@@ -39,9 +39,16 @@ import (
 // So a schedule that runs several times an hour, such as "*/15 * * * *",
 // makes no run during the second pass of that hour, where classic cron
 // keeps it running.
+//
+// Set a worker's schedules in [WorkerConfig.Schedules]. [NewWorker] reports
+// a schedule that is not valid as an error that wraps [ErrInvalidArgument].
+// The [schedules guide] shows a schedule from its timetable to its handler.
+//
+// [schedules guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/schedules.md
 type Schedule struct {
 	// Name identifies the schedule, in 1 to 128 characters. Schedules are
 	// kept in the database by name, so renaming one creates a new schedule.
+	// Required.
 	Name string
 
 	// Cron is a cron expression of five fields separated by spaces, such as
@@ -56,17 +63,19 @@ type Schedule struct {
 	// Cron can also be one of the macros @yearly, @annually, @monthly,
 	// @weekly, @daily, @midnight, and @hourly. [NewWorker] rejects an
 	// expression that matches no time in the next five years, such as
-	// February 31.
+	// February 31. Required.
 	Cron string
 
 	// Location is the time zone the expression is read in. Default: UTC.
 	Location *time.Location
 
-	// Args and Options describe the task to enqueue; Options may be nil.
-	// The schedule sets the run time and the dedupe key itself, to enqueue
-	// each run once, so [NewWorker] rejects Options that set RunAt,
-	// DedupeKey, or DedupeWindow.
-	Args    Args
+	// Args is the task to enqueue, with the limits of any payload: see
+	// [Args]. Required.
+	Args Args
+
+	// Options are the task's options. It may be nil. The schedule sets the
+	// run time and the dedupe key itself, to enqueue each run once, so
+	// [NewWorker] rejects Options that set RunAt, DedupeKey, or DedupeWindow.
 	Options *EnqueueOptions
 }
 
@@ -117,10 +126,15 @@ func (t *TaskInfo) ScheduledFor() time.Time {
 
 // ScheduleInfo describes a schedule and its state.
 type ScheduleInfo struct {
-	Name  string
+	Name string
+
+	// Queue is the queue of the task that the schedule enqueues.
 	Queue string
-	Kind  string
-	Cron  string
+
+	// Kind is the kind of that task.
+	Kind string
+
+	Cron string
 
 	// Location is the name of the schedule's time zone, such as
 	// "Europe/Berlin" or "UTC".
@@ -442,7 +456,7 @@ func sameNumber(x, y json.Number) bool {
 	return okP && okQ && p.Cmp(q) == 0
 }
 
-// Schedules returns every schedule stored in the database.
+// Schedules returns every schedule stored in the database, ordered by name.
 func (c *Client) Schedules(ctx context.Context) ([]ScheduleInfo, error) {
 	r, err := c.pool.Query(ctx, c.sql.listSchedules)
 	if err != nil {
@@ -472,7 +486,7 @@ func (c *Client) PauseSchedule(ctx context.Context, name string) error {
 }
 
 // ResumeSchedule undoes [Client.PauseSchedule]. Runs missed while paused
-// collapse into one run.
+// collapse into one run. It returns [ErrNotFound] for an unknown schedule.
 func (c *Client) ResumeSchedule(ctx context.Context, name string) error {
 	return c.setSchedulePaused(ctx, name, false)
 }

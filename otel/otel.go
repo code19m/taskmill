@@ -25,6 +25,12 @@
 // it: an error with an ErrorType() string method names its own. taskmill's
 // errors name theirs, such as "invalid_argument", "panic", or "timeout" for
 // an attempt that ran out of time.
+//
+// The [observability guide] shows the setup. The [metrics page] lists every
+// span, metric, and gauge as an operator sees it, with its Prometheus name.
+//
+// [observability guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/observability.md
+// [metrics page]: https://github.com/code19m/taskmill/blob/main/docs/reference/metrics.md
 package otel
 
 import (

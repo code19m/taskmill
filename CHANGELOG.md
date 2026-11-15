@@ -7,6 +7,16 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The doc comments are now the complete reference of the API. The comment of
+  each identifier states its default, its limits, its zero value, and its
+  errors, so look an identifier up on
+  [pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill) or with
+  `go doc`. The package comments say where to start, `Client` groups its
+  methods by what you want to do, and the main types link to the page that
+  teaches them. No behavior changes.
+
 ## [0.6.0] - 2026-11-13
 
 ### Added

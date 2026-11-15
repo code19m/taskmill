@@ -1,15 +1,20 @@
 // Package outbox publishes messages to a message broker reliably, with the
 // transactional outbox pattern.
 //
-// [Outbox.Store] saves messages in the same transaction as the business data
-// that produced them, so a message exists if and only if that data was
-// committed. A relay, registered on a worker with [Outbox.AddRelay], then
-// publishes the stored messages through a [Publisher] that wraps any broker
-// client: Kafka, NATS, RabbitMQ, or another. Messages with the same topic and
-// key are published one at a time, in the order they were stored. A message
-// that cannot be published is retried for about a month; then it is dead,
-// and its key halts until an operator retries or deletes it, so later
-// messages never overtake it.
+// It takes three steps:
+//
+//   - [New] returns an [Outbox] for a [taskmill.Client].
+//   - [Outbox.Store] saves each [Message] in the same transaction as the
+//     business data that produced it, so a message exists if and only if
+//     that data was committed.
+//   - [Outbox.AddRelay] registers a relay on a worker. The relay publishes
+//     the stored messages through a [Publisher], which wraps any broker
+//     client: Kafka, NATS, RabbitMQ, or another.
+//
+// Messages with the same topic and key are published one at a time, in the
+// order they were stored. A message that cannot be published is retried for
+// about a month; then it is dead, and its key halts until an operator retries
+// or deletes it, so later messages never overtake it.
 //
 // Publishing is at least once: a message can be published twice, for example
 // if the worker crashes after the broker accepted it. Every delivery carries
@@ -17,6 +22,10 @@
 // The receiving side needs no package: a consumer that enqueues a task for
 // each message, with the message ID as [taskmill.EnqueueOptions.DedupeKey],
 // creates at most one task per message within the dedupe window.
+//
+// The [outbox guide] shows each step with a broker.
+//
+// [outbox guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/outbox.md
 package outbox
 
 import (
@@ -32,8 +41,10 @@ import (
 	"github.com/code19m/taskmill/internal/uuid"
 )
 
-// Queue is the taskmill queue that holds stored messages. A worker with a
-// relay reads it by default.
+// Queue is the taskmill queue that holds stored messages, as tasks of the
+// kind "taskmill.outbox.message". A worker with a relay reads it by default.
+// A published message is deleted right away: it is not kept in the task
+// history.
 const Queue = "outbox"
 
 const (
@@ -46,21 +57,23 @@ const (
 // minutes, so a broker outage of up to a month loses nothing.
 var relayRetry = taskmill.ExponentialBackoff{Base: time.Second, Max: 5 * time.Minute}
 
-// Message is an event to publish.
+// Message is an event to publish. Save it with [Outbox.Store].
 type Message struct {
 	// Topic is the broker destination, such as a Kafka topic. Required.
 	Topic string
 
 	// Key orders messages: messages with the same topic and key are
 	// published one at a time, in the order they were stored. Messages
-	// without a key are published in any order.
+	// without a key are published in any order. Default: none.
 	Key []byte
 
-	// Value is the message body. It is stored base64-encoded in a task
-	// payload, whose 1 MiB limit allows about 750 KiB of Value.
+	// Value is the message body. The topic, the key, the value, and the
+	// headers are stored base64-encoded in one task payload, whose 1 MiB
+	// limit allows about 750 KiB of Value. Default: empty.
 	Value []byte
 
-	// Headers are passed to the broker with the message.
+	// Headers are passed to the broker with the message. They share the
+	// size limit of Value. Default: none.
 	Headers map[string][]byte
 }
 
@@ -85,6 +98,10 @@ type Delivery struct {
 // never two with the same topic and key. Each call has
 // [RelayOptions.Timeout]: then its context is canceled, and the deliveries
 // without a nil result are retried.
+//
+// A failed delivery is retried after 1 second, then after twice as long each
+// time, up to every 5 minutes, with ±10% jitter. After 10,000 tries, about a
+// month, the message is dead.
 type Publisher interface {
 	Publish(ctx context.Context, deliveries []Delivery) []error
 }
@@ -103,7 +120,9 @@ type Outbox struct {
 	client *taskmill.Client
 }
 
-// New returns an outbox that keeps its messages in client's database.
+// New returns an outbox that keeps its messages in client's database. With a
+// nil client, [Outbox.Store] returns an error that wraps
+// [taskmill.ErrInvalidArgument].
 func New(client *taskmill.Client) *Outbox {
 	return &Outbox{client: client}
 }
@@ -113,7 +132,7 @@ func New(client *taskmill.Client) *Outbox {
 // over the payload limit (see [Message.Value]), or a call over the limits of
 // [taskmill.Client.EnqueueMany], 10,000 messages and 64 MiB, fails with an
 // error that wraps [taskmill.ErrInvalidArgument], and leaves the transaction
-// usable.
+// usable. A call with no messages does nothing.
 func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Message) error {
 	if o.client == nil {
 		return fmt.Errorf("%w: outbox client is nil", taskmill.ErrInvalidArgument)
@@ -138,10 +157,11 @@ func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Messag
 // RelayOptions configure a relay. The zero value keeps the defaults.
 type RelayOptions struct {
 	// BatchSize is the most deliveries that one call of the publisher
-	// receives. Default: 100. Maximum: 1,000.
+	// receives. It must not be negative. Default: 100. Maximum: 1,000.
 	BatchSize int
 
-	// Timeout bounds each call of the publisher. Default: 1 minute.
+	// Timeout bounds each call of the publisher. It must not be negative.
+	// Default: 1 minute.
 	Timeout time.Duration
 }
 
