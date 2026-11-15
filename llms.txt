@@ -111,6 +111,7 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Lists and operator actions](docs/design/schema-operations.md): The statements that list and count tasks, and that retry, cancel, and delete them
 - [FIFO groups and deduplication](docs/design/schema-groups.md): How a group keeps its order, and how a dedupe key admits one task
 - [Maintenance and notifications](docs/design/schema-maintenance.md): What the maintainer runs, how it counts the queues, and how workers are woken
+- [Rows that taskmill did not write](docs/design/schema-rows.md): Which values the tables refuse, and how the code survives the others
 - [Benchmarks](docs/design/benchmarks.md): The performance targets, how we measure them, and the latest results
 - [Releasing](docs/design/releasing.md): How the project team publishes a version
 - [Writing docs](docs/design/writing-docs.md): The style guide and the page templates

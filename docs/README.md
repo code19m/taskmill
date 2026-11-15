@@ -133,6 +133,7 @@ These pages are for contributors.
 - [Lists and operator actions](design/schema-operations.md)
 - [FIFO groups and deduplication](design/schema-groups.md)
 - [Maintenance and notifications](design/schema-maintenance.md)
+- [Rows that taskmill did not write](design/schema-rows.md)
 - [Benchmarks](design/benchmarks.md)
 - [Releasing](design/releasing.md)
 - [Writing docs](design/writing-docs.md)

@@ -168,6 +168,37 @@ func TestElectionTryWritesOnlyWhenItWins(t *testing.T) {
 	try("a", false)
 }
 
+// No constraint can refuse a lease in the leader table that ends too late: a
+// CHECK cannot read the clock. Obeyed, such a row, written by hand, would
+// keep every worker from leading for as long as it says. A worker writes a
+// lease that ends one lease from now, a minute in this test, so the election
+// takes another worker's lease for one only if it ends within two.
+func TestElectionIgnoresALeaseThatNoWorkerWrites(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for _, tt := range []struct {
+		lease, expires string
+		lasts          bool
+	}{
+		{"a lease as a worker writes it", "now() + interval '1 minute'", true},
+		{"a lease and a half, as a release with a longer lease may write it", "now() + interval '90 seconds'", true},
+		{"three leases", "now() + interval '3 minutes'", false},
+		{"ten years", "now() + interval '10 years'", false},
+		{"a lease without end", "'infinity'", false},
+	} {
+		e.exec(t, "DELETE FROM {s}.leader")
+		e.exec(t, `INSERT INTO {s}.leader (name, worker_id, elected_at, expires_at)
+		           VALUES ('maintainer', 'nobody', now(), `+tt.expires+`)`)
+		leads, wrote, err := taskmill.Elect(t.Context(), e.client, "worker")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if leads == tt.lasts || wrote == tt.lasts {
+			t.Errorf("beside %s: the worker leads %t, wrote %t; want both %t", tt.lease, leads, wrote, !tt.lasts)
+		}
+	}
+}
+
 // TestMaintainerStoppedWhileRenewingResigns checks that a maintainer that
 // stops while it renews its lease still resigns, so that another worker
 // takes over at once, not once the lease expires.
@@ -341,14 +372,14 @@ func TestPromotionStaysOnItsIndexBesideABacklog(t *testing.T) {
 func TestRetentionReadsOnlyTheTasksItDeletes(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	// Tasks that wait, and after them as many dead tasks of an hour ago:
+	// Tasks that wait, and after them as many dead tasks of two hours ago:
 	// with so many, a plan that does not know the age expects to meet an
 	// old task soon wherever it reads. The table is large enough that the
 	// planner deletes the picked tasks by their IDs, at half the cost of
 	// reading the table for them.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
 	           SELECT 'q' || i % 10, 'email.send', CASE WHEN i > 200000 THEN 'dead' ELSE 'scheduled' END::{s}.task_state,
-	                  now() + interval '1 year', '{}', 1, CASE WHEN i > 200000 THEN now() - interval '1 hour' END
+	                  now() + interval '1 year', '{}', 1, CASE WHEN i > 200000 THEN now() - interval '2 hours' END
 	           FROM generate_series(1, 400000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
 
@@ -358,7 +389,7 @@ func TestRetentionReadsOnlyTheTasksItDeletes(t *testing.T) {
 	}{
 		{"no task is old enough", "30 days", 100},
 		// A batch reads its tasks once to pick them, and once to delete them.
-		{"every dead task is old enough", "1 minute", 2100},
+		{"every dead task is old enough", "1 hour", 2100},
 	} {
 		e.exec(t, "UPDATE {s}.settings SET dead_retention = $1::interval", c.retention)
 		n, err := taskmill.RetentionRowsRead(t.Context(), e.client)
@@ -707,7 +738,7 @@ func TestRetentionCountsDaysOf24Hours(t *testing.T) {
 }
 
 // A period can be longer than any history: the longest duration is how Go
-// code says "for good", and SQL can store thousands of years.
+// code says "for good", and SQL can store up to 300 years, a little more.
 func TestLongestHistoryRetentionKeepsHistory(t *testing.T) {
 	t.Parallel()
 	longest := time.Duration(math.MaxInt64)
@@ -721,11 +752,10 @@ func TestLongestHistoryRetentionKeepsHistory(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
-		// Its cutoff is a year before our era, which has the digits of a
-		// year long after today.
-		{"5,000 years, stored by hand", func(t *testing.T, e *env) {
+		// The longest period that the table accepts.
+		{"300 years, stored by hand", func(t *testing.T, e *env) {
 			t.Helper()
-			e.exec(t, "UPDATE {s}.settings SET history_retention = interval '5000 years'")
+			e.exec(t, "UPDATE {s}.settings SET history_retention = interval '300 years'")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

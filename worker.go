@@ -67,7 +67,7 @@ var defaultTiming = timing{
 	maintainer:      time.Second,
 	heartbeat:       5 * time.Second,
 	election:        2 * time.Second,
-	leaderLease:     10 * time.Second,
+	leaderLease:     10 * time.Second, // at most doubled or halved by a release: see electLeader
 	retention:       time.Minute,
 	stats:           10 * time.Second,
 	activity:        10 * time.Second,

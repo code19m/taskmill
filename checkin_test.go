@@ -100,32 +100,30 @@ func TestMaintainerRemovesAWorkerByItsOwnLease(t *testing.T) {
 	}
 }
 
-// A row of workers that taskmill did not write can hold any lease. One that
-// is too long to subtract from a time must not fail the list of the workers,
-// or the removal of the others. No worker writes such a lease, so the row
-// counts as one without a lease.
-func TestWorkerWithAnAbsurdLeaseDoesNotFailTheOthers(t *testing.T) {
+// The workers table accepts a lease of up to 300 years, which is more than
+// any worker has. The statements that move a time back by a lease, or by two,
+// must work with the longest one: a row that fails them fails the list of
+// the workers, and the removal of the others.
+func TestWorkerWithTheLongestLeaseDoesNotFailTheOthers(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	old := e.oldWorker(t)
-	for id, lease := range map[string]string{"long": "1000000 years", "negative": "-1000000 years"} {
-		e.exec(t, "INSERT INTO {s}.workers (id, queues, hostname, version, lease_duration) VALUES ($1, '{}', 'host', 'v', '"+lease+"')", id)
-	}
+	e.exec(t, `INSERT INTO {s}.workers (id, queues, hostname, version, lease_duration)
+	           VALUES ('longest', '{}', 'host', 'v', interval '300 years')`)
 
-	e.exec(t, "UPDATE {s}.workers SET heartbeat_at = now() - interval '40 seconds'")
+	e.exec(t, "UPDATE {s}.workers SET heartbeat_at = now() - interval '7 minutes'")
 	workers, err := e.client.Workers(t.Context())
-	if err != nil || len(workers) != 3 {
-		t.Fatalf("list the workers: %d of 3, %v", len(workers), err)
+	if err != nil || len(workers) != 2 {
+		t.Fatalf("list the workers: %d of 2, %v", len(workers), err)
 	}
 	for _, w := range workers {
-		if !w.Stale {
-			t.Errorf("the worker %s shows as healthy 40 seconds after its check-in", w.ID)
+		if w.Stale != (w.ID == old) {
+			t.Errorf("the worker %s, silent for 7 minutes: stale is %v", w.ID, w.Stale)
 		}
 	}
 
-	e.exec(t, "UPDATE {s}.workers SET heartbeat_at = now() - interval '7 minutes'")
 	taskmill.RunRetention(t.Context(), newWorker(t, e, &taskmill.WorkerConfig{}))
-	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
-		t.Errorf("the maintainer kept %d of 3 workers that were silent for 7 minutes, the one named %q among them", n, old)
+	if n := e.count(t, "SELECT count(*) FROM {s}.workers WHERE id = $1", old); n != 0 {
+		t.Errorf("the maintainer kept the worker %q, silent for 7 minutes, beside one with the longest lease", old)
 	}
 }
