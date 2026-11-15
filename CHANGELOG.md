@@ -48,10 +48,14 @@ All notable changes to taskmill are recorded here. The format follows
   implements one of the interfaces, such as a wrapper that traces
   statements, may now leave the method out: it needs `Exec` and `Query`, or
   `ExecContext` and `QueryContext`. `CancelTx` and `CompleteTx` ask for a
-  transaction as before. Only code that calls `QueryRow` or
-  `QueryRowContext` on a variable of taskmill's interface type stops
-  building. To migrate, give that variable an interface of your own that
-  has the method.
+  transaction as before. What stops building is code that uses
+  `taskmill.PgxQuerier` or `taskmill.SQLQuerier` as the type of its own
+  values, and needs the removed method there. Such code calls the method
+  on the value, embeds the interface in an interface of its own, or passes
+  the value where the method is needed: for example to the code that sqlc
+  generates for pgx, whose `DBTX` has `QueryRow`. To migrate, pass the
+  `pgx.Tx` or the pool itself there, or give the value an interface of
+  your own that has the method, such as that `DBTX`.
 
 ## [0.7.0] - 2026-11-15
 

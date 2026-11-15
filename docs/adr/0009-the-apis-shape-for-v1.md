@@ -84,9 +84,12 @@ would break the build of its callers for no change in behavior.
 
 ## Consequences
 
-- A user's wrapper of a transaction has two methods. Code that called
-  `QueryRow` or `QueryRowContext` through taskmill's interface stops
-  building once, and declares an interface of its own.
+- A user's wrapper of a transaction has two methods. Code that used
+  taskmill's interface as the type of its own values, and needs the removed
+  method there, stops building once. It calls the method, embeds the
+  interface, or passes the value where the method is needed: sqlc's `DBTX`
+  for pgx was the old `PgxQuerier`, method for method. Such code passes the
+  `pgx.Tx` or the pool itself there, or declares an interface of its own.
 - Whoever encodes a `TaskInfo` gets other keys for its `Errors` entries
   once, with no build error: the changelog names the old and the new keys.
   After that, a release never renames a key, and adds one only with a new
