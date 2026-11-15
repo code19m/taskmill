@@ -9,6 +9,8 @@ upgrade, see [Upgrading](../production/upgrading.md).
 - The latest release is **v0.7.0**.
 - **The API is final for v1.0.0.** v1.0.0 is not tagged yet: it waits for
   more use in production.
+  [ADR 0009](../adr/0009-the-apis-shape-for-v1.md) says why the API has
+  this shape: what changed last, and what stays as it is.
 - taskmill follows [Semantic Versioning](https://semver.org/). Before v1.0.0,
   it allows a minor release to break the API. If one does, the
   [changelog](../../CHANGELOG.md) marks the change with **Breaking:** and

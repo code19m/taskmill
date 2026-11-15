@@ -29,6 +29,12 @@ All notable changes to taskmill are recorded here. The format follows
   that ends in `return nil` after it sent its deliveries sends them again
   at each retry: return `make([]error, len(deliveries))`. The behavior is
   the same as before.
+- [ADR 0009](docs/adr/0009-the-apis-shape-for-v1.md) records the shape of
+  the API for v1.0.0, with the reasons: the two breaking changes of this
+  release, and what stays as it is. `ui.New` keeps returning
+  `http.Handler`, a batch result that is missing keeps failing its task,
+  and `Middleware`, `AttemptError`, `QueueInfo.Counts`, `Activity.Counts`,
+  and `GroupParams` keep their names.
 
 ### Removed
 
