@@ -53,9 +53,12 @@ const (
 	logKeyVersion  = "version"
 )
 
-const (
-	readyTimeout = 2 * time.Second // bound on one check of the database
-	readyReuse   = time.Second     // how long /readyz reuses a check's answer
+const readyTimeout = 2 * time.Second // bound on one check of the database
+
+// These times are not configurable, but tests shorten them.
+var (
+	readTimeout = 10 * time.Second // for a whole request to arrive: its body is a small form at most
+	readyReuse  = time.Second      // how long /readyz reuses a check's answer
 )
 
 func main() {
@@ -159,7 +162,7 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 	}
 	server := &http.Server{
 		Handler:      h,
-		ReadTimeout:  10 * time.Second, // for a whole request: its body is a small form at most
+		ReadTimeout:  readTimeout,
 		WriteTimeout: 30 * time.Second, // pages take at most 10 seconds to read
 		IdleTimeout:  2 * time.Minute,
 	}
