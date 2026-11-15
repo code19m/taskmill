@@ -29,10 +29,19 @@ func newCountedEnv(t *testing.T) (*env, *fetchCounter) {
 	return newTracedEnv(t, fetches), fetches
 }
 
-// startIdleWorker runs a worker of idleQueues that polls every 20 ms while
+// startIdleWorker runs a worker from newIdleWorker.
+func startIdleWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) (*taskmill.Worker, <-chan struct{}) {
+	t.Helper()
+	w, started := newIdleWorker(t, e, cfg)
+	startWorker(t, w)
+	return w, started
+}
+
+// newIdleWorker returns a worker of idleQueues that polls every 20 ms while
 // the maintainer's heartbeats do not reach it, and every hour, as tests do,
 // while they do. cfg, which may be nil, sets the rest of its configuration.
-func startIdleWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) (*taskmill.Worker, <-chan struct{}) {
+// The channel gets a value for each task that starts.
+func newIdleWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) (*taskmill.Worker, <-chan struct{}) {
 	t.Helper()
 	if cfg == nil {
 		cfg = &taskmill.WorkerConfig{}
@@ -43,9 +52,7 @@ func startIdleWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) (*taskmil
 		return nil
 	}, nil)
 	cfg.Queues, cfg.PollInterval = idleQueues, 20*time.Millisecond
-	w := newWorker(t, e, cfg)
-	startWorker(t, w)
-	return w, started
+	return newWorker(t, e, cfg), started
 }
 
 func TestIdleWorkerFetchesRarelyWhileHeartbeatsArrive(t *testing.T) {
@@ -119,10 +126,13 @@ func TestIdleWorkerPollsWhileTheMaintainerFailsOver(t *testing.T) {
 	e, _ := newCountedEnv(t)
 	// A maintainer that crashed holds the role until its lease runs out, so
 	// no heartbeat comes, and nothing wakes a queue whose notification was
-	// lost.
+	// lost. The lease is a minute here, and the worker's own too: it takes a
+	// lease that ends later than two of its own for none.
 	e.exec(t, `INSERT INTO {s}.leader (name, worker_id, elected_at, expires_at)
 	           VALUES ('maintainer', 'crashed', now(), now() + interval '1 minute')`)
-	w, started := startIdleWorker(t, e, nil)
+	w, started := newIdleWorker(t, e, nil)
+	taskmill.SetTiming(w, taskmill.Timing{LeaderLease: time.Minute})
+	startWorker(t, w)
 	time.Sleep(500 * time.Millisecond)
 	if taskmill.Notifying(w) {
 		t.Fatal("the worker counts on notifications without heartbeats")

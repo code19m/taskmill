@@ -40,6 +40,44 @@ To skip a release, do one of these:
 - Stop every old process that uses taskmill, web pods included, before the
   new ones start.
 
+## What a migration repairs
+
+A migration can add a rule to a table, such as "a retention period is at
+least 1 hour". It first repairs the rows that break the rule. taskmill never
+writes such a row: only SQL by hand does, or a tool of your own. So most
+upgrades repair nothing.
+
+| A row with | Becomes |
+|---|---|
+| A worker whose start or check-in time is infinite, whose queues or kinds hold a `NULL` or have two dimensions, or whose lease is below zero, above 300 years, or written with a negative field | Deleted. A worker that still runs registers again at its next check-in |
+| A schedule whose next run time is infinite | A paused schedule. When you resume it, it runs right away: once for the time of the upgrade, and once more if it missed a regular run since |
+| A schedule whose last run time is infinite | A schedule without a last run |
+| A retention period below 1 hour, or above 300 years | 1 hour, or 300 years, which keeps tasks for good |
+| A retention period written with a negative field, such as `7 days -1 hour` | The same period without one: `6 days 23:00:00` |
+
+To see what an upgrade repaired, run this right after it, with your
+schema's name. A repaired row has the time of the migration as its
+`updated_at`, until something changes the row again:
+
+```sql
+SELECT 'schedule ' || s.name AS repaired
+FROM taskmill.schedules s, taskmill.migrations m
+WHERE m.version = 6 AND s.updated_at = m.applied_at
+UNION ALL
+SELECT 'settings'
+FROM taskmill.settings s, taskmill.migrations m
+WHERE m.version = 6 AND s.updated_at = m.applied_at;
+```
+
+- **Resume a schedule that the upgrade paused,** on Dashboard › Schedules.
+- **A deleted worker row leaves no trace in the database.** You see it only
+  in the log of a worker that still runs, as the Warn line `worker was
+  removed as stale; registering again`.
+- **SQL that writes such a value now fails** with a check violation
+  (SQLSTATE `23514`), which names the rule. taskmill's tables are internal:
+  change settings, schedules, and queues through `Client`
+  ([Compatibility](../reference/compatibility.md#what-may-change-in-a-minor-release)).
+
 ## Roll back
 
 Rolling back one release is safe: the old code runs on the new schema. Deploy

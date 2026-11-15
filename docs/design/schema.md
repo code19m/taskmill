@@ -1,7 +1,7 @@
 # Storage schema
 
 This page maps the [task lifecycle](task-lifecycle.md) onto PostgreSQL: the
-tables and indexes, and why each was chosen. Four more pages cover the rest:
+tables and indexes, and why each was chosen. Five more pages cover the rest:
 
 | Page | What it covers |
 |---|---|
@@ -9,6 +9,7 @@ tables and indexes, and why each was chosen. Four more pages cover the rest:
 | [Lists and operator actions](schema-operations.md) | The statements that list and count tasks, and that retry, cancel, and delete them |
 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, how it counts the queues, and how workers are woken |
+| [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
 
 The exact definitions are in [`internal/migrations`](../../internal/migrations),
 and the exact statements in [`sql.go`](../../sql.go). The statements were
@@ -34,8 +35,8 @@ configurable, so several schemas can share a database. It must match
    all of them work inside the caller's transaction and behind poolers in
    transaction mode, such as PgBouncer.
 4. **The database enforces the lifecycle's invariants** with `CHECK`
-   constraints, as a second line of defense behind the code. The code, in
-   turn, survives [a row that it did not write](schema-maintenance.md#rows-that-taskmill-did-not-write).
+   constraints, as a second line of defense behind the code. The small tables
+   also refuse what no release writes. Elsewhere, the code survives [such a row](schema-rows.md).
 5. **Frequent updates touch no indexed column.** Lease renewals change only
    `lease_expires_at`, which no index contains, so PostgreSQL can update the
    row in place (a HOT update) without writing to any index.
@@ -139,8 +140,7 @@ and `freed_key_expires_at` for a [retry](schema-operations.md#a-retry-takes-its-
 - `workers` gets a check-in from every worker process; `fillfactor = 50`
   keeps those updates HOT. A check-in sets `heartbeat_at`, which keeps its
   name: a rename would fail an older release's workers in a rolling deploy.
-  `lease_duration` holds the worker's `LeaseDuration`, which says
-  [how long it may be silent](schema-maintenance.md#maintenance).
+  `lease_duration` holds its `LeaseDuration`: [how long it may be silent](schema-maintenance.md#maintenance).
 - `leader` elects the maintainer with a lease row rather than an advisory
   lock. Session advisory locks need a dedicated connection and do not work
   behind poolers in transaction mode. A lease row works everywhere.

@@ -88,7 +88,7 @@ statements in one transaction (see
 | 7 | `running` | `running` | The worker renews the lease, every third of it. | Worker |
 | 8 | `running` | `completed` | The handler returned no error. | Worker |
 | 9 | `running` | `retryable` | The handler failed and attempts remain. The run time becomes now plus a backoff. | Worker |
-| 10 | `running` | `dead` | The handler failed with no attempts left, or returned a permanent error; the payload did not decode, or the row ([Rows that taskmill did not write](schema-maintenance.md#rows-that-taskmill-did-not-write)); or no worker with a handler for the kind appeared within 1 hour. | Worker |
+| 10 | `running` | `dead` | The handler failed with no attempts left, or returned a permanent error; the payload did not decode, or the row ([Rows that taskmill did not write](schema-rows.md)); or no worker with a handler for the kind appeared within 1 hour. | Worker |
 | 11 | `running` | `scheduled`, or `available` for a snooze of zero or less | The handler snoozed, or the worker has no handler for the kind and waits for one that has. Gives the attempt back. | Worker |
 | 12 | `running` | `available` | The worker released the task during graceful shutdown. Gives the attempt back. | Worker |
 | 13 | `running` | `retryable`, `dead`, or `canceled` | The lease expired: the worker crashed or lost the database. Counts as a failed attempt. | Maintainer |

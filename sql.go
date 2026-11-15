@@ -188,12 +188,6 @@ func newStatements(schema string) *statements {
 		// that cannot grow cannot tell the next attempt from this one.
 		"{attempt}", "least(t.attempt + 1, t.max_attempts)",
 		"{token}", "least(t.lease_token, "+strconv.Itoa(math.MaxInt32-1)+") + 1",
-		// {lease} is a worker's lease, or NULL if its row holds none, as a
-		// worker of a release without the column leaves it. A lease that no
-		// worker writes is none either: a Go duration ends below 300 years,
-		// and a row written by hand can hold more than a time can be moved
-		// by, which would fail the statement for every worker.
-		"{lease}", "(CASE WHEN lease_duration BETWEEN interval '0' AND interval '300 years' THEN lease_duration END)",
 		// {unnoted} is a task's errors without a no_handler note at their
 		// end. The note says that the task waits for a worker with a handler
 		// for its kind: the wait is over once such a worker has the task, or
@@ -984,15 +978,29 @@ SET queues = EXCLUDED.queues, kinds = EXCLUDED.kinds, hostname = EXCLUDED.hostna
 		// proposes its row only if no other worker's lease lasts: a conflict
 		// locks the leader's row even when it then changes nothing, which
 		// makes every try of every other worker a write.
+		//
+		// Another worker's lease lasts only if it ends within two leases
+		// from now. A worker writes a lease that ends one lease from now, by
+		// the database's clock, so a lease that ends later is no worker's: a
+		// row written by hand. No constraint can refuse it, because a CHECK
+		// cannot read the clock, and obeyed, it would keep every worker from
+		// leading for as long as it says. Taken as no lease, it does so for
+		// two leases at most. The second lease is room for a release that
+		// changes the lease: its workers and the previous release's take
+		// each other's leases for real ones if it at most doubles or halves
+		// it. Otherwise two workers can lead for a moment, which the
+		// maintainer's work allows: the lease never gave exclusive access.
 		electLeader: q(`
 INSERT INTO {s}.leader AS l (name, worker_id, elected_at, expires_at)
 SELECT 'maintainer', $1, now(), now() + $2 * interval '1 microsecond'
-WHERE NOT EXISTS (SELECT FROM {s}.leader WHERE name = 'maintainer' AND worker_id <> $1 AND expires_at >= now())
+WHERE NOT EXISTS (SELECT FROM {s}.leader WHERE name = 'maintainer' AND worker_id <> $1
+                  AND expires_at BETWEEN now() AND now() + $2 * interval '2 microseconds')
 ON CONFLICT (name) DO UPDATE
 SET worker_id = EXCLUDED.worker_id,
     elected_at = CASE WHEN l.worker_id = EXCLUDED.worker_id THEN l.elected_at ELSE now() END,
     expires_at = EXCLUDED.expires_at
-WHERE l.worker_id = EXCLUDED.worker_id OR l.expires_at < now()
+WHERE l.worker_id = EXCLUDED.worker_id
+   OR l.expires_at NOT BETWEEN now() AND now() + $2 * interval '2 microseconds'
 RETURNING worker_id`),
 		// resignLeader gives up $1's lease, and tells the workers on channel
 		// $2, so that another takes over right away.
@@ -1113,10 +1121,11 @@ RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.att
 		// it detaches: a table that an operator detached or copied, to keep
 		// it, has none.
 		//
-		// A period that only SQL can store, of thousands of years, has its
-		// cutoff before our era, whose year to_char prints without a sign,
-		// like a year after today. Such a cutoff counts as the year 1, so
-		// that nothing is older.
+		// The cutoff is a day of our era, and not after today, because the
+		// settings refuse a period of more than 300 years, and one with a
+		// negative field. to_char prints a year before our era without a
+		// sign, like a year after today, so such a cutoff would expire every
+		// partition, as a cutoff after today does.
 		expiredHistory: q(`
 SELECT c.relname, i.inhrelid IS NOT NULL, coalesce(i.inhdetachpending, false)
 FROM pg_class c
@@ -1125,8 +1134,7 @@ WHERE c.relnamespace = '{s}'::regnamespace
   AND c.relkind = 'r'
   AND (i.inhrelid IS NOT NULL OR NOT c.relispartition AND obj_description(c.oid, 'pg_class') = $2)
   AND c.relname ~ '^task_history_[0-9]{8}$'
-  AND c.relname < 'task_history_' || to_char(greatest(
-          {utc} - (SELECT history_retention FROM {s}.settings), timestamp '0001-01-01'), 'YYYYMMDD')
+  AND c.relname < 'task_history_' || to_char({utc} - (SELECT history_retention FROM {s}.settings), 'YYYYMMDD')
 ORDER BY coalesce(i.inhdetachpending, false) DESC, i.inhrelid IS NULL,
          CASE WHEN i.inhrelid IS NOT NULL THEN c.relname END, random()
 LIMIT $1`),
@@ -1185,9 +1193,11 @@ DELETE FROM {s}.dedupe_keys d USING expired WHERE d.key = expired.key`),
 		// twice their lease if that is longer. A worker checks in every third
 		// of its lease, so one with a long lease is silent for long while it
 		// is healthy. A worker of a release that stores no lease has only
-		// the $1 seconds.
+		// the $1 seconds. The table refuses a lease of more than 300 years,
+		// and one with a negative field, so a time can always be moved back
+		// by twice a lease.
 		deleteWorkers: q(`
-DELETE FROM {s}.workers WHERE heartbeat_at < now() - greatest($1 * interval '1 second', 2 * {lease})`),
+DELETE FROM {s}.workers WHERE heartbeat_at < now() - greatest($1 * interval '1 second', 2 * lease_duration)`),
 
 		// pruneSchedules deletes the schedules that are not among $1 and did
 		// not run or change for a day: they were removed from the code. The day
@@ -1289,7 +1299,7 @@ WHERE (extract(epoch FROM history_retention) * 1000000)::bigint = $1
 		// microseconds.
 		listWorkers: q(`
 SELECT w.id, w.hostname, w.version, w.queues, w.kinds, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL,
-       w.heartbeat_at < now() - coalesce({lease}, $1 * interval '1 microsecond')
+       w.heartbeat_at < now() - coalesce(w.lease_duration, $1 * interval '1 microsecond')
 FROM {s}.workers w
 LEFT JOIN {s}.leader l ON l.name = 'maintainer' AND l.worker_id = w.id AND l.expires_at > now()
 ORDER BY w.id`),
