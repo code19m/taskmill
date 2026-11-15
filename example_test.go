@@ -439,7 +439,7 @@ func ExampleClient_Queues() {
 }
 
 // This example prints the dead tasks of one queue with their last errors,
-// newest first, one page at a time.
+// the task that died last first, one page at a time.
 func ExampleClient_List() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient

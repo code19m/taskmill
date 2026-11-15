@@ -325,6 +325,96 @@ func TestTaskFilters(t *testing.T) {
 	}
 }
 
+// A list of dead tasks shows the task that died last first, says so, and
+// shows when each task died. Its pages lead on in that order, under links
+// that name it. A list that mixes dead tasks with others is in the order of
+// the IDs, as every other list.
+func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	// 60 dead tasks, more than a page. Task i died (7i mod 60) minutes ago:
+	// every task at a time of its own, and in another order than the IDs.
+	_, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+		SELECT 'mail', 'greet', 'dead', now(), '{}', 1, now() - (i * 7 % 60) * interval '1 minute' FROM generate_series(1, 60) i`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Enqueue(t.Context(), greet{Name: "a"}, nil); err != nil { // task 61, which waits
+		t.Fatal(err)
+	}
+	latestFirst := make([]string, 60)
+	for i := 1; i <= 60; i++ {
+		latestFirst[i*7%60] = strconv.Itoa(i)
+	}
+	h := handler(t, client, nil)
+	row := regexp.MustCompile(`<tr data-href="[^"]*" data-key="(\d+)"`)
+	list := func(target string) (body string, ids []string) {
+		t.Helper()
+		code, body, _ := get(t, h, target)
+		if code != http.StatusOK {
+			t.Fatalf("GET %s: status %d", target, code)
+		}
+		for _, m := range row.FindAllStringSubmatch(body, -1) {
+			ids = append(ids, m[1])
+		}
+		return body, ids
+	}
+	next := func(body, label string) string {
+		t.Helper()
+		m := regexp.MustCompile(`href="([^"]+)">(?:<svg.*?</svg>)?` + label + `<`).FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("the page has no link %q", label)
+		}
+		return html.UnescapeString(m[1])
+	}
+
+	body, ids := list("/tasks?state=dead")
+	if !strings.Contains(body, `<span class="meta">latest first</span>`) || !strings.Contains(body, "<th>Finished</th>") {
+		t.Errorf("the first page of dead tasks does not say that the latest come first, or does not show when they died\n%s", body)
+	}
+	body, later := list(next(body, "Earlier"))
+	if !slices.Equal(slices.Concat(ids, later), latestFirst) {
+		t.Errorf("the two pages of dead tasks show %v, then %v; want %v", ids, later, latestFirst)
+	}
+	if !strings.Contains(body, `<span class="meta">earlier</span>`) || next(body, "Latest") != "/tasks?state=dead" || strings.Contains(body, ">Earlier<") {
+		t.Errorf("the last page of dead tasks does not say where it is, or leads on\n%s", body)
+	}
+
+	mixed, ids := list("/tasks?state=dead&state=available")
+	if !slices.Equal(ids[:3], []string{"61", "60", "59"}) || !strings.Contains(mixed, "<th>Run at</th>") ||
+		!strings.Contains(mixed, ">Older<") || strings.Contains(mixed, "latest first") {
+		t.Errorf("a list of dead and available tasks starts with %v, or names another order than that of the IDs\n%s", ids[:3], mixed)
+	}
+}
+
+// A task list that the client refuses says what is wrong, as the client
+// names it: the filter, or the cursor. An address with a cursor, as a
+// bookmark of a list of dead tasks from the previous release is, also says
+// where such a cursor comes from, and leads to the first page of the same
+// list: its filter may be fine. Without a cursor, the filter is what is
+// wrong, and the page offers to clear it.
+func TestTaskListSaysWhatItRefuses(t *testing.T) {
+	t.Parallel()
+	h := handler(t, setup(t), nil)
+	const upgrade = "before an upgrade"
+	for _, c := range []struct {
+		target, wrong, back, label string
+		cursor                     bool
+	}{
+		{"/tasks?state=dead&cursor=MTIz", "invalid cursor", "/tasks?state=dead", "Back to the first page", true}, // "123", of the ID order
+		{"/tasks?cursor=%25", "invalid cursor", "/tasks", "Back to the first page", true},
+		{"/tasks?state=bogus&cursor=MTIz", "unknown state", "/tasks?state=bogus", "Back to the first page", true},
+		{"/tasks?state=bogus", "unknown state", "/tasks", "Clear the filters", false},
+	} {
+		code, body, _ := get(t, h, c.target)
+		if code != http.StatusBadRequest || !strings.Contains(body, "<h1>Invalid request</h1>") || !strings.Contains(body, c.wrong) ||
+			strings.Contains(body, upgrade) != c.cursor || !strings.Contains(body, `<a class="btn" href="`+c.back+`">`) ||
+			!strings.Contains(body, c.label+"</a>") {
+			t.Errorf("GET %s: status %d, want 400, a page that says %q, and the link %q to %s\n%s", c.target, code, c.wrong, c.label, c.back, body)
+		}
+	}
+}
+
 func TestLiveUpdateResponses(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)

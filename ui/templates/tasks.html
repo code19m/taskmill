@@ -2,7 +2,7 @@
 {{$d := .Data}}
 <header class="topbar">
   <h1>{{.Title}}</h1>
-  {{if $d.Paged}}<span class="meta">older</span>{{end}}
+  {{with or (and $d.Paged $d.Order.Later) $d.Order.Start}}<span class="meta">{{.}}</span>{{end}}
   {{with $d.Bulk}}
   <div class="right">
     {{with .Retry}}<a class="btn primary" href="{{.}}">{{template "icon" "retry"}}Retry all</a>{{end}}
@@ -28,7 +28,7 @@
     <colgroup><col class="c-id"><col class="c-kind"><col class="c-queue"><col class="c-state"><col class="c-attempt"><col class="c-time"><col class="c-time"><col></colgroup>
     <thead><tr>
       <th class="num">ID</th><th>Kind</th><th>Queue</th><th>State</th><th class="num">Attempt</th>
-      <th>Created</th><th>Run at</th><th>Last error</th>
+      <th>Created</th><th>{{if $d.Order.ByFinish}}Finished{{else}}Run at{{end}}</th><th>Last error</th>
     </tr></thead>
     <tbody>{{range $d.Tasks}}
       <tr data-href="{{path "/tasks/"}}{{.ID}}" data-key="{{.ID}}">
@@ -38,7 +38,8 @@
         <td>{{template "state" .State}}{{if ne .Priority 2}} <span class="chip priority-{{.Priority}}">{{.Priority}}</span>{{end}}</td>
         <td class="num mono">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
         <td class="tone-faint" title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>
-        <td class="tone-faint" title="{{timestamp .RunAt}}">{{ago .RunAt}}</td>
+        {{if $d.Order.ByFinish}}<td class="tone-faint" title="{{timestamp .FinalizedAt}}">{{ago .FinalizedAt}}</td>
+        {{else}}<td class="tone-faint" title="{{timestamp .RunAt}}">{{ago .RunAt}}</td>{{end}}
         <td class="error-cell">{{with lastError .Errors}}<span title="{{printf "%.300s" .Message}}">{{printf "%.140s" .Message}}</span>{{end}}</td>
       </tr>
     {{end}}</tbody>
@@ -46,8 +47,8 @@
   </div>
   {{if or $d.Next $d.Paged}}
   <div class="pager">
-    {{if $d.Paged}}<a class="btn sm quiet" href="{{$d.Newest}}">{{template "icon" "first"}}Newest</a>{{else}}<span></span>{{end}}
-    {{if $d.Next}}<a class="btn sm" href="{{$d.Next}}">Older{{template "icon" "next"}}</a>{{end}}
+    {{if $d.Paged}}<a class="btn sm quiet" href="{{$d.First}}">{{template "icon" "first"}}{{$d.Order.First}}</a>{{else}}<span></span>{{end}}
+    {{if $d.Next}}<a class="btn sm" href="{{$d.Next}}">{{$d.Order.Next}}{{template "icon" "next"}}</a>{{end}}
   </div>
   {{end}}
   {{else}}<div class="card-body">{{template "empty" (print (or (and $d.Filtered "No tasks match these filters") "No tasks yet"))}}</div>{{end}}

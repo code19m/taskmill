@@ -36,8 +36,7 @@ pkg.go.dev lists every method.
 
 ## Find tasks
 
-`List` returns the tasks that match a `TaskFilter`, newest first, one page
-at a time:
+`List` returns the tasks that match a `TaskFilter`, one page at a time:
 
 ```go
 params := &taskmill.ListParams{Filter: taskmill.TaskFilter{
@@ -59,21 +58,40 @@ for {
 }
 ```
 
+The states that you list choose the order. The doc comment of
+[`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List)
+has the exact rules:
+
+| You list | The first task is | What a page reads |
+|---|---|---|
+| Only dead tasks, only canceled tasks, or both | The one that finished last. Tasks that finished at the same time come by ID, highest first | About the tasks it shows, however many other tasks wait |
+| All tasks, the completed tasks of one queue or of all, or the pending tasks of one queue's FIFO group | The newest: the highest ID | About the tasks it shows |
+| Anything else, such as one unfinished state, or dead tasks with other states | The newest: the highest ID | The newer tasks of every queue and state first, unless its tasks are among the newest |
+
 - A filter can name queues, states, kinds, and FIFO group keys. A task
   matches when it matches every field you set. An empty field matches all.
+- Pass `Next` back with the same filter. A cursor from a list in the other
+  order returns an error that wraps `ErrInvalidArgument`.
 - Each page's query stops after 5 seconds, so a list never loads the
-  database for longer. A list that needs more returns an error.
-- Three lists read about the tasks they show, on a table of any size: all
-  tasks, the completed tasks of one queue or of all, and the pending tasks
-  of one queue's FIFO group. An index holds their tasks newest first.
-- A list of dead or canceled tasks has no such index, for one queue or for
-  all. It is fast in two cases: the tasks that it shows are among the
-  newest of all tasks, or the database expects to find few of them, and
-  reads them all. It expects few when few tasks are dead, or when the queue
-  that you name holds a small part of all tasks. In other cases it reads
-  the newer tasks of every queue and state first, which can take the 5
-  seconds on a very large table. The same holds for a list by kind, or by
-  another state.
+  database for longer. A list that needs more returns an error. On a very
+  large table, a list of the table's last row can need more.
+- **A list of dead or canceled tasks reads more than its page in two
+  cases:**
+  - **You name no queue.** A page then reads up to a page from each queue
+    that has such tasks. With hundreds of queues, name the queue.
+  - **Many tasks finished at the same time.** A page reads all tasks that
+    share a finish time with the task where it starts, or with the task
+    where it ends. One batch of `CancelMatching` gives up to 1,000 tasks
+    one finish time, so a page can read two such batches. All `CancelTx`
+    calls in one transaction of yours give their tasks one finish time
+    too, with no limit.
+- **A list of dead or canceled tasks is not a log.** A task's finish time
+  is the start of the transaction that finished it, so a task can show up
+  below tasks that you have already read. To read what died since your
+  last look, read from the first page to a little before the latest finish
+  time that you saw, and drop the IDs that you already have.
+- With a kind or a FIFO group in the filter, such a list reads the dead
+  or canceled tasks of each queue until the page is full.
 - Set `Summary: true` in `ListParams` when you show one line per task. A
   page then comes without payloads and metadata, and with only the newest
   error of each task. So it stays small, whatever the tasks hold: a full

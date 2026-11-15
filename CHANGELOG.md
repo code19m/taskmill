@@ -62,6 +62,46 @@ All notable changes to taskmill are recorded here. The format follows
   migration locks each of the three tables for a moment, waits at most 5
   seconds for each lock, and reads a few pages. The previous release's
   code keeps working on the new schema.
+- **Breaking:** `Client.List` returns a list of only dead tasks, only
+  canceled tasks, or both in a new order: by when the tasks finished, the
+  latest first, and by ID among tasks that finished at the same time. It
+  returned them by ID, newest first, as it still returns every other list:
+  one that mixes these states with others too. No index holds dead and
+  canceled tasks in ID order. So a page of them read every newer task of
+  any state, or every dead task, and reached its time limit of 5 seconds
+  when the table was large, as in an incident. It now reads the index of
+  finished tasks, and about the tasks it returns: on a table of 61,500
+  tasks with 10,000 dead ones, 52 rows for a page of 50 dead tasks of one
+  queue, where it read 11,565. There is no new index and no migration.
+  [ADR 0008](docs/adr/0008-list-dead-and-canceled-tasks-by-when-they-finished.md)
+  has the reasons, and
+  [Manage tasks from code](docs/guides/operations-api.md#find-tasks) says
+  when such a list reads more. To migrate:
+  - If your code needs dead or canceled tasks in ID order, read every page
+    and sort the tasks by `TaskInfo.ID`.
+  - If your code read only what died since its last look, and stopped at
+    the highest ID that it had seen: read from the first page to a little
+    before the latest `TaskInfo.FinalizedAt` that you saw last time, and
+    drop the IDs that you already have. A task's finish time is the start
+    of the transaction that finished it, so a task can show up later with
+    an earlier finish time than one that you have seen. How far back to
+    read depends on how long such a transaction stays open: usually
+    seconds for taskmill's own, and as long as yours when it calls
+    `CancelTx`.
+  - A cursor that the previous release returned for such a list is now an
+    error that wraps `ErrInvalidArgument`: start again from the first
+    page. The same holds while both releases run during a rolling deploy.
+    A list in one order also refuses a cursor of the other, so pass
+    `ListResult.Next` back with the filter that it came from.
+- The dashboard's lists of dead tasks, of canceled tasks, and of both show
+  the tasks that finished last first. They say "latest first" beside their
+  title, show when each task finished in place of its run time, and name
+  their page links "Latest" and "Earlier". The page for a task list that
+  is refused is now titled "Invalid request", and says what is wrong: the
+  filter, or the cursor. If the address has a cursor, as a bookmark from
+  before the upgrade has, the page links to the first page of the same
+  list. Before, it was titled "Invalid filter", and offered only to clear
+  the filters.
 
 ### Removed
 

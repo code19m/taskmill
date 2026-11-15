@@ -146,22 +146,6 @@ func TestErrorJSON(t *testing.T) {
 	}
 }
 
-func TestListBounds(t *testing.T) {
-	t.Parallel()
-	limit, before, err := listBounds(&ListParams{})
-	if err != nil || limit != defaultListLimit || before <= 0 {
-		t.Fatalf("defaults: got %d, %d, %v", limit, before, err)
-	}
-	for _, p := range []ListParams{{Limit: -1}, {Limit: maxListLimit + 1}, {Cursor: "%%%"}, {Cursor: "eA"}} {
-		if _, _, err := listBounds(&p); !errors.Is(err, ErrInvalidArgument) {
-			t.Errorf("%+v: got %v, want ErrInvalidArgument", p, err)
-		}
-	}
-	if _, before, err := listBounds(&ListParams{Cursor: "NDI"}); err != nil || before != 42 { // "42"
-		t.Fatalf("cursor: got %d, %v", before, err)
-	}
-}
-
 func TestMergeOptions(t *testing.T) {
 	t.Parallel()
 	base := EnqueueOptions{Queue: "q", Priority: PriorityLow, MaxAttempts: 3, Metadata: map[string]string{"a": "1"}}

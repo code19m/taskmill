@@ -3,9 +3,11 @@ package taskmill_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -14,7 +16,8 @@ import (
 
 // FuzzList lists tasks with any filters, page size, and cursor, as a service
 // passes them on from its own users: List returns a page or
-// ErrInvalidArgument, and each page's cursor leads to the next, older page.
+// ErrInvalidArgument, and each page's cursor leads to the next page, in the
+// order of the list.
 func FuzzList(f *testing.F) {
 	f.Add("", 0, "", "", "", "")
 	f.Add("MTA", 1, "available", taskmill.DefaultQueue, "email.send", "g")
@@ -23,10 +26,26 @@ func FuzzList(f *testing.F) {
 	f.Add("!", -1, "", "", "", "")
 	// Text that PostgreSQL rejects once failed the call.
 	f.Add("", 0, "", "\x00", "\xff", "\xc3")
+	// Cursors of a list in finish order, which hold a finish time as
+	// PostgreSQL stores it, and an ID: the first and the last time that a
+	// column can hold, the two infinite times, and times and text that no
+	// column holds, which once would have failed the call in the database.
+	for _, position := range []string{
+		"f0,2", "f-211813488000000000,1", "f9223371331199999999,1", "f9223372036854775807,9223372036854775807",
+		"f-9223372036854775808,0", "f-211813488000000001,1", "f9223371331200000000,1", "f1,", "f,1", "f1.5,1",
+	} {
+		f.Add(base64.RawURLEncoding.EncodeToString([]byte(position)), 1, "canceled", "", "", "")
+	}
 	e := newEnv(f)
 	for i := range 3 {
-		if _, err := e.client.Enqueue(f.Context(), sendEmail{UserID: int64(i)}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
+		res, err := e.client.Enqueue(f.Context(), sendEmail{UserID: int64(i)}, &taskmill.EnqueueOptions{GroupKey: "g"})
+		if err != nil {
 			f.Fatal(err)
+		}
+		if i > 0 { // two canceled tasks, for the lists in finish order
+			if err := e.client.Cancel(f.Context(), res.ID); err != nil {
+				f.Fatal(err)
+			}
 		}
 	}
 
@@ -42,21 +61,31 @@ func FuzzList(f *testing.F) {
 	})
 }
 
-// listPages lists every page of p, and fails t unless the tasks come newest
-// first.
+// listPages lists every page of p, which names one state at most, and fails
+// t unless the tasks come in the order of the list: dead or canceled tasks
+// by when they finished and then by ID, and others by ID, the latest and
+// the newest first.
 func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
 	t.Helper()
-	var last int64
+	states := p.Filter.States
+	byFinish := slices.Equal(states, only(taskmill.StateDead)) || slices.Equal(states, only(taskmill.StateCanceled))
+	var last *taskmill.TaskInfo
 	for {
 		res, err := client.List(t.Context(), p)
 		if err != nil {
 			t.Fatalf("List(%+v): %v", p, err)
 		}
-		for _, task := range res.Tasks {
-			if last != 0 && task.ID >= last {
-				t.Fatalf("List(%+v): task %d follows task %d", p, task.ID, last)
+		for i := range res.Tasks {
+			task := &res.Tasks[i]
+			earlier := last == nil || task.ID < last.ID
+			if byFinish && last != nil && !task.FinalizedAt.Equal(last.FinalizedAt) {
+				earlier = task.FinalizedAt.Before(last.FinalizedAt)
 			}
-			last = task.ID
+			if !earlier {
+				t.Fatalf("List(%+v): task %d, finished at %s, follows task %d, finished at %s",
+					p, task.ID, task.FinalizedAt, last.ID, last.FinalizedAt)
+			}
+			last = task
 		}
 		if res.Next == "" {
 			return

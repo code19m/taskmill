@@ -582,12 +582,97 @@ func TestListPagesNewestFirst(t *testing.T) {
 	if len(available.Tasks) != 5 {
 		t.Fatalf("got %d available tasks, want 5", len(available.Tasks))
 	}
-	if _, err := e.client.List(t.Context(), &taskmill.ListParams{Cursor: "%%%"}); !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("bad cursor: got %v", err)
+}
+
+// List returns 100 tasks a page when the caller names no page size, and
+// refuses a page size, a cursor, or a state that it cannot use.
+func TestListChecksItsParams(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'default', 'email.send', 'scheduled', now() + interval '1 day', '{}', 1 FROM generate_series(1, 101)`)
+	if page, err := e.client.List(t.Context(), &taskmill.ListParams{Summary: true}); err != nil || len(page.Tasks) != 100 || page.Next == "" {
+		t.Fatalf("no limit: got a page of %d tasks, next %q, %v; want 100 tasks and a next page", len(page.Tasks), page.Next, err)
 	}
-	unknown := &taskmill.ListParams{Filter: taskmill.TaskFilter{States: []taskmill.State{"bogus"}}}
-	if _, err := e.client.List(t.Context(), unknown); !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("unknown state: got %v", err)
+	for _, p := range []taskmill.ListParams{
+		{Limit: -1}, {Limit: 1001}, {Cursor: "%%%"}, {Cursor: "eA"}, // "x"
+		{Filter: taskmill.TaskFilter{States: []taskmill.State{"bogus"}}},
+	} {
+		if _, err := e.client.List(t.Context(), &p); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("%+v: got %v, want ErrInvalidArgument", p, err)
+		}
+	}
+}
+
+// A list of only dead tasks, only canceled tasks, or both comes in the order
+// in which the tasks finished, latest first, and by ID among the tasks of
+// one finish time. Its pages chain in that order: through tasks that share
+// a finish time, as those that one bulk action cancels do, and past the
+// finish times that only an UPDATE by hand writes, the infinite ones. Every
+// other list keeps the order of the IDs. A cursor of one order is no cursor
+// for the other, and the cursors of earlier releases are all of the ID
+// order.
+func TestListsOfFinishedTasksComeLatestFirst(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.rawGroups = true // the dead task of a group is written by hand, without its group
+	ctx := t.Context()
+	// Three dead tasks of the queue "a" share a finish time, and the one with
+	// the highest ID was written first: the index holds the tasks of one
+	// finish time in the order in which they were written.
+	e.exec(t, `INSERT INTO {s}.tasks (id, queue, kind, state, finalized_at, group_key, run_at, payload, max_attempts)
+	           OVERRIDING SYSTEM VALUE
+	           SELECT v.id, v.queue, v.kind, v.state::{s}.task_state, v.finished::timestamptz, v.grp, now(), '{}', 1
+	           FROM (VALUES (9, 'a', 'report.build', 'dead', '2026-01-01 00:00:03+00', NULL),
+	                        (1, 'a', 'email.send', 'dead', '2026-01-01 00:00:03+00', NULL),
+	                        (5, 'a', 'email.send', 'dead', '2026-01-01 00:00:03+00', NULL),
+	                        (2, 'a', 'email.send', 'dead', '2026-01-01 00:00:01+00', 'g'),
+	                        (3, 'a', 'email.send', 'canceled', '2026-01-01 00:00:02+00', NULL),
+	                        (4, 'b', 'report.build', 'dead', '2026-01-01 00:00:02+00', NULL),
+	                        (6, 'b', 'email.send', 'canceled', 'infinity', NULL),
+	                        (7, 'a', 'email.send', 'dead', '-infinity', NULL),
+	                        (8, 'a', 'email.send', 'available', NULL, NULL)
+	                ) AS v(id, queue, kind, state, finished, grp)`)
+	dead, canceled := []taskmill.State{taskmill.StateDead}, []taskmill.State{taskmill.StateCanceled}
+	finished := []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}
+	for _, c := range []struct {
+		filter taskmill.TaskFilter
+		want   []int64
+	}{
+		{taskmill.TaskFilter{States: finished}, []int64{6, 9, 5, 1, 4, 3, 2, 7}},
+		{taskmill.TaskFilter{States: dead}, []int64{9, 5, 1, 4, 2, 7}},
+		{taskmill.TaskFilter{States: canceled}, []int64{6, 3}},
+		{taskmill.TaskFilter{States: finished, Queues: []string{"a"}}, []int64{9, 5, 1, 3, 2, 7}},
+		{taskmill.TaskFilter{States: finished, Queues: []string{"a", "a"}}, []int64{9, 5, 1, 3, 2, 7}},
+		{taskmill.TaskFilter{States: finished, Queues: []string{"b", "a"}}, []int64{6, 9, 5, 1, 4, 3, 2, 7}},
+		{taskmill.TaskFilter{States: dead, Kinds: []string{"report.build"}}, []int64{9, 4}},
+		{taskmill.TaskFilter{States: dead, GroupKeys: []string{"g"}}, []int64{2}},
+		// A list that mixes dead tasks with others keeps the order of the IDs.
+		{taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead, taskmill.StateAvailable}}, []int64{9, 8, 7, 5, 4, 2, 1}},
+	} {
+		for _, limit := range []int{1, 2, 3, 100} {
+			got, next := listed(t, e.client, taskmill.ListParams{Filter: c.filter, Limit: limit}, len(c.want))
+			if next != "" || !slices.Equal(got, c.want) {
+				t.Errorf("%+v in pages of %d: got %v and next %q, want %v and no next page", c.filter, limit, got, next, c.want)
+			}
+		}
+	}
+
+	byID := taskmill.ListParams{Limit: 1}
+	byFinish := taskmill.ListParams{Limit: 1, Filter: taskmill.TaskFilter{States: dead}}
+	first, err := e.client.List(ctx, &byID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest, err := e.client.List(ctx, &byFinish)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID.Cursor, byFinish.Cursor = latest.Next, first.Next
+	for _, p := range []taskmill.ListParams{byID, byFinish} {
+		if _, err := e.client.List(ctx, &p); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("a list of states %v with the cursor of the other order: got %v, want ErrInvalidArgument", p.Filter.States, err)
+		}
 	}
 }
 
@@ -735,36 +820,23 @@ func TestListSomeStatesAndKinds(t *testing.T) {
 	}
 }
 
-// A page of tasks reads about its own rows where an index holds the rows of
-// its filters, or gives them in the order of their IDs: not the newer tasks
-// of other queues, however many they are.
-//
-// Two of the three lists below have an index in ID order, so they hold
+// A page of tasks in ID order reads about its own rows where an index holds
+// the rows of its filters in that order: not the newer tasks of other
+// queues, however many they are. Two lists have such an index, so they hold
 // whatever the planner expects: the completed tasks of one queue, and the
-// waiting tasks of one group. The third has none: no index holds dead or
-// canceled tasks in ID order. The planner chooses between the index of the
-// queue's finished tasks, which reads all of them and sorts, and the primary
-// key backward, which reads every newer task of any queue and state. It
-// takes the index only where it expects few matches: it multiplies the
-// queue's share of all tasks by the share of dead and canceled ones. So this
-// test pins that list for a queue with a small share of the tasks, here
-// 1%, beside a queue full of dead tasks. It does not pin it for a queue
-// with a large share: at 6% of 341,000 tasks, with no dead task of its own
-// and 15% dead elsewhere, such a list read the whole table. A list of one
-// finished state across all queues is not pinned either.
+// waiting tasks of one group.
 func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	e.rawGroups = true // pending tasks are written by hand, without their groups
 	// The oldest tasks are those of the queue "rare": pending ones of two
-	// groups, and completed ones. The others are newer, and many, and every
-	// fifth of them is dead: here the planner's choice depends on the size,
-	// and with 5,000 tasks in each table it reads the history without its
-	// index.
-	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key, finalized_at)
+	// groups, and completed ones. The others are newer, and many: here the
+	// planner's choice depends on the size, and with 5,000 tasks in each
+	// table it reads the history without its index.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key)
 	           SELECT CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, 'email.send',
-	                  CASE WHEN i <= 400 THEN 'pending' WHEN i % 5 = 0 THEN 'dead' ELSE 'available' END::{s}.task_state,
-	                  now(), '{}', 1, CASE WHEN i <= 400 THEN 'g' || i % 2 END, CASE WHEN i > 400 AND i % 5 = 0 THEN now() END
+	                  CASE WHEN i <= 400 THEN 'pending' ELSE 'available' END::{s}.task_state,
+	                  now(), '{}', 1, CASE WHEN i <= 400 THEN 'g' || i % 2 END
 	           FROM generate_series(1, 40000) i`)
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
@@ -778,10 +850,9 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	for _, filter := range []taskmill.TaskFilter{
 		{Queues: rare, States: []taskmill.State{taskmill.StateCompleted}},
 		{Queues: rare, States: []taskmill.State{taskmill.StatePending}, GroupKeys: []string{"g1"}},
-		{Queues: rare, States: []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}},
 	} {
 		const limit = 50
-		read, err := taskmill.ListRowsRead(t.Context(), e.client, &taskmill.ListParams{Filter: filter, Limit: limit})
+		read, err := taskmill.ListRowsRead(t.Context(), e.client, &taskmill.ListParams{Filter: filter, Limit: limit}, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -789,6 +860,109 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 		if read > limit+1 {
 			t.Errorf("%+v: read %d rows of tasks, want at most %d", filter, read, limit+1)
 		}
+	}
+}
+
+// A page of dead or canceled tasks reads about its own rows, whatever the
+// planner expects: a range of the index of finished tasks for each queue
+// and state, which ends with the page. It holds for one queue and for all,
+// for a queue with many such tasks and for one with none beside it, and
+// with a plan that knows neither the filters nor the size of the page.
+//
+// The statistics are wrong in the three ways that an incident makes them
+// wrong. They expect few dead tasks of a kind that just started to fail:
+// with sorts on, the planner then reads every dead task of the queue and
+// sorts them, 1,920 rows for a page of 50. They know nothing of a queue
+// whose tasks died since the last ANALYZE. And they expect dead tasks in
+// every queue, where one has none.
+//
+// What a page reads besides its own rows is bounded too: the tasks that
+// share a finish time with the task where it starts or with the one where
+// it ends, as the 300 do that one statement canceled here, and one index
+// entry for each queue that holds dead or canceled tasks, when no queue is
+// named. A later page reads no more than the first one: not the tasks of
+// the pages before it.
+func TestPagesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// A backlog in two queues. Every fifth task of the queue "busy" is dead,
+	// 1,920 that died one after the other, and the 200 that died last are
+	// of a kind of their own: one task in 50.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END,
+	                  CASE WHEN i > 9000 AND i % 5 = 0 THEN 'webhook.send' ELSE 'email.send' END,
+	                  CASE WHEN i > 400 AND i % 5 = 0 THEN 'dead' ELSE 'available' END::{s}.task_state, now(), '{}', 1,
+	                  CASE WHEN i > 400 AND i % 5 = 0 THEN now() - (10000 - i) * interval '1 second' END
+	           FROM generate_series(1, 10000) i`)
+	e.exec(t, "ANALYZE {s}.tasks")
+	// What the statistics do not know: the queue "late" got its dead tasks
+	// since, and the queue "bulk" its canceled ones, 300 in each statement.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT 'late', 'email.send', 'dead', now(), '{}', 1, now() - i * interval '1 second' FROM generate_series(1, 2000) i`)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT 'bulk', 'email.send', 'canceled', now(), '{}', 1, now() - (i / 300) * interval '1 minute'
+	           FROM generate_series(0, 899) i`)
+
+	const (
+		limit = 50
+		page  = limit + 2 // one row past the limit, to know whether more follow, and one past its finish time
+		batch = 300       // the tasks that share a finish time
+		found = 3         // an index entry for each queue that holds such tasks
+		// Until PostgreSQL 18, a plan reports the rows of a scan that ran
+		// several times as their rounded average: up to half a row off for
+		// each of the three queues, in each state, and for each queue found.
+		rounded = 5
+	)
+	dead, canceled := []taskmill.State{taskmill.StateDead}, []taskmill.State{taskmill.StateCanceled}
+	both := []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}
+	for _, c := range []struct {
+		what   string
+		filter taskmill.TaskFilter
+		after  int // the page follows one of this many tasks
+		most   int64
+	}{
+		{"a queue with many dead tasks", taskmill.TaskFilter{Queues: []string{"busy"}, States: dead}, 0, page},
+		{"the kind that started to fail", taskmill.TaskFilter{Queues: []string{"busy"}, States: dead, Kinds: []string{"webhook.send"}}, 0, page},
+		{"a queue with none, beside one with many", taskmill.TaskFilter{Queues: []string{"rare"}, States: both}, 0, 0},
+		{"a queue that the statistics do not know", taskmill.TaskFilter{Queues: []string{"late"}, States: dead}, 0, page},
+		{"tasks that one statement canceled", taskmill.TaskFilter{Queues: []string{"bulk"}, States: canceled}, 0, page + batch},
+		{"all queues", taskmill.TaskFilter{States: dead}, 0, found + 2*page + rounded},
+		{"all queues, both states", taskmill.TaskFilter{States: both}, 0, found + 3*page + batch + rounded},
+		// A later page reads the task that it starts below once more.
+		{"a later page", taskmill.TaskFilter{Queues: []string{"busy"}, States: dead}, 1000, page + 1},
+		// It starts 10 tasks before the end of one statement's 300, and ends
+		// in the next statement's.
+		{"a page across two statements", taskmill.TaskFilter{Queues: []string{"bulk"}, States: canceled}, batch - 10, page + 2*batch},
+	} {
+		params := taskmill.ListParams{Filter: c.filter, Limit: limit}
+		if c.after > 0 {
+			before, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: c.filter, Limit: c.after, Summary: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			params.Cursor = before.Next
+		}
+		for _, generic := range []bool{false, true} {
+			read, err := taskmill.ListRowsRead(t.Context(), e.client, &params, generic)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if read > c.most {
+				t.Errorf("%s (generic plan %t): a page of %d read %d rows of tasks, want at most %d", c.what, generic, limit, read, c.most)
+			}
+		}
+	}
+
+	// The database does not compile the page's statement (JIT), though it
+	// would compile any: until PostgreSQL 18, sorts turned off make the
+	// statement look costly enough to compile, which takes longer than the
+	// read.
+	compiled, err := taskmill.ListCompiled(t.Context(), e.client, &taskmill.ListParams{Filter: taskmill.TaskFilter{States: dead}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled {
+		t.Error("the database compiled the statement of a page of dead tasks")
 	}
 }
 
@@ -870,6 +1044,24 @@ func TestReadSettingsHoldForTheReadOnly(t *testing.T) {
 	if n := pool.Stat().NewConnsCount() - opened; n != 0 {
 		t.Errorf("the pool opened %d connections after the canceled read, want it to use the same one again", n)
 	}
+}
+
+// listed returns the IDs of the tasks that List returns for params, page
+// after page, up to a number of pages, and the cursor of the page that it
+// did not read, if the list has more.
+func listed(t *testing.T, client *taskmill.Client, params taskmill.ListParams, pages int) (got []int64, next string) {
+	t.Helper()
+	for range pages {
+		page, err := client.List(t.Context(), &params)
+		if err != nil {
+			t.Fatalf("%+v: %v", params, err)
+		}
+		got = append(got, ids(page.Tasks)...)
+		if params.Cursor = page.Next; page.Next == "" {
+			break
+		}
+	}
+	return got, params.Cursor
 }
 
 func ids(tasks []taskmill.TaskInfo) []int64 {

@@ -8,13 +8,16 @@ and [`sql.go`](../../sql.go) has the exact text of both.
 
 ## Listing
 
-`Client.List` and the dashboard page through tasks by `id`, newest
-first, with keyset pagination: each page starts below the last `id` of the
-previous one. Unfinished tasks and history are read in two branches, each
-limited on its own, and merged. Each page runs with a 5-second statement
-timeout, and with custom query plans (`plan_cache_mode = force_custom_plan`),
-so the planner sees which filters are set. Two more things let it pick the
-index that gives a page in ID order:
+`Client.List` and the dashboard page through tasks with keyset pagination:
+each page starts below the position where the previous one ended. A list
+is in one of two orders, and each order has its own statement. Both run
+with a 5-second statement timeout, and with custom query plans
+(`plan_cache_mode = force_custom_plan`), so the planner sees which filters
+are set.
+
+**Most lists page by `id`, newest first.** Unfinished tasks and history
+are read in two branches, each limited on its own, and merged. Two things
+let the planner pick the index that gives a page in ID order:
 
 - **A single queue, kind, or group is compared with `=`,** not with a list
   of one value. Only then does the planner see that an index which leads
@@ -24,26 +27,48 @@ index that gives a page in ID order:
 - **Each selected state is tested as a literal,** so the planner sees which
   states are left, and which partial indexes hold them.
 
-**Dead and canceled tasks have no index in ID order,** for one queue or for
-all: `tasks_finished_idx` holds them by queue, state, and the time they
-finished. So the planner has two ways to read such a page, and both can be
-far from the tasks it shows:
+Where no index holds a list's tasks in ID order, a page reads the primary
+key backward: every newer task of any queue and state, until it is full. A
+list of one unfinished state across all queues is such a list, and so is
+one that mixes dead tasks with other states. The time limit bounds them.
 
-| Way | It reads | Fast when |
-|---|---|---|
-| The primary key, backward | Every newer task of any queue and state, until the page is full | The page's tasks are among the newest |
-| `tasks_finished_idx`, then a sort | Every dead or canceled task of the queue, or of all queues | Those are few |
+**A list of only dead tasks, only canceled tasks, or both pages by when
+the tasks finished,** latest first, and by `id` among the tasks of one
+finish time. No index holds these tasks in ID order, and
+`tasks_finished_idx` holds them by queue, state, and finish time. So the
+list reads that index, and no other task
+([ADR 0008](../adr/0008-list-dead-and-canceled-tasks-by-when-they-finished.md)):
 
-The planner takes the index only where it expects few matches. For one
-queue, it multiplies the queue's part of all tasks by the part of all tasks
-that is dead. So a small queue gets the index, and a large queue with no
-dead task of its own does not: its page reads the whole table. Measured on
-341,000 tasks of which 50,000 were dead, older than 51,000 other tasks: the
-dead tasks of all queues, and of the queue with most of them, read 51,000
-tasks for a page of 50. Those of a queue with 6% of the tasks and none dead
-read all 341,000. The time limit bounds every such read. An index on `id`
-for dead tasks would give the page 51 rows, but a migration that builds it
-must read a busy table under a lock, which is a design of its own.
+- **One range for each queue and state,** backward from the page's
+  position and up to a page, and then a merge of the ranges. With no queue
+  named, the statement first finds the queues that hold such tasks, with
+  one index probe each, as retention does.
+- **A range ends with its last finish time whole** (`WITH TIES`). The index
+  has no `id`, so the merge is what orders the tasks of one finish time. So
+  a page also reads the tasks that share the finish time where it ends,
+  and those of the finish time where it starts. That time is `now()`, the
+  start of the transaction: a batch of a bulk action or of rescue gives it
+  to up to 1,000 tasks, and a page can read two such batches.
+- **Sorts are off in the list's transaction** (`enable_sort`), so each
+  range is read in index order and ends with its page. With sorts on, the
+  planner reads every dead task of a queue and sorts them where it expects
+  few matches: 20,300 rows for a page of 50, for a kind that had just
+  started to fail, and 52 with sorts off. JIT is off too. Until PostgreSQL
+  18, a sort that is off makes a plan look costly, and the merge is a sort
+  that the page needs: the database then takes about 100 ms to compile a
+  read of under 1 ms.
+- **The cursor holds the finish time and the ID** of the page's last task,
+  the time as PostgreSQL stores it. So a list gets past an infinite finish
+  time, which only an `UPDATE` by hand writes. Each order refuses the
+  cursor of the other.
+
+Measured on PostgreSQL 18 with 61,500 tasks, 10,000 of them dead: a page of
+50 dead tasks reads 52 rows for one queue and 106 for all, with any
+statistics, where it read 11,500 in ID order. Two lists read more than
+their page. With no queue named, a page reads up to a page of each queue
+that holds such tasks: 10,707 rows when 202 queues hold dead tasks. And a
+filter by kind or FIFO group reads a queue's dead or canceled tasks until
+the page is full.
 
 **A summary leaves out what makes a task large.** With
 `ListParams.Summary`, the statement returns no payload and no metadata, and

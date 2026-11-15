@@ -177,7 +177,7 @@ period and deleting old rows.
 | `tasks_due_idx` | `run_at`, including `queue` and `state` | `scheduled`, `retryable` | Making due tasks available; finding when the next task is due; counting scheduled and retryable tasks |
 | `tasks_running_idx` | `queue` | `running` | Lease rescue; `MaxRunning` limits; counting running tasks |
 | `tasks_pending_idx` | `queue, group_key, id` | `pending` | Promoting the next task of a group; counting pending tasks |
-| `tasks_finished_idx` | `queue, state, finalized_at` | `dead`, `canceled` | Retention; counting dead and canceled tasks |
+| `tasks_finished_idx` | `queue, state, finalized_at` | `dead`, `canceled` | Retention; counting dead and canceled tasks; listing them, latest first |
 
 The fetch index's key matches the fetch query's `ORDER BY` exactly. PostgreSQL
 reads the first rows of the index in order and stops at the `LIMIT`, with no
