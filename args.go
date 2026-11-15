@@ -18,10 +18,16 @@ package taskmill
 //     in full: 1e6 counts as 7 bytes.
 //   - PostgreSQL can still reject a value that passes these checks, such as
 //     an unpaired surrogate escape (\ud800).
+//
+// The [guide to defining tasks] says what to put in a payload, and how to
+// change one later.
+//
+// [guide to defining tasks]: https://github.com/code19m/taskmill/blob/main/docs/guides/define-tasks.md
 type Args interface {
 	// Kind returns the task kind, such as "email.send", in 1 to 128
-	// characters. It must not depend on the value's fields: handler
-	// registration reads it from a zero value.
+	// characters of valid UTF-8, with no NUL character. It must not depend
+	// on the value's fields: handler registration reads it from a zero
+	// value.
 	Kind() string
 }
 

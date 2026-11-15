@@ -95,16 +95,13 @@ func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 
 ## Options
 
-| Option | What it does | Default |
-|---|---|---|
-| `Queue` | The queue to add the task to | `"default"` |
-| `Priority` | Which waiting task of the queue starts first: `PriorityLow`, `PriorityNormal`, `PriorityHigh`, or `PriorityCritical` | `PriorityNormal` |
-| `RunAt` | The earliest time the task may start | Now |
-| `MaxAttempts` | How many times the task may run: 1 to 10,000 | 25 |
-| `GroupKey` | Runs the tasks of one key in one queue one at a time, in order ([ordering](ordering.md)) | None |
-| `DedupeKey` | Creates no new task if this kind already used this key in this queue within `DedupeWindow` ([deduplication](deduplication.md)) | None |
-| `DedupeWindow` | How long the key blocks duplicates, from the enqueue | 24 hours |
-| `Metadata` | Text tags saved with the task and passed to its handler, such as a trace ID | None |
+This page shows three options at work: `RunAt`, `Priority`, and `Metadata`.
+Other pages teach the other options:
+
+- `Queue`: [Workers and queues](workers-and-queues.md)
+- `MaxAttempts`: [Retries and errors](retries-and-errors.md)
+- `GroupKey`: [Task order and FIFO groups](ordering.md)
+- `DedupeKey` and `DedupeWindow`: [Avoid duplicate tasks](deduplication.md)
 
 A zero value means "not set". For each option, the first value that is set
 wins:
@@ -114,9 +111,10 @@ wins:
 3. taskmill's default.
 
 `Metadata` merges key by key: the call's keys win, and the other keys of
-both are kept. An invalid option fails with `ErrInvalidArgument`.
-[Configuration](../reference/configuration.md#enqueueoptions) has each
-option's type and exact limits.
+both are kept. An invalid option fails with `ErrInvalidArgument`. The doc
+comment of
+[`EnqueueOptions`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions)
+has every option, with its default and its limits.
 
 ## Read the result
 

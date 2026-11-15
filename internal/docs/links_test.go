@@ -1,6 +1,8 @@
 // Package docs checks the repository's Markdown files: their links, the code
 // that the quickstart and the tutorial show, and the rules of the style guide
-// that a machine can check.
+// that a machine can check. It also checks the doc comments of the packages,
+// which are the reference of the API: that they name the defaults, and the
+// links between them and the pages.
 package docs
 
 import (

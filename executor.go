@@ -20,6 +20,11 @@ import (
 //
 // Executor is sealed: only this package implements it, which lets its methods
 // change without breaking callers.
+//
+// The [transactions guide] shows an enqueue, a completion, and a cancel in
+// the caller's transaction.
+//
+// [transactions guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/transactions.md
 type Executor interface {
 	querier() querier
 }

@@ -47,4 +47,4 @@ why.
 - [The dashboard](../guides/dashboard.md): `ui` or `taskmill-ui`, and when to use which
 - [Test your code](../guides/testing.md): how to use `taskmilltest`
 
-**Next:** [Performance](performance.md)
+**Next:** [Configuration](configuration.md)

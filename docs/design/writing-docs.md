@@ -96,8 +96,8 @@ flowchart LR
 | `> [!NOTE]` | Good to know |
 | `> [!WARNING]` | You can lose data, run work twice by surprise, or break production |
 
-**10. Round numbers in prose,** and link to the exact value in the
-[reference](../reference/README.md): Configuration, or Defaults and limits.
+**10. Round numbers in prose,** and link to the exact value: the identifier on
+pkg.go.dev, or [Fixed timings and limits](../reference/defaults-and-limits.md).
 Contributor pages, such as [Benchmarks](benchmarks.md), keep exact numbers.
 - Before: "One worker drained a backlog at over 31,000 tasks per second…"
 - After: "One worker runs about 30,000 tasks a second on a laptop."
@@ -148,17 +148,17 @@ status lives in one place: [Compatibility](../reference/compatibility.md).
 
 ## Where content lives
 
-Each fact has one home; other places summarize it in a line and link. Docs
-never copy godoc, and godoc links to pages, never to anchors, which move.
+Each fact has one home; other places summarize it in a line and link.
+[Writing doc comments](writing-godoc.md) says how godoc and `docs/` share the work.
 
 | Content | Home |
 |---|---|
 | Pitch, install, a short taste, links | `README.md` |
-| Learning, how-to, choices, production | `docs/` |
+| What an identifier does: its contract, default, limits, zero value, errors, and edge cases | Its doc comment, and nowhere else. Runnable code for it: its `Example` function |
+| Learning, how-to, choices, production | `docs/`, which links to the identifiers on pkg.go.dev |
 | Steps that build one program, with what the reader sees | `docs/tutorial/`. The reasons stay in the guides and concepts |
-| The exact contract of one identifier, and its edge cases | Its godoc comment |
-| Runnable code for one API | Godoc `Example` functions |
-| Exact defaults and limits | A field's: `docs/reference/configuration.md`, and the field's godoc. Fixed timings, and limits that are not a field: `docs/reference/defaults-and-limits.md` |
+| What has no identifier: log lines, metric names, fixed timings, the `taskmill-ui` command, compatibility, performance | `docs/reference/` |
+| Names and links that lead to an identifier or a page | An index: a section's `README.md`, `llms.txt`, and in `docs/reference/`, Packages, Configuration, and Errors |
 | What changed, and how to migrate | `CHANGELOG.md` |
 | Why taskmill is built this way | `docs/design/`, `docs/adr/` |
 
@@ -230,7 +230,7 @@ bullets **Cause:**, **Check:**, and **Do:** instead of the table:
 | <The most likely cause> | <Where to look> | <The fix, with a link> |
 ```
 
-A section's `README.md`. Its table may use "I want to…" rows instead:
+A section's `README.md`. "I want to…" rows work too. `llms.txt` is made from the rows:
 
 ```markdown
 # <Section name>
@@ -247,4 +247,4 @@ A section's `README.md`. Its table may use "I want to…" rows instead:
 - [Glossary](../concepts/glossary.md): every term the docs use
 - [How taskmill is built](README.md): the design pages
 
-**Next:** [Documentation](../README.md)
+**Next:** [Writing doc comments](writing-godoc.md)

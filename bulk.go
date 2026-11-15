@@ -95,13 +95,14 @@ type TaskCounts struct {
 }
 
 // BulkParams selects the tasks of a bulk action, such as
-// [Client.RetryMatching].
+// [Client.RetryMatching]. Nil params, an empty filter, and a cursor that is
+// not valid are errors that wrap [ErrInvalidArgument].
 type BulkParams struct {
-	// Filter selects the tasks. It must not be empty.
+	// Filter selects the tasks. Required: it must set at least one field.
 	Filter TaskFilter
 
 	// Cursor continues an action that stopped early, from its
-	// [BulkResult.Next].
+	// [BulkResult.Next]. Empty means from the oldest task.
 	Cursor string
 }
 

@@ -67,7 +67,11 @@ func (w *Worker) checkIn(ctx context.Context) {
 // can no longer keep its tasks' leases. Health reads only memory, so a
 // readiness probe may call it often. It fails while the database is out of
 // reach, which restarting the worker does not fix: do not base a liveness
-// probe on it.
+// probe on it. The error wraps none of taskmill's error values.
+//
+// The [Kubernetes page] has a probe and manifests to copy.
+//
+// [Kubernetes page]: https://github.com/code19m/taskmill/blob/main/docs/production/kubernetes.md
 func (w *Worker) Health() error {
 	at := w.reached.Load()
 	if at == nil {

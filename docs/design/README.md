@@ -19,6 +19,7 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | 6 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
 | 7 | [Releasing](releasing.md) | How the project team publishes a version |
 | 8 | [Writing docs](writing-docs.md) | The style guide and the page templates |
+| 9 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
 
 The [Architecture Decision Records](../adr/README.md) (ADRs) explain the big
 choices: the dependency policy, the supported Go and PostgreSQL versions, the

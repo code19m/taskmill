@@ -63,7 +63,7 @@ a backup, so a lost notification delays a task, but never loses it.
 
 Idle workers cost the database little: while all is well, an idle queue
 checks the database about once a minute. The exact timings are in
-[Defaults and limits](../reference/defaults-and-limits.md).
+[Fixed timings and limits](../reference/defaults-and-limits.md).
 
 ## What if a worker crashes?
 

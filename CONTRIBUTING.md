@@ -70,7 +70,10 @@ Every change meets the same bar:
   `//nolint` directive names the linter and gives a reason, for example
   `//nolint:gosec // the query text is a constant`.
 - **Every exported name has a doc comment.** It starts with the name. It
-  describes behavior and guarantees, not how the code works inside.
+  describes behavior and guarantees, not how the code works inside. The
+  comments are the reference of the API, so a comment also states the
+  default, the limits, and the errors: see
+  [Writing doc comments](docs/design/writing-godoc.md).
 - **Errors carry context.** Wrap them with `fmt.Errorf("...: %w", err)`.
   When callers must handle a condition, expose it as a sentinel error
   (`ErrX`) or an error type (`XError`).
@@ -213,6 +216,22 @@ and a table or a diagram where it explains better. `go test ./internal/docs/`
 fails on a broken link or a missing anchor. It also fails where a page
 breaks a rule of the guide that a machine can check: a banned word, a page
 over the length limit, a page that no index lists, or a wrong Next line.
+
+The doc comments are the reference of the API, and the pages link to them:
+[Writing doc comments](docs/design/writing-godoc.md) has the rules. The same
+test reads the comments from the source. It fails on a config field whose
+comment names no default, on a page that copies a struct's fields into a
+table, and on a link between a page and pkg.go.dev, or between a comment and
+a page, that leads nowhere.
+
+[llms.txt](llms.txt) lists every package and every page in one line each,
+for tools and AI agents. It is generated from the package comments and from
+the tables of each section's `README.md`. After you add a page, or change
+one of those lines, write it again:
+
+```sh
+go test ./internal/docs/ -run TestLLMs -update
+```
 
 ## Releasing
 

@@ -10,6 +10,11 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+### Changed
+
+- The package comment links to the guide that shows the setup, and to the
+  page that lists every span, metric, and gauge. No behavior changes.
+
 ## [0.4.1] - 2026-11-13
 
 ### Fixed

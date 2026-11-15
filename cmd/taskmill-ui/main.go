@@ -1,5 +1,5 @@
-// Command taskmill-ui serves taskmill's dashboard of an installation on its
-// own, apart from the applications that use it.
+// Command taskmill-ui serves taskmill's dashboard as a program of its own,
+// apart from the applications that use the installation.
 //
 //	go install github.com/code19m/taskmill/cmd/taskmill-ui@latest
 //	TASKMILL_DATABASE_URL=postgres://... TASKMILL_UI_PASSWORD=... taskmill-ui
@@ -7,42 +7,17 @@
 // Each release also publishes it as binaries and as the container image
 // ghcr.io/code19m/taskmill-ui.
 //
-// It reads its settings from the environment:
+// It reads all its settings from environment variables, and has no flags.
+// Only TASKMILL_DATABASE_URL is required. Without TASKMILL_UI_PASSWORD,
+// anyone who reaches its address, localhost:8080 by default, can use the
+// dashboard. It never migrates the schema: the applications that own it do.
 //
-//	TASKMILL_DATABASE_URL        the PostgreSQL connection string (required)
-//	TASKMILL_SCHEMA              the installation's schema (default: taskmill)
-//	TASKMILL_UI_ADDR             the address to listen on (default:
-//	                             localhost:8080; use :8080 in a container)
-//	TASKMILL_UI_USERNAME         the user of HTTP basic authentication
-//	                             (default: admin)
-//	TASKMILL_UI_PASSWORD         its password; without one, anyone who
-//	                             reaches the address can use the dashboard
-//	TASKMILL_UI_READ_ONLY        true to disable every action (any value
-//	                             that strconv.ParseBool accepts)
-//	TASKMILL_UI_PREFIX           the path the dashboard is served at, such as
-//	                             /admin/tasks, when a proxy forwards that path
-//	                             to it unchanged (default: the root)
-//	TASKMILL_UI_FRAME_ANCESTORS  the origins of the pages that may show the
-//	                             dashboard in a frame, separated by commas or
-//	                             spaces, such as https://admin.example.com
-//	                             (default: none)
-//	TASKMILL_UI_LOG_FORMAT       the format of the logs on standard error:
-//	                             text or json (default: text)
+// The [manual] lists every variable, why the command exits when it starts,
+// its probes, and the dashboard's routes. To serve the dashboard from an
+// application's own HTTP server instead, use package
+// github.com/code19m/taskmill/ui.
 //
-// TASKMILL_UI_USERNAME has no effect without TASKMILL_UI_PASSWORD. If a
-// setting is missing or not valid, the database is out of reach, or the
-// schema is not migrated, the command logs why and exits with status 1.
-//
-// For probes, it answers two paths at the root, with no login and whatever
-// the prefix: /livez answers 200 while the server runs, and /readyz answers
-// 200 while the database answers too, and 503 otherwise. Base only the
-// readiness probe on /readyz: a restart does not bring the database back.
-// /readyz asks the database at most once a second, and waits for it at most
-// 2 seconds.
-//
-// It does not migrate the schema: the applications that own it do. It exports
-// no metrics: the applications export the queue gauges, through the module
-// github.com/code19m/taskmill/otel.
+// [manual]: https://github.com/code19m/taskmill/blob/main/docs/reference/taskmill-ui.md
 package main
 
 import (

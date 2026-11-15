@@ -97,6 +97,6 @@ its disk, and correct the size.
 
 - [Autoscaling](autoscaling.md): let KEDA add and remove workers
 - [Performance](../reference/performance.md): how fast and how light taskmill is
-- [Configuration](../reference/configuration.md#settings): the retention settings, and the default of every other field
+- [`Settings`](https://pkg.go.dev/github.com/code19m/taskmill#Settings) on pkg.go.dev: the retention settings, with their defaults and limits
 
 **Next:** [Monitoring](monitoring.md)

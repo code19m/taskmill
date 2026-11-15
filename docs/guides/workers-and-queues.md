@@ -24,8 +24,9 @@ return worker.Run(ctx) // on SIGTERM, it stops cleanly, then returns
   schema that does shared work, such as retries, delayed tasks, and
   schedules.
 - `WorkerConfig` has more fields, such as `LeaseDuration`, `PollInterval`,
-  and `ListenConfig`. [Configuration](../reference/configuration.md) lists
-  them all.
+  and `ListenConfig`. Its doc comment on
+  [pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill#WorkerConfig)
+  has them all, with their defaults.
 
 > [!TIP]
 > In production, run workers as their own deployment, from the same image

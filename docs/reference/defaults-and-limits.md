@@ -1,47 +1,42 @@
-# Defaults and limits
+# Fixed timings and limits
 
-The timings and limits that are not a field you set, with their exact
-values. The guides round these numbers. For every field's default and
-limit, see [Configuration](configuration.md).
+The timings and limits of the workers, the maintainer, and the dashboard
+that belong to no function, type, or field, with their exact values. The
+guides round these numbers. Every value here is fixed, unless its row names
+the setting that changes it.
 
-Every value on this page is fixed, unless its row names the setting that
-changes it.
+A default or a limit of a function, a type, or a field is not on this page.
+It is in the doc comment of that identifier.
 
-## Tasks
+## Limits in the doc comments
 
-| What | Value |
+| You look for | Read the doc comment of |
 |---|---|
-| Queue names, kinds, and schedule names | 1 to 128 characters |
-| Payload | At most 1 MiB of JSON. The godoc of [`Args`](https://pkg.go.dev/github.com/code19m/taskmill#Args) has the exact rules |
-| One enqueue call (`EnqueueMany`, `EnqueueManyTx`, `outbox.Store`) | At most 10,000 tasks, and 64 MiB of payload and metadata |
-| A delayed task, a retry, or a snoozed task becomes available | Within about 1 second of its [run time](../concepts/glossary.md#run-time), while a maintainer runs |
-
-## Handlers
-
-| What | Value |
-|---|---|
-| Wait after the nth failed attempt, with the default `Retry` | 2^(n−1) seconds: 1, 2, 4, and so on, up to 1 hour from the 13th failure on. Each wait varies at random by ±10% |
-| Time from the first failure to dead, with the default `MaxAttempts` and `Retry` | About 13 hours (25 attempts) |
-| Retry wait after a lost [lease](../concepts/glossary.md#lease), or after a panic in `RetryPolicy.Backoff` or in a method of the handler's error | The default [backoff](../concepts/glossary.md#backoff), whatever the kind's `Retry` says |
-| A task whose kind has no handler on the worker that fetched it | Snoozed 1 minute at a time, without using an attempt. Dead with `unknown_kind` if no worker with a handler takes it within 1 hour. A worker with a handler ends the wait, and so does a retry |
-| Error history (`TaskInfo.Errors`) | The 20 most recent entries, with at most 4 KiB per message |
+| The default or the limits of a field | The field's type: [Configuration](configuration.md) names the types |
+| The size of a payload, and what it may hold | [`Args`](https://pkg.go.dev/github.com/code19m/taskmill#Args) |
+| The length of a queue name, a kind, a schedule name, or a group key | [`EnqueueOptions`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions), [`Args`](https://pkg.go.dev/github.com/code19m/taskmill#Args), and [`Schedule`](https://pkg.go.dev/github.com/code19m/taskmill#Schedule) |
+| The tasks and bytes of one enqueue call | [`Client.EnqueueMany`](https://pkg.go.dev/github.com/code19m/taskmill#Client.EnqueueMany) |
+| The waits between retries, and the number of attempts | [`ExponentialBackoff`](https://pkg.go.dev/github.com/code19m/taskmill#ExponentialBackoff) and [`EnqueueOptions`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions) |
+| A task whose kind has no handler | [`CodeNoHandler`](https://pkg.go.dev/github.com/code19m/taskmill#CodeNoHandler) |
+| The length of the error history | [`TaskInfo`](https://pkg.go.dev/github.com/code19m/taskmill#TaskInfo) and [`AttemptError`](https://pkg.go.dev/github.com/code19m/taskmill#AttemptError) |
+| The lease, the check-in, polling, and shutdown | [`WorkerConfig`](https://pkg.go.dev/github.com/code19m/taskmill#WorkerConfig) |
+| A worker's connections, and its health | [`Worker`](https://pkg.go.dev/github.com/code19m/taskmill#Worker) and [`Worker.Health`](https://pkg.go.dev/github.com/code19m/taskmill#Worker.Health) |
+| The caps of the queue counts, and their age | [`QueueInfo`](https://pkg.go.dev/github.com/code19m/taskmill#QueueInfo) and [`Client.Count`](https://pkg.go.dev/github.com/code19m/taskmill#Client.Count) |
+| The time limit of a list, and the size of a page | [`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List) and [`ListParams`](https://pkg.go.dev/github.com/code19m/taskmill#ListParams) |
+| The batches of a bulk action | [`Client.RetryMatching`](https://pkg.go.dev/github.com/code19m/taskmill#Client.RetryMatching) |
+| The tries of `Cancel`, `Retry`, `Delete`, and of an update of settings | [`Client.Cancel`](https://pkg.go.dev/github.com/code19m/taskmill#Client.Cancel) and [`Client.UpdateQueue`](https://pkg.go.dev/github.com/code19m/taskmill#Client.UpdateQueue) |
+| A schedule's run on request, and a schedule removed from the code | [`Client.RunSchedule`](https://pkg.go.dev/github.com/code19m/taskmill#Client.RunSchedule) and [`Schedule`](https://pkg.go.dev/github.com/code19m/taskmill#Schedule) |
+| How long tasks and activity are kept | [`Settings`](https://pkg.go.dev/github.com/code19m/taskmill#Settings) and [`ActivityParams`](https://pkg.go.dev/github.com/code19m/taskmill#ActivityParams) |
+| The outbox: its queue, the size of a message, and its retries | [`outbox.Queue`](https://pkg.go.dev/github.com/code19m/taskmill/outbox#Queue), [`outbox.Message`](https://pkg.go.dev/github.com/code19m/taskmill/outbox#Message), and [`outbox.Publisher`](https://pkg.go.dev/github.com/code19m/taskmill/outbox#Publisher) |
 
 ## Workers
 
 | What | Value |
 |---|---|
-| The worker's [check-in](../concepts/glossary.md#check-in): it renews its leases and notes that it is alive | Every third of `LeaseDuration`: 10 seconds by default |
-| A lease starts | When the task is taken, by the database's clock: not when the fetch began |
 | A fetch from a queue with `MaxRunning` waits for the queue's row | At most 1 second. Then the worker fetches again when the queue is next woken or polled |
 | Reads that notifications ask for: cancel requests, and queue settings | At most one of each kind per 20 ms |
-| Poll of an idle queue while the [heartbeats](../concepts/glossary.md#heartbeat) of the [maintainer](../concepts/glossary.md#maintainer) arrive | Once a minute, ±10%. Every `PollInterval`, if that is longer |
-| A task whose [notification](../concepts/glossary.md#notification) was lost starts | Within about 2 seconds while heartbeats arrive. Within about 16 seconds if the maintainer or the notification connection fails silently |
-| Handlers that still run when `DrainTimeout` ends | Their contexts are canceled. 5 seconds later, their tasks go back to their queues |
-| Database connections of one worker | Its pool, plus 1 for notifications |
 | Warning that the pool is full | Logged when the pool is full, and a lease renewal waits 1 second or longer for a connection (`LeaseDuration` / 30). At most once a minute |
-| `Worker.Health` returns an error | While `Run` is not running, or when the last successful check-in is older than `LeaseDuration` |
 | A result that the worker cannot record | Tried again after 0.1 to 2 seconds, until the task's lease would run out |
-| Activity counts, for the charts | Written every 10 seconds. Counts that a worker cannot write are dropped after 1 hour |
 | "Tasks available" notifications | At most one per queue per 50 ms from each client |
 | Notification connection: time to connect, and to answer when heartbeats stop | 10 seconds each |
 | Notification connection: reconnect | After 1 second, then twice as long each time, up to 30 seconds |
@@ -49,18 +44,17 @@ changes it.
 
 ## The maintainer
 
-The maintainer is one worker, chosen by election, that does the shared
-work.
+The [maintainer](../concepts/glossary.md#maintainer) is one worker, chosen
+by election, that does the shared work.
 
 | What | When |
 |---|---|
 | Wake queues whose next task waited over 1 second | Every second |
-| Send its heartbeat to the workers | Every 5 seconds, and right away when a new maintainer starts |
+| Send its [heartbeat](../concepts/glossary.md#heartbeat) to the workers | Every 5 seconds, and right away when a new maintainer starts |
 | Workers notice that the heartbeats stopped | After 15 seconds without one. Idle queues then poll every `PollInterval` |
-| [Promote](../concepts/glossary.md#promote) due tasks: delayed tasks, retries, and snoozed tasks | As they come due, at most 20 times a second |
+| [Promote](../concepts/glossary.md#promote) due tasks: delayed tasks, retries, and snoozed tasks | As they come due, at most 20 times a second. So a task becomes available within about 1 second of its [run time](../concepts/glossary.md#run-time) |
 | [Rescue](../concepts/glossary.md#rescue) tasks whose leases ran out | Every second |
 | Enqueue due schedule runs | Every second |
-| `Client.RunSchedule` | The run is enqueued within about 1 second, if the maintainer defines the schedule. A request adds no run while a run of the schedule is already due |
 | Dedupe window of a schedule run | 24 hours, or twice the time to the schedule's next run if that is longer |
 | Refresh queue statistics | Every 10 seconds |
 | Apply retention | Every minute |
@@ -69,43 +63,7 @@ work.
 | Other workers try to take over | Every 2 to 3 seconds, with a statement that writes nothing while the maintainer's lease lasts |
 | A new maintainer after a crash | Within about 12 seconds (the maintainer's lease is 10 seconds) |
 | A new maintainer after a clean stop | Right away, when the old one starts to stop. It gives the role up before it waits for its running tasks |
-| Remove a worker that stopped checking in | After 5 minutes without a check-in. A worker with a `LeaseDuration` above 15 minutes checks in less often, so it is removed, and registers again |
-| Delete a schedule removed from the code | After 24 hours without a run or a change |
-
-## Retention
-
-| What | Value |
-|---|---|
-| Completed tasks, and dead and canceled tasks | Set in [`Settings`](configuration.md#settings): 7 and 30 days by default |
-| A dead task that halts its [FIFO group](../concepts/glossary.md#fifo-group) | Kept until you retry or delete it |
-| Activity (`Client.Activity`) | Kept 24 hours, one point per minute |
-| Published outbox messages | Not kept |
-
-## Operations API
-
-| What | Value |
-|---|---|
-| Query time of `List`, `Groups`, `Count`, and `Activity` | 5 seconds, then an error |
-| `Count` | Stops at 10,000 tasks per state |
-| Queue statistics (`Client.Queues`) | Refreshed every 10 seconds. A count stops at 10,000 tasks per queue and state, and at 100,000 scheduled and retryable tasks in all |
-| `QueueInfo.Lag` | No cap. It can be too high for up to 10 seconds: a task that finished after the last count still counts |
-| `QueueInfo.HaltedGroups` | Stops at 10,000 groups per queue |
-| `QueueInfo.MostFailures` | The maintainer looks at 10,000 retryable tasks across all queues: the ones whose next retry is furthest away. It also looks at one such task per queue. With more retryable tasks than that, the number can be too low |
-| Bulk actions (`RetryMatching`, `CancelMatching`, `DeleteMatching`) | Batches of 1,000 tasks. When the context ends, the current batch finishes within 5 seconds |
-| A bulk action whose matching tasks lie far apart | The database ends a statement of a batch after 1 second. From then on, each batch reads at most 100,000 tasks, whether they match or not |
-| `Cancel`, `Delete`, and `Retry` | Run again by themselves, up to 5 times in all, when the task changes under their lock, or PostgreSQL ends their transaction with `deadlock detected` |
-| `UpdateQueue`, `UpdateSettings` | Up to 10 tries, with random pauses of up to 50 ms. Then `ErrConflict` |
-| A change of a queue's settings reaches the workers | Right away, by notification. Within 10 seconds without notifications |
-
-## Outbox
-
-| What | Value |
-|---|---|
-| Queue (`outbox.Queue`) | `outbox` |
-| Task kind | `taskmill.outbox.message` |
-| Size of one message | Its topic, key, value, and headers share the 1 MiB payload limit, base64-encoded. That allows about 750 KiB of `Message.Value` |
-| Messages per `Store` call | At most 10,000, and 64 MiB |
-| Retries of a failed delivery | After 1 second, doubling up to 5 minutes, ±10%. 10,000 tries, about a month. Then the message is dead |
+| Remove a worker that stopped checking in | After 5 minutes without a [check-in](../concepts/glossary.md#check-in) |
 
 ## Dashboard
 
@@ -127,9 +85,9 @@ The values of the `taskmill-ui` command, such as its HTTP timeouts, are in
 
 ## See also
 
-- [Configuration](configuration.md): every field, with its default and limits
-- [Errors](errors.md): what each error means, and what to do
+- [Configuration](configuration.md): the type that holds each setting
 - [Workers and queues](../guides/workers-and-queues.md): how concurrency, leases, and shutdown work
-- [Retries and errors](../guides/retries-and-errors.md): the retry table
+- [Maintenance and notifications](../design/schema-maintenance.md): why the maintainer works this way
+- [API on pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill): every default and limit of the API
 
-**Next:** [The `taskmill-ui` command](taskmill-ui.md)
+**Next:** [Compatibility](compatibility.md)

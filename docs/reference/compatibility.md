@@ -120,4 +120,4 @@ rolling back one release is safe: the old code runs on the new schema.
 - [Deploys](../production/deploys.md): when to run migrations
 - [CHANGELOG.md](../../CHANGELOG.md): what changed in each release
 
-**Next:** [Packages](packages.md)
+**Next:** [Performance](performance.md)

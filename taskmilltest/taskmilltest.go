@@ -8,7 +8,9 @@
 // A typical test checks two things: that the code under test enqueues the
 // right tasks, with [Enqueued], and that a handler does the right work, with
 // [Run]. An integration test can also process everything enqueued, with
-// [Work].
+// [Work]. The [testing guide] shows each of them in a test.
+//
+// [testing guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/testing.md
 package taskmilltest
 
 import (

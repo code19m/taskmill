@@ -23,7 +23,9 @@ const historyDaysAhead = 7
 // behind it.
 const partitionLockTimeout = "5s"
 
-// MigrateConfig configures [Migrate]. The zero value is valid.
+// MigrateConfig configures [Migrate]. The zero value is valid. Migrate
+// reports a Schema that is not valid as an error that wraps
+// [ErrInvalidArgument].
 type MigrateConfig struct {
 	// Schema is the PostgreSQL schema to migrate. It must match
 	// ^[a-z_][a-z0-9_]{0,62}$. Default: "taskmill".
@@ -39,6 +41,10 @@ type MigrateConfig struct {
 // time: one applies the migrations while the others wait. A schema that is up to date
 // is left as it is, so Migrate then needs no privilege to change it, and a
 // failure to prepare partitions is only logged. cfg may be nil.
+//
+// The [setup guide] says when to call Migrate, and with which role.
+//
+// [setup guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/setup.md
 func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error {
 	if pool == nil {
 		return invalidArgument("pool is nil")
@@ -213,7 +219,14 @@ type Migration struct {
 // their own migration tools apply these instead of calling [Migrate]. They
 // create no history partitions: each worker creates them when it starts, and
 // the maintainer keeps them ready, which needs the workers' role to own the
-// taskmill tables.
+// taskmill tables. An empty schema means "taskmill". A name that does not
+// match the pattern of [MigrateConfig.Schema] is an error that wraps
+// [ErrInvalidArgument].
+//
+// The [recipe for migration tools] shows the steps with goose, Atlas, and
+// Flyway.
+//
+// [recipe for migration tools]: https://github.com/code19m/taskmill/blob/main/docs/recipes/use-your-migration-tool.md
 func Migrations(schema string) ([]Migration, error) {
 	schema, err := validateSchema(schema)
 	if err != nil {

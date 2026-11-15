@@ -40,6 +40,6 @@ explains it.
 
 - [Troubleshooting](troubleshooting.md): what to do when something goes wrong
 - [Guarantees](../concepts/guarantees.md): what taskmill promises, and what it does not
-- [Defaults and limits](../reference/defaults-and-limits.md)
+- [Fixed timings and limits](../reference/defaults-and-limits.md): the exact timings of the workers and the maintainer
 
 **Next:** [Database](database.md)

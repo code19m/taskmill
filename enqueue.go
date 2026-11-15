@@ -50,17 +50,28 @@ var (
 // [ArgsWithDefaults]), which win over taskmill's defaults. Metadata merges
 // key by key instead: the call's keys win over the same keys of the
 // defaults, and the other keys of both are kept.
+//
+// An enqueue returns an error that wraps [ErrInvalidArgument] for a field
+// outside its limits. The queue and the group key must also be valid UTF-8,
+// and neither they nor the metadata may hold a NUL character.
+//
+// The [enqueue guide] shows each option at work.
+//
+// [enqueue guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/enqueue.md
 type EnqueueOptions struct {
 	// Queue is the queue to enqueue into, at most 128 characters.
 	// Default: [DefaultQueue].
 	Queue string
 
-	// Priority orders tasks within the queue. Default: [PriorityNormal].
+	// Priority orders tasks within the queue, from [PriorityLow] to
+	// [PriorityCritical]. Default: [PriorityNormal].
 	Priority Priority
 
-	// RunAt is the earliest time the task may start. Default: now. It must
-	// be a time that PostgreSQL can store, from 4713 BC to 294276 AD, so a
-	// time that stands for "never", such as Go's largest, is rejected.
+	// RunAt is the earliest time the task may start. Default: now. A task
+	// with a later RunAt becomes available within about a second of that
+	// time, while a maintainer runs. It must be a time that PostgreSQL can
+	// store, from 4713 BC to 294276 AD, so a time that stands for "never",
+	// such as Go's largest, is rejected.
 	RunAt time.Time
 
 	// MaxAttempts is how many times the task may run, from 1 to 10,000.
@@ -94,9 +105,12 @@ type EnqueueOptions struct {
 	Metadata map[string]string
 }
 
-// EnqueueParams is one task in a batch enqueue. Options may be nil.
+// EnqueueParams is one task in a batch enqueue.
 type EnqueueParams struct {
-	Args    Args
+	// Args is the task. Required.
+	Args Args
+
+	// Options are the task's options, as in [Client.Enqueue]. It may be nil.
 	Options *EnqueueOptions
 }
 
@@ -126,6 +140,11 @@ type EnqueueResult struct {
 // that the caller can roll back; any other enqueue has committed, so it
 // returns the results and logs the error, and a retry does not duplicate the
 // tasks.
+//
+// Add enqueue middleware in [ClientConfig.EnqueueMiddleware]. The
+// [middleware guide] shows one that tags every task.
+//
+// [middleware guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/middleware.md
 type EnqueueMiddleware func(ctx context.Context, tasks []*EnqueueTask, next func(context.Context) error) error
 
 // EnqueueTask is a task being enqueued, as [EnqueueMiddleware] sees it.
@@ -145,7 +164,19 @@ type EnqueueTask struct {
 	Result EnqueueResult
 }
 
-// Enqueue enqueues one task in its own transaction. opts may be nil.
+// Enqueue enqueues one task in its own transaction, and returns the task's
+// ID. opts may be nil: [EnqueueOptions] has the options and their defaults.
+// If the options set a DedupeKey that is taken, Enqueue creates no task: the
+// result holds the ID of the existing task, and its Duplicate is true.
+//
+// The [ClientConfig.EnqueueMiddleware] runs around the enqueue. The enqueue
+// notifies the workers of a task that may start now, so a worker with a free
+// slot usually starts it within milliseconds.
+//
+// It returns an error that wraps [ErrInvalidArgument] for nil args, for an
+// option outside its limits, and for a payload that cannot be stored: [Args]
+// and [EnqueueOptions] have the rules. To enqueue in the same transaction as
+// the application's own writes, use [Client.EnqueueTx].
 func (c *Client) Enqueue(ctx context.Context, args Args, opts *EnqueueOptions) (EnqueueResult, error) {
 	res, err := c.enqueue(ctx, pgxQuerier{q: c.pool}, []EnqueueParams{{Args: args, Options: opts}})
 	if err != nil {
@@ -155,7 +186,14 @@ func (c *Client) Enqueue(ctx context.Context, args Args, opts *EnqueueOptions) (
 }
 
 // EnqueueTx enqueues one task in the caller's transaction: the task exists
-// only if that transaction commits. opts may be nil.
+// only if that transaction commits, and workers see it from then on. opts
+// may be nil. In all else it works like [Client.Enqueue], and returns the
+// same errors.
+//
+// tx may be a transaction, a connection, or a pool: see [Executor]. A nil
+// executor is an error that wraps [ErrInvalidArgument]. An option or a
+// payload that fails taskmill's checks fails before any statement runs, so
+// the transaction stays usable.
 func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *EnqueueOptions) (EnqueueResult, error) {
 	q, err := executorQuerier(tx)
 	if err != nil {
@@ -168,14 +206,20 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 	return res[0], nil
 }
 
-// EnqueueMany enqueues several tasks in one round trip and one transaction.
-// Results are in the same order as params. One call takes at most 10,000
-// tasks, with at most 64 MiB of payload and metadata in all.
+// EnqueueMany enqueues several tasks in one round trip and one transaction:
+// all of them, or none if it returns an error. Results are in the same order
+// as params. One call takes at most 10,000 tasks, with at most 64 MiB of
+// payload and metadata in all.
+//
+// A call over these limits, or with a task that is not valid, is an error
+// that wraps [ErrInvalidArgument]; for a task, the error says which one. A
+// call with no params does nothing, and returns nil.
 func (c *Client) EnqueueMany(ctx context.Context, params []EnqueueParams) ([]EnqueueResult, error) {
 	return c.enqueue(ctx, pgxQuerier{q: c.pool}, params)
 }
 
-// EnqueueManyTx is [Client.EnqueueMany] in the caller's transaction.
+// EnqueueManyTx is [Client.EnqueueMany] in the caller's transaction. tx may
+// be a transaction, a connection, or a pool, as for [Client.EnqueueTx].
 func (c *Client) EnqueueManyTx(ctx context.Context, tx Executor, params []EnqueueParams) ([]EnqueueResult, error) {
 	q, err := executorQuerier(tx)
 	if err != nil {

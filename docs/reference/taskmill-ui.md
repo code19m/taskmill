@@ -23,7 +23,8 @@ counts as not set.
 | `TASKMILL_UI_LOG_FORMAT` | `text` | `text` or `json` | Sets the format of the log lines on standard error |
 
 The command has no flags and no config file. It sets the fields of
-[`ui.Config`](configuration.md#uiconfig) from these variables.
+[`ui.Config`](https://pkg.go.dev/github.com/code19m/taskmill/ui#Config)
+from these variables.
 
 ## Why it exits at start
 
@@ -146,9 +147,8 @@ the person, see
 ## See also
 
 - [The dashboard](../guides/dashboard.md): run it, protect it, and show it inside another app
-- [Configuration](configuration.md#uiconfig): the fields of `ui.Config`
-- [Defaults and limits](defaults-and-limits.md#dashboard): the dashboard's limits, such as its page size
+- [Fixed timings and limits](defaults-and-limits.md#dashboard): the dashboard's limits, such as its page size
 - [Kubernetes](../production/kubernetes.md): manifests with the probes
-- [`taskmill-ui` on pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill/cmd/taskmill-ui)
+- [`taskmill-ui`](https://pkg.go.dev/github.com/code19m/taskmill/cmd/taskmill-ui) and [`ui.Config`](https://pkg.go.dev/github.com/code19m/taskmill/ui#Config) on pkg.go.dev
 
-**Next:** [Errors](errors.md)
+**Next:** [Log messages](log-messages.md)

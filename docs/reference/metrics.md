@@ -167,4 +167,4 @@ metric to follow OpenTelemetry's conventions, and its
 - [Autoscaling](../production/autoscaling.md): scale workers on these gauges
 - [`otel` on pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill/otel)
 
-**Next:** [Compatibility](compatibility.md)
+**Next:** [Fixed timings and limits](defaults-and-limits.md)

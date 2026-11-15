@@ -99,7 +99,9 @@ In every case, do the same:
 
 - **Stop the work, and return the context's error.** taskmill then cancels
   the task, retries it, or puts it back in its queue, as the cause needs.
-  [Errors](../reference/errors.md) has the table.
+  The doc comment of each cause, on
+  [pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill#pkg-variables),
+  says which.
 - **If the work finished anyway, return nil.** The task is completed,
   except after `ErrLeaseLost`: then the result is ignored.
 - **Return soon.** taskmill can't stop your code: a handler that ignores its
@@ -117,20 +119,18 @@ taskmill.AddHandler(&handlers, &ReportBuilder{}, &taskmill.HandlerOptions{
 })
 ```
 
-| Option | What it does | Default |
-|---|---|---|
-| `Timeout` | The time limit of each attempt, or each batch. You can't turn it off | 1 minute |
-| `Retry` | The wait before each retry: see [Retries and errors](retries-and-errors.md) | `ExponentialBackoff{}` |
-| `BatchSize` | The most tasks per call of a batch handler: see [Handle tasks in batches](batch-handlers.md) | 100 |
-| `DiscardCompleted` | Deletes completed tasks right away, instead of keeping them in history | `false` |
-
-[Configuration](../reference/configuration.md#handleroptions) has each
-option's type and limits.
-
-- **`Timeout`:** set it a little above the slowest normal run. For tasks
-  that take minutes or hours, see [Run long tasks](../recipes/run-long-tasks.md).
-- **`DiscardCompleted`:** use it for busy kinds when nobody looks at their
-  finished tasks. It saves one history row per task.
+- **`Timeout`** limits the time of each attempt, or of each batch: 1 minute
+  by default. You can't turn it off. Set it a little above the slowest
+  normal run. For tasks that take minutes or hours, see
+  [Run long tasks](../recipes/run-long-tasks.md).
+- **`DiscardCompleted`** deletes the kind's completed tasks right away,
+  instead of keeping them in history. Use it for busy kinds when nobody
+  looks at their finished tasks. It saves one history row per task.
+- **The other options** are `Retry`, which
+  [Retries and errors](retries-and-errors.md) shows, and `BatchSize`, which
+  [Handle tasks in batches](batch-handlers.md) shows. The doc comment of
+  [`HandlerOptions`](https://pkg.go.dev/github.com/code19m/taskmill#HandlerOptions)
+  has every option, with its default and its limits.
 - **Max attempts** is not a handler option: it is saved with each task when
   it is enqueued. Set it per kind, as
   [Retries and errors](retries-and-errors.md#set-the-number-of-attempts-per-kind)

@@ -40,7 +40,7 @@ err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 - `Store` only writes to PostgreSQL, so your app keeps working while the
   broker is down.
 - A `Value` can be up to about 750 KiB: see
-  [Defaults and limits](../reference/defaults-and-limits.md#outbox).
+  [`outbox.Message`](https://pkg.go.dev/github.com/code19m/taskmill/outbox#Message).
 - A [relay](#relay-messages-to-your-broker) on your workers then publishes
   the message.
 

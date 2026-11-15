@@ -15,8 +15,8 @@ commit with your data, run at least once, and survive a crashed worker.
 | Find the best way to do something | [How do I…?](recipes/README.md) |
 | Go to production | [Production checklist](production/checklist.md) |
 | Fix a problem | [Troubleshooting](production/troubleshooting.md) |
-| Look up a default, an error, a log line, or a metric | [Reference](reference/README.md) |
-| See every function and type | [API on pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill) |
+| Look up a function, a type, a default, a limit, or an error | [API on pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill) |
+| Look up a log line, a metric, a timing, or the `taskmill-ui` command | [Reference](reference/README.md) |
 | Contribute | [CONTRIBUTING.md](../CONTRIBUTING.md) and [How taskmill is built](design/README.md) |
 
 ## Learning path
@@ -113,14 +113,14 @@ that, open a [guide](guides/README.md) when you need a feature.
 
 ### [Reference](reference/README.md)
 
+- [Packages](reference/packages.md)
 - [Configuration](reference/configuration.md)
-- [Defaults and limits](reference/defaults-and-limits.md)
-- [The `taskmill-ui` command](reference/taskmill-ui.md)
 - [Errors](reference/errors.md)
+- [The `taskmill-ui` command](reference/taskmill-ui.md)
 - [Log messages](reference/log-messages.md)
 - [Metrics and traces](reference/metrics.md)
+- [Fixed timings and limits](reference/defaults-and-limits.md)
 - [Compatibility](reference/compatibility.md)
-- [Packages](reference/packages.md)
 - [Performance](reference/performance.md)
 
 ### [How taskmill is built](design/README.md)
@@ -135,6 +135,7 @@ These pages are for contributors.
 - [Benchmarks](design/benchmarks.md)
 - [Releasing](design/releasing.md)
 - [Writing docs](design/writing-docs.md)
+- [Writing doc comments](design/writing-godoc.md)
 
 ### Contribute
 
@@ -146,5 +147,6 @@ These pages are for contributors.
 - [API reference](https://pkg.go.dev/github.com/code19m/taskmill) on pkg.go.dev
 - [Shop example](../examples/shop/README.md): most features in one small program
 - [Changelog](../CHANGELOG.md): what changed in each release
+- [llms.txt](../llms.txt): every package and every page in one line each, for tools and AI agents
 
 **Next:** [Get started](start/README.md)

@@ -30,16 +30,23 @@ const (
 )
 
 // QueueSettings are a queue's installation-wide settings, stored in the
-// database. The zero value means no limit.
+// database. Change them with [Client.UpdateQueue]. The zero value means no
+// limit.
 type QueueSettings struct {
 	// MaxRunning caps the tasks of the queue running at the same time across
-	// all workers of the installation. It must not be negative. Zero means
-	// no limit.
+	// all workers of the installation. Each task of a batch counts. It must
+	// not be negative. Zero means no limit.
 	MaxRunning int
 }
 
 // QueueInfo describes a queue: its settings, its workers, and its latest
-// statistics, which the maintainer refreshes every 10 seconds.
+// statistics, which the maintainer refreshes every 10 seconds. Read it with
+// [Client.Queues].
+//
+// The [monitoring page] says which of these numbers to alert on, and at
+// which values.
+//
+// [monitoring page]: https://github.com/code19m/taskmill/blob/main/docs/production/monitoring.md
 type QueueInfo struct {
 	Name     string
 	Settings QueueSettings
@@ -102,9 +109,11 @@ type QueueInfo struct {
 }
 
 // Settings are the installation-wide settings, stored in the database and
-// applied by the maintainer. Zero fields mean their defaults. A period is
-// stored in whole microseconds, and the longest [time.Duration], about 292
-// years, keeps tasks for good.
+// applied by the maintainer. Read them with [Client.Settings], and change
+// them with [Client.UpdateSettings]. Zero fields mean their defaults. A
+// period shorter than its minimum is an error that wraps
+// [ErrInvalidArgument]. A period is stored in whole microseconds, and the
+// longest [time.Duration], about 292 years, keeps tasks for good.
 type Settings struct {
 	// HistoryRetention is how long completed tasks stay in history, at
 	// least: history is dropped a whole UTC day at a time, so a task stays
@@ -135,15 +144,18 @@ type WorkerInfo struct {
 	Maintainer  bool      // the worker is the elected maintainer
 }
 
-// ListParams filters and pages [Client.List].
+// ListParams filters and pages [Client.List]. A field outside its limits is
+// an error that wraps [ErrInvalidArgument].
 type ListParams struct {
-	// Filter selects the tasks. Its zero value selects every task.
+	// Filter selects the tasks. Empty means every task.
 	Filter TaskFilter
 
-	// Limit is the page size. Default: 100. Maximum: 1,000.
+	// Limit is the page size. It must not be negative. Default: 100.
+	// Maximum: 1,000.
 	Limit int
 
-	// Cursor continues from a previous page's [ListResult.Next].
+	// Cursor continues from a previous page's [ListResult.Next]. Empty means
+	// the first page.
 	Cursor string
 }
 
@@ -195,13 +207,13 @@ func retryConflicts(ctx context.Context, op string, try func() (saved bool, err 
 //
 // No lock is held while update runs. The settings are written back only if
 // they did not change meanwhile; if they did, update runs again on the new
-// settings, after a short random pause, up to 10 times before UpdateQueue
-// gives up with an error that wraps [ErrConflict]. So concurrent updates
-// never lose each other's changes, and update may run more than once: it
-// must only change the settings it gets, with no I/O and no calls to the
-// Client. Workers apply the change within 10 seconds, and right away if
-// they receive notifications. A negative MaxRunning is an error that wraps
-// [ErrInvalidArgument].
+// settings, after a random pause of at most 50 milliseconds, up to 10 times
+// before UpdateQueue gives up with an error that wraps [ErrConflict]. So
+// concurrent updates never lose each other's changes, and update may run
+// more than once: it must only change the settings it gets, with no I/O and
+// no calls to the Client. Workers apply the change within 10 seconds, and
+// right away if they receive notifications. A negative MaxRunning is an
+// error that wraps [ErrInvalidArgument].
 //
 //	err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
 func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*QueueSettings)) error {
@@ -238,12 +250,15 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 }
 
 // PauseQueue stops workers from fetching the queue's tasks. Tasks already
-// running finish normally.
+// running finish normally. Workers apply the pause within 10 seconds, and
+// right away if they receive notifications. It never returns [ErrNotFound]:
+// it creates the queue's settings if the queue has none.
 func (c *Client) PauseQueue(ctx context.Context, name string) error {
 	return c.changeQueue(ctx, name, c.sql.pauseQueue, true)
 }
 
-// ResumeQueue undoes [Client.PauseQueue].
+// ResumeQueue undoes [Client.PauseQueue]. Workers apply it as fast as a
+// pause, and like PauseQueue it never returns [ErrNotFound].
 func (c *Client) ResumeQueue(ctx context.Context, name string) error {
 	return c.changeQueue(ctx, name, c.sql.pauseQueue, false)
 }
@@ -267,8 +282,9 @@ func (c *Client) changeQueue(ctx context.Context, name, sql string, args ...any)
 	return nil
 }
 
-// Queues returns every known queue: those with settings, those that workers
-// read, and those that hold tasks, as of the latest statistics.
+// Queues returns every known queue, ordered by name: those with settings,
+// those that workers read, and those that hold tasks, as of the latest
+// statistics.
 func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 	r, err := c.pool.Query(ctx, c.sql.listQueues)
 	if err != nil {
@@ -370,8 +386,9 @@ func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) err
 	})
 }
 
-// Workers returns the registered worker processes. A worker that stopped
-// without unregistering disappears 5 minutes after its last check-in.
+// Workers returns the registered worker processes, ordered by ID. A worker
+// that stopped without unregistering disappears 5 minutes after its last
+// check-in.
 func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	r, err := c.pool.Query(ctx, c.sql.listWorkers)
 	if err != nil {
@@ -393,9 +410,10 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 }
 
 // List returns tasks that match params, newest first, one page at a time.
-// Each page's query is canceled after 5 seconds, so listing cannot overload
-// the database; on a very large table, a filter that matches few tasks can
-// reach that limit and return an error.
+// params may be nil, for the first page of every task. Each page's query is
+// canceled after 5 seconds, so listing cannot overload the database; on a
+// very large table, a filter that matches few tasks can reach that limit and
+// return an error.
 func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, error) {
 	if params == nil {
 		params = &ListParams{}
@@ -458,7 +476,8 @@ func checkFilter(what string, values []string, maxLen int) ([]string, error) {
 }
 
 // GroupParams selects and pages the FIFO groups that [Client.Groups]
-// returns.
+// returns. A field outside its limits is an error that wraps
+// [ErrInvalidArgument].
 type GroupParams struct {
 	// Queues limits the result to groups of these queues. Empty means all
 	// queues. Maximum: 100 names.
@@ -471,10 +490,12 @@ type GroupParams struct {
 	// Halted limits the result to the groups that a dead task halts.
 	Halted bool
 
-	// Limit is the page size. Default: 100. Maximum: 1,000.
+	// Limit is the page size. It must not be negative. Default: 100.
+	// Maximum: 1,000.
 	Limit int
 
-	// Cursor continues from a previous page's [GroupsResult.Next].
+	// Cursor continues from a previous page's [GroupsResult.Next]. Empty
+	// means the first page.
 	Cursor string
 }
 
@@ -486,8 +507,8 @@ type GroupsResult struct {
 	Next string
 }
 
-// GroupInfo is a FIFO group that has a row: one that has unfinished tasks,
-// or that a dead task halts.
+// GroupInfo describes a FIFO group that has unfinished tasks, or that a dead
+// task halts.
 type GroupInfo struct {
 	Queue string
 	Key   string
@@ -502,10 +523,11 @@ type GroupInfo struct {
 }
 
 // Groups returns the FIFO groups that have unfinished tasks or a dead task
-// that halts them, one page at a time, ordered by queue and key. Each queue
-// named in [GroupParams.Queues] reads up to a page, so it takes at most 100
-// names. Like [Client.List], each page's query is canceled after 5 seconds;
-// a search that matches few of very many groups can reach that limit and
+// that halts them, one page at a time, ordered by queue and key. params may
+// be nil, for the first page of every group. Each queue named in
+// [GroupParams.Queues] reads up to a page, so it takes at most 100 names.
+// Like [Client.List], each page's query is canceled after 5 seconds; a
+// search that matches few of very many groups can reach that limit and
 // return an error.
 func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult, error) {
 	p := GroupParams{}

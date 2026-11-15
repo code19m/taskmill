@@ -1,16 +1,13 @@
-// Package ui serves taskmill's dashboard of queues, tasks, schedules, and
-// workers, with actions to pause and resume queues and schedules, run a
+// Package ui serves taskmill's dashboard as an HTTP handler.
+//
+// The dashboard shows the queues, tasks, schedules, and workers of an
+// installation. Its actions pause and resume queues and schedules, run a
 // schedule now, and retry, cancel, and delete tasks, one at a time or all
 // that match the task list's filters.
 //
-// The dashboard is rendered on the server with the standard library. Two
-// small scripts, served with it, keep pages live, apply filters as they
-// change, confirm actions in dialogs, and apply the chosen theme. Every page
-// also works without them, and nothing needs a JavaScript build step. The
-// dashboard reads only through the bounded queries of [taskmill.Client], so
-// it is safe to point at a busy production database.
-//
-// Mount it in an application, behind the application's own authentication:
+// [New] returns the handler, and [Config] sets its path, its login, and what
+// it allows. Mount it in an application, behind the application's own
+// authentication:
 //
 //	dashboard, err := ui.New(client, &ui.Config{Prefix: "/taskmill"})
 //	// ...
@@ -21,8 +18,25 @@
 // its own. Another web application can show it in a frame once its origin is
 // listed in [Config.FrameAncestors].
 //
-// Actions are protected against cross-site request forgery with
-// [http.CrossOriginProtection], and [Config.ReadOnly] disables them entirely.
+// Every action is a POST request, and a GET request never changes anything,
+// so an application in front of the dashboard can allow or log the actions
+// by their method. Actions are protected against cross-site request forgery
+// with [http.CrossOriginProtection], and [Config.ReadOnly] disables them
+// entirely.
+//
+// The dashboard is rendered on the server with the standard library. Two
+// small scripts, served with it, keep pages live, apply filters as they
+// change, confirm actions in dialogs, and apply the chosen theme. Every page
+// also works without them, and nothing needs a JavaScript build step. The
+// dashboard reads only through the bounded queries of [taskmill.Client], so
+// it is safe to point at a busy production database.
+//
+// The [dashboard guide] shows how to run and protect it. The [manual] of the
+// command lists the dashboard's routes and status codes, for the allow-list
+// of a proxy.
+//
+// [dashboard guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/dashboard.md
+// [manual]: https://github.com/code19m/taskmill/blob/main/docs/reference/taskmill-ui.md
 package ui
 
 import (
@@ -86,12 +100,14 @@ var errSlow = errors.New("the database did not answer in time")
 // errBudget is why a bulk action stopped before it was done.
 var errBudget = errors.New("the bulk action used its time")
 
-// Config configures the dashboard. The zero value is valid.
+// Config configures the dashboard. The zero value is valid. [New] reports a
+// field outside its limits as an error that wraps
+// [taskmill.ErrInvalidArgument].
 type Config struct {
-	// Prefix is the path the handler is mounted at, such as "/taskmill".
-	// The handler strips it from requests and adds it to links and
-	// redirects, so do not wrap the handler in http.StripPrefix.
-	// Default: none, the root.
+	// Prefix is the path the handler is mounted at, such as "/taskmill". It
+	// must start with a slash. The handler strips it from requests and adds
+	// it to links and redirects, so do not wrap the handler in
+	// http.StripPrefix. Default: none, the root.
 	Prefix string
 
 	// ReadOnly hides and refuses every action that changes state.
@@ -105,7 +121,8 @@ type Config struct {
 
 	// FrameAncestors lists the origins of the pages that may show the
 	// dashboard in a frame, such as "https://admin.example.com", or "'self'"
-	// for the application's own pages. Default: none; the dashboard cannot be
+	// for the application's own pages. An entry must not be empty, or hold a
+	// space, a comma, or a semicolon. Default: none; the dashboard cannot be
 	// framed, which protects it from clickjacking.
 	FrameAncestors []string
 
@@ -114,9 +131,13 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// BasicAuth is the one user that may use the dashboard.
+// BasicAuth is the one user that may use the dashboard. Set it in
+// [Config.BasicAuth].
 type BasicAuth struct {
+	// Username is the user's name. Required.
 	Username string
+
+	// Password is the user's password. Required.
 	Password string
 }
 

@@ -22,6 +22,11 @@ import (
 // Handle must return promptly once ctx is canceled. [context.Cause] says
 // why: [ErrTaskCanceled], [ErrLeaseLost], [ErrAttemptTimeout], or
 // [ErrShutdown].
+//
+// Register a handler with [AddHandler]. The [guide to handling tasks] says
+// what a handler should return, and what happens on a panic or a timeout.
+//
+// [guide to handling tasks]: https://github.com/code19m/taskmill/blob/main/docs/guides/handle-tasks.md
 type Handler[A Args] interface {
 	Handle(ctx context.Context, task *Task[A]) error
 }
@@ -50,11 +55,23 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 // canceled task becomes completed if the batch returned nil for it, because
 // the work was done, and canceled otherwise; the result of a task that lost
 // its lease is discarded.
+//
+// Register a batch handler with [AddBatchHandler]. The [batch guide] shows
+// one, and says when a batch is worth it.
+//
+// [batch guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/batch-handlers.md
 type BatchHandler[A Args] interface {
 	HandleBatch(ctx context.Context, tasks []*Task[A]) []error
 }
 
-// HandlerOptions configure how a worker runs one kind.
+// HandlerOptions configure how a worker runs one kind. Pass them to
+// [AddHandler] or [AddBatchHandler]. The zero value keeps the defaults.
+// [NewWorker] reports a value outside its limits, as an error that wraps
+// [ErrInvalidArgument].
+//
+// The [guide to handling tasks] shows the options at work.
+//
+// [guide to handling tasks]: https://github.com/code19m/taskmill/blob/main/docs/guides/handle-tasks.md
 type HandlerOptions struct {
 	// Timeout bounds each attempt, or each batch. It must not be negative.
 	// Default: 1 minute.
@@ -65,8 +82,9 @@ type HandlerOptions struct {
 	// rescues it knows no handler's options. Default: [ExponentialBackoff]{}.
 	Retry RetryPolicy
 
-	// BatchSize is the most tasks a [BatchHandler] receives in one call.
-	// Default: 100. Maximum: 1,000. Ignored for other handlers.
+	// BatchSize is the most tasks a [BatchHandler] receives in one call. It
+	// must not be negative. Default: 100. Maximum: 1,000. Ignored for other
+	// handlers.
 	BatchSize int
 
 	// DiscardCompleted deletes completed tasks of the kind right away,
@@ -229,19 +247,32 @@ func (hs *Handlers) fail(err error) {
 	hs.err = errors.Join(hs.err, err)
 }
 
-// RetryPolicy decides how long to wait before retrying a failed attempt.
+// RetryPolicy decides how long to wait before retrying a failed attempt. Set
+// one for a kind in [HandlerOptions.Retry]. The default is the zero value of
+// [ExponentialBackoff].
+//
+// The worker calls the policy each time a failed attempt leads to a retry,
+// before it records the failure. So Backoff must return fast, with no I/O.
+//
+// The [guide to retries] shows how to change the wait, and what happens to a
+// task with no attempts left.
+//
+// [guide to retries]: https://github.com/code19m/taskmill/blob/main/docs/guides/retries-and-errors.md
 type RetryPolicy interface {
 	// Backoff returns the delay before the retry that follows the given
-	// failed attempt, counting from 1. If it panics, the attempt fails with
-	// the code [CodePanic] instead of the handler's error, and the task is
-	// retried after the default backoff.
+	// failed attempt, counting from 1. A delay of zero or less makes the
+	// task due right away: the maintainer makes it available within about a
+	// second. If Backoff panics, the attempt fails with the code [CodePanic]
+	// instead of the handler's error, and the task is retried after the
+	// default backoff.
 	Backoff(attempt int) time.Duration
 }
 
 // ExponentialBackoff doubles the delay after each failed attempt, from Base up
 // to Max, and spreads retries out with ±10% random jitter, so a delay can
 // reach 10% above Max. The zero value uses a base of 1 second and a maximum
-// of 1 hour.
+// of 1 hour: the delays are 1, 2, 4, and 8 seconds, and so on, and 1 hour
+// from the 13th failed attempt on.
 type ExponentialBackoff struct {
 	// Base is the delay after the first failed attempt. Zero or less means
 	// the default, 1 second.
