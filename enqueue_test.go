@@ -329,6 +329,119 @@ func TestEnqueueDeduplicates(t *testing.T) {
 	}
 }
 
+// An enqueue of a key that a task holds creates nothing, so it must write
+// nothing: no transaction ID, which every write takes, no lock on the key's
+// row, and no task ID from the sequence. A producer that sends many
+// duplicates, and a cancel of the task that holds the key, would pay for
+// them.
+func TestDuplicateEnqueueWritesNothing(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a wait for a lock would end it
+	defer cancel()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42", GroupKey: "customer-7"}
+	first := e.keyed(t, opts)
+	last := e.count(t, "SELECT last_value FROM {s}.tasks_id_seq")
+
+	tx := e.begin(t)
+	for _, enqueue := range []func() (taskmill.EnqueueResult, error){
+		func() (taskmill.EnqueueResult, error) {
+			return e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, opts)
+		},
+		func() (taskmill.EnqueueResult, error) {
+			res, err := e.client.EnqueueManyTx(ctx, taskmill.Pgx(tx), []taskmill.EnqueueParams{
+				{Args: sendEmail{}, Options: opts}, {Args: sendEmail{}, Options: opts},
+			})
+			if err != nil {
+				return taskmill.EnqueueResult{}, err
+			}
+			return res[1], nil
+		},
+	} {
+		if dup, err := enqueue(); err != nil || !dup.Duplicate || dup.ID != first.ID {
+			t.Fatalf("got %+v, %v; want a duplicate of task %d", dup, err, first.ID)
+		}
+	}
+	var wrote bool
+	if err := tx.QueryRow(ctx, "SELECT pg_current_xact_id_if_assigned() IS NOT NULL").Scan(&wrote); err != nil {
+		t.Fatal(err)
+	}
+	if wrote {
+		t.Error("the transaction of the duplicate enqueues took a transaction ID: they wrote")
+	}
+	if n := e.count(t, "SELECT last_value FROM {s}.tasks_id_seq"); n != last {
+		t.Errorf("the duplicate enqueues took %d task IDs from the sequence, want none", n-last)
+	}
+	// The open transaction holds nothing that a cancel of the task needs.
+	if err := e.client.Cancel(ctx, first.ID); err != nil {
+		t.Fatalf("cancel while the transaction of the duplicate enqueues is open: %v", err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An enqueue answers from what was committed when it began. While a cancel
+// of the task that holds the key is not committed, the task holds the key,
+// so the enqueue is a duplicate, and does not wait for the cancel.
+func TestEnqueueDoesNotWaitForACancelOfTheKeysTask(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a wait for the cancel would end it
+	defer cancel()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
+	first := e.keyed(t, opts)
+	tx := e.begin(t)
+	if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if dup, err := e.client.Enqueue(ctx, sendEmail{}, opts); err != nil || !dup.Duplicate || dup.ID != first.ID {
+		t.Fatalf("while the cancel is open: got %+v, %v; want a duplicate of task %d", dup, err, first.ID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if next, err := e.client.Enqueue(ctx, sendEmail{}, opts); err != nil || next.Duplicate {
+		t.Fatalf("after the cancel: got %+v, %v; want a new task", next, err)
+	}
+}
+
+// A transaction at REPEATABLE READ or SERIALIZABLE sees the keys as they
+// were when it began. A key that it sees as held may be free by now: its
+// enqueue must find that out, and create the task, not report a duplicate of
+// a task that was canceled meanwhile.
+func TestEnqueueInASnapshotTransactionSeesAFreedKey(t *testing.T) {
+	t.Parallel()
+	for _, level := range []pgx.TxIsoLevel{pgx.RepeatableRead, pgx.Serializable} {
+		t.Run(string(level), func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			ctx := t.Context()
+			opts := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
+			first := e.keyed(t, opts)
+			tx, err := e.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: level})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = tx.Rollback(context.Background()) }()
+			// The transaction's snapshot: the first task holds the key.
+			if _, err := tx.Exec(ctx, replaceSchema("SELECT count(*) FROM {s}.dedupe_keys", e.schema)); err != nil {
+				t.Fatal(err)
+			}
+			e.cancel(t, first.ID)
+
+			res, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, opts)
+			if err != nil || res.Duplicate {
+				t.Fatalf("got %+v, %v; want a new task: the key is free", res, err)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			e.wantState(t, res.ID, taskmill.StateAvailable)
+		})
+	}
+}
+
 func TestEnqueueDeduplicatesConcurrently(t *testing.T) {
 	t.Parallel()
 	e := newEnvWith(t, testdb.PoolSize(t, 24), nil)
@@ -365,6 +478,93 @@ func TestEnqueueDeduplicatesConcurrently(t *testing.T) {
 	}
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != keys {
 		t.Fatalf("got %d tasks, want exactly %d", n, keys)
+	}
+}
+
+// brokenKeys counts what breaks the rule of one unfinished task per dedupe
+// key, in one snapshot: the keys with more than one unfinished task, the
+// unfinished tasks that do not hold their key, and the keys that a canceled
+// or deleted task holds. The tasks are sendEmails to their key.
+func (e *env) brokenKeys(t *testing.T) int {
+	t.Helper()
+	return e.count(t, `
+SELECT (SELECT count(*) FROM (SELECT FROM {s}.tasks WHERE state <> 'canceled' GROUP BY payload ->> 'to' HAVING count(*) > 1) k)
+     + (SELECT count(*) FROM {s}.tasks t WHERE t.state <> 'canceled'
+        AND NOT EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id))
+     + (SELECT count(*) FROM {s}.dedupe_keys d
+        WHERE NOT EXISTS (SELECT FROM {s}.tasks t WHERE t.id = d.task_id AND t.state <> 'canceled'))`)
+}
+
+// lostToOthers reports whether err is one that an operation gets when it
+// loses to concurrent ones: it finds the task in another state, or gone, or
+// its key taken, or PostgreSQL ends it to end a wait.
+func lostToOthers(err error) bool {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return errors.Is(err, taskmill.ErrConflict) || errors.Is(err, taskmill.ErrInvalidState) ||
+		errors.Is(err, taskmill.ErrNotFound) || ok && (pgErr.Code == "40P01" || pgErr.Code == "55P03")
+}
+
+// operate does to task id what an operator may do: the choice turns with n.
+func (e *env) operate(ctx context.Context, n int, id int64) error {
+	switch n % 6 {
+	case 0, 1:
+		return e.client.Cancel(ctx, id)
+	case 2, 3:
+		return e.client.Retry(ctx, id)
+	case 4:
+		return e.client.Delete(ctx, id)
+	}
+	_, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}))
+	return err
+}
+
+// Producers enqueue a few keys again and again while operators cancel,
+// retry, and delete their tasks, one at a time and in bulk. Whatever order
+// the database gives them, a key stands for at most one unfinished task,
+// every unfinished task holds its key, and no key is held by a task that is
+// canceled or gone. Each check reads one snapshot, so the rule holds at
+// every moment, not only at the end.
+func TestDedupeKeysHoldUnderConcurrentOperations(t *testing.T) {
+	t.Parallel()
+	e := newEnvWith(t, testdb.PoolSize(t, 12), nil)
+	const workers, rounds, keys = 8, 60, 3
+	var last atomic.Int64 // the newest task that an enqueue named
+	round := func(w, i int) error {
+		key := strconv.Itoa((w + i) % keys)
+		res, err := e.client.Enqueue(t.Context(), sendEmail{To: key}, &taskmill.EnqueueOptions{DedupeKey: key, GroupKey: "g" + key})
+		if err != nil && !lostToOthers(err) {
+			return fmt.Errorf("enqueue: %w", err)
+		}
+		// The task that the enqueue named, or another recent one.
+		id := res.ID
+		if err != nil || i%3 == 0 {
+			id = max(1, last.Load()-int64(i%7))
+		}
+		last.Store(max(last.Load(), res.ID))
+		if err := e.operate(t.Context(), w+i, id); err != nil && !lostToOthers(err) {
+			return fmt.Errorf("on task %d: %w", id, err)
+		}
+		if n := e.brokenKeys(t); n != 0 {
+			return fmt.Errorf("%d keys or tasks break the rule of one unfinished task per key", n)
+		}
+		return nil
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for w := range workers {
+		wg.Go(func() {
+			for i := range rounds {
+				if err := round(w, i); err != nil {
+					errs <- fmt.Errorf("round %d of worker %d: %w", i, w, err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
 	}
 }
 

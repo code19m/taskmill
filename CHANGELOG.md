@@ -68,6 +68,17 @@ All notable changes to taskmill are recorded here. The format follows
 - The migration also drops the index `schedules_due_idx`. No statement read
   it: each one finds its schedules by name. Every run of a schedule had to
   update it.
+- An enqueue of a dedupe key that a task holds writes nothing. It locked
+  the key's row to find out that the key was taken, so every duplicate took
+  a transaction ID, wrote WAL, and committed as a write, and it took a task
+  ID from the sequence. Now a duplicate only reads. Two things that you can
+  see change with it. A cancel of the task that holds the key no longer
+  waits for an open transaction that enqueued the same key. And an enqueue
+  no longer waits for an open transaction that cancels or deletes the task
+  that holds its key: until that transaction commits, the task holds the
+  key, so the enqueue is a duplicate of it. Before, the enqueue waited, and
+  created a task if the cancel committed. A new key costs one more index
+  lookup.
 - Each read of the operations API is one round trip to the database.
   `List` made 5, `Count`, `Groups`, and `Activity` 4 each, and `Queues` 2:
   they sent `BEGIN`, their settings, the statement, and `COMMIT` one by

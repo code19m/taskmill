@@ -148,8 +148,9 @@ const groupFree = `(t.group_key IS NULL
        OR NOT EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key))`
 
 // keyFree matches the tasks t that hold no dedupe key, or whose key's row it
-// locks. It skips key rows that other transactions hold, such as a duplicate
-// enqueue in an open transaction, so a statement never waits for them.
+// locks. It skips key rows that other transactions hold, such as an enqueue
+// that tried to claim the key in an open transaction, so a statement never
+// waits for them.
 const keyFree = `(NOT EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id)
        OR EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id FOR UPDATE SKIP LOCKED))`
 
@@ -258,6 +259,28 @@ SELECT coalesce(max(version), 0), current_setting('default_transaction_isolation
 		// the key. A holder whose window ended is such a case: the statement
 		// would have claimed its key, had another enqueue not done so
 		// meanwhile. The client then reads the key again.
+		//
+		// A task whose key the statement sees as held is a duplicate right
+		// away: it gets no ID, and the statement does not try to claim its
+		// key. So a duplicate writes nothing: a claim that fails locks the
+		// key's row, and so takes a transaction ID and writes WAL, and an ID
+		// is a write to the sequence. Deduplication stays exact, because
+		// every task that is created still goes through the claim, which
+		// alone decides. Skipping the claim only gives its answer early. A
+		// held key's row changes in one way: the cancel or the delete of its
+		// task removes it. Only an expired key is claimed again. So for a
+		// key that the statement sees as held, the claim would report the
+		// same duplicate, unless such a removal is under way, or commits
+		// while the statement runs: then the claim would wait for it, and
+		// take the key. The statement reports the duplicate that was true
+		// when it began, as if it had run just before the removal.
+		//
+		// That holds only if the statement sees the keys as they are when it
+		// begins, as at READ COMMITTED. A caller's transaction at REPEATABLE
+		// READ or SERIALIZABLE sees them as they were when the transaction
+		// began: a key that it sees as held may have been free for long.
+		// There every key goes through the claim, which looks at the rows as
+		// they are now.
 		enqueue: q(`
 WITH input AS (
     SELECT queue, kind, priority, run_at, max_attempts, group_key,
@@ -267,13 +290,19 @@ WITH input AS (
         WITH ORDINALITY AS t(queue, kind, priority, run_at, max_attempts, group_key,
                              dedupe_key, dedupe_window_us, payload, metadata, ord)
 ), ids AS (
-    SELECT input.*, nextval('{s}.tasks_id_seq') AS id
+    SELECT input.*,
+           CASE WHEN dedupe_key IS NOT NULL
+                     AND current_setting('transaction_isolation') NOT IN ('repeatable read', 'serializable')
+                     AND EXISTS (SELECT FROM {s}.dedupe_keys k
+                                 WHERE k.key = input.dedupe_key AND k.expires_at > now())
+                THEN NULL
+                ELSE nextval('{s}.tasks_id_seq') END AS id
     FROM input
 ), claimed AS (
     INSERT INTO {s}.dedupe_keys AS d (key, task_id, expires_at)
     SELECT dedupe_key, id, now() + dedupe_window_us * interval '1 microsecond'
     FROM ids
-    WHERE dedupe_key IS NOT NULL
+    WHERE dedupe_key IS NOT NULL AND id IS NOT NULL
     ORDER BY dedupe_key
     ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
         WHERE d.expires_at <= now()

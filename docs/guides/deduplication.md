@@ -83,6 +83,10 @@ _, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), RemindCustomer{OrderID: id}, &
 | Waiting, running, completed, or dead | When the window ends, even if the task has not run yet |
 | Canceled or deleted | Right away |
 
+"Right away" means when the cancel or the delete is committed. While a
+`CancelTx` waits in an open transaction, the task still holds the key, and
+an enqueue of the key is a duplicate.
+
 ## Retry a canceled task that has a key
 
 A retry gives the canceled task its key back, for the rest of the window.

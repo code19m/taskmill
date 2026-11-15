@@ -170,8 +170,31 @@ in a second statement. It does the same when the holder it sees is one
 whose window ended: the statement did not get that key, so another enqueue
 claimed it meanwhile, and its task is the one to report. Two concurrent
 enqueues of the same key cannot both succeed: the second waits on the
-first's key and then finds it taken. A duplicate wastes one sequence value,
-which is harmless.
+first's key and then finds it taken.
+
+**A duplicate writes nothing.** A claim that fails still locks the key's
+row: it takes a transaction ID and writes WAL, and its transaction commits
+as a write. So the real statement first looks: a task whose key it sees as
+held gets no ID from the sequence, and is left out of the claim. It is
+reported as a duplicate of the holder it saw. One duplicate enqueue read 43
+pages and wrote 1 to 3 WAL records before, and reads 17 pages and writes
+nothing now. A new key costs one more index lookup, 4 pages.
+
+Deduplication stays exact, because the claim alone still decides who gets a
+key: every task that is created went through it. Leaving a key out only
+gives the claim's answer early, and the two answers can differ in one case.
+The row of a held key changes in one way only: the cancel or the delete of
+its task removes it. An enqueue and a retry claim only a key whose window
+has ended. If such a removal is not committed when the statement begins,
+the claim would wait for it, and then take the key. The statement reports
+the duplicate instead: the answer of an enqueue that ran just before the
+removal, which is a correct order of the two.
+
+This holds only if the statement sees the keys as they are when it begins,
+as at READ COMMITTED. A caller's transaction at REPEATABLE READ or
+SERIALIZABLE sees them as they were when it began, so a key that it sees as
+held may be free. There the statement leaves no key out, and the claim,
+which looks at the rows as they are now, decides alone.
 
 `Cancel` and `Delete` delete the task's key, through the index on `task_id`,
 so the same key can be enqueued again right away. A completed or dead task
