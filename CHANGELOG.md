@@ -124,6 +124,35 @@ All notable changes to taskmill are recorded here. The format follows
   `pgx.Tx` or the pool itself there, or give the value an interface of
   your own that has the method, such as that `DBTX`.
 
+### Fixed
+
+- A FIFO group that has no row is now reported by every operation that
+  takes a task out of it. A group's row is missing only if something broke
+  the group, such as a `DELETE` by hand, and taskmill then logs
+  `fifo group missing` at Error. But only `Cancel`, `Delete`, an attempt
+  that ended dead or canceled, and a rescue did. A completion,
+  `CancelMatching`, and `DeleteMatching`, which end most tasks, logged
+  nothing. They now log the line too, with the `queue`, the `group`, and
+  the `task_id`. A bulk action that takes several tasks out of one such
+  group logs one line for them, without `task_id`. The tasks end as
+  before. If you see the line, please report it.
+- Three fixes for a FIFO group whose rows were changed by hand:
+  - **Two tasks of one group that complete in the same batch** are both
+    taken off the group's count. One stayed counted. The group's row then
+    never went away, and a task enqueued into the group later waited in
+    `pending` for good, behind a head that did not exist. A group has two
+    running tasks only after an `UPDATE` by hand, such as one that made a
+    pending task available.
+  - **A halt ends with the task that it names, however that task leaves
+    its group.** `Cancel` and `Delete` already ended such a halt. Now
+    `CancelMatching` and `DeleteMatching` end it too, and so does a
+    completion, after which the next task runs: the group stayed halted
+    by a task that was gone. taskmill halts a group only by its dead head,
+    so only a row written by hand names another task.
+  - **A rescue that ends two tasks of one group, one dead and one
+    canceled,** leaves the group halted by the dead one. It made the next
+    task available when the canceled task was the older of the two.
+
 ### Security
 
 - One value that taskmill never writes, in a small table, no longer takes a

@@ -40,19 +40,14 @@ type statements struct {
 
 	getTask       string
 	lockTask      string
-	retry         string
 	takeKeys      string
 	keyHolder     string
 	releaseKeys   string
 	deleteTask    string
 	deleteHistory string
 	taskExists    string
-	haltedBy      string
 
 	haltGroup         string
-	decrementGroup    string
-	deleteEmptyGroup  string
-	promoteGroup      string
 	lockGroups        string
 	lockLeased        string
 	recountGroups     string
@@ -428,16 +423,6 @@ LIMIT 1`),
 SELECT state::text, queue, coalesce(group_key, '')
 FROM {s}.tasks WHERE id = $1 AND (NOT $2 OR state = 'pending') FOR UPDATE`),
 
-		// retry makes task $1 run again, as pending if $2. It forgets the
-		// dedupe key that the task's cancel freed: takeKeys ran before.
-		retry: q(`
-UPDATE {s}.tasks
-SET state = CASE WHEN $2 THEN 'pending' ELSE 'available' END::{s}.task_state,
-    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted},
-    freed_key = NULL, freed_key_expires_at = NULL
-WHERE id = $1 AND state IN ('dead', 'canceled')
-RETURNING queue`),
-
 		// takeKeys gives the tasks $1, which a retry holds, the dedupe keys
 		// that their cancels freed, for the rest of each key's window. It
 		// claims a key as an enqueue does: only if no task holds it, or its
@@ -499,55 +484,11 @@ UNION ALL
 SELECT 'completed' FROM {s}.task_history WHERE id = $1
 LIMIT 1`),
 
-		// haltedBy reports whether task $3 halts its group. Callers run it as
-		// its own statement after locking the task, so that it sees the latest
-		// halt: only statements that hold the task's lock change whether the
-		// task halts its group.
-		haltedBy: q(`
-SELECT EXISTS (SELECT 1 FROM {s}.groups WHERE queue = $1 AND group_key = $2 AND halted_task_id = $3)`),
-
 		// haltGroup marks a group halted by its dead head, which stays
 		// counted.
 		haltGroup: q(`
 UPDATE {s}.groups SET halted_task_id = $3, halted_at = now(), updated_at = now()
 WHERE queue = $1 AND group_key = $2`),
-
-		// decrementGroup removes one task from a group's count, locking the
-		// group's row; if that task was the halting head, the halt ends. The
-		// count stops at zero. Only a row that taskmill did not write counts
-		// fewer tasks than its group holds, and a count below zero breaks the
-		// table's rule: the error would fail the caller's transaction, which
-		// in a rescue ends the expired leases of every queue.
-		decrementGroup: q(`
-UPDATE {s}.groups
-SET tasks = greatest(tasks - 1, 0),
-    halted_task_id = CASE WHEN halted_task_id = $3 THEN NULL ELSE halted_task_id END,
-    halted_at = CASE WHEN halted_task_id = $3 THEN NULL ELSE halted_at END,
-    updated_at = now()
-WHERE queue = $1 AND group_key = $2
-RETURNING tasks, halted_task_id IS NOT NULL`),
-
-		deleteEmptyGroup: q(`DELETE FROM {s}.groups WHERE queue = $1 AND group_key = $2 AND tasks = 0`),
-
-		// promoteGroup makes the oldest pending task of group ($1, $2) its
-		// head, notifying channel $3 if $4 and the task is available. It must
-		// run as its own statement after decrementGroup, so that it sees tasks
-		// enqueued while decrementGroup waited for the group's lock.
-		promoteGroup: q(`
-WITH next AS (
-    SELECT id FROM {s}.tasks
-    WHERE queue = $1 AND group_key = $2 AND state = 'pending'
-    ORDER BY id
-    LIMIT 1
-    FOR UPDATE
-), promoted AS (
-    UPDATE {s}.tasks t
-    SET state = CASE WHEN t.run_at > now() THEN 'scheduled' ELSE 'available' END::{s}.task_state
-    FROM next
-    WHERE t.id = next.id
-    RETURNING t.queue, t.state
-)
-SELECT count(pg_notify($3, '{available}' || queue)) FROM promoted WHERE $4 AND state = 'available'`),
 
 		// lockGroups locks the rows of groups ($1, $2) that no other
 		// transaction holds. It returns each locked group with true, and each
@@ -586,13 +527,36 @@ SELECT t.id, false FROM attempts JOIN {s}.tasks t USING (id, lease_token)
 WHERE {leased}`),
 
 		// recountGroups adds $3, which is negative for tasks that left, to the
-		// counts of groups ($1, $2). The caller holds the groups' locks, and
-		// has ended the halts of halting heads that left. A count stops at
-		// zero, as in decrementGroup: here the error would fail the
-		// completion of the tasks of every other group in the batch.
+		// counts of groups ($1, $2), and returns each group that has a row,
+		// with its count and whether it is still halted. A group is named
+		// once: an UPDATE changes a row once.
+		//
+		// $4 are the tasks that left, or none. If one of them halts its
+		// group, the halt ends here, with the task's place in the count. A
+		// halt that stayed would name a task that is no longer counted, or
+		// no longer exists: a retry of that task would end the halt and
+		// count the task as still there, and nothing could end the halt of
+		// a task that is gone. A task that taskmill halted a group by is
+		// dead, and leaves only when it is deleted, but a row written by
+		// hand can name any task.
+		//
+		// It locks the rows, and waits for one that another transaction
+		// holds. The plan decides in which order it takes the rows of
+		// several groups: a nested loop takes them in the order of the
+		// arrays, and a hash join can take them as they lie in the table.
+		//
+		// A count stops at zero. Only a row that taskmill did not write
+		// counts fewer tasks than its group holds, and a count below zero
+		// breaks the table's rule: the error would fail the caller's
+		// transaction, which in a rescue ends the expired leases of every
+		// queue, and in a completion the tasks of every other group in the
+		// batch.
 		recountGroups: q(`
 UPDATE {s}.groups g
-SET tasks = greatest(g.tasks + u.n, 0), updated_at = now()
+SET tasks = greatest(g.tasks + u.n, 0),
+    halted_task_id = CASE WHEN g.halted_task_id = ANY($4::bigint[]) THEN NULL ELSE g.halted_task_id END,
+    halted_at = CASE WHEN g.halted_task_id = ANY($4::bigint[]) THEN NULL ELSE g.halted_at END,
+    updated_at = now()
 FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
 WHERE g.queue = u.queue AND g.group_key = u.group_key
 RETURNING g.queue, g.group_key, g.tasks, g.halted_task_id IS NOT NULL`),
@@ -601,8 +565,11 @@ RETURNING g.queue, g.group_key, g.tasks, g.halted_task_id IS NOT NULL`),
 DELETE FROM {s}.groups g USING unnest($1::text[], $2::text[]) AS u(queue, group_key)
 WHERE g.queue = u.queue AND g.group_key = u.group_key AND g.tasks = 0`),
 
-		// promoteGroups is promoteGroup for groups ($1, $2), notifying the
-		// queues in $4.
+		// promoteGroups makes the oldest pending task of each group ($1, $2)
+		// its head, and notifies channel $3 of the queues in $4 that got an
+		// available task. It must run as its own statement after
+		// recountGroups, so that it sees tasks enqueued while recountGroups
+		// waited for a group's lock.
 		promoteGroups: q(`
 WITH next AS (
     SELECT p.id FROM unnest($1::text[], $2::text[]) AS u(queue, group_key)
@@ -639,6 +606,11 @@ INSERT INTO {s}.groups AS g (queue, group_key, tasks) VALUES ($1, $2, 1)
 ON CONFLICT (queue, group_key) DO UPDATE SET tasks = g.tasks + 1, updated_at = now()
 RETURNING tasks`),
 
+		// resumeHaltedHead ends the halt of group ($1, $2) if task $3 halts
+		// it: it changes a row only then. Callers run it as its own statement
+		// after locking the task, so that it sees the latest halt: only
+		// statements that hold the task's lock change whether the task halts
+		// its group.
 		resumeHaltedHead: q(`
 UPDATE {s}.groups SET halted_task_id = NULL, halted_at = NULL, updated_at = now()
 WHERE queue = $1 AND group_key = $2 AND halted_task_id = $3`),
@@ -696,9 +668,11 @@ ORDER BY queue COLLATE "C", group_key COLLATE "C"
 ON CONFLICT DO NOTHING
 RETURNING queue, group_key`),
 
-		// retryTasks retries the picked tasks $1, those of $2 into pending,
-		// and notifies channel $3 of queues $4. Like retry, it runs after
-		// takeKeys.
+		// retryTasks makes the tasks $1 run again, one task or a batch, those
+		// of $2 as pending, and notifies channel $3 of queues $4. The caller
+		// holds the tasks' rows, and has seen that they are dead or canceled.
+		// It forgets the dedupe keys that the tasks' cancels freed: takeKeys
+		// ran before.
 		retryTasks: q(`
 WITH retried AS (
     UPDATE {s}.tasks

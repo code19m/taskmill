@@ -216,11 +216,8 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64, check bool) er
 	if s == StateRunning || group == "" {
 		return nil
 	}
-	how := leftHead
-	if s == StatePending {
-		how = leftWaiting
-	}
-	if err := c.leaveGroup(ctx, c.logger, q, queue, group, id, how); err != nil {
+	left := []groupLeave{{id: id, queue: queue, group: group, head: s != StatePending}}
+	if err := c.leaveGroups(ctx, c.logger, q, left); err != nil {
 		return fail(err)
 	}
 	return nil
@@ -247,10 +244,11 @@ func (c *Client) Retry(ctx context.Context, id int64) error {
 }
 
 func (c *Client) retry(ctx context.Context, q querier, id int64) error {
+	fail := func(err error) error { return fmt.Errorf("taskmill: retry task %d: %w", id, err) }
 	var state, queue, group string
 	found, err := queryRow(ctx, q, c.sql.lockTask, []any{id, false}, &state, &queue, &group)
 	if err != nil {
-		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+		return fail(err)
 	}
 	if !found {
 		return c.stateError(ctx, q, id, "retry")
@@ -262,12 +260,12 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	// The key comes before the group, as in an enqueue.
 	refused, err := c.takeKeys(ctx, q, []int64{id})
 	if err != nil {
-		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+		return fail(err)
 	}
 	if refused[id] {
 		held, err := c.keyHolder(ctx, q, id)
 		if err != nil {
-			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+			return fail(err)
 		}
 		return fmt.Errorf("%w: cannot retry task %d: %s", ErrConflict, id, held)
 	}
@@ -275,16 +273,20 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	pending := false
 	if group != "" {
 		if pending, err = c.rejoinGroup(ctx, q, queue, group, id); err != nil {
-			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+			return fail(err)
 		}
 	}
-	if _, err := q.exec(ctx, c.sql.retry, id, pending); err != nil {
-		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+	// The statement of a bulk retry, with one task: it also notifies the
+	// queue of a task that is available again.
+	waiting := []int64{} // the tasks that become pending: this one, or none
+	var notify []string
+	if pending {
+		waiting = append(waiting, id)
+	} else {
+		notify = c.notifiable(ctx, []string{queue})
 	}
-	if !pending {
-		if err := c.notifyAvailable(ctx, c.logger, q, queue); err != nil {
-			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
-		}
+	if _, err := q.exec(ctx, c.sql.retryTasks, []int64{id}, waiting, c.schema, notify); err != nil {
+		return fail(err)
 	}
 	return nil
 }
@@ -339,14 +341,11 @@ func (c *Client) takeKeys(ctx context.Context, q querier, ids []int64) (refused 
 
 // rejoinGroup counts a retried task back into its FIFO group, and reports
 // whether it must wait behind the group's other tasks. A dead head that halts
-// its group is still counted: retrying it resumes the group.
+// its group is still counted: retrying it resumes the group. The caller
+// holds the task's lock.
 func (c *Client) rejoinGroup(ctx context.Context, q querier, queue, group string, id int64) (pending bool, err error) {
-	halting, err := c.haltedBy(ctx, q, queue, group, id)
-	if err != nil {
-		return false, err
-	}
-	if halting {
-		_, err = q.exec(ctx, c.sql.resumeHaltedHead, queue, group, id)
+	resumed, err := q.exec(ctx, c.sql.resumeHaltedHead, queue, group, id)
+	if err != nil || resumed == 1 {
 		return false, err
 	}
 	var tasks int
@@ -354,14 +353,6 @@ func (c *Client) rejoinGroup(ctx context.Context, q querier, queue, group string
 		return false, err
 	}
 	return tasks > 1, nil
-}
-
-// haltedBy reports whether task id halts its group. The caller must hold the
-// task's lock.
-func (c *Client) haltedBy(ctx context.Context, q querier, queue, group string, id int64) (bool, error) {
-	var halting bool
-	_, err := queryRow(ctx, q, c.sql.haltedBy, []any{queue, group, id}, &halting)
-	return halting, err
 }
 
 // Delete deletes a task that is not running, including a completed task in
@@ -376,44 +367,44 @@ func (c *Client) Delete(ctx context.Context, id int64) error {
 
 // delete deletes task id on q. check is for takeTask.
 func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) error {
+	fail := func(err error) error { return fmt.Errorf("taskmill: delete task %d: %w", id, err) }
 	var state, queue, group string
 	found, err := c.takeTask(ctx, q, id, c.sql.deleteTask, check, &state, &queue, &group)
 	if err != nil {
-		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+		return fail(err)
 	}
 	if !found {
-		n, herr := q.exec(ctx, c.sql.deleteHistory, id)
-		if herr != nil {
-			return fmt.Errorf("taskmill: delete task %d: %w", id, herr)
+		n, err := q.exec(ctx, c.sql.deleteHistory, id)
+		if err != nil {
+			return fail(err)
 		}
 		if n == 0 {
 			return c.stateError(ctx, q, id, "delete")
 		}
 	}
 	if _, err := q.exec(ctx, c.sql.releaseKeys, []int64{id}); err != nil {
-		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+		return fail(err)
 	}
 	if !found || group == "" {
 		return nil
 	}
 	// Unfinished tasks are counted in their group, and so is a dead head that
-	// halts it.
+	// halts it: its halt ends here.
 	s := State(state)
 	counted := !s.Finished()
 	if !counted {
-		if counted, err = c.haltedBy(ctx, q, queue, group, id); err != nil {
-			return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+		resumed, err := q.exec(ctx, c.sql.resumeHaltedHead, queue, group, id)
+		if err != nil {
+			return fail(err)
 		}
+		counted = resumed == 1
 	}
 	if !counted {
 		return nil
 	}
-	how := leftHead
-	if s == StatePending {
-		how = leftWaiting
-	}
-	if err := c.leaveGroup(ctx, c.logger, q, queue, group, id, how); err != nil {
-		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
+	left := []groupLeave{{id: id, queue: queue, group: group, head: s != StatePending}}
+	if err := c.leaveGroups(ctx, c.logger, q, left); err != nil {
+		return fail(err)
 	}
 	return nil
 }
@@ -504,70 +495,62 @@ func (c *Client) stateError(ctx context.Context, q querier, id int64, op string)
 	return fmt.Errorf("%w: cannot %s task %d in state %s", ErrInvalidState, op, id, state)
 }
 
-// leaving says how a counted task left its FIFO group.
-type leaving int
-
-const (
-	leftWaiting  leaving = iota // a pending task left: the head stays
-	leftHead                    // the head finished or was removed: the next task becomes the head
-	leftDeadHead                // the head became dead: the group halts behind it
-)
-
-// leaveGroup updates a FIFO group after one of its counted tasks finished or
-// was removed. Callers run it in the same transaction as the change to the
-// task, and pass their logger: a worker's names it.
-func (c *Client) leaveGroup(ctx context.Context, logger *slog.Logger, q querier, queue, group string, id int64, how leaving) error {
-	if how == leftDeadHead {
-		halted, err := q.exec(ctx, c.sql.haltGroup, queue, group, id)
-		if err != nil || halted == 1 {
-			return err
-		}
-	}
-
-	var remaining int
-	var halted bool
-	found, err := queryRow(ctx, q, c.sql.decrementGroup, []any{queue, group, id}, &remaining, &halted)
-	if err != nil {
-		return err
-	}
-	switch {
-	case !found:
-		logger.LogAttrs(ctx, slog.LevelError, "fifo group missing",
-			slog.String(logKeyQueue, queue), slog.String(logKeyGroup, group), slog.Int64(logKeyTaskID, id))
-		return nil
-	case remaining == 0:
-		_, err = q.exec(ctx, c.sql.deleteEmptyGroup, queue, group)
-		return err
-	case how != leftWaiting && !halted:
-		_, err = q.exec(ctx, c.sql.promoteGroup, queue, group, c.schema, c.notifier.allow(ctx, queue))
-		return err
-	default:
-		return nil
-	}
-}
-
-// groupLeave is a FIFO group that some of its counted tasks left.
+// groupLeave is a counted task that left its FIFO group.
 type groupLeave struct {
+	id           int64
 	queue, group string
-	tasks        int  // how many left
-	head         bool // its head was among them: the next task becomes the head
+	head         bool // it was the group's head, not a pending task behind it
 }
 
-// leaveGroups is leaveGroup for many groups, with a few statements for all
-// of them. The caller holds the groups' locks, and has ended the halts of
-// the halting heads that left.
-func (c *Client) leaveGroups(ctx context.Context, q querier, left []groupLeave) error {
-	queues := make([]string, len(left))
-	groups := make([]string, len(left))
-	counts := make([]int, len(left))
-	heads := make(map[[2]string]bool)
-	for i, l := range left {
-		queues[i], groups[i], counts[i] = l.queue, l.group, -l.tasks
-		if l.head {
-			heads[[2]string{l.queue, l.group}] = true
-		}
+// leaveGroups updates FIFO groups after counted tasks of theirs finished or
+// were removed: one task or many, each an entry of left. It takes the tasks
+// off their groups' counts, and ends a halt that names one of them: a halt
+// must not outlive the place of its task in the count. It deletes a group
+// that has no task left, and makes the oldest pending task the head of a
+// group whose head left, unless another task halts the group. A group that
+// has no row, which should never happen, is logged.
+//
+// Callers run it in the transaction that changed the tasks, and pass their
+// logger: a worker's names it. It waits for a group's row that another
+// transaction holds. It takes the rows of several groups in the order that
+// the plan of its statement gives, which is not always the order of left:
+// a caller cannot choose a lock order here. The callers with more than one
+// group hold the rows before they call: lockGroups, the pick statements,
+// and the rescue took them, and only rows that were free.
+//
+// The exception is completeWaiting, the last completions of a worker that
+// stops, for the groups whose rows were held until then. It can meet a
+// transaction that takes the same rows in another order, such as one of
+// the application that enqueues into several groups. PostgreSQL then ends
+// one of the two, and a completion that it ended runs again (whileLeased).
+func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier, left []groupLeave) error {
+	if len(left) == 0 {
+		return nil
 	}
-	r, err := q.query(ctx, c.sql.recountGroups, queues, groups, counts)
+	// Each group goes to the recount once, with all its tasks that left: an
+	// UPDATE changes a row once.
+	type leave struct {
+		tasks int   // how many of the group's tasks left
+		id    int64 // one of them: the task, if only one left
+		head  bool  // its head was among them: the next task becomes the head
+	}
+	var asked groupSet
+	ids := make([]int64, len(left))
+	leaves := make(map[[2]string]leave, len(left)) // by group, until its row is read back
+	for i, l := range left {
+		ids[i] = l.id
+		key := [2]string{l.queue, l.group}
+		g, seen := leaves[key]
+		if !seen {
+			asked.add(l.queue, l.group)
+		}
+		leaves[key] = leave{tasks: g.tasks + 1, id: l.id, head: g.head || l.head}
+	}
+	counts := make([]int, len(asked.queues))
+	for i := range counts {
+		counts[i] = -leaves[[2]string{asked.queues[i], asked.groups[i]}].tasks
+	}
+	r, err := q.query(ctx, c.sql.recountGroups, asked.queues, asked.groups, counts, ids)
 	if err != nil {
 		return err
 	}
@@ -580,16 +563,22 @@ func (c *Client) leaveGroups(ctx context.Context, q querier, left []groupLeave) 
 			r.Close()
 			return err
 		}
+		key := [2]string{queue, group}
+		head := leaves[key].head
+		delete(leaves, key)
 		switch {
 		case remaining == 0:
 			empty.add(queue, group)
-		case !halted && heads[[2]string{queue, group}]:
+		case head && !halted:
 			next.add(queue, group)
 		}
 	}
 	r.Close()
 	if err := r.Err(); err != nil {
 		return err
+	}
+	for key, g := range leaves { // not read back: the group has no row
+		groupMissing(ctx, logger, key[0], key[1], g.tasks, g.id)
 	}
 	if len(empty.queues) > 0 {
 		if _, err := q.exec(ctx, c.sql.deleteEmptyGroups, empty.queues, empty.groups); err != nil {
@@ -600,6 +589,29 @@ func (c *Client) leaveGroups(ctx context.Context, q querier, left []groupLeave) 
 		return nil
 	}
 	return c.promoteGroups(ctx, q, next)
+}
+
+// haltGroup halts a FIFO group behind its head, task id, which became dead
+// and stays counted. Callers run it in the transaction that made the task
+// dead, with their logger. A group that has no row is logged, as in
+// leaveGroups.
+func (c *Client) haltGroup(ctx context.Context, logger *slog.Logger, q querier, queue, group string, id int64) error {
+	halted, err := q.exec(ctx, c.sql.haltGroup, queue, group, id)
+	if err == nil && halted == 0 {
+		groupMissing(ctx, logger, queue, group, 1, id)
+	}
+	return err
+}
+
+// groupMissing logs a FIFO group that has no row, which should never happen,
+// for the tasks that left it or halted it. The line names the task, id, if
+// it is the only one.
+func groupMissing(ctx context.Context, logger *slog.Logger, queue, group string, tasks int, id int64) {
+	attrs := []slog.Attr{slog.String(logKeyQueue, queue), slog.String(logKeyGroup, group)}
+	if tasks == 1 {
+		attrs = append(attrs, slog.Int64(logKeyTaskID, id))
+	}
+	logger.LogAttrs(ctx, slog.LevelError, "fifo group missing", attrs...)
 }
 
 // groupSet holds groups as two parallel slices, as statements take them.

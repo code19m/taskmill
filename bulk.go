@@ -702,12 +702,16 @@ func briefly(ctx context.Context, q querier, fn func() error) (done bool, err er
 // The other tasks of a group that has a row wait behind its head. A group
 // that has no row gets one, and its oldest task becomes its head; if it
 // cannot get one now, its tasks are left out.
+//
+// The two are not one function, as leaveGroups is for the way out of a
+// group: one task waits for its group's row and joins, and a batch never
+// waits.
 func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (retried []bulkTask, pending []int64, err error) {
 	resumed, err := c.releaseHalts(ctx, q, ts)
 	if err != nil {
 		return nil, nil, err
 	}
-	pending = []int64{} // not nil: the statement compares with every element
+	pending = []int64{} // the tasks that become pending, or none
 	for _, t := range ts {
 		if t.group == "" || resumed[t.id] {
 			retried = append(retried, t)
@@ -715,7 +719,8 @@ func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (re
 	}
 	counted, missing, byGroup := groupTasks(ts, resumed)
 	if len(counted.queues) > 0 {
-		if _, err := q.exec(ctx, c.sql.recountGroups, counted.queues, counted.groups, counted.sizes(byGroup)); err != nil {
+		left := []int64{} // the tasks join their groups: none leaves
+		if _, err := q.exec(ctx, c.sql.recountGroups, counted.queues, counted.groups, counted.sizes(byGroup), left); err != nil {
 			return nil, nil, err
 		}
 		for _, t := range counted.tasks(byGroup) {
@@ -926,23 +931,10 @@ func (c *Client) releaseHalts(ctx context.Context, q querier, ts []bulkTask) (ma
 // those for which leaves is true, after the tasks changed.
 func (c *Client) leaveAll(ctx context.Context, q querier, ts []bulkTask, leaves func(bulkTask) bool) error {
 	var left []groupLeave
-	index := make(map[[2]string]int)
 	for _, t := range ts {
-		if t.group == "" || !leaves(t) {
-			continue
+		if t.group != "" && leaves(t) {
+			left = append(left, groupLeave{id: t.id, queue: t.queue, group: t.group, head: t.state != StatePending})
 		}
-		key := [2]string{t.queue, t.group}
-		i, ok := index[key]
-		if !ok {
-			i = len(left)
-			index[key] = i
-			left = append(left, groupLeave{queue: t.queue, group: t.group})
-		}
-		left[i].tasks++
-		left[i].head = left[i].head || t.state != StatePending
 	}
-	if len(left) == 0 {
-		return nil
-	}
-	return c.leaveGroups(ctx, q, left)
+	return c.leaveGroups(ctx, c.logger, q, left)
 }
