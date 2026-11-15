@@ -27,6 +27,7 @@ import (
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/argkind"
+	"github.com/code19m/taskmill/internal/recovered"
 )
 
 // workLimit bounds how long Work waits for the queues to empty.
@@ -126,7 +127,7 @@ func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Han
 			ran = true
 			defer func() {
 				if r := recover(); r != nil {
-					handlerErr = fmt.Errorf("handler panicked: %v", r)
+					handlerErr = fmt.Errorf("handler panicked: %s", recovered.Text(r))
 					panic(r) // for the worker to record, as it would in production
 				}
 			}()

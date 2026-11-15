@@ -10,9 +10,9 @@ queues, and how notifications and polling wake the workers.
 |---|---|
 | Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
 | Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
-| Retention | Every minute, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that made no check-in for 5 minutes, or for twice their `LeaseDuration` if that is longer, and schedules that the maintainer does not define and that did not run or change for a day. |
-| History | Keeps partitions for today and the next 6 days, and drops a partition once its whole day is older than the retention period (see [Operational notes](schema.md#operational-notes)). |
-| Statistics | Every 10 seconds, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. |
+| Retention | Every minute, in a loop of its own, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that made no check-in for 5 minutes, or for twice their `LeaseDuration` if that is longer, and schedules that the maintainer does not define and that did not run or change for a day. |
+| History | Every minute, keeps partitions for today and the next 6 days, and drops up to 10 partitions whose whole day is older than the retention period (see [Operational notes](schema.md#operational-notes)). |
+| Statistics | Every 10 seconds, in a loop of its own, so that a long retention pass never delays it, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when the lease has expired. |
 
 - **Retention stays on its index.** It finds the queues that have dead or
@@ -21,6 +21,10 @@ queues, and how notifications and polling wake the workers.
   looks up each old task's halt by its group's key.
 - **The database's clock decides the history's days:** which days need a
   partition, and which partitions have expired, in UTC.
+- **Retention drops only the history that it detached.** A pass marks a
+  partition with a comment before it detaches it. It drops a table that is
+  no partition only with that mark, so one that an operator detached stays.
+  A later pass finishes what failed: see [`maintainer.go`](../../maintainer.go).
 - **A failed election try writes nothing.** The upsert proposes its row only
   if no other worker's lease lasts. A conflict would lock the leader's row,
   and make every try of every other worker a write.
@@ -158,8 +162,8 @@ send one, as often as it likes, also a role with no rights on taskmill's
 tables. So a worker changes nothing because of a notification alone, and
 never reads the database where it receives them:
 
-- **`a|` only wakes a fetch,** which reads the tables. A worker whose fetch
-  found nothing pauses 20 ms before it acts on the next one.
+- **`a|` only wakes a fetch,** which reads the tables. After a fetch that
+  found nothing, the next `a|` waits 20 ms. A worker's own tasks do not.
 - **`c|` and `q|` only mark what they name.** One loop for each then reads
   the truth: the cancel requests in the rows of the marked tasks, by ID and
   lease token, in one statement for all of them, and the queues' settings.
@@ -205,7 +209,7 @@ heartbeats:
 |---|---|---|
 | Heartbeats arrive | Once a minute | About 2 seconds: the maintainer wakes its queue |
 | No heartbeat came for 15 seconds, three missed | Every `PollInterval`, starting right away | About 16 seconds after the last heartbeat. From then on, `PollInterval` |
-| A `MaxRunning` limit blocked the queue's last fetch | Every `PollInterval` | `PollInterval`: finishing a task sends no notification |
+| A `MaxRunning` limit blocked the queue's last fetch | Every `PollInterval` | `PollInterval`, when another worker's task made the room: finishing a task sends no notification |
 
 - **While heartbeats arrive,** notifications reach the worker, and the
   maintainer wakes every queue whose task waits. The poll once a minute only
@@ -218,7 +222,8 @@ heartbeats:
 - **A maintainer that stops hands over without such a gap.** It resigns with
   `r|`, and another worker takes over and sends its heartbeat.
 - **A new connection makes every queue fetch right away,** since
-  notifications may have been missed meanwhile.
+  notifications may have been missed meanwhile. The worker also reads its
+  queues' settings again then: it may have missed a pause.
 
 ### The notification connection
 

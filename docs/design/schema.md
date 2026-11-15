@@ -124,7 +124,7 @@ caller's key, so index entries stay small. A key blocks duplicates until
 `expires_at`, unless its task is canceled or deleted. The index on
 `expires_at` serves retention, and the one on `task_id` lets `Cancel` and
 `Delete` release a task's key, which a cancel stores in `tasks.freed_key`
-and `freed_key_expires_at` for a [retry](schema-groups.md#deduplication).
+and `freed_key_expires_at` for a [retry](schema-operations.md#a-retry-takes-its-dedupe-key-back).
 
 ### Settings, coordination, and bookkeeping
 
@@ -220,10 +220,10 @@ index-only scan).
   `task_history` alone, not its partitions, in `SHARE UPDATE EXCLUSIVE` mode,
   which attaching takes anyway, and waits for it at most 5 seconds. So
   processes that create partitions at the same time wait for each other.
-- **Old partitions are detached, then dropped.** The detach is
-  `DETACH PARTITION ... CONCURRENTLY`, bounded by 30 seconds. An interrupted
-  detach is finished next time with `DETACH PARTITION ... FINALIZE`. These
-  commands need ownership of `task_history`.
+- **Old partitions are detached, then dropped,** with
+  `DETACH PARTITION ... CONCURRENTLY`, bounded by 30 seconds. These commands
+  need ownership of `task_history`. A later pass finishes a step that failed
+  (see [Maintenance](schema-maintenance.md#maintenance)).
 - **There is no default partition.** Attaching a partition would then have to
   scan and lock it. If a day's partition is missing, completions skip history
   and the worker logs an error, so the gap shows up in alerts.

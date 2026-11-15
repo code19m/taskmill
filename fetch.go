@@ -22,17 +22,19 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 	fetches := newFailures(w, "fetch tasks", slog.String(logKeyQueue, q.name))
 
 	// notified reports that a notification caused the last fetch, and held
-	// that the queue's MaxRunning limit blocked tasks.
+	// that the queue's MaxRunning limit blocked tasks. Until quietUntil, the
+	// loop leaves notifications waiting.
 	notified, held := false, false
-	wait := func(pause bool) (ok bool) {
-		ok, notified = waitForWork(ctx, q, w.pollWait(held), pause)
+	var quietUntil time.Time
+	wait := func() (ok bool) {
+		ok, notified = waitForWork(ctx, q, w.pollWait(held), quietUntil)
 		return ok
 	}
 
 	for ctx.Err() == nil {
 		free := cap(q.slots) - len(q.slots)
 		if q.paused.Load() || free == 0 {
-			if !wait(false) {
+			if !wait() {
 				return
 			}
 			continue
@@ -41,15 +43,12 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 		held = limited
 		fetches.observe(ctx, err)
 		w.dispatch(ctx, r, q, tasks)
-		if err != nil {
-			if !wait(false) {
-				return
-			}
-			continue
-		}
 		// A notification wakes every worker of the queue, and most find
-		// nothing: those pause before acting on the next one.
-		if !more && !wait(notified && len(tasks) == 0) {
+		// nothing: those let a moment pass before they act on the next one.
+		if err == nil && notified && len(tasks) == 0 {
+			quietUntil = time.Now().Add(w.timing.quiet)
+		}
+		if (err != nil || !more) && !wait() {
 			return
 		}
 	}
@@ -63,7 +62,8 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 // heartbeat, so this poll only bounds the harm of a fault in that. Otherwise
 // it polls every PollInterval, and so does a queue whose installation-wide
 // limit held tasks back: no notification says when another worker's task of
-// that queue ends.
+// that queue ends. The end of this worker's own task wakes the queue (see
+// madeRoom).
 func (w *Worker) pollWait(held bool) time.Duration {
 	if held || !w.notifying.Load() {
 		return w.cfg.PollInterval
@@ -76,19 +76,24 @@ func (w *Worker) pollWait(held bool) time.Duration {
 }
 
 // waitForWork waits for a nudge, a freed slot, or the poll. It reports false
-// if ctx ends first, and whether a nudge woke it. If pause is set, it first
-// lets a moment pass, which gathers the nudges that arrive meanwhile into one
-// fetch.
-func waitForWork(ctx context.Context, q *queueState, poll time.Duration, pause bool) (ok, nudged bool) {
-	if pause {
+// if ctx ends first, and whether a nudge woke it. Until quietUntil, it
+// leaves nudges waiting, which gathers those that arrive meanwhile into one
+// fetch. A freed slot wakes it at any time: that is the worker's own news,
+// not a hint, and it comes no more often than the worker's tasks end.
+func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUntil time.Time) (ok, nudged bool) {
+	timer := time.NewTimer(poll)
+	defer timer.Stop()
+	if quiet := time.Until(quietUntil); quiet > 0 {
 		select {
 		case <-ctx.Done():
 			return false, false
-		case <-time.After(emptyFetchCooldown):
+		case <-q.freed:
+			return true, false
+		case <-timer.C:
+			return true, false
+		case <-time.After(quiet):
 		}
 	}
-	timer := time.NewTimer(poll)
-	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return false, false

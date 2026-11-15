@@ -655,6 +655,62 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 	}
 }
 
+// The worker that completes the head of a FIFO group fetches the group's
+// next task itself: it does not wait for a notification, which a client
+// sends for a queue at most once in 50 ms. And the moment for which a queue
+// leaves notifications waiting, after one's fetch found nothing, holds back
+// notifications only, not that fetch. Here the moment never ends, and each
+// task sends a notification. The group's tasks follow each other all the
+// same, with two fetches each, and the notifications add none.
+func TestFIFOGroupRunsWhileNotificationsWait(t *testing.T) {
+	t.Parallel()
+	const tasks = 20
+	e, fetches := newCountedEnv(t)
+	params := make([]taskmill.EnqueueParams, tasks)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}, Options: &taskmill.EnqueueOptions{GroupKey: "account-7"}}
+	}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
+	}
+	notify := replaceSchema("SELECT pg_notify('{s}', 'a|"+taskmill.DefaultQueue+"')", e.schema)
+	started, release := make(chan int64, tasks), make(chan struct{})
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			if _, err := e.pool.Exec(ctx, notify); err != nil {
+				return err
+			}
+			started <- task.Args.UserID
+			<-release
+			return nil
+		}, nil),
+		Queues:       defaultQueue(2),
+		PollInterval: time.Hour,
+		NoMaintainer: true,
+	})
+	taskmill.SetTiming(w, taskmill.Timing{Quiet: time.Hour})
+	startWorker(t, w)
+
+	// While the group's first task runs, a notification's fetch finds
+	// nothing: the first task's own, or the one of the listener's start.
+	// From that second fetch on, the queue hears no notification.
+	recv(t, started, "the group's first task to start")
+	waitFor(t, "a notification's fetch to find nothing", func() bool { return fetches.n.Load() >= 2 })
+
+	before := fetches.n.Load()
+	close(release)
+	for i := 1; i < tasks; i++ {
+		if got := recv(t, started, "the group's next task to start"); got != int64(i) {
+			t.Fatalf("task %d of the group ran in place %d", got, i)
+		}
+	}
+	// One fetch when a task frees its slot, which comes too early to find
+	// the next task, and one when its completion is recorded.
+	if n := fetches.n.Load() - before; n > 2*tasks {
+		t.Errorf("the worker fetched %d times for %d tasks, want at most %d: notifications got through", n, tasks, 2*tasks)
+	}
+}
+
 // The task's row decides whether an attempt ends in a cancellation, whatever
 // the worker believed while the handler ran.
 func TestAttemptEndsCanceledOnlyIfTheTaskSaysSo(t *testing.T) {
@@ -754,6 +810,67 @@ func TestWorkerDrainsRunningTasksOnShutdown(t *testing.T) {
 	e.wantState(t, id, taskmill.StateCompleted)
 	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
 		t.Fatalf("stopped worker is still registered")
+	}
+}
+
+// A worker that stops says that it waits for running tasks only when it
+// does. It counts the tasks whose handlers run: not a task whose handler
+// returned, and whose result it has yet to record.
+func TestStoppingWorkerSaysThatItWaitsOnlyWhenTasksRun(t *testing.T) {
+	t.Parallel()
+	const waiting = "worker stopping; waiting for running tasks"
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	started, release := make(chan struct{}, 3), make(chan struct{})
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			if task.GroupKey == "" {
+				<-release
+			}
+			return nil
+		}, nil),
+		Queues:       defaultQueue(2),
+		NoMaintainer: true,
+	})
+
+	// An idle worker stops without a word about waiting.
+	stop := startWorker(t, w)
+	waitFor(t, "the worker to start", func() bool { return logs.count("worker started") == 1 })
+	stop()
+	if n := logs.count(waiting); n != 0 {
+		t.Fatalf("an idle worker said %d times that it waits for running tasks", n)
+	}
+
+	// It runs again, with three tasks. The handler of the first, a task of a
+	// FIFO group, returns right away, and its result waits: a transaction
+	// holds the group's row. The worker has two slots, so the third task
+	// starts in the slot that the first gave back: once all three have
+	// started, the first handler is through.
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "held"})
+	e.enqueue(t, sendEmail{}, nil)
+	e.enqueue(t, sendEmail{}, nil)
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.groups FOR UPDATE")
+	stop = startWorker(t, w)
+	for range 3 {
+		recv(t, started, "a handler to start")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	waitFor(t, "the worker to say that it waits", func() bool { return logs.count(waiting) == 1 })
+	close(release)
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, stopped, "the worker to stop")
+	for _, r := range logs.all() {
+		if r.Message == waiting && attr(r, "tasks") != "2" {
+			t.Fatalf("the worker said that it waits for %s tasks, want the 2 whose handlers ran", attr(r, "tasks"))
+		}
 	}
 }
 
@@ -1098,6 +1215,56 @@ func TestFetchDoesNotLockAQueueAtItsLimit(t *testing.T) {
 		t.Errorf("peak concurrency %d, want the limit of 1", p)
 	}
 	e.wantState(t, waiting, taskmill.StateRunning)
+}
+
+// A task that ends in a queue at its limit makes room for one more. Its
+// worker fetches when the result is recorded, not only when the slot is
+// free: a fetch that comes before the result still counts the task as
+// running, finds no room, and leaves the queue below its limit until the
+// next poll. Here no poll comes, and each start counts the running tasks.
+func TestLimitedQueueStartsATaskWhenOneEnds(t *testing.T) {
+	t.Parallel()
+	const limit, tasks = 2, 8
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	e.limitDefaultQueue(t, limit)
+	for range tasks {
+		e.enqueue(t, sendEmail{}, nil)
+	}
+	running := replaceSchema("SELECT count(*) FILTER (WHERE state = 'running') FROM {s}.tasks", e.schema)
+	started, release := make(chan int, tasks), make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			var n int
+			if err := e.pool.QueryRow(ctx, running).Scan(&n); err != nil {
+				return err
+			}
+			started <- n
+			<-release
+			return nil
+		}, nil),
+		Queues:       defaultQueue(2 * limit),
+		PollInterval: time.Hour,
+		NoMaintainer: true, // nothing wakes the queue either
+	})
+	t.Cleanup(func() { close(release) })
+	// The listener's start wakes every queue once: that must not stand in
+	// for the fetch that the test waits for.
+	e.waitListening(t)
+
+	for i := range tasks {
+		if i >= limit {
+			release <- struct{}{}
+		}
+		if n := recv(t, started, "a task to start in the room that the last one left"); n != limit {
+			t.Fatalf("task %d started with %d tasks running, want the limit of %d", i+1, n, limit)
+		}
+	}
+	// A fetch that leases locks the queue's row once. More locks than
+	// tasks would mean fetches that found no room.
+	if n := sent.count(queueLock); n > tasks {
+		t.Errorf("the worker locked the queue's row %d times to start %d tasks", n, tasks)
+	}
 }
 
 func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
@@ -1712,6 +1879,63 @@ func TestFailedSettingsRefreshKeepsQueuesPaused(t *testing.T) {
 	id := e.enqueue(t, sendEmail{}, nil)
 	e.waitState(t, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "canary"}), taskmill.StateCompleted)
 	e.wantState(t, id, taskmill.StateAvailable)
+}
+
+// Pause is a tool for incidents: a worker must not fetch from a queue before
+// it knows the queue's settings. Here its first read of them cannot end. The
+// worker gives that read up by itself, fetches nothing, says that it is not
+// ready, and reads again until a read works.
+func TestWorkerDoesNotFetchBeforeItKnowsItsQueuesSettings(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
+		t.Fatal(err)
+	}
+	paused := e.enqueue(t, sendEmail{}, nil)
+	ran := make(chan string, 2)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			ran <- task.Queue
+			return nil
+		}, nil),
+		Queues:       map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}, "canary": {}},
+		NoMaintainer: true,
+	})
+	// A read may take as long as the interval between two reads.
+	taskmill.SetTiming(w, taskmill.Timing{Settings: 100 * time.Millisecond})
+
+	// The worker starts while a read of the settings cannot end.
+	tx := e.begin(t)
+	e.txExec(t, tx, "LOCK TABLE {s}.queues IN ACCESS EXCLUSIVE MODE")
+	stop := startWorker(t, w)
+	waitFor(t, "the worker to give up its read of the settings", func() bool {
+		return len(operationLines(logs.all())["load queue settings"]) > 0
+	})
+	// A worker that takes no task is not ready, and says why.
+	if err := w.Health(); err == nil || !strings.Contains(err.Error(), "settings") {
+		t.Errorf("a worker that has not read its queues' settings reports the health %v", err)
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The canary's queue is not paused: its task shows that the worker read
+	// the settings again, and fetches.
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "canary"})
+	if queue := recv(t, ran, "the canary's task to run"); queue != "canary" {
+		t.Fatalf("a task of the paused queue %q ran: the worker fetched before it knew the queue's settings", queue)
+	}
+	if err := w.Health(); err != nil {
+		t.Errorf("the worker read its queues' settings, and reports the health %v", err)
+	}
+	// A worker that stops gives back a task that it fetched and did not
+	// start, so the task's state alone does not show a fetch.
+	stop()
+	if info := e.get(t, paused); info.State != taskmill.StateAvailable || !info.AttemptedAt.IsZero() {
+		t.Fatalf("the worker fetched a task of the paused queue before it knew the queue's settings: it is %s, fetched at %s",
+			info.State, info.AttemptedAt)
+	}
 }
 
 func TestAttemptThatLostItsLeaseIsCanceledAndDiscarded(t *testing.T) {

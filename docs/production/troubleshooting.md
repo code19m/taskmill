@@ -24,6 +24,7 @@ shows many available tasks.
 | The workers are full | Running tasks are about replicas × `Concurrency` | Add replicas, or raise `Concurrency` and the pool with it |
 | A queue limit (`MaxRunning`) blocks tasks | `QueueInfo.Settings.MaxRunning` is set, and running tasks equal it | Raise or remove it with `Client.UpdateQueue` |
 | The workers crash | Pod restarts | See [Worker pods restart again and again](#worker-pods-restart-again-and-again) |
+| New workers cannot read the queues' pauses and limits, so they take no task | `operation failed` or `operation still failing` for `load queue settings`, since the worker started | Fix what the error names: the database, or the role's right to read `queues` |
 | No maintainer runs | `taskmill_stats_age_seconds` is over 60 | See [the next entry](#retries-delayed-tasks-or-schedules-dont-run) |
 | Fetches got slow | A transaction has been open for a long time | See [Throughput falls over hours](#throughput-falls-over-hours) |
 
@@ -212,17 +213,18 @@ Later, maybe `task history has no partition for today`.
 | Its `error` says | Cause | Do |
 |---|---|---|
 | `detach …: timeout` | A long transaction uses the history, such as `pg_dump`. The maintainer waits for it before it drops an old partition | Nothing: it ends with that transaction, and the log says `operation recovered` |
+| `drop task_history_…: cannot drop table` | Something of yours, such as a view, depends on an old partition that taskmill detached. Other old partitions are still dropped | Drop what the error names, or change it. The next pass drops the table |
 | `must own the taskmill tables`, or `must be owner of table` | The workers' role is not the owner. Tasks still complete, but soon without history. A worker also logs `prepare history partitions failed` when it starts | [Make that role the owner](database.md#run-workers-as-the-owner-of-taskmills-tables). The maintainer creates the missing partitions within a minute |
 
 ### Kubernetes marks workers as not ready
 
 **You see:** worker pods are not ready, and a rollout stops. `/healthz`
-returns 503, with `the worker has not reached the database for …` or
-`the worker is not running`.
+returns 503, with `the worker has not reached the database for …`, `the
+worker has not read the settings of its queues`, or `the worker is not running`.
 
 | Likely cause | Check | Do |
 |---|---|---|
-| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases` | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
+| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases`, or for `load queue settings` in a new worker | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
 | Handlers hold every connection of the pool | The warning `the pool was full, so renewing leases waited` | Raise `pool_max_conns`, or give handlers their own pool |
 | `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix that error: see [the errors at start](#errors-at-start-and-in-calls) |
 
@@ -235,11 +237,9 @@ dashboard shows "10,000+". To watch a backlog, use lag: it has no cap
 ### The dashboard says "Taking too long" or "Something went wrong"
 
 - **Cause:** the database did not answer a page within 10 seconds, or a
-  list of tasks read for more than 5 seconds: both say "Taking too long".
-  Any other failure says "Something went wrong", and is in the log.
-- **Do:** try again. For a task list, choose a queue and a state, or fewer
-  filters ([which lists are fast](../guides/operations-api.md#find-tasks)).
-  Then check the database's load.
+  task list within 5: "Taking too long". Other failures are in the log.
+- **Do:** try again, and check the database's load. A task list with a queue
+  and a state is fast: see [Find tasks](../guides/operations-api.md#find-tasks).
 
 ## See also
 

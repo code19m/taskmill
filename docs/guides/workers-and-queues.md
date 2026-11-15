@@ -128,6 +128,8 @@ return client.ResumeQueue(ctx, "emails")
   enqueue new ones.
 - Workers apply a pause as fast as a limit: right away, or within 10
   seconds.
+- A pause holds through a deploy. A worker that starts takes no task
+  before it has read the pauses and limits of its queues.
 - While the queue is paused, its lag grows, so lag alerts fire.
 - The [dashboard](dashboard.md) can pause and resume queues, too.
 

@@ -26,23 +26,22 @@ const (
 	defaultDrainTimeout  = 20 * time.Second
 	defaultConcurrency   = 10
 
-	minLeaseDuration   = 100 * time.Millisecond
-	recordTimeout      = 30 * time.Second       // bound on one try to record a result
-	recordRetryFirst   = 100 * time.Millisecond // first wait before trying to record a result again
-	recordRetryMax     = 2 * time.Second        // longest wait between those tries
-	cleanupTimeout     = 5 * time.Second        // bound on best-effort cleanup, such as closing a connection
-	maxFetch           = 1000                   // most tasks one fetch leases
-	completionBatch    = 500                    // most completions recorded in one statement
-	completionLinger   = 2 * time.Millisecond   // wait for more completions to batch with
-	heldRetryDelay     = 20 * time.Millisecond  // first wait before retrying completions whose rows were held
-	heldRetryMax       = time.Second            // longest wait before retrying them
-	emptyFetchCooldown = 20 * time.Millisecond  // pause after a notification that found nothing
-	hintCooldown       = 20 * time.Millisecond  // pause after a read of cancel requests or settings that notifications asked for
-	errorMessageLimit  = 4096                   // bytes of an error message that are kept
+	minLeaseDuration  = 100 * time.Millisecond
+	recordTimeout     = 30 * time.Second       // bound on one try to record a result
+	recordRetryFirst  = 100 * time.Millisecond // first wait before trying to record a result again
+	recordRetryMax    = 2 * time.Second        // longest wait between those tries
+	cleanupTimeout    = 5 * time.Second        // bound on best-effort cleanup, such as closing a connection
+	maxFetch          = 1000                   // most tasks one fetch leases
+	completionBatch   = 500                    // most completions recorded in one statement
+	completionLinger  = 2 * time.Millisecond   // wait for more completions to batch with
+	heldRetryDelay    = 20 * time.Millisecond  // first wait before retrying completions whose rows were held
+	heldRetryMax      = time.Second            // longest wait before retrying them
+	hintCooldown      = 20 * time.Millisecond  // pause after a read of cancel requests or settings that notifications asked for
+	errorMessageLimit = 4096                   // bytes of an error message that are kept
 )
 
 // timing holds a worker's fixed intervals. They are not configurable, but
-// tests shorten them.
+// tests change them.
 type timing struct {
 	maintainer      time.Duration // how often the maintainer works, at most
 	heartbeat       time.Duration // how often the maintainer sends its heartbeat
@@ -59,6 +58,7 @@ type timing struct {
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
 	failureReport   time.Duration // how often an operation that keeps failing logs, at most
 	idlePoll        time.Duration // how often idle queues poll while the maintainer's heartbeats arrive
+	quiet           time.Duration // how long a queue leaves notifications waiting after the fetch for one found nothing
 	listen          time.Duration // bound on opening the notification connection, and on its answer when heartbeats stop
 }
 
@@ -78,6 +78,7 @@ var defaultTiming = timing{
 	reconnectMax:    30 * time.Second,
 	failureReport:   time.Minute,
 	idlePoll:        time.Minute,
+	quiet:           20 * time.Millisecond,
 	listen:          10 * time.Second,
 }
 
@@ -112,6 +113,7 @@ type Worker struct {
 
 	running   atomic.Bool
 	reached   atomic.Pointer[time.Time] // when Run last reached the database; nil while it does not run
+	settled   atomic.Bool               // Run has read the settings of its queues: until then, they fetch nothing
 	released  atomic.Int64              // tasks given back during the current Run's shutdown
 	notifying atomic.Bool               // the maintainer's heartbeats arrive, so notifications reach the worker
 	resigned  chan struct{}             // the maintainer resigned: this worker's maintainer tries to take over now
@@ -198,7 +200,8 @@ type WorkerConfig struct {
 	// A queue that its [QueueSettings.MaxRunning] limit keeps from fetching
 	// more tasks is checked every PollInterval too, whether heartbeats
 	// arrive or not: no notification says when another worker's task of the
-	// queue ends.
+	// queue ends. When one of its own tasks ends, the worker fetches right
+	// away.
 	PollInterval time.Duration
 
 	// DrainTimeout is how long Run waits for running tasks after its context
@@ -388,9 +391,9 @@ type queueState struct {
 	name       string
 	slots      chan struct{} // one per running attempt or batch
 	wake       chan struct{} // nudges the fetch loop: tasks may be available
-	freed      chan struct{} // nudges the fetch loop: a slot was freed
-	paused     atomic.Bool
-	maxRunning atomic.Int32 // installation-wide limit; 0 means none
+	freed      chan struct{} // nudges the fetch loop: a slot was freed, or a recorded completion made room
+	paused     atomic.Bool   // the queue is paused, or Run has not read its settings yet
+	maxRunning atomic.Int32  // installation-wide limit; 0 means none
 }
 
 func (q *queueState) nudge() {
@@ -472,6 +475,12 @@ func (w *Worker) prepareHistory(ctx context.Context) {
 // lacks, as [Migrate] does, so that a schema applied with [Migrations] keeps
 // the history of its first completed tasks. A failure is only logged: the
 // maintainer tries again.
+//
+// Run fetches from no queue before it has read the queues' settings, so a
+// paused queue stays paused and a [QueueSettings.MaxRunning] limit holds
+// from the first fetch. If that read fails, Run logs it and reads again:
+// 100 milliseconds later, then waiting twice as long each time, up to 10
+// seconds. Each read is given up after 10 seconds.
 func (w *Worker) Run(ctx context.Context) error {
 	if !w.running.CompareAndSwap(false, true) {
 		return fmt.Errorf("%w: the worker is already running", ErrInvalidState)
@@ -490,13 +499,20 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
+	// No queue fetches before the worker knows its settings, which the
+	// settings loop reads first: a paused queue stays paused, and a limit
+	// holds, also when that read fails or takes long. Health says so until
+	// then. A worker without queues has nothing to read.
+	w.settled.Store(len(w.queues) == 0)
+	for _, q := range w.queues {
+		q.paused.Store(true)
+	}
 	now := time.Now()
 	w.reached.Store(&now)
 	w.checkInFailures = newFailures(w, "record check-in")
 	w.settingsFailures = newFailures(w, "load queue settings")
 	w.activityFailures = newFailures(w, "record activity")
 	w.listenFailures = newFailures(w, "listen for notifications")
-	w.refreshQueueSettings(ctx)
 	w.prepareHistory(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
@@ -557,13 +573,10 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 		r.inflight.Wait()
 		close(done)
 	}()
-	select {
-	case <-done:
-		return
-	default:
+	if n := w.runningTasks(); n > 0 {
+		w.logger.LogAttrs(ctx, slog.LevelInfo, "worker stopping; waiting for running tasks",
+			slog.Int(logKeyTasks, n), slog.Duration(logKeyTimeout, w.cfg.DrainTimeout))
 	}
-	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker stopping; waiting for running tasks",
-		slog.Int(logKeyTasks, w.tracking()), slog.Duration(logKeyTimeout, w.cfg.DrainTimeout))
 
 	select {
 	case <-done:
@@ -598,11 +611,19 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 	}
 }
 
-// tracking returns how many attempts the worker tracks.
-func (w *Worker) tracking() int {
+// runningTasks returns how many tasks the handlers of Run are running.
+func (w *Worker) runningTasks() int {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return len(w.attempts)
+	n := 0
+	for _, t := range w.attempts {
+		t.mu.Lock()
+		if t.state == stateRunning && !t.direct {
+			n++
+		}
+		t.mu.Unlock()
+	}
+	return n
 }
 
 // RunTask runs one task now, in the calling goroutine, the way [Worker.Run]

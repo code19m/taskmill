@@ -149,10 +149,6 @@ case <-ctx.Done():
 
 ## Watch out
 
-- **A queue with `MaxRunning` often runs fewer tasks than its limit.** When
-  a task ends, a worker can wait up to `PollInterval`, 1 second by default,
-  before it starts the next one. In a test with calls of 1 second, a limit
-  of 4 ran 3 calls at the same time on average.
 - **`MaxRunning` counts tasks, not batches.** A
   [batch handler](../concepts/glossary.md#batch-handler) in this queue gets
   at most 4 tasks per batch.

@@ -74,6 +74,26 @@ database connection busy. Maintenance works the same way: it skips group rows
 that other transactions hold and retries them in its next cycle, so a long
 application transaction cannot stall it.
 
+**The next task starts without a notification.** The promotion notifies the
+queue, but a client sends at most one notification per queue per 50 ms (see
+[Notifications](schema-maintenance.md#notifications)). A group whose every
+task waited for one ran 20 tasks a second. So the worker that completed the
+head fetches the queue again when its batch commits. Only that worker does:
+the others still wake at the pace of the notifications. Measured with one
+worker and tasks that take no time, 200 tasks of one group ran at about 220
+a second. What remains is the 2 ms for which the completer gathers a batch,
+and the statements of the completion and of the fetch.
+
+The wake-up comes with the commit because the fetch that follows a freed
+slot comes too early. A slot is free as soon as its handler returns, and the
+completer records the result a few milliseconds later, in a batch. A fetch
+in between finds the group's next task still `pending`. It also still counts
+the task as running, so a queue at its `MaxRunning` limit looks full: a
+committed batch wakes the fetch of such a queue too, and the queue runs at
+its limit without a poll. The worker's own notification of the promotion
+comes back to it, and its fetch finds nothing. The 20 ms that follow hold
+back notifications only, not these wake-ups.
+
 **Lock order.** Group rows are always locked in bytewise order of queue and
 group key: `COLLATE "C"` in SQL, and Go's string order in code, which is the
 same. A `pending` task's row is locked only after its group's row: promotion
@@ -203,42 +223,9 @@ redelivered message does not run again after its task failed. Uniqueness
 among unfinished tasks only ("at most one queued refresh per product") can be
 added later as a new option, without a disruptive migration.
 
-**A retry takes the key back.** Without that, a cancel, an enqueue of the
-same key, and a retry of the canceled task would leave two unfinished tasks
-for one key. `dedupe_keys` holds one row per key, so a canceled task cannot
-keep a row there. The statement that cancels a task and deletes its key
-therefore stores the key and the end of its window in the task's own row:
-`freed_key` and `freed_key_expires_at`. A running task that is asked to
-stop gets them then, with the key's release.
-
-A retry claims the stored key as an enqueue does, with the window's old
-end: it gets the key if no row has it, or if the row's window has ended.
-Then it clears the two columns. If another task holds the key, a `Retry`
-rolls back and returns `ErrConflict`, and a bulk retry leaves the task and
-counts it. A stored key whose window has ended claims nothing: the window
-is fixed at the enqueue, and a task past it has no claim, canceled or not.
-
-| Decision | Why |
-|---|---|
-| Two columns, not the task's metadata | Producers write metadata, and handlers and tools copy it. A key there could be forged, or travel to another task. Only a role with `UPDATE` on `tasks` writes the columns: the grants of a role that only enqueues leave them out |
-| The retry is refused whatever state the holder is in | A completed or dead holder still stands for the work until its window ends, as it does for an enqueue |
-| The refusal names the holder only if that task exists | A completed task keeps its key for its window, also when no history is kept of it. Nobody can cancel or delete a task that is gone, so the error gives the end of the window |
-| A stored key that is not 32 bytes counts as none | `dedupe_keys` would refuse it, and one such row would fail every batch of a bulk retry |
-| The columns are not copied to the history | A task that completes after its cancel was requested needs no key back |
-
-Two things follow from the claim. A transaction of the caller that enqueues
-a key and then calls `CancelTx` for a task, while a `Retry` of that task
-waits for the key, makes the two wait for each other: the retry runs again,
-or the caller's transaction gets the deadlock error. And while a
-transaction that claimed a key stays open, a bulk retry leaves the tasks of
-a batch that need a key, and counts them as skipped.
-
-The previous release names the columns that it writes, so it works on the
-new schema as before: its cancel stores no key, and a retry of that task
-takes none. Its retry leaves what a cancel of this release stored, on a
-task that runs on without its key. Only a canceled task takes a key back,
-so that task asks for none if it dies. After another cancel, a retry of
-this release takes the stored key back if it is free.
+**A retry takes the key back.** A cancel stores the key that it frees with
+the task, and a retry of the canceled task claims it again: see
+[Lists and operator actions](schema-operations.md#a-retry-takes-its-dedupe-key-back).
 
 ## See also
 

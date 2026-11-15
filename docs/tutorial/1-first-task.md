@@ -216,7 +216,6 @@ line that taskmill writes.
 Press Ctrl-C. **You should see** the worker stop cleanly:
 
 ```text
-time=… level=INFO msg="worker stopping; waiting for running tasks" worker_id=… tasks=0 timeout=20s
 time=… level=INFO msg="worker stopped" worker_id=… released=0
 ```
 

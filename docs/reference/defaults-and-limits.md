@@ -34,6 +34,7 @@ It is in the doc comment of that identifier.
 | What | Value |
 |---|---|
 | A fetch from a queue with `MaxRunning` waits for the queue's row | At most 1 second. Then the worker fetches again when the queue is next woken or polled |
+| A worker's first read of its queues' pauses and limits | Before its first fetch. If it fails: again after 0.1 seconds, then twice as long each time, up to 10 seconds. A read ends after 10 seconds |
 | Reads that notifications ask for: cancel requests, and queue settings | At most one of each kind per 20 ms |
 | Warning that the pool is full | Logged when the pool is full, and a lease renewal waits 1 second or longer for a connection (`LeaseDuration` / 30). At most once a minute |
 | A result that the worker cannot record | Tried again after 0.1 to 2 seconds, until the task's lease would run out |
@@ -59,7 +60,7 @@ by election, that does the shared work.
 | Refresh queue statistics | Every 10 seconds |
 | Apply retention | Every minute |
 | Prepare history partitions | 7 days ahead: today and the next 6 days, by UTC day on the database's clock |
-| Drop an old history partition | Waits up to 30 seconds for transactions that use the history. Tried again every minute |
+| Drop old history partitions | At most 10 in a pass of retention, so 10 a minute: a much shorter `HistoryRetention` takes a while to free its disk space. A pass waits up to 30 seconds for transactions that use the history, and tries again a minute later |
 | Other workers try to take over | Every 2 to 3 seconds, with a statement that writes nothing while the maintainer's lease lasts |
 | A new maintainer after a crash | Within about 12 seconds (the maintainer's lease is 10 seconds) |
 | A new maintainer after a clean stop | Right away, when the old one starts to stop. It gives the role up before it waits for its running tasks |

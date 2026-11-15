@@ -127,8 +127,9 @@ within the first 5 tasks, and all five finished at about the same time.
   delete it ([Keep order per key](keep-order-per-key.md#fix-a-halted-group)).
   If one bad page must not block the rest, save the failure in your own
   table and return nil.
-- **One group runs slowly,** about 20 short tasks a second with one worker.
-  So give each task real work: a page of rows, not a single row.
+- **One group runs slowly,** about 200 short tasks a second, however many
+  workers you run. So give each task real work: a page of rows, not a
+  single row.
 - **Lag doesn't show a long group.** The tasks that wait behind the
   [head](../concepts/glossary.md#head) of their group don't count in the
   queue's [lag](../concepts/glossary.md#lag). To see how much a customer has

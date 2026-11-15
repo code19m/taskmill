@@ -80,7 +80,7 @@ successes between them.
 | `renew leases` | Renews the [leases](../concepts/glossary.md#lease) of running tasks | Every third of `LeaseDuration` | The database, and the pool size |
 | `record check-in` | Notes in the database that the worker is alive, at its [check-in](../concepts/glossary.md#check-in) | Every third of `LeaseDuration` | The database |
 | `record results` | Saves the results of finished attempts | After each attempt | The database |
-| `load queue settings` | Reads pauses and limits of the queues | Every 10 seconds | The database |
+| `load queue settings` | Reads pauses and limits of the queues. A worker fetches no tasks before its first read worked | When the worker starts, then every 10 seconds. While the first read fails, again after 0.1 to 10 seconds | The database, and the role's right to read `queues` |
 | `record activity` | Writes the counts for the charts | Every 10 seconds | The database |
 | `listen for notifications` | Keeps the connection that receives notifications. Idle queues poll every `PollInterval` meanwhile | On failure, again after 1 to 30 seconds | `ListenConfig`, and any proxy in between |
 | `elect maintainer` | Takes or keeps the maintainer role | Every second on the maintainer, and every 2 to 3 seconds on the other workers | The database |
@@ -114,7 +114,7 @@ backticks.
 |---|---|---|---|
 | `worker started` | Info | `Run` started, and reads the queues in `queues`. | Nothing. |
 | `the worker does not serve the default queue of these registered kinds` | Warn | The worker has handlers for `kinds`, but does not read their default queues. Their tasks wait for another worker. | Add the queues to `WorkerConfig.Queues`, or run a worker that reads them. |
-| `worker stopping; waiting for running tasks` | Info | `Run`'s context ended. It waits up to `timeout` for `tasks` running tasks. | Nothing. |
+| `worker stopping; waiting for running tasks` | Info | `Run`'s context ended while `tasks` tasks ran. It waits up to `timeout` for them. A worker that runs no task does not log this line. | Nothing. |
 | `handler ignored shutdown; releasing its task` | Warn | A handler did not return within 5 seconds after its context was canceled. Its task goes back to the queue and runs again. The handler may still be running. | Make the handler return when its context ends. |
 | `worker stopped` | Info | `Run` returned. `released` tasks went back to their queues. | Nothing. |
 | `unregister worker failed` | Warn | The stopped worker could not remove itself from the list of workers. It stays listed, as stale, until the maintainer removes it: after 5 minutes, or twice its `LeaseDuration` if that is longer. | Nothing, unless it repeats: then check the database. |
