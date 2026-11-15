@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-15
+
 ### Added
 
 - More examples on pkg.go.dev: `Client.Enqueue`, `Client.EnqueueTx`,
@@ -994,7 +996,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/code19m/taskmill/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/code19m/taskmill/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/code19m/taskmill/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/code19m/taskmill/compare/v0.3.0...v0.4.0
