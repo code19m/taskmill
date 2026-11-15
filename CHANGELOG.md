@@ -113,8 +113,9 @@ All notable changes to taskmill are recorded here. The format follows
   leased, with a lease that never ends: such a row holds a place under its
   queue's `MaxRunning` for good. If you use the old grant, run
   `REVOKE INSERT ON billing.tasks FROM orders`, with your names, and then
-  the new `GRANT` of the recipe. A role with `INSERT` on the whole table
-  stays trusted, as [Security](docs/production/security.md) now says.
+  the new `GRANT` of the recipe. The recipe also lists what the role can
+  still do, such as choose a task's ID. A role with `INSERT` on the whole
+  table stays trusted, as [Security](docs/production/security.md) now says.
 - A FIFO group whose row counts fewer tasks than the group holds no longer
   fails the work of other groups. A role with `UPDATE` on `groups`, which a
   role that only enqueues has, can write such a count. When a task then

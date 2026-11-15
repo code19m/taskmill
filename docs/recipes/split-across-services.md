@@ -93,11 +93,21 @@ first.
   a task's lease, attempts, or errors: no task of its making looks leased or
   finished.
 
-  Billing still trusts the orders service. The role can enqueue any task, in
-  any number, into any queue and FIFO group. It can also change the rows of
-  `groups` and `dedupe_keys`. A wrong count stops that FIFO group, or breaks
-  its order: the other groups run as before. A changed key blocks a dedupe
-  key, or admits a duplicate.
+  Billing still trusts the orders service. With these grants, the role can:
+
+  - **Enqueue any task,** in any number, into any queue.
+  - **Write a row with SQL of its own,** past what the client checks: any
+    priority, any `max_attempts`, a payload over the size limit, or a task
+    of a FIFO group that the group's row does not count. Such a task runs
+    beside the group's head.
+  - **Choose a task's ID.** Rows with IDs ahead of the sequence make later
+    enqueues fail with a duplicate key, for every producer, until the
+    sequence has passed them. The grant needs the column: an enqueue
+    reserves each ID before it inserts the task, so that its result and a
+    dedupe key can name the task.
+  - **Change the rows of `groups` and `dedupe_keys`.** A wrong count stops
+    that FIFO group, or breaks its order: the other groups run as before. A
+    changed key blocks a dedupe key, or admits a duplicate.
 
   These tables are internal, so a later release may need more: a table, or a
   column of `tasks`. The error `permission denied for table …` then names

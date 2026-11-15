@@ -103,8 +103,9 @@ ALTER DEFAULT PRIVILEGES FOR ROLE shop IN SCHEMA taskmill
   also write a row with SQL of its own that looks leased, and such a row
   holds a place under its queue's `MaxRunning` for as long as its lease
   says. The shorter list of that recipe names the columns that an enqueue
-  writes, so its role cannot write a lease. A task whose row a worker cannot
-  read fails alone, with the code
+  writes, so its role cannot write a lease, and the recipe lists what that
+  role can still do. A task whose row a worker cannot read fails alone, with
+  the code
   [`invalid_row`](https://pkg.go.dev/github.com/code19m/taskmill#CodeInvalidRow).
 
 ## Keep secrets out of tasks and errors
