@@ -1,7 +1,12 @@
 -- Three changes to the catalog: no statement reads or writes a row. Each
--- takes an ACCESS EXCLUSIVE lock on its table, waits for it at most 5
--- seconds, or 1 second from tasks on, and holds it until the migration
--- commits, a moment later. See docs/design/schema.md.
+-- takes an ACCESS EXCLUSIVE lock on its table, waits at most 5 seconds for
+-- it, and holds it until the migration commits, a moment later. See
+-- docs/design/schema.md.
+--
+-- The 5 seconds are longer than PostgreSQL's deadlock_timeout, 1 second by
+-- default, and must be: only after that time does a waiting statement cancel
+-- an autovacuum that holds its table, and tasks is vacuumed often. A shorter
+-- wait would give up first, try after try.
 --
 -- The order of the locks is safe beside a running fleet: schedules, then
 -- tasks, then workers. Two lock orders can deadlock only if a transaction
@@ -20,16 +25,6 @@ SET LOCAL lock_timeout = '5s';
 -- operator may have dropped it already, hence IF EXISTS.
 -- Lock: schedules, which only the maintainer and the dashboard use.
 DROP INDEX IF EXISTS __SCHEMA__.schedules_due_idx;
-
--- From here on, the migration waits at most 1 second for a lock. Every
--- statement on a table queues behind a migration that waits for that table,
--- and tasks is the table that every fetch, enqueue, and completion uses:
--- with three processes that migrated in turn behind one long reader of
--- tasks, inserts and check-ins waited 15 of 15.1 seconds. Once the
--- migration holds tasks, its wait for workers holds those statements up
--- too, so that wait is as short. A migration that gives up changes nothing,
--- and the next try runs it again.
-SET LOCAL lock_timeout = '1s';
 
 -- Stores, with a canceled task, the dedupe key that its cancel freed, as
 -- dedupe_keys stores it, and the end of the key's window, so that a retry

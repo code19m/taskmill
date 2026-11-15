@@ -56,14 +56,11 @@ All notable changes to taskmill are recorded here. The format follows
   with its default: they link to the type.
 - The reference section has a new order: the three indexes come first, then
   the pages about what has no Go identifier.
-- This release has a schema migration, `0005_worker_leases`. It adds a
-  column to `workers` and two to `tasks`, changes only the catalog, and
-  reads no row. It waits at most 5 seconds for its first lock, and at most
-  1 second for the lock on `tasks` and the one after it: every enqueue and
-  every worker waits behind a migration that waits for `tasks`. A migration
-  that gives up has changed nothing, and the next try runs it again. The
-  previous release's code keeps working on the new schema, so a rolling
-  deploy is safe, as always.
+- This release has a schema migration, `0005_worker_leases_and_freed_keys`.
+  It adds a column to `workers` and two to `tasks`, changes only the
+  catalog, and reads no row. It waits at most 5 seconds for each of its
+  locks. The previous release's code keeps working on the new schema, so a
+  rolling deploy is safe, as always.
 - The migration also drops the index `schedules_due_idx`. No statement read
   it: each one finds its schedules by name. Every run of a schedule had to
   update it.
