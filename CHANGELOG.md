@@ -136,21 +136,22 @@ All notable changes to taskmill are recorded here. The format follows
   the `task_id`. A bulk action that takes several tasks out of one such
   group logs one line for them, without `task_id`. The tasks end as
   before. If you see the line, please report it.
-- Two fixes for a FIFO group whose rows were changed by hand. Both come
-  from one change: every operation that takes tasks out of a group now
-  runs the same statements.
+- Three fixes for a FIFO group whose rows were changed by hand:
   - **Two tasks of one group that complete in the same batch** are both
     taken off the group's count. One stayed counted. The group's row then
     never went away, and a task enqueued into the group later waited in
     `pending` for good, behind a head that did not exist. A group has two
     running tasks only after an `UPDATE` by hand, such as one that made a
     pending task available.
-  - **`CancelMatching` and `DeleteMatching` end a group's halt** when they
-    take out the task that the halt names, as `Cancel` and `Delete` do. The
-    halt stayed: after a delete nothing could end it, and after a cancel a
-    `Retry` of the task ended it, but counted the group wrong. taskmill
-    halts a group only by its dead head, which a bulk delete already
-    handled: only a row written by hand names another task.
+  - **A halt ends with the task that it names, however that task leaves
+    its group.** `Cancel` and `Delete` already ended such a halt. Now
+    `CancelMatching` and `DeleteMatching` end it too, and so does a
+    completion, after which the next task runs: the group stayed halted
+    by a task that was gone. taskmill halts a group only by its dead head,
+    so only a row written by hand names another task.
+  - **A rescue that ends two tasks of one group, one dead and one
+    canceled,** leaves the group halted by the dead one. It made the next
+    task available when the canceled task was the older of the two.
 
 ### Security
 
