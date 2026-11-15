@@ -166,6 +166,52 @@ func TestIdleWorkerPollsWhileItsListenerIsCut(t *testing.T) {
 	waitFor(t, "heartbeats to arrive again", func() bool { return taskmill.Notifying(w) })
 }
 
+// A worker hears of a pause, a resume, or a limit through a notification.
+// One that comes while the worker does not listen is lost: at its start, and
+// while it reconnects. So the worker reads its queues' settings again once
+// it listens. Here it is a resume, because a task that runs shows that the
+// worker has read it.
+func TestWorkerReadsItsQueuesSettingsAgainOnceItListens(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	direct := newProxy(t, testdb.DirectURL(t))
+	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
+	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
+		t.Fatal(err)
+	}
+	ran := make(chan struct{}, 1)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			ran <- struct{}{}
+			return nil
+		}, nil),
+		Queues:       defaultQueue(1),
+		NoMaintainer: true,
+		ListenConfig: listen,
+	})
+	// No later read of the settings stands in for the one that the test
+	// waits for.
+	taskmill.SetTiming(w, taskmill.Timing{Settings: time.Hour})
+
+	// The worker starts, and reads that the queue is paused, while it cannot
+	// listen: it is healthy once it has read the settings. A resume that
+	// commits now notifies nobody.
+	direct.cut(true)
+	startWorker(t, w)
+	waitFor(t, "the worker to read its queues' settings", func() bool { return w.Health() == nil })
+	if err := e.client.ResumeQueue(t.Context(), taskmill.DefaultQueue); err != nil {
+		t.Fatal(err)
+	}
+	e.enqueue(t, sendEmail{}, nil)
+
+	direct.cut(false)
+	recv(t, ran, "the task of the resumed queue to run once the worker listens")
+}
+
 func TestIdleWorkerReplacesAListenerThatFallsSilent(t *testing.T) {
 	t.Parallel()
 	e, _ := newCountedEnv(t)

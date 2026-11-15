@@ -152,7 +152,9 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 		return false, err
 	}
 	w.listenFailures.observe(ctx, nil)
-	// Notifications may have been missed while disconnected.
+	// Notifications may have been missed while disconnected: of changed
+	// settings, such as a pause, and of tasks.
+	signal(w.queueHints)
 	for _, q := range w.queues {
 		q.nudge()
 	}

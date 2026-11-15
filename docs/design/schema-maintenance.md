@@ -251,7 +251,9 @@ heartbeats:
 - **A maintainer that stops hands over without such a gap.** It resigns with
   `r|`, and another worker takes over and sends its heartbeat.
 - **A new connection makes every queue fetch right away,** since
-  notifications may have been missed meanwhile.
+  notifications may have been missed meanwhile. The worker also reads its
+  queues' settings again then: a pause may have come while it did not
+  listen, as when it starts or reconnects.
 
 ### The notification connection
 

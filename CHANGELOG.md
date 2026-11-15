@@ -155,6 +155,10 @@ All notable changes to taskmill are recorded here. The format follows
   answer it kept the worker from starting: no check-in, no maintainer, no
   fetch. Each read now ends after 10 seconds, and it no longer delays the
   rest of the start.
+- A pause, a resume, or a new `MaxRunning` reached a worker up to 10
+  seconds late when it was set while the worker did not listen for
+  notifications: as the worker started, or while it reconnected. The
+  worker now reads the settings of its queues again as soon as it listens.
 - A history partition that the maintainer had detached but could not drop
   stayed in the schema for good, with a day of completed tasks on disk:
   for example when the worker stopped, or lost the database, between the
