@@ -16,9 +16,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -42,7 +44,12 @@ func setup(tb testing.TB) *taskmill.Client {
 // pool and name. When the test ends, it checks the schema's FIFO groups.
 func setupDB(tb testing.TB) (*taskmill.Client, *pgxpool.Pool, string) {
 	tb.Helper()
-	pool := testdb.Pool(tb)
+	return setupOn(tb, testdb.Pool(tb))
+}
+
+// setupOn is setupDB on a given pool.
+func setupOn(tb testing.TB, pool *pgxpool.Pool) (*taskmill.Client, *pgxpool.Pool, string) {
+	tb.Helper()
 	schema := testdb.Schema(tb, pool)
 	if err := taskmill.Migrate(tb.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		tb.Fatal(err)
@@ -472,34 +479,57 @@ func TestTaskListOffersBulkActions(t *testing.T) {
 // its page to go on.
 func TestBulkActionStopsInTime(t *testing.T) {
 	t.Parallel()
-	client := setup(t)
-	params := make([]taskmill.EnqueueParams, 5000)
+	picks := &pickHook{}
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = picks
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	client, _, _ := setupOn(t, pool)
+	// Three batches of tasks.
+	params := make([]taskmill.EnqueueParams, 3000)
 	for i := range params {
 		params[i] = taskmill.EnqueueParams{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{GroupKey: strconv.Itoa(i % 10)}}
 	}
-	for range 6 {
-		if _, err := client.EnqueueMany(t.Context(), params); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
 	}
 	h := handler(t, client, nil)
 	form := regexp.MustCompile(`<form class="bulk-actions" method="post" action="([^"]*)">`)
-	target, total := "/tasks/bulk/cancel?queue=default", 0
+	target, total, requests := "/tasks/bulk/cancel?queue=default", 0, 0
 	for range 200 {
-		ctx, cancel := context.WithTimeout(t.Context(), 400*time.Millisecond)
+		// A request has 400 ms, so the action works for 200 ms of it. Its
+		// second batch starts only after those: the action then ends that
+		// batch, and stops short of the third.
+		const deadline = 400 * time.Millisecond
+		ctx, cancel := context.WithTimeout(t.Context(), deadline)
+		began, batch := time.Now(), 0
+		hold := func() {
+			if batch++; batch == 2 {
+				time.Sleep(time.Until(began.Add(deadline/2 + 20*time.Millisecond)))
+			}
+		}
+		picks.at.Store(&hold)
 		req := httptest.NewRequestWithContext(ctx, http.MethodPost, target, nil)
 		req.Header.Set("Sec-Fetch-Site", "same-origin")
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		cancel()
+		requests++
 		loc, _ := url.Parse(rec.Header().Get("Location"))
 		q := loc.Query()
 		n, _ := strconv.Atoi(q.Get("count"))
 		total += n
 		if q.Get("done") == "cancel-all" {
 			// The task list shows every task again.
-			if total != 30000 || loc.Path != "/tasks" || q.Has("cursor") {
-				t.Fatalf("canceled %d tasks in all, then went to %q; want 30,000, and the task list", total, loc)
+			if total != 3000 || requests < 2 || loc.Path != "/tasks" || q.Has("cursor") {
+				t.Fatalf("canceled %d tasks in %d requests, then went to %q; want 3,000 in two or more, and the task list",
+					total, requests, loc)
 			}
 			return
 		}
@@ -517,6 +547,19 @@ func TestBulkActionStopsInTime(t *testing.T) {
 	}
 	t.Fatal("the cancel did not end")
 }
+
+// pickHook calls a function each time a batch of a bulk action on its pool
+// picks its tasks.
+type pickHook struct{ at atomic.Pointer[func()] }
+
+func (h *pickHook) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if f := h.at.Load(); f != nil && strings.Contains(d.SQL, "WITH candidates AS") {
+		(*f)()
+	}
+	return ctx
+}
+
+func (*pickHook) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 // A bulk action that left tasks that other work held says so, and leads back
 // to its page to try again.
