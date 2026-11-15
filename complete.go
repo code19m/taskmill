@@ -443,10 +443,12 @@ func (c *Client) noteMissingHistory(ctx context.Context, logger *slog.Logger, er
 		slog.Any(logKeyError, err))
 }
 
-// sortedByGroup returns the grouped tasks in a fixed order of queue and
-// group, the lock order of group rows. The order alone prevents no deadlock:
-// the statement that takes the rows follows it only under some plans. See
-// leaveGroups for the callers that wait for these rows.
+// sortedByGroup returns the grouped tasks in the order of queue and group in
+// which an enqueue takes the rows of several groups. It serves the one
+// caller that waits for such rows, completeWaiting. Where the plan of the
+// recount follows its arrays, as the nested loop over a large table does,
+// the rows are then taken in the order of an enqueue, and the two cannot
+// deadlock. No plan must follow them: see leaveGroups.
 func sortedByGroup(ts []completedTask) []completedTask {
 	var grouped []completedTask
 	for _, t := range ts {

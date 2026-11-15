@@ -49,12 +49,11 @@ This is one reason taskmill's own transactions require READ COMMITTED.
 
 **One way out.** A counted task leaves its group when it completes, is
 canceled, or is deleted, alone or in a batch. Every such change runs the
-same three statements, in one function (`leaveGroups`): the decrement, the
-delete of the empty groups, and the promotion. The decrement also ends a
-halt that names a task that leaves, so no halt outlives its task. A
-`pending` task that leaves was not the head, so nothing is promoted for it.
-A group that has no row, which should never happen, is logged as
-`fifo group missing`, and the task still ends.
+same three statements, in one function (`leaveGroups`): the decrement,
+which also ends a halt that names a leaving task, the delete of the empty
+groups, and the promotion. A `pending` task that leaves was not the head,
+so nothing is promoted for it. A group that has no row, which should never
+happen, is logged as `fifo group missing`, and the task still ends.
 
 **Completing a batch.** A worker completes the grouped tasks of a batch in one
 transaction, with a few statements for the whole batch rather than a few per
@@ -103,9 +102,14 @@ its limit without a poll. The worker's own notification of the promotion
 comes back to it, and its fetch finds nothing. The 20 ms that follow hold
 back notifications only, not these wake-ups.
 
-**Lock order.** Group rows are always locked in bytewise order of queue and
-group key: `COLLATE "C"` in SQL, and Go's string order in code, which is the
-same. A `pending` task's row is locked only after its group's row: promotion
+**Lock order.** An enqueue, and a bulk retry that creates groups, take the
+rows of several groups in bytewise order of queue and group key
+(`COLLATE "C"`). The decrement takes rows in the order of its plan. So
+completions, bulk actions, and rescues first lock their groups' rows and
+skip the held ones: their decrement never waits. Only the last completions
+of a stopping worker wait for several groups, and run again after a deadlock.
+
+A `pending` task's row is locked only after its group's row: promotion
 takes them in that order, and `Cancel` and `Delete` lock a pending task's
 group first. Locking in one order prevents deadlocks, for example between a
 `Cancel` and the promotion of the same task. The row of any other task is

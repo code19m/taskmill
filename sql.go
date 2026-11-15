@@ -543,7 +543,7 @@ WHERE {leased}`),
 		// It locks the rows, and waits for one that another transaction
 		// holds. The plan decides in which order it takes the rows of
 		// several groups: a nested loop takes them in the order of the
-		// arrays, and a hash join as they lie in the table.
+		// arrays, and a hash join can take them as they lie in the table.
 		//
 		// A count stops at zero. Only a row that taskmill did not write
 		// counts fewer tasks than its group holds, and a count below zero
