@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"maps"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -278,6 +281,334 @@ func TestCancelAndDeleteFreeTheDedupeKey(t *testing.T) {
 	}
 	if third := enqueue(); third.Duplicate {
 		t.Fatalf("the deleted task still holds its key: %+v", third)
+	}
+}
+
+// keyed enqueues a task with a dedupe key, and returns the result.
+func (e *env) keyed(t *testing.T, opts *taskmill.EnqueueOptions) taskmill.EnqueueResult {
+	t.Helper()
+	res, err := e.client.Enqueue(t.Context(), sendEmail{}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// keyCancels are the ways to cancel a task, which all free its dedupe key.
+var keyCancels = map[string]func(t *testing.T, e *env, id int64){
+	"Cancel": func(t *testing.T, e *env, id int64) {
+		t.Helper()
+		e.cancel(t, id)
+	},
+	"CancelTx": func(t *testing.T, e *env, id int64) {
+		t.Helper()
+		tx := e.begin(t)
+		if err := e.client.CancelTx(t.Context(), taskmill.Pgx(tx), id); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	},
+	"CancelMatching": func(t *testing.T, e *env, _ int64) {
+		t.Helper()
+		if _, err := e.client.CancelMatching(t.Context(), bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}})); err != nil {
+			t.Fatal(err)
+		}
+	},
+	// A running task gives its key away when it is asked to stop, and
+	// becomes canceled when its attempt ends.
+	"Cancel while it runs": func(t *testing.T, e *env, id int64) {
+		t.Helper()
+		e.lease(t, id)
+		e.cancel(t, id)
+		e.exec(t, `UPDATE {s}.tasks SET state = 'canceled', finalized_at = now(), lease_expires_at = NULL WHERE id = $1`, id)
+	},
+}
+
+// keyRetries are the ways to retry a canceled or a dead task. A canceled
+// task takes its dedupe key back.
+var keyRetries = map[string]func(t *testing.T, e *env, id int64){
+	"Retry": func(t *testing.T, e *env, id int64) {
+		t.Helper()
+		if err := e.client.Retry(t.Context(), id); err != nil {
+			t.Fatal(err)
+		}
+	},
+	"RetryMatching": func(t *testing.T, e *env, _ int64) {
+		t.Helper()
+		finished := &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled, taskmill.StateDead}}
+		if res, err := e.client.RetryMatching(t.Context(), bulk(finished)); err != nil || res.Changed != 1 || res.Conflicts != 0 {
+			t.Fatalf("retried %+v, %v; want 1 task", res, err)
+		}
+	},
+}
+
+// A cancel frees the task's dedupe key, and a retry takes it back, however
+// the task was canceled and retried: one key never stands for two unfinished
+// tasks while its window lasts.
+func TestRetryTakesTheDedupeKeyBack(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for cancelName, cancel := range keyCancels {
+		for retryName, retry := range keyRetries {
+			cancelThenRetry(t, e, cancelName+" then "+retryName, cancel, retry)
+		}
+	}
+}
+
+// cancelThenRetry cancels a task with a dedupe key and retries it. The key
+// must be free in between, and the task's again afterwards. The task shows
+// nothing of the key, canceled or retried: its metadata is its own. The
+// retry leaves nothing stored of the key that the cancel freed: the task
+// holds its key again, so when it is dead later, a retry asks for none. In
+// the end it deletes the task, and so leaves e as it found it.
+func cancelThenRetry(t *testing.T, e *env, name string, cancel, retry func(t *testing.T, e *env, id int64)) {
+	t.Helper()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42", Metadata: map[string]string{"tenant": "7"}}
+	first := e.keyed(t, opts)
+	cancel(t, e, first.ID)
+	other := e.keyed(t, opts)
+	if other.Duplicate {
+		t.Fatalf("%s: the canceled task still holds its key: %+v", name, other)
+	}
+	if got := e.get(t, first.ID).Metadata; !maps.Equal(got, opts.Metadata) {
+		t.Fatalf("%s: metadata of the canceled task: got %v, want %v", name, got, opts.Metadata)
+	}
+	if err := e.client.Delete(t.Context(), other.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	retry(t, e, first.ID)
+	e.wantState(t, first.ID, taskmill.StateAvailable)
+	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != first.ID {
+		t.Fatalf("%s: after the retry: got %+v, want a duplicate of task %d", name, dup, first.ID)
+	}
+	if got := e.get(t, first.ID).Metadata; !maps.Equal(got, opts.Metadata) {
+		t.Fatalf("%s: metadata after the retry: got %v, want %v", name, got, opts.Metadata)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE freed_key IS NOT NULL OR freed_key_expires_at IS NOT NULL"); n != 0 {
+		t.Fatalf("%s: the retried task still stores the key that its cancel freed", name)
+	}
+	e.die(t, first.ID)
+	retry(t, e, first.ID)
+	e.wantState(t, first.ID, taskmill.StateAvailable)
+	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != first.ID {
+		t.Fatalf("%s: after the retry of the dead task: got %+v, want a duplicate of task %d", name, dup, first.ID)
+	}
+	if err := e.client.Delete(t.Context(), first.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// wantRefused retries a canceled task whose dedupe key another task holds:
+// the retry must fail with ErrConflict, name the holder, and change nothing.
+func (e *env) wantRefused(t *testing.T, what string, id, holder int64) {
+	t.Helper()
+	err := e.client.Retry(t.Context(), id)
+	if !errors.Is(err, taskmill.ErrConflict) || !strings.Contains(err.Error(), fmt.Sprintf("task %d holds", holder)) {
+		t.Fatalf("%s: got %v, want ErrConflict that names task %d", what, err, holder)
+	}
+	e.wantState(t, id, taskmill.StateCanceled)
+}
+
+// While another task holds the key, a retry would make two tasks stand for
+// the same work. It is refused with ErrConflict, and changes nothing.
+func TestRetryIsRefusedWhileAnotherTaskHoldsTheDedupeKey(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "remind-42", GroupKey: "customer-7"}
+	first := e.keyed(t, opts)
+	// One transaction replaces the task, as the deduplication guide shows.
+	tx := e.begin(t)
+	if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, opts)
+	if err != nil || second.Duplicate {
+		t.Fatalf("enqueue after the cancel: %+v, %v; want a new task", second, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	e.wantRefused(t, "while the new task waits", first.ID, second.ID)
+	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != second.ID {
+		t.Fatalf("after the refused retry: got %+v, want a duplicate of task %d", dup, second.ID)
+	}
+	if n := e.count(t, "SELECT tasks FROM {s}.groups WHERE group_key = 'customer-7'"); n != 1 {
+		t.Fatalf("the group counts %d tasks after the refused retry, want 1", n)
+	}
+	// A dead task keeps its key until the window ends, so it still holds it.
+	e.die(t, second.ID)
+	e.wantRefused(t, "while the new task is dead", first.ID, second.ID)
+
+	// Once the holder gives the key away, the retry takes it, and the other
+	// task is the one that cannot come back.
+	if err := e.client.Retry(ctx, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.cancel(t, second.ID)
+	if err := e.client.Retry(ctx, first.ID); err != nil {
+		t.Fatalf("retry once the key is free: %v", err)
+	}
+	e.wantRefused(t, "the task that gave the key away", second.ID, first.ID)
+	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != first.ID {
+		t.Fatalf("after the retry: got %+v, want a duplicate of task %d", dup, first.ID)
+	}
+}
+
+// A key belongs to its task until its window ends, and a cancel does not
+// change when that is. A task retried after its window takes no key: like any
+// task that outlives its window, it can run beside a newer task of the key.
+func TestRetryAfterTheWindowTakesNoKey(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	opts := &taskmill.EnqueueOptions{DedupeKey: "report-monday"}
+	first := e.keyed(t, opts)
+	e.cancel(t, first.ID)
+	second := e.keyed(t, opts)
+	if second.Duplicate {
+		t.Fatalf("the canceled task still holds its key: %+v", second)
+	}
+	// The first task's window ends.
+	e.exec(t, "UPDATE {s}.tasks SET freed_key_expires_at = now() - interval '1 second' WHERE id = $1", first.ID)
+
+	if err := e.client.Retry(t.Context(), first.ID); err != nil {
+		t.Fatalf("retry after the window: %v", err)
+	}
+	e.wantState(t, first.ID, taskmill.StateAvailable)
+	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != second.ID {
+		t.Fatalf("after the retry: got %+v, want a duplicate of task %d, which holds the key", dup, second.ID)
+	}
+}
+
+// A retry takes its key back before it takes its group's row, the order of
+// an enqueue. While it waits for a transaction that claims the key, it holds
+// no group, so that transaction can continue into the task's group. In the
+// other order, the two would wait for each other: PostgreSQL would end the
+// retry after a second, and the retry would run again. So the retry must
+// have run once.
+func TestRetryTakesItsKeyBeforeItsGroup(t *testing.T) {
+	t.Parallel()
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	id := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "k", GroupKey: "g"}).ID
+	e.cancel(t, id)
+	tx := e.begin(t)
+	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{DedupeKey: "k"}); err != nil {
+		t.Fatal(err)
+	}
+	sent.reset()
+	retried := make(chan error, 1)
+	go func() { retried <- e.client.Retry(ctx, id) }()
+	e.waitBlocked(t, "INSERT INTO {s}.dedupe_keys")
+	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
+		t.Fatalf("enqueue into the group while the retry waits for the key: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// The transaction's task holds the key now.
+	if err := recv(t, retried, "the retry"); !errors.Is(err, taskmill.ErrConflict) {
+		t.Fatalf("retry: got %v, want ErrConflict", err)
+	}
+	e.wantState(t, id, taskmill.StateCanceled)
+	if n := sent.count("(NOT $2 OR state = 'pending') FOR UPDATE"); n != 1 {
+		t.Errorf("the retry locked its task %d times, want 1: it ran again, as after a deadlock", n)
+	}
+}
+
+// What taskmill stores of a freed key is in columns that only a trusted
+// role writes. A value there that is no key, as a write by hand may leave,
+// counts as none: a retry, of one task or of many, never fails on it. So
+// does a key on a task that is not canceled. The retry of the previous
+// release leaves the columns as they are, on a task that runs on without its
+// key: if that task dies, its retry asks for no key, like any dead task's.
+func TestRetryIgnoresAStoredKeyThatIsNotOne(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	var single, many []int64
+	for _, stored := range []string{
+		`freed_key = '\x01', freed_key_expires_at = 'infinity'`,
+		`freed_key = NULL, freed_key_expires_at = 'infinity'`,
+		`freed_key = sha256('k'), freed_key_expires_at = NULL`,
+		`freed_key = sha256('k'), freed_key_expires_at = '-infinity'`,
+		`freed_key = sha256('k'), freed_key_expires_at = 'infinity', state = 'dead'`,
+	} {
+		for _, ids := range []*[]int64{&single, &many} {
+			id := e.enqueue(t, sendEmail{}, nil)
+			e.cancel(t, id)
+			e.exec(t, "UPDATE {s}.tasks SET "+stored+" WHERE id = $1", id)
+			*ids = append(*ids, id)
+		}
+	}
+	for _, id := range single {
+		if err := e.client.Retry(ctx, id); err != nil {
+			t.Fatalf("retry of task %d: %v", id, err)
+		}
+	}
+	finished := &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled, taskmill.StateDead}}
+	res, err := e.client.RetryMatching(ctx, bulk(finished))
+	if err != nil || res.Changed != int64(len(many)) || res.Conflicts != 0 {
+		t.Fatalf("retried %+v, %v; want the other %d tasks", res, err, len(many))
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.dedupe_keys"); n != 0 {
+		t.Fatalf("%d dedupe keys were claimed from values that are no keys of canceled tasks", n)
+	}
+	// A key whose window never ends is a key: the task takes it back.
+	forever := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "forever"})
+	e.exec(t, "UPDATE {s}.dedupe_keys SET expires_at = 'infinity'")
+	e.cancel(t, forever.ID)
+	if err := e.client.Retry(ctx, forever.ID); err != nil {
+		t.Fatalf("retry of a task with a key that never expires: %v", err)
+	}
+	if dup := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "forever"}); !dup.Duplicate || dup.ID != forever.ID {
+		t.Fatalf("after the retry: got %+v, want a duplicate of task %d", dup, forever.ID)
+	}
+	// And a retry that it refuses says so without the end of its window.
+	e.cancel(t, forever.ID)
+	second := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "forever"})
+	e.exec(t, "UPDATE {s}.dedupe_keys SET expires_at = 'infinity'")
+	e.wantRefused(t, "a key that never expires", forever.ID, second.ID)
+}
+
+// A completed task keeps its key until the window ends, also when the task
+// itself is gone: its kind keeps no history, or the history's retention
+// removed it. A retry that needs the key is refused until then, and its
+// error names no task: a caller could find none to cancel or delete.
+func TestRetryIsRefusedByTheKeyOfATaskThatIsGone(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
+	first := e.keyed(t, opts)
+	e.cancel(t, first.ID)
+	holder := e.keyed(t, opts)
+	// The holder completes, and nothing of it is kept but its key.
+	e.exec(t, "DELETE FROM {s}.tasks WHERE id = $1", holder.ID)
+
+	err := e.client.Retry(ctx, first.ID)
+	if !errors.Is(err, taskmill.ErrConflict) || !strings.Contains(err.Error(), "a task that no longer exists holds its dedupe key until 2") ||
+		strings.Contains(err.Error(), fmt.Sprintf("task %d", holder.ID)) {
+		t.Fatalf("got %v, want ErrConflict that names no task, and the end of the key's window", err)
+	}
+	if err := e.client.Delete(ctx, holder.ID); !errors.Is(err, taskmill.ErrNotFound) {
+		t.Fatalf("delete of the task that is gone: got %v, want ErrNotFound", err)
+	}
+	e.wantState(t, first.ID, taskmill.StateCanceled)
+
+	// Once the window of the gone task ends, the retry takes the key.
+	e.exec(t, "UPDATE {s}.dedupe_keys SET expires_at = now() - interval '1 second'")
+	if err := e.client.Retry(ctx, first.ID); err != nil {
+		t.Fatalf("retry after the window of the task that is gone: %v", err)
+	}
+	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != first.ID {
+		t.Fatalf("after the retry: got %+v, want a duplicate of task %d", dup, first.ID)
 	}
 }
 

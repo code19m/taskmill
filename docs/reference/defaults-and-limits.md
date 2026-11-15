@@ -70,7 +70,7 @@ by election, that does the shared work.
 
 | What | Value |
 |---|---|
-| Time limit of one request | 10 seconds. Then the page says "Taking too long" |
+| Time limit of one request | 10 seconds. Then the page says "Taking too long". It says the same when a list of tasks reads for more than its 5 seconds |
 | Live updates | About every 5 seconds while the browser tab is visible. Up to 1 minute apart while the server is out of reach |
 | Tasks per page of the task list | 50 |
 | One bulk action request | Works for about 5 seconds, then offers to continue |
@@ -78,7 +78,7 @@ by election, that does the shared work.
 | Values per filter | Up to 100 |
 | FIFO groups that a filter lists | The first 100. Its search finds the others |
 | Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds |
-| Page of a dead task in a FIFO group | Counts up to 100 tasks that wait behind it |
+| Page of a dead task in a FIFO group | Counts up to 10,000 tasks that wait behind it |
 | Charts | The last hour, 6 hours, or day, with one point per 1, 5, or 15 minutes |
 
 The values of the `taskmill-ui` command, such as its HTTP timeouts, are in

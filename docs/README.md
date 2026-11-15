@@ -130,6 +130,7 @@ These pages are for contributors.
 - [Task lifecycle and guarantees](design/task-lifecycle.md)
 - [Storage schema](design/schema.md)
 - [Key statements](design/schema-statements.md)
+- [Lists and operator actions](design/schema-operations.md)
 - [FIFO groups and deduplication](design/schema-groups.md)
 - [Maintenance and notifications](design/schema-maintenance.md)
 - [Benchmarks](design/benchmarks.md)

@@ -42,6 +42,7 @@ func (job) Kind() string { return "compat.job" }
 func TestReleaseOnCurrentSchema(t *testing.T) {
 	r := newRelease(t)
 	r.enqueue(t)
+	r.retryCanceled(t)
 	r.work(t)
 	r.runSchedule(t)
 	r.checkRuns(t)
@@ -52,6 +53,7 @@ func TestReleaseOnCurrentSchema(t *testing.T) {
 // migrated, and what its handlers did.
 type release struct {
 	pool      *pgxpool.Pool
+	schema    string
 	client    *taskmill.Client
 	box       *outbox.Outbox
 	ran       chan job
@@ -92,7 +94,10 @@ func newRelease(t *testing.T) *release {
 	if err != nil {
 		t.Fatalf("the release's NewClient: %v", err)
 	}
-	return &release{pool: pool, client: client, box: outbox.New(client), ran: make(chan job, 32), published: make(chan string, 1)}
+	return &release{
+		pool: pool, schema: schema, client: client, box: outbox.New(client),
+		ran: make(chan job, 32), published: make(chan string, 1),
+	}
 }
 
 // enqueue enqueues every task before the worker starts, so that the FIFO
@@ -121,6 +126,22 @@ func (r *release) enqueue(t *testing.T) {
 		return r.box.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "compat", Value: []byte("message")})
 	}); err != nil {
 		t.Fatalf("the release's EnqueueTx: %v", err)
+	}
+}
+
+// retryCanceled retries the task that the current code canceled. Its row
+// stores the dedupe key that the cancel freed, in columns that the release
+// does not know.
+func (r *release) retryCanceled(t *testing.T) {
+	t.Helper()
+	ctx := t.Context()
+	var id int64
+	stored := "SELECT id FROM " + r.schema + ".tasks WHERE state = 'canceled' AND freed_key IS NOT NULL AND freed_key_expires_at > now()"
+	if err := r.pool.QueryRow(ctx, stored).Scan(&id); err != nil {
+		t.Fatalf("the task that the current code canceled, with its key stored: %v", err)
+	}
+	if err := r.client.Retry(ctx, id); err != nil {
+		t.Fatalf("the release's Retry of a task that stores a key: %v", err)
 	}
 }
 
@@ -193,7 +214,7 @@ func (r *release) runSchedule(t *testing.T) {
 func (r *release) checkRuns(t *testing.T) {
 	t.Helper()
 	want := []string{
-		"complete in a transaction", "current: deduplicated", "current: delayed",
+		"complete in a transaction", "current: canceled", "current: deduplicated", "current: delayed",
 		"current: fifo", "current: fifo", "current: fifo",
 		"enqueue in a transaction", "fifo", "fifo", "fifo", "retry", "schedule",
 	}

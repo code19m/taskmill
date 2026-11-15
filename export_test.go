@@ -343,8 +343,21 @@ func ListRowsRead(ctx context.Context, c *Client, params *ListParams) (int64, er
 	if err != nil {
 		return 0, err
 	}
-	args := []any{m.queues, m.states, m.kinds, before, limit + 1, len(m.states) > 0, m.history, m.groups}
-	return rowsRead(ctx, c, "SET LOCAL plan_cache_mode = force_custom_plan", c.sql.listTasks, args, taskTables)
+	args := []any{m.queues, m.states, m.kinds, before, limit + 1, len(m.states) > 0, m.history, m.groups, params.Summary}
+	return rowsRead(ctx, c, pageSettings, c.sql.listTasks, args, taskTables)
+}
+
+// ReadAlone runs sql after settings as List, Count, Groups, and Activity run
+// their statements, and returns the first column of each row.
+func ReadAlone(ctx context.Context, c *Client, settings, sql string) ([]string, error) {
+	var out []string
+	err := c.readAlone(ctx, settings, sql, nil, func(r pgx.Rows) error {
+		var v string
+		err := r.Scan(&v)
+		out = append(out, v)
+		return err
+	})
+	return out, err
 }
 
 // GroupRowsRead runs the read of a page of groups on params, as Groups runs
@@ -355,7 +368,7 @@ func GroupRowsRead(ctx context.Context, c *Client, params *GroupParams) (int64, 
 	if err != nil {
 		return 0, err
 	}
-	return rowsRead(ctx, c, groupsSettings, sql, args, func(rel string) bool { return rel == "groups" })
+	return rowsRead(ctx, c, pageSettings, sql, args, func(rel string) bool { return rel == "groups" })
 }
 
 // RetentionRowsRead runs the statement that deletes a batch of the dead and

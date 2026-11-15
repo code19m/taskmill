@@ -22,7 +22,7 @@ your handlers must follow.
 | **Retries stop.** | A failing task waits longer after each failure, then becomes [dead](glossary.md#dead-task) when its attempts run out. It keeps its last 20 errors. |
 | **Tasks start in order.** | In a queue, a higher [priority](glossary.md#priority) starts first, then an earlier [run time](glossary.md#run-time), then the order you added them. Tasks may finish in any order. |
 | **FIFO groups keep their order.** | The tasks of a [FIFO group](glossary.md#fifo-group) run one at a time, in order. A dead task is never skipped: the group waits for you. |
-| **A dedupe key gives one task.** | Within its window, a [dedupe key](glossary.md#dedupe-key) makes one task, even when two processes enqueue the same key at the same moment. The window starts at the enqueue. A cancel or a delete of the task ends it early ([Avoid duplicate tasks](../guides/deduplication.md#when-is-a-key-free-again)). |
+| **A dedupe key gives one task.** | Within its window, a [dedupe key](glossary.md#dedupe-key) makes one task, even when two processes enqueue the same key at the same moment. The window starts at the enqueue. A cancel or a delete of the task frees the key early, and a retry of the canceled task takes it back, or is refused while another task holds it ([Avoid duplicate tasks](../guides/deduplication.md#when-is-a-key-free-again)). |
 | **Delayed tasks start on time.** | They start within about a second of their run time, while a [maintainer](glossary.md#maintainer) runs. Don't count on more exact timing. |
 | **Payload values arrive exact.** | The JSON is decoded straight into your struct, so large integers are safe. The JSON text itself is not kept: [Define tasks](../guides/define-tasks.md#keep-the-payload-small) says what changes. |
 

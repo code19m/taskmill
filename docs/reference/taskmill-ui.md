@@ -102,8 +102,8 @@ queue `emails`.
 - **`theme` works on every page:** `?theme=light`, `dark`, or `system`. The
   browser remembers the choice.
 - **The dashboard sets some parameters itself,** in the redirect after an
-  action: `done`, `count`, `skipped`, and the `cursor` of a bulk action.
-  Don't write them.
+  action: `done`, `count`, `skipped`, `conflicts`, and the `cursor` of a
+  bulk action. Don't write them.
 
 | Status | When |
 |---|---|
@@ -115,9 +115,9 @@ queue `emails`.
 | 403 | An action in read-only mode, or a `POST` from another site |
 | 404 | No such page, task, or schedule. With a prefix, also a path that only starts like it, such as `/admin/tasksx` |
 | 405 | The path exists, but not with this method |
-| 409 | The action does not fit, such as a retry of a running task |
+| 409 | The action does not fit, such as a retry of a running task. Or a retry of a canceled task whose dedupe key another task holds: the page names that task |
 | 500 | A read or an action failed. The log has `dashboard request failed` |
-| 503 | The database did not answer in time. The page says "Taking too long" |
+| 503 | The database did not answer in time, or a list of tasks read for more than its 5 seconds. The page says "Taking too long" |
 
 ## Actions in the log
 

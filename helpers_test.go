@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -147,6 +148,29 @@ func (l *statementLog) count(fragments ...string) int {
 		return slices.ContainsFunc(fragments, func(f string) bool { return !strings.Contains(sql, f) })
 	}))
 }
+
+// roundTrips counts the round trips that a pool's connections make to the
+// database: each statement sent alone, and each batch. It leaves out the
+// round trip in which a connection first prepares the statements of a batch.
+type roundTrips struct {
+	n atomic.Int64
+}
+
+func (r *roundTrips) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	r.n.Add(1)
+	return ctx
+}
+
+func (*roundTrips) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (r *roundTrips) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	r.n.Add(1)
+	return ctx
+}
+
+func (*roundTrips) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+
+func (*roundTrips) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
 
 // checkGroups fails the test unless every FIFO group satisfies the
 // invariants in docs/design/task-lifecycle.md.

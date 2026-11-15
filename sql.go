@@ -40,10 +40,10 @@ type statements struct {
 
 	getTask       string
 	lockTask      string
-	flagCancel    string
-	cancelWaiting string
 	retry         string
-	releaseKey    string
+	takeKeys      string
+	keyHolder     string
+	releaseKeys   string
 	deleteTask    string
 	deleteHistory string
 	taskExists    string
@@ -149,8 +149,9 @@ const groupFree = `(t.group_key IS NULL
        OR NOT EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key))`
 
 // keyFree matches the tasks t that hold no dedupe key, or whose key's row it
-// locks. It skips key rows that other transactions hold, such as a duplicate
-// enqueue in an open transaction, so a statement never waits for them.
+// locks. It skips key rows that other transactions hold, such as an enqueue
+// that tried to claim the key in an open transaction, so a statement never
+// waits for them.
 const keyFree = `(NOT EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id)
        OR EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id FOR UPDATE SKIP LOCKED))`
 
@@ -208,6 +209,16 @@ func newStatements(schema string) *statements {
 		// running tasks, so when the tasks are matched against the list of
 		// attempts instead, it compares every task with every attempt.
 		"{leased}", "state::text = 'running'",
+		// {keyed} matches the tasks t that must take a dedupe key back when
+		// they are retried: they are canceled, their cancel freed a key, and
+		// stored it with them, and the key's window still lasts. Only a
+		// canceled task gave its key away. A task in another state that
+		// stores one was retried by the previous release, which leaves the
+		// columns as they are: it ran on without its key, and so asks for
+		// none when it is dead. A stored key that is not one, which only a
+		// write by hand leaves, counts as none: the table of the keys would
+		// refuse it, and fail the retry.
+		"{keyed}", `(t.state = 'canceled' AND t.freed_key_expires_at > now() AND octet_length(t.freed_key) = 32)`,
 		// {utc} is the database's time in UTC, without a time zone. A
 		// retention period is subtracted from it, not from now(): there, a
 		// period's days are days of the session's time zone, which are 23 or
@@ -225,7 +236,8 @@ WITH candidates AS (
     LIMIT {batch}
 ), picked AS (
     SELECT t.id, t.state::text AS state,
-           EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key) AS in_group
+           EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key) AS in_group,
+           coalesce({keyed}, false) AS keyed
     FROM {s}.tasks t
     WHERE t.id = ANY(ARRAY(SELECT id FROM candidates)) AND ` + cond + `
       AND t.state = ANY($4::text[]::{s}.task_state[])
@@ -234,7 +246,8 @@ WITH candidates AS (
       AND ` + groupFree + gates + `
     FOR UPDATE OF t SKIP LOCKED
 )
-SELECT c.id, c.queue, c.group_key, p.id IS NOT NULL, coalesce(p.state, ''), coalesce(p.in_group, false)
+SELECT c.id, c.queue, c.group_key, p.id IS NOT NULL, coalesce(p.state, ''), coalesce(p.in_group, false),
+       coalesce(p.keyed, false)
 FROM candidates c LEFT JOIN picked p ON p.id = c.id
 ORDER BY c.id`)
 	}
@@ -251,6 +264,28 @@ SELECT coalesce(max(version), 0), current_setting('default_transaction_isolation
 		// the key. A holder whose window ended is such a case: the statement
 		// would have claimed its key, had another enqueue not done so
 		// meanwhile. The client then reads the key again.
+		//
+		// A task whose key the statement sees as held is a duplicate right
+		// away: it gets no ID, and the statement does not try to claim its
+		// key. So a duplicate writes nothing: a claim that fails locks the
+		// key's row, and so takes a transaction ID and writes WAL, and an ID
+		// is a write to the sequence. Deduplication stays exact, because
+		// every task that is created still goes through the claim, which
+		// alone decides. Skipping the claim only gives its answer early. A
+		// held key's row changes in one way: the cancel or the delete of its
+		// task removes it. Only an expired key is claimed again. So for a
+		// key that the statement sees as held, the claim would report the
+		// same duplicate, unless such a removal is under way, or commits
+		// while the statement runs: then the claim would wait for it, and
+		// take the key. The statement reports the duplicate that was true
+		// when it began, as if it had run just before the removal.
+		//
+		// That holds only if the statement sees the keys as they are when it
+		// begins, as at READ COMMITTED. A caller's transaction at REPEATABLE
+		// READ or SERIALIZABLE sees them as they were when the transaction
+		// began: a key that it sees as held may have been free for long.
+		// There every key goes through the claim, which looks at the rows as
+		// they are now.
 		enqueue: q(`
 WITH input AS (
     SELECT queue, kind, priority, run_at, max_attempts, group_key,
@@ -260,13 +295,19 @@ WITH input AS (
         WITH ORDINALITY AS t(queue, kind, priority, run_at, max_attempts, group_key,
                              dedupe_key, dedupe_window_us, payload, metadata, ord)
 ), ids AS (
-    SELECT input.*, nextval('{s}.tasks_id_seq') AS id
+    SELECT input.*,
+           CASE WHEN dedupe_key IS NOT NULL
+                     AND current_setting('transaction_isolation') NOT IN ('repeatable read', 'serializable')
+                     AND EXISTS (SELECT FROM {s}.dedupe_keys k
+                                 WHERE k.key = input.dedupe_key AND k.expires_at > now())
+                THEN NULL
+                ELSE nextval('{s}.tasks_id_seq') END AS id
     FROM input
 ), claimed AS (
     INSERT INTO {s}.dedupe_keys AS d (key, task_id, expires_at)
     SELECT dedupe_key, id, now() + dedupe_window_us * interval '1 microsecond'
     FROM ids
-    WHERE dedupe_key IS NOT NULL
+    WHERE dedupe_key IS NOT NULL AND id IS NOT NULL
     ORDER BY dedupe_key
     ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
         WHERE d.expires_at <= now()
@@ -392,23 +433,61 @@ LIMIT 1`),
 SELECT state::text, queue, coalesce(group_key, '')
 FROM {s}.tasks WHERE id = $1 AND (NOT $2 OR state = 'pending') FOR UPDATE`),
 
-		// flagCancel asks the worker running task $1 to cancel it.
-		flagCancel: q(`UPDATE {s}.tasks SET cancel_requested_at = now() WHERE id = $1`),
-
-		// cancelWaiting cancels task $1, which is not running.
-		cancelWaiting: q(`
-UPDATE {s}.tasks SET state = 'canceled', finalized_at = now(), cancel_requested_at = now() WHERE id = $1`),
-
+		// retry makes task $1 run again, as pending if $2. It forgets the
+		// dedupe key that the task's cancel freed: takeKeys ran before.
 		retry: q(`
 UPDATE {s}.tasks
 SET state = CASE WHEN $2 THEN 'pending' ELSE 'available' END::{s}.task_state,
-    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted}
+    attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted},
+    freed_key = NULL, freed_key_expires_at = NULL
 WHERE id = $1 AND state IN ('dead', 'canceled')
 RETURNING queue`),
 
-		// releaseKey frees the dedupe key that task $1 holds, so that the key
-		// can be enqueued again.
-		releaseKey: q(`DELETE FROM {s}.dedupe_keys WHERE task_id = $1`),
+		// takeKeys gives the tasks $1, which a retry holds, the dedupe keys
+		// that their cancels freed, for the rest of each key's window. It
+		// claims a key as an enqueue does: only if no task holds it, or its
+		// holder's window has ended. A task whose key's window has ended
+		// asks for no key. It returns the tasks that did not get their key:
+		// another task holds it, which may be an older task of $1.
+		//
+		// Like an enqueue, it waits for a transaction that claims or holds
+		// the same key, so a retry runs it before it takes a FIFO group's
+		// row, the order of an enqueue.
+		takeKeys: q(`
+WITH wanted AS (
+    SELECT t.id, t.freed_key AS key, t.freed_key_expires_at AS expires_at
+    FROM {s}.tasks t
+    WHERE t.id = ANY($1::bigint[]) AND {keyed}
+), taken AS (
+    INSERT INTO {s}.dedupe_keys AS d (key, task_id, expires_at)
+    SELECT DISTINCT ON (key) key, id, expires_at FROM wanted ORDER BY key, id
+    ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
+        WHERE d.expires_at <= now()
+    RETURNING d.task_id
+)
+SELECT id FROM wanted WHERE id NOT IN (SELECT task_id FROM taken)`),
+
+		// keyHolder reads who holds the dedupe key that task $1 stores, for
+		// the error of a retry that takeKeys refused: the task that holds
+		// it, and the end of that task's window, if it ends. The task is 0
+		// if it no longer exists: a completed task keeps its key for its
+		// window, also after its history is gone. It returns no row if no
+		// task holds the key any more.
+		keyHolder: q(`
+SELECT coalesce(h.id, 0), CASE WHEN isfinite(d.expires_at) THEN d.expires_at END
+FROM {s}.tasks t
+JOIN {s}.dedupe_keys d ON d.key = t.freed_key AND d.expires_at > now()
+LEFT JOIN LATERAL (
+    SELECT id FROM {s}.tasks WHERE id = d.task_id
+    UNION ALL
+    SELECT id FROM {s}.task_history WHERE id = d.task_id
+    LIMIT 1
+) h ON true
+WHERE t.id = $1`),
+
+		// releaseKeys frees the dedupe keys that tasks $1 hold, so that the
+		// keys can be enqueued again.
+		releaseKeys: q(`DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])`),
 
 		// deleteTask deletes task $1 unless it is running, and returns the
 		// state it was in; if $2, only if the task is pending, as lockTask
@@ -593,7 +672,8 @@ SELECT least($2::bigint,
 		// keys that other transactions hold, the groups ($7, $8) that the
 		// action left before, and tasks that changed meanwhile. They report
 		// whether each task's group had a row, which they then hold. A
-		// cancel skips running tasks already asked to stop.
+		// cancel skips running tasks already asked to stop. They also report
+		// the tasks that must take a dedupe key back if they are retried.
 		pickRetry: pick(`t.state IN ('dead', 'canceled')`, ``),
 		pickCancel: pick(`t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
       AND t.cancel_requested_at IS NULL`, ` AND `+keyFree),
@@ -622,33 +702,42 @@ ON CONFLICT DO NOTHING
 RETURNING queue, group_key`),
 
 		// retryTasks retries the picked tasks $1, those of $2 into pending,
-		// and notifies channel $3 of queues $4.
+		// and notifies channel $3 of queues $4. Like retry, it runs after
+		// takeKeys.
 		retryTasks: q(`
 WITH retried AS (
     UPDATE {s}.tasks
     SET state = CASE WHEN id = ANY($2::bigint[]) THEN 'pending' ELSE 'available' END::{s}.task_state,
-        attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted}
+        attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted},
+        freed_key = NULL, freed_key_expires_at = NULL
     WHERE id = ANY($1::bigint[])
 ), notified AS (
     SELECT count(pg_notify($3, '{available}' || q)) AS n FROM unnest($4::text[]) AS q
 )
 SELECT n FROM notified`),
 
-		// cancelTasks cancels the picked tasks $1 and releases their dedupe
-		// keys. It flags the running ones, and asks their workers on channel
-		// $2 to stop them.
+		// cancelTasks cancels the tasks $1, whose rows the caller holds, and
+		// frees their dedupe keys, so that the keys can be enqueued again. It
+		// stores each freed key with its task, and the end of the key's
+		// window, so that a retry can take the key back: see takeKeys. It
+		// flags the running tasks, and asks their workers on channel $2 to
+		// stop them. A task that holds no key keeps what an earlier cancel
+		// stored: a running task can be flagged twice.
 		cancelTasks: q(`
 WITH released AS (
-    DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])
+    DELETE FROM {s}.dedupe_keys d WHERE d.task_id = ANY($1::bigint[]) RETURNING d.task_id, d.key, d.expires_at
 ), canceled AS (
-    UPDATE {s}.tasks SET state = 'canceled', finalized_at = now(), cancel_requested_at = now()
-    WHERE id = ANY($1::bigint[]) AND state <> 'running'
-), flagged AS (
-    UPDATE {s}.tasks SET cancel_requested_at = now()
-    WHERE id = ANY($1::bigint[]) AND state = 'running'
-    RETURNING id
+    UPDATE {s}.tasks t
+    SET state = CASE WHEN t.state = 'running' THEN t.state ELSE 'canceled' END,
+        finalized_at = CASE WHEN t.state = 'running' THEN NULL ELSE now() END,
+        cancel_requested_at = now(),
+        freed_key = coalesce(r.key, t.freed_key),
+        freed_key_expires_at = coalesce(r.expires_at, t.freed_key_expires_at)
+    FROM unnest($1::bigint[]) AS u(id) LEFT JOIN released r ON r.task_id = u.id
+    WHERE t.id = u.id
+    RETURNING t.id, t.state
 )
-SELECT count(pg_notify($2, '{cancel}' || id)) FROM flagged`),
+SELECT count(pg_notify($2, '{cancel}' || id)) FROM canceled WHERE state = 'running'`),
 
 		// deleteTasks deletes the picked tasks $1 and releases their dedupe
 		// keys.
@@ -1210,17 +1299,17 @@ ORDER BY w.id`),
 		// with custom plans, so that the planner sees which filters are set,
 		// and its filters are written so that the planner also sees a single
 		// queue or group and the selected states: see inList and inStates.
+		// If $9, it returns a summary of each task: see listColumns.
 		listTasks: q(`
 SELECT ` + taskColumns + ` FROM (
-    (SELECT ` + taskColumns + ` FROM {s}.tasks
+    (SELECT ` + listColumns(`state::text`) + ` FROM {s}.tasks
      WHERE $6 AND ` + inList(`queue`, `$1::text[]`) + `
        AND (cardinality($2::text[]) = 0 OR ` + inStates(`$2::text[]`) + `)
        AND ` + inList(`kind`, `$3::text[]`) + `
        AND ` + inList(`group_key`, `$8::text[]`) + ` AND id < $4
      ORDER BY id DESC LIMIT $5)
     UNION ALL
-    (SELECT id, queue, kind, 'completed', priority, attempt, max_attempts, coalesce(group_key, ''),
-            metadata, payload, errors, created_at, run_at, attempted_at, finalized_at
+    (SELECT ` + listColumns(`'completed'`) + `
      FROM {s}.task_history
      WHERE $7 AND ` + inList(`queue`, `$1::text[]`) + `
        AND ` + inList(`kind`, `$3::text[]`) + `
@@ -1465,6 +1554,18 @@ SELECT paused FROM s`),
 UPDATE {s}.schedules SET paused_at = CASE WHEN $2 THEN coalesce(paused_at, now()) END, updated_at = now()
 WHERE name = $1`),
 	}
+}
+
+// listColumns are taskColumns as listTasks reads them from a table of tasks
+// in the given state. If $9, they leave out what a list of tasks rarely
+// shows, and what makes a task large: they have no metadata and no payload,
+// and of the errors only the newest. The planner sees $9, so a summary does
+// not read the values it leaves out.
+func listColumns(state string) string {
+	return `id, queue, kind, ` + state + `, priority, attempt, max_attempts, coalesce(group_key, ''),
+            CASE WHEN $9 THEN NULL ELSE metadata END, CASE WHEN $9 THEN NULL ELSE payload END,
+            CASE WHEN $9 THEN jsonb_path_query_array(errors, '$[last]') ELSE errors END,
+            created_at, run_at, attempted_at, finalized_at`
 }
 
 // inList matches the rows whose column is among the values of the text array

@@ -22,6 +22,11 @@ All notable changes to taskmill are recorded here. The format follows
   check-in for its whole `LeaseDuration`, by the database's clock. Such a
   worker stopped without unregistering, or cannot reach the database. The
   dashboard's Workers page marks the same workers.
+- `ListParams.Summary` makes `Client.List` return each task without its
+  payload and metadata, and with only the newest of its errors. The
+  database does not read or send what is left out, so a page costs about
+  the same whatever its tasks hold. Use it for a list that shows one line
+  per task. Without it, `List` returns every task in full, as before.
 
 ### Changed
 
@@ -51,14 +56,41 @@ All notable changes to taskmill are recorded here. The format follows
   with its default: they link to the type.
 - The reference section has a new order: the three indexes come first, then
   the pages about what has no Go identifier.
-- This release has a schema migration, `0005_worker_leases`. It adds a
-  column to `workers`, changes only the catalog, reads no row, and never
-  locks `tasks`. It waits at most 5 seconds for each of its locks. The
-  previous release's code keeps working on the new schema, so a rolling
-  deploy is safe, as always.
+- This release has a schema migration, `0005_worker_leases_and_freed_keys`.
+  It adds a column to `workers` and two to `tasks`, changes only the
+  catalog, and reads no row. It waits at most 5 seconds for each of its
+  locks. The previous release's code keeps working on the new schema, so a
+  rolling deploy is safe, as always.
 - The migration also drops the index `schedules_due_idx`. No statement read
   it: each one finds its schedules by name. Every run of a schedule had to
   update it.
+- An enqueue of a dedupe key that a task holds writes nothing. It locked
+  the key's row to find out that the key was taken, so every duplicate took
+  a transaction ID, wrote WAL, and committed as a write, and it took a task
+  ID from the sequence. Now a duplicate only reads. Two things that you can
+  see change with it. A cancel of the task that holds the key no longer
+  waits for an open transaction that enqueued the same key. And an enqueue
+  no longer waits for an open transaction that cancels or deletes the task
+  that holds its key: until that transaction commits, the task holds the
+  key, so the enqueue is a duplicate of it. Before, the enqueue waited, and
+  created a task if the cancel committed. A new key costs one more index
+  lookup.
+- The dashboard says "Taking too long" when a list of tasks reaches its
+  time limit of 5 seconds, with a way to try again, and for a list with
+  filters, what may help. It said "Something went wrong", as for any
+  failure, and answered 500 where it now answers 503. The docs now say
+  which lists read only the tasks they show. A list of dead or canceled
+  tasks is not always one of them, for one queue or for all: the notes of
+  0.6.0 said that the dead tasks of a queue that has few of them are, which
+  holds only for a queue with a small part of all tasks.
+- Each read of the operations API is one round trip to the database.
+  `List` made 5, `Count`, `Groups`, and `Activity` 4 each, and `Queues` 2:
+  they sent `BEGIN`, their settings, the statement, and `COMMIT` one by
+  one. Now they send the settings and the statement as one batch, which
+  PostgreSQL runs as one transaction. The results are the same. A
+  dashboard far from its database gains most: its overview makes 5 round
+  trips where it made 9, its task list 2 where it made 7, and a task's page
+  3 at most where it made 8.
 
 ### Fixed
 
@@ -146,6 +178,58 @@ All notable changes to taskmill are recorded here. The format follows
   tasks` with `tasks=0` each time it stopped. It now logs that line only
   when it waits. And `tasks` counts the tasks whose handlers still run: it
   also counted the finished ones whose results were not recorded yet.
+- A retry of a canceled task takes the task's dedupe key back. A cancel
+  frees the key, and a retry did not take it back. So after a cancel, an
+  enqueue of the same key, and a retry of the canceled task, two unfinished
+  tasks stood for one key, and both ran. Now the retried task holds its key
+  again, for the rest of the key's window, and an enqueue of the key is a
+  duplicate again. If another task holds the key by then, the retry changes
+  nothing. `Retry` returns `ErrConflict`, which only `UpdateQueue` and
+  `UpdateSettings` returned so far, so check for it where you retry
+  canceled tasks. `RetryMatching` leaves such a task, and counts it in the
+  new `BulkResult.Conflicts`. The dashboard's Retry button says which task
+  holds the key, and a retry of many tasks says how many it left. A task
+  that is retried after its window ended takes no key, as before. The
+  cancel stores the key with the task, in two columns that the migration
+  adds to `tasks`, so the task looks as before. If the task that holds the
+  key is gone, the error names none, and says when the key's window ends.
+  During a rolling deploy, a task that the previous release cancels has no
+  stored key, so its retry takes no key, as before.
+- `CancelMatching`, `RetryMatching`, and `DeleteMatching` no longer fail
+  with `canceling statement due to lock timeout` (SQLSTATE 55P03) when
+  commits that notify are slow. Each batch of such an action waits at most
+  100 ms for a row that another transaction holds. That limit also held
+  for the batch's commit. A transaction that sent a notification, as a
+  batch does that wakes a queue or stops a running task, waits at its
+  commit for a lock that every such transaction of the database server
+  takes in turn. With synchronous replication, each one holds it while it
+  waits for the standby. When that wait took over 100 ms, the batch was
+  undone, and the action returned the error after the batches before it.
+  The dashboard's buttons for many tasks failed the same way. A batch now
+  commits without the limit. A schedule's run had the same limit, of one
+  second: when the wait took longer, the run was not enqueued, the worker
+  logged the error, and the next cycle tried again. It also commits
+  without the limit now.
+- `Enqueue` and `EnqueueMany` no longer fail with PostgreSQL's `deadlock
+  detected` (SQLSTATE 40P01) for a deadlock that other transactions opened.
+  A `CancelTx` in an application's transaction can take its locks in an
+  order that makes it wait for another transaction, and that one for it.
+  An enqueue into the same FIFO group that waits between the two is part
+  of the circle, and PostgreSQL may end the enqueue to end the wait. On
+  the client's pool, an enqueue is one statement in a transaction of its
+  own, so nothing of it was saved. It now runs again by itself, up to 5
+  times in all, as `Cancel`, `Delete`, and `Retry` do. `EnqueueTx` and
+  `EnqueueManyTx` cannot, because the transaction is yours: run it again.
+- The dashboard's task list no longer reads what it does not show. It read
+  every task of a page in full: the payload, up to 1 MiB, the metadata, and
+  all 20 errors, to show one line per task. One page of 50 tasks with large
+  payloads took 54 MiB of memory in the process that serves the dashboard,
+  and an open tab asked for it again every 5 seconds. The list now asks for
+  summaries: a page reads the columns it shows and the last error of each
+  task, whatever the payloads hold. The page of a dead task that halts its
+  FIFO group listed up to 100 of the tasks behind it, in full, only to
+  count them. It now counts them, so it shows the number up to 10,000,
+  where it showed "100+".
 
 ### Security
 

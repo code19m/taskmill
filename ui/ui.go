@@ -64,6 +64,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/code19m/taskmill"
 )
 
@@ -83,7 +85,6 @@ const (
 
 const (
 	pageSize       = 50
-	groupPeek      = 100              // most waiting tasks of a group that a task page counts
 	requestTimeout = 10 * time.Second // bound on one request, so a slow database cannot hold it
 	maxChoices     = 100              // most values of one filter that a request may choose
 	gzipMin        = 1024             // smallest response worth compressing
@@ -386,15 +387,21 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := taskFilter(q)
-	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: pageSize}
+	// The list shows no payload, no metadata, and only each task's last error.
+	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: pageSize, Summary: true}
 	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		s.render(w, r, http.StatusBadRequest, "error.html",
 			page{Title: "Invalid filter", Data: problem{err.Error(), "/tasks", "Clear the filters"}})
 		return
 	}
+	filtered := len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
 	if err != nil {
-		s.fail(w, r, err)
+		hint := ""
+		if filtered {
+			hint = filtersHint
+		}
+		s.failWith(w, r, err, hint)
 		return
 	}
 	known, err := s.client.Queues(r.Context())
@@ -408,7 +415,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	offered := s.filterChoices(r)
 	newest := maps.Clone(q)
-	for _, key := range []string{"cursor", "done", "count"} {
+	for _, key := range []string{"cursor", "done", "count", "conflicts"} {
 		newest.Del(key)
 	}
 	next := ""
@@ -430,7 +437,6 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	if offered.moreGroups {
 		groupFilter.Source = s.path("/choices/groups")
 	}
-	filtered := len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
 	var bulk *bulkLinks
 	if filtered && !s.readOnly {
 		bulk = s.bulkLinks(f)
@@ -527,7 +533,7 @@ type bulkAction struct {
 var bulkActions = map[string]bulkAction{
 	"retry": {
 		Verb: "Retry", Icon: "retry",
-		Explain: "They run again with a fresh set of attempts. A dead task that halts its FIFO group resumes the group.",
+		Explain: "They run again with a fresh set of attempts. A dead task that halts its FIFO group resumes the group. A canceled task stays canceled if another task holds its dedupe key.",
 		None:    "Retry applies to dead and canceled tasks.",
 		path:    "/tasks/bulk/retry",
 		do:      (*taskmill.Client).RetryMatching,
@@ -780,9 +786,8 @@ func selected(values []string) []string {
 
 // group describes a task's place in its FIFO group.
 type group struct {
-	Waiting int  // tasks waiting behind a dead task, up to groupPeek
-	More    bool // more than groupPeek wait
-	Head    *taskmill.TaskInfo
+	Waiting taskmill.TaskCount // tasks waiting behind a dead task
+	Head    *taskmill.TaskInfo // the task that a pending task waits behind, in summary
 }
 
 func (s *server) task(w http.ResponseWriter, r *http.Request) {
@@ -821,19 +826,19 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 	}
 	switch t.State {
 	case taskmill.StateDead:
-		page, err := s.client.List(r.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{
+		counts, err := s.client.Count(r.Context(), &taskmill.TaskFilter{
 			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, States: []taskmill.State{taskmill.StatePending},
-		}, Limit: groupPeek})
+		})
 		if err != nil {
 			return g, err
 		}
-		g.Waiting, g.More = len(page.Tasks), page.Next != ""
+		g.Waiting = counts.States[taskmill.StatePending]
 	case taskmill.StatePending:
 		page, err := s.client.List(r.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{
 			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, States: []taskmill.State{
 				taskmill.StateScheduled, taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateRetryable, taskmill.StateDead,
 			},
-		}, Limit: 1})
+		}, Limit: 1, Summary: true})
 		if err != nil {
 			return g, err
 		}
@@ -888,6 +893,7 @@ var notices = map[string]string{
 	"retry-all":       "{tasks} retried. They run again with fresh attempts.",
 	"retry-more":      "{tasks} retried so far; more remain.",
 	"retry-skipped":   "{tasks} retried; other work held {skipped}. Try again for those.",
+	"retry-conflicts": "{tasks} retried; {conflicts} not, because another task holds the same dedupe key.",
 	"cancel-all":      "{tasks} canceled. Running tasks stop when their handlers return.",
 	"cancel-more":     "{tasks} canceled so far; more remain.",
 	"cancel-skipped":  "{tasks} canceled; other work held {skipped}. Try again for those.",
@@ -897,7 +903,8 @@ var notices = map[string]string{
 }
 
 // notice returns the notice that a query asks for, with the numbers of
-// tasks in its "count" and "skipped" parameters for a bulk action.
+// tasks in its "count", "skipped", and "conflicts" parameters for a bulk
+// action.
 func notice(q url.Values) string {
 	text := notices[q.Get("done")]
 	if !strings.Contains(text, "{tasks}") {
@@ -908,7 +915,10 @@ func notice(q url.Values) string {
 		return ""
 	}
 	text = strings.Replace(text, "{tasks}", tasks(taskmill.TaskCount{N: n}), 1)
-	return strings.Replace(text, "{skipped}", tasks(taskmill.TaskCount{N: queryNumber(q, "skipped")}), 1)
+	for _, key := range []string{"skipped", "conflicts"} {
+		text = strings.Replace(text, "{"+key+"}", tasks(taskmill.TaskCount{N: queryNumber(q, key)}), 1)
+	}
+	return text
 }
 
 func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
@@ -989,12 +999,14 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 	http.Redirect(w, r, s.path(target+"?done="+notice), http.StatusSeeOther)
 }
 
-// actionFailed explains why an action did not apply.
+// actionFailed explains why an action did not apply: the error says it, as
+// for a retry that another task's dedupe key refuses.
 func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error, back string) {
 	switch {
 	case errors.Is(err, taskmill.ErrNotFound):
 		s.notFound(w, r)
-	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrInvalidArgument):
+	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrInvalidArgument),
+		errors.Is(err, taskmill.ErrConflict):
 		s.render(w, r, http.StatusConflict, "error.html", page{Title: "Not possible", Data: problem{err.Error(), back, "Go back"}})
 	default:
 		s.fail(w, r, err)
@@ -1006,9 +1018,10 @@ func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error,
 // deadline, so that it answers in time. If more tasks remain, it leads back
 // to its page, whose form continues where it stopped. If it left tasks that
 // other work held, it leads back to its page, which offers to try those
-// again. Otherwise it leads to the task list. Only its page carries where a
-// run continues: the task list always shows every task that the filters
-// select.
+// again. Otherwise it leads to the task list, and says how many tasks a
+// retry left because other tasks hold their dedupe keys: trying again does
+// not help those. Only its page carries where a run continues: the task
+// list always shows every task that the filters select.
 func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
 		return
@@ -1046,6 +1059,9 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		target = a.path + "?"
 		query.Set("done", name+"-skipped")
 		query.Set("skipped", strconv.FormatInt(res.Skipped, 10))
+	case res.Conflicts > 0:
+		query.Set("done", name+"-conflicts")
+		query.Set("conflicts", strconv.FormatInt(res.Conflicts, 10))
 	default:
 		query.Set("done", name+"-all")
 	}
@@ -1071,11 +1087,31 @@ func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
+// filtersHint tells the reader of a task list that ran out of time what may
+// help. A list by state, kind, or FIFO group can read many tasks that it does
+// not show: only some lists have an index that holds their tasks in the
+// list's order.
+const filtersHint = " A list with these filters can read many tasks that it does not show. " +
+	"A queue and a state in the filters, or fewer filters, may help."
+
+// timeLimit reports whether the database ended a read at its time limit: the
+// client's reads of tasks, groups, and activity set one of 5 seconds.
+func timeLimit(err error) bool {
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && pgErr.Code == "57014" // query_canceled
+}
+
 // fail answers a request whose reads or action failed. A request whose
 // client went away gets no answer, and is not an error of the dashboard.
 func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
+	s.failWith(w, r, err, "")
+}
+
+// failWith is fail with a hint for the reader, shown if the request, or a
+// read of it, ran out of time.
+func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hint string) {
 	ctx := r.Context()
-	if errors.Is(context.Cause(ctx), errSlow) {
+	if errors.Is(context.Cause(ctx), errSlow) || timeLimit(err) {
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request timed out",
 			slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
 		again, label := r.URL.RequestURI(), "Try again"
@@ -1084,7 +1120,7 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		}
 		w.Header().Set("Retry-After", "5")
 		s.render(w, r, http.StatusServiceUnavailable, "error.html", page{Title: "Taking too long", Data: problem{
-			"The database did not answer in time. Try again in a moment.", again, label,
+			"The database did not answer in time. Try again in a moment." + hint, again, label,
 		}})
 		return
 	}

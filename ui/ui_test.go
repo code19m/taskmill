@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -590,6 +591,271 @@ func TestBulkActionTellsWhatItLeft(t *testing.T) {
 	_, body, _ := get(t, h, rec.Header().Get("Location"))
 	if !strings.Contains(body, "2 tasks canceled; other work held 1 task. Try again for those.") || !strings.Contains(body, "Cancel 1 task</button>") {
 		t.Fatalf("the page after a cancel that left a task:\n%s", body)
+	}
+}
+
+// A retry that another task's dedupe key refuses says which task holds the
+// key, on the page of a refused action. A bulk retry says how many tasks it
+// left for that reason, and leads to the task list: trying again does not
+// help them.
+func TestRetryRefusedByADedupeKey(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	ctx := t.Context()
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
+	first, err := client.Enqueue(ctx, greet{Name: "x"}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Cancel(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, err := client.Enqueue(ctx, greet{Name: "x"}, opts)
+	if err != nil || second.Duplicate {
+		t.Fatalf("enqueue after the cancel: %+v, %v", second, err)
+	}
+	h := handler(t, client, nil)
+	id, holder := strconv.FormatInt(first.ID, 10), strconv.FormatInt(second.ID, 10)
+
+	rec := post(t, h, "/tasks/"+id+"/retry", "same-origin")
+	if body := rec.Body.String(); rec.Code != http.StatusConflict ||
+		!strings.Contains(body, "cannot retry task "+id+": task "+holder+" holds its dedupe key") ||
+		!strings.Contains(body, `href="/tasks/`+id+`"`) {
+		t.Fatalf("refused retry: %d\n%s", rec.Code, body)
+	}
+	if info, _ := client.Get(ctx, first.ID); info.State != taskmill.StateCanceled {
+		t.Fatalf("task is %s after the refused retry", info.State)
+	}
+
+	rec = post(t, h, "/tasks/bulk/retry?state=canceled", "same-origin")
+	if loc := rec.Header().Get("Location"); loc != "/tasks?conflicts=1&count=0&done=retry-conflicts&state=canceled" {
+		t.Fatalf("bulk retry of a task whose key is taken: %d to %q", rec.Code, loc)
+	}
+	_, body, _ := get(t, h, rec.Header().Get("Location"))
+	if !strings.Contains(body, "0 tasks retried; 1 task not, because another task holds the same dedupe key.") {
+		t.Fatalf("the page after a retry that left a task:\n%s", body)
+	}
+}
+
+// countingConn counts the bytes that a connection reads.
+type countingConn struct {
+	net.Conn
+	read *atomic.Int64
+}
+
+func (c countingConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	c.read.Add(int64(n))
+	return n, err
+}
+
+// roundTrips counts the round trips that a pool's connections make to the
+// database: each statement sent alone, and each batch. It leaves out the
+// round trip in which a connection first prepares the statements of a batch.
+type roundTrips struct {
+	n atomic.Int64
+}
+
+func (r *roundTrips) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	r.n.Add(1)
+	return ctx
+}
+
+func (*roundTrips) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (r *roundTrips) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	r.n.Add(1)
+	return ctx
+}
+
+func (*roundTrips) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+
+func (*roundTrips) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
+
+// setupCounting is setupDB with a pool of its own, which counts the bytes
+// that its connections read from the database, and their round trips.
+func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, schema string, read *atomic.Int64, trips *roundTrips) {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, trips = new(atomic.Int64), &roundTrips{}
+	cfg.ConnConfig.Tracer = trips
+	cfg.ConnConfig.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		return countingConn{Conn: conn, read: read}, err
+	}
+	if pool, err = pgxpool.NewWithConfig(t.Context(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	schema = testdb.Schema(t, pool)
+	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		t.Fatal(err)
+	}
+	if client, err = taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema}); err != nil {
+		t.Fatal(err)
+	}
+	return client, pool, schema, read, trips
+}
+
+// The task list shows no payload and no metadata, and one line of each
+// task's last error. So a page must not read them from the database: a
+// payload can take 1 MiB, and an open page asks again every 5 seconds. The
+// page of a dead task that halts its FIFO group counts the tasks behind it,
+// and the page of a task that waits names the task ahead of it: they must
+// not read those tasks in full either.
+func TestTaskPagesReadNoPayloadsTheyDoNotShow(t *testing.T) {
+	t.Parallel()
+	client, pool, schema, read, _ := setupCounting(t)
+	ctx := t.Context()
+	const page, payload = 50, 100 << 10
+	params := make([]taskmill.EnqueueParams, page)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: greet{Name: strings.Repeat("x", payload)}, Options: &taskmill.EnqueueOptions{
+			GroupKey: "g", Metadata: map[string]string{"trace": strings.Repeat("m", payload/10)},
+		}}
+	}
+	res, err := client.EnqueueMany(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every task has a full error history, and the group's head is dead.
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET errors = (
+	        SELECT jsonb_agg(jsonb_build_object('attempt', n, 'at', now(), 'message', repeat('e', 1000) || n))
+	        FROM generate_series(1, 20) n)`); err != nil {
+		t.Fatal(err)
+	}
+	head, next := strconv.FormatInt(res[0].ID, 10), strconv.FormatInt(res[1].ID, 10)
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, res[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.groups SET halted_task_id = $1, halted_at = now()`, res[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+
+	// What a page reads must not grow with what its tasks hold: the limit is
+	// far below one task's payload for each task.
+	const limit = page * payload / 20
+	for _, tt := range []struct{ target, want string }{
+		{"/tasks", `<span title="` + strings.Repeat("e", 300) + `">`}, // the last error of each task
+		{"/tasks/" + head, "49 tasks wait"},
+		{"/tasks/" + next, `Waits behind <a class="mono" href="/tasks/` + head + `">`},
+	} {
+		before := read.Load()
+		code, body, _ := get(t, h, tt.target)
+		got := read.Load() - before
+		if code != http.StatusOK || !strings.Contains(body, tt.want) {
+			t.Fatalf("%s: %d, without %q", tt.target, code, tt.want)
+		}
+		// A task's own page shows its payload, metadata, and errors.
+		if tt.target != "/tasks" {
+			got -= payload + payload/10 + 20*1000
+		}
+		t.Logf("%s read %d bytes from the database beyond the task it shows in full", tt.target, got)
+		if got > limit {
+			t.Errorf("%s read %d bytes from the database, want at most %d: it reads what it does not show", tt.target, got, limit)
+		}
+	}
+}
+
+// A page asks the database as few times as it has things to show: each read
+// of the client is one round trip, also those with a time limit of their
+// own. It matters for a dashboard far from its database, whose pages
+// refresh every 5 seconds.
+func TestPagesMakeFewRoundTrips(t *testing.T) {
+	t.Parallel()
+	client, pool, schema, _, trips := setupCounting(t)
+	ctx := t.Context()
+	// One enqueue for the three tasks: the client sends a later notification
+	// for enqueues that follow each other closely, and that would count.
+	grouped := taskmill.EnqueueParams{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}}
+	res, err := client.EnqueueMany(ctx, []taskmill.EnqueueParams{grouped, grouped, grouped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := []int64{res[0].ID, res[1].ID, res[2].ID}
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.groups SET halted_task_id = $1, halted_at = now()`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+	get(t, h, "/tasks") // reads the filters' choices, which the next pages reuse
+
+	for _, tt := range []struct {
+		target string
+		want   int64
+		reads  string
+	}{
+		{"/", 5, "the queues, the workers, the schedules, the settings, and the activity"},
+		{"/tasks", 2, "the tasks, and the queues"},
+		{"/tasks/" + strconv.FormatInt(ids[0], 10), 3, "the task, the count of the tasks behind it, and the queues"},
+		{"/tasks/" + strconv.FormatInt(ids[1], 10), 3, "the task, the task ahead of it, and the queues"},
+		{"/tasks/bulk/retry?state=dead", 2, "the count, and the queues"},
+		{"/schedules", 2, "the schedules, and the queues"},
+	} {
+		before := trips.n.Load()
+		if code, _, _ := get(t, h, tt.target); code != http.StatusOK {
+			t.Fatalf("%s: %d", tt.target, code)
+		}
+		if n := trips.n.Load() - before; n > tt.want {
+			t.Errorf("%s made %d round trips to the database, want at most %d: %s", tt.target, n, tt.want, tt.reads)
+		}
+	}
+}
+
+// A task list that the database does not finish within the list's time limit
+// says so, as a request that ran out of time does, with a way to try again.
+// A list with filters also says what may help: it can read many tasks that
+// it does not show.
+func TestTaskListThatRunsOutOfTime(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	ctx := t.Context()
+	h := handler(t, client, nil)
+	// The list waits for the table, and the database ends its statement, as
+	// it does at the time limit: here, because the test cancels it.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(ctx, `LOCK TABLE `+schema+`.tasks IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	const hint = "A queue and a state in the filters, or fewer filters, may help."
+	for target, hinted := range map[string]bool{"/tasks?state=dead": true, "/tasks": false} {
+		type answer struct {
+			code   int
+			body   string
+			header http.Header
+		}
+		answered := make(chan answer, 1)
+		go func() {
+			code, body, header := get(t, h, target)
+			answered <- answer{code, body, header}
+		}()
+		var got answer
+		for waiting := true; waiting; {
+			select {
+			case got = <-answered:
+				waiting = false
+			case <-time.After(20 * time.Millisecond):
+				_, err := pool.Exec(ctx, `SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+				                          WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0 AND pid <> pg_backend_pid()`, schema)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if got.code != http.StatusServiceUnavailable || got.header.Get("Retry-After") == "" ||
+			!strings.Contains(got.body, "Taking too long") || strings.Contains(got.body, hint) != hinted {
+			t.Errorf("%s: %d, a hint about the filters: %t, want it: %t\n%s", target, got.code, strings.Contains(got.body, hint), hinted, got.body)
+		}
 	}
 }
 

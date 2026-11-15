@@ -107,7 +107,8 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 
 - [Task lifecycle and guarantees](docs/design/task-lifecycle.md): The contract: every state change, the invariants, and how each guarantee is kept
 - [Storage schema](docs/design/schema.md): The tables and indexes, and the reasoning behind them
-- [Key statements](docs/design/schema-statements.md): The statements that enqueue, fetch, complete, list, and change tasks
+- [Key statements](docs/design/schema-statements.md): The statements that enqueue, fetch, and complete tasks, and record their failures
+- [Lists and operator actions](docs/design/schema-operations.md): The statements that list and count tasks, and that retry, cancel, and delete them
 - [FIFO groups and deduplication](docs/design/schema-groups.md): How a group keeps its order, and how a dedupe key admits one task
 - [Maintenance and notifications](docs/design/schema-maintenance.md): What the maintainer runs, how it counts the queues, and how workers are woken
 - [Benchmarks](docs/design/benchmarks.md): The performance targets, how we measure them, and the latest results

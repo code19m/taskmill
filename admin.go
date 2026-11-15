@@ -166,6 +166,15 @@ type ListParams struct {
 	// Cursor continues from a previous page's [ListResult.Next]. Empty means
 	// the first page.
 	Cursor string
+
+	// Summary leaves out what makes a task large, for a list that shows one
+	// line per task: each [TaskInfo] comes with a nil Payload, a nil
+	// Metadata, and only the newest entry of its Errors. The database does
+	// not read or send what is left out, so a page costs about the same
+	// whatever its tasks hold. [TaskInfo.ScheduledFor] reads the metadata,
+	// so it returns the zero time for such a task. Default: false, which
+	// returns every field, as [Client.Get] does.
+	Summary bool
 }
 
 // ListResult is one page of tasks, newest first.
@@ -295,7 +304,13 @@ func (c *Client) changeQueue(ctx context.Context, name, sql string, args ...any)
 // those that workers read, and those that hold tasks, as of the latest
 // statistics.
 func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
-	r, err := c.pool.Query(ctx, c.sql.listQueues)
+	// The queues and their statistics, in one round trip.
+	b := &pgx.Batch{}
+	b.Queue(c.sql.listQueues)
+	b.Queue(c.sql.queueStats)
+	br := c.pool.SendBatch(ctx, b)
+	defer func() { _ = br.Close() }()
+	r, err := br.Query()
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: list queues: %w", err)
 	}
@@ -316,7 +331,7 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 		return nil, fmt.Errorf("taskmill: list queues: %w", err)
 	}
 
-	r, err = c.pool.Query(ctx, c.sql.queueStats)
+	r, err = br.Query()
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: list queues: %w", err)
 	}
@@ -426,10 +441,18 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 }
 
 // List returns tasks that match params, newest first, one page at a time.
-// params may be nil, for the first page of every task. Each page's query is
-// canceled after 5 seconds, so listing cannot overload the database; on a
-// very large table, a filter that matches few tasks can reach that limit and
-// return an error.
+// params may be nil, for the first page of every task. A page holds every
+// task in full, payloads included, unless [ListParams.Summary] is set.
+//
+// Each page's query is canceled after 5 seconds, so listing cannot load the
+// database for longer: a list that needs more returns an error. A page
+// reads about the tasks it returns where an index holds them newest first:
+// with no filter, for the completed tasks of one queue or of all, and for
+// the pending tasks of one queue's FIFO group. Other lists, such as the
+// dead tasks of one queue or of all, are as fast when their tasks are among
+// the newest, or when the database expects few of them. Otherwise they read
+// the newer tasks of every queue and state first, which on a very large
+// table can reach the limit.
 func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, error) {
 	if params == nil {
 		params = &ListParams{}
@@ -444,29 +467,14 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	}
 
 	var out ListResult
-	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+listTimeout+"'"); err != nil {
-			return err
-		}
-		// Custom plans see which filters are empty, and so use the indexes
-		// that serve the filters that are set.
-		if _, err := tx.Exec(ctx, "SET LOCAL plan_cache_mode = force_custom_plan"); err != nil {
-			return err
-		}
-		r, err := tx.Query(ctx, c.sql.listTasks,
-			m.queues, m.states, m.kinds, before, limit+1, len(m.states) > 0, m.history, m.groups)
+	args := []any{m.queues, m.states, m.kinds, before, limit + 1, len(m.states) > 0, m.history, m.groups, params.Summary}
+	err = c.readAlone(ctx, pageSettings, c.sql.listTasks, args, func(r pgx.Rows) error {
+		info, err := scanTaskInfo(r)
 		if err != nil {
 			return err
 		}
-		defer r.Close()
-		for r.Next() {
-			info, err := scanTaskInfo(r)
-			if err != nil {
-				return err
-			}
-			out.Tasks = append(out.Tasks, *info)
-		}
-		return r.Err()
+		out.Tasks = append(out.Tasks, *info)
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: list tasks: %w", err)
@@ -476,6 +484,33 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 		out.Next = encodeCursor(out.Tasks[limit-1].ID)
 	}
 	return &out, nil
+}
+
+// pageSettings start the read of a page of tasks or of groups. They bound
+// the read, so that inspection never loads the database for long. Custom
+// plans see which filters are set, and so use the indexes that serve them:
+// for a page of groups, the index of halted groups, if only those are asked
+// for.
+const pageSettings = `SELECT set_config('statement_timeout', '` + listTimeout + `', true), set_config('plan_cache_mode', 'force_custom_plan', true)`
+
+// readAlone runs a read after settings, both in one round trip, and calls
+// scan with each row of the result. The batch is one transaction without a
+// BEGIN, so the settings end with it. And a read that fails, as one does
+// that runs out of its time, leaves no open transaction on its connection:
+// the pool would close such a connection, and open another for the next
+// read.
+func (c *Client) readAlone(ctx context.Context, settings, sql string, args []any, scan func(pgx.Rows) error) error {
+	b := &pgx.Batch{}
+	b.Queue(settings)
+	b.Queue(sql, args...).Query(func(r pgx.Rows) error {
+		for r.Next() {
+			if err := scan(r); err != nil {
+				return err
+			}
+		}
+		return nil // Close returns an error of the rows.
+	})
+	return c.pool.SendBatch(ctx, b).Close()
 }
 
 // checkFilter checks that a filter's values are valid names, and returns them
@@ -554,21 +589,14 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult
 	if err != nil {
 		return nil, err
 	}
-	var out GroupsResult
-	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, groupsSettings); err != nil {
+	out := GroupsResult{Groups: []GroupInfo{}} // never nil, as callers have always got it
+	err = c.readAlone(ctx, pageSettings, sql, args, func(r pgx.Rows) error {
+		var g GroupInfo
+		if err := r.Scan(&g.Queue, &g.Key, &g.Tasks, &g.HaltedBy); err != nil {
 			return err
 		}
-		r, err := tx.Query(ctx, sql, args...)
-		if err != nil {
-			return err
-		}
-		out.Groups, err = pgx.CollectRows(r, func(r pgx.CollectableRow) (GroupInfo, error) {
-			var g GroupInfo
-			err := r.Scan(&g.Queue, &g.Key, &g.Tasks, &g.HaltedBy)
-			return g, err
-		})
-		return err
+		out.Groups = append(out.Groups, g)
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: list groups: %w", err)
@@ -580,10 +608,6 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult
 	}
 	return &out, nil
 }
-
-// groupsSettings start the read of a page of groups. Custom plans see
-// whether only halted groups are asked for, and so read their index.
-const groupsSettings = `SELECT set_config('statement_timeout', '` + listTimeout + `', true), set_config('plan_cache_mode', 'force_custom_plan', true)`
 
 // groupsQuery checks p, sets its default limit, and returns the statement
 // that reads its page, one group more than the limit, with its arguments.

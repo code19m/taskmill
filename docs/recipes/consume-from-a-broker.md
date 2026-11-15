@@ -71,7 +71,8 @@ topic, partition, and offset together also work.
   Kafka's retention. The window counts from the enqueue. After it ends, the
   same message ID makes a new task.
 - **Canceling or deleting a task frees its key right away.** If the message
-  arrives again later, it makes a new task.
+  arrives again later, it makes a new task. A retry of the canceled task is
+  then refused, so the message still runs once.
 - **A key belongs to one queue and one kind.** If you rename the kind or
   move it to another queue, old keys no longer catch repeats.
 

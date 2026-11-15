@@ -13,13 +13,14 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 |---|---|---|
 | 1 | [Task lifecycle and guarantees](task-lifecycle.md) | The contract: every state change, the invariants, and how each guarantee is kept |
 | 2 | [Storage schema](schema.md) | The tables and indexes, and the reasoning behind them |
-| 3 | [Key statements](schema-statements.md) | The statements that enqueue, fetch, complete, list, and change tasks |
-| 4 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
-| 5 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, how it counts the queues, and how workers are woken |
-| 6 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
-| 7 | [Releasing](releasing.md) | How the project team publishes a version |
-| 8 | [Writing docs](writing-docs.md) | The style guide and the page templates |
-| 9 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
+| 3 | [Key statements](schema-statements.md) | The statements that enqueue, fetch, and complete tasks, and record their failures |
+| 4 | [Lists and operator actions](schema-operations.md) | The statements that list and count tasks, and that retry, cancel, and delete them |
+| 5 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
+| 6 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, how it counts the queues, and how workers are woken |
+| 7 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
+| 8 | [Releasing](releasing.md) | How the project team publishes a version |
+| 9 | [Writing docs](writing-docs.md) | The style guide and the page templates |
+| 10 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
 
 The [Architecture Decision Records](../adr/README.md) (ADRs) explain the big
 choices: the dependency policy, the supported Go and PostgreSQL versions, the

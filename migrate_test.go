@@ -216,9 +216,9 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 // order of their own: a statistics refresh reads tasks and then workers, and
 // a run of a schedule writes schedules and then tasks. A migration that
 // locks two of their tables in the other order deadlocks with them, and
-// PostgreSQL ends one of the two. So a migration locks no two tables that a
-// transaction of the fleet holds together, and it locks workers, which every
-// check-in writes, last: while it waits for schedules, it holds nothing.
+// PostgreSQL ends one of the two. So a migration locks the tables that a
+// transaction of the fleet holds together in the fleet's order: schedules,
+// then tasks, then workers, which every check-in writes.
 func TestMigrateDoesNotDeadlockWithTheFleet(t *testing.T) {
 	t.Parallel()
 	t.Run("a statistics refresh", func(t *testing.T) {

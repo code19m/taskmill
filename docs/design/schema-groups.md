@@ -105,6 +105,12 @@ locked before its group's row, as a worker that records a failure and a
 transaction that holds a group's row never waits for the row of a task that
 is not pending.
 
+A dedupe key's row comes before a group's row. An enqueue claims its keys
+first and counts its groups after, in one statement. A `Retry` locks its
+task, then takes the task's key back, and only then takes the group's row.
+So a retry that waits for a transaction that claims the same key holds no
+group, and that transaction can continue into the group.
+
 `Cancel` and `Delete` cannot know which order applies before they hold a
 lock: a `Retry`, a promotion, or the task's own enqueue may commit between
 the read of the task's state and the lock. So they check again under the
@@ -128,9 +134,12 @@ group at the same moment: a retry of the task, the end of the group's head,
 which promotes the task while a cancel or a delete of it comes in, or an
 enqueue that commits between the two statements of `CancelTx`. PostgreSQL
 ends one of the transactions with a deadlock error (SQLSTATE 40P01), which
-may hit the other one. `Cancel`, `Delete`, and `Retry` run again when it
-hits them, within their five tries. Any other transaction that got the
-error can be run again by its caller.
+may hit the other one, or a third that only waits between the two, such
+as an enqueue into the group. `Cancel`, `Delete`, and `Retry` run again
+when it hits them, within their five tries. So do `Enqueue` and
+`EnqueueMany`: on the client's pool, the enqueue statement is a transaction
+of its own, so nothing of a try that PostgreSQL ended was saved. Any other
+transaction that got the error can be run again by its caller.
 
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the
@@ -181,8 +190,31 @@ in a second statement. It does the same when the holder it sees is one
 whose window ended: the statement did not get that key, so another enqueue
 claimed it meanwhile, and its task is the one to report. Two concurrent
 enqueues of the same key cannot both succeed: the second waits on the
-first's key and then finds it taken. A duplicate wastes one sequence value,
-which is harmless.
+first's key and then finds it taken.
+
+**A duplicate writes nothing.** A claim that fails still locks the key's
+row: it takes a transaction ID and writes WAL, and its transaction commits
+as a write. So the real statement first looks: a task whose key it sees as
+held gets no ID from the sequence, and is left out of the claim. It is
+reported as a duplicate of the holder it saw. One duplicate enqueue read 43
+pages and wrote 1 to 3 WAL records before, and reads 17 pages and writes
+nothing now. A new key costs one more index lookup, 4 pages.
+
+Deduplication stays exact, because the claim alone still decides who gets a
+key: every task that is created went through it. Leaving a key out only
+gives the claim's answer early, and the two answers can differ in one case.
+The row of a held key changes in one way only: the cancel or the delete of
+its task removes it. An enqueue and a retry claim only a key whose window
+has ended. If such a removal is not committed when the statement begins,
+the claim would wait for it, and then take the key. The statement reports
+the duplicate instead: the answer of an enqueue that ran just before the
+removal, which is a correct order of the two.
+
+This holds only if the statement sees the keys as they are when it begins,
+as at READ COMMITTED. A caller's transaction at REPEATABLE READ or
+SERIALIZABLE sees them as they were when it began, so a key that it sees as
+held may be free. There the statement leaves no key out, and the claim,
+which looks at the rows as they are now, decides alone.
 
 `Cancel` and `Delete` delete the task's key, through the index on `task_id`,
 so the same key can be enqueued again right away. A completed or dead task
@@ -191,9 +223,14 @@ redelivered message does not run again after its task failed. Uniqueness
 among unfinished tasks only ("at most one queued refresh per product") can be
 added later as a new option, without a disruptive migration.
 
+**A retry takes the key back.** A cancel stores the key that it frees with
+the task, and a retry of the canceled task claims it again: see
+[Lists and operator actions](schema-operations.md#a-retry-takes-its-dedupe-key-back).
+
 ## See also
 
-- [Key statements](schema-statements.md): the Complete statement, and the bulk actions
+- [Key statements](schema-statements.md): the Complete statement
+- [Lists and operator actions](schema-operations.md): the bulk actions
 - [Task lifecycle and guarantees](task-lifecycle.md): invariant 6, and guarantees 8 and 9
 - [Task order and FIFO groups](../guides/ordering.md) and [Avoid duplicate tasks](../guides/deduplication.md): the user's view
 

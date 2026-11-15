@@ -8,12 +8,16 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -587,6 +591,54 @@ func TestListPagesNewestFirst(t *testing.T) {
 	}
 }
 
+// A summary is the same page of tasks without what makes a task large: no
+// payload, no metadata, and only the newest error. Everything else is as the
+// full list returns it, for unfinished tasks and for completed ones.
+func TestListSummary(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	opts := &taskmill.EnqueueOptions{Metadata: map[string]string{"tenant": "7"}}
+	failed := e.enqueue(t, sendEmail{To: "failed"}, opts)
+	e.exec(t, `UPDATE {s}.tasks SET errors = '[{"attempt": 1, "at": "2026-01-01T00:00:00Z", "message": "first"},
+	           {"attempt": 2, "at": "2026-01-02T00:00:00Z", "message": "last", "code": "timeout"}]' WHERE id = $1`, failed)
+	e.enqueue(t, sendEmail{To: "waiting"}, opts)
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: map[string]taskmill.QueueOptions{"done": {}}})
+	completed := e.enqueue(t, sendEmail{To: "completed"}, &taskmill.EnqueueOptions{Queue: "done", Metadata: opts.Metadata})
+	e.waitState(t, completed, taskmill.StateCompleted)
+
+	full, err := e.client.List(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	brief, err := e.client.List(ctx, &taskmill.ListParams{Summary: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(full.Tasks) != 3 || len(brief.Tasks) != 3 {
+		t.Fatalf("got %d tasks in full and %d in summary, want 3 of each", len(full.Tasks), len(brief.Tasks))
+	}
+	for i, want := range full.Tasks {
+		if len(want.Payload) == 0 || len(want.Metadata) == 0 {
+			t.Fatalf("the full list left out the payload or the metadata of task %d: %+v", want.ID, want)
+		}
+		got := brief.Tasks[i]
+		if got.Payload != nil || got.Metadata != nil {
+			t.Errorf("the summary of task %d has payload %q and metadata %v, want none", got.ID, got.Payload, got.Metadata)
+		}
+		want.Payload, want.Metadata = nil, nil
+		if n := len(want.Errors); n > 1 {
+			want.Errors = want.Errors[n-1:]
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("the summary of task %d:\n got %+v\nwant %+v", got.ID, got, want)
+		}
+	}
+	if last := brief.Tasks[2]; last.ID != failed || len(last.Errors) != 1 || last.Errors[0].Message != "last" {
+		t.Errorf("the summary of the failed task: %+v, want only its newest error", last)
+	}
+}
+
 func TestListSomeQueues(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -686,18 +738,33 @@ func TestListSomeStatesAndKinds(t *testing.T) {
 // A page of tasks reads about its own rows where an index holds the rows of
 // its filters, or gives them in the order of their IDs: not the newer tasks
 // of other queues, however many they are.
+//
+// Two of the three lists below have an index in ID order, so they hold
+// whatever the planner expects: the completed tasks of one queue, and the
+// waiting tasks of one group. The third has none: no index holds dead or
+// canceled tasks in ID order. The planner chooses between the index of the
+// queue's finished tasks, which reads all of them and sorts, and the primary
+// key backward, which reads every newer task of any queue and state. It
+// takes the index only where it expects few matches: it multiplies the
+// queue's share of all tasks by the share of dead and canceled ones. So this
+// test pins that list for a queue with a small share of the tasks, here
+// 1%, beside a queue full of dead tasks. It does not pin it for a queue
+// with a large share: at 6% of 341,000 tasks, with no dead task of its own
+// and 15% dead elsewhere, such a list read the whole table. A list of one
+// finished state across all queues is not pinned either.
 func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	e.rawGroups = true // pending tasks are written by hand, without their groups
 	// The oldest tasks are those of the queue "rare": pending ones of two
-	// groups, and completed ones. The others are newer, and many: here the
-	// planner's choice depends on the size, and with 5,000 tasks in each
-	// table it reads the history without its index.
-	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key)
+	// groups, and completed ones. The others are newer, and many, and every
+	// fifth of them is dead: here the planner's choice depends on the size,
+	// and with 5,000 tasks in each table it reads the history without its
+	// index.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key, finalized_at)
 	           SELECT CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, 'email.send',
-	                  CASE WHEN i <= 400 THEN 'pending' ELSE 'available' END::{s}.task_state, now(), '{}', 1,
-	                  CASE WHEN i <= 400 THEN 'g' || i % 2 END
+	                  CASE WHEN i <= 400 THEN 'pending' WHEN i % 5 = 0 THEN 'dead' ELSE 'available' END::{s}.task_state,
+	                  now(), '{}', 1, CASE WHEN i <= 400 THEN 'g' || i % 2 END, CASE WHEN i > 400 AND i % 5 = 0 THEN now() END
 	           FROM generate_series(1, 40000) i`)
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
@@ -722,6 +789,86 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 		if read > limit+1 {
 			t.Errorf("%+v: read %d rows of tasks, want at most %d", filter, read, limit+1)
 		}
+	}
+}
+
+// Each read of the operations API is one round trip to the database, also
+// those that run in a transaction of their own, with a time limit and plan
+// settings: a dashboard far from its database makes several per page.
+func TestReadsTakeOneRoundTrip(t *testing.T) {
+	t.Parallel()
+	trips := &roundTrips{}
+	e := newTracedEnv(t, trips)
+	ctx := t.Context()
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	for name, read := range map[string]func() error{
+		"Get":       func() error { _, err := e.client.Get(ctx, id); return err },
+		"List":      func() error { _, err := e.client.List(ctx, nil); return err },
+		"Count":     func() error { _, err := e.client.Count(ctx, nil); return err },
+		"Groups":    func() error { _, err := e.client.Groups(ctx, nil); return err },
+		"Queues":    func() error { _, err := e.client.Queues(ctx); return err },
+		"Activity":  func() error { _, err := e.client.Activity(ctx, nil); return err },
+		"Settings":  func() error { _, err := e.client.Settings(ctx); return err },
+		"Workers":   func() error { _, err := e.client.Workers(ctx); return err },
+		"Schedules": func() error { _, err := e.client.Schedules(ctx); return err },
+	} {
+		before := trips.n.Load()
+		if err := read(); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if n := trips.n.Load() - before; n != 1 {
+			t.Errorf("%s made %d round trips to the database, want 1", name, n)
+		}
+	}
+}
+
+// A read with a time limit sets it in the round trip that carries its
+// statement. The limit must hold for that statement, and end with it: the
+// connection goes back to the pool for statements that have no limit, also
+// after a read that ran out of time. A pool that had to replace the
+// connection of each such read would open a new one for every slow page of
+// the dashboard.
+func TestReadSettingsHoldForTheReadOnly(t *testing.T) {
+	t.Parallel()
+	trips := &roundTrips{}
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = trips
+	cfg.MaxConns = 1 // every statement of the test uses the one connection
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	e := newEnvWith(t, pool, nil)
+	ctx := t.Context()
+	const brief = "SELECT set_config('statement_timeout', '50ms', true)"
+
+	before := trips.n.Load()
+	got, err := taskmill.ReadAlone(ctx, e.client, brief, "SELECT current_setting('statement_timeout')")
+	if err != nil || !slices.Equal(got, []string{"50ms"}) {
+		t.Fatalf("the statement ran with a time limit of %v, %v; want 50ms", got, err)
+	}
+	if n := trips.n.Load() - before; n != 1 {
+		t.Errorf("the read made %d round trips, want 1", n)
+	}
+	unlimited := func(after string) {
+		t.Helper()
+		if n := e.count(t, "SELECT count(*) FROM pg_sleep(0.1)"); n != 1 {
+			t.Fatalf("a statement %s did not run", after)
+		}
+	}
+	unlimited("after the read")
+	opened := pool.Stat().NewConnsCount()
+	_, err = taskmill.ReadAlone(ctx, e.client, brief, "SELECT pg_sleep(30)::text")
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "57014" { // query_canceled
+		t.Fatalf("a statement past its time limit: got %v, want it canceled", err)
+	}
+	unlimited("after the read that was canceled")
+	if n := pool.Stat().NewConnsCount() - opened; n != 0 {
+		t.Errorf("the pool opened %d connections after the canceled read, want it to use the same one again", n)
 	}
 }
 
@@ -788,6 +935,12 @@ func TestGroups(t *testing.T) {
 		if !slices.Equal(got, c.want) {
 			t.Fatalf("%+v: got %+v, want %+v", c.params, got, c.want)
 		}
+	}
+	// A page without groups is an empty list, not nil: a caller that encodes
+	// it as JSON has always got [] for it.
+	none, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Search: "no-such-group"})
+	if err != nil || none.Groups == nil || len(none.Groups) != 0 || none.Next != "" {
+		t.Fatalf("no groups: got %#v, %v; want an empty list that is not nil", none, err)
 	}
 	for _, params := range []taskmill.GroupParams{{Limit: -1}, {Cursor: "%%%"}, {Cursor: "b25seS1vbmU"}} { // "only-one"
 		if _, err := e.client.Groups(t.Context(), &params); !errors.Is(err, taskmill.ErrInvalidArgument) {

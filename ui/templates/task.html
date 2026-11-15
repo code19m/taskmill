@@ -19,10 +19,10 @@
   {{end}}
 </header>
 <div class="page">
-{{if and (eq (print $t.State) "dead") $g.Waiting}}
+{{if and (eq (print $t.State) "dead") $g.Waiting.N}}
 <div class="callout failed" role="note">
   <div><strong>This task halts its FIFO group.</strong>
-    {{$g.Waiting}}{{if $g.More}}+{{end}} {{if eq $g.Waiting 1}}task waits{{else}}tasks wait{{end}} behind it until you retry or delete it.</div>
+    {{count $g.Waiting}} {{if eq $g.Waiting.N 1}}task waits{{else}}tasks wait{{end}} behind it until you retry or delete it.</div>
   <a class="btn sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group{{template "icon" "next"}}</a>
 </div>
 {{else if and (eq (print $t.State) "pending") $g.Head}}

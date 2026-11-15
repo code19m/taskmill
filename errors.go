@@ -64,9 +64,13 @@ var (
 	// version of the application starts.
 	ErrSchemaOutdated = classError("taskmill: database schema is missing or outdated", "schema_outdated")
 
-	// ErrConflict means that [Client.UpdateQueue] or [Client.UpdateSettings]
+	// ErrConflict means that other work stands in the way of the call.
+	// [Client.UpdateQueue] and [Client.UpdateSettings] return it when they
 	// lost to concurrent updates of the same settings each of the 10 times
-	// it tried. Try again a little later.
+	// they tried: try again a little later. [Client.Retry] returns it when
+	// another task holds the dedupe key that the canceled task had: that
+	// task stands for the same work, so trying again helps only once it
+	// gave the key away.
 	ErrConflict = classError("taskmill: conflict", "conflict")
 
 	// ErrTaskCanceled is the cause of a handler's context when the task was

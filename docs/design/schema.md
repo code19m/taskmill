@@ -1,18 +1,18 @@
 # Storage schema
 
 This page maps the [task lifecycle](task-lifecycle.md) onto PostgreSQL: the
-tables and indexes, and why each was chosen. Three more pages cover the rest:
+tables and indexes, and why each was chosen. Four more pages cover the rest:
 
 | Page | What it covers |
 |---|---|
-| [Key statements](schema-statements.md) | The statements that enqueue, fetch, complete, list, and change tasks |
+| [Key statements](schema-statements.md) | The statements that enqueue, fetch, and complete tasks, and record their failures |
+| [Lists and operator actions](schema-operations.md) | The statements that list and count tasks, and that retry, cancel, and delete them |
 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, how it counts the queues, and how workers are woken |
 
-The exact definitions are in
-[`internal/migrations`](../../internal/migrations), starting with
-`0001_initial.sql`, and the exact statements are in [`sql.go`](../../sql.go).
-The statements were measured on PostgreSQL 15 and 18 with 1.7 million tasks.
+The exact definitions are in [`internal/migrations`](../../internal/migrations),
+and the exact statements in [`sql.go`](../../sql.go). The statements were
+measured on PostgreSQL 15 and 18 with 1.7 million tasks.
 
 All objects live in one schema, `taskmill` by default. The name is
 configurable, so several schemas can share a database. It must match
@@ -84,9 +84,8 @@ configurable, so several schemas can share a database. It must match
   space, and 97% HOT after PostgreSQL pruned old row versions.
 - **Autovacuum is aggressive on `tasks`:** a 1% scale factor, a 1,000-row
   threshold, no cost delay. Every fetch and result leaves a dead row version.
-- **`queue` and `kind` are stored as text,** not as IDs into lookup tables.
-  The rows are slightly larger, but there are no joins, no lookups, and no
-  registration step before the first enqueue.
+- **`queue` and `kind` are stored as text,** not as IDs into lookup tables:
+  slightly larger rows, but no joins and no registration before an enqueue.
 
 ### `task_history`
 
@@ -121,10 +120,11 @@ Two partial indexes cover the halted groups only, so they stay small:
 ### `dedupe_keys`
 
 The key is a SHA-256 hash, computed in Go, of the queue, the kind, and the
-caller's key, so index entries stay small whatever the caller's key looks
-like. A key blocks duplicates until `expires_at`, unless its task is canceled
-or deleted. The index on `expires_at` serves retention, and the index on
-`task_id` lets `Cancel` and `Delete` release a task's key.
+caller's key, so index entries stay small. A key blocks duplicates until
+`expires_at`, unless its task is canceled or deleted. The index on
+`expires_at` serves retention, and the one on `task_id` lets `Cancel` and
+`Delete` release a task's key, which a cancel stores in `tasks.freed_key`
+and `freed_key_expires_at` for a [retry](schema-operations.md#a-retry-takes-its-dedupe-key-back).
 
 ### Settings, coordination, and bookkeeping
 

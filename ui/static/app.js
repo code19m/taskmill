@@ -451,6 +451,7 @@
       url.searchParams.delete("done");
       url.searchParams.delete("count");
       url.searchParams.delete("skipped");
+      url.searchParams.delete("conflicts");
       history.replaceState(history.state, "", url);
     }
   }

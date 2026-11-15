@@ -22,7 +22,7 @@ metrics of the `otel` module ([Metrics and traces](metrics.md)).
 | `invalid_state` | [`ErrInvalidState`](https://pkg.go.dev/github.com/code19m/taskmill#ErrInvalidState) | A call returns it |
 | `invalid_argument` | [`ErrInvalidArgument`](https://pkg.go.dev/github.com/code19m/taskmill#ErrInvalidArgument) | A call returns it |
 | `schema_outdated` | [`ErrSchemaOutdated`](https://pkg.go.dev/github.com/code19m/taskmill#ErrSchemaOutdated) | `NewClient` returns it |
-| `conflict` | [`ErrConflict`](https://pkg.go.dev/github.com/code19m/taskmill#ErrConflict) | `UpdateQueue` or `UpdateSettings` returns it |
+| `conflict` | [`ErrConflict`](https://pkg.go.dev/github.com/code19m/taskmill#ErrConflict) | `UpdateQueue`, `UpdateSettings`, or `Retry` returns it |
 | `lease_lost` | [`ErrLeaseLost`](https://pkg.go.dev/github.com/code19m/taskmill#ErrLeaseLost) | `Task.CompleteTx` returns it, or a handler's context ends with it |
 | `canceled` | [`ErrTaskCanceled`](https://pkg.go.dev/github.com/code19m/taskmill#ErrTaskCanceled) | A handler's context ends with it |
 | `timeout` | [`ErrAttemptTimeout`](https://pkg.go.dev/github.com/code19m/taskmill#ErrAttemptTimeout) | A handler's context ends with it |

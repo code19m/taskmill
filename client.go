@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -162,7 +163,8 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 // task's context is canceled, and the task becomes canceled when its attempt
 // ends, unless the handler completed it. A batch handler does not see the
 // request: a task of a batch becomes canceled when its batch ends, unless
-// the batch completed it. Cancel frees the task's dedupe key. It returns
+// the batch completed it. Cancel frees the task's dedupe key right away, and
+// [Client.Retry] of the canceled task takes it back. It returns
 // [ErrNotFound] if no task has the ID, and [ErrInvalidState] if the task
 // already finished.
 //
@@ -207,22 +209,11 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64, check bool) er
 	if s.Finished() {
 		return fmt.Errorf("%w: cannot cancel task %d in state %s", ErrInvalidState, id, s)
 	}
-	if _, err := q.exec(ctx, c.sql.releaseKey, id); err != nil {
+	// A waiting task is canceled, and a running one is asked to stop.
+	if _, err := q.exec(ctx, c.sql.cancelTasks, []int64{id}, c.schema); err != nil {
 		return fail(err)
 	}
-	if s == StateRunning {
-		if _, err := q.exec(ctx, c.sql.flagCancel, id); err != nil {
-			return fail(err)
-		}
-		if _, err := q.exec(ctx, notifySQL, c.schema, notifyCancel+"|"+strconv.FormatInt(id, 10)); err != nil {
-			return fail(err)
-		}
-		return nil
-	}
-	if _, err := q.exec(ctx, c.sql.cancelWaiting, id); err != nil {
-		return fail(err)
-	}
-	if group == "" {
+	if s == StateRunning || group == "" {
 		return nil
 	}
 	how := leftHead
@@ -239,9 +230,18 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64, check bool) er
 // attempts. Retrying the dead task that halts its FIFO group resumes the
 // group; another task of a group waits until the group's current head
 // finishes, and then runs before the group's tasks that were enqueued after
-// it. It returns [ErrNotFound] if no task has the ID, and [ErrInvalidState]
-// for tasks in other states. Like [Client.Cancel], it runs again by itself,
-// up to 5 times in all, when it loses to another transaction.
+// it.
+//
+// A canceled task takes back the dedupe key that its cancel freed, for the
+// rest of the key's window, so that an enqueue of the key is a duplicate
+// again. If another task took the key meanwhile and still holds it, Retry
+// changes nothing and returns [ErrConflict]: the two would stand for the
+// same work. A task whose window has ended takes no key, like any task that
+// outlives its window.
+//
+// It returns [ErrNotFound] if no task has the ID, and [ErrInvalidState] for
+// tasks in other states. Like [Client.Cancel], it runs again by itself, up
+// to 5 times in all, when it loses to another transaction.
 func (c *Client) Retry(ctx context.Context, id int64) error {
 	return c.inLockOrder(ctx, func(q querier, _ bool) error { return c.retry(ctx, q, id) })
 }
@@ -259,6 +259,19 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 		return fmt.Errorf("%w: cannot retry task %d in state %s", ErrInvalidState, id, s)
 	}
 
+	// The key comes before the group, as in an enqueue.
+	refused, err := c.takeKeys(ctx, q, []int64{id})
+	if err != nil {
+		return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+	}
+	if refused[id] {
+		held, err := c.keyHolder(ctx, q, id)
+		if err != nil {
+			return fmt.Errorf("taskmill: retry task %d: %w", id, err)
+		}
+		return fmt.Errorf("%w: cannot retry task %d: %s", ErrConflict, id, held)
+	}
+
 	pending := false
 	if group != "" {
 		if pending, err = c.rejoinGroup(ctx, q, queue, group, id); err != nil {
@@ -274,6 +287,54 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 		}
 	}
 	return nil
+}
+
+// heldKey says who holds the dedupe key that a retried task did not get.
+type heldKey struct {
+	by    int64     // the task that holds it; 0 if that task no longer exists, or no task holds the key now
+	until time.Time // the end of that task's window; zero if it has no end, or no task holds the key now
+}
+
+// String says it as the reason of a refused retry. It names the holder only
+// if a caller can still find that task, to cancel or delete it.
+func (h heldKey) String() string {
+	switch {
+	case h.by != 0:
+		return "task " + strconv.FormatInt(h.by, 10) + " holds its dedupe key"
+	case !h.until.IsZero():
+		return "a task that no longer exists holds its dedupe key until " + h.until.UTC().Format(time.RFC3339)
+	}
+	return "another task holds its dedupe key"
+}
+
+// keyHolder reads who holds the dedupe key that the canceled task id did not
+// get back.
+func (c *Client) keyHolder(ctx context.Context, q querier, id int64) (heldKey, error) {
+	var held heldKey
+	var until *time.Time
+	_, err := queryRow(ctx, q, c.sql.keyHolder, []any{id}, &held.by, &until)
+	held.until = deref(until)
+	return held, err
+}
+
+// takeKeys gives the tasks ids, which a retry holds, the dedupe keys that
+// their cancels freed. It returns the tasks that did not get theirs, because
+// another task holds the key.
+func (c *Client) takeKeys(ctx context.Context, q querier, ids []int64) (refused map[int64]bool, err error) {
+	r, err := q.query(ctx, c.sql.takeKeys, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	refused = make(map[int64]bool)
+	for r.Next() {
+		var id int64
+		if err := r.Scan(&id); err != nil {
+			return nil, err
+		}
+		refused[id] = true
+	}
+	return refused, r.Err()
 }
 
 // rejoinGroup counts a retried task back into its FIFO group, and reports
@@ -329,7 +390,7 @@ func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) er
 			return c.stateError(ctx, q, id, "delete")
 		}
 	}
-	if _, err := q.exec(ctx, c.sql.releaseKey, id); err != nil {
+	if _, err := q.exec(ctx, c.sql.releaseKeys, []int64{id}); err != nil {
 		return fmt.Errorf("taskmill: delete task %d: %w", id, err)
 	}
 	if !found || group == "" {
@@ -361,9 +422,10 @@ func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) er
 // the task changed between pending and another state while it took them.
 var errLockOrder = errors.New("taskmill: the task changed while its rows were locked")
 
-// lockOrderTries is how many times inLockOrder runs its transaction. Each new
-// try takes another transaction that changes the same task or its group
-// while the try before runs.
+// lockOrderTries is how many times inLockOrder runs its transaction, and an
+// enqueue on the client's pool its statement. Each new try takes another
+// transaction that changes the same task or its group while the try before
+// runs.
 const lockOrderTries = 5
 
 // inLockOrder runs fn in a transaction on the client's pool, as Cancel,

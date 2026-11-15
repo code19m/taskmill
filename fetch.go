@@ -281,7 +281,9 @@ const planSettings = `SELECT set_config('enable_sort', 'off', true), set_config(
 // a MaxRunning limit. They also bound its wait for the queue's row to one
 // second: a transaction that holds the row for long, such as a stalled
 // worker's, must not tie up a connection of every waiting worker, or keep
-// them from stopping, for as long as it holds the row.
+// them from stopping, for as long as it holds the row. The timeout can hold
+// until the transaction ends: a fetch sends no notification, so its commit
+// waits for no lock (see liftLockTimeout).
 const limitedSettings = planSettings + `, set_config('lock_timeout', '1s', true)`
 
 // errQueueHeld reports that the fetch of a queue with a MaxRunning limit

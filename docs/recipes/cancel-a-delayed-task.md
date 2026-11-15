@@ -120,7 +120,8 @@ inside your transaction.
   They mean that nothing was left to cancel. Your transaction is still
   usable after them, so commit your own change.
 - **Don't retry a canceled reminder.** A retried task runs right away, not
-  at its old time. And if a newer task took its dedupe key, both run.
+  at its old time. And if a newer task took its dedupe key, the retry is
+  refused with `ErrConflict`.
 - **Keep the transaction short.** `CancelTx` locks the task's row until you
   commit ([Use your own transactions](../guides/transactions.md)).
 - **Run the transaction again after a deadlock.** When another transaction
