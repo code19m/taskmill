@@ -127,19 +127,16 @@ func (e *stubbornError) Error() string { panic(e) }
 
 func TestRunReportsPanics(t *testing.T) {
 	t.Parallel()
+	client := taskmilltest.NewClient(t, testdb.Pool(t), nil)
 	for name, value := range map[string]any{
 		"a string": "boom",
 		"a value that panics when it is formatted": &stubbornError{},
 	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			client := taskmilltest.NewClient(t, testdb.Pool(t), nil)
-			h := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { panic(value) })
-			info, err := taskmilltest.Run(t, client, h, greet{})
-			if err == nil || info.State != taskmill.StateRetryable || info.Errors[0].Code != taskmill.CodePanic {
-				t.Fatalf("got %s with %+v, %v", info.State, info.Errors, err)
-			}
-		})
+		h := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { panic(value) })
+		info, err := taskmilltest.Run(t, client, h, greet{})
+		if err == nil || info.State != taskmill.StateRetryable || info.Errors[0].Code != taskmill.CodePanic {
+			t.Errorf("a handler that panics with %s: got %s with %+v, %v", name, info.State, info.Errors, err)
+		}
 	}
 }
 

@@ -448,50 +448,20 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	})
 }
 
-// Retention drops a table that is no partition only if it detached that
-// table itself, which its mark on the table shows. A table that someone else
-// detached or made stays, whatever its name: an operator may keep a day of
-// history that way.
-func TestRetentionDropsOnlyTheHistoryItDetached(t *testing.T) {
+// Retention detaches a history partition before it drops it, and a later
+// pass finishes what a pass could not. Here a view depends on as many expired
+// partitions as a pass handles, the oldest ones: retention detaches them,
+// and cannot drop them. One fixture shows what follows, step by step:
+//
+//   - A pass handles no more tables than it may.
+//   - Tables that cannot be dropped do not keep the others, however the
+//     pass orders them.
+//   - Once the views are gone, retention drops what it detached. Two
+//     maintainers that do so at the same moment both succeed.
+//   - A table that retention did not detach stays, whatever its name.
+func TestRetentionFinishesTheDropsItBegan(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	w := newWorker(t, e, &taskmill.WorkerConfig{})
-	today := time.Now().UTC().Truncate(24 * time.Hour)
-	// A partition that an operator detached to keep it, and a copy of the
-	// history, both named after expired days.
-	kept := e.attachHistory(t, today.AddDate(0, 0, -40))
-	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+kept)
-	copied := "task_history_" + today.AddDate(0, 0, -41).Format("20060102")
-	e.exec(t, "CREATE TABLE {s}."+copied+" AS TABLE {s}.task_history")
-	// A partition that retention detaches and then cannot drop: a view
-	// depends on it.
-	failed := e.attachHistory(t, today.AddDate(0, 0, -42))
-	e.exec(t, "CREATE VIEW {s}.report AS SELECT id FROM {s}."+failed)
-
-	taskmill.RunRetention(t.Context(), w)
-	partitions := "SELECT count(*) FROM pg_inherits WHERE inhrelid = ('{s}.' || $1)::regclass"
-	if e.historyTables(t, failed) != 1 || e.count(t, partitions, failed) != 0 {
-		t.Fatal("retention did not detach the expired partition that it cannot drop")
-	}
-	e.exec(t, "DROP VIEW {s}.report")
-	taskmill.RunRetention(t.Context(), w)
-	if e.historyTables(t, failed) != 0 {
-		t.Error("retention did not finish the drop of the partition that it had detached")
-	}
-	if n := e.historyTables(t, kept, copied); n != 2 {
-		t.Errorf("retention dropped %d of 2 tables that it did not detach", 2-n)
-	}
-}
-
-// A table that retention cannot drop must not keep it from the others. Here
-// as many expired partitions as a pass handles, the oldest ones, each have a
-// view that depends on them: the newer expired partitions are dropped all
-// the same, and the log names what failed.
-func TestRetentionContinuesPastTablesItCannotDrop(t *testing.T) {
-	t.Parallel()
-	logs := &logRecorder{}
-	e := newEnv(t).withLogger(t, slog.New(logs))
-	w := newWorker(t, e, &taskmill.WorkerConfig{})
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	var stuck, free []string
 	for i := range taskmill.HistoryDrops {
@@ -502,16 +472,38 @@ func TestRetentionContinuesPastTablesItCannotDrop(t *testing.T) {
 	for i := range 3 {
 		free = append(free, e.attachHistory(t, today.AddDate(0, 0, -30-i)))
 	}
+	// An operator detached one expired partition to keep it, and copied the
+	// history under the name of another expired day.
+	kept := e.attachHistory(t, today.AddDate(0, 0, -40))
+	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+kept)
+	copied := "task_history_" + today.AddDate(0, 0, -41).Format("20060102")
+	e.exec(t, "CREATE TABLE {s}."+copied+" AS TABLE {s}.task_history")
+	attached := func(parts []string) int {
+		return e.count(t, `SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+		                   WHERE i.inhparent = '{s}.task_history'::regclass AND c.relname = ANY($1)`, parts)
+	}
 
-	// A pass takes the tables in an order of its own, so the three may need
+	logs := &logRecorder{}
+	w := newWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{})
+	taskmill.RunRetention(t.Context(), w)
+	expired := slices.Concat(stuck, free)
+	if n := e.historyTables(t, kept, copied); n != 2 {
+		t.Fatalf("retention dropped %d of 2 tables that it did not detach", 2-n)
+	}
+	if n, want := attached(expired), len(expired)-taskmill.HistoryDrops; n != want {
+		t.Fatalf("after one pass, %d of %d expired partitions are attached, want %d: a pass handles %d",
+			n, len(expired), want, taskmill.HistoryDrops)
+	}
+
+	// A pass takes the tables in an order of its own, so the rest may need
 	// a few passes: far fewer than these.
 	for range 50 {
-		if e.historyTables(t, free...) == 0 {
+		if attached(expired) == 0 {
 			break
 		}
 		taskmill.RunRetention(t.Context(), w)
 	}
-	if n := e.historyTables(t, free...); n != 0 {
+	if n := e.historyTables(t, free...); n != 0 || attached(stuck) != 0 {
 		t.Fatalf("%d of %d expired partitions are left behind tables that retention cannot drop", n, len(free))
 	}
 	if n := e.historyTables(t, stuck...); n != len(stuck) {
@@ -523,66 +515,41 @@ func TestRetentionContinuesPastTablesItCannotDrop(t *testing.T) {
 	if !reported {
 		t.Error("no log line says that a table could not be dropped")
 	}
-}
 
-// A pass drops no more partitions than it may: the next pass continues.
-func TestRetentionDropsAFewPartitionsInAPass(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	w := newWorker(t, e, &taskmill.WorkerConfig{})
-	today := time.Now().UTC().Truncate(24 * time.Hour)
-	var expired []string
-	for i := range taskmill.HistoryDrops + 1 {
-		expired = append(expired, e.attachHistory(t, today.AddDate(0, 0, -30-i)))
-	}
-	for left := 1; left >= 0; left-- {
-		taskmill.RunRetention(t.Context(), w)
-		if n := e.historyTables(t, expired...); n != left {
-			t.Fatalf("a pass left %d of %d expired partitions, want %d", n, len(expired), left)
-		}
-	}
-}
-
-// While the maintainer's role changes hands, two workers can apply retention
-// at the same moment. Both find the same detached tables, and for each table
-// one of them comes second. That is no failure: the table is gone.
-func TestTwoMaintainersDropTheSameHistory(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	today := time.Now().UTC().Truncate(24 * time.Hour)
-	// Tables that a pass detached and could not drop: a view depended on
-	// each of them.
-	var detached []string
-	for i := range taskmill.HistoryDrops {
-		part := e.attachHistory(t, today.AddDate(0, 0, -30-i))
-		e.exec(t, "CREATE VIEW {s}.report_"+strconv.Itoa(i)+" AS SELECT id FROM {s}."+part)
-		detached = append(detached, part)
-	}
-	taskmill.RunRetention(t.Context(), newWorker(t, e, &taskmill.WorkerConfig{}))
-	for i := range detached {
+	// The views go. While the maintainer's role changes hands, two workers
+	// can apply retention at the same moment: both find the same detached
+	// tables, and for each table one of them comes second. A reader holds
+	// the tables here until both passes have found them, and wait to drop.
+	for i := range stuck {
 		e.exec(t, "DROP VIEW {s}.report_"+strconv.Itoa(i))
 	}
-
-	var logs [2]*logRecorder
+	reader := e.begin(t)
+	e.txExec(t, reader, "LOCK TABLE {s}."+strings.Join(stuck, ", {s}.")+" IN ACCESS SHARE MODE")
+	var racing [2]*logRecorder
 	var passes sync.WaitGroup
-	start := make(chan struct{})
-	for i := range logs {
-		logs[i] = &logRecorder{}
-		w := newWorker(t, e.withLogger(t, slog.New(logs[i])), &taskmill.WorkerConfig{})
-		passes.Go(func() {
-			<-start
-			taskmill.RunRetention(t.Context(), w)
-		})
+	for i := range racing {
+		racing[i] = &logRecorder{}
+		w := newWorker(t, e.withLogger(t, slog.New(racing[i])), &taskmill.WorkerConfig{})
+		passes.Go(func() { taskmill.RunRetention(t.Context(), w) })
 	}
-	close(start)
+	waitFor(t, "both passes to wait for a table", func() bool {
+		return e.count(t, `SELECT count(*) FROM pg_stat_activity
+		                   WHERE wait_event_type = 'Lock' AND query LIKE 'DROP TABLE%' || $1 || '.%'`, e.schema) == 2
+	})
+	if err := reader.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 	passes.Wait()
-	if n := e.historyTables(t, detached...); n != 0 {
-		t.Fatalf("%d of %d detached tables are left", n, len(detached))
+	if n := e.historyTables(t, stuck...); n != 0 {
+		t.Errorf("%d of %d tables that retention had detached are left", n, len(stuck))
 	}
-	for i, l := range logs {
+	for i, l := range racing {
 		if lines := operationLines(l.all())["apply retention"]; len(lines) > 0 {
 			t.Errorf("worker %d reported a failure for tables that the other one dropped first: %s", i+1, recordText(lines[0]))
 		}
+	}
+	if n := e.historyTables(t, kept, copied); n != 2 {
+		t.Errorf("retention dropped %d of 2 tables that it did not detach", 2-n)
 	}
 }
 
@@ -963,39 +930,10 @@ func countedQueues(t *testing.T, e *env, names ...string) map[string]taskmill.Qu
 }
 
 // Retention can take long: a detach waits for a transaction that reads the
-// history, and a backlog of old tasks takes many batches. The statistics,
-// which Lag and autoscalers read, are refreshed meanwhile.
-func TestSlowRetentionDoesNotDelayStatistics(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	e.attachHistory(t, time.Now().UTC().AddDate(0, 0, -30).Truncate(24*time.Hour))
-	// A long reader of history, such as a report, makes the detach of the
-	// expired partition wait.
-	reader := e.begin(t)
-	e.txExec(t, reader, "SELECT count(*) FROM {s}.task_history")
-	runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
-	e.waitBlocked(t, "DETACH PARTITION")
-
-	// A task that arrives while retention waits shows in the statistics.
-	e.enqueue(t, sendEmail{}, nil)
-	waitFor(t, "the statistics to count a task that arrived while retention waited", func() bool {
-		queues, err := e.client.Queues(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, q := range queues {
-			if q.Name == taskmill.DefaultQueue {
-				return q.Counts[taskmill.StateAvailable].N == 1
-			}
-		}
-		return false
-	})
-	if err := reader.Rollback(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestSlowRetentionDoesNotDelayPromotion(t *testing.T) {
+// history, and a backlog of old tasks takes many batches. Due tasks are
+// promoted meanwhile, and the statistics, which Lag and autoscalers read, are
+// refreshed.
+func TestSlowRetentionDelaysNeitherPromotionNorStatistics(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	day := time.Now().UTC().AddDate(0, 0, -30).Truncate(24 * time.Hour)
@@ -1028,6 +966,17 @@ func TestSlowRetentionDoesNotDelayPromotion(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the scheduled task was not promoted while retention waited")
 	}
+	// A task that arrives now, in a queue that no worker reads, is counted.
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "unread"})
+	waitFor(t, "the statistics to count a task that arrived while retention waited", func() bool {
+		queues, err := e.client.Queues(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(queues, func(q taskmill.QueueInfo) bool {
+			return q.Name == "unread" && q.Counts[taskmill.StateAvailable].N == 1
+		})
+	})
 	if err := reader.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}

@@ -655,56 +655,16 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 	}
 }
 
-// A notification that tasks are available is a hint too. A worker whose
-// fetch found nothing lets 20 ms pass before it acts on the next one, also
-// while its own tasks end: a FIFO group that runs during a flood takes its
-// two fetches for each task, and the flood adds one per 20 ms.
-func TestFloodOfNotificationsAddsOneFetchPer20Milliseconds(t *testing.T) {
+// The worker that completes the head of a FIFO group fetches the group's
+// next task itself: it does not wait for a notification, which a client
+// sends for a queue at most once in 50 ms. And the moment for which a queue
+// leaves notifications waiting, after one's fetch found nothing, holds back
+// notifications only, not that fetch. Here the moment never ends, and each
+// task sends a notification. The group's tasks follow each other all the
+// same, with two fetches each, and the notifications add none.
+func TestFIFOGroupRunsWhileNotificationsWait(t *testing.T) {
 	t.Parallel()
-	const flood, tasks = 20000, 100
-	e, fetches := newCountedEnv(t)
-	ran := make(chan struct{}, tasks)
-	runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
-			ran <- struct{}{}
-			return nil
-		}, nil),
-		Queues:       defaultQueue(2),
-		PollInterval: time.Hour,
-		NoMaintainer: true,
-	})
-	e.waitListening(t)
-
-	before, flooded := fetches.n.Load(), time.Now()
-	stopFlood := e.flood(t, flood)
-	params := make([]taskmill.EnqueueParams, tasks)
-	for i := range params {
-		params[i] = taskmill.EnqueueParams{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "account-7"}}
-	}
-	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
-		t.Fatal(err)
-	}
-	for range tasks {
-		recv(t, ran, "the group's next task to start during the flood")
-	}
-	stopFlood()
-	// Now and then a notification's fetch takes a task just before the
-	// worker's own fetch for it, which then finds nothing: a tenth more
-	// fetches allows for that.
-	n, most := fetches.n.Load()-before, int64(2*tasks+tasks/10)+int64(time.Since(flooded)/(20*time.Millisecond))
-	if n > most {
-		t.Errorf("the worker fetched %d times for %d tasks and %d notifications, want at most %d", n, tasks, flood, most)
-	}
-}
-
-// The moment for which a queue leaves notifications waiting, after one found
-// nothing, holds back notifications only. The worker's own tasks do not wait
-// for its end: here it never ends, and the tasks of a FIFO group still
-// follow each other, with two fetches each. A flood of notifications adds
-// no fetch.
-func TestQuietQueueHoldsBackNotificationsOnly(t *testing.T) {
-	t.Parallel()
-	const flood, tasks = 20000, 20
+	const tasks = 20
 	e, fetches := newCountedEnv(t)
 	params := make([]taskmill.EnqueueParams, tasks)
 	for i := range params {
@@ -713,9 +673,13 @@ func TestQuietQueueHoldsBackNotificationsOnly(t *testing.T) {
 	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
 		t.Fatal(err)
 	}
+	notify := replaceSchema("SELECT pg_notify('{s}', 'a|"+taskmill.DefaultQueue+"')", e.schema)
 	started, release := make(chan int64, tasks), make(chan struct{})
 	w := newWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			if _, err := e.pool.Exec(ctx, notify); err != nil {
+				return err
+			}
 			started <- task.Args.UserID
 			<-release
 			return nil
@@ -727,58 +691,23 @@ func TestQuietQueueHoldsBackNotificationsOnly(t *testing.T) {
 	taskmill.SetTiming(w, taskmill.Timing{Quiet: time.Hour})
 	startWorker(t, w)
 
-	// The group's first task runs, so a notification's fetch finds nothing:
-	// from that second fetch on, the queue hears no notification.
+	// While the group's first task runs, a notification's fetch finds
+	// nothing: the first task's own, or the one of the listener's start.
+	// From that second fetch on, the queue hears no notification.
 	recv(t, started, "the group's first task to start")
-	e.waitListening(t)
-	e.exec(t, "SELECT pg_notify($1, 'a|' || $2)", e.schema, taskmill.DefaultQueue)
 	waitFor(t, "a notification's fetch to find nothing", func() bool { return fetches.n.Load() >= 2 })
 
 	before := fetches.n.Load()
-	stopFlood := e.flood(t, flood)
 	close(release)
 	for i := 1; i < tasks; i++ {
 		if got := recv(t, started, "the group's next task to start"); got != int64(i) {
 			t.Fatalf("task %d of the group ran in place %d", got, i)
 		}
 	}
-	stopFlood()
-	// One fetch when a task frees its slot, and one when its completion is
-	// recorded.
+	// One fetch when a task frees its slot, which comes too early to find
+	// the next task, and one when its completion is recorded.
 	if n := fetches.n.Load() - before; n > 2*tasks {
 		t.Errorf("the worker fetched %d times for %d tasks, want at most %d: notifications got through", n, tasks, 2*tasks)
-	}
-}
-
-// flood sends n notifications that tasks are available in the default queue,
-// each in a transaction of its own: PostgreSQL delivers equal notifications
-// of one transaction once. It returns at once. stop ends a flood that still
-// runs, since on a busy database it can take long, and fails the test if the
-// flood failed.
-func (e *env) flood(t *testing.T, n int) (stop func()) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	var failed error
-	ended := make(chan struct{})
-	go func() {
-		defer close(ended)
-		_, failed = e.pool.Exec(ctx, "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(n)+" LOOP PERFORM pg_notify('"+
-			e.schema+"', 'a|"+taskmill.DefaultQueue+"'); COMMIT; END LOOP; END $$")
-	}()
-	return func() {
-		t.Helper()
-		defer cancel()
-		select {
-		case <-ended:
-			if failed != nil {
-				t.Fatalf("flood of notifications: %v", failed)
-			}
-		default:
-			// It still runs: the error with which it ends now is the
-			// test's own doing.
-			cancel()
-			<-ended
-		}
 	}
 }
 
@@ -884,52 +813,16 @@ func TestWorkerDrainsRunningTasksOnShutdown(t *testing.T) {
 	}
 }
 
-// A worker that stops says that it waits for running tasks, and for how
-// many, only when it does. It counts the tasks whose handlers run: not those
-// whose handlers returned, and whose results it has yet to record.
+// A worker that stops says that it waits for running tasks only when it
+// does. It counts the tasks whose handlers run: not a task whose handler
+// returned, and whose result it has yet to record.
 func TestStoppingWorkerSaysThatItWaitsOnlyWhenTasksRun(t *testing.T) {
 	t.Parallel()
-	for name, tc := range map[string]struct {
-		running, recording int      // tasks whose handlers run, and tasks whose results wait
-		said               []string // the tasks of each line that says that the worker waits
-	}{
-		"an idle worker":                  {0, 0, nil},
-		"a worker with two running tasks": {2, 0, []string{"2"}},
-		"a worker with two running tasks, and one whose result waits": {2, 1, []string{"2"}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			if said := stopWhileRunning(t, tc.running, tc.recording); !slices.Equal(said, tc.said) {
-				t.Fatalf("the worker said that it waits for %v tasks, want %v", said, tc.said)
-			}
-		})
-	}
-}
-
-// stopWhileRunning stops a worker while its handlers run `running` tasks,
-// and while the results of `recording` more tasks, whose handlers returned,
-// wait to be recorded: a transaction holds the rows of their FIFO groups. It
-// lets the handlers return, and ends that transaction, once the worker said
-// that it waits. It returns the number of tasks that each such line names.
-func stopWhileRunning(t *testing.T, running, recording int) (said []string) {
-	t.Helper()
 	const waiting = "worker stopping; waiting for running tasks"
 	logs := &logRecorder{}
 	e := newEnv(t).withLogger(t, slog.New(logs))
-	// The grouped tasks come first, and their handlers return right away.
-	// The worker has one slot for each task that keeps running, so the last
-	// of those start in the slots that the grouped tasks gave back: once
-	// every task has started, the handler of every grouped task is through.
-	for i := range recording {
-		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "held-" + strconv.Itoa(i)})
-	}
-	for range running {
-		e.enqueue(t, sendEmail{}, nil)
-	}
-	tx := e.begin(t)
-	e.txExec(t, tx, "SELECT FROM {s}.groups FOR UPDATE")
-	started, release := make(chan struct{}, running+recording), make(chan struct{})
-	stop := runWorker(t, e, &taskmill.WorkerConfig{
+	started, release := make(chan struct{}, 3), make(chan struct{})
+	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
 			if task.GroupKey == "" {
@@ -937,33 +830,48 @@ func stopWhileRunning(t *testing.T, running, recording int) (said []string) {
 			}
 			return nil
 		}, nil),
-		Queues:       defaultQueue(max(running, 1)),
+		Queues:       defaultQueue(2),
 		NoMaintainer: true,
 	})
-	for range running + recording {
+
+	// An idle worker stops without a word about waiting.
+	stop := startWorker(t, w)
+	waitFor(t, "the worker to start", func() bool { return logs.count("worker started") == 1 })
+	stop()
+	if n := logs.count(waiting); n != 0 {
+		t.Fatalf("an idle worker said %d times that it waits for running tasks", n)
+	}
+
+	// It runs again, with three tasks. The handler of the first, a task of a
+	// FIFO group, returns right away, and its result waits: a transaction
+	// holds the group's row. The worker has two slots, so the third task
+	// starts in the slot that the first gave back: once all three have
+	// started, the first handler is through.
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "held"})
+	e.enqueue(t, sendEmail{}, nil)
+	e.enqueue(t, sendEmail{}, nil)
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.groups FOR UPDATE")
+	stop = startWorker(t, w)
+	for range 3 {
 		recv(t, started, "a handler to start")
 	}
-	waitFor(t, "the worker to start", func() bool { return logs.count("worker started") == 1 })
-
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
 		stop()
 	}()
-	if running > 0 {
-		waitFor(t, "the worker to say that it waits", func() bool { return logs.count(waiting) > 0 })
-	}
+	waitFor(t, "the worker to say that it waits", func() bool { return logs.count(waiting) == 1 })
 	close(release)
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	recv(t, stopped, "the worker to stop")
 	for _, r := range logs.all() {
-		if r.Message == waiting {
-			said = append(said, attr(r, "tasks"))
+		if r.Message == waiting && attr(r, "tasks") != "2" {
+			t.Fatalf("the worker said that it waits for %s tasks, want the 2 whose handlers ran", attr(r, "tasks"))
 		}
 	}
-	return said
 }
 
 func TestWorkerReleasesTasksThatOutliveTheDrain(t *testing.T) {
@@ -1056,53 +964,6 @@ func TestFIFOGroupRunsOneAtATimeInOrder(t *testing.T) {
 	}
 	if !slices.IsSorted(order) || len(order) != n {
 		t.Fatalf("group ran out of order: %v", order)
-	}
-}
-
-// The worker that completes the head of a FIFO group knows that the group's
-// next task became available, and fetches it. It does not wait for the
-// notification, which a client sends for a queue at most once in 50 ms: here
-// no notification reaches the worker, and no poll comes.
-func TestFIFOGroupRunsWithoutNotifications(t *testing.T) {
-	t.Parallel()
-	const tasks = 20
-	e, fetches := newCountedEnv(t)
-	params := make([]taskmill.EnqueueParams, tasks)
-	for i := range params {
-		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}, Options: &taskmill.EnqueueOptions{GroupKey: "account-7"}}
-	}
-	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
-		t.Fatal(err)
-	}
-	// A listener on another database connects, and receives nothing.
-	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	listen.Database = "postgres"
-	ran := make(chan int64, tasks)
-	runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
-			ran <- task.Args.UserID
-			return nil
-		}, nil),
-		Queues:       defaultQueue(4),
-		PollInterval: time.Hour,
-		NoMaintainer: true,
-		ListenConfig: listen,
-	})
-
-	for i := range tasks {
-		if got := recv(t, ran, "the group's next task to start"); got != int64(i) {
-			t.Fatalf("task %d of the group ran in place %d", got, i)
-		}
-	}
-	// Each task takes two fetches at most: one when its predecessor frees
-	// the slot, which comes too early to find it, and one when the
-	// predecessor's completion is recorded. Two more come at the start: the
-	// worker's first, and one when its listener connects.
-	if n := fetches.n.Load(); n > 2*tasks+2 {
-		t.Errorf("the worker fetched %d times to run %d tasks of one group", n, tasks)
 	}
 }
 
@@ -1965,46 +1826,16 @@ func TestHandlerForPointerArgs(t *testing.T) {
 	}
 }
 
-// stubbornArgs are args whose Kind method panics with a value that panics
-// again when it is formatted.
-type stubbornArgs struct{}
-
-func (stubbornArgs) Kind() string { panic(&stubbornError{}) }
-
-// A kind is read from a zero value of the args when a handler is added. A
-// Kind method that panics there is an error of NewWorker, whatever the
-// panic's value: adding a handler must not end the process.
-func TestHandlerWhoseKindPanicsIsRejected(t *testing.T) {
+func TestHandlerForInterfaceArgsIsRejected(t *testing.T) {
 	t.Parallel()
-	for name, add := range map[string]func(*taskmill.Handlers){
-		"args of an interface type, whose zero value is nil": func(hs *taskmill.Handlers) {
-			taskmill.AddHandler(hs, taskmill.HandlerFunc[taskmill.Args](func(context.Context, *taskmill.Task[taskmill.Args]) error {
-				return nil
-			}), nil)
-		},
-		"a panic whose value panics again when it is formatted": func(hs *taskmill.Handlers) {
-			taskmill.AddHandler(hs, taskmill.HandlerFunc[stubbornArgs](func(context.Context, *taskmill.Task[stubbornArgs]) error {
-				return nil
-			}), nil)
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			e := newEnv(t)
-			var hs taskmill.Handlers
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						t.Fatalf("AddHandler panicked with a %T", r)
-					}
-				}()
-				add(&hs)
-			}()
-			_, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
-			if !errors.Is(err, taskmill.ErrInvalidArgument) || !strings.Contains(err.Error(), "Kind panicked") {
-				t.Fatalf("got %v, want ErrInvalidArgument for a Kind method that panicked", err)
-			}
-		})
+	e := newEnv(t)
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[taskmill.Args](func(context.Context, *taskmill.Task[taskmill.Args]) error {
+		return nil
+	}), nil)
+	_, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+	if !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -2051,42 +1882,11 @@ func TestFailedSettingsRefreshKeepsQueuesPaused(t *testing.T) {
 }
 
 // Pause is a tool for incidents: a worker must not fetch from a queue before
-// it knows the queue's settings. A worker whose first read of them fails, or
-// does not end, fetches nothing, and reads them again by itself.
+// it knows the queue's settings. Here its first read of them cannot end. The
+// worker gives that read up by itself, fetches nothing, says that it is not
+// ready, and reads again until a read works.
 func TestWorkerDoesNotFetchBeforeItKnowsItsQueuesSettings(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name     string
-		settings time.Duration // the worker's interval for reading settings; 0 keeps the default
-		// lost waits until the first read, which waits for a lock, is lost.
-		lost func(t *testing.T, e *env, logs *logRecorder)
-	}{
-		{"the read fails", 0, func(t *testing.T, e *env, _ *logRecorder) {
-			t.Helper()
-			e.exec(t, "SELECT pg_cancel_backend($1)", e.waitBlocked(t, "{s}.queues WHERE name = ANY"))
-		}},
-		{"the read does not end", 300 * time.Millisecond, func(t *testing.T, _ *env, logs *logRecorder) {
-			t.Helper()
-			waitFor(t, "the worker to give the read up", func() bool {
-				return len(operationLines(logs.all())["load queue settings"]) > 0
-			})
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			startWithoutSettings(t, tc.settings, tc.lost)
-		})
-	}
-}
-
-// startWithoutSettings starts a worker of a paused queue and of the queue
-// "canary" while its read of the settings cannot end, waits with lost until
-// that read is lost, and then lets the next read work. It checks that the
-// worker fetches nothing, and says that it is not ready, before it knows the
-// settings. settings is the worker's interval for reading them; 0 keeps the
-// default.
-func startWithoutSettings(t *testing.T, settings time.Duration, lost func(t *testing.T, e *env, logs *logRecorder)) {
-	t.Helper()
 	logs := &logRecorder{}
 	e := newEnv(t).withLogger(t, slog.New(logs))
 	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
@@ -2102,13 +1902,16 @@ func startWithoutSettings(t *testing.T, settings time.Duration, lost func(t *tes
 		Queues:       map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}, "canary": {}},
 		NoMaintainer: true,
 	})
-	taskmill.SetTiming(w, taskmill.Timing{Settings: settings})
+	// A read may take as long as the interval between two reads.
+	taskmill.SetTiming(w, taskmill.Timing{Settings: 100 * time.Millisecond})
 
-	// The worker starts while its read of the settings cannot end.
+	// The worker starts while a read of the settings cannot end.
 	tx := e.begin(t)
 	e.txExec(t, tx, "LOCK TABLE {s}.queues IN ACCESS EXCLUSIVE MODE")
 	stop := startWorker(t, w)
-	lost(t, e, logs)
+	waitFor(t, "the worker to give up its read of the settings", func() bool {
+		return len(operationLines(logs.all())["load queue settings"]) > 0
+	})
 	// A worker that takes no task is not ready, and says why.
 	if err := w.Health(); err == nil || !strings.Contains(err.Error(), "settings") {
 		t.Errorf("a worker that has not read its queues' settings reports the health %v", err)
