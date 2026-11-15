@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -56,6 +57,12 @@ const (
 	StateCanceled  State = "canceled"  // canceled on request
 )
 
+// allStates lists every task state.
+var allStates = []State{
+	StateScheduled, StatePending, StateAvailable, StateRunning,
+	StateRetryable, StateCompleted, StateDead, StateCanceled,
+}
+
 // Finished reports whether the state is final: completed, dead, or canceled.
 func (s State) Finished() bool {
 	return s == StateCompleted || s == StateDead || s == StateCanceled
@@ -82,12 +89,7 @@ func (s State) CanDelete() bool {
 
 // valid reports whether s is one of the task states.
 func (s State) valid() bool {
-	switch s {
-	case StateScheduled, StatePending, StateAvailable, StateRunning,
-		StateRetryable, StateCompleted, StateDead, StateCanceled:
-		return true
-	}
-	return false
+	return slices.Contains(allStates, s)
 }
 
 // TaskInfo describes a task: where it is in its lifecycle and what happened

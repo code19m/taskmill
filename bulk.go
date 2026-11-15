@@ -136,12 +136,8 @@ type BulkResult struct {
 	Next string
 }
 
-// The states, and those that each bulk action applies to.
+// The states that each bulk action applies to.
 var (
-	allStates = []State{
-		StateScheduled, StatePending, StateAvailable, StateRunning,
-		StateRetryable, StateCompleted, StateDead, StateCanceled,
-	}
 	retryStates  = slices.DeleteFunc(slices.Clone(allStates), func(s State) bool { return !s.CanRetry() })
 	cancelStates = slices.DeleteFunc(slices.Clone(allStates), func(s State) bool { return !s.CanCancel() })
 	deleteStates = slices.DeleteFunc(slices.Clone(allStates), func(s State) bool { return !s.CanDelete() })

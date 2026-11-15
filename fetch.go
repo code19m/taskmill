@@ -427,7 +427,7 @@ func (w *Worker) dispatch(ctx context.Context, r *run, q *queueState, tasks []*t
 		if !q.takeSlot(ctx) {
 			for _, t := range unit {
 				t.mu.Lock()
-				t.state = stateRecording
+				t.state = attemptRecording
 				t.mu.Unlock()
 				w.record(context.WithoutCancel(ctx), t, outcome{kind: outcomeRelease})
 			}
