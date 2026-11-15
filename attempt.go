@@ -127,47 +127,27 @@ func safeBatch(ctx context.Context, reg *registration, infos []*TaskInfo, atts [
 	return reg.runBatch(ctx, infos, atts)
 }
 
-// invoke runs call through the middleware chain, turning panics into errors.
-// It runs call at most once, whatever the middleware does. A middleware that
-// returns nil without calling its next fails right away, so that the middleware
-// outside it sees the failure too.
+// invoke runs call through the worker's middleware, by the rules of through,
+// turning panics into errors: a panic of call reaches the middleware as an
+// error from its next.
 func (w *Worker) invoke(ctx context.Context, t *tracked, call func(context.Context) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = panicFailure(r)
 		}
 	}()
-	var called atomic.Bool
-	next := func(ctx context.Context) (err error) {
-		if called.Swap(true) {
-			return errors.New("taskmill: middleware called next twice")
-		}
+	return through(ctx, w.cfg.Middleware, t.info, func(ctx context.Context) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				err = panicFailure(r)
 			}
 		}()
 		return call(ctx)
-	}
-	for _, m := range slices.Backward(w.cfg.Middleware) {
-		inner := next
-		next = func(ctx context.Context) error {
-			var reached atomic.Bool
-			err := m(ctx, t.info, func(ctx context.Context) error {
-				reached.Store(true)
-				return inner(ctx)
-			})
-			if err == nil && !reached.Load() {
-				return errSkippedHandler
-			}
-			return err
-		}
-	}
-	if err := next(ctx); err != nil || called.Load() {
-		return err
-	}
-	return errSkippedHandler // a middleware hid the error of its next
+	}, errNextTwice, errSkippedHandler)
 }
+
+// errNextTwice fails the second call of next in an attempt's middleware.
+var errNextTwice = errors.New("taskmill: middleware called next twice")
 
 // errSkippedHandler fails an attempt whose middleware returned nil without
 // running the handler.
