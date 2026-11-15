@@ -78,7 +78,7 @@ would break the build of its callers for no change in behavior.
 | Option | Why not |
 |---|---|
 | Keep the two querier methods | It costs nothing now. But an interface that never grows never shrinks either: the unused methods would stay until v2 |
-| Tag every result type in snake_case, with durations in seconds | A tag on every field of about 15 types, an encoder of our own for durations, and a promise to keep all of it: a format for the network that taskmill itself never uses |
+| Tag every result type in snake_case | The tags are cheap to write. Their cost is the promise: a wire format for about 15 types, kept for all of v1, that taskmill itself never puts on a wire. A duration would still be a number of nanoseconds in it, unless we also wrote an encoder for durations |
 | Keep the tags of `AttemptError` only | One type would encode with other keys than the rest, and the reference would explain that accident for good |
 | Remove the tags, and still decode the stored entries into `AttemptError` | It works, because `encoding/json` matches keys without regard to case. But the storage format would rest on a rule that nobody sees in the code |
 | `ui.New` returns a concrete type | It pays now, with code that stops building, for a need that is a guess. And `ui.Handler`, the natural name of that type, was the constructor before `ui.New` |
