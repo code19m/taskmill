@@ -691,17 +691,19 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	e := newEnv(t)
 	e.rawGroups = true // pending tasks are written by hand, without their groups
 	// The oldest tasks are those of the queue "rare": pending ones of two
-	// groups, and completed ones. The others are newer.
+	// groups, and completed ones. The others are newer, and many: here the
+	// planner's choice depends on the size, and with 5,000 tasks in each
+	// table it reads the history without its index.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key)
 	           SELECT CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, 'email.send',
 	                  CASE WHEN i <= 400 THEN 'pending' ELSE 'available' END::{s}.task_state, now(), '{}', 1,
 	                  CASE WHEN i <= 400 THEN 'g' || i % 2 END
-	           FROM generate_series(1, 100000) i`)
+	           FROM generate_series(1, 40000) i`)
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
 	           SELECT 1000000 + i, now(), CASE WHEN i <= 400 THEN 'rare' ELSE 'busy' END, now(), 'email.send', now(), 'w', now(),
 	                  2, 1, 1, '{}', '{}', '[]'
-	           FROM generate_series(1, 100000) i`)
+	           FROM generate_series(1, 40000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "ANALYZE {s}.task_history")
 
