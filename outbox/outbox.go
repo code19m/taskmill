@@ -32,7 +32,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -98,6 +100,12 @@ type Delivery struct {
 // never two with the same topic and key. Each call has
 // [RelayOptions.Timeout]: then its context is canceled, and the deliveries
 // without a nil result are retried.
+//
+// A delivery without a result is retried, as after an error: Publish
+// returned nil, or fewer errors than deliveries. Nil never means that all
+// were published. So a publisher that ends in "return nil" after it sent
+// its deliveries sends them all again at each retry, until they are dead.
+// When all were published, return make([]error, len(deliveries)).
 //
 // A failed delivery is retried after 1 second, then after twice as long each
 // time, up to every 5 minutes, with ±10% jitter. After 10,000 tries, about a
@@ -210,8 +218,19 @@ func (r relay) HandleBatch(ctx context.Context, tasks []*taskmill.Task[message])
 			Metadata: t.Metadata,
 		}
 	}
-	return r.pub.Publish(ctx, ds)
+	// Clipped, so that the errors added here stay out of the publisher's
+	// own slice.
+	errs := slices.Clip(r.pub.Publish(ctx, ds))
+	for len(errs) < len(ds) {
+		errs = append(errs, errNoResult)
+	}
+	return errs
 }
+
+// errNoResult fails a delivery for which the publisher returned no result.
+// It names the publisher, which is what the application wrote: the worker's
+// error for a missing result names the batch handler, which is the relay.
+var errNoResult = errors.New("the publisher returned no result for this delivery")
 
 // groupKey orders the messages of one topic and key. The two are joined by
 // the ASCII unit separator. Keys that are long, binary, or contain a NUL

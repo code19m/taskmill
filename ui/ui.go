@@ -146,6 +146,11 @@ type BasicAuth struct {
 // cfg.Prefix does not start with a slash, if cfg.BasicAuth has an empty
 // username or password, or if an entry of cfg.FrameAncestors is empty or
 // holds a space, comma, or semicolon.
+//
+// The handler has nothing to close: it starts no goroutine, and it reaches
+// the database only through client. That is why New returns a plain
+// [http.Handler], which the caller mounts, and may wrap in middleware of its
+// own.
 func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	if cfg == nil {
 		cfg = &Config{}

@@ -145,18 +145,30 @@ type TaskInfo struct {
 type AttemptError struct {
 	// Attempt is the attempt that failed, counting from 1. For a note, it is
 	// the number of attempts used so far, which may be 0.
-	Attempt int `json:"attempt"`
+	Attempt int
 
 	// At is when the entry was recorded, by the database's clock.
-	At time.Time `json:"at"`
+	At time.Time
 
 	// Message is the error's text, truncated to 4 KiB.
-	Message string `json:"message"`
+	Message string
 
 	// Code classifies the entries that taskmill itself recorded, and marks a
 	// handler's error returned after its attempt timed out as [CodeTimeout].
 	// It is empty for other errors returned by a handler.
-	Code ErrorCode `json:"code,omitempty"`
+	Code ErrorCode
+}
+
+// storedError is an entry of a task's errors column, with the names that the
+// database holds: errorJSON and the statements fail, snooze, and rescue
+// write them. The tasks of every release hold these names, so they never
+// change. Its fields are those of AttemptError, so that an entry converts to
+// one.
+type storedError struct {
+	Attempt int       `json:"attempt"`
+	At      time.Time `json:"at"`
+	Message string    `json:"message"`
+	Code    ErrorCode `json:"code"`
 }
 
 // ErrorCode classifies an entry of a task's error history that taskmill
@@ -327,18 +339,24 @@ func decodeErrors(errs []byte) []AttemptError {
 	if len(errs) == 0 || string(errs) == "[]" {
 		return nil
 	}
-	var all []AttemptError
-	if json.Unmarshal(errs, &all) == nil {
-		return all
-	}
-	var entries []json.RawMessage
-	_ = json.Unmarshal(errs, &entries) // no entries if the column holds no array
-	var kept []AttemptError
-	for _, entry := range entries {
-		var e AttemptError
-		if json.Unmarshal(entry, &e) == nil {
-			kept = append(kept, e)
+	var stored []storedError
+	if json.Unmarshal(errs, &stored) != nil {
+		stored = nil // it holds a zero entry for each one that did not decode
+		var entries []json.RawMessage
+		_ = json.Unmarshal(errs, &entries) // no entries if the column holds no array
+		for _, entry := range entries {
+			var e storedError
+			if json.Unmarshal(entry, &e) == nil {
+				stored = append(stored, e)
+			}
 		}
+	}
+	if len(stored) == 0 {
+		return nil
+	}
+	kept := make([]AttemptError, len(stored))
+	for i, e := range stored {
+		kept[i] = AttemptError(e)
 	}
 	return kept
 }

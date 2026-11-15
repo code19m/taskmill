@@ -1013,11 +1013,6 @@ func (s spyTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, er
 	return s.Tx.Query(ctx, sql, args...)
 }
 
-func (s spyTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row { //nolint:ireturn // pgx's row type is an interface
-	*s.statements = append(*s.statements, sql)
-	return s.Tx.QueryRow(ctx, sql, args...)
-}
-
 // CancelTx runs in the caller's transaction, where it must set no savepoint.
 // Each savepoint that writes is a subtransaction, and a transaction with many
 // of them slows every session of the database down while it stays open.

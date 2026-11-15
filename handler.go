@@ -42,8 +42,12 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 // BatchHandler runs tasks of one kind in batches, for work that is cheaper in
 // bulk, such as publishing messages to a broker. It returns one error per
 // task, in the same order: nil completes that task, and an error fails it as
-// a [Handler]'s error would. Returning a shorter slice fails the tasks
-// without an entry.
+// a [Handler]'s error would.
+//
+// A task without a result fails, as after an error: HandleBatch returned nil,
+// or fewer errors than tasks. So a handler that returns early completes no
+// task that it did not run, and one that did all its work returns
+// make([]error, len(tasks)), never nil.
 //
 // A batch takes one slot of its queue's concurrency. When a worker fetches a
 // task of a batch kind, it fills that task's batch with more available tasks

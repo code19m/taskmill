@@ -29,21 +29,25 @@ type Executor interface {
 	querier() querier
 }
 
-// PgxQuerier is the part of pgx that taskmill uses. [pgx.Tx], [*pgx.Conn],
-// and [*pgxpool.Pool] implement it.
+// PgxQuerier is the part of pgx that taskmill uses: these two methods, and
+// no other. [pgx.Tx], [*pgx.Conn], and [*pgxpool.Pool] implement it. An
+// application's own type that wraps one of them, for example to trace
+// statements, needs only these two methods to enqueue. For [Client.CancelTx]
+// and [Task.CompleteTx], it must also be a [pgx.Tx], as [Executor] says.
 type PgxQuerier interface {
 	Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, query string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
 }
 
-// SQLQuerier is the part of database/sql that taskmill uses. [*sql.Tx],
-// [*sql.Conn], and [*sql.DB] implement it. The connection must use pgx's
-// database/sql driver, github.com/jackc/pgx/v5/stdlib.
+// SQLQuerier is the part of database/sql that taskmill uses: these two
+// methods, and no other. [*sql.Tx], [*sql.Conn], and [*sql.DB] implement it.
+// An application's own type that wraps one of them needs only these two
+// methods to enqueue. For [Client.CancelTx] and [Task.CompleteTx], it must
+// also have Commit and Rollback methods, as [Executor] says. The connection
+// must use pgx's database/sql driver, github.com/jackc/pgx/v5/stdlib.
 type SQLQuerier interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // Pgx returns an [Executor] that runs statements on q, typically a [pgx.Tx].

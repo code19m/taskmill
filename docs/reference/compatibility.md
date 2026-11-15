@@ -9,6 +9,8 @@ upgrade, see [Upgrading](../production/upgrading.md).
 - The latest release is **v0.7.0**.
 - **The API is final for v1.0.0.** v1.0.0 is not tagged yet: it waits for
   more use in production.
+  [ADR 0009](../adr/0009-the-apis-shape-for-v1.md) says why the API has
+  this shape: what changed last, and what stays as it is.
 - taskmill follows [Semantic Versioning](https://semver.org/). Before v1.0.0,
   it allows a minor release to break the API. If one does, the
   [changelog](../../CHANGELOG.md) marks the change with **Breaking:** and
@@ -29,13 +31,22 @@ From v1.0.0 on, this is the promise:
 - **Interfaces never grow.** The interfaces you implement keep their
   methods: `Args`, `ArgsWithDefaults`, `Handler`, `BatchHandler`,
   `RetryPolicy`, and `outbox.Publisher`. So do `PgxQuerier` and
-  `SQLQuerier`, which your transactions and pools satisfy. New features come
-  as new optional interfaces, the way `ArgsWithDefaults` extends `Args`.
+  `SQLQuerier`, which your transactions and pools satisfy. Each has only the
+  two methods that taskmill calls, so a wrapper of your own needs no more to
+  enqueue. New features come as new optional interfaces, the way
+  `ArgsWithDefaults` extends `Args`.
 - **`Executor` is sealed:** only taskmill implements it.
 - **Function types keep their signatures:** `HandlerFunc`, `Middleware`,
   `EnqueueMiddleware`, and `outbox.PublisherFunc`.
 - **Config structs only get new fields whose zero value keeps the old
   behavior.**
+- **The types that taskmill hands to your code have no JSON tags and no
+  marshal methods, and get none.** These are the types that `Client`
+  returns, such as `TaskInfo` and `QueueInfo`, the `Task` of a handler, and
+  the outbox's `Delivery` with its `Message`. They are Go values, not a
+  format for the network. `encoding/json` writes them with their field
+  names as keys and a duration in nanoseconds, and a new field adds a key.
+  To send one to another program, encode a type of your own.
 - **Names that are stored, or that your code compares, never change:**
   - the `State` values, such as `available` and `dead`, and no state is added
     within v1;

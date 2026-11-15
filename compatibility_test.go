@@ -1,23 +1,32 @@
 package taskmill_test
 
-// Tests of the names that docs/reference/compatibility.md promises never to
-// change: the database stores them, or the code of applications compares
-// them. Each test writes the values out, because a test that compares a
-// constant with itself passes after any rename. A failure here is a breaking
-// change: it needs a new major version, not a new value in the test.
+// Tests of what docs/reference/compatibility.md promises never to change:
+// the names that the database stores, or that the code of applications
+// compares, the interfaces that applications implement, and the keys that
+// results have when applications encode them. Each test writes the values
+// out, because a test that compares a constant with itself passes after any
+// rename. A failure here is a breaking change: it needs a new major version,
+// not a new value in the test.
 
 import (
 	"context"
+	"database/sql"
+	"encoding"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
+	"github.com/code19m/taskmill/outbox"
 )
 
 // promised starts the reason of every failure in this file.
@@ -91,6 +100,117 @@ type textEmail struct {
 }
 
 func (textEmail) Kind() string { return sendEmail{}.Kind() }
+
+// An entry of a task's error history is stored as a JSON object. No type of
+// the API carries its names: taskmill reads them into a type of its own.
+func TestStoredErrorNamesNeverChange(t *testing.T) {
+	t.Parallel()
+	const breaks = promised + "the previous release's code works on this release's schema: the tasks of every release " +
+		"store their error history under these names, so TaskInfo.Errors would lose what earlier releases recorded, " +
+		"and the previous release would not read this one's entries during a rolling deploy"
+	e := newEnv(t)
+
+	// As every release so far stored it.
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	stored := e.insertTask(t, `errors = '[{"attempt": 3, "at": "2026-01-02T03:04:05Z", "message": "smtp is down", "code": "timeout"}]'`)
+	if got := e.get(t, stored).Errors; len(got) != 1 || got[0].Attempt != 3 || !got[0].At.Equal(at) ||
+		got[0].Message != "smtp is down" || got[0].Code != taskmill.CodeTimeout {
+		t.Errorf(`the stored entry reads as %+v, want attempt 3 at %s with the message "smtp is down" and the code "timeout". %s`,
+			got, at, breaks)
+	}
+
+	// As this release stores it. Three statements write an entry, and an
+	// entry that taskmill records has a code.
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()})
+	failed := e.enqueue(t, textEmail{UserID: "not a number"}, nil) // its payload does not decode
+	snoozed := e.enqueue(t, report{}, nil)                         // the worker has no handler for its kind
+	for _, id := range []int64{failed, snoozed} {
+		if _, err := w.RunTask(t.Context(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rescued := e.enqueue(t, sendEmail{}, nil)
+	e.exec(t, `UPDATE {s}.tasks SET state = 'running', attempt = 1, lease_token = 1, attempted_at = now(), attempted_by = 'gone',
+	           lease_expires_at = now() - interval '1 second' WHERE id = $1`, rescued)
+	taskmill.Rescue(t.Context(), w)
+	for what, id := range map[string]int64{"a failed attempt": failed, "the note of a snooze": snoozed, "a rescued attempt": rescued} {
+		var names []string
+		err := e.pool.QueryRow(t.Context(),
+			"SELECT array(SELECT jsonb_object_keys(errors -> -1) ORDER BY 1) FROM "+e.schema+".tasks WHERE id = $1", id).Scan(&names)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"at", "attempt", "code", "message"}; !slices.Equal(names, want) {
+			t.Errorf("%s is stored under the names %q, want %q. %s", what, names, want, breaks)
+		}
+	}
+}
+
+// customEncodings walks typ and the types that it holds: those of its
+// exported fields, its elements, and its keys. It returns what makes
+// encoding/json write a type of pkgs in another form than Go's default: a
+// struct tag, or a marshal method. seen notes the types of pkgs that it
+// checked.
+func customEncodings(typ reflect.Type, pkgs []string, seen map[reflect.Type]bool) (found []string) {
+	if typ.Name() != "" {
+		if !slices.Contains(pkgs, typ.PkgPath()) || seen[typ] {
+			return nil // a type of another package, or one that is checked
+		}
+		seen[typ] = true
+		for _, marshaler := range []reflect.Type{reflect.TypeFor[json.Marshaler](), reflect.TypeFor[encoding.TextMarshaler]()} {
+			// A pointer has the methods of both kinds of receiver.
+			if reflect.PointerTo(typ).Implements(marshaler) {
+				found = append(found, fmt.Sprintf("%s implements %s", typ, marshaler))
+			}
+		}
+	}
+	switch typ.Kind() {
+	case reflect.Map:
+		found = append(found, customEncodings(typ.Key(), pkgs, seen)...)
+		found = append(found, customEncodings(typ.Elem(), pkgs, seen)...)
+	case reflect.Pointer, reflect.Slice:
+		found = append(found, customEncodings(typ.Elem(), pkgs, seen)...)
+	case reflect.Struct:
+		for f := range typ.Fields() {
+			if !f.IsExported() && !f.Anonymous {
+				continue // no encoder reads it
+			}
+			if f.Tag != "" {
+				found = append(found, fmt.Sprintf("%s.%s has the struct tag %q", typ, f.Name, f.Tag))
+			}
+			found = append(found, customEncodings(f.Type, pkgs, seen)...)
+		}
+	default:
+	}
+	return found
+}
+
+// What encoding/json makes of a type that taskmill hands to an application
+// is Go's default, for good. gorelease does not see a struct tag, and calls
+// a new method compatible, so this test looks for both.
+func TestHandedTypesKeepTheirDefaultJSON(t *testing.T) {
+	t.Parallel()
+	client := reflect.TypeFor[*taskmill.Client]()
+	// What a handler gets, what a publisher gets, and what each method of
+	// Client returns.
+	handed := []reflect.Type{reflect.TypeFor[taskmill.Task[sendEmail]](), reflect.TypeFor[outbox.Delivery]()}
+	for method := range client.Methods() {
+		handed = slices.AppendSeq(handed, method.Type.Outs())
+	}
+	pkgs := []string{client.Elem().PkgPath(), reflect.TypeFor[outbox.Delivery]().PkgPath()}
+	seen := make(map[reflect.Type]bool)
+	for _, typ := range handed {
+		for _, found := range customEncodings(typ, pkgs, seen) {
+			t.Errorf("%s. %sthe types that taskmill hands to an application have no JSON tags and no marshal methods, "+
+				"and get none: either one changes what every application that encodes the type sends", found, promised)
+		}
+	}
+	for _, reached := range []reflect.Type{reflect.TypeFor[taskmill.AttemptError](), reflect.TypeFor[taskmill.TaskCount](), reflect.TypeFor[outbox.Message]()} {
+		if !seen[reached] {
+			t.Errorf("the walk did not reach %s: it checks less than it says", reached)
+		}
+	}
+}
 
 func TestErrorClassesNeverChange(t *testing.T) {
 	t.Parallel()
@@ -228,6 +348,61 @@ func TestScheduledRunMetadataNeverChanges(t *testing.T) {
 		if !maps.Equal(got[tt.name], want) {
 			t.Errorf("the run of schedule %q has the metadata %v, want %v. %s", tt.name, got[tt.name], want, breaks)
 		}
+	}
+}
+
+// execAndQuery is the smallest PgxQuerier, and execAndQueryContext the
+// smallest SQLQuerier: all that an application's own wrapper of a
+// transaction must have. If one of them is no longer an argument for
+// taskmill.Pgx or taskmill.SQL, its interface grew, and every such wrapper
+// stops building.
+type execAndQuery struct{ tx pgx.Tx }
+
+func (q execAndQuery) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	return q.tx.Exec(ctx, query, args...)
+}
+
+func (q execAndQuery) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) { //nolint:ireturn // pgx's rows type is an interface
+	return q.tx.Query(ctx, query, args...)
+}
+
+type execAndQueryContext struct{ tx *sql.Tx }
+
+func (q execAndQueryContext) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return q.tx.ExecContext(ctx, query, args...)
+}
+
+func (q execAndQueryContext) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return q.tx.QueryContext(ctx, query, args...)
+}
+
+func TestQuerierInterfacesNeverGrow(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	pgxTx := e.begin(t)
+	sqlTx, err := openSQL(t).BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sqlTx.Rollback() }()
+	for _, tt := range []struct {
+		name   string
+		tx     taskmill.Executor
+		commit func() error
+	}{
+		{"PgxQuerier", taskmill.Pgx(execAndQuery{pgxTx}), func() error { return pgxTx.Commit(ctx) }},
+		{"SQLQuerier", taskmill.SQL(execAndQueryContext{sqlTx}), sqlTx.Commit},
+	} {
+		res, err := e.client.EnqueueTx(ctx, tt.tx, sendEmail{}, nil)
+		if err == nil {
+			err = tt.commit()
+		}
+		if err != nil {
+			t.Fatalf("an enqueue through a type with only the methods of %s: %v. %sinterfaces never grow: "+
+				"an application's wrapper of its transaction has these methods and no other", tt.name, err, promised)
+		}
+		e.wantState(t, res.ID, taskmill.StateAvailable)
 	}
 }
 

@@ -78,6 +78,12 @@ func WakeQueues(ctx context.Context, w *Worker) {
 	newMaintainer(w).wake(ctx, true)
 }
 
+// Rescue fails the attempts whose leases expired, as w's maintainer does each
+// cycle.
+func Rescue(ctx context.Context, w *Worker) {
+	newMaintainer(w).rescue(ctx)
+}
+
 // PruneSchedules deletes the stored schedules that w does not define, as its
 // maintainer does once a minute.
 func PruneSchedules(ctx context.Context, w *Worker) {

@@ -25,8 +25,9 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 The [Architecture Decision Records](../adr/README.md) (ADRs) explain the big
 choices: the dependency policy, the supported Go and PostgreSQL versions, the
 outbox on the shared engine, pgx as the driver, OpenTelemetry in its own
-module, the health and scaling read paths, and how stuck work is counted.
-Their index also says how to write a new one.
+module, the health and scaling read paths, how stuck work is counted, and
+the shape of the API for v1.0.0. Their index also says how to write a new
+one.
 
 ## Change the docs with the code
 

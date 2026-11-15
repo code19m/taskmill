@@ -7,6 +7,61 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `AttemptError` has no JSON tags any more, like every other
+  type that `Client` returns. If you encode a `TaskInfo` with
+  `encoding/json`, the keys of each entry of its `Errors` change:
+  `attempt`, `at`, `message`, and `code` are now `Attempt`, `At`,
+  `Message`, and `Code`, and `Code` is written when it is empty too. No
+  build fails, so look for each place where a task leaves your program as
+  JSON, such as an admin endpoint that a page or a script reads. To
+  migrate, encode a type of your own there, with the keys that your readers
+  expect, as the recipe
+  [One dashboard for many services](docs/recipes/one-dashboard-for-many-services.md)
+  now does. Go code that decodes that JSON into `AttemptError` needs no
+  change. The types that taskmill hands to your code are Go values, not a
+  format for the network, and get no JSON tags and no marshal methods: see
+  [Compatibility](docs/reference/compatibility.md). The stored tasks do
+  not change.
+- The doc comments of `BatchHandler` and `outbox.Publisher` now say plainly
+  what a nil or short result does: a task or a delivery without an entry
+  fails, and is retried. Nil never means that all succeeded. So a publisher
+  that ends in `return nil` after it sent its deliveries sends them again
+  at each retry: return `make([]error, len(deliveries))`. The rule is the
+  same as before.
+- A delivery for which a publisher returns no result now fails with the
+  error `the publisher returned no result for this delivery`. Its error
+  was `the batch handler returned no result for this task`, which names
+  the relay inside taskmill, and not the publisher that you wrote.
+- [ADR 0009](docs/adr/0009-the-apis-shape-for-v1.md) records the shape of
+  the API for v1.0.0, with the reasons: the two breaking changes of this
+  release, and what stays as it is. `ui.New` keeps returning
+  `http.Handler`, a batch result that is missing keeps failing its task,
+  and `Middleware`, `AttemptError`, `QueueInfo.Counts`, `Activity.Counts`,
+  and `GroupParams` keep their names.
+
+### Removed
+
+- **Breaking:** `PgxQuerier` no longer has `QueryRow`, and `SQLQuerier` no
+  longer has `QueryRowContext`. taskmill never called either of them on a
+  value that you passed, and from v1.0.0 on an interface keeps its methods
+  for good. Nothing changes for code that passes a pgx or `database/sql`
+  value to `taskmill.Pgx` or `taskmill.SQL`: a `pgx.Tx`, a `*pgx.Conn`, a
+  `*pgxpool.Pool`, a `*sql.Tx`, a `*sql.Conn`, a `*sql.DB`, or a type that
+  embeds one of them, such as `*sqlx.Tx`. A type of your own that
+  implements one of the interfaces, such as a wrapper that traces
+  statements, may now leave the method out: it needs `Exec` and `Query`, or
+  `ExecContext` and `QueryContext`. `CancelTx` and `CompleteTx` ask for a
+  transaction as before. What stops building is code that uses
+  `taskmill.PgxQuerier` or `taskmill.SQLQuerier` as the type of its own
+  values, and needs the removed method there. Such code calls the method
+  on the value, embeds the interface in an interface of its own, or passes
+  the value where the method is needed: for example to the code that sqlc
+  generates for pgx, whose `DBTX` has `QueryRow`. To migrate, pass the
+  `pgx.Tx` or the pool itself there, or give the value an interface of
+  your own that has the method, such as that `DBTX`.
+
 ## [0.7.0] - 2026-11-15
 
 ### Added
