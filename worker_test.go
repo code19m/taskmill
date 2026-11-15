@@ -1861,32 +1861,39 @@ func TestWorkerWithUnusableListenConfigPolls(t *testing.T) {
 	e.waitState(t, id, taskmill.StateCompleted)
 }
 
+// A worker that cannot read its queues' settings keeps the ones that it has:
+// a paused queue stays paused. Here no read can end, whichever loop of the
+// worker starts it, and the worker gives each one up by itself.
 func TestFailedSettingsRefreshKeepsQueuesPaused(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
 	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
 		t.Fatal(err)
 	}
-	runWorker(t, e, &taskmill.WorkerConfig{
+	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: noopHandlers(),
 		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}, "canary": {}},
 	})
-	e.waitListening(t)
+	// The worker reads the settings this often, and a read may take as long.
+	taskmill.SetTiming(w, taskmill.Timing{Settings: 100 * time.Millisecond})
+	startWorker(t, w)
+	// The canary's queue is not paused. A worker fetches nothing before it
+	// has read the settings, so the canary's task shows that it has.
+	canary := &taskmill.EnqueueOptions{Queue: "canary"}
+	e.waitState(t, e.enqueue(t, sendEmail{}, canary), taskmill.StateCompleted)
 
-	// A settings refresh waits for a lock on the queues, and is canceled.
+	// From here on, every read of the settings waits for the queues' table.
 	tx := e.begin(t)
 	e.txExec(t, tx, "LOCK TABLE {s}.queues IN ACCESS EXCLUSIVE MODE")
-	e.exec(t, "SELECT pg_notify($1, 'q|default')", e.schema)
-	pid := e.waitBlocked(t, "{s}.queues WHERE name = ANY")
-	e.exec(t, "SELECT pg_cancel_backend($1)", pid)
-	if err := tx.Rollback(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	waitFor(t, "the worker to give up a read of the settings", func() bool {
+		return len(operationLines(logs.all())["load queue settings"]) > 0
+	})
 
-	// The canary, enqueued after the paused task into a queue that is not
-	// paused, shows that the worker is fetching.
+	// The canary, enqueued after the paused queue's task, shows that the
+	// worker is fetching.
 	id := e.enqueue(t, sendEmail{}, nil)
-	e.waitState(t, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "canary"}), taskmill.StateCompleted)
+	e.waitState(t, e.enqueue(t, sendEmail{}, canary), taskmill.StateCompleted)
 	e.wantState(t, id, taskmill.StateAvailable)
 }
 
