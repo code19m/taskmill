@@ -339,18 +339,41 @@ func taskTables(rel string) bool {
 
 // ListRowsRead runs the read of a page of tasks on params, as List runs it,
 // under EXPLAIN ANALYZE, and returns how many rows its scans of the task
-// tables read.
-func ListRowsRead(ctx context.Context, c *Client, params *ListParams) (int64, error) {
-	limit, before, err := listBounds(params)
+// tables read. With generic, the statement runs with its generic plan, which
+// knows neither the filters nor the size of the page: List never uses it.
+func ListRowsRead(ctx context.Context, c *Client, params *ListParams, generic bool) (int64, error) {
+	page, err := c.taskPage(params)
 	if err != nil {
 		return 0, err
 	}
-	m, err := match(&params.Filter, allStates)
+	plan, err := analyze(ctx, c, generic, page.settings, page.sql, page.args...)
+	return planSum(plan, scanned(taskTables)), err
+}
+
+// ListCompiled reports whether the database compiled the read of a page of
+// tasks on params (JIT), as List runs it, in a transaction where it compiles
+// every statement that it may.
+func ListCompiled(ctx context.Context, c *Client, params *ListParams) (bool, error) {
+	page, err := c.taskPage(params)
 	if err != nil {
-		return 0, err
+		return false, err
 	}
-	args := []any{m.queues, m.states, m.kinds, before, limit + 1, len(m.states) > 0, m.history, m.groups, params.Summary}
-	return rowsRead(ctx, c, pageSettings, c.sql.listTasks, args, taskTables)
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, s := range []string{"SET LOCAL jit_above_cost = 0", page.settings} {
+		if _, err := tx.Exec(ctx, s); err != nil {
+			return false, err
+		}
+	}
+	var out []map[string]any
+	if err := tx.QueryRow(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+page.sql, page.args...).Scan(&out); err != nil {
+		return false, err
+	}
+	_, compiled := out[0]["JIT"]
+	return compiled, nil
 }
 
 // ReadAlone runs sql after settings as List, Count, Groups, and Activity run

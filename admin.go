@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // Limits for listing tasks and refreshing statistics.
@@ -166,7 +168,10 @@ type ListParams struct {
 	Limit int
 
 	// Cursor continues from a previous page's [ListResult.Next]. Empty means
-	// the first page.
+	// the first page. Pass it with the filter that it came from: each of
+	// the two orders of [Client.List] has cursors of its own, and a cursor
+	// of the other order, like any text that is not a cursor, is an error
+	// that wraps [ErrInvalidArgument].
 	Cursor string
 
 	// Summary leaves out what makes a task large, for a list that shows one
@@ -179,7 +184,8 @@ type ListParams struct {
 	Summary bool
 }
 
-// ListResult is one page of tasks, newest first.
+// ListResult is one page of tasks, in the order of its list: see
+// [Client.List].
 type ListResult struct {
 	Tasks []TaskInfo
 
@@ -442,50 +448,150 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	return out, nil
 }
 
-// List returns tasks that match params, newest first, one page at a time.
-// params may be nil, for the first page of every task. A page holds every
-// task in full, payloads included, unless [ListParams.Summary] is set.
+// List returns the tasks that match params, one page at a time. params may
+// be nil, for the first page of every task. A page holds every task in
+// full, payloads included, unless [ListParams.Summary] is set.
+//
+// A list is in one of two orders, which [TaskFilter.States] chooses:
+//
+//   - A list of only dead tasks, only canceled tasks, or both is ordered by
+//     when the tasks finished, the latest first: by [TaskInfo.FinalizedAt],
+//     and by ID, the highest first, among tasks that finished at the same
+//     time. A finish time that is infinite, as only an UPDATE by hand
+//     writes it, reads as the zero time, and comes before or after all
+//     others.
+//   - Every other list is ordered by ID, the newest task first.
+//
+// A task's finish time is the start of the transaction that finished it,
+// so tasks do not show up in the order of their finish times. A walk
+// through the pages of a list in finish order can miss a task that finishes
+// meanwhile. It can return a task twice, if the task is retried and
+// finishes again meanwhile.
 //
 // Each page's query is canceled after 5 seconds, so listing cannot load the
-// database for longer: a list that needs more returns an error. A page
-// reads about the tasks it returns where an index holds them newest first:
-// with no filter, for the completed tasks of one queue or of all, and for
-// the pending tasks of one queue's FIFO group. Other lists, such as the
-// dead tasks of one queue or of all, are as fast when their tasks are among
-// the newest, or when the database expects few of them. Otherwise they read
-// the newer tasks of every queue and state first, which on a very large
-// table can reach the limit.
+// database for longer: a list that needs more returns an error.
+//
+// A list of dead or canceled tasks reads about the tasks it returns,
+// however many tasks of other states the table holds. Two things make it
+// read more. A page reads every task that shares a finish time with the
+// task where it starts, or with the task where it ends. One bulk action,
+// or one rescue by the maintainer, gives up to 1,000 tasks one finish time,
+// so a page can read two such batches, and a transaction of the application
+// that cancels more gives one finish time to all of them. And with no queue
+// named, a page reads up to a page of each queue that holds such tasks:
+// with hundreds of queues, name the queue. A filter by kind or FIFO group
+// reads a queue's dead or canceled tasks until it has a page.
+//
+// A list in ID order reads about the tasks it returns where an index holds
+// them newest first: with no filter, for the completed tasks of one queue
+// or of all, and for the pending tasks of one queue's FIFO group. Other
+// lists in ID order, such as one of a single unfinished state, or one that
+// mixes dead tasks with other states, are as fast when their tasks are
+// among the newest, or when the database expects few of them. Otherwise
+// they read the newer tasks of every queue and state first, which on a very
+// large table can reach the limit.
 func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, error) {
 	if params == nil {
 		params = &ListParams{}
 	}
-	limit, before, err := listBounds(params)
+	page, err := c.taskPage(params)
 	if err != nil {
 		return nil, err
 	}
-	m, err := match(&params.Filter, allStates)
-	if err != nil {
-		return nil, err
-	}
-
-	var out ListResult
-	args := []any{m.queues, m.states, m.kinds, before, limit + 1, len(m.states) > 0, m.history, m.groups, params.Summary}
-	err = c.readAlone(ctx, pageSettings, c.sql.listTasks, args, func(r pgx.Rows) error {
-		info, err := scanTaskInfo(r)
+	var (
+		out        ListResult
+		finishedAt pgtype.Timestamptz // the finish time of the task last read, in finish order
+		last       pgtype.Timestamptz // that of the page's last task, where the next page starts
+	)
+	err = c.readAlone(ctx, page.settings, page.sql, page.args, func(r pgx.Rows) error {
+		var row rows = r
+		if page.byFinish {
+			row = finishRows{r, &finishedAt}
+		}
+		info, err := scanTaskInfo(row)
 		if err != nil {
 			return err
 		}
-		out.Tasks = append(out.Tasks, *info)
+		if out.Tasks = append(out.Tasks, *info); len(out.Tasks) == page.limit {
+			last = finishedAt
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: list tasks: %w", err)
 	}
-	if len(out.Tasks) > limit {
-		out.Tasks = out.Tasks[:limit]
-		out.Next = encodeCursor(out.Tasks[limit-1].ID)
+	if len(out.Tasks) > page.limit {
+		out.Tasks = out.Tasks[:page.limit]
+		if id := out.Tasks[page.limit-1].ID; page.byFinish {
+			out.Next = encodeFinishCursor(last, id)
+		} else {
+			out.Next = encodeCursor(id)
+		}
 	}
 	return &out, nil
+}
+
+// taskPage is the read of one page of tasks: its statement, which reads one
+// task more than the page's limit, with the settings that start its
+// transaction and with its arguments.
+type taskPage struct {
+	settings, sql string
+	args          []any
+	limit         int
+	byFinish      bool // the page is in finish order, and its rows are finishRows
+}
+
+// taskPage checks p, and returns the read of its page. A list of only dead
+// and canceled tasks is in finish order, and every other list in ID order.
+// Each order has its own statement and its own cursor, and refuses the
+// cursor of the other: the two orders share no position.
+func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
+	page := taskPage{settings: pageSettings, sql: c.sql.listTasks, limit: p.Limit}
+	switch {
+	case p.Limit == 0:
+		page.limit = defaultListLimit
+	case p.Limit < 0 || p.Limit > maxListLimit:
+		return nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
+	}
+	m, err := match(&p.Filter, allStates)
+	if err != nil {
+		return nil, err
+	}
+	unfinished := func(state string) bool { return state != string(StateDead) && state != string(StateCanceled) }
+	page.byFinish = !m.history && !slices.ContainsFunc(m.states, unfinished)
+	if page.byFinish {
+		// The first page starts below the latest finish time there is.
+		at, before := pgtype.Timestamptz{InfinityModifier: pgtype.Infinity, Valid: true}, int64(math.MaxInt64)
+		if p.Cursor != "" {
+			if at, before, err = decodeFinishCursor(p.Cursor); err != nil {
+				return nil, err
+			}
+		}
+		page.settings, page.sql = finishedSettings, c.sql.listFinished
+		page.args = []any{m.queues, m.states, m.kinds, m.groups, at, before, page.limit + 1, p.Summary}
+		return &page, nil
+	}
+	before := int64(math.MaxInt64)
+	if p.Cursor != "" {
+		if before, err = decodeCursor(p.Cursor); err != nil {
+			return nil, invalidArgument("invalid cursor")
+		}
+	}
+	page.args = []any{m.queues, m.states, m.kinds, before, page.limit + 1, len(m.states) > 0, m.history, m.groups, p.Summary}
+	return &page, nil
+}
+
+// finishRows are the rows of listFinished: each is a task, and then the
+// task's finish time once more, which Scan stores in finishedAt. The cursor
+// of a page needs the time as the column holds it, and scanTaskInfo reads an
+// infinite one as the zero time.
+type finishRows struct {
+	pgx.Rows
+	finishedAt *pgtype.Timestamptz
+}
+
+func (f finishRows) Scan(dest ...any) error {
+	return f.Rows.Scan(append(dest, f.finishedAt)...)
 }
 
 // pageSettings start the read of a page of tasks or of groups. They bound
@@ -494,6 +600,18 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 // for a page of groups, the index of halted groups, if only those are asked
 // for.
 const pageSettings = `SELECT set_config('statement_timeout', '` + listTimeout + `', true), set_config('plan_cache_mode', 'force_custom_plan', true)`
+
+// finishedSettings are pageSettings for a page of dead and canceled tasks.
+// With sorts off, each queue's tasks are read in the order of the index of
+// finished tasks, and the read ends with the page. With sorts on, a plan
+// that expects few matches reads every such task of the queue and sorts
+// them. It expects few of a kind that just started to fail, whose dead tasks
+// are a small part of all tasks, and the same of a plan that does not know
+// the size of the page. The one sort that the page needs, which merges the
+// queues, runs either way. Until PostgreSQL 18, the planner prices a sort
+// that is off so high that the database compiles the statement (JIT), which
+// takes far longer than the read: so JIT is off too.
+const finishedSettings = pageSettings + `, set_config('enable_sort', 'off', true), set_config('jit', 'off', true)`
 
 // readAlone runs a read after settings, both in one round trip, and calls
 // scan with each row of the result. The batch is one transaction without a
@@ -659,25 +777,6 @@ func decodeGroupCursor(cursor string) (queue, key string, err error) {
 	return queue, key, nil
 }
 
-// listBounds validates a page size and decodes a cursor into the ID that
-// the page starts below.
-func listBounds(p *ListParams) (limit int, before int64, err error) {
-	limit = p.Limit
-	switch {
-	case limit == 0:
-		limit = defaultListLimit
-	case limit < 0 || limit > maxListLimit:
-		return 0, 0, invalidArgument("limit must be between 1 and %d", maxListLimit)
-	}
-	if p.Cursor == "" {
-		return limit, math.MaxInt64, nil
-	}
-	if before, err = decodeCursor(p.Cursor); err != nil {
-		return 0, 0, invalidArgument("invalid cursor")
-	}
-	return limit, before, nil
-}
-
 // encodeCursor and decodeCursor turn a task ID into the opaque cursor of a
 // list or a bulk action, and back.
 func encodeCursor(id int64) string {
@@ -690,4 +789,54 @@ func decodeCursor(cursor string) (int64, error) {
 		return 0, err
 	}
 	return strconv.ParseInt(string(raw), 10, 64)
+}
+
+// The cursor of a list in finish order holds the finish time and the ID of
+// the page's last task, as "f<time>,<ID>": no cursor in ID order, which is a
+// number, starts with a letter. The time is the number that PostgreSQL
+// stores, microseconds since the year 2000, and so it holds every time that
+// a column can: the largest and the smallest number are the two infinite
+// times.
+const (
+	pgEpoch     = 946_684_800               // the year 2000 in Unix seconds
+	pgFirstTime = -211_813_488_000_000_000  // 4714-11-24 BC, the first time of PostgreSQL
+	pgTimesEnd  = 9_223_371_331_200_000_000 // the year 294277, which PostgreSQL's times end before
+)
+
+func encodeFinishCursor(at pgtype.Timestamptz, id int64) string {
+	var micros int64
+	switch at.InfinityModifier {
+	case pgtype.Infinity:
+		micros = math.MaxInt64
+	case pgtype.NegativeInfinity:
+		micros = math.MinInt64
+	case pgtype.Finite:
+		micros = (at.Time.Unix()-pgEpoch)*1e6 + int64(at.Time.Nanosecond())/1e3
+	}
+	return base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, "f%d,%d", micros, id))
+}
+
+// decodeFinishCursor decodes the cursor of a list in finish order into the
+// position that the page starts below. It refuses a time that PostgreSQL
+// would refuse.
+func decodeFinishCursor(cursor string) (at pgtype.Timestamptz, id int64, err error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	position, isFinish := strings.CutPrefix(string(raw), "f")
+	when, which, _ := strings.Cut(position, ",")
+	micros, errTime := strconv.ParseInt(when, 10, 64)
+	id, errID := strconv.ParseInt(which, 10, 64)
+	at.Valid = true
+	switch {
+	case err != nil || !isFinish || errTime != nil || errID != nil:
+		return at, 0, invalidArgument("invalid cursor")
+	case micros == math.MaxInt64:
+		at.InfinityModifier = pgtype.Infinity
+	case micros == math.MinInt64:
+		at.InfinityModifier = pgtype.NegativeInfinity
+	case micros < pgFirstTime || micros >= pgTimesEnd:
+		return at, 0, invalidArgument("invalid cursor")
+	default:
+		at.Time = time.Unix(pgEpoch+micros/1e6, micros%1e6*1e3)
+	}
+	return at, id, nil
 }

@@ -117,6 +117,7 @@ type statements struct {
 	swapSettings     string
 	listWorkers      string
 	listTasks        string
+	listFinished     string
 	listGroups       string
 	listQueueGroups  string
 	countStats       string
@@ -1312,14 +1313,14 @@ ORDER BY w.id`),
 		// If $9, it returns a summary of each task: see listColumns.
 		listTasks: q(`
 SELECT ` + taskColumns + ` FROM (
-    (SELECT ` + listColumns(`state::text`) + ` FROM {s}.tasks
+    (SELECT ` + listColumns(`state::text`, `$9`) + ` FROM {s}.tasks
      WHERE $6 AND ` + inList(`queue`, `$1::text[]`) + `
        AND (cardinality($2::text[]) = 0 OR ` + inStates(`$2::text[]`) + `)
        AND ` + inList(`kind`, `$3::text[]`) + `
        AND ` + inList(`group_key`, `$8::text[]`) + ` AND id < $4
      ORDER BY id DESC LIMIT $5)
     UNION ALL
-    (SELECT ` + listColumns(`'completed'`) + `
+    (SELECT ` + listColumns(`'completed'`, `$9`) + `
      FROM {s}.task_history
      WHERE $7 AND ` + inList(`queue`, `$1::text[]`) + `
        AND ` + inList(`kind`, `$3::text[]`) + `
@@ -1328,6 +1329,58 @@ SELECT ` + taskColumns + ` FROM (
 ) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
        created_at, run_at, attempted_at, finalized_at)
 ORDER BY id DESC LIMIT $5`),
+
+		// listFinished pages through dead and canceled tasks by when they
+		// finished, latest first, and by ID among the tasks of one finish
+		// time. That is the order of the index of finished tasks within one
+		// queue and state, so the statement reads one range of it for each
+		// listed queue ($1) and state ($2), backward from the position ($5,
+		// $6) and up to a page ($7), and merges the ranges. No index holds
+		// these tasks in the order of their IDs, in which listTasks would
+		// read every newer task of any state, or all of them and sort.
+		//
+		// With no queue named, it finds the queues that hold such tasks with
+		// one index probe each, as deleteFinished does. A queue named twice
+		// is read once. The state is compared with a value that the planner
+		// does not know, so the test for both states is what tells it that
+		// the index's condition holds.
+		//
+		// The index has no ID, so a range is read in the order of the finish
+		// time alone: WITH TIES makes it end with the last finish time whole,
+		// and the merge then orders by ID. So a page reads its own tasks and
+		// those that share its last finish time, such as the rest of a batch
+		// that one bulk action canceled. The position bounds the range by its
+		// finish time, so a page also reads again what the pages before
+		// returned of that finish time, and the comparison of the pair leaves
+		// it out: up to two such batches for one page.
+		//
+		// Each row ends with the task's finish time once more, as the column
+		// holds it: see finishRows. If $8, the rows are summaries.
+		listFinished: q(`
+WITH RECURSIVE finished AS (
+    (SELECT queue FROM {s}.tasks WHERE state IN ('dead', 'canceled') ORDER BY queue LIMIT 1)
+    UNION ALL
+    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state IN ('dead', 'canceled') AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
+    FROM finished x WHERE x.queue IS NOT NULL
+), listed AS (
+    SELECT queue FROM finished WHERE cardinality($1::text[]) = 0 AND queue IS NOT NULL
+    UNION ALL
+    SELECT DISTINCT q FROM unnest($1::text[]) AS q
+)
+SELECT ` + taskColumns + `, finalized_at
+FROM listed AS l(name)
+CROSS JOIN unnest($2::text[]) AS selected
+CROSS JOIN LATERAL (
+    SELECT ` + listColumns(`t.state::text`, `$8`) + `
+    FROM {s}.tasks t
+    WHERE t.queue = l.name AND t.state = selected::{s}.task_state AND t.state IN ('dead', 'canceled')
+      AND (t.finalized_at, t.id) < ($5::timestamptz, $6::bigint)
+      AND ` + inList(`t.kind`, `$3::text[]`) + `
+      AND ` + inList(`t.group_key`, `$4::text[]`) + `
+    ORDER BY t.finalized_at DESC FETCH FIRST $7 ROWS WITH TIES
+) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
+       created_at, run_at, attempted_at, finalized_at)
+ORDER BY page.finalized_at DESC, page.id DESC LIMIT $7`),
 
 		// listGroups reads a page of FIFO groups in the order of the primary
 		// key, after group ($4, $5) where the last page ended, so a page with
@@ -1566,15 +1619,15 @@ WHERE name = $1`),
 	}
 }
 
-// listColumns are taskColumns as listTasks reads them from a table of tasks
-// in the given state. If $9, they leave out what a list of tasks rarely
-// shows, and what makes a task large: they have no metadata and no payload,
-// and of the errors only the newest. The planner sees $9, so a summary does
-// not read the values it leaves out.
-func listColumns(state string) string {
+// listColumns are taskColumns as a list reads them from a table of tasks in
+// the given state. If the boolean parameter summary is set, they leave out
+// what a list of tasks rarely shows, and what makes a task large: they have
+// no metadata and no payload, and of the errors only the newest. The planner
+// sees the parameter, so a summary does not read the values it leaves out.
+func listColumns(state, summary string) string {
 	return `id, queue, kind, ` + state + `, priority, attempt, max_attempts, coalesce(group_key, ''),
-            CASE WHEN $9 THEN NULL ELSE metadata END, CASE WHEN $9 THEN NULL ELSE payload END,
-            CASE WHEN $9 THEN jsonb_path_query_array(errors, '$[last]') ELSE errors END,
+            CASE WHEN ` + summary + ` THEN NULL ELSE metadata END, CASE WHEN ` + summary + ` THEN NULL ELSE payload END,
+            CASE WHEN ` + summary + ` THEN jsonb_path_query_array(errors, '$[last]') ELSE errors END,
             created_at, run_at, attempted_at, finalized_at`
 }
 
