@@ -99,6 +99,25 @@ func TestScheduledFor(t *testing.T) {
 	}
 }
 
+// parkedArgs is a kind whose default run time and dedupe window no enqueue
+// accepts.
+type parkedArgs struct{}
+
+func (parkedArgs) Kind() string { return "parked" }
+
+func (parkedArgs) EnqueueDefaults() EnqueueOptions {
+	return EnqueueOptions{RunAt: endRunAt, DedupeWindow: -time.Second}
+}
+
+func TestScheduleIsCheckedAsARunEnqueuesIt(t *testing.T) {
+	t.Parallel()
+	// A run sets its own run time and dedupe window over those of the kind's
+	// defaults, so the schedule is valid whatever those are.
+	if _, err := compileSchedules([]Schedule{{Name: "nightly", Cron: "@daily", Args: parkedArgs{}}}); err != nil {
+		t.Fatalf("got %v, want a valid schedule", err)
+	}
+}
+
 func TestExponentialBackoff(t *testing.T) {
 	t.Parallel()
 	b := ExponentialBackoff{}
