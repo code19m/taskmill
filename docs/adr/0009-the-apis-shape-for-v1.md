@@ -37,8 +37,11 @@ tags, because taskmill decoded the `errors` column straight into it. So the
 public type was also the storage format, and an encoded `TaskInfo` had two
 styles of keys. The stored names now live in a private type, and a test
 pins them. Field names cannot change within v1, so Go's default JSON of a
-result keeps its keys without any promise but this one: no tags. A program
-that sends results to another program encodes a type of its own.
+result keeps its keys without any promise but this one: no tags, and no
+marshal methods, which change the JSON as a tag does. The promise covers
+what taskmill hands to an application: the types that `Client` returns, the
+`Task` of a handler, and the outbox's `Delivery`. A program that sends one
+of them to another program encodes a type of its own.
 
 **`ui.New` returns `http.Handler`.** The dashboard starts no goroutine and
 owns no resource: it uses the client's pool. So it needs no method, such as
@@ -94,9 +97,11 @@ would break the build of its callers for no change in behavior.
   once, with no build error: the changelog names the old and the new keys.
   After that, a release never renames a key, and adds one only with a new
   field.
-- `make api` does not see a struct tag. `compatibility_test.go` does: it
-  fails on a tag in any type that a method of `Client` returns, and on a
-  stored error entry that no longer reads back.
+- `make api` does not see a struct tag, and calls a new method compatible.
+  `compatibility_test.go` sees both: it fails on a tag or a marshal method
+  in any type that a method of `Client` returns, in `Task`, and in
+  `outbox.Delivery`. It also fails on a stored error entry that no longer
+  reads back.
 - A batch handler or a publisher that returns too few results fails,
   loudly. Both doc comments say so.
 - `GroupParams` stays the one name of its kind that does not follow its

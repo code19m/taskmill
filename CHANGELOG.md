@@ -20,9 +20,10 @@ All notable changes to taskmill are recorded here. The format follows
   expect, as the recipe
   [One dashboard for many services](docs/recipes/one-dashboard-for-many-services.md)
   now does. Go code that decodes that JSON into `AttemptError` needs no
-  change. The result types are Go values, not a format for the network, and
-  get no JSON tags: see [Compatibility](docs/reference/compatibility.md).
-  The stored tasks do not change.
+  change. The types that taskmill hands to your code are Go values, not a
+  format for the network, and get no JSON tags and no marshal methods: see
+  [Compatibility](docs/reference/compatibility.md). The stored tasks do
+  not change.
 - The doc comments of `BatchHandler` and `outbox.Publisher` now say plainly
   what a nil or short result does: a task or a delivery without an entry
   fails, and is retried. Nil never means that all succeeded. So a publisher

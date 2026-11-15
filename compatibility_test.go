@@ -11,7 +11,10 @@ package taskmill_test
 import (
 	"context"
 	"database/sql"
+	"encoding"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"reflect"
 	"slices"
@@ -23,6 +26,7 @@ import (
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
+	"github.com/code19m/taskmill/outbox"
 )
 
 // promised starts the reason of every failure in this file.
@@ -132,39 +136,69 @@ func TestStoredErrorNamesNeverChange(t *testing.T) {
 	}
 }
 
-// What encoding/json makes of a result is Go's default, for good. gorelease
-// does not see a struct tag, so this test does.
-func TestResultTypesGetNoStructTags(t *testing.T) {
-	t.Parallel()
-	client := reflect.TypeFor[*taskmill.Client]()
-	seen := make(map[reflect.Type]bool)
-	var walk func(typ reflect.Type)
-	walk = func(typ reflect.Type) {
-		for slices.Contains([]reflect.Kind{reflect.Pointer, reflect.Slice, reflect.Map}, typ.Kind()) {
-			typ = typ.Elem()
-		}
-		if typ.Kind() != reflect.Struct || typ.PkgPath() != client.Elem().PkgPath() || seen[typ] {
-			return
+// customEncodings walks typ and the types that it holds: those of its
+// exported fields, its elements, and its keys. It returns what makes
+// encoding/json write a type of pkgs in another form than Go's default: a
+// struct tag, or a marshal method. seen notes the types of pkgs that it
+// checked.
+func customEncodings(typ reflect.Type, pkgs []string, seen map[reflect.Type]bool) (found []string) {
+	if typ.Name() != "" {
+		if !slices.Contains(pkgs, typ.PkgPath()) || seen[typ] {
+			return nil // a type of another package, or one that is checked
 		}
 		seen[typ] = true
-		for f := range typ.Fields() {
-			// No encoder reads a field that is not exported.
-			if f.IsExported() && f.Tag != "" {
-				t.Errorf("%s.%s has the struct tag %q. %sthe types that Client returns have no JSON tags, and get none: "+
-					"a tag renames a key for every application that encodes the type", typ.Name(), f.Name, f.Tag, promised)
+		for _, marshaler := range []reflect.Type{reflect.TypeFor[json.Marshaler](), reflect.TypeFor[encoding.TextMarshaler]()} {
+			// A pointer has the methods of both kinds of receiver.
+			if reflect.PointerTo(typ).Implements(marshaler) {
+				found = append(found, fmt.Sprintf("%s implements %s", typ, marshaler))
 			}
-			walk(f.Type)
 		}
 	}
-	// The result types are those that a method of Client returns, and the
-	// types of their fields.
+	switch typ.Kind() {
+	case reflect.Map:
+		found = append(found, customEncodings(typ.Key(), pkgs, seen)...)
+		found = append(found, customEncodings(typ.Elem(), pkgs, seen)...)
+	case reflect.Pointer, reflect.Slice:
+		found = append(found, customEncodings(typ.Elem(), pkgs, seen)...)
+	case reflect.Struct:
+		for f := range typ.Fields() {
+			if !f.IsExported() && !f.Anonymous {
+				continue // no encoder reads it
+			}
+			if f.Tag != "" {
+				found = append(found, fmt.Sprintf("%s.%s has the struct tag %q", typ, f.Name, f.Tag))
+			}
+			found = append(found, customEncodings(f.Type, pkgs, seen)...)
+		}
+	default:
+	}
+	return found
+}
+
+// What encoding/json makes of a type that taskmill hands to an application
+// is Go's default, for good. gorelease does not see a struct tag, and calls
+// a new method compatible, so this test looks for both.
+func TestHandedTypesKeepTheirDefaultJSON(t *testing.T) {
+	t.Parallel()
+	client := reflect.TypeFor[*taskmill.Client]()
+	// What a handler gets, what a publisher gets, and what each method of
+	// Client returns.
+	handed := []reflect.Type{reflect.TypeFor[taskmill.Task[sendEmail]](), reflect.TypeFor[outbox.Delivery]()}
 	for method := range client.Methods() {
-		for result := range method.Type.Outs() {
-			walk(result)
+		handed = slices.AppendSeq(handed, method.Type.Outs())
+	}
+	pkgs := []string{client.Elem().PkgPath(), reflect.TypeFor[outbox.Delivery]().PkgPath()}
+	seen := make(map[reflect.Type]bool)
+	for _, typ := range handed {
+		for _, found := range customEncodings(typ, pkgs, seen) {
+			t.Errorf("%s. %sthe types that taskmill hands to an application have no JSON tags and no marshal methods, "+
+				"and get none: either one changes what every application that encodes the type sends", found, promised)
 		}
 	}
-	if !seen[reflect.TypeFor[taskmill.AttemptError]()] {
-		t.Fatal("the walk did not reach AttemptError, which Client.Get returns in TaskInfo.Errors: it checks nothing")
+	for _, reached := range []reflect.Type{reflect.TypeFor[taskmill.AttemptError](), reflect.TypeFor[taskmill.TaskCount](), reflect.TypeFor[outbox.Message]()} {
+		if !seen[reached] {
+			t.Errorf("the walk did not reach %s: it checks less than it says", reached)
+		}
 	}
 }
 
