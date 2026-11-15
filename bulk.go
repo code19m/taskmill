@@ -547,12 +547,13 @@ func (s *step) held(ts []bulkTask) []bulkTask {
 
 // skip counts a task that the action leaves. A retry, which passes left,
 // also leaves the task's group, recorded there, for the rest of the action.
-func (s *step) skip(t bulkTask, left map[[2]string]bool) {
+func (s *step) skip(t bulkTask, left map[groupKey]bool) {
 	s.skipped++
 	if s.firstSkipped == 0 || t.id < s.firstSkipped {
 		s.firstSkipped = t.id
 	}
-	if key := [2]string{t.queue, t.group}; left != nil && t.group != "" && !left[key] {
+	key := groupKey{t.queue, t.group}
+	if left != nil && t.group != "" && !left[key] {
 		left[key] = true
 		s.left.add(t.queue, t.group)
 	}
@@ -570,13 +571,13 @@ func (c *Client) retryBatch(ctx context.Context, q querier, m *matching) (step, 
 		return step{}, err
 	}
 	s := step{end: m.end(idsOf(ts))}
-	left := make(map[[2]string]bool)
+	left := make(map[groupKey]bool)
 	for i := range m.left.queues {
-		left[[2]string{m.left.queues[i], m.left.groups[i]}] = true
+		left[groupKey{m.left.queues[i], m.left.groups[i]}] = true
 	}
 	var held []bulkTask
 	for _, t := range ts {
-		if t.held && (t.group == "" || !left[[2]string{t.queue, t.group}]) {
+		if t.held && (t.group == "" || !left[groupKey{t.queue, t.group}]) {
 			held = append(held, t)
 		} else {
 			s.skip(t, left)
@@ -611,7 +612,7 @@ func (c *Client) retryBatch(ctx context.Context, q querier, m *matching) (step, 
 // leaveOut skips the tasks of held that are not among retried: those that
 // rejoinGroups left out. Such a task stays canceled, so it gives away again
 // the dedupe key that it took back.
-func (c *Client) leaveOut(ctx context.Context, q querier, held, retried []bulkTask, s *step, left map[[2]string]bool) error {
+func (c *Client) leaveOut(ctx context.Context, q querier, held, retried []bulkTask, s *step, left map[groupKey]bool) error {
 	var keyed []int64
 	for _, t := range held {
 		if slices.ContainsFunc(retried, func(r bulkTask) bool { return r.id == t.id }) {
@@ -637,7 +638,7 @@ func (c *Client) leaveOut(ctx context.Context, q querier, held, retried []bulkTa
 // a later run, with the later tasks of their groups. The tasks of ts have
 // passed the groups that the action left before: a task ahead of one that
 // was left is still retried, and so keeps the key that it takes here.
-func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *step, left map[[2]string]bool) ([]bulkTask, error) {
+func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *step, left map[groupKey]bool) ([]bulkTask, error) {
 	var keyed []int64
 	for _, t := range ts {
 		if t.keyed {
@@ -656,9 +657,9 @@ func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *
 		return nil, err
 	}
 	var out []bulkTask
-	leftNow := make(map[[2]string]bool) // the groups of the tasks that are left here
+	leftNow := make(map[groupKey]bool) // the groups of the tasks that are left here
 	for _, t := range ts {
-		group := [2]string{t.queue, t.group}
+		group := groupKey{t.queue, t.group}
 		switch {
 		case t.keyed && !taken, t.group != "" && leftNow[group]:
 			s.skip(t, left)
