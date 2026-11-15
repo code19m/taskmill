@@ -132,6 +132,21 @@ All notable changes to taskmill are recorded here. The format follows
   key is gone, the error names none, and says when the key's window ends.
   During a rolling deploy, a task that the previous release cancels has no
   stored key, so its retry takes no key, as before.
+- `CancelMatching`, `RetryMatching`, and `DeleteMatching` no longer fail
+  with `canceling statement due to lock timeout` (SQLSTATE 55P03) when
+  commits that notify are slow. Each batch of such an action waits at most
+  100 ms for a row that another transaction holds. That limit also held
+  for the batch's commit. A transaction that sent a notification, as a
+  batch does that wakes a queue or stops a running task, waits at its
+  commit for a lock that every such transaction of the database server
+  takes in turn. With synchronous replication, each one holds it while it
+  waits for the standby. When that wait took over 100 ms, the batch was
+  undone, and the action returned the error after the batches before it.
+  The dashboard's buttons for many tasks failed the same way. A batch now
+  commits without the limit. A schedule's run had the same limit, of one
+  second: when the wait took longer, the run was not enqueued, the worker
+  logged the error, and the next cycle tried again. It also commits
+  without the limit now.
 - `Enqueue` and `EnqueueMany` no longer fail with PostgreSQL's `deadlock
   detected` (SQLSTATE 40P01) for a deadlock that other transactions opened.
   A `CancelTx` in an application's transaction can take its locks in an

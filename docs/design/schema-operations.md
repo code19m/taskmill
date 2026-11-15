@@ -142,6 +142,14 @@ makes that step wait.
     `CancelTx` that locked the task after another transaction made it
     pending. If the wait times out, the batch rolls back, and the action
     stops with a cursor to continue.
+  - **No lock timeout at the commit.** The timeout is for the batch's
+    statements, and the batch lifts it as its last one. A transaction that
+    sent a notification takes one more lock when it commits: the lock that
+    every notifying transaction of the server takes in turn, and holds
+    until its commit is done. With synchronous replication, that includes
+    the wait for the standby. Under the timeout, a batch whose work was
+    done failed there. A schedule's run, which waits at most a second for
+    a group's row, lifts its timeout the same way.
   - **Exact counts, and continuing.** A batch whose statements ran commits
     even if the caller's context ends meanwhile, so the number of changed
     tasks is exact. An action that stops early returns a cursor to continue:

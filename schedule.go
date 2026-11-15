@@ -394,7 +394,14 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		// The enqueue middleware sees taskmill's own metadata, and cannot
 		// change it: a handler must find the run's time whatever it does.
 		run.own = s.ownMetadata(s.scheduledFor(due))
-		_, err = m.c.storeThrough(ctx, pgxQuerier{q: tx}, []*resolvedTask{run})
+		if _, err = m.c.storeThrough(ctx, pgxQuerier{q: tx}, []*resolvedTask{run}); err != nil {
+			return err
+		}
+		// The timeout was for the group's row. At the commit, it would keep
+		// the schedule from running for as long as notifying transactions
+		// queue there for over a second, while every other enqueue only
+		// waits its turn.
+		_, err = tx.Exec(ctx, liftLockTimeout)
 		return err
 	})
 }

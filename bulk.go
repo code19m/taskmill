@@ -31,9 +31,10 @@ const (
 
 // bulkSettings start each batch of a bulk action. Custom plans see which
 // filters are set, and so use the indexes of the states they select. The
-// lock timeout bounds the one wait that a batch can meet, far below the
-// deadlock timeout, so that a batch never holds other transactions up for
-// long, and never takes part in a deadlock.
+// lock timeout bounds each wait of the batch's statements for a row, far
+// below the deadlock timeout, so that a batch never holds other transactions
+// up for long, and never takes part in a deadlock. It ends before the
+// commit: see liftLockTimeout.
 const bulkSettings = `SELECT set_config('plan_cache_mode', 'force_custom_plan', true), set_config('lock_timeout', '100ms', true)`
 
 // openSettings are bulkSettings for a batch that reads without a window. The
@@ -448,9 +449,9 @@ func (c *Client) nextWindow(ctx context.Context, m *matching) error {
 }
 
 // runBatch runs batch in a transaction of its own, which starts with
-// settings. Once the transaction began, the batch continues if ctx ends
-// meanwhile, until ends: batchTimeout from now, unless a transaction of the
-// same batch set it before.
+// settings and ends with liftLockTimeout. Once the transaction began, the
+// batch continues if ctx ends meanwhile, until ends: batchTimeout from now,
+// unless a transaction of the same batch set it before.
 func (c *Client) runBatch(ctx context.Context, m *matching, batch batchFunc, settings string, ends *time.Time) (step, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
@@ -464,6 +465,9 @@ func (c *Client) runBatch(ctx context.Context, m *matching, batch batchFunc, set
 	var s step
 	if _, err = tx.Exec(ctx, settings); err == nil {
 		s, err = batch(ctx, pgxQuerier{q: tx}, m)
+	}
+	if err == nil {
+		_, err = tx.Exec(ctx, liftLockTimeout)
 	}
 	if err != nil {
 		_ = tx.Rollback(ctx) // err says what went wrong

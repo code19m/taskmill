@@ -240,6 +240,55 @@ func TestBulkActionsWorkInBatches(t *testing.T) {
 	}
 }
 
+// A transaction that sent a notification waits at its commit for the lock
+// that every notifying transaction of the server takes there. The lock
+// timeout of a bulk action's batch, or of a schedule's run, is for its
+// statements: at the commit it would fail a transaction whose work is done.
+// That lock belongs to the whole server, so the test does not hold it: a
+// deferred trigger runs inside each commit, and refuses one that still has a
+// lock timeout.
+func TestALockTimeoutEndsBeforeTheCommit(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	e.exec(t, `
+CREATE FUNCTION {s}.commit_without_lock_timeout() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF current_setting('lock_timeout') <> '0' THEN
+        RAISE EXCEPTION 'the commit has a lock timeout of %', current_setting('lock_timeout');
+    END IF;
+    RETURN NULL;
+END $$`)
+	e.exec(t, `
+CREATE CONSTRAINT TRIGGER commit_without_lock_timeout AFTER INSERT OR UPDATE OR DELETE ON {s}.tasks
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {s}.commit_without_lock_timeout()`)
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+
+	all := bulk(&taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}})
+	for _, step := range []struct {
+		name string
+		do   func(context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error)
+	}{
+		{"cancel", e.client.CancelMatching},
+		{"retry", e.client.RetryMatching},
+		{"delete", e.client.DeleteMatching},
+	} {
+		if res, err := step.do(ctx, all); err != nil || res.Changed != 2 {
+			t.Fatalf("%s: %d tasks, %v; want 2", step.name, res.Changed, err)
+		}
+	}
+
+	// The first pass stores the schedule, and the second enqueues its run.
+	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{{Name: "digest", Cron: "@hourly", Args: sendEmail{}}}})
+	taskmill.RunSchedules(ctx, w)
+	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
+	taskmill.RunSchedules(ctx, w)
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
+		t.Errorf("the schedule's run enqueued %d tasks, want 1", n)
+	}
+}
+
 // states counts the tasks in each state.
 func (e *env) states(t *testing.T) map[string]int {
 	t.Helper()

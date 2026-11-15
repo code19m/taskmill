@@ -32,6 +32,16 @@ const (
 	notifySQL = "SELECT pg_notify($1, $2)"
 )
 
+// liftLockTimeout is the last statement of a transaction that set a lock
+// timeout for its statements and may have sent a notification. Such a
+// transaction takes one more lock when it commits: the lock that every
+// notifying transaction of the whole server takes, and holds until its
+// commit is done, which with synchronous replication includes the wait for
+// the standby. Under the timeout, a commit that waits longer for that lock
+// fails, and undoes work that was done. The wait cannot be part of a
+// deadlock: whoever holds the lock is committing, and asks for nothing more.
+const liftLockTimeout = `SELECT set_config('lock_timeout', '0', true)`
+
 // notifier throttles "tasks available" notifications per queue. The first
 // enqueue in a window notifies inside its own transaction; later ones in the
 // same window share one trailing notification when the window ends.
