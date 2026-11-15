@@ -192,7 +192,10 @@ drops it. If the drop fails, a later pass finishes it.
 
 - **To keep a day,** detach its partition yourself before it expires, or
   copy it. taskmill drops a table that is no partition only if the table
-  has taskmill's mark, so yours stays.
+  has taskmill's mark, so yours stays. If `\dt+
+  taskmill.task_history_20261001` shows a comment of taskmill, a pass has
+  marked the partition already: clear the mark first, with `COMMENT ON
+  TABLE taskmill.task_history_20261001 IS NULL;`.
 - **A detached table without the mark stays for good.** A taskmill release
   that set no mark yet may have left one, when a drop failed. `\d+
   taskmill.task_history` lists the partitions: a table named
