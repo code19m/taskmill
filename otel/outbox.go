@@ -95,8 +95,18 @@ type panicError struct {
 	value any
 }
 
-// Error implements the error interface.
-func (e panicError) Error() string { return fmt.Sprintf("panic: %v", e.value) }
+// Error implements the error interface. Formatting the value runs its own
+// methods, which can panic again, as an Error method that panics with its
+// receiver does. The text then names the value's type, as the worker's does:
+// a second panic here would leave the spans open.
+func (e panicError) Error() (text string) {
+	defer func() {
+		if recover() != nil {
+			text = fmt.Sprintf("panic: a %T that panics when it is formatted", e.value)
+		}
+	}()
+	return fmt.Sprintf("panic: %v", e.value)
+}
 
 // ErrorType returns the error's class, which semconv.ErrorType reports as
 // error.type.

@@ -630,46 +630,65 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 	})
 }
 
+// stubbornError is an error whose Error method panics with the error itself,
+// so that the panic's value panics again when it is formatted.
+type stubbornError struct{}
+
+func (e *stubbornError) Error() string { panic(e) }
+
 func TestPublisherThatPanicsEndsItsSpans(t *testing.T) {
 	t.Parallel()
-	e := setup(t)
-	ob := outbox.New(e.client)
-	broker := outbox.PublisherFunc(func(context.Context, []outbox.Delivery) []error {
-		panic("the broker's client broke")
-	})
-	var hs taskmill.Handlers
-	ob.AddRelay(&hs, e.in.Publisher("kafka", broker), nil)
-	w := e.worker(t, &hs)
+	for name, tc := range map[string]struct {
+		value  any    // what the publisher panics with
+		status string // a part of the span's status that names the panic
+	}{
+		"with a string": {"the broker's client broke", "the broker's client broke"},
+		"with a value that panics when it is formatted": {&stubbornError{}, "stubbornError"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := setup(t)
+			ob := outbox.New(e.client)
+			broker := outbox.PublisherFunc(func(context.Context, []outbox.Delivery) []error {
+				panic(tc.value)
+			})
+			var hs taskmill.Handlers
+			ob.AddRelay(&hs, e.in.Publisher("kafka", broker), nil)
+			w := e.worker(t, &hs)
 
-	err := pgx.BeginFunc(t.Context(), e.pool, func(tx pgx.Tx) error {
-		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Topic: "orders", Value: []byte("order 7")})
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	page, err := e.client.List(t.Context(), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	info, err := w.RunTask(t.Context(), page.Tasks[0].ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+			err := pgx.BeginFunc(t.Context(), e.pool, func(tx pgx.Tx) error {
+				return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Topic: "orders", Value: []byte("order 7")})
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			page, err := e.client.List(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := w.RunTask(t.Context(), page.Tasks[0].ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	// The delivery's span ends with the panic as its error, and is counted.
-	send := e.one(t, "send orders")
-	if got := send.Status(); got.Code != codes.Error || !strings.Contains(got.Description, "the broker's client broke") {
-		t.Errorf("got the status %+v, want an error that names the panic", got)
-	}
-	wantAttrs(t, send, "error.type=panic")
-	wantPoints(t, "sent to the broker", slices.DeleteFunc(e.points(t, "messaging.client.sent.messages"),
-		func(p string) bool { return strings.Contains(p, "messaging.system=taskmill") }), []string{
-		"error.type=panic messaging.destination.name=orders messaging.operation.name=send messaging.system=kafka: 1",
-	})
-	// The worker records the panic as it does without the wrapper: with the
-	// stack of the publisher that panicked.
-	if got := info.Errors; len(got) != 1 || got[0].Code != taskmill.CodePanic || !strings.Contains(got[0].Message, t.Name()) {
-		t.Errorf("got the errors %+v, want one panic whose stack names this test's publisher", got)
+			// The delivery's span ends with the panic as its error, and is
+			// counted.
+			send := e.one(t, "send orders")
+			if got := send.Status(); got.Code != codes.Error || !strings.Contains(got.Description, tc.status) {
+				t.Errorf("got the status %+v, want an error that names the panic", got)
+			}
+			wantAttrs(t, send, "error.type=panic")
+			wantPoints(t, "sent to the broker", slices.DeleteFunc(e.points(t, "messaging.client.sent.messages"),
+				func(p string) bool { return strings.Contains(p, "messaging.system=taskmill") }), []string{
+				"error.type=panic messaging.destination.name=orders messaging.operation.name=send messaging.system=kafka: 1",
+			})
+			// The worker records the panic as it does without the wrapper:
+			// with the stack of the publisher that panicked.
+			const publisher = "TestPublisherThatPanicsEndsItsSpans"
+			if got := info.Errors; len(got) != 1 || got[0].Code != taskmill.CodePanic || !strings.Contains(got[0].Message, publisher) {
+				t.Errorf("got the errors %+v, want one panic whose stack names this test's publisher", got)
+			}
+		})
 	}
 }
 

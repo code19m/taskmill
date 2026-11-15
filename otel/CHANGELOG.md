@@ -15,6 +15,14 @@ rename spans, attributes, or metrics to follow them, and says so here.
 - The package comment links to the guide that shows the setup, and to the
   page that lists every span, metric, and gauge. No behavior changes.
 
+### Fixed
+
+- When a publisher wrapped with `Publisher` panicked with a value that
+  panics again when it is formatted, such as an error whose `Error` method
+  panics with its own receiver, the `send {topic}` spans of its deliveries
+  never ended, and `messaging.client.sent.messages` did not count them. Now
+  each span ends, with an error that names the value's type.
+
 ## [0.4.1] - 2026-11-13
 
 ### Fixed
