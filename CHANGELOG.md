@@ -157,12 +157,13 @@ All notable changes to taskmill are recorded here. The format follows
   stayed in the schema for good, with a day of completed tasks on disk:
   for example when the worker stopped, or lost the database, between the
   two steps. No later pass found the table, because it was no partition
-  any more. Retention now finds such a table by its name, and drops it.
-  So it drops every table of taskmill's schema that is named
-  `task_history_` and a day, once that day is older than
-  `HistoryRetention`: rename a partition that you detached to keep it. A
-  pass drops at most 10 partitions, the oldest first, and the next pass, a
-  minute later, continues.
+  any more. The maintainer now marks a partition with a comment before it
+  detaches it, and a later pass drops a detached table that has the mark.
+  A table without the mark stays: one that you detached or copied to keep
+  it, and one that an earlier release left behind, which you remove with
+  `DROP TABLE` ([Database](docs/production/database.md)). A pass drops at
+  most 10 partitions, the oldest first, and the next pass, a minute later,
+  continues.
 - Queue statistics went stale while retention had much to do. The
   maintainer refreshed them in the loop that also applies retention. So
   the counts, `QueueInfo.Lag`, and `QueueInfo.RefreshedAt` stood still

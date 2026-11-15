@@ -1007,8 +1007,10 @@ RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.att
 		//
 		// A partition that a pass detached and could not drop is a table of
 		// its own, which the history no longer names. So the statement reads
-		// the schema's tables by name, and takes those that are partitions of
-		// the history or of nothing.
+		// the schema's tables by name. Of those that are no partition, it
+		// takes only the ones with the comment $2, which a pass sets before
+		// it detaches: a table that an operator detached or copied, to keep
+		// it, has none.
 		//
 		// A period that only SQL can store, of thousands of years, has its
 		// cutoff before our era, whose year to_char prints without a sign,
@@ -1020,7 +1022,7 @@ FROM pg_class c
 LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND i.inhparent = '{s}.task_history'::regclass
 WHERE c.relnamespace = '{s}'::regnamespace
   AND c.relkind = 'r'
-  AND (i.inhrelid IS NOT NULL OR NOT c.relispartition)
+  AND (i.inhrelid IS NOT NULL OR NOT c.relispartition AND obj_description(c.oid, 'pg_class') = $2)
   AND c.relname ~ '^task_history_[0-9]{8}$'
   AND c.relname < 'task_history_' || to_char(greatest(
           {utc} - (SELECT history_retention FROM {s}.settings), timestamp '0001-01-01'), 'YYYYMMDD')

@@ -24,9 +24,15 @@ queues, and how notifications and polling wake the workers.
 - **A later pass finishes a drop that failed.** A detach that was
   interrupted is finished with `DETACH PARTITION ... FINALIZE`. A partition
   that was detached but not dropped is a table of its own, which the history
-  no longer names. So a pass reads the schema's tables by name. It drops
-  each one named `task_history_` and a day, once that day has expired,
-  whether it is attached or not. To keep such a table, rename it.
+  no longer names. So a pass reads the schema's tables by name.
+- **Retention drops only what it detached itself.** Before a pass detaches a
+  partition, it marks it with `COMMENT ON TABLE`. Of the tables that are no
+  partition, a pass drops only those with that mark. So a partition that an
+  operator detached to keep it, or a copy with such a name, stays. The mark
+  comes first because a crash after it changes nothing, while a table
+  detached without it would stay for good. The comment takes the lock on
+  the partition that the detach takes next anyway (`SHARE UPDATE
+  EXCLUSIVE`), which blocks neither reads nor writes.
 - **A failed election try writes nothing.** The upsert proposes its row only
   if no other worker's lease lasts. A conflict would lock the leader's row,
   and make every try of every other worker a write.

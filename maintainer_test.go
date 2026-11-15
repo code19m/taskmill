@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"math"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -448,44 +447,63 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	})
 }
 
-// A drop that fails after its detach leaves a table that is no partition any
-// more, so the history's partitions no longer name it. Retention finds such a
-// table by its name, and drops it once its day has expired: the oldest
-// first, and no more tables in a pass than a pass may drop.
-func TestRetentionDropsPartitionsThatWereOnlyDetached(t *testing.T) {
+// Retention drops a table that is no partition only if it detached that
+// table itself, which its mark on the table shows. A table that someone else
+// detached or made stays, whatever its name: an operator may keep a day of
+// history that way.
+func TestRetentionDropsOnlyTheHistoryItDetached(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	w := newWorker(t, e, &taskmill.WorkerConfig{})
 	today := time.Now().UTC().Truncate(24 * time.Hour)
-	detached := func(daysAgo int) string {
-		part := e.attachHistory(t, today.AddDate(0, 0, -daysAgo))
-		e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+part)
-		return part
-	}
-	// One table more than a pass drops, the newest first, and one whose day
-	// has not expired.
-	var expired []string
-	for i := range taskmill.HistoryDrops + 1 {
-		expired = append(expired, detached(30+i))
-	}
-	recent := detached(2)
-	left := func() (names []string) {
-		for _, part := range slices.Concat(expired, []string{recent}) {
-			if e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = $2", e.schema, part) == 1 {
-				names = append(names, part)
-			}
-		}
-		return names
-	}
+	// A partition that an operator detached to keep it, and a copy of the
+	// history, both named after expired days.
+	kept := e.attachHistory(t, today.AddDate(0, 0, -40))
+	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+kept)
+	copied := "task_history_" + today.AddDate(0, 0, -41).Format("20060102")
+	e.exec(t, "CREATE TABLE {s}."+copied+" AS TABLE {s}.task_history")
+	// A partition that retention detaches and then cannot drop: a view
+	// depends on it.
+	failed := e.attachHistory(t, today.AddDate(0, 0, -42))
+	e.exec(t, "CREATE VIEW {s}.report AS SELECT id FROM {s}."+failed)
 
 	taskmill.RunRetention(t.Context(), w)
-	if got, want := left(), []string{expired[0], recent}; !slices.Equal(got, want) {
-		t.Fatalf("after one pass, the detached tables %v are left, want %v", got, want)
+	partitions := "SELECT count(*) FROM pg_inherits WHERE inhrelid = ('{s}.' || $1)::regclass"
+	if e.historyTables(t, failed) != 1 || e.count(t, partitions, failed) != 0 {
+		t.Fatal("retention did not detach the expired partition that it cannot drop")
 	}
+	e.exec(t, "DROP VIEW {s}.report")
 	taskmill.RunRetention(t.Context(), w)
-	if got, want := left(), []string{recent}; !slices.Equal(got, want) {
-		t.Fatalf("after two passes, the detached tables %v are left, want %v", got, want)
+	if e.historyTables(t, failed) != 0 {
+		t.Error("retention did not finish the drop of the partition that it had detached")
 	}
+	if n := e.historyTables(t, kept, copied); n != 2 {
+		t.Errorf("retention dropped %d of 2 tables that it did not detach", 2-n)
+	}
+}
+
+// A pass drops no more partitions than it may: the next pass goes on.
+func TestRetentionDropsAFewPartitionsInAPass(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{})
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	var expired []string
+	for i := range taskmill.HistoryDrops + 1 {
+		expired = append(expired, e.attachHistory(t, today.AddDate(0, 0, -30-i)))
+	}
+	for left := 1; left >= 0; left-- {
+		taskmill.RunRetention(t.Context(), w)
+		if n := e.historyTables(t, expired...); n != left {
+			t.Fatalf("a pass left %d of %d expired partitions, want %d", n, len(expired), left)
+		}
+	}
+}
+
+// historyTables returns how many of the named tables the env's schema has.
+func (e *env) historyTables(t *testing.T, names ...string) int {
+	t.Helper()
+	return e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = ANY($2)", e.schema, names)
 }
 
 // attachHistory attaches a history partition for the UTC day that starts at

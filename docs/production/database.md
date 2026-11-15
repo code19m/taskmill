@@ -184,6 +184,25 @@ A longer lease has costs, because other timings follow it:
 
 So keep `LeaseDuration` as short as your failover allows.
 
+## Keep or remove a day of old history
+
+The maintainer drops a history partition once its whole day is older than
+`HistoryRetention`. It marks the partition with a comment, detaches it, and
+drops it. If the drop fails, a later pass finishes it.
+
+- **To keep a day,** detach its partition yourself before it expires, or
+  copy it. taskmill drops a table that is no partition only if the table
+  has taskmill's mark, so yours stays.
+- **A detached table without the mark stays for good.** A taskmill release
+  that set no mark yet may have left one, when a drop failed. `\d+
+  taskmill.task_history` lists the partitions: a table named
+  `task_history_` and a day that is not in that list is detached. Remove it
+  by hand:
+
+  ```sql
+  DROP TABLE taskmill.task_history_20261001;
+  ```
+
 ## Keep clocks in sync
 
 taskmill takes most times from the database, but not all. Keep every
