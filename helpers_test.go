@@ -283,18 +283,25 @@ func (e *env) txExec(t *testing.T, tx pgx.Tx, sql string, args ...any) {
 }
 
 // waitBlocked waits until a statement that contains fragment, with {s} for
-// the schema, waits for a lock, and returns its backend's process ID.
-func (e *env) waitBlocked(t *testing.T, fragment string) int {
+// the schema, waits for a lock.
+//
+// It does not see a statement that waits for a table's lock if the pool ran
+// that statement before, on another connection. A connection prepares a
+// statement before it first runs it. Through PgBouncer, the server's
+// connection may have the statement already, and then gets only the request
+// to describe it. PostgreSQL locks the statement's tables for that too, and
+// pg_stat_activity shows the statement that ran before. A test of such a
+// wait needs another signal, such as what the waiting code logs or returns.
+func (e *env) waitBlocked(t *testing.T, fragment string) {
 	t.Helper()
-	var pid int
 	waitFor(t, "a statement to wait for a lock", func() bool {
+		var pid int
 		err := e.pool.QueryRow(t.Context(), `
 SELECT pid FROM pg_stat_activity
 WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0
 LIMIT 1`, replaceSchema(fragment, e.schema)).Scan(&pid)
 		return err == nil
 	})
-	return pid
 }
 
 // openSQL opens the test database through database/sql.
