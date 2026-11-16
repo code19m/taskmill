@@ -17,6 +17,12 @@ All notable changes to taskmill are recorded here. The format follows
   actions", and the queue statistics left "Maintenance and notifications".
   A link to an old record, or to a section that moved, no longer works. No
   behavior changes.
+- The comment at the top of migration `0004_stuck_work.sql` names the
+  design page, and no longer a decision record that is gone. Its
+  statements are the same, and `Migrate` applies migrations by their
+  numbers, so it sees no change. If you apply the migrations with a tool
+  that stores a checksum of each file, such as Flyway or Atlas, the
+  checksum of this one file changes: repair it with your tool.
 
 ## [0.8.0] - 2026-11-16
 
