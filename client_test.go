@@ -858,7 +858,14 @@ func TestDeleteOfATaskCanceledMeanwhileDoesNotDeadlockWithItsRetry(t *testing.T)
 		t.Fatal(err)
 	}
 	for what, done := range map[string]chan error{"cancel": canceled, "retry": retried, "delete": deleted} {
-		if err := recv(t, done, "the "+what); err != nil {
+		err := recv(t, done, "the "+what)
+		// The Delete and the Retry both go on when the Cancel ends. Mostly
+		// the Retry takes the canceled task first, and the Delete deletes the
+		// retried one. If the Delete is first, the Retry finds no task.
+		if what == "retry" && errors.Is(err, taskmill.ErrNotFound) {
+			continue
+		}
+		if err != nil {
 			t.Fatalf("%s: %v", what, err)
 		}
 	}
