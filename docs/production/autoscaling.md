@@ -13,7 +13,8 @@ based on how much work waits in a queue.
 
 Never point KEDA's PostgreSQL scaler at taskmill's tables. They are internal
 and change between releases. `Client.Queues` and the gauges are the stable
-way to read them ([ADR 0006](../adr/0006-health-and-scaling-read-paths.md)).
+way to read them: [Queue statistics and health](../design/schema-statistics.md)
+says why.
 
 ## Scale on tasks with Prometheus
 

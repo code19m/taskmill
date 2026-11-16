@@ -26,10 +26,6 @@ type page struct {
 	prose string // its text with the code blanked out, on the same lines
 }
 
-// record is the path of a decision record. An accepted record is never
-// edited, so the rules skip the records.
-var record = regexp.MustCompile(`^docs/adr/\d{4}-[^/]+\.md$`)
-
 // files returns the paths of the repository's Markdown files.
 func files(t *testing.T) []string {
 	t.Helper()
@@ -50,16 +46,13 @@ func read(t *testing.T, name string) string {
 	return string(text)
 }
 
-// boundPages returns the Markdown files that the style guide binds: all but
-// the decision records. Of a changelog, only the Unreleased section counts:
-// its released sections are history.
+// boundPages returns the pages that the style guide binds: every Markdown
+// file. Of a changelog, only the Unreleased section counts: its released
+// sections are history.
 func boundPages(t *testing.T) []page {
 	t.Helper()
 	var pages []page
 	for _, name := range files(t) {
-		if record.MatchString(name) {
-			continue
-		}
 		text := read(t, name)
 		if path.Base(name) == "CHANGELOG.md" {
 			text = unreleased(text)
@@ -261,15 +254,15 @@ func linkTo(t *testing.T, from, to string) string {
 }
 
 // TestNextChain checks that the Next lines make one chain. Every page of
-// docs/, except the decision records, has one place in the reading order.
-// It starts with its title, and its last line leads to the page after it,
-// by that page's title. The last page leads back to the home. So a reader
-// who starts at the home and follows Next visits every page exactly once.
+// docs/ has one place in the reading order. It starts with its title, and
+// its last line leads to the page after it, by that page's title. The last
+// page leads back to the home. So a reader who starts at the home and
+// follows Next visits every page exactly once.
 func TestNextChain(t *testing.T) {
 	t.Parallel()
 	order := readingOrder(t)
 	for _, name := range files(t) {
-		if strings.HasPrefix(name, "docs/") && !strings.HasPrefix(name, "docs/adr/") && !slices.Contains(order, name) {
+		if strings.HasPrefix(name, "docs/") && !slices.Contains(order, name) {
 			t.Errorf("%s: no Next line leads to it, because the README.md of a section does not link to it. "+
 				"Add a row for it to the README.md of its folder, which must be one of docs/{%s}",
 				name, strings.Join(sections, ","))
@@ -355,22 +348,6 @@ func TestLearningPath(t *testing.T) {
 				home, lines[i], link, linkTo(t, home, order[at]))
 		default:
 			at = place
-		}
-	}
-}
-
-// TestRecordsIndex checks that the index of the decision records links to
-// every record.
-func TestRecordsIndex(t *testing.T) {
-	t.Parallel()
-	const index = "docs/adr/README.md"
-	var linked []string
-	for _, r := range refsOf(t, index) {
-		linked = append(linked, r.dest)
-	}
-	for _, name := range files(t) {
-		if record.MatchString(name) && !slices.Contains(linked, name) {
-			t.Errorf("%s: its table does not link to %s. Add a row for it", index, name)
 		}
 	}
 }

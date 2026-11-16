@@ -7,6 +7,17 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The decision records in `docs/adr/` are gone. The design pages now hold
+  what they said: each decision is on the page of the mechanism that it
+  explains, with its reasons and the options that were rejected. Start at
+  [How taskmill is built](docs/design/README.md). Two design pages were
+  split by topic on the way: lists and counts left "Lists and operator
+  actions", and the queue statistics left "Maintenance and notifications".
+  A link to an old record, or to a section that moved, no longer works. No
+  behavior changes.
+
 ## [0.8.0] - 2026-11-16
 
 ### Changed
@@ -36,7 +47,7 @@ All notable changes to taskmill are recorded here. The format follows
   error `the publisher returned no result for this delivery`. Its error
   was `the batch handler returned no result for this task`, which names
   the relay inside taskmill, and not the publisher that you wrote.
-- [ADR 0009](docs/adr/0009-the-apis-shape-for-v1.md) records the shape of
+- [The API's shape](docs/design/api-shape.md) records the shape of
   the API for v1.0.0, with the reasons: the two breaking changes of this
   release, and what stays as it is. `ui.New` keeps returning
   `http.Handler`, a batch result that is missing keeps failing its task,
@@ -75,7 +86,7 @@ All notable changes to taskmill are recorded here. The format follows
   finished tasks, and about the tasks it returns: on a table of 61,500
   tasks with 10,000 dead ones, 52 rows for a page of 50 dead tasks of one
   queue, where it read 11,565. There is no new index and no migration.
-  [ADR 0008](docs/adr/0008-list-dead-and-canceled-tasks-by-when-they-finished.md)
+  [Lists and counts](docs/design/schema-lists.md)
   has the reasons, and
   [Manage tasks from code](docs/guides/operations-api.md#find-tasks) says
   when such a list reads more. To migrate:
@@ -831,7 +842,7 @@ All notable changes to taskmill are recorded here. The format follows
   `queue_stats` (migration `0004_stuck_work.sql`).
   [Monitoring](docs/production/monitoring.md) has an alert for each, and no
   longer asks you to poll `Client.Groups` for halted groups.
-  [ADR 0007](docs/adr/0007-count-stuck-work-with-the-queue-statistics.md)
+  [Queue statistics and health](docs/design/schema-statistics.md)
   explains the choice.
 
 ### Changed

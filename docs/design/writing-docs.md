@@ -160,7 +160,7 @@ Each fact has one home; other places summarize it in a line and link.
 | What has no identifier: log lines, metric names, fixed timings, the `taskmill-ui` command, compatibility, performance | `docs/reference/` |
 | Names and links that lead to an identifier or a page | An index: a section's `README.md`, `llms.txt`, and in `docs/reference/`, Packages, Configuration, and Errors |
 | What changed, and how to migrate | `CHANGELOG.md` |
-| Why taskmill is built this way | `docs/design/`, `docs/adr/` |
+| Why taskmill is built this way, and the options that we rejected | `docs/design/`, on the page of the mechanism |
 
 ## Templates
 

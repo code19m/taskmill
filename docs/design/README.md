@@ -14,28 +14,32 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | 1 | [Task lifecycle and guarantees](task-lifecycle.md) | The contract: every state change, the invariants, and how each guarantee is kept |
 | 2 | [Storage schema](schema.md) | The tables and indexes, and the reasoning behind them |
 | 3 | [Key statements](schema-statements.md) | The statements that enqueue, fetch, and complete tasks, and record their failures |
-| 4 | [Lists and operator actions](schema-operations.md) | The statements that list and count tasks, and that retry, cancel, and delete them |
-| 5 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
-| 6 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, how it counts the queues, and how workers are woken |
-| 7 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
-| 8 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
-| 9 | [Releasing](releasing.md) | How the project team publishes a version |
-| 10 | [Writing docs](writing-docs.md) | The style guide and the page templates |
-| 11 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
+| 4 | [Lists and counts](schema-lists.md) | The statements that list and count tasks, and why dead and canceled tasks come by finish time |
+| 5 | [Operator actions](schema-operations.md) | The statements that retry, cancel, and delete tasks, one or many |
+| 6 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
+| 7 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
+| 8 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
+| 9 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
+| 10 | [The API's shape](api-shape.md) | Why each point of the API has its shape, and when we look at it again |
+| 11 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry has a module of its own, and how to add a dependency |
+| 12 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
+| 13 | [Releasing](releasing.md) | How the project team publishes a version |
+| 14 | [Writing docs](writing-docs.md) | The style guide and the page templates |
+| 15 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
 
-The [Architecture Decision Records](../adr/README.md) (ADRs) explain the big
-choices: the dependency policy, the supported Go and PostgreSQL versions, the
-outbox on the shared engine, pgx as the driver, OpenTelemetry in its own
-module, the health and scaling read paths, how stuck work is counted, the
-order of the lists of dead and canceled tasks, and the shape of the API for
-v1.0.0. Their index also says how to write a new one.
+**Each page gives its decisions next to the mechanism that they explain:**
+what is so, why, and the options that we rejected. These pages are the home
+of "why", and there is no separate list of decisions. One reason lives with
+its policy instead: [Compatibility](../reference/compatibility.md#supported-go-and-postgresql-versions)
+says why taskmill supports the versions that it does.
 
 ## Change the docs with the code
 
 A change to documented behavior updates the docs in the same pull request:
 the user docs in `docs/`, the godoc, these design pages, and CHANGELOG.md. If
-the change goes against an ADR, write a new ADR that replaces it. Teams run
-taskmill in production from these docs, so they must match the code.
+the change goes against a decision on a design page, change that page in the
+same pull request, and say why in it. Teams run taskmill in production from
+these docs, so they must match the code.
 
 ## The product shape
 
@@ -57,18 +61,51 @@ flowchart BT
 ```
 
 - **One Go module, except `otel`.** Everything is in one module, except the
-  OpenTelemetry integration, which has a module of its own
-  ([ADR 0005](../adr/0005-opentelemetry-in-a-module-of-its-own.md)).
-  Integrations that need third-party modules, such as broker clients, live
-  in separate modules too, never in the core
-  ([ADR 0001](../adr/0001-dependency-policy.md)). They build on the core's
-  middleware for enqueues and attempts.
-- **The outbox is a package, not a project.**
-  [ADR 0003](../adr/0003-outbox-on-the-shared-engine.md) explains why.
+  OpenTelemetry integration, which has a module of its own. Integrations
+  that need third-party modules, such as broker clients, live in separate
+  modules too, never in the core. They build on the core's middleware for
+  enqueues and attempts. [Dependencies and modules](dependencies.md) has
+  the rule and its reasons.
+- **The outbox is a package on the engine, not a project.** The section
+  [below](#why-the-outbox-is-a-package-on-the-engine) explains why.
 - **The tables are internal,** so that they can change. Only the
   `migrations` table is public, for teams that apply migrations with their
   own tools. A stable SQL function to enqueue from other languages or from
   triggers can come once users need it.
+
+### Why the outbox is a package on the engine
+
+A service that publishes to a message broker needs a transactional outbox:
+it stores the message in the same transaction as the business data, and
+then publishes it reliably and in order. An outbox needs almost everything
+that the engine has: rows written in the caller's transaction, safe
+concurrent fetching, leases and lease tokens, retries and dead tasks, order
+per key, batching, notifications, the election of a maintainer, migrations,
+and monitoring. These are the hardest parts to get right. But outbox users
+think in topics, keys, and messages, not in tasks and handlers.
+
+| Option | Why, or why not |
+|---|---|
+| A separate project with its own engine | The hardest parts would be built twice, and a service that needs both would run two systems |
+| Outbox features mixed into the engine's API | One API would speak of tasks and handlers, and of topics, keys, and messages |
+| **A package on top of the engine** | Chosen. `outbox` is built on the engine's public API, and speaks of topics, keys, and messages. Users implement a small publisher interface with the broker client of their choice |
+
+What follows:
+
+- **There is one engine to make correct.** A service that needs background
+  tasks and an outbox runs one system, with one schema and one dashboard.
+- **The outbox tests the engine's API.** If the outbox cannot be built
+  cleanly on the public API, the API is wrong.
+- **The engine provides what the outbox needs:** FIFO groups, batch
+  handlers, permanent failures, and deleting tasks on completion.
+- **It is a package of the core module, not a module of its own,** because
+  it has no dependency of its own. It becomes a module only if that
+  changes. Ready-made broker adapters need a broker's client, so they are
+  separate modules.
+- **Another storage model can come later.** At very high volumes, around
+  100,000 messages per second, rows that are only appended and read in
+  order are faster. The outbox API hides its storage, so such an engine can
+  be added without changing users' code.
 
 ### How the dashboard is built
 

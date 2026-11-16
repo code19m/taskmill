@@ -9,8 +9,8 @@ however small, to these goals:
 - **Reliable.** When the database, the network, or a worker is slow or gone,
   degrade gracefully, say so, and recover without help.
 - **Efficient and light.** Bound every query, request, and loop. Be kind to
-  the database, slow networks, and old machines. Add no dependency without an
-  ADR (see [docs/adr](docs/adr)).
+  the database, slow networks, and old machines. Add no dependency without
+  recording why in [docs/design/dependencies.md](docs/design/dependencies.md).
 - **Well designed and compact.** Choose the design a senior maintainer would
   be proud of, then build its smallest complete form: clear names, plain
   words, no dead code, no speculative options. When a trade-off is real,

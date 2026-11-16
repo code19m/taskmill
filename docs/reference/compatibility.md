@@ -8,9 +8,8 @@ upgrade, see [Upgrading](../production/upgrading.md).
 
 - The latest release is **v0.8.0**.
 - **The API is final for v1.0.0.** v1.0.0 is not tagged yet: it waits for
-  more use in production.
-  [ADR 0009](../adr/0009-the-apis-shape-for-v1.md) says why the API has
-  this shape: what changed last, and what stays as it is.
+  more use in production. [The API's shape](../design/api-shape.md) says
+  why the API has this shape, and which other shapes we rejected.
 - taskmill follows [Semantic Versioning](https://semver.org/). Before v1.0.0,
   it allows a minor release to break the API. If one does, the
   [changelog](../../CHANGELOG.md) marks the change with **Breaking:** and
@@ -88,7 +87,19 @@ From v1.0.0 on, this is the promise:
 When a new Go comes out, the next minor release of taskmill needs the Go
 before it. A PostgreSQL version is dropped in the first minor release after
 its end of life. CI also runs every test through PgBouncer in transaction
-mode. [ADR 0002](../adr/0002-supported-versions.md) explains these choices.
+mode.
+
+Why these versions, and no older ones:
+
+- **An older version would reach more apps, but it has a cost.** taskmill
+  could not use the newest features of Go, its standard library, and
+  PostgreSQL, and CI would test more combinations.
+- **Go: the two releases that Go itself supports.** taskmill follows Go's
+  own support policy.
+- **PostgreSQL: from 15.** PostgreSQL 14 reached its end of life a few
+  weeks after taskmill's first release, so taskmill never supported it.
+- **The price:** an app on an older Go, or on PostgreSQL 14, cannot use
+  taskmill.
 
 ## Which releases get fixes
 

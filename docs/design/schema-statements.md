@@ -2,10 +2,10 @@
 
 This page explains the statements that enqueue tasks and that workers run,
 and why each is written the way it is.
-[Lists and operator actions](schema-operations.md) has the statements of
-the operations API. [Storage schema](schema.md) has the tables
-and indexes that they use, and [`sql.go`](../../sql.go) has their exact
-text.
+[Lists and counts](schema-lists.md) and
+[Operator actions](schema-operations.md) have the statements of the
+operations API. [Storage schema](schema.md) has the tables and indexes that
+they use, and [`sql.go`](../../sql.go) has their exact text.
 
 The statements send batches as arrays and use `unnest`, so a batch, up to the
 10,000 tasks that one enqueue call takes, is one round trip with fixed SQL
@@ -148,8 +148,8 @@ a transaction that also updates the group if the task finished.
 ## See also
 
 - [Storage schema](schema.md): the tables and indexes that these statements use
-- [Lists and operator actions](schema-operations.md): the statements that list, count, retry, cancel, and delete tasks
+- [Lists and counts](schema-lists.md) and [Operator actions](schema-operations.md): the statements that list, count, retry, cancel, and delete tasks
 - [FIFO groups and deduplication](schema-groups.md): the statements of grouped and deduplicated tasks
 - [Maintenance and notifications](schema-maintenance.md): the statements that the maintainer runs
 
-**Next:** [Lists and operator actions](schema-operations.md)
+**Next:** [Lists and counts](schema-lists.md)

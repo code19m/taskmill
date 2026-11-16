@@ -238,12 +238,12 @@ added later as a new option, without a disruptive migration.
 
 **A retry takes the key back.** A cancel stores the key that it frees with
 the task, and a retry of the canceled task claims it again: see
-[Lists and operator actions](schema-operations.md#a-retry-takes-its-dedupe-key-back).
+[Operator actions](schema-operations.md#a-retry-takes-its-dedupe-key-back).
 
 ## See also
 
 - [Key statements](schema-statements.md): the Complete statement
-- [Lists and operator actions](schema-operations.md): the bulk actions
+- [Operator actions](schema-operations.md): the bulk actions
 - [Task lifecycle and guarantees](task-lifecycle.md): invariant 6, and guarantees 8 and 9
 - [Task order and FIFO groups](../guides/ordering.md) and [Avoid duplicate tasks](../guides/deduplication.md): the user's view
 

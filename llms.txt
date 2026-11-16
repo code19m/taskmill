@@ -108,10 +108,14 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Task lifecycle and guarantees](docs/design/task-lifecycle.md): The contract: every state change, the invariants, and how each guarantee is kept
 - [Storage schema](docs/design/schema.md): The tables and indexes, and the reasoning behind them
 - [Key statements](docs/design/schema-statements.md): The statements that enqueue, fetch, and complete tasks, and record their failures
-- [Lists and operator actions](docs/design/schema-operations.md): The statements that list and count tasks, and that retry, cancel, and delete them
+- [Lists and counts](docs/design/schema-lists.md): The statements that list and count tasks, and why dead and canceled tasks come by finish time
+- [Operator actions](docs/design/schema-operations.md): The statements that retry, cancel, and delete tasks, one or many
 - [FIFO groups and deduplication](docs/design/schema-groups.md): How a group keeps its order, and how a dedupe key admits one task
-- [Maintenance and notifications](docs/design/schema-maintenance.md): What the maintainer runs, how it counts the queues, and how workers are woken
+- [Maintenance and notifications](docs/design/schema-maintenance.md): What the maintainer runs, and how workers are woken
+- [Queue statistics and health](docs/design/schema-statistics.md): How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read
 - [Rows that taskmill did not write](docs/design/schema-rows.md): Which values the tables refuse, and how the code survives the others
+- [The API's shape](docs/design/api-shape.md): Why each point of the API has its shape, and when we look at it again
+- [Dependencies and modules](docs/design/dependencies.md): Why pgx is the only dependency, why OpenTelemetry has a module of its own, and how to add a dependency
 - [Benchmarks](docs/design/benchmarks.md): The performance targets, how we measure them, and the latest results
 - [Releasing](docs/design/releasing.md): How the project team publishes a version
 - [Writing docs](docs/design/writing-docs.md): The style guide and the page templates

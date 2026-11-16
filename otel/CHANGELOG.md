@@ -4,7 +4,7 @@ All notable changes to the `github.com/code19m/taskmill/otel` module are
 recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The module has its
 own versions, tagged `otel/vX.Y.Z`; see
-[ADR 0005](../docs/adr/0005-opentelemetry-in-a-module-of-its-own.md). While
+[Dependencies and modules](../docs/design/dependencies.md#the-opentelemetry-module). While
 OpenTelemetry's messaging conventions are in development, a minor release may
 rename spans, attributes, or metrics to follow them, and says so here.
 
