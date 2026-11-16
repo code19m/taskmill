@@ -73,9 +73,9 @@ linters:
   settings:
     depguard:
       # Only the standard library and this module may be imported. Adding a
-      # dependency means editing this list and recording why in an ADR; see
-      # docs/adr/0001-dependency-policy.md. The otel module, linted with this
-      # file too, has its own list.
+      # dependency means editing this list and recording why, in the same
+      # pull request, in docs/design/dependencies.md. The otel module, linted
+      # with this file too, has its own list.
       rules:
         main:
           list-mode: strict
@@ -85,7 +85,7 @@ linters:
           allow:
             - $gostd
             - github.com/code19m/taskmill
-            - github.com/jackc/pgx/v5 # ADR 0004
+            - github.com/jackc/pgx/v5 # docs/design/dependencies.md
         otel:
           list-mode: strict
           files:
@@ -94,7 +94,7 @@ linters:
             - $gostd
             - github.com/code19m/taskmill
             - github.com/jackc/pgx/v5 # the tests connect to PostgreSQL
-            - go.opentelemetry.io/otel # ADR 0005
+            - go.opentelemetry.io/otel # docs/design/dependencies.md
 
     errcheck:
       check-type-assertions: true

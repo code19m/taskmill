@@ -77,8 +77,9 @@ Every change meets the same bar:
 - **Errors carry context.** Wrap them with `fmt.Errorf("...: %w", err)`.
   When callers must handle a condition, expose it as a sentinel error
   (`ErrX`) or an error type (`XError`).
-- **No new dependencies without an ADR.** The `depguard` linter enforces the
-  allowlist. See [ADR 0001](docs/adr/0001-dependency-policy.md).
+- **No new dependency without its reason on record.** The `depguard` linter
+  enforces the allowlist. [Dependencies and modules](docs/design/dependencies.md)
+  has the rule, and gets an entry for each new dependency.
 - **Library manners.** No global state, no `init` functions, no writing to
   stdout, and no panics on bad input. Every call that can block takes a
   `context.Context`.
@@ -203,10 +204,11 @@ docs: explain at-least-once delivery
 
 ## Design decisions
 
-We record important decisions as Architecture Decision Records (ADRs) in
-[docs/adr](docs/adr/README.md). If your change goes against a decision,
-write a new ADR that replaces it, in the same pull request. [How taskmill is
-built](docs/design/README.md) explains the design.
+The design pages in [How taskmill is built](docs/design/README.md) say why
+taskmill works the way it does, and which options we rejected. Each
+decision is on the page of the mechanism that it explains. If your change
+goes against a decision, change that page in the same pull request, and say
+why in it.
 
 ## Writing docs
 

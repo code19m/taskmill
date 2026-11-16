@@ -128,7 +128,8 @@ the pages that show the queues.
 ## See also
 
 - [Storage schema](schema.md): the tables and their indexes
-- [Maintenance and notifications](schema-maintenance.md): the election, and the statistics
+- [Maintenance and notifications](schema-maintenance.md): the election
+- [Queue statistics and health](schema-statistics.md): how the maintainer replaces the statistics
 - [Upgrading](../production/upgrading.md): what a migration repairs in your tables
 
-**Next:** [Benchmarks](benchmarks.md)
+**Next:** [The API's shape](api-shape.md)

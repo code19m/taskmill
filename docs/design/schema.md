@@ -1,14 +1,16 @@
 # Storage schema
 
 This page maps the [task lifecycle](task-lifecycle.md) onto PostgreSQL: the
-tables and indexes, and why each was chosen. Five more pages cover the rest:
+tables and indexes, and why each was chosen. Seven more pages cover the rest:
 
 | Page | What it covers |
 |---|---|
 | [Key statements](schema-statements.md) | The statements that enqueue, fetch, and complete tasks, and record their failures |
-| [Lists and operator actions](schema-operations.md) | The statements that list and count tasks, and that retry, cancel, and delete them |
+| [Lists and counts](schema-lists.md) | The statements that list and count tasks, and why dead and canceled tasks come by finish time |
+| [Operator actions](schema-operations.md) | The statements that retry, cancel, and delete tasks, one or many |
 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
-| [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, how it counts the queues, and how workers are woken |
+| [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
+| [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
 
 The exact definitions are in [`internal/migrations`](../../internal/migrations),
@@ -96,11 +98,10 @@ which is instant and leaves nothing for vacuum to clean up. Two indexes serve
 the list pages: `(queue, id)` for one queue, and `(id)` for `Get` and for all
 queues.
 
-History retention is one setting for the whole schema, stored in
-`settings`, because dropping a day's partition removes every queue's rows for
-that day. Per-queue periods would need row deletes, which the partitions exist
-to avoid. A kind that needs no history skips it with
-`HandlerOptions.DiscardCompleted`.
+History retention is one setting for the whole schema, stored in `settings`,
+because dropping a day's partition removes every queue's rows for that day.
+Per-queue periods would need row deletes, which the partitions exist to avoid.
+A kind that needs no history skips it with `HandlerOptions.DiscardCompleted`.
 
 ### `groups`
 
@@ -147,9 +148,8 @@ and `freed_key_expires_at` for a [retry](schema-operations.md#a-retry-takes-its-
 
 ### `activity`
 
-One row per minute and queue, kept for 24 hours, behind `Client.Activity`
-and the dashboard's charts. Two writers share a row, each with its own
-columns:
+One row per minute and queue, kept for 24 hours, behind `Client.Activity` and
+the dashboard's charts. Two writers share a row, each with its own columns:
 
 - **The maintainer** copies the counts it stores in `queue_stats` into the
   current minute, every 10 seconds, with zeros for known queues that have no

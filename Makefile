@@ -1,6 +1,6 @@
 # Development tools are pinned here and installed into ./bin, so every machine
 # and CI run uses the same versions. They are deliberately kept out of go.mod:
-# see docs/adr/0001-dependency-policy.md. Dependabot does not update them.
+# see docs/design/dependencies.md. Dependabot does not update them.
 # gorelease, which compares APIs (not GoReleaser), comes from golang.org/x/exp,
 # which has no releases: it is pinned to a commit.
 GOLANGCI_LINT_VERSION := v2.15.0
@@ -11,7 +11,7 @@ SYFT_VERSION          := v1.57.1
 GORELEASE_VERSION     := v0.0.0-20261014143641-f0251eb4aa3e
 
 # The repository's modules: the core, and the integrations that need modules
-# of their own (docs/adr/0005-opentelemetry-in-a-module-of-its-own.md).
+# of their own (docs/design/dependencies.md).
 # Targets that check code run in each.
 MODULES := . otel
 

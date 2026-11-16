@@ -130,10 +130,14 @@ These pages are for contributors.
 - [Task lifecycle and guarantees](design/task-lifecycle.md)
 - [Storage schema](design/schema.md)
 - [Key statements](design/schema-statements.md)
-- [Lists and operator actions](design/schema-operations.md)
+- [Lists and counts](design/schema-lists.md)
+- [Operator actions](design/schema-operations.md)
 - [FIFO groups and deduplication](design/schema-groups.md)
 - [Maintenance and notifications](design/schema-maintenance.md)
+- [Queue statistics and health](design/schema-statistics.md)
 - [Rows that taskmill did not write](design/schema-rows.md)
+- [The API's shape](design/api-shape.md)
+- [Dependencies and modules](design/dependencies.md)
 - [Benchmarks](design/benchmarks.md)
 - [Releasing](design/releasing.md)
 - [Writing docs](design/writing-docs.md)
@@ -142,7 +146,6 @@ These pages are for contributors.
 ### Contribute
 
 - [CONTRIBUTING.md](../CONTRIBUTING.md): setup, tests, and pull requests
-- [Decisions](adr/README.md): why taskmill is built this way
 
 ## See also
 

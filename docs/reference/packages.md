@@ -17,9 +17,8 @@ All packages but `otel` are in one Go module:
 go get github.com/code19m/taskmill
 ```
 
-Its only direct dependency is pgx, the PostgreSQL driver
-([ADR 0001](../adr/0001-dependency-policy.md),
-[ADR 0004](../adr/0004-pgx-as-the-postgresql-driver.md)).
+Its only direct dependency is pgx, the PostgreSQL driver.
+[Dependencies and modules](../design/dependencies.md) says why.
 
 ## The `otel` module
 
@@ -38,8 +37,8 @@ go get github.com/code19m/taskmill/otel
   Its Go API follows taskmill's [compatibility](compatibility.md) promise,
   but a minor release may rename a span, attribute, or metric.
 
-[ADR 0005](../adr/0005-opentelemetry-in-a-module-of-its-own.md) explains
-why.
+[Dependencies and modules](../design/dependencies.md#the-opentelemetry-module)
+explains why.
 
 ## See also
 
