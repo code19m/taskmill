@@ -1,7 +1,7 @@
 -- Stores, with the counts of queue_stats, two signs of work that is stuck
 -- while the queue's lag stays near zero: on each dead count, how many FIFO
 -- groups a dead task halts; on each retryable count, the most times in a row
--- that one of those tasks has failed. See docs/design/schema.md and ADR 0007.
+-- that one of those tasks has failed. See docs/design/schema-statistics.md.
 -- Nullable columns without a default change only the catalog; the lock
 -- timeout keeps a migration that waits behind the maintainer from holding up
 -- other work on the table.
