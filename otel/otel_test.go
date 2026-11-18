@@ -22,6 +22,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/code19m/taskmill"
 	tmotel "github.com/code19m/taskmill/otel"
@@ -53,7 +54,7 @@ func setup(t *testing.T) *env {
 	in := tmotel.New(&tmotel.Config{
 		TracerProvider: tp,
 		MeterProvider:  sdkmetric.NewMeterProvider(sdkmetric.WithReader(metrics)),
-		Propagator:     propagation.TraceContext{},
+		Propagator:     propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}),
 	})
 	pool := testPool(t)
 	client := taskmilltest.NewClient(t, pool, &taskmill.ClientConfig{
@@ -210,7 +211,9 @@ func TestTraceFollowsTheTaskFromEnqueueToAttempts(t *testing.T) {
 	ctx, request := e.tracer.Start(t.Context(), "request")
 	var id int64
 	err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
-		res, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{Queue: "emails"})
+		res, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{
+			Queue: "emails", Metadata: map[string]string{"tracestate": "vendor=old", "baggage": "user=old"}, // of another trace
+		})
 		id = res.ID
 		return err
 	})
@@ -229,10 +232,15 @@ func TestTraceFollowsTheTaskFromEnqueueToAttempts(t *testing.T) {
 		return nil
 	}), nil)
 	w := e.worker(t, &hs)
-	for range 2 { // a failed attempt, then a retry
-		if _, err := w.RunTask(t.Context(), id); err != nil {
-			t.Fatal(err)
-		}
+	// A failed attempt, then a retry under a span of the worker's caller.
+	if _, err := w.RunTask(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	retryCtx, retry := e.tracer.Start(t.Context(), "retry")
+	info, err := w.RunTask(retryCtx, id)
+	retry.End()
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	send := e.one(t, "send emails")
@@ -242,6 +250,10 @@ func TestTraceFollowsTheTaskFromEnqueueToAttempts(t *testing.T) {
 	taskID := strconv.FormatInt(id, 10)
 	wantAttrs(t, send, "messaging.system=taskmill", "messaging.operation.name=send", "messaging.operation.type=send",
 		"messaging.destination.name=emails", "taskmill.task.kind=email.send", "messaging.message.id="+taskID)
+	// The span's context replaces the trace context that the metadata brought.
+	if got := info.Metadata; len(got) != 1 || !strings.Contains(got["traceparent"], send.SpanContext().SpanID().String()) {
+		t.Errorf("got the metadata %q, want the send span's traceparent only", got)
+	}
 
 	attempts := e.ended("process emails")
 	if len(attempts) != 2 || len(handlerSpans) != 2 {
@@ -251,9 +263,10 @@ func TestTraceFollowsTheTaskFromEnqueueToAttempts(t *testing.T) {
 		if !handlerSpans[i].Equal(span.SpanContext()) {
 			t.Errorf("attempt %d: the handler's context does not carry its span", i+1)
 		}
-		wantProcess(t, span, send)
 		wantAttrs(t, span, "messaging.message.id="+taskID, "taskmill.task.attempt="+strconv.Itoa(i+1))
 	}
+	wantProcess(t, attempts[0], send)
+	wantProcess(t, attempts[1], send, retry.SpanContext().SpanID())
 	if s := attempts[0].Status(); s.Code != codes.Error || s.Description != "smtp unavailable" {
 		t.Errorf("failed attempt: got status %+v", s)
 	}
@@ -273,7 +286,7 @@ func TestMetricsCountEnqueuesAndAttempts(t *testing.T) {
 		t.Fatal(err)
 	}
 	batch, err := e.client.EnqueueMany(ctx, []taskmill.EnqueueParams{
-		{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{Queue: "emails"}},
+		{Args: sendEmail{To: "snooze"}, Options: &taskmill.EnqueueOptions{Queue: "emails"}},
 		{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{Queue: "reports"}},
 	})
 	if err != nil {
@@ -308,6 +321,8 @@ func TestMetricsCountEnqueuesAndAttempts(t *testing.T) {
 		case "slow":
 			<-ctx.Done()
 			return ctx.Err()
+		case "snooze":
+			return taskmill.Snooze(time.Hour)
 		}
 		return nil
 	}), &taskmill.HandlerOptions{Timeout: 100 * time.Millisecond})
@@ -316,10 +331,20 @@ func TestMetricsCountEnqueuesAndAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []int64{single.ID, batch[1].ID, slow.ID} {
+	for _, id := range []int64{single.ID, batch[0].ID, batch[1].ID, slow.ID} {
 		if _, err := w.RunTask(ctx, id); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// A snooze is not an error: its span has no error status or type, and
+	// its point below has no type either.
+	attempts := e.ended("process emails") // the panic, then the snooze
+	if len(attempts) != 2 {
+		t.Fatalf("got %d process spans of the emails queue, want 2", len(attempts))
+	}
+	if s, attrs := attempts[1].Status(), render(attempts[1].Attributes()); s.Code != codes.Unset ||
+		slices.ContainsFunc(attrs, func(a string) bool { return strings.HasPrefix(a, "error.type=") }) {
+		t.Errorf("snoozed attempt: got the status %+v and the attributes %v, want no error", s, attrs)
 	}
 
 	invalidType := "error.type=invalid_argument "
@@ -337,6 +362,7 @@ func TestMetricsCountEnqueuesAndAttempts(t *testing.T) {
 	wantPoints(t, "process duration", e.points(t, "messaging.process.duration"), []string{
 		"error.type=panic messaging.destination.name=emails messaging.operation.name=process messaging.system=taskmill taskmill.task.kind=email.send: 1",
 		"error.type=timeout messaging.destination.name=reports messaging.operation.name=process messaging.system=taskmill taskmill.task.kind=email.send: 1",
+		"messaging.destination.name=emails messaging.operation.name=process messaging.system=taskmill taskmill.task.kind=email.send: 1",
 		"messaging.destination.name=reports messaging.operation.name=process messaging.system=taskmill taskmill.task.kind=email.send: 1",
 	})
 }
@@ -577,8 +603,11 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 		errs := make([]error, len(ds))
 		for i, d := range ds {
 			got = append(got, d)
-			if string(d.Value) == "rejected" {
+			switch string(d.Value) {
+			case "rejected":
 				errs[i] = errors.New("broker rejected the message")
+			case "unanswered":
+				return errs[:i] // no result for this delivery
 			}
 		}
 		return errs
@@ -590,8 +619,11 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 	ctx, request := e.tracer.Start(t.Context(), "request")
 	err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
 		return ob.Store(ctx, taskmill.Pgx(tx),
-			outbox.Message{Topic: "orders", Value: []byte("accepted"), Headers: map[string][]byte{"origin": []byte("shop")}},
-			outbox.Message{Topic: "orders", Value: []byte("rejected")})
+			outbox.Message{Topic: "orders", Value: []byte("accepted"), Headers: map[string][]byte{
+				"origin": []byte("shop"), "tracestate": []byte("vendor=old"), "baggage": []byte("user=old"), // of another trace
+			}},
+			outbox.Message{Topic: "orders", Value: []byte("rejected")},
+			outbox.Message{Topic: "orders", Value: []byte("unanswered")})
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -613,17 +645,20 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 
 	stored := e.one(t, "send outbox")
 	sends := e.ended("send orders")
-	if len(got) != 2 || len(sends) != 2 {
-		t.Fatalf("got %d deliveries and %d send spans, want 2 of each", len(got), len(sends))
+	if len(got) != 3 || len(sends) != 3 {
+		t.Fatalf("got %d deliveries and %d send spans, want 3 of each", len(got), len(sends))
 	}
-	for i, span := range sends {
-		wantSend(t, span, got[i], stored)
+	// A delivery without a result failed, as the rejected one did.
+	for i, want := range []codes.Code{codes.Unset, codes.Error, codes.Error} {
+		wantSend(t, sends[i], got[i], stored)
+		if s := sends[i].Status(); s.Code != want {
+			t.Errorf("send of %s: got the status %+v, want %s", got[i].Value, s, want)
+		}
 	}
-	if string(got[0].Headers["origin"]) != "shop" {
-		t.Errorf("the message's own header was lost: %q", got[0].Headers)
-	}
-	if sends[0].Status().Code != codes.Unset || sends[1].Status().Code != codes.Error {
-		t.Errorf("got statuses %v and %v, want unset and error", sends[0].Status(), sends[1].Status())
+	// The message keeps its own header, and the span's context replaces the
+	// trace context that the message brought.
+	if h := got[0].Headers; len(h) != 2 || string(h["origin"]) != "shop" {
+		t.Errorf("got the headers %q, want the message's origin and its send span's traceparent only", h)
 	}
 	for _, span := range e.ended("process outbox") {
 		if span.Parent().SpanID() != stored.SpanContext().SpanID() {
@@ -632,7 +667,7 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 	}
 	wantPoints(t, "sent to the broker", slices.DeleteFunc(e.points(t, "messaging.client.sent.messages"),
 		func(p string) bool { return strings.Contains(p, "messaging.system=taskmill") }), []string{
-		"error.type=*errors.errorString messaging.destination.name=orders messaging.operation.name=send messaging.system=kafka: 1",
+		"error.type=*errors.errorString messaging.destination.name=orders messaging.operation.name=send messaging.system=kafka: 2",
 		"messaging.destination.name=orders messaging.operation.name=send messaging.system=kafka: 1",
 	})
 }
@@ -680,15 +715,50 @@ func TestPublisherThatPanicsEndsItsSpans(t *testing.T) {
 	}
 }
 
+// With no span to store, as under a no-op tracer, the trace context that the
+// metadata or the headers brought is still removed: it is another trace's.
+func TestWithoutASpanAnOldTraceContextIsRemoved(t *testing.T) {
+	t.Parallel()
+	in := tmotel.New(&tmotel.Config{
+		TracerProvider: noop.NewTracerProvider(),
+		MeterProvider:  sdkmetric.NewMeterProvider(),
+		Propagator:     propagation.TraceContext{},
+	})
+	const old = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+	task := &taskmill.EnqueueTask{Queue: "emails", Kind: "email.send", Metadata: map[string]string{"tenant": "acme", "traceparent": old}}
+	err := in.EnqueueMiddleware(t.Context(), []*taskmill.EnqueueTask{task}, func(context.Context) error { return nil })
+	if err != nil || len(task.Metadata) != 1 || task.Metadata["tenant"] != "acme" {
+		t.Errorf("got the error %v and the metadata %q, want the task's tenant only", err, task.Metadata)
+	}
+
+	var sent outbox.Delivery
+	broker := outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
+		sent = ds[0]
+		return make([]error, len(ds))
+	})
+	in.Publisher("kafka", broker).Publish(t.Context(), []outbox.Delivery{{Message: outbox.Message{
+		Topic: "orders", Headers: map[string][]byte{"origin": []byte("shop"), "traceparent": []byte(old)},
+	}}})
+	if h := sent.Headers; len(h) != 1 || string(h["origin"]) != "shop" {
+		t.Errorf("got the headers %q, want the message's origin only", h)
+	}
+}
+
 // wantProcess fails the test unless span traces an attempt of a task of the
-// emails queue as a consumer child of send, linked to it.
-func wantProcess(t *testing.T, span, send sdktrace.ReadOnlySpan) {
+// emails queue as a consumer child of send, linked to it and then to the
+// ambient spans, those that the attempt's context already carried.
+func wantProcess(t *testing.T, span, send sdktrace.ReadOnlySpan, ambient ...trace.SpanID) {
 	t.Helper()
 	if span.SpanKind() != trace.SpanKindConsumer || span.Parent().SpanID() != send.SpanContext().SpanID() {
 		t.Errorf("process span: kind %s, parent %s; want a consumer child of the send span", span.SpanKind(), span.Parent().SpanID())
 	}
-	if links := span.Links(); len(links) != 1 || links[0].SpanContext.SpanID() != send.SpanContext().SpanID() {
-		t.Errorf("process span: got links %v, want one to the send span", links)
+	var links []trace.SpanID
+	for _, l := range span.Links() {
+		links = append(links, l.SpanContext.SpanID())
+	}
+	if want := append([]trace.SpanID{send.SpanContext().SpanID()}, ambient...); !slices.Equal(links, want) {
+		t.Errorf("process span: got links to %v, want to the send span and the ambient spans: %v", links, want)
 	}
 	wantAttrs(t, span, "messaging.system=taskmill", "messaging.operation.name=process", "messaging.operation.type=process",
 		"messaging.destination.name=emails", "taskmill.task.kind=email.send")

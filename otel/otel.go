@@ -166,7 +166,9 @@ func (in *Instrumentation) EnqueueMiddleware(ctx context.Context, tasks []*taskm
 	ctx, span := in.tracer.Start(ctx, spanName("send", queue),
 		trace.WithSpanKind(trace.SpanKindProducer), trace.WithAttributes(attrs...))
 	defer span.End()
+	fields := in.propagator.Fields()
 	for _, t := range tasks {
+		deleteFields(t.Metadata, fields)
 		in.propagator.Inject(ctx, propagation.MapCarrier(t.Metadata))
 	}
 
@@ -255,6 +257,16 @@ func (in *Instrumentation) Middleware(ctx context.Context, task *taskmill.TaskIn
 	}
 	in.processDuration.Record(ctx, elapsed, "process", system, shared...)
 	return err
+}
+
+// deleteFields removes from carrier the fields that the propagator sets,
+// before it injects a span's context there. Inject sets only the fields that
+// it has values for: alone, it leaves an old tracestate or baggage next to
+// the new traceparent, and the old traceparent too when there is no span.
+func deleteFields[V any](carrier map[string]V, fields []string) {
+	for _, field := range fields {
+		delete(carrier, field)
+	}
 }
 
 // spanName names a span after its operation and destination, as the

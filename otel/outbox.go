@@ -36,6 +36,7 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 	return outbox.PublisherFunc(func(ctx context.Context, deliveries []outbox.Delivery) (errs []error) {
 		sent := make([]outbox.Delivery, len(deliveries))
 		spans := make([]trace.Span, len(deliveries))
+		fields := in.propagator.Fields()
 		for i, d := range deliveries {
 			parent := in.propagator.Extract(ctx, propagation.MapCarrier(d.Metadata))
 			sctx, span := in.tracer.Start(parent, spanName("send", d.Topic),
@@ -49,6 +50,7 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 				))
 			headers := make(map[string][]byte, len(d.Headers)+2)
 			maps.Copy(headers, d.Headers)
+			deleteFields(headers, fields)
 			in.propagator.Inject(sctx, headerCarrier(headers))
 			d.Headers = headers
 			sent[i], spans[i] = d, span
