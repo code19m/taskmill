@@ -140,7 +140,12 @@ func run(logger *slog.Logger) error {
 	}
 	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = server.Serve(ln) }() // it returns when Shutdown is called
-	defer func() { _ = server.Shutdown(context.WithoutCancel(ctx)) }()
+	defer func() {
+		// Wait up to 10 seconds for open requests to finish.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx)
+	}()
 	logger.LogAttrs(ctx, slog.LevelInfo, "open the dashboard", slog.String(logKeyURL, "http://"+addr+"/taskmill/"))
 
 	// Run the worker until Ctrl-C. Then it lets running tasks finish.
