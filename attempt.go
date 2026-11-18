@@ -326,17 +326,8 @@ func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.T
 
 	switch {
 	case o.kind == outcomeComplete && t.direct:
-		ts := []*tracked{t}
-		var done []completedTask
-		err := w.whileLeased(context.WithoutCancel(ctx), ts, func(ctx context.Context) error {
-			return w.client.inTx(ctx, func(q querier) error {
-				var err error
-				done, err = w.client.complete(ctx, w.logger, q, completionsOf(ts))
-				t.completedDirectly = err == nil && len(done) == 1
-				return err
-			})
-		})
-		w.completed(ctx, ts, done, err)
+		done := w.completeWaiting(context.WithoutCancel(ctx), []*tracked{t})
+		t.completedDirectly = len(done) == 1
 	case o.kind == outcomeComplete:
 		w.completions <- t // Run stops the completer only after every result is in
 	default:

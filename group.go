@@ -50,11 +50,13 @@ func (s *groupSet) add(queue, group string) {
 // group hold the rows before they call: lockGroups, the pick statements,
 // and the rescue took them, and only rows that were free.
 //
-// The exception is completeWaiting, the last completions of a worker that
-// stops, for the groups whose rows were held until then. It can meet a
-// transaction that takes the same rows in another order, such as one of
-// the application that enqueues into several groups. PostgreSQL then ends
-// one of the two, and a completion that it ended runs again (whileLeased).
+// The exception is completeWaiting with several groups: the last
+// completions of a worker that stops, for the groups whose rows were held
+// until then. It can meet a transaction that takes the same rows in another
+// order, such as one of the application that enqueues into several groups.
+// PostgreSQL then ends one of the two, and a completion that it ended runs
+// again (whileLeased). The task of RunTask, which completeWaiting completes
+// too, has one group at most.
 func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier, left []groupLeave) error {
 	if len(left) == 0 {
 		return nil

@@ -79,11 +79,14 @@ ready:
 	return batch
 }
 
-// completeWaiting completes tasks whose groups other transactions held,
-// waiting for those locks.
-func (w *Worker) completeWaiting(ctx context.Context, ts []*tracked) {
+// completeWaiting completes tasks in one transaction, in which it waits for
+// the rows of their FIFO groups that other transactions hold. The completer
+// ends with it, for the tasks whose groups were held until then, and RunTask
+// completes its task with it. It returns the tasks that it completed, once
+// that is committed.
+func (w *Worker) completeWaiting(ctx context.Context, ts []*tracked) []completedTask {
 	if len(ts) == 0 {
-		return
+		return nil
 	}
 	var done []completedTask
 	err := w.whileLeased(ctx, ts, func(ctx context.Context) error {
@@ -93,7 +96,11 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*tracked) {
 			return err
 		})
 	})
+	if err != nil {
+		done = nil // the transaction did not commit
+	}
 	w.completed(ctx, ts, done, err)
+	return done
 }
 
 // flush completes a batch of successful attempts. Ungrouped tasks complete
