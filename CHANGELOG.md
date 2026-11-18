@@ -147,6 +147,18 @@ All notable changes to taskmill are recorded here. The format follows
   Such a value failed before too, but with an error of the driver that read
   like a failure of the database.
 
+### Security
+
+- A flood of notifications can no longer make the workers run elections
+  one after the other. PostgreSQL lets every role of a database send
+  notifications, and each one that said that the maintainer resigned made
+  every worker try to lead right away. So with thousands of them a second,
+  the maintainer renewed its lease, rescued tasks, and loaded its schedules
+  hundreds of times a second, and every other worker tried to take over as
+  often. A worker that leads now ignores that notification, and another
+  worker follows it at most once in 2 seconds. A maintainer that stops is
+  still replaced right away.
+
 ## [0.8.0] - 2026-11-16
 
 ### Changed

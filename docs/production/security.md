@@ -47,7 +47,8 @@ each role may do.
   run, change, or cancel a task. It only changes when workers query the
   database, which costs extra queries. That cost has a limit: however many
   notifications arrive, a worker reads the cancel requests, the queue
-  settings, and each idle queue at most about 50 times a second.
+  settings, and each idle queue at most about 50 times a second. They add
+  at most one try to become the maintainer in 2 seconds.
 - **taskmill waits only for locks on its own tables.** A role needs rights
   on a table to lock it. taskmill takes no advisory locks, which PostgreSQL
   lets every role of a database take and hold.

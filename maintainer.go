@@ -31,7 +31,9 @@ type maintainer struct {
 	leader atomic.Bool
 	term   chan struct{} // a term began: the wake loop sends the heartbeat right away
 
-	lastElection time.Time // used by the main loop only
+	// Used by the main loop only.
+	lastElection time.Time
+	lastTakeover time.Time // when a notification that the maintainer resigned last made this worker try to lead
 
 	// The failures of each kind of work, which it logs only now and then.
 	election, promotion, waking, rescues, schedules, pruning, stats, retention *failures
@@ -75,12 +77,26 @@ func (m *maintainer) run(ctx context.Context) {
 			m.resign(context.WithoutCancel(ctx))
 			return
 		case <-m.w.resigned:
-			m.lastElection = time.Time{} // the leader left: take over now
-			m.cycle(ctx)
+			m.takeOver(ctx)
 		case <-tick.C:
 			m.cycle(ctx)
 		}
 	}
+}
+
+// takeOver follows a notification that the maintainer resigned: this worker
+// tries to lead now, not at its next election. The notification is only a
+// hint, which any role in the database can send as often as it likes. So a
+// worker that leads ignores it, and another worker follows it at most once
+// per election interval: a flood adds at most one election try per interval
+// to the one that the worker makes anyway.
+func (m *maintainer) takeOver(ctx context.Context) {
+	if m.leader.Load() || time.Since(m.lastTakeover) < m.w.timing.election {
+		return
+	}
+	m.lastTakeover = time.Now()
+	m.lastElection = time.Time{}
+	m.cycle(ctx)
 }
 
 // cycle renews or tries to take the leadership, and if this worker leads,
