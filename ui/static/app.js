@@ -229,6 +229,15 @@
     }, SEARCH_WAIT_MS);
   }
 
+  // refine shows what a menu's search finds: among the options that the
+  // menu lists, and on the server among those that it does not.
+  function refine(sel) {
+    const field = sel.querySelector("[data-sel-search]");
+    if (!field) return;
+    search(sel, field.value);
+    findMore(sel, field.value);
+  }
+
   // place opens a menu toward the side with room.
   function place(sel) {
     const pop = sel.querySelector(".pop");
@@ -310,10 +319,7 @@
 
   document.addEventListener("input", (event) => {
     const field = event.target;
-    if (!field.matches?.("[data-sel-search]")) return;
-    const sel = field.closest(".sel");
-    search(sel, field.value);
-    findMore(sel, field.value);
+    if (field.matches?.("[data-sel-search]")) refine(field.closest(".sel"));
   });
 
   document.addEventListener("change", (event) => {
@@ -566,6 +572,9 @@
     if (result.doc.title) document.title = result.doc.title;
     shownETag = result.etag;
     highlight(main);
+    // The newer copy lists every option of a menu, and none that a search
+    // found on the server: an open menu shows its search again.
+    for (const sel of openMenus()) refine(sel);
   }
 
   // Live updates: every few seconds the page fetches itself and updates in

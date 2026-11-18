@@ -1,22 +1,24 @@
 // Applies the chosen theme before the page paints, so it never flashes.
 // Until someone picks Light or Dark, follow the device, also when it changes.
 // A page that embeds the interface can pick one with ?theme=light, dark, or
-// system; the choice is remembered.
+// system. The choice is remembered where the browser allows storage, and
+// holds for this page where it does not.
 (() => {
   // Controls that need the scripts show from the first paint.
   document.documentElement.classList.add("js");
 
   const key = "taskmill-theme";
   const valid = (value) => value === "light" || value === "dark";
-  let choice = "system";
+  const asked = new URLSearchParams(location.search).get("theme");
+  let choice = valid(asked) ? asked : "system";
   try {
-    const asked = new URLSearchParams(location.search).get("theme");
     if (valid(asked)) localStorage.setItem(key, asked);
     if (asked === "system" || asked === "auto") localStorage.removeItem(key);
     const saved = localStorage.getItem(key);
     if (valid(saved)) choice = saved;
   } catch {
-    // Storage is blocked: follow the device.
+    // Storage is blocked, as it can be in another site's frame: the address
+    // decides for this page, and nothing is remembered.
   }
   let device = null;
   try { device = matchMedia("(prefers-color-scheme: dark)"); } catch { device = null; }

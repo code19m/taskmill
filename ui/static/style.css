@@ -21,7 +21,6 @@
   --surface-sidebar: #282828;
   --surface-raised: #282828;
   --surface-control: #2d2d2d;
-  --surface-backdrop: #282828;
   --surface-glass: rgba(45, 45, 45, 0.92);
   --surface-code: rgb(var(--tone-rgb) / 0.05);
 
@@ -66,10 +65,8 @@
   --button-fill: rgb(var(--tone-rgb) / 0.07);
   --button-fill-hover: rgb(var(--tone-rgb) / 0.11);
   --button-fill-pressed: rgb(var(--tone-rgb) / 0.15);
-  --radius-xs: 6px;
   --radius-sm: 8px;
   --radius-md: 12px;
-  --radius-lg: 16px;
 
 }
 
@@ -80,7 +77,6 @@
   --surface-sidebar: #f2f2f2;
   --surface-raised: #fafafa;
   --surface-control: #f1f1f1;
-  --surface-backdrop: #f2f2f2;
   --surface-glass: rgba(255, 255, 255, 0.9);
   --surface-code: #f5f5f5;
   --ink: #202020;
@@ -121,7 +117,6 @@
     --surface-sidebar: #f2f2f2;
     --surface-raised: #fafafa;
     --surface-control: #f1f1f1;
-    --surface-backdrop: #f2f2f2;
     --surface-glass: rgba(255, 255, 255, 0.9);
     --surface-code: #f5f5f5;
     --ink: #202020;
@@ -187,7 +182,6 @@ code, pre { font-family: var(--font-mono); }
 .mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .subtle { font-size: var(--text-xs); color: var(--ink-ghost); }
 .strong { font-weight: 500; color: var(--ink); }
-.nowrap { white-space: nowrap; }
 .tone-faint { color: var(--ink-faint); }
 .tone-ghost { color: var(--ink-ghost); }
 .tone-warn { color: var(--warn); }
@@ -426,13 +420,13 @@ a.chip:hover { text-decoration: none; color: var(--ink); border-color: var(--lin
 /* ---------- status ---------- */
 
 .state-scheduled, .ring-scheduled { --c: var(--ink-faint); }
-.state-pending, .ring-pending { --c: var(--warn); }
+.ring-pending { --c: var(--warn); }
 .state-available, .ring-available { --c: var(--review); }
 .state-running, .ring-running { --c: var(--run); }
-.state-retryable, .ring-retryable { --c: var(--warn); }
+.ring-retryable { --c: var(--warn); }
 .state-completed, .ring-completed { --c: var(--ok); }
 .state-dead, .ring-dead { --c: var(--err); }
-.state-canceled, .ring-canceled { --c: var(--ink-ghost); }
+.ring-canceled { --c: var(--ink-ghost); }
 .ring { color: var(--c); flex-shrink: 0; }
 .status { display: inline-flex; align-items: center; gap: 7px; color: var(--ink-soft); font-size: var(--text-label); white-space: nowrap; }
 

@@ -64,6 +64,18 @@ All notable changes to taskmill are recorded here. The format follows
   with no valid name. It answered 409, "Not possible". That answer now
   means only that the action does not fit the task or the schedule as it
   is, such as a retry of a running task.
+- Where the browser blocks storage, as some do in a frame of another site,
+  the dashboard ignored `?theme=light` and `?theme=dark`, and followed the
+  device. The parameter now sets the theme of its page without storage.
+  The pages that the reader opens from there still follow the device:
+  [The dashboard](docs/guides/dashboard.md#show-it-inside-another-app) now
+  says so.
+- In a filter of the dashboard's task list, a tick on an option while the
+  menu's search box held text showed every option again, and dropped the
+  options that the search had found on the server. The box kept its text.
+  The menu now keeps showing what the search finds.
+- The dashboard's Workers page now shows the word "stale" beside the ID of
+  a stale worker. Only the color of its dot said so before.
 
 ### Fixed
 

@@ -126,7 +126,10 @@ dashboard, err := ui.New(client, &ui.Config{
 
 To match your app's theme, add `?theme=light`, `?theme=dark`, or
 `?theme=system` to the frame's address, such as
-`https://shop.example.com/taskmill/?theme=dark`.
+`https://shop.example.com/taskmill/?theme=dark`. The browser remembers the
+theme for the pages that the reader opens next. Some browsers block storage
+in a frame of another site: there, only the page with the parameter has the
+theme, and the next pages follow the device.
 
 ## What people can do in it
 
@@ -141,9 +144,9 @@ To match your app's theme, add `?theme=light`, `?theme=dark`, or
 On the **Workers** page, the **Kinds** column counts the kinds that the
 worker has handlers for: click the count to list them. The **Checked in**
 column shows the worker's last
-[check-in](../concepts/glossary.md#check-in). A yellow dot marks a worker as
-stale: it made no check-in for longer than its `LeaseDuration`, so it has
-stopped, or it cannot reach the database.
+[check-in](../concepts/glossary.md#check-in). A yellow dot and the word
+"stale" mark a worker that made no check-in for longer than its
+`LeaseDuration`: it has stopped, or it cannot reach the database.
 
 Before an action on many tasks, the dashboard shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,

@@ -230,7 +230,8 @@ func TestWorkersAreStaleByTheirOwnLease(t *testing.T) {
 
 	// stale sets the last check-in of the workers to ago before now, and
 	// returns how many of them the page then marks as stale. It first waits
-	// for all of them to be registered.
+	// for all of them to be registered. The page marks a worker with a color
+	// and with a word: a color is never the only cue.
 	h := handler(t, client, nil)
 	stale := func(workers int64, ago string) int {
 		t.Helper()
@@ -244,7 +245,11 @@ func TestWorkersAreStaleByTheirOwnLease(t *testing.T) {
 			}
 		}
 		_, body, _ := get(t, h, "/workers")
-		return strings.Count(body, `class="health stale"`)
+		dots, words := strings.Count(body, `class="health stale"`), strings.Count(body, `<span class="chip warn">stale</span>`)
+		if dots != words {
+			t.Errorf("the page marks %d workers as stale by color, and %d in words\n%s", dots, words, body)
+		}
+		return dots
 	}
 	if n := stale(1, "5 minutes"); n != 0 {
 		t.Error("a worker that checked in within its lease of 10 minutes shows as stale")
