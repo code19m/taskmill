@@ -25,6 +25,11 @@ rename spans, attributes, or metrics to follow them, and says so here.
   `EnqueueResult.ID` is 0: no task has that ID. Such a span now has no
   message ID.
 
+### Security
+
+- The module now requires pgx v5.13.0, which fixes a vulnerability in pgx:
+  [GHSA-w9rp-vfrh-q8vv](https://github.com/jackc/pgx/security/advisories/GHSA-w9rp-vfrh-q8vv).
+
 ## [0.4.2] - 2026-11-15
 
 ### Changed
