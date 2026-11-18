@@ -906,6 +906,93 @@ func TestWorkerReleasesTasksThatOutliveTheDrain(t *testing.T) {
 	}
 }
 
+// fetchGate lets a test keep a fetch of the worker whose pool it traces in
+// flight, as a slow database does, or a pool whose connections are all in
+// use.
+type fetchGate struct {
+	hold atomic.Pointer[func()] // called once, before the next fetch is sent
+}
+
+// holdNext stops the next fetch before it is sent. It returns a channel that
+// is closed when that fetch arrives, and a function that lets the fetch go.
+func (g *fetchGate) holdNext() (held <-chan struct{}, release func()) {
+	arrived, free := make(chan struct{}), make(chan struct{})
+	hold := func() {
+		close(arrived)
+		<-free
+	}
+	g.hold.Store(&hold)
+	return arrived, sync.OnceFunc(func() { close(free) })
+}
+
+func (*fetchGate) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+
+func (*fetchGate) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// A queue without a limit sends each of its fetches as a batch.
+func (g *fetchGate) TraceBatchStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceBatchStartData) context.Context {
+	fetch := slices.ContainsFunc(d.Batch.QueuedQueries, func(q *pgx.QueuedQuery) bool {
+		return strings.Contains(q.SQL, "WITH picked AS")
+	})
+	if !fetch {
+		return ctx
+	}
+	if hold := g.hold.Swap(nil); hold != nil {
+		(*hold)()
+	}
+	return ctx
+}
+
+func (*fetchGate) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+
+func (*fetchGate) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
+
+// DrainTimeout counts from the moment the worker is told to stop, whatever
+// its fetch loops do then. A fetch that is in flight can take long. When the
+// handlers work on the worker's pool and hold every connection of it, the
+// fetch waits for one of them to return, for up to 30 seconds: a clock that
+// started only when the fetch has ended would start that much too late.
+func TestDrainTimeoutCountsFromTheStop(t *testing.T) {
+	t.Parallel()
+	gate := &fetchGate{}
+	e := newTracedEnv(t, gate)
+	started, cause := make(chan struct{}, 1), make(chan error, 1)
+	stop := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			cause <- context.Cause(ctx)
+			return ctx.Err()
+		}, nil),
+		Queues:       defaultQueue(2), // one slot stays free, so the queue keeps fetching
+		DrainTimeout: 50 * time.Millisecond,
+		NoMaintainer: true,
+	})
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the handler to start")
+
+	// The worker is told to stop while a fetch is in flight, and the fetch
+	// stays in flight until the handler has learned of the shutdown.
+	held, release := gate.holdNext()
+	defer release()
+	recv(t, held, "the next fetch to start")
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		stop()
+	}()
+	if err := recv(t, cause, "the handler's context to end"); !errors.Is(err, taskmill.ErrShutdown) {
+		t.Fatalf("the handler's context ended with %v, want ErrShutdown", err)
+	}
+	release()
+	recv(t, stopped, "the worker to stop")
+	if info := e.get(t, id); info.State != taskmill.StateAvailable || info.Attempt != 0 {
+		t.Fatalf("released task: got %s with attempt %d, want available with 0", info.State, info.Attempt)
+	}
+}
+
 func TestCheckInsKeepLongTasksLeased(t *testing.T) {
 	t.Parallel()
 	sent := &statementLog{}
