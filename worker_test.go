@@ -994,6 +994,84 @@ func TestDrainTimeoutCountsFromTheStop(t *testing.T) {
 	}
 }
 
+// A fetch that is in flight when the worker is told to stop can still lease
+// tasks. They cannot start any more, so the worker gives them back. A task
+// that it only stopped tracking would stay running, with no one to run it,
+// until its lease ran out.
+func TestTasksFetchedWhileTheWorkerStopsGoBack(t *testing.T) {
+	t.Parallel()
+	gate := &fetchGate{}
+	e := newTracedEnv(t, gate)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers:     handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil),
+		Queues:       defaultQueue(1),
+		NoMaintainer: true,
+	})
+	id := e.enqueue(t, sendEmail{}, nil)
+
+	// The worker's first fetch reaches the database only after the worker
+	// was told to stop.
+	held, release := gate.holdNext()
+	defer release()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	recv(t, held, "the worker's first fetch")
+	cancel()
+	release()
+	if err := recv(t, done, "the worker to stop"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The lease token counts the times that the task was leased.
+	if n := e.count(t, "SELECT lease_token FROM {s}.tasks WHERE id = $1", id); n != 1 {
+		t.Fatalf("the task was leased %d times, want once, by the fetch that was in flight", n)
+	}
+	if info := e.get(t, id); info.State != taskmill.StateAvailable || info.Attempt != 0 {
+		t.Fatalf("got %s with attempt %d, want available with 0", info.State, info.Attempt)
+	}
+}
+
+// Run returns only when the results of its attempts are recorded. That
+// holds also when the drain gives up: an attempt whose handler returned in
+// time is not abandoned then, and its result may still be on its way to a
+// slow database.
+func TestRunWaitsForAResultThatIsBeingRecorded(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	started := make(chan struct{}, 1)
+	stop := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			return ctx.Err()
+		}, nil),
+		Queues:       defaultQueue(1),
+		DrainTimeout: 10 * time.Millisecond,
+		NoMaintainer: true,
+	})
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the handler to start")
+
+	// The database takes longer to give the task back than the drain waits
+	// for a handler that it canceled, which is 200 ms in tests.
+	e.exec(t, `
+CREATE FUNCTION {s}.slow_release() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_sleep(0.4);
+    RETURN NEW;
+END $$`)
+	e.exec(t, `
+CREATE TRIGGER slow_release BEFORE UPDATE ON {s}.tasks
+FOR EACH ROW WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.slow_release()`)
+	stop()
+	if info := e.get(t, id); info.State != taskmill.StateAvailable || info.Attempt != 0 {
+		t.Fatalf("Run returned before the task was given back: it is %s with attempt %d, want available with 0",
+			info.State, info.Attempt)
+	}
+}
+
 func TestCheckInsKeepLongTasksLeased(t *testing.T) {
 	t.Parallel()
 	sent := &statementLog{}
@@ -2865,9 +2943,11 @@ func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
 	}
 }
 
-// The statements that find a batch of tasks by their attempts find a task
-// only for an attempt with its ID and its lease token, and only while it
-// runs.
+// The statements that find tasks by their attempts find a task only for an
+// attempt with its ID and its lease token, and only while it runs: those of
+// a batch of attempts, and those that end one attempt. Without the lease
+// token, an attempt that lost its task could fail, snooze, or release the
+// task under the attempt that runs it now.
 func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -2899,12 +2979,17 @@ func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 	}
 	// The lock and the renewal return each task they find twice: as locked
 	// or renewed, and as owned. The others return it once. An attempt
-	// listed twice changes none of this.
+	// listed twice changes none of this. The failure, the snooze, and the
+	// release run once for each attempt of the list, so they find the task
+	// of the attempt that is listed twice both times.
 	twice := []int64{owned, owned, alsoOwned, alsoOwned}
-	for i, want := range [][]int64{twice, twice, {alsoOwned}, {owned, alsoOwned}} {
+	each := []int64{owned, owned, alsoOwned}
+	statements := []string{
+		"the lock", "the renewal", "the read of cancel requests", "the completion", "the failure", "the snooze", "the release",
+	}
+	for i, want := range [][]int64{twice, twice, {alsoOwned}, {owned, alsoOwned}, each, each, each} {
 		if !slices.Equal(found[i], want) {
-			t.Errorf("%s found the tasks %v, want %v",
-				[]string{"the lock", "the renewal", "the read of cancel requests", "the completion"}[i], found[i], want)
+			t.Errorf("%s found the tasks %v, want %v", statements[i], found[i], want)
 		}
 	}
 	for id, state := range map[int64]taskmill.State{
