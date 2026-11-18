@@ -11,7 +11,7 @@ maintainer counts the queues.
 |---|---|
 | Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
 | Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
-| Retention | Every minute, in a loop of its own, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that made no check-in for 5 minutes, or for twice their `LeaseDuration` if that is longer, and schedules that the maintainer does not define and that did not run or change for a day. |
+| Retention | Every minute, in a loop of its own, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that made no check-in for 5 minutes, or for twice their `LeaseDuration` if that is longer, and schedules that no maintainer has defined for a day. |
 | History | Every minute, keeps partitions for today and the next 6 days, and drops up to 10 partitions whose whole day is older than the retention period (see [Operational notes](schema.md#operational-notes)). |
 | Statistics | Every 10 seconds, in a loop of its own, so that a long retention pass never delays it, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. [Queue statistics and health](schema-statistics.md) says how. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when no other worker's lease lasts. |
@@ -20,6 +20,13 @@ maintainer counts the queues.
   canceled tasks with one probe each, and reads each queue's old tasks as a
   range of `tasks_finished_idx`: a few pages when no task is old enough. It
   looks up each old task's halt by its group's key.
+- **A schedule's day counts from when a maintainer last defined it,** not
+  from its last run or change. Each pass notes in `updated_at` that its
+  maintainer defines a schedule, once the note is an hour old. So a rolling
+  deploy or a rollback in which some workers do not define a schedule keeps
+  its pause and its last run, and a schedule that is gone from the code is
+  deleted 23 to 24 hours later. A pass skips a schedule's row that another
+  transaction holds, so two maintainers never wait for each other.
 - **The database's clock decides the history's days:** which days need a
   partition, and which partitions have expired, in UTC.
 - **Retention drops only the history that it detached.** A pass marks a

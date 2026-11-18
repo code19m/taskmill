@@ -1145,11 +1145,31 @@ DELETE FROM {s}.dedupe_keys d USING expired WHERE d.key = expired.key`),
 		deleteWorkers: q(`
 DELETE FROM {s}.workers WHERE heartbeat_at < now() - greatest($1 * interval '1 second', 2 * lease_duration)`),
 
-		// pruneSchedules deletes the schedules that are not among $1 and did
-		// not run or change for a day: they were removed from the code. The day
-		// keeps a rolling deploy, or a rollback, from losing their state.
+		// pruneSchedules deletes the schedules that no maintainer has defined
+		// for a day: they were removed from the code. The day keeps a rolling
+		// deploy, a canary, or a rollback, in which some workers do not define
+		// a schedule, from losing its state, such as its pause.
+		//
+		// A schedule's updated_at says when a maintainer last defined it, if
+		// nothing changed it later: the statement sets it for the schedules
+		// among $1, which are the caller's. It does so only once it is an
+		// hour old, so that most passes write nothing. So a schedule is
+		// deleted 23 to 24 hours after a maintainer last defined it.
+		//
+		// The statement first locks the rows that it changes, and skips the
+		// ones that another transaction holds, such as one that runs, pauses,
+		// marks, or deletes the schedule: the next pass finds what is left to
+		// do. So it waits for no row, and two maintainers that prune at the
+		// same time cannot deadlock, whatever each one defines.
 		pruneSchedules: q(`
-DELETE FROM {s}.schedules WHERE NOT (name = ANY($1)) AND updated_at < now() - interval '1 day'`),
+WITH old AS (
+    SELECT name, name = ANY($1) AS defined FROM {s}.schedules
+    WHERE updated_at < now() - CASE WHEN name = ANY($1) THEN interval '1 hour' ELSE interval '1 day' END
+    FOR UPDATE SKIP LOCKED
+), marked AS (
+    UPDATE {s}.schedules s SET updated_at = now() FROM old WHERE s.name = old.name AND old.defined
+)
+DELETE FROM {s}.schedules s USING old WHERE s.name = old.name AND NOT old.defined`),
 
 		loadSchedules: q(`
 SELECT name, queue, kind, cron, timezone, payload, next_run_at, paused_at IS NOT NULL

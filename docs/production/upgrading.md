@@ -57,7 +57,8 @@ upgrades repair nothing.
 
 To see what an upgrade repaired, run this right after it, with your
 schema's name. A repaired row has the time of the migration as its
-`updated_at`, until something changes the row again:
+`updated_at`, until something changes the row again. After an hour, the
+maintainer does that to each schedule that it defines:
 
 ```sql
 SELECT 'schedule ' || s.name AS repaired

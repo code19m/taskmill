@@ -149,7 +149,7 @@ after the other:
 | Stop a schedule for a while | `client.PauseSchedule`, then `ResumeSchedule` |
 | Run it once now, such as after a fix | `client.RunSchedule`. The run comes within about a second, and the timetable doesn't change. It fails for a paused schedule |
 | Change its time, time zone, or task | Change the definition and deploy |
-| Remove it, or rename it | Change the code. The old schedule no longer runs. A maintainer that defines other schedules deletes it from the database after a day |
+| Remove it, or rename it | Change the code. The old schedule no longer runs. About a day after a maintainer last defined it, a maintainer that defines other schedules deletes it from the database. Until then it keeps its state, such as a pause, so a rolling deploy or a rollback loses nothing |
 
 A run that you ask for with `RunSchedule` is for the time of your request:
 its `ScheduledFor()` returns that time. Close to a regular run, you get both

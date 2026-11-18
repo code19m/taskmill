@@ -147,6 +147,22 @@ All notable changes to taskmill are recorded here. The format follows
   Such a value failed before too, but with an error of the driver that read
   like a failure of the database.
 
+### Fixed
+
+- A schedule no longer loses its pause and its last run time in a deploy
+  in which some workers do not define it. A maintainer deletes the stored
+  schedules that it does not define, after a day. But the day counted from
+  the schedule's last run, pause, or change, not from when a maintainer
+  last defined it. So one retention pass of a maintainer without the
+  schedule, as in a rolling deploy, a canary, or a rollback, deleted a
+  schedule that was paused more than a day ago, or that runs once a week.
+  The next maintainer that defined it stored it again, not paused, so it
+  ran at its next time. Now each maintainer notes once an hour which
+  schedules it defines, in the column `updated_at` of `schedules`, and a
+  schedule is deleted only when no maintainer has defined it for about a
+  day. This holds once a maintainer of this release that defines the
+  schedule has applied retention, which it does every minute.
+
 ### Security
 
 - A flood of notifications can no longer make the workers run elections

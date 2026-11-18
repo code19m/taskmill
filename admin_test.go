@@ -1556,6 +1556,72 @@ func TestRemovedSchedulesArePruned(t *testing.T) {
 	}
 }
 
+// The day counts from when a maintainer last defined the schedule, not from
+// the schedule's last run or change. So a schedule that ran and was paused
+// long ago keeps both while a worker that does not define it leads, as in a
+// rolling deploy, a canary, or a rollback.
+func TestScheduleOutlivesAMaintainerThatDoesNotDefineIt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	defining := func(name string) *taskmill.Worker {
+		return newWorker(t, e, &taskmill.WorkerConfig{
+			Schedules: []taskmill.Schedule{{Name: name, Cron: "@weekly", Args: sendEmail{}}},
+		})
+	}
+	with, without := defining("weekly"), defining("other")
+	ctx := t.Context()
+	taskmill.RunSchedules(ctx, with)
+	if err := e.client.PauseSchedule(ctx, "weekly"); err != nil {
+		t.Fatal(err)
+	}
+	e.exec(t, "UPDATE {s}.schedules SET last_run_at = now() - interval '2 days', updated_at = now() - interval '2 days'")
+
+	taskmill.PruneSchedules(ctx, with)
+	taskmill.PruneSchedules(ctx, without)
+	ss, err := e.client.Schedules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ss) != 1 || !ss[0].Paused || ss[0].LastRunAt.IsZero() {
+		t.Fatalf("got schedules %+v, want the paused one with its last run", ss)
+	}
+
+	// The maintainer that defines it notes so once an hour, not in every
+	// pass.
+	e.exec(t, "UPDATE {s}.schedules SET updated_at = now() - interval '30 minutes'")
+	taskmill.PruneSchedules(ctx, with)
+	if n := e.count(t, "SELECT count(*) FROM {s}.schedules WHERE updated_at < now() - interval '29 minutes'"); n != 1 {
+		t.Fatal("a pass within the hour wrote the schedule again")
+	}
+}
+
+// A pass skips a schedule whose row another transaction holds: that one
+// runs, pauses, or deletes it. So a pass waits for no row, and two
+// maintainers that prune at the same time cannot deadlock.
+func TestPruningSchedulesWaitsForNoRow(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Schedules: []taskmill.Schedule{{Name: "kept", Cron: "@yearly", Args: sendEmail{}}},
+	})
+	taskmill.RunSchedules(t.Context(), w)
+	e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at) VALUES ('removed', 'default', 'email.send', '@daily', now())`)
+	e.exec(t, "UPDATE {s}.schedules SET updated_at = now() - interval '2 days'")
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.schedules WHERE name = 'removed' FOR UPDATE")
+
+	// A pass that waited for the row would not end while the test holds it.
+	passed := make(chan struct{})
+	go func() {
+		defer close(passed)
+		taskmill.PruneSchedules(t.Context(), w)
+	}()
+	recv(t, passed, "the pass to end while a schedule's row is held")
+	if n := e.count(t, "SELECT count(*) FROM {s}.schedules WHERE updated_at > now() - interval '1 day'"); n != 1 {
+		t.Fatal("the pass did not note the schedule that it defines")
+	}
+}
+
 func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
