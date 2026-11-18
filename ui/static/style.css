@@ -485,7 +485,9 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 /* Tables have fixed column widths, so a live update that changes a count or
    a time never moves a column. Text that does not fit ends in an ellipsis
    and is complete in its tooltip. */
-.table-scroll { overflow-x: auto; }
+/* Positioned, so that it also holds its hidden labels: an absolute box inside
+   a wide table would otherwise make the whole page scroll sideways. */
+.table-scroll { position: relative; overflow-x: auto; }
 .table {
   width: 100%; border-collapse: collapse; table-layout: fixed;
   font-size: var(--text-label); font-variant-numeric: tabular-nums;
