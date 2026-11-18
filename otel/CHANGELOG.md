@@ -10,6 +10,8 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-18
+
 ### Fixed
 
 - When a task's metadata or an outbox message's headers already held a trace
@@ -121,7 +123,8 @@ Initial release, for taskmill v0.2.0 or newer.
 - A wrapper for the outbox's publisher, which traces each delivery and carries
   the trace to the broker in the message's headers.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/otel/v0.4.2...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/otel/v0.4.3...HEAD
+[0.4.3]: https://github.com/code19m/taskmill/compare/otel/v0.4.2...otel/v0.4.3
 [0.4.2]: https://github.com/code19m/taskmill/compare/otel/v0.4.1...otel/v0.4.2
 [0.4.1]: https://github.com/code19m/taskmill/compare/otel/v0.4.0...otel/v0.4.1
 [0.4.0]: https://github.com/code19m/taskmill/compare/otel/v0.3.0...otel/v0.4.0
