@@ -70,6 +70,11 @@ never reads the database where it receives them:
   Each loop pauses 20 ms after a read. So a flood of notifications costs a
   worker about 50 reads of each kind a second, and `Cancel` still stops a
   running task within that time.
+- **`r|` only moves a worker's next election try forward.** A worker that
+  leads ignores it. Another worker follows it at most once per election
+  interval of 2 seconds. So a flood adds at most one try per interval to
+  the one that each worker makes anyway, and a try writes nothing while the
+  maintainer's lease lasts.
 - **Only an ID in its canonical form counts.** PostgreSQL delivers equal
   notifications of one transaction once, and other ways to write the same
   number, such as `+7` or `007`, would get around that.

@@ -597,10 +597,15 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		payload func(running int64) string // of every notification of the flood
-		reads   string                     // a part of the statement that a worker sends to follow it
+		reads   string                     // a part of the statement that a worker sends to follow it, and of no other
+		every   time.Duration              // the workers send that statement at most once in this time
 	}{
-		{"cancel", func(running int64) string { return "c|" + strconv.FormatInt(running, 10) }, "cancel_requested_at IS NOT NULL"},
-		{"settings", func(int64) string { return "q|" + taskmill.DefaultQueue }, "paused_at IS NOT NULL"},
+		{"cancel", func(running int64) string { return "c|" + strconv.FormatInt(running, 10) }, "AND t.cancel_requested_at IS NOT NULL", 20 * time.Millisecond},
+		{"settings", func(int64) string { return "q|" + taskmill.DefaultQueue }, "paused_at IS NOT NULL, coalesce(max_running", 20 * time.Millisecond},
+		// Per election interval, the worker that leads renews its lease once,
+		// whatever arrives, and the other one tries to lead once, and once
+		// more for a notification.
+		{"resign", func(int64) string { return "r|" }, ".leader AS l", testTiming.Election / 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -622,11 +627,15 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 				}, &taskmill.HandlerOptions{Timeout: time.Minute}),
 				Queues: defaultQueue(2),
 			})
+			// A second worker only takes part in the election, so one of the
+			// two leads, and the other one does not.
+			runWorker(t, e, &taskmill.WorkerConfig{})
 			running := e.enqueue(t, sendEmail{}, nil)
 			asked := e.enqueue(t, sendEmail{}, nil)
 			recv(t, started, "the first handler to start")
 			recv(t, started, "the second handler to start")
-			e.waitListening(t)
+			waitFor(t, "both workers to listen", func() bool { return len(e.listenerPIDs(t)) == 2 })
+			waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
 			sent.reset()
 
 			// Each notification commits alone: PostgreSQL delivers equal ones
@@ -644,10 +653,10 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 			if waited := time.Since(start); waited > 2*time.Second {
 				t.Errorf("the cancellation waited %s behind %d notifications", waited.Round(time.Millisecond), flood)
 			}
-			// The worker reads at most once per 20 ms, however long a slow
-			// database takes to commit the flood.
-			if n, most := sent.count(tc.reads), int(time.Since(flooded)/(20*time.Millisecond))+flood/1000; n > most {
-				t.Errorf("the worker read the database %d times for %d notifications, want at most %d", n, flood, most)
+			// The workers read at their own pace, however long a slow database
+			// takes to commit the flood.
+			if n, most := sent.count(tc.reads), int(time.Since(flooded)/tc.every)+flood/1000; n > most {
+				t.Errorf("the workers read the database %d times for %d notifications, want at most %d", n, flood, most)
 			}
 			close(proceed)
 			e.waitState(t, running, taskmill.StateCompleted)
