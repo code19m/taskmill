@@ -70,7 +70,7 @@ by election, that does the shared work.
 
 | What | Value |
 |---|---|
-| Time limit of one request | 10 seconds. Then the page says "Taking too long". It says the same when a list of tasks reads for more than its 5 seconds |
+| Time limit of one request | 10 seconds, or less if your app sets an earlier deadline in the request's context. Then the page says "Taking too long". It says the same when a list of tasks reads for more than its 5 seconds |
 | Live updates | About every 5 seconds while the browser tab is visible. Up to 1 minute apart while the server is out of reach |
 | Tasks per page of the task list | 50 |
 | One bulk action request | Works for about 5 seconds, then offers to continue |

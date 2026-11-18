@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -117,13 +118,9 @@ func TestPagesRender(t *testing.T) {
 	h := handler(t, client, &ui.Config{Prefix: "/admin/tasks"})
 	id := strconv.FormatInt(res.ID, 10)
 
-	code, body, header := get(t, h, "/admin/tasks/")
+	code, body, _ := get(t, h, "/admin/tasks/")
 	if code != http.StatusOK || !strings.Contains(body, "mail") || !strings.Contains(body, "max 3") {
 		t.Fatalf("overview: %d\n%s", code, body)
-	}
-	if csp := header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") ||
-		!strings.Contains(csp, "frame-ancestors 'none'") || header.Get("X-Frame-Options") != "DENY" {
-		t.Fatalf("missing security headers: %v", header)
 	}
 	for _, path := range []string{"/admin/tasks/schedules", "/admin/tasks/workers"} {
 		if code, _, _ := get(t, h, path); code != http.StatusOK {
@@ -450,8 +447,10 @@ func TestActions(t *testing.T) {
 	h := handler(t, client, &ui.Config{Logger: slog.New(logs)})
 	id := strconv.FormatInt(res.ID, 10)
 
-	if rec := post(t, h, "/tasks/"+id+"/cancel", "cross-site"); rec.Code != http.StatusForbidden {
-		t.Fatalf("cross-site cancel: %d", rec.Code)
+	for _, route := range postRoutes(t) {
+		if rec := post(t, h, route, "cross-site"); rec.Code != http.StatusForbidden {
+			t.Errorf("POST %s from another site: %d", route, rec.Code)
+		}
 	}
 	if rec := post(t, h, "/tasks/"+id+"/cancel", "same-origin"); rec.Code != http.StatusSeeOther {
 		t.Fatalf("cancel: %d %s", rec.Code, rec.Body)
@@ -530,7 +529,7 @@ func TestBulkActions(t *testing.T) {
 	if code, _, _ := get(t, h, "/tasks/bulk/delete"); code != http.StatusBadRequest {
 		t.Fatalf("bulk delete page without filters: %d", code)
 	}
-	if rec := post(t, h, "/tasks/bulk/delete", "same-origin"); rec.Code != http.StatusConflict {
+	if rec := post(t, h, "/tasks/bulk/delete", "same-origin"); rec.Code != http.StatusBadRequest {
 		t.Fatalf("bulk delete without filters: %d", rec.Code)
 	}
 	if code, _, _ := get(t, h, "/tasks/bulk/archive?queue=mail"); code != http.StatusNotFound {
@@ -958,10 +957,12 @@ func number(n int) string {
 	return s
 }
 
-// actionLog records the actions that the dashboard logs.
+// actionLog records what the dashboard logs: every message, and each action
+// with its target.
 type actionLog struct {
-	mu      sync.Mutex
-	actions []string
+	mu       sync.Mutex
+	messages []string
+	actions  []string
 }
 
 func (*actionLog) Enabled(context.Context, slog.Level) bool { return true }
@@ -977,10 +978,11 @@ func (l *actionLog) Handle(_ context.Context, r slog.Record) error {
 		}
 		return true
 	})
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.messages = append(l.messages, r.Message)
 	if r.Message == "dashboard action" {
-		l.mu.Lock()
 		l.actions = append(l.actions, action+" "+target)
-		l.mu.Unlock()
 	}
 	return nil
 }
@@ -992,28 +994,119 @@ func (l *actionLog) WithGroup(string) slog.Handler { return l }
 func TestReadOnly(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
+	storeSchedules(t, client, []taskmill.Schedule{{Name: "nightly", Cron: "@daily", Args: greet{}}})
 	res, err := client.Enqueue(t.Context(), greet{Name: "x"}, nil)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UpdateQueue(t.Context(), "default", func(*taskmill.QueueSettings) {}); err != nil {
 		t.Fatal(err)
 	}
 	h := handler(t, client, &ui.Config{ReadOnly: true})
 	id := strconv.FormatInt(res.ID, 10)
 
-	_, body, _ := get(t, h, "/tasks/"+id)
-	if strings.Contains(body, "/cancel") || !strings.Contains(body, "read-only") {
-		t.Fatalf("read-only page offers actions:\n%s", body)
-	}
-	if rec := post(t, h, "/tasks/"+id+"/cancel", "same-origin"); rec.Code != http.StatusForbidden {
-		t.Fatalf("read-only cancel: %d", rec.Code)
+	// The pages that offer actions offer none, and say why.
+	operate := handler(t, client, nil)
+	for _, page := range []string{"/", "/schedules", "/tasks/" + id} {
+		if _, body, _ := get(t, operate, page); !strings.Contains(body, `method="post"`) {
+			t.Fatalf("%s offers no action that a read-only dashboard could hide\n%s", page, body)
+		}
+		if _, body, _ := get(t, h, page); strings.Contains(body, `method="post"`) || !strings.Contains(body, "read-only") {
+			t.Errorf("read-only %s offers an action, or does not say that it is read-only\n%s", page, body)
+		}
 	}
 	if _, body, _ := get(t, h, "/tasks?queue=default"); strings.Contains(body, "/tasks/bulk/") {
-		t.Fatalf("read-only task list offers bulk actions:\n%s", body)
+		t.Errorf("read-only task list offers bulk actions:\n%s", body)
 	}
 	if code, _, _ := get(t, h, "/tasks/bulk/cancel?queue=default"); code != http.StatusForbidden {
-		t.Fatalf("read-only bulk cancel page: %d", code)
+		t.Errorf("read-only bulk cancel page: %d", code)
 	}
-	if rec := post(t, h, "/tasks/bulk/cancel?queue=default", "same-origin"); rec.Code != http.StatusForbidden {
-		t.Fatalf("read-only bulk cancel: %d", rec.Code)
+	// Every action is a POST, and each is refused.
+	for _, route := range postRoutes(t) {
+		if rec := post(t, h, route, "same-origin"); rec.Code != http.StatusForbidden {
+			t.Errorf("read-only POST %s: %d", route, rec.Code)
+		}
+	}
+}
+
+// postRoutes returns a path for each POST route of the dashboard. It reads
+// the routes from where New registers them, so it never misses a new one.
+func postRoutes(t *testing.T) []string {
+	t.Helper()
+	src, err := os.ReadFile("ui.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wildcard := regexp.MustCompile(`\{[^}]*\}`)
+	var paths []string
+	for _, m := range regexp.MustCompile(`mux\.Handle(?:Func)?\("POST (/[^"]*)"`).FindAllStringSubmatch(string(src), -1) {
+		paths = append(paths, wildcard.ReplaceAllString(m[1], "1"))
+	}
+	if len(paths) == 0 {
+		t.Fatal("ui.go registers no POST route in the form that this test reads")
+	}
+	return paths
+}
+
+// An action with a value that is not valid is a bad request, as a page with
+// the same value is. Only an action that does not fit the task as it is now
+// is a conflict.
+func TestActionsRefuseValuesThatAreNotValid(t *testing.T) {
+	t.Parallel()
+	h := handler(t, setup(t), nil)
+	for _, target := range []string{
+		"/tasks/bulk/retry?state=bogus", "/tasks/bulk/retry?state=dead&cursor=zzz",
+		"/queues/pause", "/queues/resume?name=%ff", "/schedules/run?name=",
+	} {
+		rec := post(t, h, target, "same-origin")
+		if body := rec.Body.String(); rec.Code != http.StatusBadRequest || !strings.Contains(body, "<h1>Invalid request</h1>") {
+			t.Errorf("POST %s: status %d, want 400 and a page that says so\n%s", target, rec.Code, body)
+		}
+	}
+}
+
+// A request that runs out of time gets the page that says so, whoever set
+// its deadline: the dashboard, or the application, whose middleware may give
+// a request less time. Only a request whose client went away gets no answer.
+func TestRequestsPastTheirDeadline(t *testing.T) {
+	t.Parallel()
+	logs := &actionLog{}
+	h := handler(t, setup(t), &ui.Config{Logger: slog.New(logs)})
+	late, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	gone, cancel := context.WithCancel(t.Context())
+	cancel()
+	serve := func(ctx context.Context, method, target string) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(ctx, method, target, nil)
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	requests := []struct{ method, target string }{
+		{http.MethodGet, "/"},
+		{http.MethodGet, "/tasks?state=dead"},
+		{http.MethodGet, "/tasks/1"},
+		{http.MethodGet, "/tasks/bulk/retry?state=dead"},
+		{http.MethodGet, "/schedules"},
+		{http.MethodGet, "/workers"},
+		{http.MethodPost, "/tasks/1/retry"},
+		{http.MethodPost, "/tasks/bulk/retry?state=dead"},
+		{http.MethodPost, "/queues/pause?name=default"},
+	}
+	for _, r := range requests {
+		rec := serve(late, r.method, r.target)
+		if body := rec.Body.String(); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" ||
+			!strings.Contains(body, "<h1>Taking too long</h1>") {
+			t.Errorf("%s %s past its deadline: status %d, want 503 and a page that says so\n%s", r.method, r.target, rec.Code, body)
+		}
+		if rec := serve(gone, r.method, r.target); rec.Body.Len() != 0 {
+			t.Errorf("%s %s from a client that went away: an answer of %d bytes, want none", r.method, r.target, rec.Body.Len())
+		}
+	}
+	want := slices.Repeat([]string{"dashboard request timed out"}, len(requests))
+	if !slices.Equal(logs.messages, want) {
+		t.Errorf("logged %q, want one %q for each request past its deadline, and nothing else", logs.messages, want[0])
 	}
 }
 
@@ -1222,6 +1315,29 @@ func TestPrefixKeepsRequestsAndRedirects(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		if got := rec.Header().Get("Location"); rec.Code != tc.code || tc.location != "" && got != tc.location {
 			t.Errorf("%s %s: got %d to %q, want %d to %q", tc.method, tc.target, rec.Code, got, tc.code, tc.location)
+		}
+	}
+}
+
+// Every page, also one that reports an error, carries the headers that keep
+// the dashboard from being framed, sniffed, or cached, and from loading or
+// sending anything outside itself.
+func TestSecurityHeaders(t *testing.T) {
+	t.Parallel()
+	h := handler(t, setup(t), nil)
+	for _, target := range []string{"/", "/tasks?state=bogus"} {
+		_, _, header := get(t, h, target)
+		for name, want := range map[string]string{
+			"Content-Security-Policy": "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'self'; " +
+				"form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+			"X-Frame-Options":        "DENY",
+			"X-Content-Type-Options": "nosniff",
+			"Referrer-Policy":        "same-origin",
+			"Cache-Control":          "no-store",
+		} {
+			if got := header.Get(name); got != want {
+				t.Errorf("%s: the header %s is %q, want %q", target, name, got, want)
+			}
 		}
 	}
 }
