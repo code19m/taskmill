@@ -1,5 +1,9 @@
 version: 2
 updates:
+  # Each group makes one pull request update both modules. The otel module
+  # builds against the core next to it, so a dependency that they share, such
+  # as pgx, passes CI only when it changes in both. A group holds version
+  # updates or security updates, not both, so each kind has its group.
   - package-ecosystem: gomod
     directories: [/, /otel]
     schedule:
@@ -7,6 +11,12 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    groups:
+      go:
+        patterns: ["*"]
+      go-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: /

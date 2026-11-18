@@ -75,7 +75,8 @@ linters:
       # Only the standard library and this module may be imported. Adding a
       # dependency means editing this list and recording why, in the same
       # pull request, in docs/design/dependencies.md. The otel module, linted
-      # with this file too, has its own list.
+      # with this file too, has its own lists: one for the code that its users
+      # build, and a wider one for its tests.
       rules:
         main:
           list-mode: strict
@@ -90,11 +91,23 @@ linters:
           list-mode: strict
           files:
             - "**/otel/*.go"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/code19m/taskmill
+            - go.opentelemetry.io/otel # docs/design/dependencies.md
+          deny:
+            - pkg: go.opentelemetry.io/otel/sdk
+              desc: the otel module builds on OpenTelemetry's API only; the application chooses the SDK
+        otel-test:
+          list-mode: strict
+          files:
+            - "**/otel/*_test.go"
           allow:
             - $gostd
             - github.com/code19m/taskmill
             - github.com/jackc/pgx/v5 # the tests connect to PostgreSQL
-            - go.opentelemetry.io/otel # docs/design/dependencies.md
+            - go.opentelemetry.io/otel # with the SDK: the tests read what the module reports
 
     errcheck:
       check-type-assertions: true

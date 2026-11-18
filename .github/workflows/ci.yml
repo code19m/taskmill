@@ -10,8 +10,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the run of the push before it. Every
+# other run is grouped by its commit. A group per branch would skip commits:
+# GitHub keeps only the newest waiting run of a group, so of three merges
+# during one run on main, the middle one would never be tested.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Every job runs a Makefile target, so `make check` reproduces CI locally,

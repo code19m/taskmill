@@ -16,7 +16,7 @@ most of what a task queue needs: `database/sql`, `log/slog`, `context`,
 | Rule | How it works |
 |---|---|
 | The standard library first | A third-party module comes in only when the standard library cannot do the job well, and this page says why |
-| The allowlist is enforced | The `depguard` linter runs in strict mode on the list in [.golangci.yml](../../.golangci.yml): the standard library, this module, and pgx. The `otel` module has a list of its own there |
+| The allowlist is enforced | The `depguard` linter runs in strict mode on the list in [.golangci.yml](../../.golangci.yml): the standard library, this module, and pgx. The `otel` module has [lists of its own](#the-opentelemetry-module) there |
 | An integration that needs a third-party module is a Go module of its own | Users who do not need it never download it. The core offers plain extension points, such as middleware, that such modules build on |
 | Tests use only the standard library | No assertion frameworks and no container libraries. The tests connect to the PostgreSQL server that an environment variable names, and CI provides one for each supported version |
 | Development tools stay out of `go.mod` | Linters and scanners are pinned in the [Makefile](../../Makefile) and installed into `./bin`. A `tool` directive in `go.mod` would add their requirements to every user's module graph, where they can raise the versions of modules that users share with them |
@@ -86,7 +86,10 @@ queue sits in the middle of their traces: a request enqueues a task, and a
 worker runs it seconds or hours later. OpenTelemetry's modules are
 third-party, so by the rule the integration is a module of its own:
 `github.com/code19m/taskmill/otel`, in the `otel/` directory. It has its
-own `go.mod`, and its own allowlist with `go.opentelemetry.io/otel`.
+own `go.mod`, and its own allowlists. The code that its users build may
+import OpenTelemetry's API, `go.opentelemetry.io/otel`, but not the SDK:
+the application chooses that. Only the module's tests may import the SDK,
+to read what the module reports, and pgx, to connect to PostgreSQL.
 
 An application that does not use OpenTelemetry downloads none of it. One
 that does gets standard metrics, and one trace from a request through its
