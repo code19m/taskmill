@@ -24,6 +24,16 @@ All notable changes to taskmill are recorded here. The format follows
   that stores a checksum of each file, such as Flyway or Atlas, the
   checksum of this one file changes: repair it with your tool.
 
+### Fixed
+
+- `examples/quickstart` now waits at most 10 seconds for open requests
+  when it stops, and part 2 of the tutorial shows the same code. The
+  program called `Shutdown` without a deadline. So one client that sent
+  the start of an order and then stalled kept it from exiting after
+  Ctrl-C, and a second Ctrl-C did nothing. If you copied that `defer` line
+  into a program of your own, give its `Shutdown` a deadline, as the
+  example now does.
+
 ## [0.8.0] - 2026-11-16
 
 ### Changed

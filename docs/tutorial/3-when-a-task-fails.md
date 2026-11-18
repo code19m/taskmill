@@ -78,7 +78,7 @@ lines below the route for the orders:
 	mux.Handle("/taskmill/", dashboard)
 ```
 
-Below the `defer` line of the server, log where the dashboard is:
+Below the `defer` block of the server, log where the dashboard is:
 
 ```go
 	logger.LogAttrs(ctx, slog.LevelInfo, "open the dashboard", slog.String(logKeyURL, "http://"+addr+"/taskmill/"))
