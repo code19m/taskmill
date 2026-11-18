@@ -103,6 +103,25 @@ func post(t *testing.T, h http.Handler, target, fetchSite string) *httptest.Resp
 	return rec
 }
 
+// TestPagesHoldWhatTheScriptReads checks the parts of a page that the script
+// finds by name. Without one of them, it loads full pages where it could show
+// one in place, or cannot say that an action failed.
+func TestPagesHoldWhatTheScriptReads(t *testing.T) {
+	t.Parallel()
+	h := handler(t, setup(t), nil)
+	for _, path := range []string{"/", "/tasks", "/schedules", "/workers", "/tasks/0", "/tasks/bulk/retry?state=dead"} {
+		_, body, _ := get(t, h, path)
+		for _, part := range []string{
+			`<main id="main"`, `<div class="main">`, `data-live-part="nav"`, "data-announce",
+			"<template data-failure>", `id="confirm-dialog"`,
+		} {
+			if !strings.Contains(body, part) {
+				t.Errorf("%s: the page has no %s", path, part)
+			}
+		}
+	}
+}
+
 func TestPagesRender(t *testing.T) {
 	t.Parallel()
 	client := setup(t)

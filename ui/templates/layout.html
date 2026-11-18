@@ -15,6 +15,7 @@
 {{template "sprite"}}
 <a class="skip-link" href="#main">Skip to content</a>
 <header class="appbar">
+  <div class="visually-hidden" aria-live="polite" data-announce></div>
   <div class="appbar-inner">
     <a class="logo" href="{{path "/"}}" aria-label="Taskmill overview">{{template "logo"}}<span>Taskmill</span></a>
     <nav class="nav" aria-label="Sections" data-live-part="nav">
@@ -45,6 +46,8 @@
 {{define "foot"}}
 </main>
 </div>
+{{/* The notice that the script shows when an action got no answer. */}}
+<template data-failure><div class="toast failed" role="alert">{{template "icon-alert"}}<span class="toast-message">The action failed, or its answer did not arrive. Check the page before you try again.</span></div></template>
 <dialog class="modal" id="confirm-dialog" aria-labelledby="confirm-title">
   <form method="dialog">
     <h2 id="confirm-title">Are you sure?</h2>
@@ -72,6 +75,7 @@
 {{define "icon-moon"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.8 9.5A6 6 0 0 1 6.5 2.2 6 6 0 1 0 13.8 9.5Z"/></svg>{{end}}
 {{define "icon-chevron"}}<svg class="chev" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>{{end}}
 {{define "icon-tick"}}<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>{{end}}
+{{define "icon-alert"}}<svg class="toast-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 4.75v3.75M8 11.2v.05"/></svg>{{end}}
 {{define "icon-check"}}<svg class="toast-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>{{end}}
 
 {{/* A task state: a ring icon, so that color is never the only cue, and its name. */}}

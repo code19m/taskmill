@@ -1,10 +1,12 @@
-// The interface works without this script. It keeps pages live, applies
-// filters as they change, confirms actions, and adds a few conveniences.
+// The interface works without this script. It keeps pages live, shows
+// another page, a filter, or the result of an action without loading the
+// page anew, confirms actions, and adds a few conveniences.
 //
-// It is careful with the network and the machine: one request at a time,
-// each abandoned after a while, with a growing wait while the server is out
-// of reach. An update changes only the parts of the page that changed, so
-// nothing flickers, and focus, scroll, and open menus stay as they are.
+// It is careful with the network and the machine: one page request at a
+// time, each abandoned after a while, with a growing wait while the server
+// is out of reach. An update changes only the parts of the page that
+// changed, so nothing flickers, and focus, scroll, and open menus stay as
+// they are. Whatever it cannot show in place, the browser loads as a page.
 (() => {
   "use strict";
 
@@ -13,6 +15,9 @@
   const MAX_WAIT_MS = 60000; // the longest wait between failed updates
   const SLOW_MS = 300; // a navigation that takes longer shows progress
   const SEARCH_WAIT_MS = 250; // typing this close asks the server once
+  const NOTICE_MS = 4000; // a notice stays this long
+  const FADE_MS = 140; // another page fades in
+  const KEEP_PAGES = 10; // pages kept in memory for the back and forward buttons
   const LIVE_KEY = "taskmill-live";
 
   const root = document.documentElement;
@@ -39,10 +44,8 @@
   const assets = assetsOf(document);
 
   // While the next page loads, a bar slides under the header and the page it
-  // replaces fades back. Leaving shows it for a full load, which the browser
-  // marks only in its own toolbar, if at all.
+  // replaces fades back.
   const progress = (on) => root.classList.toggle("loading", on);
-  const leaving = () => setTimeout(() => progress(true), SLOW_MS);
 
   // Theme: System, Light, or Dark
 
@@ -59,13 +62,54 @@
   let confirming = null;
   let submitting = false;
 
-  function pending(form) {
+  // send runs a form's action and shows the page that the server answers
+  // with, in place: the page that the action leads to, with its notice, or
+  // the page that says why the action did not apply.
+  async function send(form) {
+    const buttons = [...form.querySelectorAll("button")];
+    const turn = ++turns;
     form.dataset.jsPending = "";
     submitting = true;
-    setTimeout(() => {
-      for (const button of form.querySelectorAll("button")) button.disabled = true;
-    });
-    setTimeout(() => { if (submitting) progress(true); }, SLOW_MS);
+    for (const button of buttons) button.disabled = true;
+    const slow = setTimeout(() => progress(true), SLOW_MS);
+    const result = await request(form.action, { body: new URLSearchParams(new FormData(form)) });
+    clearTimeout(slow);
+    submitting = false;
+    progress(false);
+    delete form.dataset.jsPending;
+    for (const button of buttons) button.disabled = false;
+    if (result.kind === "signed-out") {
+      status = "signed-out";
+      show();
+    }
+    if (result.kind !== "page") {
+      // Nothing says whether the action reached the server.
+      notify(document.querySelector("[data-failure]").content.firstElementChild.cloneNode(true), 2 * NOTICE_MS);
+      return;
+    }
+    if (turn !== turns) return; // the reader went on to another page meanwhile
+    // The server led to the page that shows the result, or it answered with
+    // a page that says why the action did not apply.
+    const url = result.url ? clean(new URL(result.url)) : new URL(location.href);
+    if (assetsOf(result.doc) !== assets) {
+      location.assign(url.href);
+      progress(true);
+      return;
+    }
+    const elsewhere = url.pathname !== location.pathname;
+    const n = address(url, elsewhere ? "push" : "replace");
+    if (n == null) return;
+    render(result, { moved: elsewhere || !result.url, n, notice: result.doc.querySelector("[data-toast]") });
+    succeeded();
+  }
+
+  // settle ends the pending state of every form. A page that was kept while
+  // an action was on its way comes back with it.
+  function settle() {
+    for (const form of document.querySelectorAll("form[data-js-pending]")) {
+      delete form.dataset.jsPending;
+      for (const button of form.querySelectorAll("button")) button.disabled = false;
+    }
   }
 
   document.addEventListener("submit", (event) => {
@@ -76,12 +120,10 @@
       applyFilters(form);
       return;
     }
-    if ("jsPending" in form.dataset) {
-      event.preventDefault();
-      return;
-    }
+    if (form.method !== "post") return;
+    event.preventDefault();
+    if ("jsPending" in form.dataset) return;
     if (form.dataset.confirm && typeof dialog?.showModal === "function") {
-      event.preventDefault();
       const danger = "confirmDanger" in form.dataset;
       const button = dialog.querySelector("[data-confirm-button]");
       dialog.querySelector("h2").textContent = form.dataset.confirmTitle || "Are you sure?";
@@ -97,19 +139,14 @@
       dialog.showModal();
       return;
     }
-    if (form.dataset.confirm && !window.confirm(`${form.dataset.confirmTitle || ""} ${form.dataset.confirm}`.trim())) {
-      event.preventDefault();
-      return;
-    }
-    if (form.method === "post") pending(form);
+    if (form.dataset.confirm && !window.confirm(`${form.dataset.confirmTitle || ""} ${form.dataset.confirm}`.trim())) return;
+    send(form);
   });
 
   dialog?.addEventListener("close", () => {
     const form = confirming;
     confirming = null;
-    if (dialog.returnValue !== "confirm" || !form?.isConnected) return;
-    pending(form);
-    form.submit(); // skips the submit event, so the dialog does not open again
+    if (dialog.returnValue === "confirm" && form?.isConnected) send(form);
   });
 
   // A page restored by the back button is live again.
@@ -117,10 +154,7 @@
     if (!event.persisted) return;
     submitting = false;
     progress(false);
-    for (const form of document.querySelectorAll("form[data-js-pending]")) {
-      delete form.dataset.jsPending;
-      for (const button of form.querySelectorAll("button")) button.disabled = false;
-    }
+    settle();
     schedule(0);
   });
 
@@ -336,52 +370,157 @@
     for (const [name, value] of new FormData(form)) {
       if (typeof value === "string" && value !== "") url.searchParams.append(name, value);
     }
-    navigate(url);
+    navigate(url, "replace");
   }
 
-  // navigate shows another state of the page in place, such as other filters.
-  // If that fails, the browser loads it and shows what went wrong.
-  async function navigate(url) {
+  // The history. Each entry gets a number, and the page that it showed is
+  // kept under that number while the tab lives, with its scroll position.
+  // So the back and forward buttons show a page right away, where the
+  // reader left it.
+  const pages = new Map();
+  const stamp = () => Date.now() + Math.random();
+  const here = () => location.pathname + location.search;
+  let entry = history.state?.n; // of the page on screen
+  let shown = here(); // the address of the page on screen
+  if (entry == null) {
+    entry = stamp();
+    history.replaceState({ n: entry }, "");
+  }
+
+  // leave keeps the page on screen, before another one takes its place.
+  function leave() {
+    pages.delete(entry);
+    pages.set(entry, { html: root.outerHTML, y: scrollY });
+    if (pages.size > KEEP_PAGES) pages.delete(pages.keys().next().value);
+  }
+
+  // address gives the page that is about to show its place in the history,
+  // and returns the number of its entry. "push" adds an entry, as a link
+  // does, and "replace" changes the address of this one, as a filter does.
+  // A frame without an origin of its own may not change its address: then
+  // the browser loads the page, and address returns nothing.
+  function address(url, mode) {
+    try {
+      if (mode === "replace" || url.href === location.href) {
+        history.replaceState({ n: entry }, "", url.href);
+        return entry;
+      }
+      leave();
+      const n = stamp();
+      history.pushState({ n }, "", url.href);
+      return n;
+    } catch {
+      location.assign(url.href);
+      progress(true);
+      return null;
+    }
+  }
+
+  // navigate shows another page, or another state of this one, in place,
+  // with its place in the history as address gives it. Whatever cannot be
+  // shown in place, the browser loads, and shows what went wrong.
+  let turns = 0; // counts navigations and actions: a newer one takes over
+
+  async function navigate(url, mode) {
+    const turn = ++turns;
     const slow = setTimeout(() => progress(true), SLOW_MS);
     const result = await load(url.href, null);
     clearTimeout(slow);
-    if (result.kind === "aborted") return; // a newer change takes over
+    if (turn !== turns || result.kind === "aborted") return; // a newer change takes over
     if (result.kind !== "page" || assetsOf(result.doc) !== assets) {
       location.assign(url.href);
       progress(true);
       return;
     }
     progress(false);
-    history.replaceState(history.state, "", url.href);
-    apply(result);
+    const n = address(url, mode);
+    if (n == null) return;
+    render(result, { moved: mode === "push", n });
     succeeded();
   }
 
-  // Rows that lead somewhere, a shortcut to the filters, and copying
+  // render puts the page of history entry n on screen. A newer state of the
+  // page that is there changes in place, as a live update does. Another
+  // page replaces it: it fades in, starts at the top, or at y for the back
+  // button, and tells a screen reader its title. The fade only follows the
+  // change, so a browser that paints late, or not at all, still has the
+  // page.
+  function render(result, { moved, n, y = 0, notice = null }) {
+    inflight?.abort(); // an update of the page that this one replaces
+    apply(result, moved);
+    entry = n;
+    shown = here();
+    if (notice) notify(notice);
+    if (!moved) return;
+    const main = document.getElementById("main");
+    scrollTo(0, y);
+    main.focus({ preventScroll: true });
+    if (!reducedMotion.matches) main.animate?.([{ opacity: 0.4 }, { opacity: 1 }], { duration: FADE_MS, easing: "ease-out" });
+    const announcer = document.querySelector("[data-announce]");
+    if (announcer) announcer.textContent = document.title;
+  }
 
-  document.addEventListener("click", (event) => {
-    const row = event.target.closest?.("tr[data-href]");
-    if (!row || event.target.closest("a, button, form, input, label, summary")) return;
-    if (window.getSelection()?.isCollapsed === false) return;
-    if (event.metaKey || event.ctrlKey) {
-      window.open(row.dataset.href, "_blank", "noopener");
-    } else {
-      location.assign(row.dataset.href);
-      leaving();
+  // The back and forward buttons. A page that is kept shows right away, as
+  // it was, and then updates. One that is not, the browser loads.
+  window.addEventListener("popstate", (event) => {
+    let n = event.state?.n;
+    // Another place on the page that is on screen, as the link to its
+    // content leads to: the browser scrolls there. Its entry is new to the
+    // script, and gets the page's number.
+    if (n == null && here() === shown) {
+      n = entry;
+      history.replaceState({ n }, "");
     }
+    if (n === entry) return;
+    const was = pages.get(n);
+    const result = was && page(was.html);
+    if (!result) {
+      location.reload();
+      return;
+    }
+    turns++; // a page or an action that is on its way was for the page before
+    progress(false);
+    leave();
+    render(result, { moved: true, n, y: was.y });
+    settle();
+    schedule(0);
   });
 
-  // A link to another page of this tab. Last, so that a handler above can
-  // take the click instead.
-  document.addEventListener("click", (event) => {
+  // Links, rows that lead somewhere, a shortcut to the filters, and copying
+
+  // destination returns the page that a click asks for in this tab, or
+  // null: the address of a link, or of a row that leads somewhere. The
+  // browser follows the other links itself: to another site or tab, a
+  // download, or a place on this page.
+  function destination(event) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return null;
     const link = event.target.closest?.("a[href]");
-    if (!link || event.defaultPrevented || event.button !== 0) return;
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    if ((link.target && link.target !== "_self") || link.hasAttribute("download")) return;
-    const url = new URL(link.href);
-    if (url.origin !== location.origin) return;
-    if (url.hash && url.pathname === location.pathname && url.search === location.search) return;
-    leaving();
+    if (link) {
+      if ((link.target && link.target !== "_self") || link.hasAttribute("download")) return null;
+      const url = new URL(link.href);
+      if (url.origin !== location.origin) return null;
+      if (url.hash && url.pathname === location.pathname && url.search === location.search) return null;
+      return url;
+    }
+    const row = event.target.closest?.("tr[data-href]");
+    if (!row || event.target.closest("button, form, input, label, summary")) return null;
+    return new URL(row.dataset.href, location.href);
+  }
+
+  // A click on a link, or on a row. Last, so that a handler above can take
+  // the click instead.
+  document.addEventListener("click", (event) => {
+    if (event.defaultPrevented) return;
+    const hit = event.target.closest?.("a, tr[data-href]");
+    if (hit?.localName === "tr" && (event.metaKey || event.ctrlKey) && !event.target.closest("button, form, input, label, summary")) {
+      window.open(hit.dataset.href, "_blank", "noopener");
+      return;
+    }
+    const url = destination(event);
+    // A click that ends a selection of text in a row is no click on the row.
+    if (!url || (hit?.localName === "tr" && window.getSelection()?.isCollapsed === false)) return;
+    event.preventDefault();
+    navigate(url, "push");
   });
 
   document.addEventListener("keydown", (event) => {
@@ -445,21 +584,34 @@
     }
   }
 
-  // Notices after an action
+  // Notices after an action. The server names a notice in the address of
+  // the page that shows it. The address loses that right away, so a reload
+  // does not show the notice again.
 
-  for (const toast of document.querySelectorAll("[data-toast]")) {
-    setTimeout(() => toast.classList.add("leaving"), 4000);
-    setTimeout(() => toast.remove(), 4400);
+  function clean(url) {
+    for (const name of ["done", "count", "skipped", "conflicts"]) url.searchParams.delete(name);
+    return url;
   }
+
+  // notify shows a notice in place of the one before it, for a while. The
+  // time counts once the tab is in view: a notice must not come and go while
+  // the reader is elsewhere.
+  function notify(toast, ms = NOTICE_MS) {
+    for (const old of document.querySelectorAll(".toast")) if (old !== toast) old.remove();
+    if (!document.contains(toast)) document.querySelector(".main").before(toast); // from the page that was fetched
+    const start = () => {
+      setTimeout(() => toast.classList.add("leaving"), ms);
+      setTimeout(() => toast.remove(), ms + 400);
+    };
+    if (document.hidden) document.addEventListener("visibilitychange", start, { once: true });
+    else start();
+  }
+
   {
-    const url = new URL(location.href);
-    if (url.searchParams.has("done")) {
-      url.searchParams.delete("done");
-      url.searchParams.delete("count");
-      url.searchParams.delete("skipped");
-      url.searchParams.delete("conflicts");
-      history.replaceState(history.state, "", url);
-    }
+    const toast = document.querySelector("[data-toast]");
+    if (toast) notify(toast);
+    const url = clean(new URL(location.href));
+    if (url.href !== location.href) history.replaceState({ n: entry }, "", url);
   }
 
   // Updating a page in place. morph changes the page to match a newer copy
@@ -523,48 +675,77 @@
     }
   }
 
-  // load fetches a page. It is the only request in flight: a newer one
-  // abandons it. The result's kind says what happened: "page", "same" (not
-  // modified), "down" (out of reach, or a server error), "signed-out", or
-  // "aborted".
+  // page reads a page of the interface from its HTML. It returns nothing
+  // for other HTML, such as a login page.
+  function page(html) {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const main = doc.getElementById("main");
+    return main ? { kind: "page", doc, main } : null;
+  }
+
+  // request fetches a page, or with a body, sends an action and reads the
+  // page that the server answers with. The result's kind says what happened:
+  // "page", "same" (not modified), "down" (out of reach, or a server error),
+  // "signed-out", or "aborted". The page of an action may be one that says
+  // why the action did not apply. Its url is where the server led to, if it
+  // led somewhere.
+  async function request(url, { etag = null, body = null, control = new AbortController() } = {}) {
+    let timedOut = false;
+    // An action may work for as long as the server lets a request take.
+    const timer = setTimeout(() => { timedOut = true; control.abort(); }, body ? 3 * TIMEOUT_MS : TIMEOUT_MS);
+    try {
+      const headers = { "X-Taskmill-Live": "1" };
+      if (etag) headers["If-None-Match"] = etag;
+      const response = await fetch(url, {
+        method: body ? "POST" : "GET", body, headers, cache: "no-store", credentials: "same-origin",
+        // A page that redirects leads to a login page, outside of the
+        // interface. An action redirects to the page that shows its result.
+        redirect: body ? "follow" : "manual", signal: control.signal,
+      });
+      if (response.status === 304) return { kind: "same" };
+      if (response.type === "opaqueredirect" || response.status === 401 || (response.status === 403 && !body)) {
+        return { kind: "signed-out" };
+      }
+      if (!body && (response.status >= 500 || response.status === 429)) return { kind: "down" };
+      if (!(response.headers.get("Content-Type") || "").startsWith("text/html")) return { kind: "down" };
+      const result = page(await response.text());
+      if (!result) return { kind: body && response.redirected ? "signed-out" : "down" };
+      return { ...result, etag: response.headers.get("ETag"), url: response.redirected ? response.url : null };
+    } catch {
+      return { kind: control.signal.aborted && !timedOut ? "aborted" : "down" };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // load fetches a page. It is the only page request in flight: a newer one
+  // abandons it.
   let inflight = null;
 
   async function load(url, etag) {
     inflight?.abort();
     const control = new AbortController();
     inflight = control;
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; control.abort(); }, TIMEOUT_MS);
     try {
-      const headers = { "X-Taskmill-Live": "1" };
-      if (etag) headers["If-None-Match"] = etag;
-      const response = await fetch(url, {
-        headers, cache: "no-store", credentials: "same-origin", redirect: "manual", signal: control.signal,
-      });
-      if (response.status === 304) return { kind: "same" };
-      // A redirect leads to a login page, outside of the interface.
-      if (response.type === "opaqueredirect" || response.status === 401 || response.status === 403) {
-        return { kind: "signed-out" };
-      }
-      if (response.status >= 500 || response.status === 429) return { kind: "down" };
-      if (!(response.headers.get("Content-Type") || "").startsWith("text/html")) return { kind: "down" };
-      const doc = new DOMParser().parseFromString(await response.text(), "text/html");
-      const main = doc.getElementById("main");
-      if (!main) return { kind: "down" };
-      return { kind: "page", doc, main, etag: response.headers.get("ETag") };
-    } catch {
-      return { kind: control.signal.aborted && !timedOut ? "aborted" : "down" };
+      return await request(url, { etag, control });
     } finally {
-      clearTimeout(timer);
       if (inflight === control) inflight = null;
     }
   }
 
   let shownETag = null; // of the page on screen, once an update fetched it
 
-  function apply(result) {
+  // apply changes the page on screen into the one of result. A newer state
+  // of the same page changes only where it differs. Another page, fresh,
+  // replaces it whole: nothing of the reader's state belongs to it.
+  function apply(result, fresh = false) {
     const main = document.getElementById("main");
-    morph(main, result.main);
+    if (fresh) {
+      syncAttributes(main, result.main);
+      main.replaceChildren(...result.main.childNodes);
+    } else {
+      morph(main, result.main);
+    }
     for (const part of result.doc.querySelectorAll("[data-live-part]")) {
       const here = document.querySelector(`[data-live-part="${CSS.escape(part.dataset.livePart)}"]`);
       if (here) morph(here, part);
@@ -633,6 +814,7 @@
   }
 
   async function update() {
+    timer = 0;
     if (!live || status === "signed-out" || document.hidden || !livePage()) return;
     // A request in flight is a navigation: it must not be abandoned for an
     // update of the page it replaces.
@@ -642,7 +824,11 @@
     }
     const started = Date.now();
     const result = await load(location.href, shownETag);
-    if (result.kind === "aborted" || !live) return; // a navigation took over, or the reader paused
+    if (!live) return; // the reader paused
+    if (result.kind === "aborted") { // another page took over: it plans the next update, or this does
+      if (!timer) schedule(REFRESH_MS);
+      return;
+    }
     if (result.kind === "page") {
       if (assetsOf(result.doc) !== assets) {
         location.reload();

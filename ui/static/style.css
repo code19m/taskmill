@@ -667,6 +667,8 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 }
 .toast-icon { flex-shrink: 0; margin-top: 1px; color: var(--ok); }
 .toast-message { flex: 1; min-width: 0; font-size: var(--text-label); line-height: 1.5; overflow-wrap: anywhere; }
+.toast.failed { border-color: var(--err); }
+.toast.failed .toast-icon { color: var(--err); }
 .toast.leaving { opacity: 0; transition: opacity var(--motion-normal) var(--ease-out); }
 
 /* ---------- small screens ---------- */
