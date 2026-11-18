@@ -116,6 +116,13 @@ What follows:
   change, confirm actions in dialogs, and apply the chosen theme. Every page
   also works without them. Nothing needs a JavaScript build step or
   third-party code.
+- **The server renders every page, and the script only shows it in place.**
+  For a link, the back button, or an action, the script fetches the page
+  that the server would send to a browser, and swaps its content in. So
+  there is one renderer and no second API, and whatever the script cannot
+  show, such as a login page, the browser loads as a full page. We rejected
+  a client-side framework: it needs a JSON API, a second set of templates,
+  and a build step, for a dashboard of five pages.
 - **Two ways to run it:** mounted on an application's own router, behind
   the application's own authentication, or on its own with basic
   authentication, through the `taskmill-ui` command.

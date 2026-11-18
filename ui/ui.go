@@ -25,7 +25,8 @@
 // entirely.
 //
 // The dashboard is rendered on the server with the standard library. Two
-// small scripts, served with it, keep pages live, apply filters as they
+// small scripts, served with it, keep pages live, show another page or the
+// result of an action without loading the page anew, apply filters as they
 // change, confirm actions in dialogs, and apply the chosen theme. Every page
 // also works without them, and nothing needs a JavaScript build step. The
 // dashboard reads only through the bounded queries of [taskmill.Client], so
@@ -90,8 +91,10 @@ const (
 	gzipMin        = 1024             // smallest response worth compressing
 )
 
-// liveHeader marks the requests of the page's live updates. They are never
-// answered with a login prompt: the page shows that the session ended instead.
+// liveHeader marks the requests of the page's script: its live updates, the
+// pages that it shows in place, and the actions that it sends. They are never
+// answered with a login prompt: the page shows that the session ended, or the
+// browser loads the page and asks then.
 const liveHeader = "X-Taskmill-Live"
 
 // errBudget is why a bulk action stopped before it was done.

@@ -7,6 +7,18 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard moves between its pages without loading each one anew. A
+  link, a row of the task list, and the back and forward buttons show the
+  next page in place: only the content changes, and a page that you return
+  to is where you left it. Actions such as Retry, Pause, and the bulk
+  actions run in place too, and show their notice without a reload. An
+  action whose answer does not arrive now says so in a notice. The server
+  sends the same pages as before: every page still works without the script,
+  and whatever the script cannot show in place, the browser loads as a full
+  page.
+
 ## [0.9.0] - 2026-11-18
 
 ### Changed
