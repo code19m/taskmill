@@ -195,6 +195,31 @@ const (
 	longPage = "docs/reference/log-messages.md"
 )
 
+// TestChangelogSections checks that a release in a changelog has each of its
+// headings, such as Fixed, once. Git merges two pull requests that each add
+// a heading without a conflict, and leaves the heading twice: a reader then
+// misses the second list, and so does a tool that reads the file by its
+// headings. CONTRIBUTING.md names the headings.
+func TestChangelogSections(t *testing.T) {
+	for _, name := range files(t) {
+		if path.Base(name) != "CHANGELOG.md" {
+			continue
+		}
+		prose, _ := parse(read(t, name))
+		release, seen := "", map[string]bool{}
+		for line := range strings.SplitSeq(prose, "\n") {
+			switch {
+			case strings.HasPrefix(line, "## "):
+				release, seen = line, map[string]bool{}
+			case strings.HasPrefix(line, "### ") && seen[line]:
+				t.Errorf("%s: %q has the heading %q twice: put its entries under the first", name, release, line)
+			case strings.HasPrefix(line, "### "):
+				seen[line] = true
+			}
+		}
+	}
+}
+
 // TestPageLength checks that no page is longer than the limit. A changelog
 // is not a page: it grows with every release.
 func TestPageLength(t *testing.T) {
