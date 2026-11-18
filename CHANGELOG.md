@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-18
+
 ### Changed
 
 - The decision records in `docs/adr/` are gone. The design pages now hold
@@ -1414,7 +1416,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/code19m/taskmill/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/code19m/taskmill/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/code19m/taskmill/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/code19m/taskmill/compare/v0.5.0...v0.6.0
