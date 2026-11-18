@@ -423,15 +423,19 @@ func (w *Worker) dispatch(ctx context.Context, r *run, q *queueState, tasks []*t
 		w.track(ctx, t)
 	}
 
-	for _, unit := range w.units(tasks) {
+	units := w.units(tasks)
+	for i, unit := range units {
 		if !q.takeSlot(ctx) {
-			for _, t := range unit {
+			// The worker is stopping, so the units after this one cannot
+			// start either.
+			unstarted := slices.Concat(units[i:]...)
+			for _, t := range unstarted {
 				t.mu.Lock()
 				t.state = attemptRecording
 				t.mu.Unlock()
-				w.record(context.WithoutCancel(ctx), t, outcome{kind: outcomeRelease})
 			}
-			continue
+			w.release(context.WithoutCancel(ctx), unstarted)
+			return
 		}
 		r.inflight.Go(func() {
 			defer q.freeSlot()

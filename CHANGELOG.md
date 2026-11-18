@@ -76,6 +76,25 @@ All notable changes to taskmill are recorded here. The format follows
   before, so a minute kept only its last count. A queue that filled and
   emptied again within a minute did not show in `Client.Activity`, nor in
   the dashboard's charts.
+- `DrainTimeout` now counts from the moment `Run`'s context ends. It
+  counted from the end of the fetches that were in flight then, and a fetch
+  waits up to 30 seconds for a connection of the pool. So when the handlers
+  worked on the worker's pool and held every connection of it, a stopping
+  worker waited for its fetch, and the fetch waited for the handlers: no
+  handler saw `ErrShutdown`, and no task went back to its queue, for up to
+  30 seconds plus `DrainTimeout`. With the defaults, Kubernetes killed such
+  a pod first, and its tasks came back only when their leases ran out, each
+  with a failed attempt (`lease_lost`). Handlers now get `ErrShutdown` one
+  `DrainTimeout` after the stop, whatever a fetch does then, and the tasks
+  that a late fetch leased go back to their queue as before. You change
+  nothing.
+- A stopping worker now bounds the time in which it gives tasks back: 30
+  seconds for all the tasks of a fetch that it could not start, and 30
+  seconds for all the tasks whose handlers ignored the shutdown. Each task
+  had 30 seconds of its own, one after the other, so a database that
+  did not answer kept `Run` from returning for that long per task. A task
+  that is not given back in time is rescued when its lease runs out, as
+  after a crash.
 
 ### Security
 

@@ -437,6 +437,7 @@ const (
 // run is the state of one call to [Worker.Run].
 type run struct {
 	attemptCtx context.Context // parent of every attempt; canceled with ErrShutdown once DrainTimeout passes
+	fetching   sync.WaitGroup  // the fetch loops
 	inflight   sync.WaitGroup  // the running attempts and batches
 }
 
@@ -530,13 +531,11 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	attemptCtx, stopAttempts := context.WithCancelCause(base)
 	r := &run{attemptCtx: attemptCtx}
-	var fetchers sync.WaitGroup
 	for _, q := range w.queues {
-		fetchers.Go(func() { w.fetchLoop(ctx, r, q) })
+		r.fetching.Go(func() { w.fetchLoop(ctx, r, q) })
 	}
 
 	<-ctx.Done()
-	fetchers.Wait()
 	w.drain(base, r, stopAttempts)
 	// Attempts that ended before drain gave up may still be recording their
 	// results, through the completer too.
@@ -557,11 +556,13 @@ func (w *Worker) Run(ctx context.Context) error {
 	return nil
 }
 
-// drain waits for running attempts, then cancels them and releases the tasks
-// of those that do not return in time.
+// drain ends a run whose context has ended. It waits for the fetch loops and
+// for the running attempts. Once DrainTimeout has passed, it cancels the
+// attempts, and it releases the tasks of those that do not return in time.
 func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelCauseFunc) {
 	done := make(chan struct{})
 	go func() {
+		r.fetching.Wait() // the fetch loops start attempts, so they end first
 		r.inflight.Wait()
 		close(done)
 	}()
@@ -570,6 +571,10 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 			slog.Int(logKeyTasks, n), slog.Duration(logKeyTimeout, w.cfg.DrainTimeout))
 	}
 
+	// The timeout counts from here, when the worker was told to stop, and not
+	// from the end of the fetch loops. A fetch that is in flight can take
+	// long: it may wait for a connection that only a handler's return frees,
+	// and so for the very attempts that this timeout cancels.
 	select {
 	case <-done:
 		return
@@ -584,7 +589,9 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 	}
 
 	// Handlers that ignore their context keep running, but their results are
-	// ignored and their tasks go back to the queue.
+	// ignored and their tasks go back to the queue. No attempt starts once
+	// the fetch loops have returned, so none escapes this.
+	r.fetching.Wait()
 	w.mu.Lock()
 	var abandoned []*tracked
 	for _, t := range w.attempts {
@@ -599,6 +606,18 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 	for _, t := range abandoned {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler ignored shutdown; releasing its task",
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind))
+	}
+	w.release(ctx, abandoned)
+}
+
+// release gives tasks back to their queues while the worker stops. One
+// deadline bounds all of it: a database that does not answer then delays
+// the shutdown once, and not once for each task. A task that is not released
+// by then is rescued when its lease runs out.
+func (w *Worker) release(ctx context.Context, ts []*tracked) {
+	ctx, cancel := context.WithTimeout(ctx, recordTimeout)
+	defer cancel()
+	for _, t := range ts {
 		w.record(ctx, t, outcome{kind: outcomeRelease})
 	}
 }

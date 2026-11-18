@@ -38,6 +38,7 @@ It is in the doc comment of that identifier.
 | Reads that notifications ask for: cancel requests, and queue settings | At most one of each kind per 20 ms |
 | Warning that the pool is full | Logged when the pool is full, and a lease renewal waits 1 second or longer for a connection (`LeaseDuration` / 30). At most once a minute |
 | A result that the worker cannot record | Tried again after 0.1 to 2 seconds, until the task's lease would run out |
+| The tasks that a stopping worker gives back | 30 seconds for all the tasks of a fetch that it could not start, and 30 seconds for all the tasks whose handlers ignored the shutdown. A task that is not given back by then is [rescued](../concepts/glossary.md#rescue) when its lease runs out |
 | "Tasks available" notifications | At most one per queue per 50 ms from each client |
 | Notification connection: time to connect, and to answer when heartbeats stop | 10 seconds each |
 | Notification connection: reconnect | After 1 second, then twice as long each time, up to 30 seconds |
