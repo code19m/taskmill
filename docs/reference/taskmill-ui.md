@@ -100,7 +100,8 @@ queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.
 
 - **Every action is a `POST`.** A `GET` never changes anything.
 - **`theme` works on every page:** `?theme=light`, `dark`, or `system`. The
-  browser remembers the choice.
+  browser remembers the choice. Where it blocks storage, as some browsers
+  do in a frame of another site, the choice holds for that page only.
 - **The dashboard sets some parameters itself,** in the redirect after an
   action: `done`, `count`, `skipped`, `conflicts`, and the `cursor` of a
   bulk action. Don't write them.
