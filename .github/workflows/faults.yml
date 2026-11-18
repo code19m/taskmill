@@ -15,8 +15,11 @@ on:
 
 permissions: {}
 
+# A new push to a pull request cancels the run of the push before it. Every
+# other run is grouped by its commit, as in ci.yml, so that no run cancels
+# the run of another commit.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
