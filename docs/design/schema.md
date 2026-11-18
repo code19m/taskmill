@@ -152,9 +152,9 @@ One row per minute and queue, kept for 24 hours, behind `Client.Activity` and
 the dashboard's charts. Two writers share a row, each with its own columns:
 
 - **The maintainer** copies the counts it stores in `queue_stats` into the
-  current minute, every 10 seconds, with zeros for known queues that have no
-  tasks. A minute with `NULL` counts had no maintainer, which a chart shows
-  as a gap rather than as an empty queue.
+  current minute, every 10 seconds, with zeros for known queues without
+  tasks. A minute keeps the most that it counted in each state. One with
+  `NULL` counts had no maintainer: a chart shows a gap, not an empty queue.
 - **Each worker** counts the attempts it ends, completed and failed, in
   memory, and adds them to their minutes every 10 seconds, in a loop of its
   own so that a slow write never delays a check-in. Counting in the

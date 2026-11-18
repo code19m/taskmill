@@ -1021,6 +1021,39 @@ func TestStatisticsCapTheDueCountsOfEveryQueue(t *testing.T) {
 	}
 }
 
+// Two maintainers whose terms overlap can refresh the statistics at the same
+// time, and both must store what they counted. Here both have counted, and
+// wait behind a transaction that holds the stored rows: when it ends, one
+// stores while the other waits for it.
+func TestStatisticsRefreshesAtTheSameTimeBothStore(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{})
+	ctx := t.Context()
+	e.enqueue(t, sendEmail{}, nil)
+	if err := taskmill.RefreshStats(ctx, w); err != nil {
+		t.Fatal(err)
+	}
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.queue_stats FOR UPDATE")
+	refreshed := make(chan error, 2)
+	for range 2 {
+		go func() { refreshed <- taskmill.RefreshStats(ctx, w) }()
+	}
+	e.waitBlockedCount(t, 2)
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := recv(t, refreshed, "a refresh to end"); err != nil {
+			t.Errorf("a refresh beside another one failed: %v", err)
+		}
+	}
+	if got := e.countedQueue(t, taskmill.DefaultQueue).Counts[taskmill.StateAvailable]; got != (taskmill.TaskCount{N: 1}) {
+		t.Errorf("the two refreshes stored %+v available tasks, want 1", got)
+	}
+}
+
 // countedQueues waits until the maintainer has counted the named queues, and
 // returns them by name.
 func countedQueues(t *testing.T, e *env, names ...string) map[string]taskmill.QueueInfo {

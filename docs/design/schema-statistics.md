@@ -26,6 +26,18 @@ flowchart LR
 So the database pays for one count every 10 seconds, however many watch
 the queues: a dashboard tab, a gauge, or a scaler only reads a small table.
 
+**One refresh stores at a time.** Two maintainers can refresh at the same
+time, when their terms overlap. A refresh replaces every row, so it first
+locks `queue_stats` in the mode that keeps other writers out and lets
+everyone read. The second refresh waits for the first, and the table always
+holds the counts of exactly one refresh.
+
+| Option | Why, or why not |
+|---|---|
+| **A lock on the table** | Chosen. Only the maintainer writes the table, and only a role with rights on the table can take the lock |
+| An insert that updates a row that is already there | A row that only the first refresh stored would stay beside the second one's counts, until the next refresh |
+| An advisory lock | Any role of the database can take and hold one, and so stop every refresh |
+
 ## Every count is bounded
 
 The count reads indexes, and every count is capped, so the cost stays
