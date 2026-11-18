@@ -19,6 +19,11 @@ rename spans, attributes, or metrics to follow them, and says so here.
   with no span to store, as under a no-op tracer, the old `traceparent`
   stayed too. Now they first remove every field that the propagator sets,
   so the metadata and the headers hold the new span's context only.
+- The `send` span of an enqueue no longer has the attribute
+  `messaging.message.id` with the value `0`. That was the span of a
+  duplicate whose existing task could not be read, for which
+  `EnqueueResult.ID` is 0: no task has that ID. Such a span now has no
+  message ID.
 
 ## [0.4.2] - 2026-11-15
 
