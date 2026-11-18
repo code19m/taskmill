@@ -95,6 +95,16 @@ All notable changes to taskmill are recorded here. The format follows
   did not answer kept `Run` from returning for that long per task. A task
   that is not given back in time is rescued when its lease runs out, as
   after a crash.
+- A statement that fails after it returned its row now counts as failed.
+  An error comes that late only from a deferred constraint or trigger of
+  your own, which fails at the commit, or from a cancel at the last
+  moment. taskmill took the row for the result. So a worker counted a
+  failed attempt, a snooze, or a release as recorded when the database had
+  rolled it back, and no longer renewed the task's lease: the task came
+  back only when the lease ran out, with a failed attempt (`lease_lost`).
+  `RunTask` ran the handler of a task that it had not leased. Now the
+  worker records the result again, as after any other error, and `RunTask`
+  returns the error and runs nothing.
 
 ### Security
 

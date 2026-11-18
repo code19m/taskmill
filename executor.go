@@ -179,5 +179,9 @@ func queryRow(ctx context.Context, q querier, query string, args []any, dest ...
 	if err := r.Scan(dest...); err != nil {
 		return false, err
 	}
+	// A statement can still fail after its first row, as a deferred
+	// constraint does at the commit, and rows report that only once they are
+	// closed. Closing skips any further rows without decoding them.
+	r.Close()
 	return true, r.Err()
 }
