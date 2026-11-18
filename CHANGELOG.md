@@ -125,6 +125,27 @@ All notable changes to taskmill are recorded here. The format follows
   the key was canceled or deleted before the read, as the comment of
   `EnqueueResult.ID` now says. In your own transaction, `EnqueueTx` and
   `EnqueueManyTx` still return the error, so that you can roll back.
+- `Count` no longer reports its `Cancel` count as exact after counting
+  stopped at the cap. `Cancel` leaves out the running tasks that were
+  already asked to stop, so it can count fewer tasks than the cap of
+  10,000, and its `Capped` was then false. With 30,000 running tasks, every
+  third of them asked to stop, it read as exactly 6,668, where
+  `CancelMatching` changes 20,000, and the dashboard showed that number as
+  exact. Now `Capped` is true whenever counting stopped at the cap.
+- `QueueInfo.Lag` no longer reads 0 for a queue whose oldest due task is
+  due for more than about 292 years, such as a task with a `RunAt` in the
+  year 1700. Such a lag does not fit a `time.Duration`, and it wrapped
+  around: a stuck queue showed no lag, also in the lag gauge of the `otel`
+  package. The lag now stops at the longest duration.
+- `Cancel`, `Retry`, and `Delete` now say in every error what they were
+  doing. An error of the begin or the commit of their transaction, such as
+  a context that ended, came back bare: `context canceled`. It now reads
+  `taskmill: cancel task 7: context canceled`, like the errors of the other
+  calls. `errors.Is` finds the same errors as before.
+- `UpdateQueue` now rejects a `MaxRunning` above 2,147,483,647, the most
+  that its column holds, with an error that wraps `ErrInvalidArgument`.
+  Such a value failed before too, but with an error of the driver that read
+  like a failure of the database.
 
 ## [0.8.0] - 2026-11-16
 

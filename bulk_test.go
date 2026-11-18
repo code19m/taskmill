@@ -1228,6 +1228,17 @@ func TestCount(t *testing.T) {
 		got.Delete != (taskmill.TaskCount{N: 10001, Capped: true}) {
 		t.Fatalf("over the cap: %+v, %v", got, err)
 	}
+
+	// Cancel leaves out the running tasks already asked to stop, here every
+	// third of 10,001. Counting stopped at the cap, so Cancel is capped too,
+	// though it counts fewer tasks than the cap.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_expires_at, cancel_requested_at)
+	           SELECT 'busy', 'k', 'running', now(), '{}', 3, 1, now() + interval '1 hour', CASE WHEN i % 3 = 0 THEN now() END
+	           FROM generate_series(1, 10001) i`)
+	got, err = e.client.Count(ctx, &taskmill.TaskFilter{Queues: []string{"busy"}})
+	if err != nil || got.States[taskmill.StateRunning] != capped || got.Cancel != (taskmill.TaskCount{N: 6668, Capped: true}) {
+		t.Fatalf("running tasks over the cap, a third of them asked to stop: %+v, %v", got, err)
+	}
 }
 
 // A count reads each state's tasks through that state's index, up to its

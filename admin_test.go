@@ -185,7 +185,12 @@ func TestUpdateQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	want(4, true)
-	for _, update := range []func(*taskmill.QueueSettings){nil, func(s *taskmill.QueueSettings) { s.MaxRunning = -1 }} {
+	for _, update := range []func(*taskmill.QueueSettings){
+		nil,
+		func(s *taskmill.QueueSettings) { s.MaxRunning = -1 },
+		// One more than the column holds.
+		func(s *taskmill.QueueSettings) { s.MaxRunning = math.MaxInt32; s.MaxRunning++ },
+	} {
 		if err := e.client.UpdateQueue(ctx, "partner", update); !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Fatalf("got %v, want ErrInvalidArgument", err)
 		}
@@ -429,6 +434,10 @@ func TestQueuesMeasureLag(t *testing.T) {
 	retry := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "retrying"})
 	e.exec(t, "UPDATE {s}.tasks SET state = 'retryable', run_at = now() - interval '30 minutes' WHERE id = $1", retry)
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "idle", RunAt: time.Now().Add(time.Hour)})
+	// A task due for longer than a duration can hold: the lag stops at the
+	// longest duration, and does not wrap around to none.
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "ancient", RunAt: time.Date(1700, 1, 1, 0, 0, 0, 0, time.UTC)})
+	longest := time.Duration(math.MaxInt64).Truncate(time.Microsecond)
 	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: noopHandlers(),
 		Queues:   map[string]taskmill.QueueOptions{"mail": {}},
@@ -443,10 +452,10 @@ func TestQueuesMeasureLag(t *testing.T) {
 		for _, q := range queues {
 			lag[q.Name] = q.Lag
 		}
-		return len(lag) >= 4 && lag["behind"] > 0 && lag["retrying"] > 0
+		return len(lag) >= 5 && lag["behind"] > 0 && lag["retrying"] > 0
 	})
-	for queue, want := range map[string]time.Duration{"behind": time.Hour, "retrying": 30 * time.Minute} {
-		if lag[queue] < want || lag[queue] > want+time.Minute {
+	for queue, want := range map[string]time.Duration{"behind": time.Hour, "retrying": 30 * time.Minute, "ancient": longest} {
+		if over := lag[queue] - want; over < 0 || over > time.Minute {
 			t.Errorf("queue %s: got lag %s, want about %s", queue, lag[queue], want)
 		}
 	}

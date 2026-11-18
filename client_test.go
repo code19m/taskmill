@@ -270,6 +270,28 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+// Every error of Cancel, Retry, and Delete says what failed, once: also one
+// that comes from outside their statements, as when the context ends before
+// the transaction begins.
+func TestCancelRetryAndDeleteSayWhatFailed(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+	for op, do := range map[string]func(context.Context, int64) error{
+		"cancel": e.client.Cancel, "retry": e.client.Retry, "delete": e.client.Delete,
+	} {
+		err := do(ended, 7)
+		if want := "taskmill: " + op + " task 7: "; !errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("%s after the context ended: got %v, want context.Canceled after %q", op, err, want)
+		}
+		err = do(t.Context(), 7)
+		if !errors.Is(err, taskmill.ErrNotFound) || strings.Count(err.Error(), "taskmill:") != 1 {
+			t.Errorf("%s of an unknown task: got %v, want ErrNotFound, said once", op, err)
+		}
+	}
+}
+
 func TestCancelAndDeleteFreeTheDedupeKey(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

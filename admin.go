@@ -37,7 +37,7 @@ const (
 type QueueSettings struct {
 	// MaxRunning caps the tasks of the queue running at the same time across
 	// all workers of the installation. Each task of a batch counts. It must
-	// not be negative. Zero means no limit.
+	// not be negative, and is at most 2,147,483,647. Zero means no limit.
 	MaxRunning int
 }
 
@@ -85,6 +85,7 @@ type QueueInfo struct {
 	// when it counts, so for up to one refresh, about 10 seconds, Lag may
 	// be too high: a task that finished since still counts. Work can be
 	// stuck while Lag stays near zero: HaltedGroups and MostFailures show it.
+	// Lag stops at the longest [time.Duration], about 292 years.
 	Lag time.Duration
 
 	// HaltedGroups counts the queue's FIFO groups that a dead task halts.
@@ -238,8 +239,8 @@ func retryConflicts(ctx context.Context, op string, try func() (saved bool, err 
 // concurrent updates never lose each other's changes, and update may run
 // more than once: it must only change the settings it gets, with no I/O and
 // no calls to the Client. Workers apply the change within 10 seconds, and
-// right away if they receive notifications. A negative MaxRunning is an
-// error that wraps [ErrInvalidArgument].
+// right away if they receive notifications. A MaxRunning outside its limits
+// is an error that wraps [ErrInvalidArgument].
 //
 //	err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
 func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*QueueSettings)) error {
@@ -264,6 +265,8 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 		switch {
 		case s.MaxRunning < 0:
 			return false, invalidArgument("MaxRunning must not be negative")
+		case s.MaxRunning > math.MaxInt32: // the column is an integer
+			return false, invalidArgument("MaxRunning %d is more than the limit of %d", s.MaxRunning, math.MaxInt32)
 		case s.MaxRunning > 0:
 			next = &s.MaxRunning
 		}
@@ -357,7 +360,7 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 			q := &out[i]
 			q.Counts[State(state)] = TaskCount{N: n, Capped: capped}
 			q.RefreshedAt = at
-			q.Lag = max(q.Lag, time.Duration(lag)*time.Microsecond)
+			q.Lag = max(q.Lag, fromMicros(lag))
 			q.HaltedGroups = max(q.HaltedGroups, halted)
 			q.MostFailures = max(q.MostFailures, failures)
 		}
@@ -374,14 +377,15 @@ func (c *Client) Settings(ctx context.Context) (*Settings, error) {
 	if err := c.pool.QueryRow(ctx, c.sql.readSettings).Scan(&history, &dead); err != nil {
 		return nil, fmt.Errorf("taskmill: read settings: %w", err)
 	}
-	return &Settings{HistoryRetention: retention(history), DeadRetention: retention(dead)}, nil
+	return &Settings{HistoryRetention: fromMicros(history), DeadRetention: fromMicros(dead)}, nil
 }
 
-// retention returns a retention period that the database stores as micros
-// microseconds. A period beyond the longest duration, which only SQL can
-// write, reads as the longest one.
-func retention(micros int64) time.Duration {
-	return time.Duration(min(micros, math.MaxInt64/int64(time.Microsecond))) * time.Microsecond
+// fromMicros returns the duration of n microseconds, in which the database
+// gives a retention period and a queue's lag. One beyond the longest duration
+// reads as the longest one: a period that only SQL can write, or the lag of
+// a task that is due for more than about 292 years.
+func fromMicros(n int64) time.Duration {
+	return time.Duration(min(n, math.MaxInt64/int64(time.Microsecond))) * time.Microsecond
 }
 
 // UpdateSettings changes the installation-wide settings. update gets a copy
@@ -402,7 +406,7 @@ func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) err
 		if err := c.pool.QueryRow(ctx, c.sql.readSettings).Scan(&history, &dead); err != nil {
 			return false, fmt.Errorf("taskmill: update settings: %w", err)
 		}
-		s := Settings{HistoryRetention: retention(history), DeadRetention: retention(dead)}
+		s := Settings{HistoryRetention: fromMicros(history), DeadRetention: fromMicros(dead)}
 		update(&s)
 		s.HistoryRetention = cmp.Or(s.HistoryRetention, defaultHistoryRetention)
 		s.DeadRetention = cmp.Or(s.DeadRetention, defaultDeadRetention)

@@ -164,6 +164,11 @@ it, so each branch reads the index of its state and stops at its cap of
 10,000 tasks. A count by kind or FIFO group alone still reads every task of
 each state.
 
+A count of what an action would change is capped whenever a state that it
+counts is. `Cancel` leaves out the running tasks already asked to stop, so
+it can count fewer tasks than the cap and still be a lower bound: the tasks
+that were not read may be ones that it would cancel.
+
 The finish order changes neither `Count` nor the bulk actions. A bulk
 action must go through tasks in ID order: its cursor is an ID, and a retry
 keeps each FIFO group in order by ID. Its windows of 100,000 tasks bound

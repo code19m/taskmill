@@ -173,7 +173,7 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 // transaction to end a deadlock (SQLSTATE 40P01). So it returns that error
 // only if the fifth try meets it too.
 func (c *Client) Cancel(ctx context.Context, id int64) error {
-	return c.inLockOrder(ctx, func(q querier, check bool) error { return c.cancel(ctx, q, id, check) })
+	return c.inLockOrder(ctx, "cancel", id, func(q querier, check bool) error { return c.cancel(ctx, q, id, check) })
 }
 
 // CancelTx is [Client.Cancel] in the caller's transaction.
@@ -240,7 +240,7 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64, check bool) er
 // tasks in other states. Like [Client.Cancel], it runs again by itself, up
 // to 5 times in all, when it loses to another transaction.
 func (c *Client) Retry(ctx context.Context, id int64) error {
-	return c.inLockOrder(ctx, func(q querier, _ bool) error { return c.retry(ctx, q, id) })
+	return c.inLockOrder(ctx, "retry", id, func(q querier, _ bool) error { return c.retry(ctx, q, id) })
 }
 
 func (c *Client) retry(ctx context.Context, q querier, id int64) error {
@@ -346,7 +346,7 @@ func (c *Client) takeKeys(ctx context.Context, q querier, ids []int64) (refused 
 // [Client.Cancel], it runs again by itself, up to 5 times in all, when it
 // loses to another transaction.
 func (c *Client) Delete(ctx context.Context, id int64) error {
-	return c.inLockOrder(ctx, func(q querier, check bool) error { return c.delete(ctx, q, id, check) })
+	return c.inLockOrder(ctx, "delete", id, func(q querier, check bool) error { return c.delete(ctx, q, id, check) })
 }
 
 // delete deletes task id on q. check is for takeTask.
@@ -415,11 +415,22 @@ const lockOrderTries = 5
 //
 // The last try runs without takeTask's check, as CancelTx does, and returns
 // what it gets.
-func (c *Client) inLockOrder(ctx context.Context, fn func(q querier, check bool) error) error {
+//
+// fn's errors say what it was doing. The begin and the commit of the
+// transaction fail outside fn, so inLockOrder wraps their errors in the same
+// words: op, such as "cancel", and the task's id.
+func (c *Client) inLockOrder(ctx context.Context, op string, id int64, fn func(q querier, check bool) error) error {
 	for try := 1; ; try++ {
 		last := try == lockOrderTries
-		err := c.inTx(ctx, func(q querier) error { return fn(q, !last) })
+		var inFn error
+		err := c.inTx(ctx, func(q querier) error {
+			inFn = fn(q, !last)
+			return inFn
+		})
 		if last || !errors.Is(err, errLockOrder) && !isDeadlock(err) {
+			if err != nil && inFn == nil {
+				err = fmt.Errorf("taskmill: %s task %d: %w", op, id, err)
+			}
 			return err
 		}
 	}
