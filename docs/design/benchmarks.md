@@ -235,7 +235,7 @@ clock is not off by that much:
 printf 'FROM postgres:18-alpine\nRUN apk add --no-cache libfaketime\n' | docker build -t taskmill-faketime -
 docker run -d --name taskmill-bench-skew -p 54333:5432 \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill \
-  -e LD_PRELOAD=/usr/lib/faketime/libfaketime.so.1 -e FAKETIME=+5m -e DONT_FAKE_MONOTONIC=1 \
+  -e LD_PRELOAD=/usr/lib/faketime/libfaketime.so.1 -e FAKETIME=+5m -e DONT_FAKE_MONOTONIC=1 -e NO_FAKE_STAT=1 \
   taskmill-faketime
 go run ./internal/cmd/bench -db 'postgres://postgres:postgres@localhost:54333/taskmill?sslmode=disable' \
   -scenarios timing -skew 5m
