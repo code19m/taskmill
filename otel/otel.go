@@ -179,7 +179,7 @@ func (in *Instrumentation) EnqueueMiddleware(ctx context.Context, tasks []*taskm
 		span.SetAttributes(errType)
 		span.SetStatus(codes.Error, err.Error())
 		shared = append(shared, errType)
-	} else if len(tasks) == 1 {
+	} else if len(tasks) == 1 && tasks[0].Result.ID != 0 { // 0: a duplicate whose task could not be read
 		span.SetAttributes(semconv.MessagingMessageID(strconv.FormatInt(tasks[0].Result.ID, 10)))
 	}
 

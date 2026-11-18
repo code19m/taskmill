@@ -745,6 +745,33 @@ func TestWithoutASpanAnOldTraceContextIsRemoved(t *testing.T) {
 	}
 }
 
+func TestDuplicateWithoutAnIDHasNoMessageID(t *testing.T) {
+	t.Parallel()
+	spans := tracetest.NewSpanRecorder()
+	in := tmotel.New(&tmotel.Config{
+		TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)),
+		MeterProvider:  sdkmetric.NewMeterProvider(),
+		Propagator:     propagation.TraceContext{},
+	})
+	task := &taskmill.EnqueueTask{Queue: "emails", Kind: "email.send", Metadata: map[string]string{}}
+	err := in.EnqueueMiddleware(t.Context(), []*taskmill.EnqueueTask{task}, func(context.Context) error {
+		task.Result = taskmill.EnqueueResult{Duplicate: true} // the task that holds the key could not be read
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ended := spans.Ended()
+	if len(ended) != 1 {
+		t.Fatalf("got %d spans, want the send span", len(ended))
+	}
+	for _, a := range ended[0].Attributes() {
+		if a.Key == "messaging.message.id" {
+			t.Errorf("send span: got the message ID %q, want none: 0 is no task's ID", a.Value.AsString())
+		}
+	}
+}
+
 // wantProcess fails the test unless span traces an attempt of a task of the
 // emails queue as a consumer child of send, linked to it and then to the
 // ambient spans, those that the attempt's context already carried.
