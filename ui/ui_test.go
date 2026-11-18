@@ -465,7 +465,7 @@ func TestActions(t *testing.T) {
 	if rec := post(t, h, "/tasks/"+id+"/retry", "same-origin"); rec.Code != http.StatusSeeOther {
 		t.Fatalf("retry: %d", rec.Code)
 	}
-	if rec := post(t, h, "/queues/default/pause", "same-origin"); rec.Code != http.StatusSeeOther {
+	if rec := post(t, h, "/queues/pause?name=default", "same-origin"); rec.Code != http.StatusSeeOther {
 		t.Fatalf("pause: %d", rec.Code)
 	}
 	if rec := post(t, h, "/tasks/"+id+"/delete", "same-origin"); rec.Code != http.StatusSeeOther {
@@ -1017,103 +1017,147 @@ func TestReadOnly(t *testing.T) {
 	}
 }
 
-func TestQueueActionsWorkForAnyName(t *testing.T) {
+// A queue or a schedule may have any name, and the buttons of its row must
+// act on it whatever the name holds: a colon, which starts an address with a
+// scheme; dots, which a browser resolves out of a path; the characters that
+// end a path or an attribute; or a line break. The test sends each form as
+// the page renders it, to the address that a browser makes of its action.
+func TestActionsWorkForAnyName(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
-	ctx := t.Context()
-	const name = "a/b?c#d%2Fe"
-	if err := client.UpdateQueue(ctx, name, func(*taskmill.QueueSettings) {}); err != nil {
-		t.Fatal(err)
+	names := []string{"emails:high", ".", "..", "a/b?c#d%2Fe", `x"><script>`, "two\nlines"}
+	schedules := make([]taskmill.Schedule, len(names))
+	for i, name := range names {
+		if err := client.UpdateQueue(t.Context(), name, func(*taskmill.QueueSettings) {}); err != nil {
+			t.Fatal(err)
+		}
+		schedules[i] = taskmill.Schedule{Name: name, Cron: "@daily", Args: greet{}}
 	}
+	storeSchedules(t, client, schedules)
 	h := handler(t, client, &ui.Config{Prefix: "/admin"})
+	due := func(sc taskmill.ScheduleInfo) bool { return !sc.NextRunAt.After(time.Now()) }
+	paused := func(sc taskmill.ScheduleInfo) bool { return sc.Paused }
 
-	_, body, _ := get(t, h, "/admin/")
-	m := regexp.MustCompile(`action="([^"]*/pause)"`).FindStringSubmatch(body)
-	if m == nil {
-		t.Fatalf("no pause form in\n%s", body)
-	}
-	if rec := post(t, h, html.UnescapeString(m[1]), "same-origin"); rec.Code != http.StatusSeeOther {
-		t.Fatalf("pause: got %d", rec.Code)
-	}
-	queues, err := client.Queues(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, q := range queues {
-		if q.Paused != (q.Name == name) {
-			t.Fatalf("queue %q paused: %v", q.Name, q.Paused)
+	for _, name := range names {
+		send(t, h, rowForms(t, h, "/admin/", name)["Pause"], http.StatusSeeOther)
+		if got := pausedQueues(t, client); !slices.Equal(got, []string{name}) {
+			t.Fatalf("after Pause on the queue %q, the queues %q are paused", name, got)
+		}
+		send(t, h, rowForms(t, h, "/admin/", name)["Resume"], http.StatusSeeOther)
+		if got := pausedQueues(t, client); len(got) != 0 {
+			t.Fatalf("after Resume on the queue %q, the queues %q are paused", name, got)
+		}
+
+		before := rowForms(t, h, "/admin/schedules", name)
+		send(t, h, before["Run now"], http.StatusSeeOther)
+		if got := schedulesThat(t, client, due); !slices.Contains(got, name) {
+			t.Fatalf("after Run now on the schedule %q, the schedules %q are due", name, got)
+		}
+		send(t, h, before["Pause"], http.StatusSeeOther)
+		if got := schedulesThat(t, client, paused); !slices.Equal(got, []string{name}) {
+			t.Fatalf("after Pause on the schedule %q, the schedules %q are paused", name, got)
+		}
+		send(t, h, before["Run now"], http.StatusConflict) // a paused schedule does not run
+		send(t, h, rowForms(t, h, "/admin/schedules", name)["Resume"], http.StatusSeeOther)
+		if got := schedulesThat(t, client, paused); len(got) != 0 {
+			t.Fatalf("after Resume on the schedule %q, the schedules %q are paused", name, got)
 		}
 	}
 }
 
-func TestScheduleActionsWorkForAnyName(t *testing.T) {
-	t.Parallel()
-	client := setup(t)
-	ctx := t.Context()
-	const name = "a/b?c#d%2Fe"
-
-	// A worker stores its schedules in its first maintenance cycle.
-	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
-		Schedules: []taskmill.Schedule{{Name: name, Cron: "@daily", Args: greet{}}},
-	})
+// storeSchedules runs a worker until it has stored the schedules, which it
+// does in its first maintenance cycle.
+func storeSchedules(t *testing.T, client *taskmill.Client, schedules []taskmill.Schedule) {
+	t.Helper()
+	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Schedules: schedules})
 	if err != nil {
 		t.Fatal(err)
 	}
-	wctx, stop := context.WithCancel(ctx)
+	ctx, stop := context.WithCancel(t.Context())
 	done := make(chan error, 1)
-	go func() { done <- w.Run(wctx) }()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		ss, err := client.Schedules(ctx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(ss) == 1 {
-			break
-		}
+	go func() { done <- w.Run(ctx) }()
+	for deadline := time.Now().Add(15 * time.Second); len(schedulesThat(t, client, nil)) < len(schedules); time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatal("the schedule was not stored")
+			t.Fatal("the schedules were not stored")
 		}
-		time.Sleep(20 * time.Millisecond)
 	}
 	stop()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
 
-	h := handler(t, client, &ui.Config{Prefix: "/admin"})
-	_, body, _ := get(t, h, "/admin/schedules")
-	form := func(action string) string {
-		m := regexp.MustCompile(`action="([^"]*/schedules/[^"]*/` + action + `)"`).FindStringSubmatch(body)
-		if m == nil {
-			t.Fatalf("no schedule %s form in\n%s", action, body)
-		}
-		return html.UnescapeString(m[1])
-	}
-	run, pause := form("run"), form("pause")
-
-	if rec := post(t, h, run, "same-origin"); rec.Code != http.StatusSeeOther {
-		t.Fatalf("run now: got %d", rec.Code)
-	}
-	ss, err := client.Schedules(ctx)
+// schedulesThat returns the names of the schedules that match, or of all
+// schedules without a match.
+func schedulesThat(t *testing.T, client *taskmill.Client, match func(taskmill.ScheduleInfo) bool) []string {
+	t.Helper()
+	stored, err := client.Schedules(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ss) != 1 || ss[0].NextRunAt.After(time.Now()) {
-		t.Fatalf("run now left the schedule not due: %+v", ss)
+	var names []string
+	for _, sc := range stored {
+		if match == nil || match(sc) {
+			names = append(names, sc.Name)
+		}
 	}
+	return names
+}
 
-	if rec := post(t, h, pause, "same-origin"); rec.Code != http.StatusSeeOther {
-		t.Fatalf("pause: got %d", rec.Code)
-	}
-	if ss, err = client.Schedules(ctx); err != nil {
+// pausedQueues returns the names of the queues that are paused.
+func pausedQueues(t *testing.T, client *taskmill.Client) []string {
+	t.Helper()
+	queues, err := client.Queues(t.Context())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ss) != 1 || ss[0].Name != name || !ss[0].Paused {
-		t.Fatalf("got %+v", ss)
+	var names []string
+	for _, q := range queues {
+		if q.Paused {
+			names = append(names, q.Name)
+		}
 	}
-	if rec := post(t, h, run, "same-origin"); rec.Code != http.StatusConflict {
-		t.Fatalf("run now while paused: got %d, want %d", rec.Code, http.StatusConflict)
+	return names
+}
+
+var (
+	tableRow  = regexp.MustCompile(`(?s)<tr data-key="([^"]*)">(.*?)</tr>`)
+	rowButton = regexp.MustCompile(`(?s)<form method="post" action="([^"]*)"[^>]*><button[^>]*><svg.*?</svg>([^<]*)</button></form>`)
+)
+
+// rowForms returns where each button in the table row of name sends its
+// form, on the page at target, by the button's text. It reads the form's
+// action from the page, and resolves it against the page's address, as a
+// browser does.
+func rowForms(t *testing.T, h http.Handler, target, name string) map[string]string {
+	t.Helper()
+	page, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := get(t, h, target)
+	found := map[string]string{}
+	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {
+		if html.UnescapeString(row[1]) != name {
+			continue
+		}
+		for _, form := range rowButton.FindAllStringSubmatch(row[2], -1) {
+			action, err := page.Parse(html.UnescapeString(form[1]))
+			if err != nil {
+				t.Fatalf("%s: the action %q in the row of %q: %v", target, form[1], name, err)
+			}
+			found[form[2]] = action.RequestURI()
+		}
+	}
+	return found
+}
+
+// send posts a form to its action, from the page's own origin, and checks
+// the status of the answer.
+func send(t *testing.T, h http.Handler, action string, want int) {
+	t.Helper()
+	if rec := post(t, h, action, "same-origin"); rec.Code != want {
+		t.Fatalf("POST %q: status %d, want %d", action, rec.Code, want)
 	}
 }
 
@@ -1166,8 +1210,9 @@ func TestPrefixKeepsRequestsAndRedirects(t *testing.T) {
 		{http.MethodGet, "/tm//example.com/x", http.StatusTemporaryRedirect, "/tm/example.com/x"},
 		{http.MethodGet, "/tm/../tasks", http.StatusTemporaryRedirect, "/tm/tasks"},
 		{http.MethodPost, "/tm//tasks/1/retry", http.StatusTemporaryRedirect, "/tm/tasks/1/retry"},
-		// An escaped slash is part of a name, here of the queue "a//b".
-		{http.MethodPost, "/tm/queues/a%2F%2Fb/pause", http.StatusSeeOther, ""},
+		// An escaped slash is part of a name, here of a static file that
+		// does not exist, and not of the path's shape.
+		{http.MethodGet, "/tm/static/a%2F%2Fb", http.StatusNotFound, ""},
 		// A path that only starts like the prefix is not under it.
 		{http.MethodGet, "/tmx/tasks", http.StatusNotFound, ""},
 		{http.MethodGet, "/tasks", http.StatusNotFound, ""},
@@ -1239,7 +1284,7 @@ func TestActionNotices(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
 	h := handler(t, client, nil)
-	rec := post(t, h, "/queues/default/pause", "same-origin")
+	rec := post(t, h, "/queues/pause?name=default", "same-origin")
 	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/?done=queue-pause" {
 		t.Fatalf("pause: %d to %q", rec.Code, rec.Header().Get("Location"))
 	}

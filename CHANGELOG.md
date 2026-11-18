@@ -23,6 +23,29 @@ All notable changes to taskmill are recorded here. The format follows
   numbers, so it sees no change. If you apply the migrations with a tool
   that stores a checksum of each file, such as Flyway or Atlas, the
   checksum of this one file changes: repair it with your tool.
+- The dashboard's actions on queues and schedules have new addresses: the
+  name is now in the query, not in the path. `POST /queues/pause?name=emails`
+  replaces `POST /queues/emails/pause`, and `resume` changes the same way.
+  So do `pause`, `resume`, and `run` under `/schedules`. The dashboard's
+  own buttons use the new addresses. If a proxy allows these routes by
+  their path, or a script of yours sends them, change it:
+  [Dashboard routes](docs/reference/taskmill-ui.md#dashboard-routes) lists
+  them. If your admin app logs the path of each action, log the query too:
+  the path no longer names the queue or the schedule, as the recipe
+  [One dashboard for many services](docs/recipes/one-dashboard-for-many-services.md)
+  now shows. While both releases serve one dashboard during a rolling
+  deploy, these buttons can answer "Not found": try again when the deploy
+  is done.
+
+### Fixed
+
+- The dashboard's Pause and Resume buttons of a queue, and the Pause,
+  Resume, and Run now buttons of a schedule, failed when the name
+  held a colon, as `emails:high` does. The page wrote `#ZgotmplZ` in place
+  of the name into the form's address, and the answer was "Not found". For
+  a queue or a schedule named `.` or `..`, the browser resolved the dots
+  out of the address, with the same answer. The buttons now work for every
+  name: a query can carry any text, and a path cannot.
 
 ### Fixed
 

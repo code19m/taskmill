@@ -182,8 +182,8 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	mux.HandleFunc("POST /tasks/{id}/{action}", s.taskAction)
 	mux.HandleFunc("GET /tasks/bulk/{action}", s.bulkPage)
 	mux.HandleFunc("POST /tasks/bulk/{action}", s.bulkAction)
-	mux.HandleFunc("POST /queues/{name}/{action}", s.queueAction)
-	mux.HandleFunc("POST /schedules/{name}/{action}", s.scheduleAction)
+	mux.HandleFunc("POST /queues/{action}", s.queueAction)
+	mux.HandleFunc("POST /schedules/{action}", s.scheduleAction)
 
 	var h http.Handler = mux
 	if s.prefix != "" {
@@ -991,13 +991,17 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 	s.finishAction(w, r, err, target, notice, notice+" task", strconv.FormatInt(id, 10))
 }
 
+// queueAction pauses or resumes the queue that the query names. A name is
+// any text, and a path cannot carry every name: a browser resolves a segment
+// of dots away, escaped or not. So the name travels as the filters of a bulk
+// action do.
 func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
 		return
 	}
 	var err error
 	var notice, action string
-	name := r.PathValue("name")
+	name := r.URL.Query().Get("name")
 	switch r.PathValue("action") {
 	case "pause":
 		err, notice, action = s.client.PauseQueue(r.Context(), name), "queue-pause", "pause queue"
@@ -1010,13 +1014,15 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 	s.finishAction(w, r, err, "/", notice, action, name)
 }
 
+// scheduleAction pauses, resumes, or runs the schedule that the query names,
+// as queueAction names its queue.
 func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
 		return
 	}
 	var err error
 	var notice, action string
-	name := r.PathValue("name")
+	name := r.URL.Query().Get("name")
 	switch r.PathValue("action") {
 	case "pause":
 		err, notice, action = s.client.PauseSchedule(r.Context(), name), "schedule-pause", "pause schedule"
@@ -1296,9 +1302,6 @@ func (s *server) funcs() template.FuncMap {
 		"period":    period,
 		"dict":      dict,
 		"lower":     strings.ToLower,
-		// segment escapes a name for one path segment: queue and schedule
-		// names may hold /, ?, #, or %.
-		"segment": url.PathEscape,
 		"query": func(pairs ...string) string {
 			v := url.Values{}
 			for i := 0; i+1 < len(pairs); i += 2 {

@@ -90,13 +90,13 @@ allow-list, or to link to a page from an alert.
 | `GET /tasks/bulk/{action}` | The page that confirms a bulk action. It counts the tasks first | The filters of `/tasks`, at least one |
 | `POST /tasks/bulk/{action}` | Retries, cancels, or deletes every task that the filters select. `{action}` is `retry`, `cancel`, or `delete` | The filters of `/tasks`, at least one |
 | `POST /tasks/{id}/{action}` | Retries, cancels, or deletes one task | — |
-| `POST /queues/{name}/{action}` | Pauses or resumes a queue. `{action}` is `pause` or `resume` | — |
-| `POST /schedules/{name}/{action}` | Pauses, resumes, or runs a schedule. `{action}` is `pause`, `resume`, or `run` | — |
+| `POST /queues/{action}` | Pauses or resumes a queue. `{action}` is `pause` or `resume` | `name`: the queue |
+| `POST /schedules/{action}` | Pauses, resumes, or runs a schedule. `{action}` is `pause`, `resume`, or `run` | `name`: the schedule |
 | `GET /choices/groups` | A JSON list of up to 100 FIFO group keys, for the group filter | `search`: text that the keys contain |
 | `GET /static/{name}` | The scripts, the styles, and the icon | `v`: the file's version |
 
 For example, `/tasks?state=dead&queue=emails` lists the dead tasks of the
-queue `emails`.
+queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.
 
 - **Every action is a `POST`.** A `GET` never changes anything.
 - **`theme` works on every page:** `?theme=light`, `dark`, or `system`. The
