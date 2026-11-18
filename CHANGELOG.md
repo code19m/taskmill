@@ -117,6 +117,14 @@ All notable changes to taskmill are recorded here. The format follows
   often. A worker that leads now ignores that notification, and another
   worker follows it at most once in 2 seconds. A maintainer that stops is
   still replaced right away.
+- taskmill now requires pgx v5.13.0, which fixes a vulnerability in pgx:
+  `Rows.Values` panicked on a row with fewer values than the server had
+  declared
+  ([GHSA-w9rp-vfrh-q8vv](https://github.com/jackc/pgx/security/advisories/GHSA-w9rp-vfrh-q8vv)).
+  taskmill does not call `Rows.Values`. Your application may, so upgrade.
+  pgx v5.13.0 also loads a client certificate from its files again for each
+  new connection: if your code replaces the parsed `TLSConfig`, read the
+  changes in [pgx's changelog](https://github.com/jackc/pgx/blob/master/CHANGELOG.md).
 
 ## [0.8.0] - 2026-11-16
 
