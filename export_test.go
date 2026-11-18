@@ -136,11 +136,7 @@ func ExplainPromote(ctx context.Context, c *Client) (string, error) {
 // attempts: those of a batch of attempts, and those of one.
 func ExplainLeased(ctx context.Context, c *Client) (string, error) {
 	var plans []string
-	for _, s := range append(leased(c, []int64{1, 2, 3}, []int32{1, 1, 1}), []statement{
-		{c.sql.fail, []any{int64(1), int32(1), "retryable", int64(1), `{"message": "m"}`}},
-		{c.sql.snooze, []any{int64(1), int32(1), int64(1), nil, true}},
-		{c.sql.release, []any{int64(1), int32(1), true}},
-	}...) {
+	for _, s := range append(leased(c, []int64{1, 2, 3}, []int32{1, 1, 1}), ended(c, 1, 1)...) {
 		plan, err := explain(ctx, c, "", s.sql, s.args...)
 		if err != nil {
 			return "", err
@@ -168,6 +164,16 @@ func leased(c *Client, ids []int64, tokens []int32) []statement {
 	}
 }
 
+// ended returns the statements that end the attempt (id, token) without
+// completing its task: the failure, the snooze, and the release.
+func ended(c *Client, id int64, token int32) []statement {
+	return []statement{
+		{c.sql.fail, []any{id, token, "retryable", int64(1), `{"message": "m"}`}},
+		{c.sql.snooze, []any{id, token, int64(1), nil, true}},
+		{c.sql.release, []any{id, token, true}},
+	}
+}
+
 // LeasedRowsRead runs the statements that find a batch of tasks by their
 // attempts (ids, tokens), with their generic plans, under EXPLAIN ANALYZE,
 // each in a transaction that it rolls back. It returns how many rows of
@@ -192,8 +198,17 @@ func LeasedRowsRead(ctx context.Context, c *Client, ids []int64, tokens []int32)
 // LeasedFound runs the same statements in one transaction, in that order,
 // the completion last. It returns the IDs of the rows that each one
 // returned, sorted.
-func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (found [4][]int64, err error) {
+//
+// Before them, it runs the statements that end one attempt: the failure, the
+// snooze, and the release. The IDs of the attempts for which each of these
+// found a task come after the others, sorted.
+func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (found [7][]int64, err error) {
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
+		one, err := endedFound(ctx, c, tx, ids, tokens)
+		if err != nil {
+			return err
+		}
+		copy(found[4:], one[:])
 		for i, s := range leased(c, ids, tokens) {
 			r, err := tx.Query(ctx, s.sql, s.args...)
 			if err != nil {
@@ -210,11 +225,39 @@ func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (f
 			if err != nil {
 				return err
 			}
+		}
+		for i := range found {
 			slices.Sort(found[i])
 		}
 		return nil
 	})
 	return found, err
+}
+
+// endedFound runs the statements that end one attempt, each for every
+// attempt (ids, tokens) in turn, in tx. Such a statement changes the task
+// that it finds, so tx undoes each one again. It returns the IDs of the
+// attempts for which each statement found a task.
+func endedFound(ctx context.Context, c *Client, tx pgx.Tx, ids []int64, tokens []int32) (found [3][]int64, err error) {
+	for i, id := range ids {
+		for j, s := range ended(c, id, tokens[i]) {
+			undo, err := tx.Begin(ctx) // a savepoint
+			if err != nil {
+				return found, err
+			}
+			ok, err := queryRow(ctx, pgxQuerier{q: undo}, s.sql, s.args, new(string), new(string), new(string))
+			if err != nil {
+				return found, err
+			}
+			if err := undo.Rollback(ctx); err != nil {
+				return found, err
+			}
+			if ok {
+				found[j] = append(found[j], id)
+			}
+		}
+	}
+	return found, nil
 }
 
 // Complete completes the attempts with the IDs ids, each with the lease
