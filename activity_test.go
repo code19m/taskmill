@@ -89,6 +89,42 @@ func TestActivitySteps(t *testing.T) {
 	}
 }
 
+// The maintainer counts the tasks several times a minute, and a minute of
+// activity keeps the most that it counted in each state. So a queue that
+// fills and drains within a minute still shows in the chart.
+func TestActivityKeepsTheMostTasksCountedInAMinute(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{})
+	ctx := t.Context()
+	refresh := func() {
+		t.Helper()
+		if err := taskmill.RefreshStats(ctx, w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 5 {
+		e.enqueue(t, sendEmail{}, nil)
+	}
+	refresh()
+	e.exec(t, "DELETE FROM {s}.tasks WHERE id > (SELECT min(id) FROM {s}.tasks)")
+	refresh()
+
+	// The two refreshes ran in one minute, or in two: the first one's count
+	// is the most of its minute either way.
+	points, err := e.client.Activity(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var most int64
+	for _, p := range points {
+		most = max(most, p.Counts[taskmill.StateAvailable])
+	}
+	if most != 5 {
+		t.Fatalf("the activity shows at most %d available tasks, want the 5 counted first: %+v", most, points)
+	}
+}
+
 // counts returns the counts of a step in which the scheduled and available
 // tasks were the given numbers, and no others.
 func counts(scheduled, available int64) map[taskmill.State]int64 {

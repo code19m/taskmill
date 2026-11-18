@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"reflect"
 	"slices"
 	"strconv"
@@ -309,6 +310,30 @@ func TestDefaultTiming(t *testing.T) {
 	}
 	if fields := reflect.TypeFor[timing]().NumField(); fields != len(intervals) {
 		t.Errorf("timing has %d intervals, and this test holds %d: add the new one", fields, len(intervals))
+	}
+}
+
+// A task can be due further away than a Duration holds, and in a row that
+// taskmill did not write, at no time at all. Converted first and limited
+// after, as before, such a number gave the shortest sleep on amd64, so the
+// maintainer looked for due tasks 20 times a second, for good.
+func TestSleepUntilDueLimitsTheSecondsFirst(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		secs float64
+		want time.Duration
+	}{
+		{0.25, 250 * time.Millisecond},
+		{0.001, minMaintainerSleep},
+		{-3600, minMaintainerSleep}, // a due task that the last promotion left, such as a locked one
+		{math.Inf(-1), minMaintainerSleep},
+		{30, time.Second},
+		{1e13, time.Second},        // about 300,000 years: RunAt may be in the year 294276
+		{math.Inf(1), time.Second}, // PostgreSQL 17 and later subtract infinite times
+	} {
+		if got := sleepUntilDue(tt.secs, time.Second); got != tt.want {
+			t.Errorf("sleepUntilDue(%g) = %s, want %s", tt.secs, got, tt.want)
+		}
 	}
 }
 

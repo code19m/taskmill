@@ -162,6 +162,24 @@ All notable changes to taskmill are recorded here. The format follows
   schedule is deleted only when no maintainer has defined it for about a
   day. This holds once a maintainer of this release that defines the
   schedule has applied retention, which it does every minute.
+- A task that is due more than about 292 years from now no longer makes
+  the maintainer look for due tasks 20 times a second, for good. `RunAt`
+  accepts times up to the year 294276. While such a task was the next one
+  due, the wait until then did not fit the type that held it, and on
+  amd64 processors the maintainer slept its shortest time, 50
+  milliseconds, between two looks. It now sleeps a second, as when no task
+  is due soon.
+- Two maintainers that refresh the queue statistics at the same time now
+  both store their counts. Two workers can be the maintainer for a moment,
+  for example after a lease ran out on a slow database. One refresh then
+  failed with a duplicate key on `queue_stats_pkey` (SQLSTATE `23505`), and
+  its worker logged `operation failed` for `refresh statistics`. The stored
+  statistics were right all the same. A refresh now waits for the other.
+- `Activity.Counts` holds the most tasks counted in each state during the
+  step, as its comment says. Within a minute, each count replaced the one
+  before, so a minute kept only its last count. A queue that filled and
+  emptied again within a minute did not show in `Client.Activity`, nor in
+  the dashboard's charts.
 
 ### Security
 

@@ -117,6 +117,7 @@ type statements struct {
 	listGroups       string
 	listQueueGroups  string
 	countStats       string
+	lockStats        string
 	clearStats       string
 	storeStats       string
 	storeActivity    string
@@ -1451,6 +1452,23 @@ UNION ALL
 SELECT d.state::text, d.queue, d.tasks, d.oldest, NULL, f.most
 FROM due d LEFT JOIN failures f ON d.state = 'retryable' AND f.queue = d.queue`),
 
+		// lockStats lets one refresh at a time replace the statistics, while
+		// everyone reads them. Two maintainers whose terms overlap can
+		// refresh at the same time. Without the lock, the second one's delete
+		// waits for the first refresh, and then sees neither the rows that
+		// it deleted nor the ones that it stored, so its insert fails on
+		// those. With it, the second refresh waits here, and its delete sees
+		// what the first one stored: the table always holds the counts of
+		// exactly one refresh. An insert that updates on conflict would
+		// keep the rows that only the first refresh stored.
+		//
+		// A maintainer of a release without the lock takes its turn too: its
+		// delete waits for the lock, and the lock for its transaction. Only
+		// the maintainer writes the table, so the lock keeps nothing else
+		// waiting but a vacuum of this small table. And only a role that may
+		// change the table can take it, unlike an advisory lock, which any
+		// role may take and hold.
+		lockStats:  q(`LOCK TABLE {s}.queue_stats IN SHARE ROW EXCLUSIVE MODE`),
 		clearStats: q(`DELETE FROM {s}.queue_stats`),
 		// storeStats stores the counts, with their halted groups ($7) and
 		// most failures ($8), and a zero available count for every other
@@ -1479,8 +1497,12 @@ WHERE $6 AND NOT EXISTS (SELECT FROM u WHERE u.q = k.name AND u.s = d.s)`),
 		// storeActivity copies the counts just stored in queue_stats into the
 		// current minute's activity, with zeros for every other known queue,
 		// so that an empty queue reads as empty rather than as not counted.
-		// A later refresh in the same minute overwrites them. Rows are locked
-		// in the byte order of their queue names, the order workers use too.
+		// A later refresh in the same minute keeps the higher count of each
+		// state, so the minute holds the most tasks counted in it: a queue
+		// that fills and drains within a minute shows. A count is NULL in a
+		// row that only a worker's attempts made so far, and greatest skips
+		// it. Rows are locked in the byte order of their queue names, the
+		// order workers use too.
 		storeActivity: q(`
 INSERT INTO {s}.activity AS a (minute, queue, scheduled, pending, available, running, retryable, dead, canceled)
 SELECT date_trunc('minute', now()), n.queue,
@@ -1498,9 +1520,10 @@ LEFT JOIN {s}.queue_stats s ON s.queue = n.queue
 GROUP BY n.queue
 ORDER BY n.queue COLLATE "C"
 ON CONFLICT (minute, queue) DO UPDATE
-SET scheduled = excluded.scheduled, pending = excluded.pending, available = excluded.available,
-    running = excluded.running, retryable = excluded.retryable, dead = excluded.dead,
-    canceled = excluded.canceled`),
+SET scheduled = greatest(a.scheduled, excluded.scheduled), pending = greatest(a.pending, excluded.pending),
+    available = greatest(a.available, excluded.available), running = greatest(a.running, excluded.running),
+    retryable = greatest(a.retryable, excluded.retryable), dead = greatest(a.dead, excluded.dead),
+    canceled = greatest(a.canceled, excluded.canceled)`),
 
 		// addActivity adds a worker's counts of ended attempts to their
 		// minutes. The caller sorts the rows by minute, then by the bytes of

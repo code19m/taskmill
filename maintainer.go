@@ -400,8 +400,17 @@ func (m *maintainer) untilNextDue(ctx context.Context) time.Duration {
 	if err := m.c.pool.QueryRow(ctx, m.c.sql.nextDue).Scan(&secs); err != nil || secs == nil {
 		return m.w.timing.maintainer
 	}
-	d := time.Duration(*secs * float64(time.Second))
-	return min(max(d, minMaintainerSleep), m.w.timing.maintainer)
+	return sleepUntilDue(*secs, m.w.timing.maintainer)
+}
+
+// sleepUntilDue returns the sleep before a task that is due in secs seconds:
+// at least minMaintainerSleep, and at most limit. It limits the seconds, not
+// the Duration that they make. A run time can be further away than a Duration
+// holds, about 292 years, and Go leaves open what such a number becomes: on
+// amd64 the lowest Duration, which gave the shortest sleep, time after time.
+func sleepUntilDue(secs float64, limit time.Duration) time.Duration {
+	secs = min(max(secs, minMaintainerSleep.Seconds()), limit.Seconds())
+	return time.Duration(secs * float64(time.Second))
 }
 
 // refreshStats counts each queue's tasks per state, up to the caps, finds
@@ -494,8 +503,13 @@ func readStats(ctx context.Context, tx pgx.Tx, sql string) (*counted, error) {
 }
 
 // store replaces the stored statistics with c, and copies its counts into
-// the current minute's activity.
+// the current minute's activity. One refresh stores at a time, so that two
+// maintainers whose terms overlap both store what they counted: see
+// lockStats.
 func (c *counted) store(ctx context.Context, tx pgx.Tx, sql *statements) error {
+	if _, err := tx.Exec(ctx, sql.lockStats); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, sql.clearStats); err != nil {
 		return err
 	}
