@@ -445,16 +445,12 @@ func (c *Client) nextBatch(ctx context.Context, m *matching, batch batchFunc) (s
 // reads each task once.
 //
 // The statement runs in a transaction of its own with windowSettings, all in
-// one round trip.
+// one round trip: see readAlone.
 func (c *Client) nextWindow(ctx context.Context, m *matching) error {
-	b := &pgx.Batch{}
-	b.Queue("BEGIN")
-	b.Queue(windowSettings)
-	b.Queue(c.sql.windowEnd, m.after, m.last, len(m.states) > 0, m.history).QueryRow(func(row pgx.Row) error {
-		return row.Scan(&m.until)
+	args := []any{m.after, m.last, len(m.states) > 0, m.history}
+	return c.readAlone(ctx, windowSettings, c.sql.windowEnd, args, func(r pgx.Rows) error {
+		return r.Scan(&m.until)
 	})
-	b.Queue("COMMIT")
-	return c.pool.SendBatch(ctx, b).Close()
 }
 
 // runBatch runs batch in a transaction of its own, which starts with
