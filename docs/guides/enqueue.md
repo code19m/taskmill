@@ -123,8 +123,8 @@ Each call returns an `EnqueueResult` per task:
 - `ID` is the task's ID. Keep it if you want to cancel the task later, or
   to find it with `client.Get`.
 - `Duplicate` is true when a dedupe key was already taken. Then no task was
-  created, and `ID` names the task that took the key:
-  [Avoid duplicate tasks](deduplication.md) says more.
+  created, and `ID` names the task that took the key, or is 0 in a rare
+  race: [Avoid duplicate tasks](deduplication.md) says more.
 
 ## Enqueue many tasks in one call
 

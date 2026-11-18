@@ -33,6 +33,10 @@ checking first: a retried request or a redelivered message does no harm.
 - Two [producers](../concepts/glossary.md#producer) can enqueue the same key
   at the same time. The second waits for the first one's transaction, so
   only one task is created. Keep these transactions short.
+- After such a wait, the duplicate's `ID` can be 0, so test `Duplicate`,
+  not `ID`:
+  [`EnqueueResult`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueResult)
+  says when.
 - The task that took the key can be gone when you look for it. A completed
   task is deleted when its history is dropped, or right away if its kind
   uses `DiscardCompleted`. Then `client.Get` returns `ErrNotFound` for that

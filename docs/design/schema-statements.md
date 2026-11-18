@@ -20,6 +20,20 @@ FIFO groups go through one that also claims the keys and counts the groups
 other batches go through a lean one. Both reserve IDs from the
 `tasks_id_seq` identity sequence first, so results map back to their inputs.
 
+**A second statement only fills in an ID.** It reads the task of a dedupe
+key that another transaction took while the first statement waited for it.
+By then the batch is stored, and on the client's pool it is committed. So
+`Enqueue` and `EnqueueMany` log a read that fails, and return the duplicate
+with the ID 0, as they do when the task that took the key was canceled or
+deleted meanwhile. An error would say that nothing was stored, and the
+caller's next try would store the tasks without a key a second time. In the
+caller's transaction the enqueue returns the error, and the caller rolls
+back.
+
+We rejected a read that outlives the caller's context, and a second try of
+the read. Both make a call that is done wait for an ID, and a caller must
+handle the ID 0 anyway.
+
 ## Fetch
 
 The fetch statement, with its list of returned columns shortened. The `least`

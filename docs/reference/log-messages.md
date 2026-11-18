@@ -138,6 +138,7 @@ backticks.
 | `complete tasks failed; they are rescued when their leases run out` | Warn | `tasks` successful attempts could not be saved. Those tasks run again. | Check the database. |
 | `handler failed after completing its task; it stays completed` | Warn | The handler returned an error after its `CompleteTx` transaction committed. | Return nil once the transaction has committed. |
 | `enqueue middleware failed after the tasks were enqueued` | Warn | An enqueue middleware returned `error` after `tasks` tasks committed. The enqueue succeeded, but the middleware's work, such as a span, may be missing. | Fix the middleware. |
+| `find duplicates failed after the enqueue committed; the duplicates have no ID` | Warn | An enqueue found `tasks` of its dedupe keys taken at the same moment, and could not read the IDs of the tasks that took them. The enqueue succeeded, and created no task for those keys. Their results have `Duplicate` set and the ID 0. | Nothing, unless it repeats: then check the database. |
 | `fifo group missing` | Error | A task left its FIFO group in `queue` and `group`, or halted it, and the group has no row. `task_id` names the task, unless several tasks left the group together. The task still ended as it should. This should never happen. | Please [report it](https://github.com/code19m/taskmill/issues). |
 
 ### The maintainer

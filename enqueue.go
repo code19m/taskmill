@@ -117,6 +117,15 @@ type EnqueueParams struct {
 type EnqueueResult struct {
 	// ID identifies the task: the new one, or the existing one for a
 	// duplicate.
+	//
+	// It is 0 for a duplicate whose existing task could not be read. That
+	// can happen only when another transaction took the key while the
+	// enqueue ran: the enqueue then reads the key a second time. The ID is 0
+	// if the task that took the key was canceled or deleted meanwhile, or if
+	// that read failed. [Client.Enqueue] and [Client.EnqueueMany] have
+	// committed by then, so they log a failed read and return no error. In
+	// the caller's transaction, the enqueue returns the error of a failed
+	// read, so that the caller can roll back.
 	ID int64
 
 	// Duplicate reports that the DedupeKey was already taken, so no task was
@@ -166,7 +175,8 @@ type EnqueueTask struct {
 // Enqueue enqueues one task in its own transaction, and returns the task's
 // ID. opts may be nil: [EnqueueOptions] has the options and their defaults.
 // If the options set a DedupeKey that is taken, Enqueue creates no task: the
-// result holds the ID of the existing task, and its Duplicate is true.
+// result holds the ID of the existing task, and its Duplicate is true. In a
+// rare race that ID is 0: see [EnqueueResult.ID].
 //
 // The [ClientConfig.EnqueueMiddleware] runs around the enqueue. The enqueue
 // notifies the workers of a task that may start now, so a worker with a free
@@ -399,6 +409,9 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		}
 	}
 
+	// Only on the client's own pool is the enqueue statement known to be a
+	// transaction of its own: any other executor may be in the caller's.
+	own := q == querier(pgxQuerier{q: c.pool})
 	var results []EnqueueResult
 	var missing [][]byte // duplicates whose existing task the statement could not see
 	var err error
@@ -410,7 +423,7 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		// statement is a transaction of its own, so nothing of it stays,
 		// and it runs again, as Cancel does: see inLockOrder. In the
 		// caller's transaction it cannot: that transaction is over.
-		if try == lockOrderTries || !isDeadlock(err) || q != querier(pgxQuerier{q: c.pool}) {
+		if try == lockOrderTries || !isDeadlock(err) || !own {
 			break
 		}
 	}
@@ -419,7 +432,15 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 	}
 	if len(missing) > 0 {
 		if err := c.resolveDuplicates(ctx, q, b, results, missing); err != nil {
-			return nil, err
+			if !own {
+				return nil, err // the caller rolls back
+			}
+			// The tasks are committed, and the read only fills in IDs. An
+			// error would say that nothing was stored, and a caller that
+			// then enqueues again would store the tasks without a dedupe
+			// key twice.
+			c.logger.LogAttrs(ctx, slog.LevelWarn, "find duplicates failed after the enqueue committed; the duplicates have no ID",
+				slog.Int(logKeyTasks, len(missing)), slog.Any(logKeyError, err))
 		}
 	}
 	return results, nil
@@ -468,7 +489,10 @@ func enqueueError(err error) error {
 }
 
 // resolveDuplicates finds the existing tasks of dedupe keys that a concurrent
-// enqueue committed while the enqueue statement ran.
+// enqueue committed while the enqueue statement ran, and sets their IDs in
+// results. A key that has no row any more, because its task was canceled or
+// deleted meanwhile, leaves its duplicates with the ID 0. So does every key
+// if the read fails.
 func (c *Client) resolveDuplicates(ctx context.Context, q querier, b *enqueueBatch, results []EnqueueResult, keys [][]byte) error {
 	r, err := q.query(ctx, c.sql.dedupeLookup, keys)
 	if err != nil {
