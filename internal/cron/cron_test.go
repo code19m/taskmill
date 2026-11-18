@@ -117,6 +117,26 @@ func nextRuns(s *Schedule, start, end time.Time) []time.Time {
 	}
 }
 
+// wantNextBetween fails the test at the first instant between two runs that
+// follow each other from which Next does not find the later one: the
+// maintainer calls Next at any moment, not only at a run. It tries 30
+// seconds after the earlier run, halfway, and 30 seconds before the later
+// one, which is after the clock change for a run that the change moved.
+func wantNextBetween(t *testing.T, expr string, s *Schedule, runs []time.Time) {
+	t.Helper()
+	for i := 1; i < len(runs); i++ {
+		earlier, later := runs[i-1], runs[i]
+		between := []time.Time{earlier.Add(30 * time.Second), earlier.Add(later.Sub(earlier) / 2), later.Add(-30 * time.Second)}
+		for _, at := range slices.CompactFunc(between, time.Time.Equal) {
+			if next, err := s.Next(at); err != nil || !next.Equal(later) {
+				t.Errorf("%q in %s: Next from %s is %s, want %s",
+					expr, at.Location(), at.Format(time.RFC3339), next.Format(time.RFC3339), later.Format(time.RFC3339))
+				return
+			}
+		}
+	}
+}
+
 // clockChanges lists the times in year at which the clocks of loc change.
 func clockChanges(loc *time.Location, year int) []time.Time {
 	var changes []time.Time
@@ -162,6 +182,7 @@ func TestNextFindsEveryRunAroundClockChanges(t *testing.T) {
 					t.Errorf("%q around the clock change of %s in %s: Next found %d runs, want %d: %s",
 						expr, change.Format(time.RFC3339), zone, len(got), len(want), firstDifference(got, want))
 				}
+				wantNextBetween(t, expr, s, want)
 			}
 		}
 	}
