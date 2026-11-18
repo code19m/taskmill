@@ -110,6 +110,22 @@ All notable changes to taskmill are recorded here. The format follows
   handler that panicked, in the format of `TASKMILL_UI_LOG_FORMAT`, at
   Error. They were plain text lines, also among JSON lines.
 
+### Fixed
+
+- `Enqueue` and `EnqueueMany` no longer return an error after their tasks
+  are stored. When an enqueue finds a dedupe key taken by a task that was
+  committed at the same moment, it reads that task's ID in a second
+  statement. If that read failed, because the context ended or the
+  connection dropped, the call returned the error, although its own
+  transaction had committed. A caller that then tried again stored every
+  task without a dedupe key a second time. Now the call returns its
+  results, and logs `find duplicates failed after the enqueue committed;
+  the duplicates have no ID` at Warn. The result of such a duplicate has
+  `Duplicate` set and the ID 0. It has the same when the task that took
+  the key was canceled or deleted before the read, as the comment of
+  `EnqueueResult.ID` now says. In your own transaction, `EnqueueTx` and
+  `EnqueueManyTx` still return the error, so that you can roll back.
+
 ## [0.8.0] - 2026-11-16
 
 ### Changed

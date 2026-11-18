@@ -933,30 +933,144 @@ func TestEnqueueFindsADuplicateCommittedWhileItWaited(t *testing.T) {
 				e.enqueue(t, sendEmail{To: "earlier"}, opts)
 				e.exec(t, "UPDATE {s}.dedupe_keys SET expires_at = now() - interval '1 second'")
 			}
-			tx := e.begin(t)
-			first, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{To: "first"}, opts)
-			if err != nil || first.Duplicate {
-				t.Fatalf("the first enqueue: got %+v, %v; want a new task", first, err)
-			}
-
-			// A second enqueue of the key waits for the first one's transaction.
-			type result struct {
-				res taskmill.EnqueueResult
-				err error
-			}
-			second := make(chan result, 1)
-			go func() {
-				res, err := e.client.Enqueue(t.Context(), sendEmail{To: "second"}, opts)
-				second <- result{res, err}
-			}()
-			e.waitBlocked(t, "{s}.dedupe_keys")
-			if err := tx.Commit(t.Context()); err != nil {
-				t.Fatal(err)
-			}
-			got := recv(t, second, "the second enqueue")
-			if got.err != nil || !got.res.Duplicate || got.res.ID != first.ID {
-				t.Fatalf("got %+v, %v; want a duplicate of task %d", got.res, got.err, first.ID)
+			holder, first := e.holdKey(t, opts)
+			got, err := behind(t, e, holder, func() (taskmill.EnqueueResult, error) {
+				return e.client.Enqueue(t.Context(), sendEmail{To: "second"}, opts)
+			})
+			if err != nil || !got.Duplicate || got.ID != first {
+				t.Fatalf("got %+v, %v; want a duplicate of task %d", got, err, first)
 			}
 		})
+	}
+}
+
+// holdKey enqueues a task with the dedupe key of opts in a transaction that
+// it leaves open, so that the transaction holds the key. It returns the
+// transaction, and the task's ID.
+func (e *env) holdKey(t *testing.T, opts *taskmill.EnqueueOptions) (pgx.Tx, int64) { //nolint:ireturn // pgx's transaction type is an interface
+	t.Helper()
+	tx := e.begin(t)
+	first, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{To: "first"}, opts)
+	if err != nil || first.Duplicate {
+		t.Fatalf("the enqueue that takes the key: got %+v, %v; want a new task", first, err)
+	}
+	return tx, first.ID
+}
+
+// behind runs enqueue, which waits for a dedupe key that the transaction
+// holder holds, and commits holder while it waits. The statement of enqueue
+// began before that commit, so it cannot see the task that took the key, and
+// enqueue reads the key again.
+func behind[T any](t *testing.T, e *env, holder pgx.Tx, enqueue func() (T, error)) (T, error) {
+	t.Helper()
+	type result struct {
+		res T
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		res, err := enqueue()
+		done <- result{res, err}
+	}()
+	e.waitBlocked(t, "{s}.dedupe_keys")
+	if err := holder.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	got := recv(t, done, "the enqueue that waited for the key")
+	return got.res, got.err
+}
+
+// beforeKeyRead calls a function once, before a connection of the pool sends
+// the statement with which an enqueue reads a dedupe key again.
+type beforeKeyRead struct {
+	call atomic.Pointer[func()]
+}
+
+func (b *beforeKeyRead) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, "SELECT key, task_id FROM") {
+		if f := b.call.Swap(nil); f != nil {
+			(*f)()
+		}
+	}
+	return ctx
+}
+
+func (*beforeKeyRead) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// plainAndKeyed returns the params of a task without a key, for the queue
+// "plain", and of a task with the dedupe key of opts.
+func plainAndKeyed(opts *taskmill.EnqueueOptions) []taskmill.EnqueueParams {
+	return []taskmill.EnqueueParams{
+		{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{Queue: "plain"}},
+		{Args: sendEmail{}, Options: opts},
+	}
+}
+
+// The second read of a dedupe key only fills in the ID of the task that took
+// the key. On the client's pool the enqueue has committed by then. So if the
+// read finds no ID, the enqueue still returns its results: an error would
+// say that nothing was stored, and the caller's next try would store the
+// task without a key again.
+func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name   string
+		gone   bool // the task that took the key is deleted before the read; otherwise the read fails
+		logged int  // warnings of a failed read
+	}{
+		{name: "the read fails", logged: 1},
+		{name: "the task that took the key is deleted", gone: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			read, logs := &beforeKeyRead{}, &logRecorder{}
+			e := newTracedEnv(t, read).withLogger(t, slog.New(logs))
+			opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
+			holder, first := e.holdKey(t, opts)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			before := func() { cancel() } // the read fails: its context has ended
+			if c.gone {
+				before = func() {
+					if err := e.client.Delete(t.Context(), first); err != nil {
+						t.Errorf("delete the task that took the key: %v", err)
+					}
+				}
+			}
+			read.call.Store(&before)
+			res, err := behind(t, e, holder, func() ([]taskmill.EnqueueResult, error) {
+				return e.client.EnqueueMany(ctx, plainAndKeyed(opts))
+			})
+			if err != nil || len(res) != 2 || res[0].ID == 0 || res[0].Duplicate || res[1] != (taskmill.EnqueueResult{Duplicate: true}) {
+				t.Fatalf("got %+v, %v; want a new task, and a duplicate without an ID", res, err)
+			}
+			if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE queue = 'plain'"); n != 1 {
+				t.Errorf("the task without a key is stored %d times, want once", n)
+			}
+			if n := logs.count("find duplicates failed after the enqueue committed; the duplicates have no ID"); n != c.logged {
+				t.Errorf("a failed read was logged %d times, want %d", n, c.logged)
+			}
+		})
+	}
+}
+
+// In the caller's transaction nothing is committed yet, so the enqueue
+// returns the error of the read, and the caller rolls back.
+func TestEnqueueTxReturnsTheFailedReadOfADuplicate(t *testing.T) {
+	t.Parallel()
+	read := &beforeKeyRead{}
+	e := newTracedEnv(t, read)
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
+	holder, _ := e.holdKey(t, opts)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	before := func() { cancel() }
+	read.call.Store(&before)
+	tx := e.begin(t)
+	res, err := behind(t, e, holder, func() ([]taskmill.EnqueueResult, error) {
+		return e.client.EnqueueManyTx(ctx, taskmill.Pgx(tx), plainAndKeyed(opts))
+	})
+	if !errors.Is(err, context.Canceled) || res != nil {
+		t.Fatalf("got %+v, %v; want the error of the read", res, err)
 	}
 }
