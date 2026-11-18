@@ -22,7 +22,9 @@ import (
 // all workers. Define the same schedules on every worker that takes part in
 // the maintainer election: the elected maintainer runs its own definitions.
 // If it defines any, it also deletes the stored schedules that it does not
-// define once they have not run or changed for a day.
+// define, once no maintainer has defined them for about a day. Until then a
+// stored schedule keeps its state, such as a pause: a rolling deploy or a
+// rollback in which some workers do not define it loses nothing.
 //
 // Runs that are missed while no maintainer runs, or while the schedule is
 // paused, collapse into one run, for the first time that was missed. Each
@@ -390,9 +392,9 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 }
 
 // pruneSchedules deletes the stored schedules that this maintainer does not
-// define, once they have not run or changed for a day. A maintainer that
-// defines none, such as a worker that only does maintenance, leaves them
-// alone.
+// define, once no maintainer has defined them for a day, and notes that it
+// defines its own. A maintainer that defines none, such as a worker that
+// only does maintenance, leaves them alone.
 func (m *maintainer) pruneSchedules(ctx context.Context) {
 	if len(m.w.schedules) == 0 {
 		return
