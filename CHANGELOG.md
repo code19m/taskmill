@@ -90,6 +90,26 @@ All notable changes to taskmill are recorded here. The format follows
   into a program of your own, give its `Shutdown` a deadline, as the
   example now does.
 
+### Fixed
+
+- `taskmill-ui` could log a part of the database password when
+  `TASKMILL_DATABASE_URL` was wrong. For a connection string that does not
+  parse, it logged pgx's error, which quotes the string and masks only what
+  it takes for the password: the rest of a password with a space, or with
+  an `@` in a URL, stayed readable. And for a URL whose password holds an
+  `@` or a `/` that is not percent-encoded, pgx takes the rest of the
+  password for the host or the database, and the connection error showed
+  them. The command now refuses both when it starts. Its error names the
+  variable, and says nothing about the string. If your log has a line
+  `taskmill-ui stopped` whose `error` starts with `cannot parse`, or names
+  a host or a database that you do not know, change that password. In a
+  URL, percent-encode the password: `@` is `%40`, and `/` is `%2F`.
+  [Security](docs/production/security.md#keep-secrets-out-of-tasks-and-errors)
+  says what the logs show.
+- `taskmill-ui` logs the lines of Go's HTTP server, such as a request
+  handler that panicked, in the format of `TASKMILL_UI_LOG_FORMAT`, at
+  Error. They were plain text lines, also among JSON lines.
+
 ## [0.8.0] - 2026-11-16
 
 ### Changed

@@ -34,7 +34,8 @@ status 1.
 
 | Cause | What to do |
 |---|---|
-| `TASKMILL_DATABASE_URL` is not set, or is not a valid connection string | Set it |
+| `TASKMILL_DATABASE_URL` is not set | Set it |
+| `TASKMILL_DATABASE_URL` is not a valid connection string. To keep the password out of the log, `error` does not say what is wrong with it | In a URL, percent-encode the password: `@` is `%40`, and `/` is `%2F`. Then check the value of each parameter, such as `sslmode`, each file that the string names, such as `sslrootcert`, and the `PG*` variables of libpq, such as `PGSSLMODE`, which pgx reads too |
 | The database is out of reach | Check the URL, the network, and the database |
 | The schema is not migrated, or is older than this version of `taskmill-ui` | Let your app run `Migrate`: the command never migrates. Then start it again |
 | `TASKMILL_SCHEMA` does not match the pattern | Fix the name |
