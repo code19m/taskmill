@@ -59,7 +59,7 @@ mux.Handle("/admin/taskmill/orders/", requireAdmin(http.HandlerFunc(func(w http.
     }
     r.Header.Set("X-Dashboard-Role", role) // replaces any value the browser sent
     if r.Method == http.MethodPost {       // every action is a POST
-        logger.InfoContext(r.Context(), "dashboard action", "user", userOf(r), "path", r.URL.Path)
+        logger.InfoContext(r.Context(), "dashboard action", "user", userOf(r), "url", r.URL.RequestURI())
     }
     orders.ServeHTTP(w, r)
 })))
@@ -76,8 +76,10 @@ mux.Handle("/admin/taskmill/orders/", requireAdmin(http.HandlerFunc(func(w http.
   request, give viewers and operators different rights. A missing header
   means read-only, which is the safe default.
 - **Every action is a `POST` through the admin app,** so the admin app can
-  log the user. Each service's `ui.Config.Logger` also logs the action and
-  its target, and for a bulk action, how many tasks it changed.
+  log the user and the address. The path names the action, and a task. The
+  query names a queue, a schedule, or the filters of a bulk action. Each
+  service's `ui.Config.Logger` also logs the action and its target, and for
+  a bulk action, how many tasks it changed.
 
 ## Show one overview of all services
 

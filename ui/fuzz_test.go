@@ -26,9 +26,9 @@ func FuzzPages(f *testing.F) {
 		f.Add(target, false)
 	}
 	for _, target := range []string{
-		"/tasks/1/retry", "/tasks/1/cancel", "/queues/mail/pause", "/queues/%ff/resume",
+		"/tasks/1/retry", "/tasks/1/cancel", "/queues/pause?name=mail", "/queues/resume?name=%ff", "/queues/pause",
 		// Text that PostgreSQL rejects once failed the request.
-		"/schedules/%00/run", "/schedules/%ff/pause",
+		"/schedules/run?name=%00", "/schedules/pause?name=%ff",
 	} {
 		f.Add(target, true)
 	}
