@@ -699,7 +699,10 @@ func (w *Worker) leaseTask(ctx context.Context, id int64) (*tracked, error) {
 	defer r.Close()
 	if r.Next() {
 		t, err := w.scanLeased(r, time.Now())
-		if err != nil {
+		// The task is leased only if the statement ends without an error,
+		// which the rows report once they are closed.
+		r.Close()
+		if err = cmp.Or(err, r.Err()); err != nil {
 			return nil, fmt.Errorf("taskmill: run task %d: %w", id, err)
 		}
 		return t, nil

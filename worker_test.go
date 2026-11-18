@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -2723,6 +2724,73 @@ func TestRunTaskRefuses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// A statement can fail after it returned a row: a later row fails, a
+// deferred constraint fails at the commit, or the statement is canceled. The
+// read of a statement's one row reports that, on every kind of executor. A
+// worker that took the row for the result would count an attempt's failure
+// as recorded after the database rolled it back.
+func TestStatementThatFailsAfterItsFirstRowIsReported(t *testing.T) {
+	t.Parallel()
+	pool, db := testdb.Pool(t), openSQL(t)
+	tx, err := pool.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) }) // t.Context is canceled before cleanups run
+	sqlTx, err := db.BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sqlTx.Rollback() })
+
+	for name, e := range map[string]taskmill.Executor{
+		"a pgx pool":                 taskmill.Pgx(pool),
+		"a pgx transaction":          taskmill.Pgx(tx),
+		"a database/sql pool":        taskmill.SQL(db),
+		"a database/sql transaction": taskmill.SQL(sqlTx),
+	} {
+		// The first row is 1, and the second divides by zero.
+		var n int
+		found, err := taskmill.QueryRow(t.Context(), e, "SELECT 1 / (2 - g) FROM generate_series(1, 2) g", &n)
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "22012" { // division_by_zero
+			t.Errorf("on %s: got a row (%t) and the error %v, want SQLSTATE 22012", name, found, err)
+		}
+	}
+}
+
+// RunTask runs a task only if the statement that leases it succeeds. Here
+// the statement returns the task and then fails, at the commit, by a
+// deferred constraint of the application: the task is not leased, so no
+// handler may run it.
+func TestRunTaskRunsNoTaskWhoseLeaseFailed(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var runs atomic.Int32
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			runs.Add(1)
+			return nil
+		}, nil),
+	})
+	id := e.enqueue(t, sendEmail{}, nil)
+	e.exec(t, `
+CREATE FUNCTION {s}.refuse_lease() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'the lease is refused at the commit';
+END $$`)
+	e.exec(t, `
+CREATE CONSTRAINT TRIGGER refuse_lease AFTER UPDATE ON {s}.tasks
+DEFERRABLE INITIALLY DEFERRED FOR EACH ROW WHEN (NEW.state = 'running') EXECUTE FUNCTION {s}.refuse_lease()`)
+
+	if _, err := w.RunTask(t.Context(), id); err == nil || !strings.Contains(err.Error(), "the lease is refused at the commit") {
+		t.Fatalf("RunTask returned %v, want the error of the statement that leases the task", err)
+	}
+	if n := runs.Load(); n != 0 {
+		t.Fatalf("the handler ran %d times for a task that was not leased", n)
+	}
+	e.wantState(t, id, taskmill.StateAvailable)
 }
 
 func TestFetchStaysOnItsIndexWithStaleStatistics(t *testing.T) {

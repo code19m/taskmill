@@ -242,6 +242,13 @@ func Complete(ctx context.Context, c *Client, settings string, ids []int64) (int
 	return len(done), err
 }
 
+// QueryRow runs sql on e and scans its row into dest, as taskmill reads a
+// statement that returns one row at most. It reports whether there was a
+// row.
+func QueryRow(ctx context.Context, e Executor, sql string, dest ...any) (bool, error) {
+	return queryRow(ctx, e.querier(), sql, nil, dest...)
+}
+
 // explain returns the plan of sql, after settings if any, in a transaction
 // that it rolls back.
 func explain(ctx context.Context, c *Client, settings, sql string, args ...any) (string, error) {
