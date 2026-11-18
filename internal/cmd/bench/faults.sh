@@ -13,7 +13,9 @@
 set -eu
 
 postgres=postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
-faketime=libfaketime=0.9.13-r0
+# A range, not one version: an Alpine release keeps only the newest build of a
+# package, so an exact version stops installing when the package is rebuilt.
+faketime=libfaketime~0.9
 db=taskmill-faults-db
 url() { echo "postgres://postgres:postgres@localhost:$1/taskmill?sslmode=disable"; }
 
@@ -33,14 +35,25 @@ trap cleanup EXIT INT TERM
 docker run -d --name $db -p 54340:5432 -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill \
 	"$postgres" -c max_connections=500 >/dev/null
 # libfaketime offsets the database's clock; the application keeps the real one.
+# NO_FAKE_STAT leaves the times of files alone: the scenario needs only the
+# clock, and libfaketime 0.9.14 ends a PostgreSQL process that it fakes them
+# for ("ft_sem_lock failed").
 printf 'FROM %s\nRUN apk add --no-cache %s\n' "$postgres" "$faketime" | docker build -q -t taskmill-faults-faketime - >/dev/null
 for skew in ahead:+5m:54341 behind:-5m:54342; do
 	docker run -d --name "$db-${skew%%:*}" -p "${skew##*:}:5432" -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill \
 		-e LD_PRELOAD=/usr/lib/faketime/libfaketime.so.1 -e FAKETIME="$(echo "$skew" | cut -d: -f2)" \
-		-e DONT_FAKE_MONOTONIC=1 taskmill-faults-faketime >/dev/null
+		-e DONT_FAKE_MONOTONIC=1 -e NO_FAKE_STAT=1 taskmill-faults-faketime >/dev/null
 done
 for c in $db $db-ahead $db-behind; do
-	until docker exec "$c" pg_isready -h 127.0.0.1 -U postgres -q; do sleep 0.2; done
+	tries=0
+	until docker exec "$c" pg_isready -h 127.0.0.1 -U postgres -q; do
+		tries=$((tries + 1))
+		if [ "$tries" -gt 300 ]; then # a database that did not start never gets ready
+			echo "$c is not ready after 60 seconds" >&2
+			exit 1
+		fi
+		sleep 0.2
+	done
 done
 
 go build -o bin/bench ./internal/cmd/bench
