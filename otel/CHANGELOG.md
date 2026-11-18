@@ -10,6 +10,16 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+### Fixed
+
+- When a task's metadata or an outbox message's headers already held a trace
+  context, such as one copied from another task, `EnqueueMiddleware` and
+  `Publisher` replaced only the fields that the new span has values for. An
+  old `tracestate` or `baggage` stayed next to the new `traceparent`, and
+  with no span to store, as under a no-op tracer, the old `traceparent`
+  stayed too. Now they first remove every field that the propagator sets,
+  so the metadata and the headers hold the new span's context only.
+
 ## [0.4.2] - 2026-11-15
 
 ### Changed
