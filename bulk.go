@@ -231,17 +231,19 @@ func (c *Client) Count(ctx context.Context, filter *TaskFilter) (*TaskCounts, er
 	return out, nil
 }
 
-// add counts n tasks in state s, of which unflagged were not asked to stop;
-// n and unflagged count one more than the cap if counting stopped there.
+// add counts the n tasks read in state s, of which unflagged were not asked
+// to stop. n is one more than the cap if counting stopped there.
 func (c *TaskCounts) add(s State, n, unflagged int64) {
 	count := TaskCount{N: min(n, countCap), Capped: n > countCap}
 	c.States[s] = count
 	if s.CanRetry() {
 		c.Retry.plus(count)
 	}
-	// Cancel skips running tasks already asked to stop.
+	// Cancel skips running tasks already asked to stop. It is capped
+	// whenever the state is, even if it counts fewer tasks than the cap:
+	// the tasks that were not read may be ones that it would cancel.
 	if s.CanCancel() {
-		c.Cancel.plus(TaskCount{N: min(unflagged, countCap), Capped: unflagged > countCap})
+		c.Cancel.plus(TaskCount{N: min(unflagged, countCap), Capped: count.Capped})
 	}
 	if s.CanDelete() {
 		c.Delete.plus(count)
