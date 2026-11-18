@@ -36,116 +36,12 @@ All notable changes to taskmill are recorded here. The format follows
   now shows. While both releases serve one dashboard during a rolling
   deploy, these buttons can answer "Not found": try again when the deploy
   is done.
-
-### Fixed
-
-- The dashboard's Pause and Resume buttons of a queue, and the Pause,
-  Resume, and Run now buttons of a schedule, failed when the name
-  held a colon, as `emails:high` does. The page wrote `#ZgotmplZ` in place
-  of the name into the form's address, and the answer was "Not found". For
-  a queue or a schedule named `.` or `..`, the browser resolved the dots
-  out of the address, with the same answer. The buttons now work for every
-  name: a query can carry any text, and a path cannot.
-- A dashboard that your app mounts answered with an empty page, status
-  200, and no log line, when your middleware gave the request a shorter
-  deadline than the dashboard's 10 seconds and the database did not answer
-  before it. The dashboard took such a request for one whose client went
-  away. A request that passes any deadline now gets 503 and the page
-  "Taking too long", and logs `dashboard request timed out`. Only a
-  canceled request gets no answer. The doc comment of `ui.New` and
-  [The dashboard](docs/guides/dashboard.md#mount-it-in-your-app) now also
-  say what the dashboard needs from your `http.Server`: a `WriteTimeout`
-  above 10 seconds, or none. A shorter one closes the connection before
-  the dashboard answers.
-- A dashboard action with a value that is not valid now answers 400, on a
-  page titled "Invalid request", as the task list does for the same value.
-  This is a bulk action with an unknown state, with a cursor that its list
-  did not make, or with no filter, and an action on a queue or a schedule
-  with no valid name. It answered 409, "Not possible". That answer now
-  means only that the action does not fit the task or the schedule as it
-  is, such as a retry of a running task.
-- Where the browser blocks storage, as some do in a frame of another site,
-  the dashboard ignored `?theme=light` and `?theme=dark`, and followed the
-  device. The parameter now sets the theme of its page without storage.
-  The pages that the reader opens from there still follow the device:
-  [The dashboard](docs/guides/dashboard.md#show-it-inside-another-app) now
-  says so.
-- In a filter of the dashboard's task list, a tick on an option while the
-  menu's search box held text showed every option again, and dropped the
-  options that the search had found on the server. The box kept its text.
-  The menu now keeps showing what the search finds.
-- The dashboard's Workers page now shows the word "stale" beside the ID of
-  a stale worker. Only the color of its dot said so before.
-- At phone width, the dashboard's Overview and Schedules pages scrolled
-  sideways as a whole: a hidden label of the table's last column reached
-  out of the table's own scroll area. Now only the table scrolls.
-
-### Fixed
-
-- `examples/quickstart` now waits at most 10 seconds for open requests
-  when it stops, and part 2 of the tutorial shows the same code. The
-  program called `Shutdown` without a deadline. So one client that sent
-  the start of an order and then stalled kept it from exiting after
-  Ctrl-C, and a second Ctrl-C did nothing. If you copied that `defer` line
-  into a program of your own, give its `Shutdown` a deadline, as the
-  example now does.
-
-### Fixed
-
-- `taskmill-ui` could log a part of the database password when
-  `TASKMILL_DATABASE_URL` was wrong. For a connection string that does not
-  parse, it logged pgx's error, which quotes the string and masks only what
-  it takes for the password: the rest of a password with a space, or with
-  an `@` in a URL, stayed readable. And for a URL whose password holds an
-  `@` or a `/` that is not percent-encoded, pgx takes the rest of the
-  password for the host or the database, and the connection error showed
-  them. The command now refuses both when it starts. Its error names the
-  variable, and says nothing about the string. If your log has a line
-  `taskmill-ui stopped` whose `error` starts with `cannot parse`, or names
-  a host or a database that you do not know, change that password. In a
-  URL, percent-encode the password: `@` is `%40`, and `/` is `%2F`.
-  [Security](docs/production/security.md#keep-secrets-out-of-tasks-and-errors)
-  says what the logs show.
-- `taskmill-ui` logs the lines of Go's HTTP server, such as a request
-  handler that panicked, in the format of `TASKMILL_UI_LOG_FORMAT`, at
-  Error. They were plain text lines, also among JSON lines.
-
-### Fixed
-
-- `Enqueue` and `EnqueueMany` no longer return an error after their tasks
-  are stored. When an enqueue finds a dedupe key taken by a task that was
-  committed at the same moment, it reads that task's ID in a second
-  statement. If that read failed, because the context ended or the
-  connection dropped, the call returned the error, although its own
-  transaction had committed. A caller that then tried again stored every
-  task without a dedupe key a second time. Now the call returns its
-  results, and logs `find duplicates failed after the enqueue committed;
-  the duplicates have no ID` at Warn. The result of such a duplicate has
-  `Duplicate` set and the ID 0. It has the same when the task that took
-  the key was canceled or deleted before the read, as the comment of
-  `EnqueueResult.ID` now says. In your own transaction, `EnqueueTx` and
-  `EnqueueManyTx` still return the error, so that you can roll back.
-- `Count` no longer reports its `Cancel` count as exact after counting
-  stopped at the cap. `Cancel` leaves out the running tasks that were
-  already asked to stop, so it can count fewer tasks than the cap of
-  10,000, and its `Capped` was then false. With 30,000 running tasks, every
-  third of them asked to stop, it read as exactly 6,668, where
-  `CancelMatching` changes 20,000, and the dashboard showed that number as
-  exact. Now `Capped` is true whenever counting stopped at the cap.
-- `QueueInfo.Lag` no longer reads 0 for a queue whose oldest due task is
-  due for more than about 292 years, such as a task with a `RunAt` in the
-  year 1700. Such a lag does not fit a `time.Duration`, and it wrapped
-  around: a stuck queue showed no lag, also in the lag gauge of the `otel`
-  package. The lag now stops at the longest duration.
-- `Cancel`, `Retry`, and `Delete` now say in every error what they were
-  doing. An error of the begin or the commit of their transaction, such as
-  a context that ended, came back bare: `context canceled`. It now reads
-  `taskmill: cancel task 7: context canceled`, like the errors of the other
-  calls. `errors.Is` finds the same errors as before.
-- `UpdateQueue` now rejects a `MaxRunning` above 2,147,483,647, the most
-  that its column holds, with an error that wraps `ErrInvalidArgument`.
-  Such a value failed before too, but with an error of the driver that read
-  like a failure of the database.
+- The doc comment of `outbox.Publisher` no longer says that a batch never
+  holds two deliveries with the same topic and key. That is true only of
+  deliveries that have a key. Deliveries without a key have no order to
+  keep, so a batch can hold many of one topic. The relay does what it did
+  before: if your publisher counts on one delivery per topic in a batch,
+  check it for messages without a key.
 
 ### Fixed
 
