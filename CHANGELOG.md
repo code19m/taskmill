@@ -76,6 +76,9 @@ All notable changes to taskmill are recorded here. The format follows
   The menu now keeps showing what the search finds.
 - The dashboard's Workers page now shows the word "stale" beside the ID of
   a stale worker. Only the color of its dot said so before.
+- At phone width, the dashboard's Overview and Schedules pages scrolled
+  sideways as a whole: a hidden label of the table's last column reached
+  out of the table's own scroll area. Now only the table scrolls.
 
 ### Fixed
 
