@@ -96,10 +96,11 @@ type Delivery struct {
 // Publisher sends deliveries to a broker. It returns one error per delivery,
 // in the same order: nil marks that delivery as published, an error retries
 // it later, and an error wrapped with [taskmill.Permanent] makes it dead
-// right away. A batch holds at most [RelayOptions.BatchSize] deliveries,
-// never two with the same topic and key. Each call has
-// [RelayOptions.Timeout]: then its context is canceled, and the deliveries
-// without a nil result are retried.
+// right away. A batch holds at most [RelayOptions.BatchSize] deliveries. Of
+// the deliveries that have a key, no two in a batch have the same topic and
+// key. Deliveries without a key have no order to keep, so a batch can hold
+// many of one topic. Each call has [RelayOptions.Timeout]: then its context
+// is canceled, and the deliveries without a nil result are retried.
 //
 // A delivery without a result is retried, as after an error: Publish
 // returned nil, or fewer errors than deliveries. Nil never means that all

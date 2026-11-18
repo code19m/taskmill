@@ -56,7 +56,7 @@ sequenceDiagram
     participant B as Message broker
     App->>DB: Save your data and store the message, in one transaction
     App->>DB: COMMIT
-    R->>DB: Fetch a batch, at most one message per topic and key
+    R->>DB: Fetch a batch, at most one message of each key
     R->>B: Publish the batch
     B-->>R: One result per message
     R->>DB: Delete published messages, retry failed ones later
