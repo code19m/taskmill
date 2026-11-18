@@ -297,8 +297,8 @@ func (r *release) checkDashboard(t *testing.T) {
 	}
 	for _, action := range []string{
 		fmt.Sprintf("/tasks/%d/cancel", retried.ID), fmt.Sprintf("/tasks/%d/retry", retried.ID),
-		fmt.Sprintf("/tasks/%d/delete", deleted.ID), "/queues/default/pause", "/queues/default/resume",
-		"/schedules/compat/pause", "/schedules/compat/resume", "/schedules/compat/run",
+		fmt.Sprintf("/tasks/%d/delete", deleted.ID), "/queues/pause?name=default", "/queues/resume?name=default",
+		"/schedules/pause?name=compat", "/schedules/resume?name=compat", "/schedules/run?name=compat",
 	} {
 		if code := serve(t, h, http.MethodPost, action); code != http.StatusSeeOther {
 			t.Errorf("the release's dashboard: POST %s: status %d", action, code)
