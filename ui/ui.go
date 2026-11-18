@@ -94,9 +94,6 @@ const (
 // answered with a login prompt: the page shows that the session ended instead.
 const liveHeader = "X-Taskmill-Live"
 
-// errSlow is why a request that ran out of time was canceled.
-var errSlow = errors.New("the database did not answer in time")
-
 // errBudget is why a bulk action stopped before it was done.
 var errBudget = errors.New("the bulk action used its time")
 
@@ -151,6 +148,12 @@ type BasicAuth struct {
 // the database only through client. That is why New returns a plain
 // [http.Handler], which the caller mounts, and may wrap in middleware of its
 // own.
+//
+// The handler gives every request 10 seconds, or the time until the deadline
+// of the request's context if the application set an earlier one, and then
+// answers 503 with a page that says so. Serve it from an [http.Server] whose
+// WriteTimeout is longer than that time, or zero: a shorter one closes the
+// connection before the answer.
 func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	if cfg == nil {
 		cfg = &Config{}
@@ -1050,14 +1053,21 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 }
 
 // actionFailed explains why an action did not apply: the error says it, as
-// for a retry that another task's dedupe key refuses.
+// for a retry that another task's dedupe key refuses. An action with a value
+// that is not valid, such as an unknown state or an empty name, is a bad
+// request, as the same value is on a page. An action that does not fit the
+// task or the schedule as it is now is not possible.
 func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error, back string) {
+	refuse := func(status int, title string) {
+		s.render(w, r, status, "error.html", page{Title: title, Data: problem{err.Error(), back, "Go back"}})
+	}
 	switch {
 	case errors.Is(err, taskmill.ErrNotFound):
 		s.notFound(w, r)
-	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrInvalidArgument),
-		errors.Is(err, taskmill.ErrConflict):
-		s.render(w, r, http.StatusConflict, "error.html", page{Title: "Not possible", Data: problem{err.Error(), back, "Go back"}})
+	case errors.Is(err, taskmill.ErrInvalidArgument):
+		refuse(http.StatusBadRequest, "Invalid request")
+	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrConflict):
+		refuse(http.StatusConflict, "Not possible")
 	default:
 		s.fail(w, r, err)
 	}
@@ -1163,10 +1173,13 @@ func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 }
 
 // failWith is fail with a hint for the reader, shown if the request, or a
-// read of it, ran out of time.
+// read of it, ran out of time. A request runs out of time at the deadline
+// that the dashboard sets, or at an earlier one that the application set in
+// the request's context: the answer is the same. Only a request that was
+// canceled is one whose client went away.
 func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hint string) {
 	ctx := r.Context()
-	if errors.Is(context.Cause(ctx), errSlow) || timeLimit(err) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || timeLimit(err) {
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request timed out",
 			slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
 		again, label := r.URL.RequestURI(), "Try again"
@@ -1267,7 +1280,7 @@ func acceptsGzip(r *http.Request) bool {
 // dashboard's requests, and the connections they use, for long.
 func deadline(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeoutCause(r.Context(), requestTimeout, errSlow)
+		ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 		defer cancel()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

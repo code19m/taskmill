@@ -46,6 +46,24 @@ All notable changes to taskmill are recorded here. The format follows
   a queue or a schedule named `.` or `..`, the browser resolved the dots
   out of the address, with the same answer. The buttons now work for every
   name: a query can carry any text, and a path cannot.
+- A dashboard that your app mounts answered with an empty page, status
+  200, and no log line, when your middleware gave the request a shorter
+  deadline than the dashboard's 10 seconds and the database did not answer
+  before it. The dashboard took such a request for one whose client went
+  away. A request that passes any deadline now gets 503 and the page
+  "Taking too long", and logs `dashboard request timed out`. Only a
+  canceled request gets no answer. The doc comment of `ui.New` and
+  [The dashboard](docs/guides/dashboard.md#mount-it-in-your-app) now also
+  say what the dashboard needs from your `http.Server`: a `WriteTimeout`
+  above 10 seconds, or none. A shorter one closes the connection before
+  the dashboard answers.
+- A dashboard action with a value that is not valid now answers 400, on a
+  page titled "Invalid request", as the task list does for the same value.
+  This is a bulk action with an unknown state, with a cursor that its list
+  did not make, or with no filter, and an action on a queue or a schedule
+  with no valid name. It answered 409, "Not possible". That answer now
+  means only that the action does not fit the task or the schedule as it
+  is, such as a retry of a running task.
 
 ### Fixed
 
