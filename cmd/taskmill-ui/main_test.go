@@ -229,6 +229,39 @@ func TestRunLogsWhyItStoppedInItsFormat(t *testing.T) {
 	}
 }
 
+// pgx's error for a connection string that it cannot parse quotes the string,
+// and masks only what it takes for the password. A URL that it parses the
+// wrong way puts the rest of the password into a connection error, as the
+// host, the database, or a parameter. No part of the password may reach the
+// log. No case reaches a database: the command stops before it connects.
+func TestRunKeepsTheDatabasePasswordOutOfTheLog(t *testing.T) {
+	t.Parallel()
+	for name, connString := range map[string]string{
+		"an escaped space, not parsed":          `host=db.internal user=app password=Sup3r\ Secret dbname=shop sslmode=bogus`,
+		"a space, not parsed":                   `host=db.internal user=app password=Sup3r Secret dbname=shop sslmode=bogus`,
+		"an @, not parsed":                      `postgres://app:Sup3r@Secret@db.internal:5432/shop?sslmode=bogus`,
+		"an @, parsed into the host":            `postgres://app:Sup3r@Secret@db.internal:5432/shop`,
+		"a /, parsed into the database":         `postgres://app:/Sup3r.Secret@db.internal:5432/shop`,
+		"an @ and a ?, parsed into a parameter": `postgres://app:Sup3r@Secret?x@db.internal:5432/shop?sslmode=disable`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			err := run(t.Context(), env(map[string]string{"TASKMILL_DATABASE_URL": connString}), &out)
+			if err == nil {
+				t.Fatal("the command accepted the connection string")
+			}
+			logged := out.String()
+			if strings.Contains(logged, "Sup3r") || strings.Contains(logged, "Secret") {
+				t.Errorf("the log holds a part of the password: %s", logged)
+			}
+			if !strings.Contains(logged, "TASKMILL_DATABASE_URL") {
+				t.Errorf("the log does not name the setting: %s", logged)
+			}
+		})
+	}
+}
+
 // shorten sets one of the command's fixed times to d until the test and its
 // server have ended. It first checks that the time is what
 // docs/reference/taskmill-ui.md says, so that a short time in a test cannot

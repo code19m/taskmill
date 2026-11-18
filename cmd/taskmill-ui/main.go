@@ -26,11 +26,13 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -136,13 +138,48 @@ func loadConfig(getenv func(string) string) (config, error) {
 	return c, nil
 }
 
+// errDatabaseURL refuses a connection string, and says nothing about it, so
+// that no part of its password reaches the log. pgx's own error quotes the
+// string, and masks only what it takes for the password.
+var errDatabaseURL = errors.New("TASKMILL_DATABASE_URL is not a valid connection string; to keep its password " +
+	"out of the log, the error says no more. In a URL, percent-encode the password: @ is %40, and / is %2F")
+
+// poolConfig returns the pool's settings for the connection string, or
+// errDatabaseURL.
+func poolConfig(connString string) (*pgxpool.Config, error) {
+	cfg, err := pgxpool.ParseConfig(connString)
+	if err != nil {
+		return nil, errDatabaseURL
+	}
+	// Like libpq, pgx reads a URL's user and password before the first "@",
+	// and reads none if a "/" comes first. So a password that holds one of
+	// the two, not percent-encoded, is cut there. What follows, with the "@"
+	// that ends the password, becomes the hosts, the database, or a
+	// parameter, and the errors of a connection name all three. No host or
+	// parameter has an "@" in its name, and a database with one is too rare
+	// to keep.
+	conn := cfg.ConnConfig
+	names := slices.AppendSeq([]string{conn.Database, conn.Host}, maps.Keys(conn.RuntimeParams))
+	for _, fallback := range conn.Fallbacks {
+		names = append(names, fallback.Host)
+	}
+	if strings.Contains(strings.Join(names, ""), "@") {
+		return nil, errDatabaseURL
+	}
+	return cfg, nil
+}
+
 // serve serves the dashboard, set up as getenv says, until ctx ends.
 func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger) error {
 	cfg, err := loadConfig(getenv)
 	if err != nil {
 		return err
 	}
-	pool, err := pgxpool.New(ctx, cfg.databaseURL)
+	poolCfg, err := poolConfig(cfg.databaseURL)
+	if err != nil {
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return err
 	}
@@ -165,6 +202,10 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 		ReadTimeout:  readTimeout,
 		WriteTimeout: 30 * time.Second, // pages take at most 10 seconds to read
 		IdleTimeout:  2 * time.Minute,
+		// The server's own lines are in the log's format too. Each reports
+		// a handler's bug, such as a panic, or connections that the server
+		// could not accept: both need a person.
+		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 	if cfg.auth == nil {
 		logger.LogAttrs(ctx, slog.LevelWarn,

@@ -50,7 +50,10 @@ The same key always means the same thing.
 | `addr`, `prefix`, `read_only` | The settings of `taskmill-ui` |
 
 No line shows a task's payload or metadata. A connection error shows what pgx
-reports, such as the host, user, and database, but never the password.
+reports, such as the host, user, and database, but never the password. For
+that, a connection URL must percent-encode its password:
+[Security](../production/security.md#keep-secrets-out-of-tasks-and-errors)
+says how.
 
 **Keep secrets out of your errors.** A handler's error is logged as the
 handler returned it, so a token or a card number in an error appears in your
@@ -185,6 +188,7 @@ backticks.
 | `taskmill-ui not ready` | Warn | `/readyz` asked the database, which did not answer. `error` says why. Until the database answers, `/readyz` fails, and Kubernetes sends no one to the pod. Only a request to `/readyz`, such as a probe, asks. | Check the database. The pod recovers by itself. |
 | `taskmill-ui ready again` | Info | The database answers `/readyz` again, after `taskmill-ui not ready`. | Nothing. |
 | `taskmill-ui stopped` | Error | The command could not start or serve, and exited. `error` says why: for example, the schema is not migrated yet, or a setting is wrong. | Fix what `error` names: [Why it exits at start](taskmill-ui.md#why-it-exits-at-start) lists the causes. |
+| A message that starts with `http:` | Error | Go's HTTP server reports a failure of its own: a request handler panicked, or the server could not accept a connection. | For a panic, please [report it](https://github.com/code19m/taskmill/issues). For `Accept error`, check the limit of open files of the process. |
 
 ## See also
 

@@ -115,11 +115,16 @@ ALTER DEFAULT PRIVILEGES FOR ROLE shop IN SCHEMA taskmill
 | Payloads | Everyone with dashboard access: the task page shows them |
 | A handler's error messages | The dashboard (each task's last 20 errors), the logs, and the spans' status |
 | Metadata | The dashboard, but never the logs |
-| Connection errors | The logs show the host, user, and database, but never the password |
+| Connection errors | The logs show the host, user, and database. They never show the password, if a URL encodes it: see below |
 | Metrics | Queues, kinds, states, and error classes, but no task IDs or payloads |
 
 So keep secrets out of payloads and out of your handlers' errors. Store an
 ID in the payload, and look the secret up in the handler.
+
+In a connection URL, percent-encode the password: `@` is `%40`, and `/` is
+`%2F`. Otherwise pgx takes a part of the password for the host or the
+database, and connection errors show those. When `taskmill-ui` finds such a
+URL, it does not start, and its error never quotes the connection string.
 
 ## Know how long task data stays
 
