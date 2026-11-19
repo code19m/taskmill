@@ -16,6 +16,7 @@
   {{template "multi" (dict "F" $d.Queues)}}
   {{template "multi" (dict "F" $d.Kinds "Mono" true)}}
   {{template "multi" (dict "F" $d.Groups "Mono" true)}}
+  {{with $d.Finished}}{{template "finished" .}}{{end}}
   <button class="btn" data-apply>Apply</button>
   {{if $d.Filtered}}<a class="btn quiet" href="{{path "/tasks"}}">{{template "icon" "clear"}}Clear</a>{{end}}
 </form>
@@ -42,9 +43,9 @@
         <td title="{{.Queue}}{{with .GroupKey}}, FIFO group {{visible .}}{{end}}">{{.Queue}}{{if .GroupKey}}<span class="group">{{visible .GroupKey}}</span>{{end}}</td>
         <td><div class="state-cell">{{template "state" .State}}{{if ne .Priority 2}}<span class="chip priority-{{.Priority}}" title="Priority: {{.Priority}}">{{.Priority}}</span>{{end}}</div></td>
         <td class="num">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
-        <td class="tone-faint" title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>
-        {{if $d.Order.ByFinish}}<td class="tone-faint" title="{{timestamp .FinalizedAt}}">{{ago .FinalizedAt}}</td>
-        {{else}}<td class="tone-faint" title="{{timestamp .RunAt}}">{{ago .RunAt}}</td>{{end}}
+        <td class="tone-faint"{{template "at" .CreatedAt}}>{{ago .CreatedAt}}</td>
+        {{if $d.Order.ByFinish}}<td class="tone-faint"{{template "at" .FinalizedAt}}>{{ago .FinalizedAt}}</td>
+        {{else}}<td class="tone-faint"{{template "at" .RunAt}}>{{ago .RunAt}}</td>{{end}}
         <td class="error-cell">{{with lastError .Errors}}<span title="{{printf "%.300s" .Message}}">{{printf "%.140s" .Message}}</span>{{end}}</td>
       </tr>
     {{end}}</tbody>

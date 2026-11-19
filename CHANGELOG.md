@@ -30,6 +30,19 @@ All notable changes to taskmill are recorded here. The format follows
   alone, as before: one with both a day of the month and a day of the week,
   a list of more than three times or days, or a step such as `*/7`, which
   starts again at every full hour and so is not "every 7 minutes".
+- The dashboard's lists of dead and canceled tasks have a filter by finish
+  time, **Finished**. Its presets show the tasks of the last hour, 6 hours,
+  24 hours, 7 days, or 30 days: each is a link from a fixed time on, with
+  no end, so the list still shows new tasks as they finish. For a precise
+  or a long period, its **From** and **To** fields take a date and a time
+  each, with the browser's own picker. The address holds the range as
+  instants, in `since` and `before`, so a link shows the same tasks to
+  everyone: write a time with `Z` or an offset, or without a zone, which is
+  UTC. "Load more" and the later pages keep the range. While a range is
+  set, the list hides "Retry all", "Cancel all", and "Delete all", which
+  would also change the tasks outside the range. A list with another state
+  takes no range, and leads to itself without it. The filter works without
+  the script, in UTC.
 - `ListParams.FinishedSince` and `ListParams.FinishedBefore` limit
   `Client.List` to the dead and canceled tasks that finished in a range of
   time: at `FinishedSince` or later, and before `FinishedBefore`. So you
@@ -54,6 +67,12 @@ All notable changes to taskmill are recorded here. The format follows
   every list that has tasks, the page also says how many it shows, and
   tells a screen reader the new number after "Load more" or a change of
   the filters.
+- With the script, the dashboard shows exact times in the reader's time
+  zone, where it showed them in UTC: the time in a tooltip, such as
+  "2026-11-19 19:05:07.089 UTC+5", and the range and the fields of the new
+  filter by finish time. Each time names its zone by its distance from UTC
+  at that time, so the times around a change of the clocks stay apart.
+  Without the script, the times are in UTC, as before.
 - The dashboard's pages show data, and keep what explains it out of the
   way:
   - **Hints.** A small button with an "i" shows a short text about what is

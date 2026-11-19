@@ -27,8 +27,9 @@
 // The dashboard is rendered on the server with the standard library. Two
 // small scripts, served with it, keep pages live, show another page or the
 // result of an action without loading the page anew, apply filters as they
-// change, confirm actions in dialogs, and apply the chosen theme. Every page
-// also works without them, and nothing needs a JavaScript build step. The
+// change, show times in the reader's time zone, confirm actions in dialogs,
+// and apply the chosen theme. Every page also works without them, with its
+// times in UTC, and nothing needs a JavaScript build step. The
 // dashboard reads only through the bounded queries of [taskmill.Client], so
 // it is safe to point at a busy production database.
 //
@@ -411,8 +412,27 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
 		return
 	}
+	since, before, err := finishRange(q)
+	if err != nil {
+		back := problem{err.Error(), listPath(withRange(first, time.Time{}, time.Time{})), "Clear the range"}
+		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
+		return
+	}
+	order, ranged := orderOf(f), !since.IsZero() || !before.IsZero()
+	if ranged && !order.ByFinish {
+		// Only a list in finish order takes a range. A reader who sets one,
+		// and then adds another state, arrives here: the list that they
+		// asked for is the same list without the range, and its address
+		// says so.
+		target := s.path(listPath(withRange(q, time.Time{}, time.Time{})))
+		http.Redirect(w, r, target, http.StatusSeeOther) //nolint:gosec // the request adds only a query to the path of the task list
+		return
+	}
+	first = withRange(first, since, before)
 	// The list shows no payload, no metadata, and only each task's last error.
-	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: limit, Summary: true}
+	params := &taskmill.ListParams{
+		Filter: f, FinishedSince: since, FinishedBefore: before, Cursor: q.Get("cursor"), Limit: limit, Summary: true,
+	}
 	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		// The error names what the client refused: the filter, or the
@@ -459,26 +479,34 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	if offered.moreGroups {
 		groupFilter.Source = s.path("/choices/groups")
 	}
+	// A bulk action acts on every task that the filters select, also outside
+	// a range of finish times: a list with a range does not offer it.
 	var bulk *bulkLinks
-	if filtered && !s.readOnly {
+	if filtered && !ranged && !s.readOnly {
 		bulk = s.bulkLinks(f)
+	}
+	var finished *finishFilter
+	if order.ByFinish {
+		finished = s.finishFilter(first, since, before, time.Now())
 	}
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
 		Tasks                         []taskmill.TaskInfo
 		Seen                          int // tasks before those that the last "Load more" added
 		Order                         listOrder
 		States, Queues, Kinds, Groups filter
+		Finished                      *finishFilter // nil for a list that is not in finish order
 		Filtered, Paged               bool
 		First, More, Next             string
 		Bulk                          *bulkLinks
 	}{
 		res.Tasks,
 		limit - pageSize,
-		orderOf(f),
+		order,
 		newFilter("state", "State", "states", stateNames, states),
 		newFilter("queue", "Queue", "queues", names, f.Queues).searchable(),
 		newFilter("kind", "Kind", "kinds", offered.kinds, f.Kinds).searchable(),
 		groupFilter,
+		finished,
 		filtered, params.Cursor != "",
 		s.path(listPath(first)), more, next,
 		bulk,
@@ -1348,6 +1376,8 @@ func (s *server) funcs() template.FuncMap {
 		"asset":     s.asset,
 		"ago":       ago,
 		"timestamp": timestamp,
+		"instant":   instant,
+		"fieldTime": fieldTime,
 		"json":      prettyJSON,
 		"states":    func() []taskmill.State { return listedStates },
 		"lastError": lastError,

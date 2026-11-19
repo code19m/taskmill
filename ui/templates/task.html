@@ -52,7 +52,7 @@
           <div class="timeline-head">
             <span class="strong">{{if .Attempt}}Attempt {{.Attempt}}{{else}}Note{{end}}</span>
             {{with .Code}}<span class="chip mono">{{.}}</span>{{end}}
-            <time class="subtle" title="{{timestamp .At}}">{{ago .At}}</time>
+            <time class="subtle"{{template "at" .At}}>{{ago .At}}</time>
           </div>
           <pre class="code code-error">{{.Message}}</pre>
         </li>
@@ -74,10 +74,10 @@
           <svg class="progress" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="progress-track" width="100" height="6" rx="3"/><rect class="progress-fill" width="{{percent $t.Attempt $t.MaxAttempts}}" height="6" rx="3"/></svg>
         </div>
       </dd>
-      <dt>Created</dt><dd title="{{timestamp $t.CreatedAt}}">{{ago $t.CreatedAt}}</dd>
-      <dt>Run at</dt><dd title="{{timestamp $t.RunAt}}">{{ago $t.RunAt}}</dd>
-      {{if not $t.AttemptedAt.IsZero}}<dt>Last attempt</dt><dd title="{{timestamp $t.AttemptedAt}}">{{ago $t.AttemptedAt}}</dd>{{end}}
-      {{if not $t.FinalizedAt.IsZero}}<dt>Finished</dt><dd title="{{timestamp $t.FinalizedAt}}">{{ago $t.FinalizedAt}}</dd>{{end}}
+      <dt>Created</dt><dd{{template "at" $t.CreatedAt}}>{{ago $t.CreatedAt}}</dd>
+      <dt>Run at</dt><dd{{template "at" $t.RunAt}}>{{ago $t.RunAt}}</dd>
+      {{if not $t.AttemptedAt.IsZero}}<dt>Last attempt</dt><dd{{template "at" $t.AttemptedAt}}>{{ago $t.AttemptedAt}}</dd>{{end}}
+      {{if not $t.FinalizedAt.IsZero}}<dt>Finished</dt><dd{{template "at" $t.FinalizedAt}}>{{ago $t.FinalizedAt}}</dd>{{end}}
     </dl>
   </aside>
 </div>

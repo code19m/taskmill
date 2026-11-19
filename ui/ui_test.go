@@ -235,7 +235,8 @@ func TestPagesRender(t *testing.T) {
 
 // A time shows in UTC, whatever the time zones of the database's sessions,
 // of the dashboard's process, and of the time that the application passed:
-// the tests run with three zones that are not UTC.
+// the tests run with three zones that are not UTC. Beside the time is its
+// instant, by which the script shows it in the reader's time zone.
 func TestTimesShowInUTC(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
@@ -245,7 +246,7 @@ func TestTimesShowInUTC(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, body, _ := get(t, handler(t, client, nil), "/tasks/"+strconv.FormatInt(res.ID, 10))
-	if want := "2031-03-04 14:36:07.089 UTC"; !strings.Contains(body, want) {
+	if want := `title="2031-03-04 14:36:07.089 UTC" data-time="2031-03-04T14:36:07.089Z"`; !strings.Contains(body, want) {
 		t.Errorf("the page of a task that runs at %s does not show %s", runAt.Format(time.RFC3339Nano), want)
 	}
 }
@@ -941,7 +942,9 @@ func TestBulkActions(t *testing.T) {
 }
 
 // The task list offers the bulk actions that the selected states allow,
-// without counting the tasks.
+// without counting the tasks. A list with a range of finish times offers
+// none: a bulk action acts on the filters alone, also on the tasks outside
+// the range.
 func TestTaskListOffersBulkActions(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
@@ -951,6 +954,9 @@ func TestTaskListOffersBulkActions(t *testing.T) {
 		"/tasks?queue=mail&state=available": {"/tasks/bulk/cancel?", "/tasks/bulk/delete?"},
 		"/tasks?state=dead":                 {"/tasks/bulk/retry?state=dead", "/tasks/bulk/delete?state=dead"},
 		"/tasks?state=running&kind=greet":   {"/tasks/bulk/cancel?kind=greet&amp;state=running"},
+		// With a range of finish times.
+		"/tasks?state=dead&since=2021-03-04T11:00Z":                 nil,
+		"/tasks?state=canceled&queue=mail&before=2021-03-04T11:00Z": nil,
 	} {
 		_, body, _ := get(t, h, path)
 		if got := strings.Count(body, `href="/tasks/bulk/`); got != len(want) {

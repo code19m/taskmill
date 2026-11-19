@@ -17,8 +17,8 @@
         <td class="mono tone-faint">{{.Version}}</td>
         <td class="wrap"><div class="chips">{{range .Queues}}<a class="chip" href="{{path "/tasks"}}{{query "queue" .}}">{{.}}</a>{{else}}<span class="tone-ghost">maintenance only</span>{{end}}</div></td>
         <td>{{if .Kinds}}<details class="kinds"><summary aria-controls="kinds-{{.ID}}">{{len .Kinds}} {{if eq (len .Kinds) 1}}kind{{else}}kinds{{end}}{{template "icon-chevron"}}</summary></details>{{else}}<span class="tone-ghost">none</span>{{end}}</td>
-        <td class="tone-faint" title="{{timestamp .StartedAt}}">{{ago .StartedAt}}</td>
-        <td class="{{if .Stale}}tone-warn{{else}}tone-faint{{end}}" title="{{timestamp .CheckedInAt}}">{{ago .CheckedInAt}}</td>
+        <td class="tone-faint"{{template "at" .StartedAt}}>{{ago .StartedAt}}</td>
+        <td class="{{if .Stale}}tone-warn{{else}}tone-faint{{end}}"{{template "at" .CheckedInAt}}>{{ago .CheckedInAt}}</td>
       </tr>
       {{- if .Kinds}}
       <tr class="kinds-row" id="kinds-{{.ID}}"><td colspan="7"><div class="chips">{{range .Kinds}}<a class="chip" href="{{path "/tasks"}}{{query "kind" .}}">{{.}}</a>{{end}}</div></td></tr>

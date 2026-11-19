@@ -84,7 +84,7 @@ allow-list, or to link to a page from an alert.
 | Method and path | What it does | Query parameters |
 |---|---|---|
 | `GET /` | The overview: queues, counts, and charts | `range`: `1h` (the default), `6h`, or `24h` |
-| `GET /tasks` | The task list: 50 tasks, and up to 250 as you load more | `state`, `queue`, `kind`, `group`: each can repeat, and its first 100 values count. `limit`: how many tasks to show, from 1 to 250. `cursor`: the task that a later page starts after |
+| `GET /tasks` | The task list: 50 tasks, and up to 250 as you load more | `state`, `queue`, `kind`, `group`: each can repeat, and its first 100 values count. `limit`: how many tasks to show, from 1 to 250. `cursor`: the task that a later page starts after. `since`, `before`: a range of finish times, for a list of only dead and canceled tasks |
 | `GET /tasks/{id}` | One task | — |
 | `GET /schedules` | The schedules | — |
 | `GET /workers` | The workers | — |
@@ -100,6 +100,11 @@ For example, `/tasks?state=dead&queue=emails` lists the dead tasks of the
 queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.
 
 - **Every action is a `POST`.** A `GET` never changes anything.
+- **`since` and `before` are instants.** The list shows the tasks that
+  finished at `since` or later, and before `before`. Write a time to the
+  minute or to the second, with `Z` or an offset: `2026-01-31T14:05Z`, or
+  `2026-01-31T19:05:30+05:00`. A time without a zone, such as
+  `2026-01-31T14:05`, is in UTC. The dashboard's own links use `Z`.
 - **`theme` works on every page:** `?theme=light`, `dark`, or `system`. The
   browser remembers the choice. Where it blocks storage, as some browsers
   do in a frame of another site, the choice holds for that page only.
@@ -109,10 +114,10 @@ queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.
 
 | Status | When |
 |---|---|
-| 303 | An action worked. The redirect leads to a page that says so |
+| 303 | An action worked. The redirect leads to a page that says so. Or a task list that is not of only dead and canceled tasks got `since` or `before`: the redirect leads to the same list without them |
 | 304 | The page did not change since the browser's copy |
 | 307 | With a prefix: the prefix without its last slash, such as `/admin/tasks`, or a path that is not clean, such as one with a double slash. The redirect leads to the clean path under the prefix |
-| 400 | A filter value is not valid, such as an unknown state. Or the `cursor` is not one that this list made, as in a bookmark from before an upgrade. Or the `limit` is not a number from 1 to 250. Or a bulk action, or its page, got no filter. Or an action on a queue or a schedule got no valid `name` |
+| 400 | A filter value is not valid, such as an unknown state. Or the `cursor` is not one that this list made, as in a bookmark from before an upgrade. Or the `limit` is not a number from 1 to 250. Or `since` or `before` is not a time in one of their forms, or `since` is not before `before`. Or a bulk action, or its page, got no filter. Or an action on a queue or a schedule got no valid `name` |
 | 401 | The login is missing or wrong, when basic authentication is on |
 | 403 | An action in read-only mode, or a `POST` from another site |
 | 404 | No such page, task, or schedule. With a prefix, also a path that only starts like it, such as `/admin/tasksx` |
