@@ -337,6 +337,47 @@ func TestSleepUntilDueLimitsTheSecondsFirst(t *testing.T) {
 	}
 }
 
+// An election does not end when its worker is told to stop, so that the
+// worker knows the answer before it resigns. It has the lease's time while
+// the worker runs, a minute here, and the clean-up's time, 5 seconds here,
+// once the worker is told to stop.
+func TestElectionOutlivesItsWorkersStopForABoundedTime(t *testing.T) {
+	t.Parallel()
+	type kept struct{}
+	for _, tt := range []struct {
+		name       string
+		stopsAfter time.Duration // 0: the worker runs on
+		wantEnd    time.Duration
+	}{
+		{"the worker runs on", 0, time.Minute},
+		{"the worker stops", 10 * time.Second, 15 * time.Second},
+		{"the worker stops just before the election's time is up", 58 * time.Second, time.Minute},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// In the bubble, the clock moves only while the test waits, so
+			// it measures the election's time exactly.
+			synctest.Test(t, func(t *testing.T) {
+				worker, stop := context.WithCancel(context.WithValue(t.Context(), kept{}, "a value"))
+				defer stop()
+				election, cancel := outlive(worker, time.Minute, 5*time.Second)
+				defer cancel()
+				start := time.Now()
+				if tt.stopsAfter > 0 {
+					time.AfterFunc(tt.stopsAfter, stop)
+				}
+				<-election.Done()
+				if got := time.Since(start); got != tt.wantEnd {
+					t.Errorf("the election ended after %s, want %s", got, tt.wantEnd)
+				}
+				if election.Value(kept{}) != "a value" {
+					t.Error("the election lost its worker's values")
+				}
+			})
+		})
+	}
+}
+
 func TestWhileLeased(t *testing.T) {
 	t.Parallel()
 	// In the bubble, the clock moves only while whileLeased waits for its

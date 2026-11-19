@@ -181,9 +181,48 @@ func (m *maintainer) every(ctx context.Context, interval time.Duration, work fun
 	}
 }
 
+// outlive returns a context that keeps ctx's values, but not its end: it ends
+// after limit, or grace after ctx has ended, whichever comes first.
+func outlive(ctx context.Context, limit, grace time.Duration) (context.Context, context.CancelFunc) {
+	out, cancel := context.WithTimeout(context.WithoutCancel(ctx), limit)
+	stop := context.AfterFunc(ctx, func() {
+		select {
+		case <-out.Done():
+		case <-time.After(grace):
+			cancel()
+		}
+	})
+	return out, func() {
+		stop()
+		cancel()
+	}
+}
+
+// elect takes or renews the maintainer's lease, and reports whether this
+// worker leads.
+//
+// The election does not end with ctx, which ends when the worker stops. The
+// worker then resigns, and it must know before that what became of its
+// election. An election that it gave up could reach the database after the
+// resignation, and give the lease to a worker that has stopped: nobody would
+// lead until that lease ran out. So a worker that stops waits for the answer
+// to the election that is under way, and starts no other.
+//
+// The wait is bounded. While the worker runs, an election has the lease's
+// time: by then the lease that it would renew has run out. Once the worker
+// is told to stop, it has cleanupTimeout left, so that a database that does
+// not answer holds the stop up no longer than the resignation may. An
+// election without an answer by then is given up. Should the database run it
+// later still, after the resignation, its lease lasts until it runs out, as
+// a crashed worker's does.
 func (m *maintainer) elect(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	electCtx, cancel := outlive(ctx, m.w.timing.leaderLease, cleanupTimeout)
+	defer cancel()
 	var id string
-	err := m.c.pool.QueryRow(ctx, m.c.sql.electLeader, m.w.id, m.w.timing.leaderLease.Microseconds()).Scan(&id)
+	err := m.c.pool.QueryRow(electCtx, m.c.sql.electLeader, m.w.id, m.w.timing.leaderLease.Microseconds()).Scan(&id)
 	if err != nil && ctx.Err() != nil {
 		// The worker stops, and the statement may have committed all the
 		// same. Whatever this worker knows, resign gives the lease up.
