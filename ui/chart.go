@@ -51,6 +51,7 @@ func windowOf(r chartRange, now time.Time) window {
 type chart struct {
 	Title, Label string
 	Steps        int
+	Start, Step  int64  // when the first step starts and how long a step is, in Unix seconds
 	Top, Half    string // labels of the y axis
 	From, Mid    string // labels of the x axis, before "now"
 	Series       []series
@@ -61,6 +62,7 @@ type chart struct {
 type series struct {
 	Name, Class string // Class colors it by task state
 	Line, Area  string // SVG paths; Area is empty for a plain line
+	Values      string // each step's value as the page shows it, between spaces; nothing for a gap
 }
 
 // column is one step, with a tooltip that lists its values.
@@ -89,12 +91,17 @@ func newChart(title, unit string, w window, now time.Time, lines []line) chart {
 	top = niceTop(top)
 	c := chart{
 		Title: title, Steps: w.steps, Note: "Nothing recorded yet",
+		Start: w.start.Unix(), Step: int64(w.step / time.Second),
 		Top: formatValue(top), Half: formatValue(top / 2),
 		From: compact(w.step*time.Duration(w.steps)) + " ago", Mid: compact(w.step*time.Duration(w.steps)/2) + " ago",
 	}
 	c.Label = fmt.Sprintf("%s over the last %s", title, compact(w.step*time.Duration(w.steps)))
-	for _, l := range lines {
-		s := series{Name: l.name, Class: l.class}
+	// Each value is worded once, for the tooltip of its column and for the
+	// script, which shows the values of the step under the pointer.
+	texts := make([][]string, len(lines))
+	for k, l := range lines {
+		texts[k] = wordValues(l.values)
+		s := series{Name: l.name, Class: l.class, Values: strings.Join(texts[k], " ")}
 		var drawn bool
 		s.Line, s.Area, drawn = draw(l.values, top)
 		if !l.area {
@@ -108,9 +115,9 @@ func newChart(title, unit string, w window, now time.Time, lines []line) chart {
 	for i := range w.steps {
 		at := w.start.Add(time.Duration(i) * w.step)
 		var parts []string
-		for _, l := range lines {
-			if v := l.values[i]; !math.IsNaN(v) {
-				parts = append(parts, formatValue(v)+" "+strings.ToLower(l.name))
+		for k, l := range lines {
+			if text := texts[k][i]; text != "" {
+				parts = append(parts, text+" "+strings.ToLower(l.name))
 			}
 		}
 		text := "no data"
@@ -120,6 +127,18 @@ func newChart(title, unit string, w window, now time.Time, lines []line) chart {
 		c.Columns = append(c.Columns, column{X: i, Title: sinceLabel(now.Sub(at)) + ": " + text})
 	}
 	return c
+}
+
+// wordValues formats each value as the page shows it, and leaves a gap
+// empty.
+func wordValues(values []float64) []string {
+	texts := make([]string, len(values))
+	for i, v := range values {
+		if !math.IsNaN(v) {
+			texts[i] = formatValue(v)
+		}
+	}
+	return texts
 }
 
 // draw returns the paths of a line and of the area under it, scaled so that
@@ -206,6 +225,150 @@ func stepName(d time.Duration) string {
 		return "minute"
 	}
 	return compact(d) + " step"
+}
+
+// settle is how long after a step ends its count of attempts may still grow:
+// a worker writes the attempts it counted every 10 seconds, and the write
+// takes a moment.
+const settle = 15 * time.Second
+
+// throughput returns the attempts a minute in the newest step whose count is
+// complete, NaN if nothing was recorded in it, and the highest rate of the
+// steps before the one in progress. A step that ended less than settle ago
+// does not count as complete: read as it is, it would pull the dial's needle
+// down for a moment at the start of every step.
+func throughput(points []taskmill.Activity, w window, now time.Time) (rate, peak float64) {
+	newest := w.steps - 2
+	if now.Sub(w.start.Add(time.Duration(w.steps-1)*w.step)) < settle {
+		newest--
+	}
+	rate = math.NaN()
+	for _, p := range points {
+		i, ok := w.index(p.At)
+		if !ok || i == w.steps-1 {
+			continue
+		}
+		r := (float64(p.Completed) + float64(p.Failed)) / w.step.Minutes()
+		peak = max(peak, r)
+		if i == newest {
+			rate = r
+		}
+	}
+	return rate, peak
+}
+
+// dial is the gauge of the attempts a minute. The server draws it as SVG,
+// like the charts, in a view box that has the hub at its origin. So one
+// rotation about the origin turns the needle and the arc of the value: 0
+// degrees at the scale's zero, on the left, and 180 at its top, on the right.
+// A browser animates a change of the rotation, and no shape changes.
+type dial struct {
+	Label        string // what a screen reader says
+	Value, Unit  string // the rate, or a dash without one, and what it counts
+	Angle        string // the rotation of the needle and the arc, in degrees
+	Minor, Major string // SVG paths of the ticks
+	Marks        []dialMark
+}
+
+// dialMark is a label of the dial's scale, and where its middle is.
+type dialMark struct{ X, Y, Text string }
+
+// The dial's measures, in the units of its view box. The template draws the
+// track at 92 from the hub, and the needle to 73.
+const (
+	dialTicks   = 20   // steps of the scale; every fifth tick is major, with a label
+	dialTickEnd = 86.0 // where a tick ends, short of the track
+	dialMinor   = 81.0 // where a minor tick starts
+	dialMajor   = 76.0 // where a major tick starts
+	dialMarkAt  = 60.0 // the middle of a label
+	dialEndDrop = 10.0 // the labels of zero and of the top stand this far below their ticks
+)
+
+// newDial draws the dial for rate, on the smallest round scale that holds
+// peak, so the needle reads against the highest rate of the period. A rate
+// that is not a number shows as no data, with the needle at rest on zero.
+func newDial(rate, peak float64) dial {
+	top := dialTop(peak)
+	d := dial{Label: "Attempts a minute: no data", Value: "—", Unit: "attempts a minute", Angle: "0"}
+	if !math.IsNaN(rate) {
+		d.Value = formatValue(rate)
+		if d.Value == "1" {
+			d.Unit = "attempt a minute"
+		}
+		d.Label = d.Value + " " + d.Unit + ", on a dial from 0 to " + formatValue(top)
+		d.Angle = coord(180 * min(max(rate/top, 0), 1))
+	}
+	var minor, major strings.Builder
+	for i := range dialTicks + 1 {
+		share := float64(i) / dialTicks
+		if i%(dialTicks/4) != 0 {
+			tick(&minor, share, dialMinor)
+			continue
+		}
+		tick(&major, share, dialMajor)
+		x, y := dialPoint(share, dialMarkAt)
+		if i%dialTicks == 0 { // under its tick, clear of a needle that rests on zero or on the top
+			x, _ = dialPoint(share, (dialMajor+dialTickEnd)/2)
+			y = dialEndDrop
+		}
+		d.Marks = append(d.Marks, dialMark{coord(x), coord(y), short(top * share)})
+	}
+	d.Minor, d.Major = minor.String(), major.String()
+	return d
+}
+
+// dialTop returns the top of the smallest round scale that holds peak: 1, 2,
+// or 5 times a power of ten, and at least 10.
+func dialTop(peak float64) float64 {
+	if math.IsNaN(peak) || peak <= 10 {
+		return 10
+	}
+	power := math.Pow(10, math.Floor(math.Log10(peak)))
+	for _, m := range []float64{1, 2, 5} {
+		if m*power >= peak {
+			return m * power
+		}
+	}
+	return 10 * power
+}
+
+// dialPoint returns the point at distance r from the hub where the dial
+// shows share of its scale: 0 is on the left, a half at the top, and 1 on
+// the right.
+func dialPoint(share, r float64) (x, y float64) {
+	sin, cos := math.Sincos(math.Pi * share)
+	return -r * cos, -r * sin
+}
+
+// tick adds a tick at share of the scale to path, from the distance from
+// to where every tick ends.
+func tick(path *strings.Builder, share, from float64) {
+	x1, y1 := dialPoint(share, from)
+	x2, y2 := dialPoint(share, dialTickEnd)
+	path.WriteString("M" + coord(x1) + " " + coord(y1) + "L" + coord(x2) + " " + coord(y2))
+}
+
+// coord formats a coordinate or an angle of the dial to a tenth, as short as
+// it gets: "43.8", "-86", "0".
+func coord(v float64) string {
+	v = math.Round(v*10) / 10
+	if v == 0 {
+		return "0" // never "-0"
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
+// short formats a mark of the dial's scale in few characters: "250", "2.5",
+// "1k", "1.25M".
+func short(v float64) string {
+	unit := ""
+	switch {
+	case v >= 1e6:
+		v, unit = v/1e6, "M"
+	case v >= 1e3:
+		v, unit = v/1e3, "k"
+	}
+	return strconv.FormatFloat(v, 'f', -1, 64) + unit
 }
 
 // index returns the step that starts at at.

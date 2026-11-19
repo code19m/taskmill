@@ -355,6 +355,7 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "read activity failed", slog.Any(logKeyError, err))
 	}
 	tasksChart, attemptsChart := taskChart(activity, win, now), attemptChart(activity, win, now)
+	rate, peak := throughput(activity, win, now)
 	if err != nil {
 		tasksChart.Note, attemptsChart.Note = "History is unavailable", "History is unavailable"
 	}
@@ -389,10 +390,11 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		RefreshedAt     time.Time
 		Ranges          []chartRange
 		Range           string
+		Dial            dial
 		Tasks, Attempts chart
 	}{
 		queues, queueStates, t, len(workers), maintainer, len(schedules), nextRun, settings, refreshed,
-		chartRanges, span.Name, tasksChart, attemptsChart,
+		chartRanges, span.Name, newDial(rate, peak), tasksChart, attemptsChart,
 	}})
 }
 

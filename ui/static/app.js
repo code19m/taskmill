@@ -387,8 +387,10 @@
     history.replaceState({ n: entry }, "");
   }
 
-  // leave keeps the page on screen, before another one takes its place.
+  // leave keeps the page on screen, before another one takes its place,
+  // without the guide of a chart: that is the script's, not the page's.
   function leave() {
+    untrace();
     pages.delete(entry);
     pages.set(entry, { html: root.outerHTML, y: scrollY });
     if (pages.size > KEEP_PAGES) pages.delete(pages.keys().next().value);
@@ -598,6 +600,94 @@
     }
   }
 
+  // Charts: the values of a step
+  //
+  // A guide marks the step of a chart that is under the pointer or a pressed
+  // finger, or that the arrow keys choose in a chart with focus. A note
+  // beside it gives the step's time and values. The page holds them all:
+  // each series has its values as text, and the legend names them. The guide
+  // is an element in the chart, so it scrolls and resizes with it. A live
+  // update removes it, as it removes whatever the server did not render,
+  // and draws it again from the newer values before the browser paints.
+
+  const guide = document.createElement("div");
+  guide.className = "chart-guide";
+  guide.id = "chart-guide"; // a name of its own: an update never takes it for a part of the page
+  guide.setAttribute("aria-hidden", "true"); // the arrow keys announce the step
+  const tip = guide.appendChild(document.createElement("div"));
+  tip.className = "chart-tip";
+  let traced = null; // the chart with the guide, and the pointer's place or the step that the keys chose: { svg, x } or { svg, i }
+  let marked = 0; // the step that the guide marks
+  let tracing = 0; // the frame that will draw the guide: pointer moves between two frames draw once
+
+  const clock = (seconds) => new Date(seconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  function untrace() {
+    traced = null;
+    guide.remove();
+  }
+
+  function trace() {
+    tracing = 0;
+    const svg = traced?.svg;
+    const series = svg?.isConnected ? [...svg.querySelectorAll("[data-values]")].map((g) => g.dataset.values.split(" ")) : [];
+    if (series.length === 0) { // the reader left the chart, or its page
+      untrace();
+      return;
+    }
+    const steps = series[0].length;
+    const box = svg.getBoundingClientRect();
+    const i = Math.min(steps - 1, Math.max(0, traced.i ?? Math.floor(((traced.x - box.left) / box.width) * steps)));
+    const plot = svg.parentNode;
+    if (i === marked && guide.parentNode === plot) return; // still on the step that it marks
+    marked = i;
+    const step = Number(svg.dataset.step);
+    const start = Number(svg.dataset.start) + i * step;
+    const time = document.createElement("span");
+    time.className = "chart-tip-time";
+    time.textContent = step > 60 ? `${clock(start)} – ${clock(start + step)}` : clock(start);
+    tip.replaceChildren(time, ...[...svg.closest(".chart").querySelectorAll(".legend span")].flatMap((name, k) => {
+      const value = document.createElement("b");
+      value.textContent = series[k]?.[i] || "—";
+      return [name.cloneNode(true), value];
+    }));
+    guide.classList.toggle("flip", 2 * i >= steps); // the note stays inside the plot
+    // The guide is the left edge of a box as wide as the plot.
+    guide.style.transform = `translateX(${((i + 0.5) / steps) * 100}%)`;
+    plot.append(guide);
+  }
+
+  for (const type of ["pointerdown", "pointermove"]) {
+    document.addEventListener(type, (event) => {
+      const svg = event.target.closest?.(".chart-plot > svg");
+      if (!svg) return;
+      traced = { svg, x: event.clientX };
+      tracing ||= requestAnimationFrame(trace);
+    });
+  }
+  // The pointer left the chart, or the finger lifted.
+  document.addEventListener("pointerout", (event) => {
+    if (traced?.svg.contains(event.target) && !traced.svg.contains(event.relatedTarget)) untrace();
+  });
+  document.addEventListener("focusout", (event) => {
+    if (traced?.svg === event.target) untrace();
+  });
+
+  // In a chart with focus, the arrow keys move the guide, from the newest
+  // step if the chart has none, and Escape hides it. A screen reader hears
+  // the step as the tooltip of its column words it.
+  document.addEventListener("keydown", (event) => {
+    const svg = event.target.closest?.(".chart-plot > svg");
+    if (!svg || event.metaKey || event.ctrlKey || event.altKey) return;
+    if (event.key === "Escape") untrace();
+    const move = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
+    if (!move) return;
+    event.preventDefault();
+    traced = { svg, i: guide.parentNode === svg.parentNode ? marked + move : Infinity };
+    trace();
+    document.querySelector("[data-announce]").textContent = svg.querySelectorAll(".col")[marked]?.textContent ?? "";
+  });
+
   // Notices after an action. The server names a notice in the address of
   // the page that shows it. The address loses that right away, so a reload
   // does not show the notice again.
@@ -767,6 +857,7 @@
     if (result.doc.title) document.title = result.doc.title;
     shownETag = result.etag;
     highlight(main);
+    if (traced) trace(); // the update took the guide off its chart, or the chart off the page
     // The newer copy lists every option of a menu, and none that a search
     // found on the server: an open menu shows its search again.
     for (const sel of openMenus()) refine(sel);

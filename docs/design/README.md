@@ -110,12 +110,12 @@ What follows:
 ### How the dashboard is built
 
 - **Server-rendered** with `html/template`, `embed`, and `net/http`. The
-  charts are SVG, drawn on the server.
+  charts and the dial are SVG, drawn on the server.
 - **Two small scripts of our own,** `app.js` and `theme.js`, under a strict
   content security policy. They keep pages live, apply filters as they
-  change, confirm actions in dialogs, and apply the chosen theme. Every page
-  also works without them. Nothing needs a JavaScript build step or
-  third-party code.
+  change, confirm actions in dialogs, show a chart's values under the
+  pointer, and apply the chosen theme. Every page also works without them.
+  Nothing needs a JavaScript build step or third-party code.
 - **The server renders every page, and the script only shows it in place.**
   For a link, the back button, or an action, the script fetches the page
   that the server would send to a browser, and swaps its content in. So

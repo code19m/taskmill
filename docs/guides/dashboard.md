@@ -135,11 +135,28 @@ theme, and the next pages follow the device.
 
 | Page | What you see | What you can do |
 |---|---|---|
-| **Overview** | Task counts per queue and state, charts of tasks and attempts over the last 1, 6, or 24 hours, and the number of workers | Pause and resume a queue |
+| **Overview** | Task counts per queue and state, a dial of the attempts a minute, charts of tasks and attempts over the last 1, 6, or 24 hours, and the number of workers | Pause and resume a queue |
 | **Tasks** | Tasks filtered by state, queue, kind, and FIFO group | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its next and last run | Pause, resume, or run it now |
 | **Workers** | Each worker, with its host, version, and queues, and which one is the [maintainer](../concepts/glossary.md#maintainer) | Nothing: this page is for looking |
+
+On the **Overview**, the **Activity** card shows the last 1, 6, or 24 hours,
+in steps of 1, 5, or 15 minutes. To read the values of one step, point at a
+chart, or press and drag on a touch screen. From the keyboard, move to a
+chart with Tab and press the left and right arrow keys; Escape hides the
+values. The **Throughput** dial reads like this:
+
+| Part of the dial | What it shows |
+|---|---|
+| The needle and the number | The attempts a minute, completed and failed together, in the newest step whose count is complete. In the longer periods, that is the mean of 5 or 15 minutes |
+| The scale | From 0 to the smallest round number that holds the highest rate of the period: 1, 2, or 5 times a power of ten, and at least 10 |
+| A dash in place of the number | No worker recorded anything in that step |
+
+So the needle reads against the busiest step of the period that you chose:
+near the top of the scale, the workers are as busy as at their peak. Workers
+write their counts every 10 seconds, so the dial reads a step 15 seconds
+after it ends, not sooner.
 
 On the **Workers** page, the **Kinds** column counts the kinds that the
 worker has handlers for: click the count to list them. The **Checked in**

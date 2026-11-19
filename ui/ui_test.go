@@ -350,11 +350,67 @@ func TestOverviewPeriods(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
 	// The charts' period is chosen in the address; an unknown one shows the
-	// last hour.
-	for query, want := range map[string]string{"?range=24h": "24h", "?range=7y": "1h"} {
+	// last hour. A day has steps of 15 minutes, and an hour steps of one: the
+	// script tells the time of a step by them.
+	for query, want := range map[string][2]string{"?range=24h": {"24h", "900"}, "?range=7y": {"1h", "60"}} {
 		_, body, _ := get(t, h, "/"+query)
-		if !strings.Contains(body, `aria-current="true">`+want+`<`) || !strings.Contains(body, `class="series"`) {
-			t.Fatalf("overview %s: want the %s period selected\n%s", query, want, body)
+		if !strings.Contains(body, `aria-current="true">`+want[0]+`<`) || !strings.Contains(body, `class="series"`) ||
+			strings.Count(body, `data-step="`+want[1]+`"`) != 2 {
+			t.Fatalf("overview %s: want the %s period selected, in steps of %s seconds\n%s", query, want[0], want[1], body)
+		}
+	}
+}
+
+// TestOverviewShowsTheAttemptsOfAStep checks what the activity card says
+// about attempts: the dial reads the newest complete minute against the
+// highest rate of the period, and the chart holds each step's values for the
+// script, which shows them under the pointer.
+func TestOverviewShowsTheAttemptsOfAStep(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	h := handler(t, client, nil)
+
+	// Nothing is recorded yet: the needle rests on zero, and the dial says so.
+	_, body, _ := get(t, h, "/")
+	for _, want := range []string{
+		`aria-label="Attempts a minute: no data"`, `aria-hidden="true">—</p>`, `class="dial-needle"[^>]* transform="rotate\(0\)"`,
+	} {
+		if !regexp.MustCompile(want).MatchString(body) {
+			t.Errorf("without activity: want %s in\n%s", want, body)
+		}
+	}
+
+	// The same counts in this minute and in the three before it: whichever of
+	// them is the newest complete one when the page renders, it has 660
+	// attempts, and so has the busiest one.
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.activity (minute, queue, completed, failed)
+	    SELECT date_trunc('minute', now()) - n * interval '1 minute', 'mail', 600, 60 FROM generate_series(0, 3) n`); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ = get(t, h, "/")
+	for _, want := range []string{
+		`aria-label="660 attempts a minute, on a dial from 0 to 1,000"`, `aria-hidden="true">660</p>`,
+		`>0</text>`, `>250</text>`, `>500</text>`, `>750</text>`, `>1k</text>`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("want %s in\n%s", want, body)
+		}
+	}
+	// The needle and the arc of the value turn together, 660 of 1,000 of a
+	// half turn.
+	if n := strings.Count(body, `transform="rotate(118.8)"`); n != 2 {
+		t.Errorf("%d shapes are turned by 118.8 degrees, want the needle and the arc\n%s", n, body)
+	}
+	// The chart can take focus, says when its steps start, and holds one
+	// value per step for each series, with nothing for a step without one.
+	// The legend names the series in the same order.
+	for _, want := range []string{
+		`tabindex="0" data-start="\d+" data-step="60">`,
+		`<g class="state-completed" data-values=" *(600 ){2,4}">`, `<g class="state-dead" data-values=" *(60 ){2,4}">`,
+		`<span class="state-completed"><i></i>Completed</span><span class="state-dead"><i></i>Failed</span>`,
+	} {
+		if !regexp.MustCompile(want).MatchString(body) {
+			t.Errorf("want %s in\n%s", want, body)
 		}
 	}
 }

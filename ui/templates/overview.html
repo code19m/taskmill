@@ -35,6 +35,7 @@
     <nav class="seg seg-sm" aria-label="Period">{{range $d.Ranges}}<a href="{{path "/"}}?range={{.Name}}"{{if eq .Name $d.Range}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
   </div>
   <div class="charts">
+    {{template "dial" $d.Dial}}
     {{template "chart" $d.Tasks}}
     {{template "chart" $d.Attempts}}
   </div>
@@ -95,8 +96,29 @@
 </div>
 {{template "foot" .}}{{end}}
 
+{{/* The dial of the attempts a minute; see chart.go. The arc of the value is
+   half a ring that hides below the scale's zero line, and comes out as far
+   as it is turned, with the needle. */}}
+{{define "dial"}}<figure class="chart dial">
+  <figcaption class="chart-title">Throughput</figcaption>
+  <svg viewBox="-94 -94 188 112" role="img" aria-label="{{.Label}}">
+    <clipPath id="dial-scale"><rect x="-94" y="-94" width="188" height="94"/></clipPath>
+    <path class="dial-track" d="M-92 0A92 92 0 0 1 92 0"/>
+    <g clip-path="url(#dial-scale)"><path class="dial-arc" d="M-92 0A92 92 0 0 0 92 0" transform="rotate({{.Angle}})"/></g>
+    <path class="dial-minor" d="{{.Minor}}"/>
+    <path class="dial-major" d="{{.Major}}"/>
+    {{range .Marks}}<text x="{{.X}}" y="{{.Y}}">{{.Text}}</text>{{end}}
+    <path class="dial-needle" d="M12 0H-73" transform="rotate({{.Angle}})"/>
+    <circle class="dial-hub" r="5"/><circle class="dial-pin" r="1.4"/>
+  </svg>
+  <p class="dial-value" aria-hidden="true">{{.Value}}</p>
+  <p class="dial-unit" aria-hidden="true">{{.Unit}}</p>
+</figure>{{end}}
+
 {{/* A chart drawn on the server; see chart.go. Each step is a column whose
-   tooltip lists its values. */}}
+   tooltip lists its values. The script shows the values of the step under
+   the pointer instead: it reads them from each series, names them by the
+   legend, and tells the step's time by data-start and data-step. */}}
 {{define "chart"}}<figure class="chart">
   <figcaption class="chart-head">
     <span class="chart-title">{{.Title}}</span>
@@ -105,9 +127,9 @@
   <div class="chart-body">
     <div class="chart-y" aria-hidden="true"><span>{{.Top}}</span><span>{{.Half}}</span><span>0</span></div>
     <div class="chart-plot">
-      <svg viewBox="0 0 {{.Steps}} 100" preserveAspectRatio="none" role="img" aria-label="{{.Label}}">
+      <svg viewBox="0 0 {{.Steps}} 100" preserveAspectRatio="none" role="img" aria-label="{{.Label}}" tabindex="0" data-start="{{.Start}}" data-step="{{.Step}}">
         <path class="grid-line" d="M0 4H{{.Steps}}M0 50H{{.Steps}}M0 96H{{.Steps}}"/>
-        {{range .Series}}<g class="{{.Class}}">{{with .Area}}<path class="area" d="{{.}}"/>{{end}}<path class="series" d="{{.Line}}"/></g>{{end}}
+        {{range .Series}}<g class="{{.Class}}" data-values="{{.Values}}">{{with .Area}}<path class="area" d="{{.}}"/>{{end}}<path class="series" d="{{.Line}}"/></g>{{end}}
         {{range .Columns}}<rect class="col" x="{{.X}}" width="1" height="100"><title>{{.Title}}</title></rect>{{end}}
       </svg>
       {{with .Note}}<p class="chart-note">{{.}}</p>{{end}}
