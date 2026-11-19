@@ -38,6 +38,19 @@ All notable changes to taskmill are recorded here. The format follows
   one baseline: a mark no longer makes its row taller. A worker built from
   taskmill's own tree shows "devel" as its version, where it showed Go's
   "(devel)": the tooltip has what the worker stored.
+- The dashboard's **Finished** filter has a calendar of its own, in place
+  of the browser's date pickers. Click the first and the last day of a
+  range: the calendar marks the days, and **From** and **To** show them,
+  from 00:00 to 23:59. Type a date as `2026-11-19` and a time as `14:05`
+  to refine a bound, or empty it. **To** is now the last minute in the
+  range, so a range to 19 November 23:59 holds every task of that day. The
+  address has not changed: its `before` is the minute after **To**. The
+  button words the range in the same way, and says "Until" for a range
+  with only an end. The calendar works from the keyboard, with the arrow
+  keys, Home, End, Page Up, and Page Down, and it names every day for a
+  screen reader. It offers no day after today, and its week starts on
+  Monday, or on the first day that the browser's language has. Without the
+  script, the browser's own fields remain, in UTC: **From** and **Before**.
 
 ## [0.11.1] - 2026-11-19
 

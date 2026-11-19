@@ -207,15 +207,15 @@ shows the tasks that finished in a range of time:
 | You want… | Do this |
 |---|---|
 | The tasks of the last hours or days | Choose a preset, such as **Last 6 hours**. The list starts at that time and has no end, so it shows new tasks as they finish |
-| A precise or a long period, such as last night | Fill in **From**, **To**, or both, and choose **Apply**. A task that finished exactly at **To** is not in the range |
+| Whole days, or a precise period such as last night | Click the first and the last day in the calendar: **From** and **To** show the range, from 00:00 to 23:59. Type other times, or dates, if you need them, or empty one for a range with one end. Then choose **Apply**. The range holds the minute of **To**: in the address, `before` is the minute after it |
 | Every task again | Choose **Any time** |
 
 The dashboard shows times in your time zone, and names the zone: the range
-on the button, the two fields, and the exact time in a tooltip. Without
-JavaScript, they are in UTC. The address holds the range as instants, in
-`since` and `before`, so a link shows the same tasks to everyone
-([Dashboard routes](../reference/taskmill-ui.md#dashboard-routes) has the
-forms of a time). While a range is set, the list hides **Retry all**,
+on the button, the calendar's fields, and the exact time in a tooltip.
+Without JavaScript, the browser's own fields take the range, in UTC. The
+address holds instants, `since` and `before`, so a link shows the same tasks
+to everyone ([Dashboard routes](../reference/taskmill-ui.md#dashboard-routes)
+has the forms of a time). While a range is set, the list hides **Retry all**,
 **Cancel all**, and **Delete all**: they act on every task that the other
 filters match, also outside the range. If you add another state, the list
 drops the range: only dead and canceled tasks are listed by finish time.

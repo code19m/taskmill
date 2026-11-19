@@ -331,3 +331,91 @@ func TestListThatIsNotInFinishOrderDropsTheRange(t *testing.T) {
 		}
 	}
 }
+
+// A browser without the script sends the form of the filters as the page
+// gives it: the checked boxes, and for the range the two fields of its own,
+// which hold the bounds in UTC. It gets the list that it had, with the same
+// range. The fields of the script's picker have no name, so no browser sends
+// them, with the script or without it.
+func TestFiltersFormKeepsTheRangeWithoutTheScript(t *testing.T) {
+	t.Parallel()
+	h := handler(t, setup(t), nil)
+	_, body, _ := get(t, h, "/tasks?state=dead&since=2021-03-04T15:00:00%2B05:00&before=2021-03-04T11:30:30Z")
+	form := tagOf(t, body, `(?s)<form class="filters"[^>]*>.*?</form>`)
+	sent := url.Values{}
+	for _, field := range regexp.MustCompile(`<input[^>]*>`).FindAllString(form, -1) {
+		name, named := attrOf(field, "name")
+		if kind, _ := attrOf(field, "type"); !named || kind == "checkbox" && !strings.Contains(field, " checked") {
+			continue
+		}
+		value, _ := attrOf(field, "value")
+		sent.Add(name, value)
+	}
+	if got, want := sent.Encode(), "before=2021-03-04T11%3A30%3A30&since=2021-03-04T10%3A00&state=dead"; got != want {
+		t.Fatalf("the form sends %s, want %s", got, want)
+	}
+	action, _ := attrOf(form, "action")
+	code, again, _ := get(t, h, action+"?"+sent.Encode())
+	if got, want := readFinishFilter(t, again), readFinishFilter(t, body); code != http.StatusOK || got != want {
+		t.Errorf("the list that the form leads to has status %d and the range\n%+v, want\n%+v", code, got, want)
+	}
+}
+
+// The menu of the filter by finish time holds what the script's picker
+// reads: a calendar with a grid that its title names, a row of seven
+// weekdays, and the two steps of its month, which are plain buttons, so that
+// a click on one never sends the form; and for each bound a date and a time,
+// which say what they are and how to write them. The page shows none of it
+// without the script, where the browser's own fields say From and Before:
+// their second bound is the one of the address.
+func TestFinishFilterHoldsWhatItsPickerReads(t *testing.T) {
+	t.Parallel()
+	_, body, _ := get(t, handler(t, setup(t), nil), "/tasks?state=dead&state=canceled")
+	menu := tagOf(t, body, `(?s)<details class="sel sel-range">.*?</details>`)
+
+	grid := tagOf(t, menu, `<div[^>]* class="cal-grid"[^>]*>`)
+	title, _ := attrOf(grid, "aria-labelledby")
+	if role, _ := attrOf(grid, "role"); role != "grid" || title == "" || !regexp.MustCompile(`<span class="cal-title" id="`+title+`"`).MatchString(menu) {
+		t.Errorf("the calendar is %s, want a grid that the title of the month names\n%s", grid, menu)
+	}
+	if week := tagOf(t, menu, `(?s)<div class="cal-row cal-week"[^>]*>.*?</div>`); strings.Count(week, "<span>") != 7 {
+		t.Errorf("the calendar's row of weekdays is %s, want seven days", week)
+	}
+	for step, name := range map[string]string{"-1": "Previous month", "1": "Next month"} {
+		button := tagOf(t, menu, `<button[^>]* data-cal-step="`+step+`"[^>]*>`)
+		kind, _ := attrOf(button, "type")
+		if label, _ := attrOf(button, "aria-label"); kind != "button" || label != name || !strings.Contains(button, `class="cal-nav"`) {
+			t.Errorf("the step %s of the month is %s, want a plain button named %q", step, button, name)
+		}
+	}
+
+	type field struct{ bound, label, placeholder string }
+	var fields []field
+	for _, tag := range regexp.MustCompile(`<input[^>]* data-bound="[^"]*"[^>]*>`).FindAllString(menu, -1) {
+		var f field
+		f.bound, _ = attrOf(tag, "data-bound")
+		f.label, _ = attrOf(tag, "aria-label")
+		f.placeholder, _ = attrOf(tag, "placeholder")
+		fields = append(fields, f)
+	}
+	want := []field{
+		{"since", "From, date", "YYYY-MM-DD"},
+		{"since", "From, time", "HH:MM"},
+		{"before", "To, date", "YYYY-MM-DD"},
+		{"before", "To, time", "HH:MM"},
+	}
+	if !slices.Equal(fields, want) {
+		t.Errorf("the bounds of the picker are\n%+v, want\n%+v", fields, want)
+	}
+
+	for _, part := range []string{`<div class="cal js-only">`, `<div class="bounds js-only">`} {
+		if !strings.Contains(menu, part) {
+			t.Errorf("the menu has no %s: the picker must not show without the script", part)
+		}
+	}
+	for name, label := range map[string]string{"since": "From", "before": "Before"} {
+		if !regexp.MustCompile(`<label class="field">` + label + `<input[^>]* type="datetime-local" name="` + name + `"`).MatchString(menu) {
+			t.Errorf("without the script, the menu has no field %q for %s\n%s", label, name, menu)
+		}
+	}
+}

@@ -460,8 +460,9 @@ form { display: inline; margin: 0; }
 }
 
 /* The filter by finish time. Its button is as wide as the range that it
-   names. Its menu has the presets, which are links, beside the two fields of
-   a custom range. On a small screen the presets are on top, two in a row. */
+   names. Its menu has the presets, which are links, beside a custom range:
+   a calendar over the two bounds. On a small screen the presets are on top,
+   two in a row. The column is as wide as seven days of the calendar. */
 .filters > .sel-range { flex-basis: auto; min-width: 200px; }
 .sel-range .sel-label { font-variant-numeric: tabular-nums; }
 .pop.range { flex-direction: row; width: max-content; max-height: none; }
@@ -470,11 +471,73 @@ a.pop-opt:hover { text-decoration: none; }
 a.pop-opt:focus-visible { outline-offset: -2px; }
 .pop-opt[aria-current] { color: var(--ink); font-weight: var(--weight-medium); }
 .range-custom {
-  display: grid; grid-template-rows: auto auto 1fr; gap: 10px; width: 248px; margin-left: 6px; padding: 6px 6px 6px 12px;
+  --day: 36px;
+  display: grid; gap: 12px; width: calc(7 * var(--day) + 19px); margin-left: 6px; padding: 6px 6px 6px 12px;
   border-left: 1px solid var(--line);
 }
+.range-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+/* The calendar: a month of days, which the script draws. The range is a
+   quiet band from its first day to its last. The two ends stand on ink, as
+   a checked box does, and today has a ring. Nothing here has the accent but
+   the focus ring. */
+.cal { display: grid; gap: 2px; }
+.cal-head { display: flex; align-items: center; justify-content: space-between; }
+.cal-title { font-size: var(--text-label); font-weight: var(--weight-medium); }
+.cal-nav {
+  position: relative; display: grid; place-items: center; width: 28px; height: 28px; padding: 0;
+  border: 0; border-radius: var(--radius-chip); background: none; color: var(--ink-faint); cursor: pointer;
+}
+.cal-nav:first-child > svg { transform: rotate(90deg); }
+.cal-nav:last-child > svg { transform: rotate(-90deg); }
+.cal-nav[aria-disabled="true"] { opacity: 0.4; cursor: default; }
+@media (hover: hover) { .cal-nav:not([aria-disabled="true"]):hover { background: var(--fill-hover); color: var(--ink); } }
+.cal-row { display: grid; grid-template-columns: repeat(7, 1fr); }
+.cal-week { padding: 4px 0; color: var(--ink-faint); font-size: var(--text-xs); text-align: center; }
+/* The six weeks have their room before the script draws them. */
+.cal-grid { display: grid; grid-template-rows: repeat(6, var(--day)); row-gap: 2px; isolation: isolate; }
+.cal-day {
+  position: relative; padding: 0; border: 0; border-radius: var(--radius-chip); background: none;
+  color: var(--ink); font-family: var(--font-sans); font-size: var(--text-label); font-variant-numeric: tabular-nums; cursor: pointer;
+}
+.cal-day.out { color: var(--ink-faint); }
+.cal-day[aria-disabled="true"] { color: color-mix(in srgb, var(--ink-ghost) 45%, transparent); cursor: default; }
+.cal-day[aria-current] { box-shadow: inset 0 0 0 1px var(--ink-faint); }
+@media (hover: hover) { .cal-day:where([aria-disabled="false"]):hover { background: var(--fill-hover); } }
+/* The band is square between its days, and round where a week ends. */
+.cal-day.in { border-radius: 0; background: var(--fill-selected); }
+.cal-day.in:first-child { border-radius: var(--radius-chip) 0 0 var(--radius-chip); }
+.cal-day.in:last-child { border-radius: 0 var(--radius-chip) var(--radius-chip) 0; }
+/* The two ends stand on ink. The band reaches each from the side of the
+   range, behind its round corners. */
+.cal-day[aria-selected="true"] { background: var(--ink); color: var(--surface-canvas); font-weight: var(--weight-medium); }
+.cal-day[aria-selected="true"][aria-current] { box-shadow: inset 0 0 0 2px var(--ink), inset 0 0 0 3px var(--surface-canvas); }
+.cal-day[aria-selected="true"]::before { content: ""; position: absolute; z-index: -1; top: 0; bottom: 0; background: var(--fill-selected); }
+.cal-day.lo:not(.hi, :last-child)::before { left: 50%; right: 0; }
+.cal-day.hi:not(.lo, :first-child)::before { left: 0; right: 50%; }
+/* The day that a click would end the range on. */
+.cal-day[aria-selected="false"]:is(.lo, .hi) { box-shadow: inset 0 0 0 1.5px var(--ink); }
+.cal-day:focus-visible { z-index: 1; outline-offset: 1px; }
+
+/* The two bounds of a custom range: a date and a time each, to type. What
+   a field shows while it is empty is quiet, and no heavier than its text. */
+.bounds {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) 84px; align-items: center; gap: 6px 8px;
+  color: var(--ink-muted); font-size: var(--text-sm);
+}
+.bounds .ctl { font-variant-numeric: tabular-nums; }
+.bounds .ctl::placeholder { color: var(--ink-muted); opacity: 1; }
+/* Without the script, the bounds are two fields of the browser. One that
+   the page gave no time is quiet too, until the page has its time. */
 .field { display: grid; gap: 4px; color: var(--ink-muted); font-size: var(--text-sm); }
-.range-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; align-self: end; }
+.field .ctl[value=""] { color: var(--ink-muted); }
+.js .field { display: none; }
+/* A finger gets 44 pixels: a day, a field, and a step of the month. */
+@media (pointer: coarse) {
+  .range-custom { --day: 44px; }
+  .bounds .ctl { min-height: 44px; }
+  .cal-nav::after { content: ""; position: absolute; inset: -8px; }
+}
 
 /* A hint: a small button, and the short text that it shows. The text is a
    popover: the browser opens it above the whole page, so no card and no

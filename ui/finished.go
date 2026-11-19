@@ -151,7 +151,9 @@ func (s *server) finishFilter(first url.Values, since, before, now time.Time) *f
 // button of the filter does, and in full, with the years and the zone. In
 // short, a day of this year has no year, and a range within one day names
 // the day once. A time has seconds only if it is not at a whole minute. The
-// script says the same in the reader's time zone: its words follow these.
+// script says the range in the reader's time zone, with these words but for
+// the end: it names the last minute in the range, as the fields of its picker
+// do, and "Until" that minute for a range with only an end.
 func rangeWords(since, before, now time.Time) (short, full string) {
 	since, before = since.UTC(), before.UTC()
 	clock := func(t time.Time) string {
