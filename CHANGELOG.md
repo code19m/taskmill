@@ -18,7 +18,8 @@ All notable changes to taskmill are recorded here. The format follows
   shows up to 250 tasks, because every update reads them all. After that,
   it continues from its last task on a page of its own, as before. Under
   every list that has tasks, the page also says how many it shows, and
-  tells a screen reader the new number after "Load more".
+  tells a screen reader the new number after "Load more" or a change of
+  the filters.
 
 ### Fixed
 
