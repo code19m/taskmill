@@ -7,6 +7,21 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The dashboard's overview has a dial of the attempts a minute, first in
+  the Activity card. It counts completed and failed attempts together, in
+  the newest step of the chosen period whose count is complete. Its scale
+  ends at the smallest round number that holds the highest rate of the
+  period, so the needle reads against the busiest step of the last 1, 6,
+  or 24 hours. With the script, the needle glides to each new value, unless
+  the device asks for reduced motion.
+- The overview's charts show the values of one step. Point at a chart,
+  press and drag on a touch screen, or move to a chart with Tab and press
+  the left and right arrow keys: a guide marks the step, and a note beside
+  it lists the step's time and the value of each series. Escape hides them.
+  Without the script, the tooltip of a step lists its values, as before.
+
 ### Changed
 
 - The dashboard's task list has a "Load more" button in place of the link

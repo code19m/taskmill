@@ -659,17 +659,23 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 /* The server draws the charts. Their view box is stretched to the plot, so
    strokes keep their width with non-scaling-stroke, and labels live in HTML. */
 .activity { overflow: hidden; }
-/* A one-pixel gap shows the line between the charts, side by side or stacked. */
+/* A one-pixel gap shows the line between the charts, side by side or stacked.
+   The dial has a row of its own until there is room for three columns. */
 .charts {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 1px;
   background: var(--line-soft);
+}
+.dial { grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; }
+@media (min-width: 1100px) {
+  .charts { grid-template-columns: minmax(0, 2fr) repeat(2, minmax(0, 3fr)); }
+  .dial { grid-column: auto; }
 }
 .chart { margin: 0; padding: 12px 16px; min-width: 0; background: var(--surface-raised); }
 .chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
 .chart-title { font-size: var(--text-label); font-weight: var(--weight-medium); color: var(--ink-soft); }
 .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: var(--text-xs); color: var(--ink-faint); }
-.legend span { display: inline-flex; align-items: center; gap: 6px; }
-.legend i { width: 10px; height: 2px; border-radius: 1px; background: var(--c); }
+.legend span, .chart-tip span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i, .chart-tip i { width: 10px; height: 2px; border-radius: 1px; background: var(--c); }
 .chart-body { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 8px; }
 .chart-y {
   display: flex; flex-direction: column; justify-content: space-between; min-width: 28px; padding: 1px 0;
@@ -694,6 +700,46 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   font-size: var(--text-xs); color: var(--ink-faint); font-variant-numeric: tabular-nums;
 }
 .seg-sm a { padding: 3px 10px; font-size: var(--text-sm); }
+
+/* With the script, a guide marks the step under the pointer, and a note beside
+   it lists the step's values, in place of the columns' own tooltips. The
+   guide is the left edge of a box as wide as the plot: moved by a share of
+   its own width, it stands on a step, whatever the width of the plot. */
+.js .chart .col { pointer-events: none; }
+.js .chart-plot svg { cursor: crosshair; touch-action: pan-y; }
+.chart-guide { position: absolute; inset: 0; border-left: 1px solid var(--ink-ghost); pointer-events: none; }
+.chart-tip {
+  position: absolute; top: 4px; left: 8px; display: grid; grid-template-columns: auto auto; gap: 4px 14px; padding: 7px 9px;
+  background: var(--surface-control); border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  color: var(--ink-soft); font-size: var(--text-xs); line-height: 1.25; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.chart-guide.flip .chart-tip { left: auto; right: calc(100% + 8px); }
+.chart-tip-time { grid-column: 1 / -1; color: var(--ink-faint); }
+.chart-tip b { color: var(--ink); font-weight: var(--weight-medium); text-align: right; }
+
+/* The dial is drawn at its own size, so that its lines and labels stay sharp.
+   The needle and the arc of the value turn by their transform attribute: a
+   live update changes it, and they glide to the new value. */
+.dial .chart-title { align-self: flex-start; }
+.dial svg { display: block; width: 188px; max-width: 100%; height: auto; margin-top: 4px; }
+.dial path { fill: none; }
+.dial-track { stroke: var(--line-strong); }
+.dial-arc { stroke: var(--accent-ink); stroke-width: 2; }
+.dial-minor, .dial-major, .dial-needle { stroke-linecap: round; }
+.dial-minor { stroke: var(--ink-ghost); }
+.dial-major { stroke: var(--ink); stroke-width: 1.4; }
+.dial-needle { stroke: var(--accent-ink); stroke-width: 1.8; }
+.dial-arc, .dial-needle { transition: transform 0.6s var(--ease-out); }
+.dial text {
+  fill: var(--ink-faint); font-size: var(--text-xs); font-variant-numeric: tabular-nums;
+  text-anchor: middle; dominant-baseline: central;
+}
+.dial-hub { fill: var(--surface-raised); stroke: var(--ink); stroke-width: 1.4; }
+.dial-pin { fill: var(--ink); }
+.dial-value {
+  font-size: 34px; font-weight: 300; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
+}
+.dial-unit { margin-top: 2px; font-size: var(--text-xs); color: var(--ink-faint); }
 
 /* ---------- workers ---------- */
 
