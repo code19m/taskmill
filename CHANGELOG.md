@@ -12,9 +12,11 @@ All notable changes to taskmill are recorded here. The format follows
 - The dashboard's main buttons are neutral, where v0.11.0 made them indigo.
   The main action of a page or a dialog has the surface of the other
   buttons, a stronger border, and bolder text. In a dialog, Cancel has no
-  surface, so the action stands out. Checked boxes are in the text color.
-  The indigo accent stays for fine lines only: the focus ring, the icon of
-  the current page, the loading bar, and the dial.
+  surface, so the action stands out. The current page's entry in the menu
+  is bolder, and its icon is no longer indigo. Checked boxes are in the text
+  color, and the loading bar and the meter of a task's attempts are gray.
+  The indigo accent stays only for the focus ring and for the needle and
+  the arc of the dial.
 
 ## [0.11.1] - 2026-11-19
 
