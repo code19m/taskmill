@@ -1359,6 +1359,7 @@ func (s *server) funcs() template.FuncMap {
 		"short":     shortID,
 		"percent":   percent,
 		"period":    period,
+		"cronWords": cronWords,
 		"dict":      dict,
 		"lower":     strings.ToLower,
 		"query": func(pairs ...string) string {

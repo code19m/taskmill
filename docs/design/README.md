@@ -123,6 +123,13 @@ What follows:
   show, such as a login page, the browser loads as a full page. We rejected
   a client-side framework: it needs a JSON API, a second set of templates,
   and a build step, for a dashboard of five pages.
+- **A schedule's timetable in words comes from the scheduler's own parser,**
+  `internal/cron`, and from the values that each field matches, never from
+  the expression's text. So the words cannot read an expression in another
+  way than the scheduler does. The page shows no words where they would not
+  be exact and short. We rejected words for every expression: "every 7
+  minutes" for `*/7` is wrong at each full hour, and a wrong sentence is
+  worse than none.
 - **Two ways to run it:** mounted on an application's own router, behind
   the application's own authentication, or on its own with basic
   authentication, through the `taskmill-ui` command.

@@ -302,6 +302,37 @@ func TestWorkersShowTheirKinds(t *testing.T) {
 	}
 }
 
+// The Schedules page says a schedule's cron expression in words where it can
+// say exactly what the expression means, above the expression and the time
+// zone that the times are in. An expression that it has no exact words for,
+// and one that no schedule can run, show as they are stored.
+func TestSchedulesSayTheirCronInWords(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.schedules (name, queue, kind, cron, timezone, next_run_at)
+	    VALUES ('nightly', 'default', 'greet', '0 3 * * *', 'Europe/Berlin', now()),
+	           ('friday-13th', 'default', 'greet', '0 0 13 * 5', 'UTC', now()),
+	           ('unreadable', 'default', 'greet', '<every> day', 'UTC', now())`); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := get(t, handler(t, client, nil), "/schedules")
+	cronCell, cells := regexp.MustCompile(`(?s)<td class="wrap"[^>]*>(.*?)</td>`), map[string]string{}
+	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {
+		if cell := cronCell.FindStringSubmatch(row[2]); cell != nil {
+			cells[row[1]] = cell[1]
+		}
+	}
+	for name, want := range map[string]string{
+		"nightly":     `<div class="cron-words">Every day at 03:00</div><code class="chip mono">0 3 * * *</code> <span class="tone-ghost">Europe/Berlin</span>`,
+		"friday-13th": `<code class="chip mono">0 0 13 * 5</code> <span class="tone-ghost">UTC</span>`,
+		"unreadable":  `<code class="chip mono">&lt;every&gt; day</code> <span class="tone-ghost">UTC</span>`,
+	} {
+		if cells[name] != want {
+			t.Errorf("the schedule %q shows its cron expression as\n%s\nwant\n%s", name, cells[name], want)
+		}
+	}
+}
+
 // A worker checks in every third of its lease: with a lease of 10 minutes,
 // it is silent for more than 3 minutes while it is healthy. The page marks a
 // worker as stale by the worker's own lease, not after a fixed time.

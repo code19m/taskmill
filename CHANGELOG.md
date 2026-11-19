@@ -21,6 +21,15 @@ All notable changes to taskmill are recorded here. The format follows
   the left and right arrow keys: a guide marks the step, and a note beside
   it lists the step's time and the value of each series. Escape hides them.
   Without the script, the tooltip of a step lists its values, as before.
+- The dashboard's Schedules page says each schedule's cron expression in
+  words, above the expression: "Every 15 minutes", "Weekdays at 09:00", or
+  "On the 1st of every month at 03:00". The times are in the schedule's time
+  zone, which stays beside the expression. The words come from the parser
+  that runs the schedules, and they are there only when they say exactly
+  what the expression does, in a few words. Any other expression shows
+  alone, as before: one with both a day of the month and a day of the week,
+  a list of more than three times or days, or a step such as `*/7`, which
+  starts again at every full hour and so is not "every 7 minutes".
 
 ### Changed
 
