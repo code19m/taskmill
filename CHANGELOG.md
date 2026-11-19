@@ -54,6 +54,31 @@ All notable changes to taskmill are recorded here. The format follows
   every list that has tasks, the page also says how many it shows, and
   tells a screen reader the new number after "Load more" or a change of
   the filters.
+- The dashboard's pages show data, and keep what explains it out of the
+  way:
+  - **Hints.** A small button with an "i" shows a short text about what is
+    beside it. It works with a mouse, a keyboard, and a finger, and without
+    the script. The **Overview** has one beside its title, in place of
+    "counted 4s ago": it says when the maintainer last counted the tasks,
+    and what a count that ends in "+" means. If the last count is over a
+    minute old, the page says so beside the title, in amber: no worker
+    runs as the maintainer, or it cannot count.
+  - **Overview.** The Workers card no longer names the maintainer: the
+    **Workers** page marks it, now also beside a long worker ID, which
+    used to push the mark out of view. The Retention card shows both
+    periods as values, each with the tasks that it holds for.
+  - **Task lists.** An arrow in the header marks the column that orders
+    the list, **ID** or **Finished**, in place of the words "latest first"
+    beside the title. "Load more" is the whole row under the list, not a
+    small button in it. A list that starts after other tasks has a row at
+    its top that leads back to the first page, in place of the words
+    "older" or "earlier" beside the title and a link under the list. A
+    page after the last task says "No more tasks", where it said "No tasks
+    yet".
+  - **Details.** The filter buttons are as tall as the buttons beside
+    them. A count of zero in the queue table is easier to read: its gray
+    had too little contrast. The counts beside headings and in the menu
+    are in the text font: the monospace font is for names from code.
 - The dashboard has a new look, in the same style as before:
   - **One accent color, indigo.** The main button of a page or a dialog is
     indigo with white text in both themes, where it was black or white.

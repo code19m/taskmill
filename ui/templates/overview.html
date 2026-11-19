@@ -2,7 +2,11 @@
 {{$d := .Data}}{{$ro := .ReadOnly}}
 <header class="topbar">
   <h1>Overview</h1>
-  {{if not $d.RefreshedAt.IsZero}}<span class="meta right" title="{{timestamp $d.RefreshedAt}}">counted {{ago $d.RefreshedAt}}</span>{{end}}
+  {{/* How old the counts are is behind the hint, and on the page only once it is a reason to act. */}}
+  {{if not $d.RefreshedAt.IsZero}}
+  {{if $d.Stale}}<span class="chip warn" title="{{timestamp $d.RefreshedAt}}">counted {{ago $d.RefreshedAt}}</span>{{end}}
+  {{template "hint" "counts"}}Counted by the maintainer {{ago $d.RefreshedAt}}.{{if $d.Totals.Capped}} A count that ends in + stopped at its cap: there are at least that many tasks.{{end}}{{template "hint-end"}}
+  {{end}}
 </header>
 <div class="page">
 <section class="stats" aria-label="Totals">
@@ -25,7 +29,6 @@
   <a class="card stat" href="{{path "/workers"}}">
     <span class="stat-label">{{template "icon-workers"}}Workers</span>
     <span class="stat-value">{{$d.Workers}}</span>
-    {{if $d.Maintainer}}<span class="stat-note mono" title="{{$d.Maintainer}}">maintainer …{{short $d.Maintainer}}</span>{{end}}
   </a>
 </section>
 
@@ -44,7 +47,7 @@
 <section class="card flush" aria-labelledby="queues-title">
   <div class="card-head">
     <h2 id="queues-title">Queues</h2>
-    <span class="subtle mono">{{len $d.Queues}}</span>
+    <span class="subtle">{{len $d.Queues}}</span>
   </div>
   {{if $d.Queues}}
   <div class="table-scroll">
@@ -77,7 +80,6 @@
     </tbody>
   </table>
   </div>
-  {{if $d.Totals.Capped}}<p class="card-foot">Some counts stopped at their cap and show at least that many.</p>{{end}}
   {{else}}<div class="card-body">{{template "empty" "No queues yet"}}</div>{{end}}
 </section>
 
@@ -85,12 +87,15 @@
   <a class="card stat" href="{{path "/schedules"}}">
     <span class="stat-label">{{template "icon-schedules"}}Schedules</span>
     <span class="stat-value">{{$d.Schedules}}</span>
-    <span class="stat-note">{{if not $d.NextRun.IsZero}}next run {{ago $d.NextRun}}{{else if $d.Schedules}}all paused{{else}}none{{end}}</span>
+    {{if $d.Schedules}}<span class="stat-note">{{if not $d.NextRun.IsZero}}next run {{ago $d.NextRun}}{{else}}all paused{{end}}</span>{{end}}
   </a>
-  <div class="card stat static">
+  {{/* How long finished tasks are kept: each period over the states that it holds for. */}}
+  <div class="card stat">
     <span class="stat-label">{{template "icon-tasks"}}Retention</span>
-    <span class="stat-value">{{period $d.Settings.HistoryRetention}}</span>
-    <span class="stat-note">history; dead and canceled tasks {{period $d.Settings.DeadRetention}}</span>
+    <dl class="stat-pair">
+      <div><dt class="stat-note">completed</dt><dd class="stat-value">{{period $d.Settings.HistoryRetention}}</dd></div>
+      <div><dt class="stat-note">dead and canceled</dt><dd class="stat-value">{{period $d.Settings.DeadRetention}}</dd></div>
+    </dl>
   </div>
 </div>
 </div>

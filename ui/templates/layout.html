@@ -21,7 +21,7 @@
     <nav class="nav" aria-label="Sections" data-live-part="nav">
       <a class="nav-item" href="{{path "/"}}"{{if eq .Nav "overview"}} aria-current="page"{{end}}>{{template "icon-overview"}}<span>Overview</span></a>
       <a class="nav-item" href="{{path "/tasks"}}"{{if eq .Nav "tasks"}} aria-current="page"{{end}}>{{template "icon-tasks"}}<span>Tasks</span></a>
-      <a class="nav-item" href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>{{template "icon-dead"}}<span>Dead</span><span class="count mono">{{if .Dead.N}}{{count .Dead}}{{end}}</span></a>
+      <a class="nav-item" href="{{path "/tasks?state=dead"}}"{{if eq .Nav "dead"}} aria-current="page"{{end}}>{{template "icon-dead"}}<span>Dead</span><span class="count">{{if .Dead.N}}{{count .Dead}}{{end}}</span></a>
       <a class="nav-item" href="{{path "/schedules"}}"{{if eq .Nav "schedules"}} aria-current="page"{{end}}>{{template "icon-schedules"}}<span>Schedules</span></a>
       <a class="nav-item" href="{{path "/workers"}}"{{if eq .Nav "workers"}} aria-current="page"{{end}}>{{template "icon-workers"}}<span>Workers</span></a>
     </nav>
@@ -110,6 +110,17 @@
 
 {{/* An icon of the sprite, drawn in the color of its text. */}}
 {{define "icon"}}<svg class="icon" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-{{.}}"/></svg>{{end}}
+
+{{/* The mark of the column that orders a list. Its argument names the order. */}}
+{{define "icon-sort"}}<svg class="sort" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" role="img"><title>{{.}}</title><path d="M8 3v10M4 9l4 4 4-4"/></svg>{{end}}
+
+{{/* A hint: a small button that shows a short text about what is beside it.
+   Its text follows it, up to "hint-end". Its argument is one word for what
+   the text is about: it names the button, and the text on the page. The
+   text is a popover, so the browser opens and closes it, with or without
+   the script, above everything else on the page. */}}
+{{define "hint"}}<span class="hint"><button type="button" popovertarget="hint-{{.}}" aria-label="About the {{.}}" aria-describedby="hint-{{.}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 7.5v3.5M8 4.75v.05"/></svg></button><span class="hint-pop" id="hint-{{.}}" popover role="note">{{end}}
+{{define "hint-end"}}</span></span>{{end}}
 
 {{/* A multiple choice filter: a menu of checkboxes. Without the script it
    is a plain details element and the form's Apply button sends it; the

@@ -273,11 +273,120 @@ func TestNavShowsTheStoredDeadCount(t *testing.T) {
 			}
 			h := handler(t, client, nil)
 			for _, path := range []string{"/", "/tasks?state=dead", "/workers"} {
-				if _, body, _ := get(t, h, path); !strings.Contains(body, `<span>Dead</span><span class="count mono">`+tc.want+`</span>`) {
+				if _, body, _ := get(t, h, path); !strings.Contains(body, `<span>Dead</span><span class="count">`+tc.want+`</span>`) {
 					t.Errorf("%s: want the nav's dead count as %s\n%s", path, tc.want, body)
 				}
 			}
 		})
+	}
+}
+
+// storeCounts stores the counts of a queue as the maintainer does, counted
+// age ago: 3 dead tasks, or as many as the cap if the count stopped there.
+func storeCounts(t *testing.T, pool *pgxpool.Pool, schema, age string, capped bool) {
+	t.Helper()
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.queue_stats (queue, state, tasks, capped, refreshed_at)
+	    VALUES ('mail', 'dead', $1, $2, now() - interval '`+age+`')`, map[bool]int{false: 3, true: 10000}[capped], capped); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The overview keeps what explains its counts behind a hint: when the
+// maintainer counted, and what a count at its cap means. A hint is a button
+// that opens the text after it, which is how the browser and the script
+// find the text. How old the counts are is on the page itself only once it
+// is a reason to act: when no maintainer has counted for over a minute.
+func TestOverviewKeepsTheAgeOfItsCountsBehindAHint(t *testing.T) {
+	t.Parallel()
+	const (
+		hint  = `<button type="button" popovertarget="hint-counts" aria-label="About the counts" aria-describedby="hint-counts">`
+		text  = `</button><span class="hint-pop" id="hint-counts" popover role="note">Counted by the maintainer `
+		atCap = "stopped at its cap"
+		late  = `>counted 5m ago</span>`
+	)
+	for _, tc := range []struct {
+		name, age     string // the age of the counts; none are stored if it is empty
+		capped        bool
+		want, without []string
+	}{
+		{"not counted yet", "", false, nil, []string{"hint-counts", "ounted "}},
+		{"counted now", "0 seconds", false, []string{hint, text}, []string{atCap, ">counted "}},
+		{"at the cap", "0 seconds", true, []string{hint, text, "10,000&#43;", atCap}, []string{">counted "}},
+		{"not counted for a minute", "5 minutes", false, []string{hint, text + "5m ago.", late}, []string{atCap}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, pool, schema := setupDB(t)
+			if tc.age != "" {
+				storeCounts(t, pool, schema, tc.age, tc.capped)
+			}
+			_, body, _ := get(t, handler(t, client, nil), "/")
+			for _, want := range tc.want {
+				if !strings.Contains(body, want) {
+					t.Errorf("want %s in\n%s", want, body)
+				}
+			}
+			for _, without := range tc.without {
+				if strings.Contains(body, without) {
+					t.Errorf("want no %s in\n%s", without, body)
+				}
+			}
+		})
+	}
+}
+
+// The overview shows both retention periods, each with the tasks that it
+// holds for.
+func TestOverviewShowsBothRetentionPeriods(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	err := client.UpdateSettings(t.Context(), func(s *taskmill.Settings) {
+		s.HistoryRetention, s.DeadRetention = 3*24*time.Hour, 36*time.Hour
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := get(t, handler(t, client, nil), "/")
+	for _, want := range []string{`>completed</dt><dd class="stat-value">3 days</dd>`, `>dead and canceled</dt><dd class="stat-value">36 hours</dd>`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("want %s in\n%s", want, body)
+		}
+	}
+}
+
+// The workers page marks the worker that holds the maintainer's lease, and
+// no other: it is the one page that says which worker is the maintainer. A
+// lease that ran out marks no worker.
+func TestWorkersPageMarksTheMaintainer(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, hostname, version)
+	    VALUES ('lead', '{mail}', 'h', 'v'), ('other', '{mail}', 'h', 'v')`); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+	const mark = `<span class="chip">maintainer</span>`
+	marked := func(lease string) []string {
+		t.Helper()
+		if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.leader (name, worker_id, elected_at, expires_at)
+		    VALUES ('maintainer', 'lead', now(), now() + interval '`+lease+`')
+		    ON CONFLICT (name) DO UPDATE SET expires_at = EXCLUDED.expires_at`); err != nil {
+			t.Fatal(err)
+		}
+		_, body, _ := get(t, h, "/workers")
+		var ids []string
+		for _, row := range strings.Split(body, `<tr data-key="`)[1:] {
+			if strings.Contains(row, mark) {
+				ids = append(ids, row[:strings.IndexByte(row, '"')])
+			}
+		}
+		return ids
+	}
+	if ids := marked("1 minute"); !slices.Equal(ids, []string{"lead"}) {
+		t.Errorf("the page marks %v as the maintainer, want the worker that holds the lease", ids)
+	}
+	if ids := marked("-1 minute"); len(ids) != 0 {
+		t.Errorf("the page marks %v as the maintainer after the lease ran out", ids)
 	}
 }
 
@@ -560,23 +669,37 @@ func linkNamed(t *testing.T, body, label string) string {
 	return html.UnescapeString(m[1])
 }
 
-// A list of dead tasks shows the task that died last first, says so, and
-// shows when each task died. A list that mixes dead tasks with others is in
-// the order of the IDs, as every other list.
+// sortedBy returns the header of the column that a task list marks as the
+// one that orders it, and the name that the mark gives the order.
+func sortedBy(t *testing.T, body string) (column, order string) {
+	t.Helper()
+	m := regexp.MustCompile(`<th[^>]* aria-sort="descending">([^<]+)<svg[^>]* role="img"><title>([^<]+)</title>`).FindAllStringSubmatch(body, -1)
+	if len(m) != 1 {
+		t.Fatalf("the list marks %d columns as the one that orders it, want one\n%s", len(m), body)
+	}
+	return m[0][1], m[0][2]
+}
+
+// A list of dead tasks shows the task that died last first, and shows when
+// each task died: that column carries the mark of the list's order, which
+// names it. A list that mixes dead tasks with others is in the order of the
+// IDs, as every other list, and marks the ID column.
 func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
 	t.Parallel()
 	h, latestFirst := deadTasks(t)
 	body, ids := listTasks(t, h, "/tasks?state=dead")
-	if !strings.Contains(body, `<span class="meta">latest first</span>`) || !strings.Contains(body, "<th>Finished</th>") {
-		t.Errorf("the first page of dead tasks does not say that the latest come first, or does not show when they died\n%s", body)
+	if column, order := sortedBy(t, body); column != "Finished" || order != "Latest first" {
+		t.Errorf("the list of dead tasks marks its order on %q as %q, want Finished, latest first", column, order)
 	}
 	if !slices.Equal(ids, latestFirst[:50]) {
 		t.Errorf("the list of dead tasks starts with %v, want the 50 that died last", ids)
 	}
 	mixed, ids := listTasks(t, h, "/tasks?state=dead&state=available")
-	if !slices.Equal(ids[:3], []string{"261", "260", "259"}) || !strings.Contains(mixed, "<th>Run at</th>") ||
-		!strings.Contains(mixed, "Load more") || strings.Contains(mixed, "latest first") {
-		t.Errorf("a list of dead and available tasks starts with %v, or names another order than that of the IDs\n%s", ids[:3], mixed)
+	if !slices.Equal(ids[:3], []string{"261", "260", "259"}) || !strings.Contains(mixed, "<th>Run at</th>") || !strings.Contains(mixed, "Load more") {
+		t.Errorf("a list of dead and available tasks starts with %v, or shows when its tasks finished\n%s", ids[:3], mixed)
+	}
+	if column, order := sortedBy(t, mixed); column != "ID" || order != "Newest first" {
+		t.Errorf("a list of dead and available tasks marks its order on %q as %q, want ID, newest first", column, order)
 	}
 }
 
@@ -584,13 +707,14 @@ func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
 // order, until the list is as long as one page gets: 250 tasks. Its link
 // names the first task that it adds, where a browser without the script
 // opens the longer list. From there, the list continues from its last task
-// on a page of its own, under a link that names the order.
+// on a page of its own, under a link that names the order. That page leads
+// back to the first one, which is how a reader tells the two apart.
 func TestTaskListLoadsMore(t *testing.T) {
 	t.Parallel()
 	h, latestFirst := deadTasks(t)
 	body, ids := listTasks(t, h, "/tasks?state=dead")
-	if strings.Contains(body, `id="more"`) {
-		t.Errorf("the first 50 dead tasks have one named \"more\"\n%s", body)
+	if strings.Contains(body, `id="more"`) || strings.Contains(body, ">Latest<") {
+		t.Errorf("the first 50 dead tasks have one named \"more\", or lead back to themselves\n%s", body)
 	}
 	for want := 100; want <= 250; want += 50 {
 		more := linkNamed(t, body, "Load more")
@@ -615,9 +739,8 @@ func TestTaskListLoadsMore(t *testing.T) {
 	if !slices.Equal(slices.Concat(ids, later), latestFirst) {
 		t.Errorf("the page after 250 dead tasks shows %v, want the 10 that died first", later)
 	}
-	if !strings.Contains(body, `<span class="meta">earlier</span>`) || linkNamed(t, body, "Latest") != "/tasks?state=dead" ||
-		strings.Contains(body, ">Earlier<") || strings.Contains(body, "Load more") {
-		t.Errorf("the last page of dead tasks does not say where it is, or leads on\n%s", body)
+	if linkNamed(t, body, "Latest") != "/tasks?state=dead" || strings.Contains(body, ">Earlier<") || strings.Contains(body, "Load more") {
+		t.Errorf("the last page of dead tasks does not lead back to the first, or leads on\n%s", body)
 	}
 }
 
@@ -626,7 +749,9 @@ func TestTaskListLoadsMore(t *testing.T) {
 // at 250 tasks: the link from there leads to the page after the list's last
 // task, and is not one that the script shows in place. A list that shows
 // all its tasks still says how many, and a list without tasks has nothing
-// to count. The tasks are in the order of the IDs, task 261 first.
+// to count. A page after the list's last task says that no more tasks
+// follow, and still leads back to the first page. The tasks are in the
+// order of the IDs, task 261 first.
 func TestTaskListSaysHowItContinues(t *testing.T) {
 	t.Parallel()
 	h, _ := deadTasks(t)
@@ -640,11 +765,15 @@ func TestTaskListSaysHowItContinues(t *testing.T) {
 		{"/tasks?cursor=MTI", "data-shown>11 shown<", "data-more"},
 		{"/tasks?state=available", "data-shown>1 shown<", "data-more"},
 		{"/tasks?state=running", "No tasks match these filters", "data-shown"},
+		{"/tasks?cursor=MQ", "No more tasks", "data-shown"}, // "1", the first task of all
 	} {
 		code, body, _ := get(t, h, c.target)
 		if code != http.StatusOK || !strings.Contains(body, c.want) || strings.Contains(body, c.not) {
 			t.Errorf("GET %s: status %d, want a page with %s, and without %s\n%s", c.target, code, c.want, c.not, body)
 		}
+	}
+	if _, body, _ := get(t, h, "/tasks?cursor=MQ"); linkNamed(t, body, "Newest") != "/tasks" {
+		t.Errorf("the page after the last task does not lead back to the first page\n%s", body)
 	}
 }
 

@@ -7,7 +7,7 @@
 </header>
 <div class="page">
 <section class="card flush bulk-card">
-  <div class="card-head"><h2>Tasks that match</h2><span class="mono">{{$d.Tasks}}</span></div>
+  <div class="card-head"><h2>Tasks that match</h2><span>{{$d.Tasks}}</span></div>
   <dl class="props">
     {{range $d.Filters}}<dt>{{.Title}}</dt><dd{{if .Mono}} class="mono"{{end}}>{{range $i, $v := .Values}}{{if $i}}, {{end}}{{visible $v}}{{end}}</dd>{{end}}
   </dl>

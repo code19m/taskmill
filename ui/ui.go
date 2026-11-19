@@ -90,6 +90,11 @@ const (
 	requestTimeout = 10 * time.Second // bound on one request, so a slow database cannot hold it
 	maxChoices     = 100              // most values of one filter that a request may choose
 	gzipMin        = 1024             // smallest response worth compressing
+
+	// staleCounts is how old the counts of the overview may be before the
+	// page warns about their age. The maintainer counts every 10 seconds:
+	// after a minute, no worker runs as the maintainer, or it cannot count.
+	staleCounts = time.Minute
 )
 
 // liveHeader marks the requests of the page's script: its live updates, the
@@ -371,29 +376,24 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 			refreshed = q.RefreshedAt
 		}
 	}
-	var maintainer string
-	for _, wk := range workers {
-		if wk.Maintainer {
-			maintainer = wk.ID
-		}
-	}
 	t := sumQueues(queues)
 	s.render(w, r, http.StatusOK, "overview.html", page{Title: "Overview", Nav: "overview", Dead: t.Dead, Data: struct {
 		Queues          []taskmill.QueueInfo
 		States          []taskmill.State
 		Totals          totals
 		Workers         int
-		Maintainer      string
 		Schedules       int
 		NextRun         time.Time
 		Settings        *taskmill.Settings
 		RefreshedAt     time.Time
+		Stale           bool // the counts are old enough to say so on the page
 		Ranges          []chartRange
 		Range           string
 		Dial            dial
 		Tasks, Attempts chart
 	}{
-		queues, queueStates, t, len(workers), maintainer, len(schedules), nextRun, settings, refreshed,
+		queues, queueStates, t, len(workers), len(schedules), nextRun, settings, refreshed,
+		!refreshed.IsZero() && now.Sub(refreshed) > staleCounts,
 		chartRanges, span.Name, newDial(rate, peak), tasksChart, attemptsChart,
 	}})
 }
@@ -531,25 +531,24 @@ func listPath(q url.Values) string {
 	return "/tasks?" + q.Encode()
 }
 
-// listOrder is how a task list names its order: what its first page and
-// its later pages say beside the title, and the links to the first and to
-// the next page.
+// listOrder is how a task list names its order: what the mark of the
+// column that orders it says, and the links to the first and to the next
+// page.
 type listOrder struct {
-	Start, Later, First, Next string
-	ByFinish                  bool // the list shows when each task finished, not when it runs
+	Name, First, Next string
+	ByFinish          bool // the list is in the order of when its tasks finished, and shows that time
 }
 
 // orderOf returns the order in which Client.List returns the tasks of f: a
 // list of only dead tasks, only canceled tasks, or both comes by when the
 // tasks finished, the latest first, and every other list by ID, the newest
-// first. A list by ID shows its order in its first column, so its first
-// page does not name it.
+// first.
 func orderOf(f taskmill.TaskFilter) listOrder {
 	unfinished := func(s taskmill.State) bool { return s != taskmill.StateDead && s != taskmill.StateCanceled }
 	if len(f.States) > 0 && !slices.ContainsFunc(f.States, unfinished) {
-		return listOrder{Start: "latest first", Later: "earlier", First: "Latest", Next: "Earlier", ByFinish: true}
+		return listOrder{Name: "Latest first", First: "Latest", Next: "Earlier", ByFinish: true}
 	}
-	return listOrder{Later: "older", First: "Newest", Next: "Older"}
+	return listOrder{Name: "Newest first", First: "Newest", Next: "Older"}
 }
 
 // taskFilter reads the task list's filters from a query.
@@ -1356,7 +1355,6 @@ func (s *server) funcs() template.FuncMap {
 		"visible":   visible,
 		"num":       number,
 		"count":     count,
-		"short":     shortID,
 		"percent":   percent,
 		"period":    period,
 		"cronWords": cronWords,
@@ -1522,15 +1520,6 @@ func count(n taskmill.TaskCount) string {
 		return number(n.N) + "+"
 	}
 	return number(n.N)
-}
-
-// shortID keeps the last part of a worker ID: its random suffix tells
-// workers on one host apart.
-func shortID(id string) string {
-	if i := strings.LastIndexByte(id, '-'); i >= 0 && i < len(id)-1 {
-		return id[i+1:]
-	}
-	return id
 }
 
 // period formats a retention period in whole days, or hours below two days.
