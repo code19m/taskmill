@@ -139,7 +139,7 @@ theme, and the next pages follow the device.
 | **Tasks** | Tasks filtered by state, queue, kind, and FIFO group. Dead and canceled tasks also by when they finished | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its timetable in words and its next and last run | Pause, resume, or run it now |
-| **Workers** | Each worker, with its host, version, and queues, and which one is the [maintainer](../concepts/glossary.md#maintainer) | Nothing: this page is for looking |
+| **Workers** | Each worker, with its host, version, queues, and kinds, and which one is the [maintainer](../concepts/glossary.md#maintainer) | Nothing: this page is for looking |
 
 On the **Overview**, the **Activity** card shows the last 1, 6, or 24 hours,
 in steps of 1, 5, or 15 minutes. To read the values of one step, point at a
@@ -168,13 +168,13 @@ words: an expression with both day fields set, or with more than three
 times, shows alone. [Write the timetable](schedules.md#write-the-timetable)
 says how an expression is read, and what happens when the clocks change.
 
-On the **Workers** page, the **Worker** column shows the part of a worker's
-ID after its host name, which the **Host** column has: the tooltip has the
-whole ID. Click the count in the **Kinds** column to list the kinds that the
-worker has handlers for. **Checked in** is the worker's last
-[check-in](../concepts/glossary.md#check-in): a yellow dot and the word
-"stale" mark a worker that made none for longer than its `LeaseDuration`,
-because it has stopped or cannot reach the database.
+On the **Workers** page, the **Worker** column shows a worker's ID without its
+host name, which the **Host** column has: the tooltip has the whole ID. A row
+shows a worker's first queues, and counts the rest and its kinds. Press a count
+to list them all, each a link to its tasks: that needs a browser with popovers.
+**Checked in** is the worker's last [check-in](../concepts/glossary.md#check-in):
+a yellow dot and the word "stale" mark a worker that made none for longer
+than its `LeaseDuration`, because it has stopped or cannot reach the database.
 
 At the end of the **Overview**'s top bar, "Counted 4s ago" says when the
 maintainer last counted the tasks, which it does every 10 seconds. Once that
@@ -207,15 +207,15 @@ shows the tasks that finished in a range of time:
 | You want… | Do this |
 |---|---|
 | The tasks of the last hours or days | Choose a preset, such as **Last 6 hours**. The list starts at that time and has no end, so it shows new tasks as they finish |
-| A precise or a long period, such as last night | Fill in **From**, **To**, or both, and choose **Apply**. A task that finished exactly at **To** is not in the range |
+| Whole days, or a precise period such as last night | Click the first and the last day in the calendar: **From** and **To** show the range, from 00:00 to 23:59. Type other times, or dates, if you need them, or empty one for a range with one end. Then choose **Apply**. The range holds the minute of **To**: in the address, `before` is the minute after it |
 | Every task again | Choose **Any time** |
 
 The dashboard shows times in your time zone, and names the zone: the range
-on the button, the two fields, and the exact time in a tooltip. Without
-JavaScript, they are in UTC. The address holds the range as instants, in
-`since` and `before`, so a link shows the same tasks to everyone
-([Dashboard routes](../reference/taskmill-ui.md#dashboard-routes) has the
-forms of a time). While a range is set, the list hides **Retry all**,
+on the button, the calendar's fields, and the exact time in a tooltip.
+Without JavaScript, the browser's own fields take the range, in UTC. The
+address holds instants, `since` and `before`, so a link shows the same tasks
+to everyone ([Dashboard routes](../reference/taskmill-ui.md#dashboard-routes)
+has the forms of a time). While a range is set, the list hides **Retry all**,
 **Cancel all**, and **Delete all**: they act on every task that the other
 filters match, also outside the range. If you add another state, the list
 drops the range: only dead and canceled tasks are listed by finish time.

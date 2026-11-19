@@ -114,8 +114,8 @@ What follows:
 - **Two small scripts of our own,** `app.js` and `theme.js`, under a strict
   content security policy. They keep pages live, apply filters as they
   change, confirm actions in dialogs, show a chart's values under the
-  pointer, show times in the reader's time zone, and apply the chosen
-  theme. Every page also works without them.
+  pointer and a tooltip without a wait, show times in the reader's time
+  zone, and apply the chosen theme. Every page also works without them.
   Nothing needs a JavaScript build step or third-party code.
 - **The server renders every page, and the script only shows it in place.**
   For a link, the back button, or an action, the script fetches the page
@@ -130,11 +130,20 @@ What follows:
   of the device, with the same words, before the page shows. A range of
   finish times is in the address as two instants: a preset is a link to a
   fixed instant, which the server computes when it renders the page, so
-  presets need no script and no zone. The two fields of a custom range are
-  the browser's own `datetime-local` fields. We rejected a calendar of our
-  own, which is much code for what every browser has. We rejected a time
-  zone in a cookie or in the address too: a link would then show other
-  tasks to another reader.
+  presets need no script and no zone. We rejected a time zone in a cookie
+  or in the address: a link would then show other tasks to another reader.
+- **A custom range is picked in a calendar of the dashboard's own,** which
+  the script draws, with a date and a time to type for each bound. The
+  browser's `datetime-local` fields look different in every browser, none
+  of them picks a range, and none shows which days a range holds. The
+  calendar is one month of buttons and about 3 KB of script, with no
+  dependency. Without the script, the browser's fields stand in, in UTC.
+- **To is the last minute of a range, and the address holds the minute
+  after it,** as `before`. A reader who picks 18 to 19 November sees
+  00:00 and 23:59 in the fields and gets all of the 19th. We rejected
+  showing the next midnight, "20 November 00:00": it is exact, but it names
+  a day that the reader did not pick. `since` and `before` stay as they
+  are, so ranges that follow each other share a bound, with no gap.
 - **A schedule's timetable in words comes from the scheduler's own parser,**
   `internal/cron`, and from the values that each field matches, never from
   the expression's text. So the words cannot read an expression in another

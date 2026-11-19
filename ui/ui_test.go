@@ -284,6 +284,59 @@ func TestTimesShowInUTC(t *testing.T) {
 	}
 }
 
+// A page says most times by how long ago they were, or how far ahead they
+// are. Each of these has the exact time as its title, with its instant: the
+// tooltip that says when, in the reader's time zone with the script. The
+// axis of a chart is no such time: it is a scale that counts back from now,
+// and the chart's guide tells the time of each step.
+func TestRelativeTimesHaveTheirExactTime(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	// What these pages tell the time of was minutes ago, or is minutes ahead.
+	storeCounts(t, pool, schema, "5 minutes", false)
+	var id int64
+	if err := pool.QueryRow(t.Context(), `
+	    WITH schedule AS (
+	        INSERT INTO `+schema+`.schedules (name, queue, kind, cron, timezone, next_run_at, last_run_at)
+	        VALUES ('nightly', 'mail', 'greet', '0 3 * * *', 'UTC', now() + interval '3 minutes', now() - interval '4 minutes')
+	    ), worker AS (
+	        INSERT INTO `+schema+`.workers (id, queues, hostname, version, started_at, heartbeat_at)
+	        VALUES ('w', '{mail}', 'h', 'v', now() - interval '6 minutes', now() - interval '2 minutes')
+	    )
+	    INSERT INTO `+schema+`.tasks (queue, kind, state, payload, attempt, max_attempts, created_at, run_at, attempted_at, finalized_at, errors)
+	    VALUES ('mail', 'greet', 'dead', '{}', 1, 1, now() - interval '9 minutes', now() - interval '8 minutes',
+	        now() - interval '7 minutes', now() - interval '7 minutes',
+	        jsonb_build_array(jsonb_build_object('attempt', 1, 'at', now() - interval '7 minutes', 'message', 'boom')))
+	    RETURNING id`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+	var (
+		axis     = regexp.MustCompile(`<div class="chart-x"[^>]*>.*?</div>`)
+		relative = regexp.MustCompile(`<[^<>]*>(?:<svg[^<>]*>(?:<[^<>]*>)*</svg>)?[^<>]*\d+[smhd] (?:ago|from now)`) // with the tag that it stands in, and its icon
+		exact    = regexp.MustCompile(`^<[^<>]* title="\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} UTC" data-time="[^"]+Z">`)
+	)
+	for path, want := range map[string]int{
+		"/":                                   1, // the age of the counts
+		"/tasks":                              2, // created, and run at
+		"/tasks?state=dead":                   2, // created, and finished
+		"/tasks/" + strconv.FormatInt(id, 10): 5, // created, run at, last attempt, finished, and the error
+		"/schedules":                          2, // the next run, and the last one
+		"/workers":                            2, // started, and checked in
+	} {
+		_, body, _ := get(t, h, path)
+		times := relative.FindAllString(axis.ReplaceAllString(body, ""), -1)
+		if len(times) != want {
+			t.Errorf("%s says %d times by how far they are from now, want %d: %q", path, len(times), want, times)
+		}
+		for _, said := range times {
+			if !exact.MatchString(said) {
+				t.Errorf("%s: a time has no exact time as its title: %s", path, said)
+			}
+		}
+	}
+}
+
 func TestNavShowsTheStoredDeadCount(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -457,20 +510,78 @@ func TestWorkersShowTheirIDsWithoutTheHost(t *testing.T) {
 	}
 }
 
-func TestWorkersShowTheirKinds(t *testing.T) {
+// A worker's row is one line, however much the worker handles. It shows the
+// first queues that fit, and counts the rest and the kinds. Each count is a
+// button, and both open the worker's one list of all its queues and kinds,
+// each a link to its tasks: a popover, which has an id for an update to know
+// it by. A row with nothing more to show has no button and no list.
+func TestWorkersShowTheirQueuesAndKinds(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
-	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, kinds, hostname, version)
-	    VALUES ('mailer', '{mail}', '{email.send,"orders&refunds"}', 'h', 'v'), ('single', '{mail}', '{email.send}', 'h', 'v')`); err != nil {
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, kinds, hostname, version) VALUES
+	    ('many', '{default,emails,images,ledger,outbox,partner-api}', '{email.send,"orders&refunds"}', 'h', 'v'),
+	    ('fits', '{default,orders,orders-priority}', '{email.send}', 'h', 'v'),
+	    ('long', '{a-queue-with-a-name-longer-than-its-column,b}', '{}', 'h', 'v'),
+	    ('words', '{почта,заказы,отчёты,склад}', '{}', 'h', 'v'),
+	    ('lead', '{}', '{}', 'h', 'v')`); err != nil {
 		t.Fatal(err)
 	}
 	_, body, _ := get(t, handler(t, client, nil), "/workers")
-	// Each worker shows how many kinds it has handlers for, and lists them,
-	// each linked to its tasks.
+	rows := map[string]string{}
+	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {
+		rows[row[1]] = row[2]
+	}
+	for _, c := range []struct {
+		worker    string
+		want, not []string
+	}{
+		{"many", []string{
+			`<span title="default, emails, images, ledger, outbox, partner-api">default, emails, images</span>`,
+			`popovertarget="lists-many">+3<span class="visually-hidden"> more queues</span></button>`,
+			`popovertarget="lists-many">2 kinds<`,
+			`id="lists-many" popover`,
+			`<h2>Queues <span class="subtle">6</span></h2>`, `<a href="/tasks?queue=partner-api">partner-api</a>`,
+			`<h2>Kinds <span class="subtle">2</span></h2>`, `<a href="/tasks?kind=orders%26refunds">orders&amp;refunds</a>`,
+		}, nil},
+		// A count takes room, so the queues that fit without one show whole.
+		{"fits", []string{`>default, orders, orders-priority</span></div>`, `popovertarget="lists-fits">1 kind<`}, []string{">+"}},
+		// The first queue shows, whatever its length. Without kinds, the
+		// list has the queues alone.
+		{"long", []string{
+			`>a-queue-with-a-name-longer-than-its-column</span><button`, `>+1<span class="visually-hidden"> more queue</span>`,
+			`<span class="tone-ghost">none</span><div class="hint-pop lists" id="lists-long" popover`,
+		}, []string{"<h2>Kinds"}},
+		// The room is in characters, not bytes.
+		{"words", []string{`>почта, заказы, отчёты, склад</span></div>`}, []string{"popover"}},
+		{"lead", []string{`<span class="tone-ghost">maintenance only</span>`, `<span class="tone-ghost">none</span></td>`}, []string{"popover"}},
+	} {
+		for _, want := range c.want {
+			if !strings.Contains(rows[c.worker], want) {
+				t.Errorf("the row of %q lacks %s\n%s", c.worker, want, rows[c.worker])
+			}
+		}
+		for _, not := range c.not {
+			if strings.Contains(rows[c.worker], not) {
+				t.Errorf("the row of %q has %s\n%s", c.worker, not, rows[c.worker])
+			}
+		}
+	}
+}
+
+// A worker built from taskmill's own tree stores Go's "(devel)" in place of a
+// version. The page shows such a word as text, without the brackets, and a
+// version as code. The tooltip has what the worker stored.
+func TestWorkersShowAVersionAsCodeAndAWordAsText(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, hostname, version)
+	    VALUES ('released', '{mail}', 'h', 'v0.11.1'), ('built', '{mail}', 'h', '(devel)')`); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := get(t, handler(t, client, nil), "/workers")
 	for _, want := range []string{
-		">2 kinds<", ">1 kind<",
-		`href="/tasks?kind=email.send">email.send<`,
-		`href="/tasks?kind=orders%26refunds">orders&amp;refunds<`,
+		`<td class="mono tone-faint" title="v0.11.1">v0.11.1</td>`,
+		`<td class="tone-ghost" title="(devel)">devel</td>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("want %s in\n%s", want, body)

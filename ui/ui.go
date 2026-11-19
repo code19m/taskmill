@@ -65,6 +65,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -1401,6 +1402,8 @@ func (s *server) funcs() template.FuncMap {
 		"period":    period,
 		"cronWords": cronWords,
 		"afterHost": afterHost,
+		"fit":       fit,
+		"join":      strings.Join,
 		"dict":      dict,
 		"lower":     strings.ToLower,
 		"query": func(pairs ...string) string {
@@ -1627,6 +1630,46 @@ func afterHost(id, host string) string {
 		return ""
 	}
 	return rest
+}
+
+// queuesRoom is how many characters of queue names a row of the Workers page
+// has room for, at the width of its Queues column. The count of the names
+// that it leaves out takes moreRoom of them.
+const (
+	queuesRoom = 34
+	moreRoom   = 4
+)
+
+// fitted is the start of a list of names, for one line of a table.
+type fitted struct {
+	Line string // the first names, with commas between them
+	More int    // how many names follow them
+}
+
+// fit returns the queues that a row of the Workers page shows: all of them
+// if the row has room, or else the first ones that leave room for the count
+// of the rest, and the first one at least. The row is one line tall, however
+// many queues a worker reads, and the page lists them all on demand.
+func fit(names []string) fitted {
+	if len(names) == 0 {
+		return fitted{}
+	}
+	const comma = ", "
+	total := (len(names) - 1) * len(comma)
+	for _, name := range names {
+		total += utf8.RuneCountInString(name)
+	}
+	if total <= queuesRoom {
+		return fitted{Line: strings.Join(names, comma)}
+	}
+	n, used := 1, utf8.RuneCountInString(names[0])
+	for ; n < len(names); n++ {
+		used += len(comma) + utf8.RuneCountInString(names[n])
+		if used > queuesRoom-moreRoom {
+			break
+		}
+	}
+	return fitted{Line: strings.Join(names[:n], comma), More: len(names) - n}
 }
 
 // lastError returns the most recent attempt error, or nil.

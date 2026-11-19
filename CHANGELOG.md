@@ -25,6 +25,44 @@ All notable changes to taskmill are recorded here. The format follows
   bar again, as "Counted 4s ago" beside a clock: quiet while it is fresh,
   and amber once it is over a minute old. It was behind a hint beside the
   title. A count that stopped at its cap says so in its tooltip.
+- The dashboard's Workers page shows each worker in one line. The Queues
+  column has the first queues as text, as many as fit, and a count of the
+  rest: "default, emails, images +3". The Kinds column has a count. Press a
+  count to list all the queues and kinds of the worker beside it, each a
+  link to its tasks. The list opens over the table: the kinds no longer
+  open a row under the worker's row. It stays open while the page updates,
+  beside its worker, and closes on Escape or a press elsewhere. A browser
+  without popovers shows the counts as text.
+- On the Workers page, the Host column has more room, the "stale" mark
+  stands after the worker's ID, and the texts and marks of a row stand on
+  one baseline: a mark no longer makes its row taller. A worker built from
+  taskmill's own tree shows "devel" as its version, where it showed Go's
+  "(devel)": the tooltip has what the worker stored.
+- The dashboard's **Finished** filter has a calendar of its own, in place
+  of the browser's date pickers. Click the first and the last day of a
+  range: the calendar marks the days, and **From** and **To** show them,
+  from 00:00 to 23:59. Type a date as `2026-11-19` and a time as `14:05`
+  to refine a bound, or empty it. **To** is now the last minute in the
+  range, so a range to 19 November 23:59 holds every task of that day. The
+  address has not changed: its `before` is the minute after **To**. The
+  button words the range in the same way, and says "Until" for a range
+  with only an end. The calendar works from the keyboard, with the arrow
+  keys, Home, End, Page Up, and Page Down, and it names every day for a
+  screen reader. It offers no day after today, and its week starts on
+  Monday, or on the first day that the browser's language has. Without the
+  script, the browser's own fields remain, in UTC: **From** and **Before**.
+- The dashboard shows a tooltip right away, where the browser showed it
+  after about a second. Point at a time such as "4s ago" to read the exact
+  time in your time zone, and at text that ends in "…" to read the whole
+  text, also where such text had no tooltip, as a long value on the button
+  of a filter. A tooltip shows too while its element has the keyboard's
+  focus, and it goes with Escape. On a touch screen, tap a time, or text
+  that is cut short: the tooltip stays until the next tap. A tap on a link,
+  a button, or a row of a task list still leads where it led. A tooltip that
+  would only repeat text that the page shows whole no longer appears. On
+  the overview, the age of the counts in their hint and the next run of the
+  schedules have their exact time as well. Without JavaScript, the browser
+  shows the tooltips as before.
 
 ## [0.11.1] - 2026-11-19
 
