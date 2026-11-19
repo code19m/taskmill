@@ -7,6 +7,31 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `ListParams.CreatedSince` and `ListParams.CreatedBefore` limit
+  `Client.List` to the tasks created in a range of time: at `CreatedSince`
+  or later, and before `CreatedBefore`. Any list takes the range, whatever
+  its states, the completed tasks too, and is then in creation order: by
+  `CreatedAt`, the latest first, and then by ID. That is a third order of
+  `List`, with cursors of its own. IDs follow creation times only roughly,
+  because a task of a long transaction has an old creation time and a new
+  ID: so the range is not a filter of the list in ID order. A page of one
+  queue reads about the tasks it returns, wherever the range lies and
+  however long it is. With no queue named, it reads up to a page of each
+  queue. A list takes a range of creation times or one of finish times:
+  both together return an error that wraps `ErrInvalidArgument`.
+- Migration 7 adds the two indexes that the range reads: `tasks_created_idx`
+  and `task_history_created_idx`, both on the queue, the creation time, and
+  the ID. A task writes one more index entry when it is enqueued, and one
+  more when it completes: about 18% more WAL for a task with a small
+  payload. A fetch writes none, because the index of `tasks` leaves out the
+  running ones. **The migration blocks writes while it builds the indexes:**
+  enqueues, fetches, and completions wait, about half a second for each
+  million tasks. Reads continue. On a large schema, migrate while the
+  queues are quiet. [Lists by creation time](docs/design/schema-creation-order.md)
+  has the measurements, and the options that we rejected.
+
 ### Changed
 
 - The dashboard's main buttons are neutral, where v0.11.0 made them indigo.

@@ -107,6 +107,11 @@ client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logg
 - A migration waits at most 5 seconds for a lock on a busy taskmill table,
   so it never blocks your workers for long. If it gives up, a pod restart or
   the Job's next try runs it again.
+- One migration makes writes wait for longer: migration 7 builds two
+  indexes of creation time. Enqueues, fetches, and completions wait while
+  it reads `tasks` and the history, about half a second for each million
+  tasks. Reads continue. On a large schema, migrate while the queues are
+  quiet.
 - While one process migrates, the others wait for its lock on the
   `migrations` table, as long as their context allows: the 5 seconds do not
   apply here. Pass `Migrate` a context with a deadline, such as one minute.

@@ -1,22 +1,23 @@
 # Lists and counts
 
 This page explains the statements behind `Client.List`, `Client.Count`, and
-the dashboard's lists: the two orders of a list, why dead and canceled tasks
+the dashboard's lists: the orders of a list, why dead and canceled tasks
 come by finish time, and what each read costs.
 [Operator actions](schema-operations.md) has the statements that change
 tasks, and [`sql.go`](../../sql.go) has the exact text of both.
 
-## A list has one of two orders
+## A list has one of three orders
 
 `Client.List` and the dashboard page through tasks with keyset pagination:
 each page starts below the position where the previous one ended. A list
-is in one of two orders, and each order has its own statement. Both run
+is in one of three orders, and each order has its own statement. All run
 with a 5-second statement timeout, and with custom query plans
 (`plan_cache_mode = force_custom_plan`), so the planner sees which filters
 are set.
 
 | The list holds | Its order | A page reads |
 |---|---|---|
+| Any tasks, in a range of creation times | By creation time, latest first, then by `id` | The two indexes of creation time: see [Lists by creation time](schema-creation-order.md) |
 | Only dead tasks, only canceled tasks, or both | By finish time, latest first, then by `id` | `tasks_finished_idx`, and no other task |
 | Anything else | By `id`, newest first | The index that holds its tasks in ID order. Without one, the primary key |
 
@@ -76,7 +77,7 @@ other task, with no new index and no migration:
 - **The cursor holds the finish time and the ID** of the page's last task,
   the time as PostgreSQL stores it. So a list gets past an infinite finish
   time, which only an `UPDATE` by hand writes. Each order refuses the
-  cursor of the other, as an invalid argument.
+  cursors of the others, as an invalid argument.
 
 The finish order is also the better order for this list. In ID order, a
 task that died a second ago can be many pages down, behind tasks that were
@@ -101,8 +102,8 @@ supported PostgreSQL version.
 
 ### What the finish order costs
 
-- **`List` has two orders, and a cursor belongs to the order that made
-  it.** For a cursor of the other order, the dashboard shows one "Invalid
+- **`List` has several orders, and a cursor belongs to the order that made
+  it.** For a cursor of another order, the dashboard shows one "Invalid
   request" page, which names the cursor and links to the list's first page.
   The order is part of what
   [v1.0.0 freezes](../reference/compatibility.md): an index can be added
@@ -165,13 +166,13 @@ Without a range, the hour measured below starts 225 pages down.
   microseconds, and the driver rounds a finer time down. Rounded down, a
   bound would count a task that finished just before it as one that
   finished at it.
-- **Only the finish time has a range, and only in finish order.** A range
-  bounds a read only where the list is in the order of that time. In ID
-  order, a range of any time is a filter: the list reads tasks until the
-  page is full, up to the time limit. No index holds tasks by when they
-  were created or last attempted. `tasks_due_idx` holds scheduled and
-  retryable tasks by run time, but a list in that order would be a third
-  order, with a cursor of its own.
+- **A range belongs to the order of its time.** A range bounds a read only
+  where the list is in the order of that time. In ID order, a range of any
+  time is a filter: the list reads tasks until the page is full, up to the
+  time limit. So a range of finish times needs a list in finish order, and
+  a range of creation times puts any list in
+  [creation order](schema-creation-order.md), with indexes and a cursor of
+  its own. No index holds tasks by when they were last attempted.
 - **The range is not part of `TaskFilter`.** `Count` and the bulk actions
   take that filter, and a bulk action reads in ID order.
 
@@ -241,8 +242,9 @@ only a lock on a whole table makes that step wait.
 
 ## See also
 
+- [Lists by creation time](schema-creation-order.md): the third order, and its two indexes
 - [Operator actions](schema-operations.md): the statements that retry, cancel, and delete tasks
 - [Storage schema](schema.md#indexes-on-tasks): the indexes that the lists read
 - [Manage tasks from code](../guides/operations-api.md): the user's view
 
-**Next:** [Operator actions](schema-operations.md)
+**Next:** [Lists by creation time](schema-creation-order.md)
