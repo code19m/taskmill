@@ -594,7 +594,11 @@ func TestListPagesNewestFirst(t *testing.T) {
 }
 
 // List returns 100 tasks a page when the caller names no page size, and
-// refuses a page size, a cursor, or a state that it cannot use.
+// refuses a page size, a cursor, a state, or a range of finish times that it
+// cannot use: a range on a list that is not in finish order, one that does
+// not start before it ends, and a bound that PostgreSQL cannot store, also
+// one that only reaches past the last time when it is rounded up to the
+// microsecond.
 func TestListChecksItsParams(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -603,9 +607,23 @@ func TestListChecksItsParams(t *testing.T) {
 	if page, err := e.client.List(t.Context(), &taskmill.ListParams{Summary: true}); err != nil || len(page.Tasks) != 100 || page.Next == "" {
 		t.Fatalf("no limit: got a page of %d tasks, next %q, %v; want 100 tasks and a next page", len(page.Tasks), page.Next, err)
 	}
+	at := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
 	for _, p := range []taskmill.ListParams{
-		{Limit: -1}, {Limit: 1001}, {Cursor: "%%%"}, {Cursor: "eA"}, // "x"
+		{Limit: -1},
+		{Limit: 1001},
+		{Cursor: "%%%"},
+		{Cursor: "eA"}, // "x"
 		{Filter: taskmill.TaskFilter{States: []taskmill.State{"bogus"}}},
+		{FinishedSince: at},
+		{FinishedBefore: at, Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}}},
+		{FinishedBefore: at, Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead, taskmill.StateAvailable}}},
+		{Filter: dead, FinishedSince: at, FinishedBefore: at},
+		{Filter: dead, FinishedSince: at.Add(time.Nanosecond), FinishedBefore: at},
+		{Filter: dead, FinishedSince: firstTimestamp.Add(-time.Microsecond)},
+		{Filter: dead, FinishedSince: lastTimestamp.Add(time.Nanosecond)},
+		{Filter: dead, FinishedBefore: lastTimestamp.Add(time.Microsecond)},
+		{Filter: dead, FinishedBefore: time.Unix(math.MaxInt64, 0)},
 	} {
 		if _, err := e.client.List(t.Context(), &p); !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Errorf("%+v: got %v, want ErrInvalidArgument", p, err)
@@ -681,6 +699,101 @@ func TestListsOfFinishedTasksComeLatestFirst(t *testing.T) {
 	for _, p := range []taskmill.ListParams{byID, byFinish} {
 		if _, err := e.client.List(ctx, &p); !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Errorf("a list of states %v with the cursor of the other order: got %v, want ErrInvalidArgument", p.Filter.States, err)
+		}
+	}
+}
+
+// A list in finish order takes a range of finish times: the tasks that
+// finished at FinishedSince or later, and before FinishedBefore. A task that
+// finished a microsecond outside the range is left out. A bound can be finer
+// than the microseconds that the database keeps, and still every task is on
+// its own side of it. The pages of a range chain inside it, also through the
+// tasks of one finish time.
+//
+// The bounds are instants. The same range selects the same tasks whatever
+// the location of its times, and whatever the time zone of the session: here
+// one whose clocks go back an hour in the middle of the range, so that its
+// local times come twice.
+func TestListsOfFinishedTasksTakeARangeOfFinishTimes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// The range of most lists starts at second 1 and ends at second 3, with
+	// America/St_Johns back on standard time from second 2.
+	start := time.Date(2026, time.November, 1, 4, 29, 58, 0, time.UTC)
+	e.exec(t, `INSERT INTO {s}.tasks (id, queue, kind, state, finalized_at, run_at, payload, max_attempts)
+	           OVERRIDING SYSTEM VALUE
+	           SELECT v.id, v.queue, v.kind, v.state::{s}.task_state, $1::timestamptz + v.finished * interval '1 microsecond', now(), '{}', 1
+	           FROM (VALUES (1, 'a', 'email.send', 'dead', 999999),
+	                        (2, 'a', 'email.send', 'dead', 1000000),
+	                        (3, 'a', 'email.send', 'canceled', 1000001),
+	                        (4, 'b', 'email.send', 'dead', 2000000),
+	                        (5, 'a', 'report.build', 'dead', 2000000),
+	                        (6, 'a', 'email.send', 'dead', 2000000),
+	                        (7, 'a', 'email.send', 'canceled', 2999999),
+	                        (8, 'a', 'email.send', 'dead', 3000000),
+	                        (9, 'b', 'email.send', 'dead', 4000000),
+	                        (10, 'a', 'email.send', 'available', NULL)
+	                ) AS v(id, queue, kind, state, finished)`, start)
+	stJohns, err := time.LoadLocation("America/St_Johns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t)) // the time zone is a parameter of the session
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["timezone"] = stJohns.String()
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	inStJohns, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema, Logger: testLogger(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	second := func(n int) time.Time { return start.Add(time.Duration(n) * time.Second) }
+	dead, canceled := []taskmill.State{taskmill.StateDead}, []taskmill.State{taskmill.StateCanceled}
+	finished := []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}
+	for _, c := range []struct {
+		filter        taskmill.TaskFilter
+		since, before time.Time
+		want          []int64
+	}{
+		{taskmill.TaskFilter{States: finished}, second(1), second(3), []int64{7, 6, 5, 4, 3, 2}},
+		{taskmill.TaskFilter{States: dead}, second(1), second(3), []int64{6, 5, 4, 2}},
+		{taskmill.TaskFilter{States: canceled}, second(1), second(3), []int64{7, 3}},
+		{taskmill.TaskFilter{States: finished, Queues: []string{"a"}}, second(1), second(3), []int64{7, 6, 5, 3, 2}},
+		{taskmill.TaskFilter{States: finished, Kinds: []string{"report.build"}}, second(1), second(3), []int64{5}},
+		{taskmill.TaskFilter{States: finished}, second(2), time.Time{}, []int64{9, 8, 7, 6, 5, 4}},
+		{taskmill.TaskFilter{States: finished}, time.Time{}, second(2), []int64{3, 2, 1}},
+		// A nanosecond after a bound, the task that finished at the bound is
+		// before it.
+		{taskmill.TaskFilter{States: finished}, second(1).Add(time.Nanosecond), second(3).Add(time.Nanosecond), []int64{8, 7, 6, 5, 4, 3}},
+		{taskmill.TaskFilter{States: finished}, second(3).Add(time.Microsecond), second(4), nil},
+		{taskmill.TaskFilter{States: finished}, firstTimestamp, lastTimestamp, []int64{9, 8, 7, 6, 5, 4, 3, 2, 1}},
+	} {
+		for _, zone := range []struct {
+			session string
+			client  *taskmill.Client
+			bounds  *time.Location
+		}{
+			{"the test pool's", e.client, time.UTC},
+			{"the test pool's", e.client, time.FixedZone("ahead", (5*60+45)*60)},
+			{stJohns.String(), inStJohns, time.UTC},
+			{stJohns.String(), inStJohns, stJohns},
+		} {
+			// The zero time is no bound in any location.
+			params := taskmill.ListParams{Filter: c.filter, FinishedSince: c.since.In(zone.bounds), FinishedBefore: c.before.In(zone.bounds)}
+			for _, limit := range []int{1, 2, 100} {
+				params.Limit = limit
+				got, next := listed(t, zone.client, params, len(c.want)+1)
+				if next != "" || !slices.Equal(got, c.want) {
+					t.Errorf("%+v in pages of %d, in a session of %s time zone: got %v and next %q, want %v and no next page",
+						params, limit, zone.session, got, next, c.want)
+				}
+			}
 		}
 	}
 }
@@ -972,6 +1085,76 @@ func TestPagesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 	}
 	if compiled {
 		t.Error("the database compiled the statement of a page of dead tasks")
+	}
+}
+
+// A page of a range of finish times reads the rows of its range only: each
+// queue's read starts where the range ends, and stops where the range
+// starts or with the page, whichever comes first. So a range that holds less
+// than a page does not read on into the older tasks, and neither does a
+// filter by kind, which without a range reads a queue's dead tasks until it
+// has a page. List runs the statement with a custom plan, which sees the
+// bounds that are set.
+func TestRangesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	// Two queues with 3,000 dead tasks each, one a second. The queue "busy"
+	// also has 600 canceled tasks, one every 5 seconds.
+	start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           SELECT v.queue, 'email.send', v.state::{s}.task_state, now(), '{}', 1, $1::timestamptz + i * interval '1 second'
+	           FROM (VALUES ('busy', 'dead'), ('busy', 'canceled'), ('other', 'dead')) AS v(queue, state),
+	                generate_series(0, 2999) i
+	           WHERE v.state = 'dead' OR i % 5 = 0`, start)
+	e.exec(t, "ANALYZE {s}.tasks")
+
+	const (
+		limit = 50
+		page  = limit + 2 // one row past the limit, to know whether more follow, and one past its finish time
+		found = 2         // an index entry for each queue that holds such tasks
+		// Until PostgreSQL 18, a plan reports the rows of a scan that ran
+		// several times as their rounded average: up to half a row off for
+		// each of the two queues, in each state, and for each queue found.
+		rounded = 3
+	)
+	second := func(n int) time.Time { return start.Add(time.Duration(n) * time.Second) }
+	dead := []taskmill.State{taskmill.StateDead}
+	both := []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}
+	busy := []string{"busy"}
+	for _, c := range []struct {
+		what          string
+		filter        taskmill.TaskFilter
+		since, before time.Time
+		after         int // the page follows one of this many tasks
+		most          int64
+	}{
+		{"a range of many pages", taskmill.TaskFilter{Queues: busy, States: dead}, second(1000), second(2000), 0, page},
+		// A later page reads the task that it starts below once more.
+		{"a later page of the range", taskmill.TaskFilter{Queues: busy, States: dead}, second(1000), second(2000), 100, page + 1},
+		{"a range of less than a page", taskmill.TaskFilter{Queues: busy, States: dead}, second(1000), second(1020), 0, 20},
+		{"a range with no start", taskmill.TaskFilter{Queues: busy, States: dead}, time.Time{}, second(20), 0, 20},
+		{"a range with no end", taskmill.TaskFilter{Queues: busy, States: dead}, second(2980), time.Time{}, 0, 20},
+		{"a range that holds nothing", taskmill.TaskFilter{Queues: busy, States: both}, second(-60), second(0), 0, 0},
+		{"a kind with no task in the range", taskmill.TaskFilter{Queues: busy, States: dead, Kinds: []string{"report.build"}}, second(1000), second(1500), 0, 500},
+		{"both states", taskmill.TaskFilter{Queues: busy, States: both}, second(1000), second(1020), 0, 20 + 4},
+		{"all queues, both states", taskmill.TaskFilter{States: both}, second(1000), second(1020), 0, found + 2*20 + 4 + rounded},
+	} {
+		params := taskmill.ListParams{Filter: c.filter, Limit: limit, FinishedSince: c.since, FinishedBefore: c.before}
+		if c.after > 0 {
+			params.Limit = c.after
+			before, err := e.client.List(t.Context(), &params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			params.Limit, params.Cursor = limit, before.Next
+		}
+		read, err := taskmill.ListRowsRead(t.Context(), e.client, &params, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if read > c.most {
+			t.Errorf("%s: a page of %d read %d rows of tasks, want at most %d", c.what, limit, read, c.most)
+		}
 	}
 }
 

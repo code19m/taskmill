@@ -1327,6 +1327,14 @@ ORDER BY id DESC LIMIT $5`),
 		// returned of that finish time, and the comparison of the pair leaves
 		// it out: up to two such batches for one page.
 		//
+		// A range of finish times, from $9 up to but not including $10,
+		// narrows each range of the index, and NULL is no bound. The
+		// statement runs with custom plans, so a bound that is set is a
+		// condition of the index, where the read then starts or stops, and
+		// one that is not set leaves the plan as it is without a range. The
+		// column and the bounds are timestamptz, so they compare as instants
+		// whatever the session's time zone.
+		//
 		// Each row ends with the task's finish time once more, as the column
 		// holds it: see finishRows. If $8, the rows are summaries.
 		listFinished: q(`
@@ -1343,6 +1351,8 @@ CROSS JOIN LATERAL (
     FROM {s}.tasks t
     WHERE t.queue = l.name AND t.state = selected::{s}.task_state AND t.state IN ('dead', 'canceled')
       AND (t.finalized_at, t.id) < ($5::timestamptz, $6::bigint)
+      AND ($9::timestamptz IS NULL OR t.finalized_at >= $9)
+      AND ($10::timestamptz IS NULL OR t.finalized_at < $10)
       AND ` + inList(`t.kind`, `$3::text[]`) + `
       AND ` + inList(`t.group_key`, `$4::text[]`) + `
     ORDER BY t.finalized_at DESC FETCH FIRST $7 ROWS WITH TIES

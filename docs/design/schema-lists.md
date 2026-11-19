@@ -129,7 +129,8 @@ supported PostgreSQL version.
   a caller polls for new dead tasks.
 - **A filter by kind or FIFO group reads a queue's dead or canceled tasks
   until the page is full:** all of them in a queue that has none of that
-  kind. It never reads a task of another state.
+  kind. It never reads a task of another state, and with a
+  [range of finish times](#a-range-of-finish-times), only tasks of the range.
 
 ### Options we rejected
 
@@ -142,6 +143,56 @@ The numbers in this table were measured on 336,500 tasks with 50,000 dead.
 | A page that reads a fixed number of tasks and may come back short, as the bulk actions do | The first page of dead tasks could be empty with more to come. That is not a list an operator can use |
 | An option to choose the order | Two orders for every caller to choose from, and the ID order of dead tasks would still have no index |
 | Sort each range by `id` with an incremental sort, in place of `WITH TIES` | It returns the same page. But it leaves a sort inside each range for the planner to choose: with sorts on, PostgreSQL 15 then sorted the whole queue when its statistics expected few dead tasks. And it needs incremental sorts to be on in the database's configuration |
+
+### A range of finish times
+
+`ListParams.FinishedSince` and `FinishedBefore` limit a list in finish order
+to the tasks that finished from one time up to, but not including, another.
+An operator reaches a past period, such as last night, in one request.
+Without a range, the hour measured below starts 225 pages down.
+
+- **Each bound is a condition of the index,** on its last column. A queue's
+  read starts where the range ends. It stops where the range starts, or
+  with the page. Custom plans see which bounds are set, so a list without a
+  range keeps its plan. A generic plan would check the bounds as a filter,
+  and read past them: `List` never runs one.
+- **The cursor and the order stay as they are.** A cursor continues inside
+  the range that it is passed with.
+- **The bounds are instants.** The column and both parameters are
+  `timestamptz`. So neither the location of a `time.Time` nor the session's
+  `TimeZone` changes what a range selects.
+- **A bound is rounded up to the microsecond.** PostgreSQL keeps
+  microseconds, and the driver rounds a finer time down. Rounded down, a
+  bound would count a task that finished just before it as one that
+  finished at it.
+- **Only the finish time has a range, and only in finish order.** A range
+  bounds a read only where the list is in the order of that time. In ID
+  order, a range of any time is a filter: the list reads tasks until the
+  page is full, up to the time limit. No index holds tasks by when they
+  were created or last attempted. `tasks_due_idx` holds scheduled and
+  retryable tasks by run time, but a list in that order would be a third
+  order, with a cursor of its own.
+- **The range is not part of `TaskFilter`.** `Count` and the bulk actions
+  take that filter, and a bulk action reads in ID order.
+
+Measured on PostgreSQL 18 with 420,000 tasks, 300,000 of them dead over 30
+days: 100,000 in the queue `emails`, and 1,000 in each of 200 other queues.
+The range is one hour of a night 3 days back, for a page of 50:
+
+| List | Without a range | With the range |
+|---|---|---|
+| Dead, `emails` | 52 rows, 5 buffers | 52 rows, 5 buffers |
+| Dead, `emails`, a kind that 1 task in 50 has | 2,600 rows, 73 buffers | 138 rows, 8 buffers |
+| Dead, `emails`, a FIFO group that 1 task in 100 has | 5,200 rows, 142 buffers | 138 rows, 8 buffers |
+| Dead, `emails`, a kind with no dead task | 100,000 rows, 2,673 buffers | 138 rows, 8 buffers |
+| Dead, all queues | 10,654 rows, 1,811 buffers | 469 rows, 1,416 buffers |
+
+The hour holds 138 dead tasks of `emails`. A range of 10 minutes holds 23,
+and reads 23 rows and 5 buffers. A range that holds no task reads no row
+and 3 buffers. With no queue named, the buffers are the index probes that
+find the 201 queues, and the end of the range in each. PostgreSQL 15 reads
+the same rows, and `TestRangesOfFinishedTasksReadOnlyTheirRows` guards
+these bounds.
 
 ## A summary leaves out what makes a task large
 

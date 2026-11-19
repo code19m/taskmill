@@ -30,6 +30,16 @@ All notable changes to taskmill are recorded here. The format follows
   alone, as before: one with both a day of the month and a day of the week,
   a list of more than three times or days, or a step such as `*/7`, which
   starts again at every full hour and so is not "every 7 minutes".
+- `ListParams.FinishedSince` and `ListParams.FinishedBefore` limit
+  `Client.List` to the dead and canceled tasks that finished in a range of
+  time: at `FinishedSince` or later, and before `FinishedBefore`. So you
+  reach a past period, such as last night, without paging down to it. A
+  page reads only tasks of the range, also with a kind or a FIFO group in
+  the filter. The bounds are instants: neither their location nor the
+  database's time zone changes what a range selects. Only a list of dead
+  tasks, canceled tasks, or both takes a range, because only that list is
+  in finish order: any other list returns an error that wraps
+  `ErrInvalidArgument`. The range needs no migration and no new index.
 
 ### Changed
 

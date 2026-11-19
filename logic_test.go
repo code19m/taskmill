@@ -108,7 +108,7 @@ type parkedArgs struct{}
 func (parkedArgs) Kind() string { return "parked" }
 
 func (parkedArgs) EnqueueDefaults() EnqueueOptions {
-	return EnqueueOptions{RunAt: endRunAt, DedupeWindow: -time.Second}
+	return EnqueueOptions{RunAt: endTime, DedupeWindow: -time.Second}
 }
 
 func TestScheduleIsCheckedAsARunEnqueuesIt(t *testing.T) {
