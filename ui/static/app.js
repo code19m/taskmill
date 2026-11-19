@@ -820,9 +820,6 @@
     lastUpdate = Date.now();
     status = "live";
     show();
-    if (toggle && !reducedMotion.matches && toggle.animate) {
-      toggle.querySelector(".live-dot")?.animate([{ opacity: 0.3 }, { opacity: 1 }], { duration: 700, easing: "ease-out" });
-    }
     // A slow server gets more time between updates.
     schedule(Math.max(REFRESH_MS, 2 * took));
   }

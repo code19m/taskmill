@@ -122,6 +122,60 @@ func TestPagesHoldWhatTheScriptReads(t *testing.T) {
 	}
 }
 
+// Every icon that a page uses is one that the page defines: a name that the
+// sprite does not have draws nothing, and nothing says so. And every button
+// icon that the sprite defines is on some page here, so the pages of this
+// test reach every button that has one.
+func TestPagesDefineTheIconsTheyUse(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	ctx := t.Context()
+	storeSchedules(t, client, []taskmill.Schedule{
+		{Name: "nightly", Cron: "@daily", Args: greet{}}, {Name: "weekly", Cron: "@weekly", Args: greet{}},
+	})
+	// A paused schedule and queue, and one of each that runs; a task that
+	// waits; and more dead tasks than a list shows, so that it continues.
+	if err := errors.Join(
+		client.PauseSchedule(ctx, "weekly"),
+		client.PauseQueue(ctx, "mail"),
+		client.UpdateQueue(ctx, "default", func(*taskmill.QueueSettings) {}),
+	); err != nil {
+		t.Fatal(err)
+	}
+	waiting, err := client.Enqueue(ctx, greet{Name: "a"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO `+schema+`.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
+		SELECT 'mail', 'greet', 'dead', now(), '{}', 1, now() FROM generate_series(1, 260)`); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+	body, dead := listTasks(t, h, "/tasks?limit=250&state=dead")
+	pages := []string{
+		"/", "/schedules", "/workers", "/tasks?state=dead", "/tasks?limit=250&state=dead", linkNamed(t, body, "Earlier"),
+		"/tasks/" + dead[0], "/tasks/" + strconv.FormatInt(waiting.ID, 10),
+		"/tasks/bulk/delete?state=dead", "/tasks/bulk/retry?state=running", "/tasks?state=none",
+	}
+
+	used := map[string]bool{}
+	for _, page := range pages {
+		_, body, _ := get(t, h, page)
+		for _, m := range regexp.MustCompile(`<use href="#([^"]+)"`).FindAllStringSubmatch(body, -1) {
+			used[m[1]] = true
+			if !strings.Contains(body, `<symbol id="`+m[1]+`"`) {
+				t.Errorf("%s uses the icon %q, which the page does not define", page, m[1])
+			}
+		}
+	}
+	used["i-check"] = true // the script shows it in place of the copy icon, once the payload is copied
+	for _, m := range regexp.MustCompile(`<symbol id="(i-[^"]+)"`).FindAllStringSubmatch(body, -1) {
+		if !used[m[1]] {
+			t.Errorf("no page of this test uses the icon %q: nothing uses it, or the test no longer reaches its button", m[1])
+		}
+	}
+}
+
 func TestPagesRender(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
@@ -470,10 +524,10 @@ func TestTaskListSaysHowItContinues(t *testing.T) {
 	t.Parallel()
 	h, _ := deadTasks(t)
 	for _, c := range []struct{ target, want, not string }{
-		{"/tasks", `href="/tasks?limit=100#more" data-more>Load more</a>`, `id="more"`},
+		{"/tasks", `href="/tasks?limit=100#more" data-more>`, `id="more"`},
 		{"/tasks", "data-shown>50 shown<", ">Older<"},
-		{"/tasks?cursor=MjAw", `href="/tasks?cursor=MjAw&amp;limit=100#more" data-more>Load more</a>`, ">Older<"}, // "200"
-		{"/tasks?limit=230", `href="/tasks?limit=250#more" data-more>Load more</a>`, ">Older<"},
+		{"/tasks?cursor=MjAw", `href="/tasks?cursor=MjAw&amp;limit=100#more" data-more>`, ">Older<"}, // "200"
+		{"/tasks?limit=230", `href="/tasks?limit=250#more" data-more>`, ">Older<"},
 		{"/tasks?limit=250", `href="/tasks?cursor=MTI">Older<`, "data-more"}, // "12", the last of the 250 tasks
 		{"/tasks?limit=250", "data-shown>250 shown<", "Load more"},
 		{"/tasks?cursor=MTI", "data-shown>11 shown<", "data-more"},
@@ -940,7 +994,7 @@ func TestTaskPagesReadNoPayloadsTheyDoNotShow(t *testing.T) {
 	for _, tt := range []struct{ target, want string }{
 		{"/tasks", `<span title="` + strings.Repeat("e", 300) + `">`}, // the last error of each task
 		{"/tasks/" + head, "49 tasks wait"},
-		{"/tasks/" + next, `Waits behind <a class="mono" href="/tasks/` + head + `">`},
+		{"/tasks/" + next, `Waits behind <a class="strong" href="/tasks/` + head + `">`},
 	} {
 		before := read.Load()
 		code, body, _ := get(t, h, tt.target)
