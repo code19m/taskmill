@@ -302,6 +302,14 @@ html:has(.appbar :focus) { scroll-padding-top: 0; }
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 56px;
 }
 .topbar h1 { white-space: nowrap; font-size: var(--text-heading); font-weight: var(--weight-bold); letter-spacing: -0.015em; }
+/* When the maintainer last counted the tasks, at the end of the overview's
+   top bar: quiet while it is fresh, amber once it is over a minute old. */
+.counted {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  font-size: var(--text-sm); color: var(--ink-faint); font-variant-numeric: tabular-nums;
+}
+.counted > svg { width: 13px; height: 13px; }
+.counted.stale { color: var(--warn); font-weight: var(--weight-medium); }
 .topbar .meta { white-space: nowrap; font-size: var(--text-label); color: var(--ink-ghost); font-variant-numeric: tabular-nums; }
 .topbar .right { margin-left: auto; min-width: 0; display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
 .task-heading { display: flex; align-items: center; gap: 10px; }

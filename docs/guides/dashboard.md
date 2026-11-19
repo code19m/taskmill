@@ -176,13 +176,13 @@ worker has handlers for. **Checked in** is the worker's last
 "stale" mark a worker that made none for longer than its `LeaseDuration`,
 because it has stopped or cannot reach the database.
 
-The pages show data, and keep what explains it behind a hint: a small
-button with an "i". On the **Overview**, the hint beside the title says when
-the maintainer last counted the tasks, which it does every 10 seconds. If
-the last count is over a minute old, the page says so in amber: check that a
-worker runs as the maintainer ([Monitoring](../production/monitoring.md) has
-an alert for this). A chart with nothing to draw says why in a hint. In a
-browser without popovers, a hint's text stands on the page.
+At the end of the **Overview**'s top bar, "Counted 4s ago" says when the
+maintainer last counted the tasks, which it does every 10 seconds. Once that
+is over a minute ago, it turns amber: check that a worker runs as the
+maintainer ([Monitoring](../production/monitoring.md) has an alert for
+this). A count that ends in "+" stopped at its cap, as its tooltip says. A
+chart with nothing to draw says why behind a hint, a small button with an
+"i": in a browser without popovers, the hint's text stands on the page.
 
 Before an action on many tasks, the dashboard shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,

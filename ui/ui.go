@@ -1396,6 +1396,7 @@ func (s *server) funcs() template.FuncMap {
 		"visible":   visible,
 		"num":       number,
 		"count":     count,
+		"atLeast":   atLeast,
 		"percent":   percent,
 		"period":    period,
 		"cronWords": cronWords,
@@ -1562,6 +1563,15 @@ func count(n taskmill.TaskCount) string {
 		return number(n.N) + "+"
 	}
 	return number(n.N)
+}
+
+// atLeast is the tooltip of a count that stopped at its cap, and empty for
+// any other count: it says what the plus after the number means.
+func atLeast(n taskmill.TaskCount) string {
+	if !n.Capped {
+		return ""
+	}
+	return "At least " + number(n.N) + " tasks: the count stopped at its cap"
 }
 
 // period formats a retention period in whole days, or hours below two days.

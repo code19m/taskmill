@@ -325,30 +325,27 @@ func storeCounts(t *testing.T, pool *pgxpool.Pool, schema, age string, capped bo
 	}
 }
 
-// The overview keeps what explains its counts behind a hint: when the
-// maintainer counted, and what a count at its cap means. A hint is a button
-// that opens the text after it, which is how the browser and the script
-// find the text. How old the counts are is on the page itself only once it
-// is a reason to act: when no maintainer has counted for over a minute. The
-// hint and that mark each have a key: a live update that brings the mark
-// must not take the hint for it, and close a hint that is open.
-func TestOverviewKeepsTheAgeOfItsCountsBehindAHint(t *testing.T) {
+// The overview says when the maintainer last counted the tasks, at the end
+// of its top bar: quiet while the count is fresh, and marked as stale once no
+// maintainer has counted for over a minute, which is a reason to act. A
+// count that stopped at its cap says so in its tooltip. The mark has a key,
+// so that a live update keeps it as it is.
+func TestOverviewSaysWhenItsCountsWereTaken(t *testing.T) {
 	t.Parallel()
 	const (
-		hint  = `<span class="hint" data-key="hint-counts"><button type="button" popovertarget="hint-counts" aria-label="About the counts" aria-describedby="hint-counts">`
-		text  = `</button><span class="hint-pop" id="hint-counts" popover role="note">Counted by the maintainer `
-		atCap = "stopped at its cap"
-		late  = `<span class="chip warn" data-key="stale" title="`
+		fresh = `<span class="counted" data-key="counted" title="`
+		late  = `<span class="counted stale" data-key="counted" title="`
+		atCap = `title="At least 10,000 tasks: the count stopped at its cap">10,000&#43;<`
 	)
 	for _, tc := range []struct {
 		name, age     string // the age of the counts; none are stored if it is empty
 		capped        bool
 		want, without []string
 	}{
-		{"not counted yet", "", false, nil, []string{"hint-counts", "ounted "}},
-		{"counted now", "0 seconds", false, []string{hint, text}, []string{atCap, ">counted "}},
-		{"at the cap", "0 seconds", true, []string{hint, text, "10,000&#43;", atCap}, []string{">counted "}},
-		{"not counted for a minute", "5 minutes", false, []string{hint, text + "5m ago.", late, ">counted 5m ago</span>"}, []string{atCap}},
+		{"not counted yet", "", false, nil, []string{`class="counted`, "ounted "}},
+		{"counted now", "0 seconds", false, []string{fresh, "</svg>Counted "}, []string{late, "stopped at its cap", "hint-counts"}},
+		{"at the cap", "0 seconds", true, []string{fresh, atCap}, []string{late}},
+		{"not counted for a minute", "5 minutes", false, []string{late, "</svg>Counted 5m ago</span>"}, []string{fresh, "stopped at its cap"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

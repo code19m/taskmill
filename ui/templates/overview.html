@@ -2,29 +2,26 @@
 {{$d := .Data}}{{$ro := .ReadOnly}}
 <header class="topbar">
   <h1>Overview</h1>
-  {{/* How old the counts are is behind the hint, and on the page only once it is a reason to act. */}}
-  {{if not $d.RefreshedAt.IsZero}}
-  {{if $d.Stale}}<span class="chip warn" data-key="stale"{{template "at" $d.RefreshedAt}}>counted {{ago $d.RefreshedAt}}</span>{{end}}
-  {{template "hint" "counts"}}Counted by the maintainer {{ago $d.RefreshedAt}}.{{if $d.Totals.Capped}} A count that ends in + stopped at its cap: there are at least that many tasks.{{end}}{{template "hint-end"}}
-  {{end}}
+  {{/* When the maintainer last counted the tasks: quiet while it is fresh, amber once it is a reason to act. */}}
+  {{if not $d.RefreshedAt.IsZero}}<span class="counted{{if $d.Stale}} stale{{end}}" data-key="counted"{{template "at" $d.RefreshedAt}}>{{template "icon-schedules"}}Counted {{ago $d.RefreshedAt}}</span>{{end}}
 </header>
 <div class="page">
 <section class="stats" aria-label="Totals">
   <a class="card stat" href="{{path "/tasks?state=available"}}">
     <span class="stat-label">{{template "state-icon" "available"}}Available</span>
-    <span class="stat-value">{{count $d.Totals.Available}}</span>
+    <span class="stat-value"{{with atLeast $d.Totals.Available}} title="{{.}}"{{end}}>{{count $d.Totals.Available}}</span>
   </a>
   <a class="card stat" href="{{path "/tasks?state=running"}}">
     <span class="stat-label">{{template "state-icon" "running"}}Running</span>
-    <span class="stat-value">{{count $d.Totals.Running}}</span>
+    <span class="stat-value"{{with atLeast $d.Totals.Running}} title="{{.}}"{{end}}>{{count $d.Totals.Running}}</span>
   </a>
   <a class="card stat" href="{{path "/tasks?state=scheduled"}}">
     <span class="stat-label">{{template "state-icon" "scheduled"}}Waiting</span>
-    <span class="stat-value">{{count $d.Totals.Waiting}}</span>
+    <span class="stat-value"{{with atLeast $d.Totals.Waiting}} title="{{.}}"{{end}}>{{count $d.Totals.Waiting}}</span>
   </a>
   <a class="card stat{{if $d.Totals.Dead.N}} failed{{end}}" href="{{path "/tasks?state=dead"}}">
     <span class="stat-label">{{template "state-icon" "dead"}}Dead</span>
-    <span class="stat-value">{{count $d.Totals.Dead}}</span>
+    <span class="stat-value"{{with atLeast $d.Totals.Dead}} title="{{.}}"{{end}}>{{count $d.Totals.Dead}}</span>
   </a>
   <a class="card stat" href="{{path "/schedules"}}"{{if $d.Schedules}} title="{{if not $d.NextRun.IsZero}}Next run {{ago $d.NextRun}}{{else}}All paused{{end}}"{{end}}>
     <span class="stat-label">{{template "icon-schedules"}}Schedules</span>
@@ -71,7 +68,7 @@
           {{with $q.Settings.MaxRunning}}<span class="chip" title="At most {{.}} running across all workers">max {{.}}</span>{{end}}
         </td>
         {{range $s := $d.States}}{{$n := index $q.Counts $s}}
-        <td class="num"><a class="{{if not $n.N}}zero{{else}}count-{{$s}}{{end}}" href="{{path "/tasks"}}{{query "queue" $q.Name "state" (print $s)}}">{{count $n}}</a></td>
+        <td class="num"><a class="{{if not $n.N}}zero{{else}}count-{{$s}}{{end}}" href="{{path "/tasks"}}{{query "queue" $q.Name "state" (print $s)}}"{{with atLeast $n}} title="{{.}}"{{end}}>{{count $n}}</a></td>
         {{end}}
         <td class="num{{if not $q.Workers}} zero{{end}}">{{$q.Workers}}</td>
         {{if not $ro}}<td class="actions-col">
