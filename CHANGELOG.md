@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-19
+
 ### Added
 
 - The dashboard's overview has a dial of the attempts a minute, first in
@@ -61,11 +63,11 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Changed
 
-- The dashboard's task list has a "Load more" button in place of the link
-  to the next page. It shows the same list with 50 more tasks: the tasks
-  that you saw stay where they are, and the live updates keep all of them
+- The dashboard's task list has a "Load more" row under it, in place of
+  the link to the next page. It shows the same list with 50 more tasks: the
+  tasks that you saw stay where they are, and the live updates keep all of them
   up to date. Without the script, the browser loads the longer list, and
-  opens it at the first task that the button added. The address holds how
+  opens it at the first task that the row added. The address holds how
   many tasks the list shows, as `limit`, so a reload shows as many. A list
   shows up to 250 tasks, because every update reads them all. After that,
   it continues from its last task on a page of its own, as before. Under
@@ -107,8 +109,7 @@ All notable changes to taskmill are recorded here. The format follows
     whole.
   - **Task lists.** An arrow in the header marks the column that orders
     the list, **ID** or **Finished**, in place of the words "latest first"
-    beside the title. "Load more" is the whole row under the list, not a
-    small button in it. A list that starts after other tasks has a row at
+    beside the title. A list that starts after other tasks has a row at
     its top that leads back to the first page, in place of the words
     "older" or "earlier" beside the title and a link under the list. A
     page after the last task says "No more tasks", where it said "No tasks
@@ -1629,7 +1630,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/code19m/taskmill/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/code19m/taskmill/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/code19m/taskmill/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/code19m/taskmill/compare/v0.7.0...v0.8.0
