@@ -354,19 +354,20 @@ func TestTaskFilters(t *testing.T) {
 func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
-	// 60 dead tasks, more than a page. Task i died (7i mod 60) minutes ago:
-	// every task at a time of its own, and in another order than the IDs.
+	// 260 dead tasks, more than the list shows on one page. Task i died
+	// (7i mod 260) minutes ago: every task at a time of its own, and in
+	// another order than the IDs.
 	_, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
-		SELECT 'mail', 'greet', 'dead', now(), '{}', 1, now() - (i * 7 % 60) * interval '1 minute' FROM generate_series(1, 60) i`)
+		SELECT 'mail', 'greet', 'dead', now(), '{}', 1, now() - (i * 7 % 260) * interval '1 minute' FROM generate_series(1, 260) i`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Enqueue(t.Context(), greet{Name: "a"}, nil); err != nil { // task 61, which waits
+	if _, err := client.Enqueue(t.Context(), greet{Name: "a"}, nil); err != nil { // task 261, which waits
 		t.Fatal(err)
 	}
-	latestFirst := make([]string, 60)
-	for i := 1; i <= 60; i++ {
-		latestFirst[i*7%60] = strconv.Itoa(i)
+	latestFirst := make([]string, 260)
+	for i := 1; i <= 260; i++ {
+		latestFirst[i*7%260] = strconv.Itoa(i)
 	}
 	h := handler(t, client, nil)
 	row := regexp.MustCompile(`<tr data-href="[^"]*" data-key="(\d+)"`)
@@ -383,7 +384,7 @@ func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
 	}
 	next := func(body, label string) string {
 		t.Helper()
-		m := regexp.MustCompile(`href="([^"]+)">(?:<svg.*?</svg>)?` + label + `<`).FindStringSubmatch(body)
+		m := regexp.MustCompile(`href="([^"]+)"[^>]*>(?:<svg.*?</svg>)?` + label + `<`).FindStringSubmatch(body)
 		if m == nil {
 			t.Fatalf("the page has no link %q", label)
 		}
@@ -394,17 +395,36 @@ func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
 	if !strings.Contains(body, `<span class="meta">latest first</span>`) || !strings.Contains(body, "<th>Finished</th>") {
 		t.Errorf("the first page of dead tasks does not say that the latest come first, or does not show when they died\n%s", body)
 	}
+	if !slices.Equal(ids, latestFirst[:50]) || !strings.Contains(body, "50 shown") {
+		t.Errorf("the list of dead tasks starts with %v, want the 50 that died last, and their number", ids)
+	}
+	// "Load more" shows the same list with a page more of it, until the list
+	// is as long as one page gets.
+	for want := 100; want <= 250; want += 50 {
+		more := next(body, "Load more")
+		if more != "/tasks?limit="+strconv.Itoa(want)+"&state=dead" {
+			t.Fatalf("after %d tasks, \"Load more\" leads to %s", want-50, more)
+		}
+		if body, ids = list(more); !slices.Equal(ids, latestFirst[:want]) {
+			t.Fatalf("%s shows %d tasks %v, want the %d that died last", more, len(ids), ids, want)
+		}
+	}
+	// From there, the list continues from its last task, on a page of its own.
+	if strings.Contains(body, "Load more") {
+		t.Errorf("the list of 250 dead tasks still offers to load more\n%s", body)
+	}
 	body, later := list(next(body, "Earlier"))
 	if !slices.Equal(slices.Concat(ids, later), latestFirst) {
-		t.Errorf("the two pages of dead tasks show %v, then %v; want %v", ids, later, latestFirst)
+		t.Errorf("the page after 250 dead tasks shows %v, want the 10 that died first", later)
 	}
-	if !strings.Contains(body, `<span class="meta">earlier</span>`) || next(body, "Latest") != "/tasks?state=dead" || strings.Contains(body, ">Earlier<") {
+	if !strings.Contains(body, `<span class="meta">earlier</span>`) || next(body, "Latest") != "/tasks?state=dead" ||
+		strings.Contains(body, ">Earlier<") || strings.Contains(body, "Load more") {
 		t.Errorf("the last page of dead tasks does not say where it is, or leads on\n%s", body)
 	}
 
 	mixed, ids := list("/tasks?state=dead&state=available")
-	if !slices.Equal(ids[:3], []string{"61", "60", "59"}) || !strings.Contains(mixed, "<th>Run at</th>") ||
-		!strings.Contains(mixed, ">Older<") || strings.Contains(mixed, "latest first") {
+	if !slices.Equal(ids[:3], []string{"261", "260", "259"}) || !strings.Contains(mixed, "<th>Run at</th>") ||
+		!strings.Contains(mixed, "Load more") || strings.Contains(mixed, "latest first") {
 		t.Errorf("a list of dead and available tasks starts with %v, or names another order than that of the IDs\n%s", ids[:3], mixed)
 	}
 }
@@ -427,6 +447,9 @@ func TestTaskListSaysWhatItRefuses(t *testing.T) {
 		{"/tasks?cursor=%25", "invalid cursor", "/tasks", "Back to the first page", true},
 		{"/tasks?state=bogus&cursor=MTIz", "unknown state", "/tasks?state=bogus", "Back to the first page", true},
 		{"/tasks?state=bogus", "unknown state", "/tasks", "Clear the filters", false},
+		{"/tasks?state=dead&limit=0", "the limit must be a number from 1 to 250", "/tasks?state=dead", "Back to the first page", false},
+		{"/tasks?limit=251&cursor=MTIz", "the limit must be", "/tasks", "Back to the first page", false},
+		{"/tasks?limit=many", "the limit must be", "/tasks", "Back to the first page", false},
 	} {
 		code, body, _ := get(t, h, c.target)
 		if code != http.StatusBadRequest || !strings.Contains(body, "<h1>Invalid request</h1>") || !strings.Contains(body, c.wrong) ||

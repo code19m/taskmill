@@ -520,7 +520,9 @@
     // A click that ends a selection of text in a row is no click on the row.
     if (!url || (hit?.localName === "tr" && window.getSelection()?.isCollapsed === false)) return;
     event.preventDefault();
-    navigate(url, "push");
+    // More of a list is another state of its page, as a filter is: it
+    // changes in place, and the reader stays where they are.
+    navigate(url, hit?.matches("a[data-more]") ? "replace" : "push");
   });
 
   document.addEventListener("keydown", (event) => {
