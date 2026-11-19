@@ -421,7 +421,7 @@
   // shown in place, the browser loads, and shows what went wrong.
   let turns = 0; // counts navigations and actions: a newer one takes over
 
-  async function navigate(url, mode) {
+  async function navigate(url, mode, more = false) {
     const turn = ++turns;
     const slow = setTimeout(() => progress(true), SLOW_MS);
     const result = await load(url.href, null);
@@ -435,7 +435,7 @@
     progress(false);
     const n = address(url, mode);
     if (n == null) return;
-    render(result, { moved: mode === "push", n });
+    render(result, { moved: mode === "push", n, more });
     succeeded();
   }
 
@@ -445,18 +445,26 @@
   // button, and tells a screen reader its title. The fade only follows the
   // change, so a browser that paints late, or not at all, still has the
   // page.
-  function render(result, { moved, n, y = 0, notice = null }) {
+  function render(result, { moved, n, y = 0, notice = null, more = false }) {
     inflight?.abort(); // an update of the page that this one replaces
+    const focused = document.activeElement;
     apply(result, moved);
     entry = n;
     shown = here();
     if (notice) notify(notice);
-    if (!moved) return;
     const main = document.getElementById("main");
+    const announcer = document.querySelector("[data-announce]");
+    if (!moved) {
+      // The change may remove the element that had focus, as the last "Load
+      // more" removes its link: the page takes the focus, not the body. And
+      // more of a list tells a screen reader how many tasks it shows now.
+      if (focused?.isConnected === false) main.focus({ preventScroll: true });
+      if (more && announcer) announcer.textContent = main.querySelector("[data-shown]")?.textContent ?? "";
+      return;
+    }
     scrollTo(0, y);
     main.focus({ preventScroll: true });
     if (!reducedMotion.matches) main.animate?.([{ opacity: 0.4 }, { opacity: 1 }], { duration: FADE_MS, easing: "ease-out" });
-    const announcer = document.querySelector("[data-announce]");
     if (announcer) announcer.textContent = document.title;
   }
 
@@ -521,8 +529,11 @@
     if (!url || (hit?.localName === "tr" && window.getSelection()?.isCollapsed === false)) return;
     event.preventDefault();
     // More of a list is another state of its page, as a filter is: it
-    // changes in place, and the reader stays where they are.
-    navigate(url, hit?.matches("a[data-more]") ? "replace" : "push");
+    // changes in place, and the reader stays where they are. The place in
+    // its link is for a browser that loads the longer list as a page.
+    const more = hit?.matches("a[data-more]");
+    if (more) url.hash = "";
+    navigate(url, more ? "replace" : "push", more);
   });
 
   document.addEventListener("keydown", (event) => {

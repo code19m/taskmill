@@ -405,8 +405,8 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := shown(q.Get("limit"))
 	if err != nil {
-		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request",
-			Data: problem{err.Error(), listPath(first), "Back to the first page"}})
+		back := problem{err.Error(), listPath(first), "Back to the first page"}
+		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
 		return
 	}
 	// The list shows no payload, no metadata, and only each task's last error.
@@ -443,24 +443,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		names = append(names, kq.Name)
 	}
 	offered := s.filterChoices(r)
-	// The list continues in place: "Load more" shows the same list with a
-	// page more of it, so that the live updates keep every task on screen
-	// up to date. Each update reads all of them, so the list stops growing
-	// at maxShown, and continues from its last task on a page of its own.
-	more, next := "", ""
-	if res.Next != "" {
-		v := maps.Clone(first)
-		if limit < maxShown {
-			if params.Cursor != "" {
-				v.Set("cursor", params.Cursor)
-			}
-			v.Set("limit", strconv.Itoa(min(limit+pageSize, maxShown)))
-			more = s.path("/tasks?" + v.Encode())
-		} else {
-			v.Set("cursor", res.Next)
-			next = s.path("/tasks?" + v.Encode())
-		}
-	}
+	more, next := s.continuation(first, params, res.Next)
 	states := filterQuery(f)["state"]
 	nav, title := "tasks", "Tasks"
 	if slices.Equal(states, []string{string(taskmill.StateDead)}) {
@@ -480,6 +463,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
 		Tasks                         []taskmill.TaskInfo
+		Seen                          int // tasks before those that the last "Load more" added
 		Order                         listOrder
 		States, Queues, Kinds, Groups filter
 		Filtered, Paged               bool
@@ -487,6 +471,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		Bulk                          *bulkLinks
 	}{
 		res.Tasks,
+		limit - pageSize,
 		orderOf(f),
 		newFilter("state", "State", "states", stateNames, states),
 		newFilter("queue", "Queue", "queues", names, f.Queues).searchable(),
@@ -496,6 +481,30 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		s.path(listPath(first)), more, next,
 		bulk,
 	}})
+}
+
+// continuation returns the link that leads on from a task list: none if no
+// task follows its last one, where the cursor after continues. The list
+// continues in place: more leads to the same list with a page more of it,
+// so that the live updates keep every task on screen up to date. It names
+// the first task that it adds, "more": a browser without the script loads
+// the longer list, and opens it there. Each update reads all the tasks on
+// screen, so the list stops growing at maxShown. From there, next leads to
+// a page of its own, which starts after the list's last task.
+func (s *server) continuation(first url.Values, params *taskmill.ListParams, after string) (more, next string) {
+	if after == "" {
+		return "", ""
+	}
+	v := maps.Clone(first)
+	if params.Limit >= maxShown {
+		v.Set("cursor", after)
+		return "", s.path("/tasks?" + v.Encode())
+	}
+	if params.Cursor != "" {
+		v.Set("cursor", params.Cursor)
+	}
+	v.Set("limit", strconv.Itoa(min(params.Limit+pageSize, maxShown)))
+	return s.path("/tasks?" + v.Encode() + "#more"), ""
 }
 
 // shown returns how many tasks the task list shows, as the limit in its

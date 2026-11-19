@@ -158,15 +158,18 @@ canceled tasks, or both shows the tasks that finished last first. So the
 task that died a minute ago is at the top of the **Dead** page. Such a list
 says "latest first" beside its title, and shows when each task finished.
 
-A task list has 5 seconds to read its page. A list of dead or canceled
+A task list has 5 seconds to read its tasks. A list of dead or canceled
 tasks never reads tasks of other states. But with no queue in the filters,
-as on the **Dead** page, it reads up to a page of each queue that has such
-tasks: with hundreds of queues, choose a queue. Some other lists can read
-many tasks that they do not show, such as the available tasks of all
-queues in a very large table. If a list runs out of time, the page says
-"Taking too long", and what may help: a queue and a state in the filters,
-or fewer filters ([Manage tasks from code](operations-api.md#find-tasks)
-says which lists are fast).
+as on the **Dead** page, it reads up to as many tasks as it shows from each
+queue that has such tasks. "Load more" makes the list longer, up to 250
+tasks, and multiplies that read: a list of 250 tasks reads up to 250 from
+each queue, five times as many as a list of 50. With hundreds of queues,
+choose a queue. Some other lists can read many tasks that they do not show,
+such as the available tasks of all queues in a very large table. If a list
+runs out of time, the page says "Taking too long", and what may help: a
+queue and a state in the filters, or fewer filters
+([Manage tasks from code](operations-api.md#find-tasks) says which lists
+are fast).
 
 A retry of a canceled task takes the task's
 [dedupe key](../concepts/glossary.md#dedupe-key) back. If another task holds

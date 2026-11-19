@@ -347,94 +347,155 @@ func TestTaskFilters(t *testing.T) {
 	}
 }
 
-// A list of dead tasks shows the task that died last first, says so, and
-// shows when each task died. Its pages lead on in that order, under links
-// that name it. A list that mixes dead tasks with others is in the order of
-// the IDs, as every other list.
-func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
-	t.Parallel()
+// deadTasks stores 260 dead tasks, more than a task list shows on one page,
+// and task 261, which waits. Task i died (7i mod 260) minutes ago: every
+// task at a time of its own, and in another order than the IDs. It returns
+// the dashboard, and the IDs of the dead tasks, the one that died last
+// first.
+func deadTasks(t *testing.T) (h http.Handler, latestFirst []string) {
+	t.Helper()
 	client, pool, schema := setupDB(t)
-	// 260 dead tasks, more than the list shows on one page. Task i died
-	// (7i mod 260) minutes ago: every task at a time of its own, and in
-	// another order than the IDs.
 	_, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
 		SELECT 'mail', 'greet', 'dead', now(), '{}', 1, now() - (i * 7 % 260) * interval '1 minute' FROM generate_series(1, 260) i`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Enqueue(t.Context(), greet{Name: "a"}, nil); err != nil { // task 261, which waits
+	if _, err := client.Enqueue(t.Context(), greet{Name: "a"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	latestFirst := make([]string, 260)
+	latestFirst = make([]string, 260)
 	for i := 1; i <= 260; i++ {
 		latestFirst[i*7%260] = strconv.Itoa(i)
 	}
-	h := handler(t, client, nil)
-	row := regexp.MustCompile(`<tr data-href="[^"]*" data-key="(\d+)"`)
-	list := func(target string) (body string, ids []string) {
-		t.Helper()
-		code, body, _ := get(t, h, target)
-		if code != http.StatusOK {
-			t.Fatalf("GET %s: status %d", target, code)
-		}
-		for _, m := range row.FindAllStringSubmatch(body, -1) {
-			ids = append(ids, m[1])
-		}
-		return body, ids
-	}
-	next := func(body, label string) string {
-		t.Helper()
-		m := regexp.MustCompile(`href="([^"]+)"[^>]*>(?:<svg.*?</svg>)?` + label + `<`).FindStringSubmatch(body)
-		if m == nil {
-			t.Fatalf("the page has no link %q", label)
-		}
-		return html.UnescapeString(m[1])
-	}
+	return handler(t, client, nil), latestFirst
+}
 
-	body, ids := list("/tasks?state=dead")
+// taskRow is the start of a task's row in a task list, with the task's ID.
+var taskRow = regexp.MustCompile(`<tr data-href="[^"]*" data-key="(\d+)"`)
+
+// listTasks requests a task list, and returns the page with the IDs of its
+// tasks in their order. As a browser does, it keeps the place on the page
+// that the address names to itself.
+func listTasks(t *testing.T, h http.Handler, target string) (body string, ids []string) {
+	t.Helper()
+	target, _, _ = strings.Cut(target, "#")
+	code, body, _ := get(t, h, target)
+	if code != http.StatusOK {
+		t.Fatalf("GET %s: status %d", target, code)
+	}
+	for _, m := range taskRow.FindAllStringSubmatch(body, -1) {
+		ids = append(ids, m[1])
+	}
+	return body, ids
+}
+
+// linkNamed returns the address of the page's link with the label.
+func linkNamed(t *testing.T, body, label string) string {
+	t.Helper()
+	m := regexp.MustCompile(`href="([^"]+)"[^>]*>(?:<svg.*?</svg>)?` + label + `<`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatalf("the page has no link %q", label)
+	}
+	return html.UnescapeString(m[1])
+}
+
+// A list of dead tasks shows the task that died last first, says so, and
+// shows when each task died. A list that mixes dead tasks with others is in
+// the order of the IDs, as every other list.
+func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
+	t.Parallel()
+	h, latestFirst := deadTasks(t)
+	body, ids := listTasks(t, h, "/tasks?state=dead")
 	if !strings.Contains(body, `<span class="meta">latest first</span>`) || !strings.Contains(body, "<th>Finished</th>") {
 		t.Errorf("the first page of dead tasks does not say that the latest come first, or does not show when they died\n%s", body)
 	}
-	if !slices.Equal(ids, latestFirst[:50]) || !strings.Contains(body, "50 shown") {
-		t.Errorf("the list of dead tasks starts with %v, want the 50 that died last, and their number", ids)
+	if !slices.Equal(ids, latestFirst[:50]) {
+		t.Errorf("the list of dead tasks starts with %v, want the 50 that died last", ids)
 	}
-	// "Load more" shows the same list with a page more of it, until the list
-	// is as long as one page gets.
-	for want := 100; want <= 250; want += 50 {
-		more := next(body, "Load more")
-		if more != "/tasks?limit="+strconv.Itoa(want)+"&state=dead" {
-			t.Fatalf("after %d tasks, \"Load more\" leads to %s", want-50, more)
-		}
-		if body, ids = list(more); !slices.Equal(ids, latestFirst[:want]) {
-			t.Fatalf("%s shows %d tasks %v, want the %d that died last", more, len(ids), ids, want)
-		}
-	}
-	// From there, the list continues from its last task, on a page of its own.
-	if strings.Contains(body, "Load more") {
-		t.Errorf("the list of 250 dead tasks still offers to load more\n%s", body)
-	}
-	body, later := list(next(body, "Earlier"))
-	if !slices.Equal(slices.Concat(ids, later), latestFirst) {
-		t.Errorf("the page after 250 dead tasks shows %v, want the 10 that died first", later)
-	}
-	if !strings.Contains(body, `<span class="meta">earlier</span>`) || next(body, "Latest") != "/tasks?state=dead" ||
-		strings.Contains(body, ">Earlier<") || strings.Contains(body, "Load more") {
-		t.Errorf("the last page of dead tasks does not say where it is, or leads on\n%s", body)
-	}
-
-	mixed, ids := list("/tasks?state=dead&state=available")
+	mixed, ids := listTasks(t, h, "/tasks?state=dead&state=available")
 	if !slices.Equal(ids[:3], []string{"261", "260", "259"}) || !strings.Contains(mixed, "<th>Run at</th>") ||
 		!strings.Contains(mixed, "Load more") || strings.Contains(mixed, "latest first") {
 		t.Errorf("a list of dead and available tasks starts with %v, or names another order than that of the IDs\n%s", ids[:3], mixed)
 	}
 }
 
-// A task list that the client refuses says what is wrong, as the client
-// names it: the filter, or the cursor. An address with a cursor, as a
-// bookmark of a list of dead tasks from the previous release is, also says
-// where such a cursor comes from, and leads to the first page of the same
-// list: its filter may be fine. Without a cursor, the filter is what is
-// wrong, and the page offers to clear it.
+// "Load more" shows the same list with a page more of it, in the list's
+// order, until the list is as long as one page gets: 250 tasks. Its link
+// names the first task that it adds, where a browser without the script
+// opens the longer list. From there, the list continues from its last task
+// on a page of its own, under a link that names the order.
+func TestTaskListLoadsMore(t *testing.T) {
+	t.Parallel()
+	h, latestFirst := deadTasks(t)
+	body, ids := listTasks(t, h, "/tasks?state=dead")
+	if strings.Contains(body, `id="more"`) {
+		t.Errorf("the first 50 dead tasks have one named \"more\"\n%s", body)
+	}
+	for want := 100; want <= 250; want += 50 {
+		more := linkNamed(t, body, "Load more")
+		if more != "/tasks?limit="+strconv.Itoa(want)+"&state=dead#more" {
+			t.Fatalf("after %d tasks, \"Load more\" leads to %s", want-50, more)
+		}
+		if body, ids = listTasks(t, h, more); !slices.Equal(ids, latestFirst[:want]) {
+			t.Fatalf("%s shows %d tasks %v, want the %d that died last", more, len(ids), ids, want)
+		}
+		if added := `data-key="` + latestFirst[want-50] + `" id="more"`; !strings.Contains(body, added) || strings.Count(body, `id="more"`) != 1 {
+			t.Errorf("%s: want the list's task %d, and no other, named \"more\"", more, want-49)
+		}
+	}
+	if strings.Contains(body, "Load more") {
+		t.Errorf("the list of 250 dead tasks still offers to load more\n%s", body)
+	}
+	earlier := linkNamed(t, body, "Earlier")
+	if strings.Contains(earlier, "limit=") {
+		t.Errorf("the page after 250 dead tasks is %s, want no limit in its address", earlier)
+	}
+	body, later := listTasks(t, h, earlier)
+	if !slices.Equal(slices.Concat(ids, later), latestFirst) {
+		t.Errorf("the page after 250 dead tasks shows %v, want the 10 that died first", later)
+	}
+	if !strings.Contains(body, `<span class="meta">earlier</span>`) || linkNamed(t, body, "Latest") != "/tasks?state=dead" ||
+		strings.Contains(body, ">Earlier<") || strings.Contains(body, "Load more") {
+		t.Errorf("the last page of dead tasks does not say where it is, or leads on\n%s", body)
+	}
+}
+
+// Under its tasks, a list has the link that leads on, and says how many
+// tasks it shows. "Load more" keeps the cursor of a later page, and stops
+// at 250 tasks: the link from there leads to the page after the list's last
+// task, and is not one that the script shows in place. A list that shows
+// all its tasks still says how many, and a list without tasks has nothing
+// to count. The tasks are in the order of the IDs, task 261 first.
+func TestTaskListSaysHowItContinues(t *testing.T) {
+	t.Parallel()
+	h, _ := deadTasks(t)
+	for _, c := range []struct{ target, want, not string }{
+		{"/tasks", `href="/tasks?limit=100#more" data-more>Load more</a>`, `id="more"`},
+		{"/tasks", "data-shown>50 shown<", ">Older<"},
+		{"/tasks?cursor=MjAw", `href="/tasks?cursor=MjAw&amp;limit=100#more" data-more>Load more</a>`, ">Older<"}, // "200"
+		{"/tasks?limit=230", `href="/tasks?limit=250#more" data-more>Load more</a>`, ">Older<"},
+		{"/tasks?limit=250", `href="/tasks?cursor=MTI">Older<`, "data-more"}, // "12", the last of the 250 tasks
+		{"/tasks?limit=250", "data-shown>250 shown<", "Load more"},
+		{"/tasks?cursor=MTI", "data-shown>11 shown<", "data-more"},
+		{"/tasks?state=available", "data-shown>1 shown<", "data-more"},
+		{"/tasks?state=running", "No tasks match these filters", "data-shown"},
+	} {
+		code, body, _ := get(t, h, c.target)
+		if code != http.StatusOK || !strings.Contains(body, c.want) || strings.Contains(body, c.not) {
+			t.Errorf("GET %s: status %d, want a page with %s, and without %s\n%s", c.target, code, c.want, c.not, body)
+		}
+	}
+}
+
+// A task list that is refused says what is wrong. The client refuses a
+// filter or a cursor, and the page names it as the client does. An address
+// with a cursor, as a bookmark of a list of dead tasks from the previous
+// release is, also says where such a cursor comes from, and leads to the
+// first page of the same list: its filter may be fine. Without a cursor,
+// the filter is what is wrong, and the page offers to clear it. The
+// dashboard itself refuses a limit that is not a number from 1 to 250,
+// before it asks the client: the page says so, and leads to the first page
+// of the same list, whatever else the address holds.
 func TestTaskListSaysWhatItRefuses(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)

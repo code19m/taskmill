@@ -540,8 +540,13 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   color: var(--ink-faint); font-family: var(--font-mono); font-size: var(--text-xs);
 }
 .error-cell { color: var(--err); font-family: var(--font-mono); font-size: var(--text-xs); }
-/* Under a list that continues: the way back to its start, the button that
-   shows more of it, and how many tasks are shown. */
+/* A browser without the script opens a longer list at the first task that
+   "Load more" added. The margin keeps that row clear of the sticky header,
+   which is two rows tall on a small screen. */
+.table tr:target { scroll-margin-top: 104px; }
+/* Under a task list: the way back to its start if it is a later page, the
+   button that shows more of it if it continues, and how many tasks are
+   shown. */
 .pager {
   display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px;
   padding: 10px 16px; border-top: 1px solid var(--line);
