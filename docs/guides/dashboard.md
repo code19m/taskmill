@@ -6,7 +6,7 @@ tasks. This page shows how to run it, how to protect it, and what it can do.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="../images/dashboard-dark.png">
-  <img alt="The dashboard's overview: task counts, charts of the last hour's tasks and attempts, and the queues" src="../images/dashboard-light.png">
+  <img alt="The dashboard's overview: task counts, a dial of the attempts a minute, charts of the last hour's tasks and attempts, and the queues" src="../images/dashboard-light.png">
 </picture>
 
 ## Which should I use?
