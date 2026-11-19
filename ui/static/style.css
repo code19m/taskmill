@@ -459,12 +459,15 @@ form { display: inline; margin: 0; }
   background: none; color: var(--ink-muted); font-family: var(--font-sans); text-align: left;
 }
 
-/* The filter by finish time. Its button is as wide as the range that it
-   names. Its menu has the presets, which are links, beside a custom range:
-   a calendar over the two bounds. On a small screen the presets are on top,
-   two in a row. The column is as wide as seven days of the calendar. */
+/* The filter by time. Its button names the time, and then the range, and is
+   as wide as the two. Its menu has the presets, which are links, beside a
+   custom range: a calendar over the two bounds. On a small screen the
+   presets are on top, two in a row. The column is as wide as seven days of
+   the calendar. */
 .filters > .sel-range { flex-basis: auto; min-width: 200px; }
-.sel-range .sel-label { font-variant-numeric: tabular-nums; }
+.sel-range .sel-btn { justify-content: flex-start; gap: 6px; }
+.sel-range .sel-name { flex-shrink: 0; color: var(--ink-muted); }
+.sel-range .sel-label { flex: 1; font-variant-numeric: tabular-nums; }
 .pop.range { flex-direction: row; width: max-content; max-height: none; }
 .range-presets { display: grid; align-content: start; min-width: 148px; }
 a.pop-opt:hover { text-decoration: none; }
@@ -739,6 +742,9 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   margin-left: 8px; padding: 1px 6px; border-radius: var(--radius-chip); background: var(--glass-2);
   color: var(--ink-faint); font-family: var(--font-mono); font-size: var(--text-xs);
 }
+/* A FIFO group key of the outbox: its topic, quiet, and then its key. */
+.topic { color: var(--ink-faint); }
+.topic-sep { margin: 0 0.4em; color: var(--ink-ghost); }
 /* A task's last error is quiet text: its state, beside it, has the color. */
 .error-cell { color: var(--ink-muted); font-size: var(--text-sm); }
 /* A schedule's timetable: what its cron expression means, above the
@@ -965,8 +971,16 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .modal::backdrop { background: var(--scrim); }
 .modal form { display: block; }
 .modal h2 { margin: 0 0 10px; font-size: var(--text-ui); font-weight: var(--weight-bold); }
-.modal-text { font-size: var(--text-label); color: var(--ink-muted); line-height: 1.5; }
+.modal-text { display: grid; gap: 12px; font-size: var(--text-label); color: var(--ink-muted); line-height: 1.5; }
+.modal-text > * { margin: 0; }
+/* The filters of an action on many tasks, as a short list. */
+.modal-text .props { grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; padding: 0; }
+/* What the last step of an action did, that it runs, or that it failed. */
+.modal-status { margin: 0 0 10px; font-size: var(--text-label); line-height: 1.5; color: var(--ink); }
+.modal-status:empty { display: none; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.modal-actions [hidden] { display: none; }
+.modal[aria-busy="true"] [data-confirm-button] { opacity: 0.55; cursor: progress; }
 
 .toast {
   position: fixed; z-index: 120; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));

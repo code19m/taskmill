@@ -40,7 +40,7 @@
 </header>
 {{with .Notice}}<div class="toast" role="status" data-toast>{{template "icon-check"}}<span class="toast-message">{{.}}</span></div>{{end}}
 <div class="main">
-<main id="main" class="content" tabindex="-1"{{if and .Nav (not .Static)}} data-live{{end}}>
+<main id="main" class="content" tabindex="-1" data-now="{{instant .Now}}"{{if and .Nav (not .Static)}} data-live{{end}}>
 {{end}}
 
 {{define "foot"}}
@@ -48,10 +48,16 @@
 </div>
 {{/* The notice that the script shows when an action got no answer. */}}
 <template data-failure><div class="toast failed" role="alert">{{template "icon-alert"}}<span class="toast-message">The action failed, or its answer did not arrive. Check the page before you try again.</span></div></template>
-<dialog class="modal" id="confirm-dialog" aria-labelledby="confirm-title">
+{{/* The dialog that asks before an action. It asks what a form on the page
+   says in its data-confirm attributes. For an action on many tasks, it
+   shows what the action's own page says, in the part of that page that
+   names the dialog's title, and stays for each answer: its status line
+   says what the last step did. */}}
+<dialog class="modal" id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-text">
   <form method="dialog">
     <h2 id="confirm-title">Are you sure?</h2>
-    <p class="modal-text" data-confirm-text></p>
+    <p class="modal-status" role="status" data-confirm-status data-busy="Working on it…"></p>
+    <div class="modal-text" id="confirm-text" data-confirm-text></div>
     <div class="modal-actions">
       <button class="btn quiet" value="cancel">Cancel</button>
       <button class="btn primary" value="confirm" data-confirm-button>Confirm</button>
@@ -130,29 +136,31 @@
    script applies each change at once, closes it on an outside click or
    Escape, and runs its search box, which can also add a value that the menu
    does not list. */}}
-{{define "multi"}}{{$f := .F}}<details class="sel" data-name="{{$f.Name}}" data-plural="{{$f.Plural}}"{{with $f.Source}} data-source="{{.}}"{{end}}{{if $.Mono}} data-mono{{end}}>
-  <summary class="ctl sel-btn{{if $f.Empty}} empty{{end}}" aria-label="{{$f.Title}}: {{$f.Label}}"><span class="sel-label">{{$f.Label}}</span>{{template "icon-chevron"}}</summary>
+{{define "multi"}}{{$f := .F}}{{$group := eq $f.Name "group"}}<details class="sel" data-name="{{$f.Name}}" data-plural="{{$f.Plural}}"{{with $f.Source}} data-source="{{.}}"{{end}}{{if $.Mono}} data-mono{{end}}>
+  <summary class="ctl sel-btn{{if $f.Empty}} empty{{end}}" aria-label="{{$f.Title}}: {{with and $group (outbox $f.Label)}}{{.}}{{else}}{{visible $f.Label}}{{end}}"><span class="sel-label">{{if $group}}{{template "group" $f.Label}}{{else}}{{visible $f.Label}}{{end}}</span>{{template "icon-chevron"}}</summary>
   <div class="pop" role="group" aria-label="{{$f.Title}}">
     {{if $f.Search}}<input class="pop-search js-only" type="search" placeholder="Search" aria-label="Search {{lower $f.Plural}}" autocomplete="off" spellcheck="false" data-sel-search>{{end}}
     <div class="pop-list">
-    {{range $f.Options}}<label class="pop-opt" data-key="{{.Value}}"><input type="checkbox" class="chk-input" name="{{$f.Name}}" value="{{.Value}}"{{if .Selected}} checked{{end}}><span class="chk">{{template "icon-tick"}}</span>{{if $.Rings}}{{template "state-icon" .Value}}{{end}}<span class="pop-text{{if $.Mono}} mono{{end}}">{{visible .Value}}</span></label>
+    {{range $f.Options}}<label class="pop-opt" data-key="{{.Value}}"><input type="checkbox" class="chk-input" name="{{$f.Name}}" value="{{.Value}}"{{if .Selected}} checked{{end}}><span class="chk">{{template "icon-tick"}}</span>{{if $.Rings}}{{template "state-icon" .Value}}{{end}}<span class="pop-text{{if $.Mono}} mono{{end}}">{{if $group}}{{template "group" .Value}}{{else}}{{visible .Value}}{{end}}</span></label>
     {{else}}<p class="pop-empty">None yet</p>{{end}}
     </div>
     {{if $f.Search}}<button type="button" class="pop-opt pop-add" data-sel-add hidden></button>{{end}}
   </div>
 </details>{{end}}
 
-{{/* The filter of a task list by when its tasks finished. Its presets are
-   links. A custom range has two bounds. With the script, the menu has a
-   calendar, where the reader picks the first and the last day, and each
-   bound is a date and a time to type, in the reader's time zone: the script
-   draws the month, fills these fields from the instants of the range, and
-   sends what they hold as instants. They have no name, so a form never
-   sends them. Without the script, the two bounds are the browser's own
-   fields, which the form sends as times in UTC. */}}
-{{define "finished"}}<details class="sel sel-range">
-  <summary class="ctl sel-btn{{if not .Set}} empty{{end}}" aria-label="Finished: {{.Full}}"{{if .Set}} title="{{.Full}}"{{end}}><span class="sel-label">{{.Label}}</span>{{template "icon-chevron"}}</summary>
-  <div class="pop range" role="group" aria-label="Finished">
+{{/* The filter of a task list by the time that orders it: when its tasks
+   were created or, on a list in finish order, when they finished. Its
+   button names the time. Its presets are links. A custom range has two
+   bounds. With the script, the menu has a calendar, where the reader picks
+   the first and the last day, and each bound is a date and a time to type,
+   in the reader's time zone: the script draws the month, fills these fields
+   from the instants of the range, and sends what they hold as instants.
+   They have no name, so a form never sends them. Without the script, the
+   two bounds are the browser's own fields, which the form sends as times in
+   UTC. */}}
+{{define "range"}}<details class="sel sel-range">
+  <summary class="ctl sel-btn{{if not .Set}} empty{{end}}" aria-label="{{.Title}}: {{.Full}}"{{if .Set}} title="{{.Full}}"{{end}}><span class="sel-name">{{.Title}}:</span><span class="sel-label">{{.Label}}</span>{{template "icon-chevron"}}</summary>
+  <div class="pop range" role="group" aria-label="{{.Title}}">
     <div class="range-presets">
     {{range .Presets}}<a class="pop-opt" href="{{.Href}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>
     {{end}}</div>
@@ -181,6 +189,14 @@
 {{define "bound"}}<span>{{.Label}}</span>
         <input class="ctl" data-bound="{{.Name}}" aria-label="{{.Label}}, date" aria-describedby="range-zone" placeholder="YYYY-MM-DD" inputmode="numeric" maxlength="10" autocomplete="off">
         <input class="ctl" data-bound="{{.Name}}" aria-label="{{.Label}}, time" aria-describedby="range-zone" placeholder="HH:MM" inputmode="numeric" maxlength="8" autocomplete="off">{{end}}
+
+{{/* A FIFO group key, as text to read. A key that the outbox made shows as
+   its two parts, the topic and the message key: the character that joins
+   them is one that no font draws. Its tooltip says both in words. Any other
+   key shows as it is, with its control characters as pictures. A value, a
+   link, and a data-key carry the key itself. The script's "group" shows a
+   key in the same way. */}}
+{{define "group"}}{{with outbox .}}<span title="{{.}}"><span class="topic">{{.Topic}}</span><span class="topic-sep" aria-hidden="true">›</span>{{.Key}}</span>{{else}}{{visible .}}{{end}}{{end}}
 
 {{/* The tooltip of a time: the time in UTC, with its instant, by which the
    script words it in the reader's time zone. */}}

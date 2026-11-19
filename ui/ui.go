@@ -288,6 +288,7 @@ type page struct {
 	ReadOnly bool
 	Notice   string
 	Dead     taskmill.TaskCount // dead tasks, for the navigation; zero if unknown
+	Now      time.Time          // when the page was rendered: its relative times count from here
 	Data     any
 }
 
@@ -413,26 +414,22 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
 		return
 	}
-	since, before, err := finishRange(q)
+	since, before, err := listRange(q)
 	if err != nil {
 		back := problem{err.Error(), listPath(withRange(first, time.Time{}, time.Time{})), "Clear the range"}
 		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
 		return
 	}
-	order, ranged := orderOf(f), !since.IsZero() || !before.IsZero()
-	if ranged && !order.ByFinish {
-		// Only a list in finish order takes a range. A reader who sets one,
-		// and then adds another state, arrives here: the list that they
-		// asked for is the same list without the range, and its address
-		// says so.
-		target := s.path(listPath(withRange(q, time.Time{}, time.Time{})))
-		http.Redirect(w, r, target, http.StatusSeeOther) //nolint:gosec // the request adds only a query to the path of the task list
-		return
-	}
+	ranged := !since.IsZero() || !before.IsZero()
+	order := orderOf(f, ranged)
 	first = withRange(first, since, before)
-	// The list shows no payload, no metadata, and only each task's last error.
-	params := &taskmill.ListParams{
-		Filter: f, FinishedSince: since, FinishedBefore: before, Cursor: q.Get("cursor"), Limit: limit, Summary: true,
+	// The list shows no payload, no metadata, and only each task's last
+	// error. Its range is of the time that orders it.
+	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: limit, Summary: true}
+	if order.ByFinish {
+		params.FinishedSince, params.FinishedBefore = since, before
+	} else {
+		params.CreatedSince, params.CreatedBefore = since, before
 	}
 	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -447,7 +444,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
 		return
 	}
-	filtered := len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
+	filtered := ranged || len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
 	if err != nil {
 		hint := ""
 		if filtered {
@@ -481,21 +478,17 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		groupFilter.Source = s.path("/choices/groups")
 	}
 	// A bulk action acts on every task that the filters select, also outside
-	// a range of finish times: a list with a range does not offer it.
+	// a range of time: a list with a range does not offer it.
 	var bulk *bulkLinks
 	if filtered && !ranged && !s.readOnly {
 		bulk = s.bulkLinks(f)
-	}
-	var finished *finishFilter
-	if order.ByFinish {
-		finished = s.finishFilter(first, since, before, time.Now())
 	}
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
 		Tasks                         []taskmill.TaskInfo
 		Seen                          int // tasks before those that the last "Load more" added
 		Order                         listOrder
 		States, Queues, Kinds, Groups filter
-		Finished                      *finishFilter // nil for a list that is not in finish order
+		Range                         *rangeFilter
 		Filtered, Paged               bool
 		First, More, Next             string
 		Bulk                          *bulkLinks
@@ -507,7 +500,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		newFilter("queue", "Queue", "queues", names, f.Queues).searchable(),
 		newFilter("kind", "Kind", "kinds", offered.kinds, f.Kinds).searchable(),
 		groupFilter,
-		finished,
+		s.rangeFilter(order.Time, first, since, before, time.Now()),
 		filtered, params.Cursor != "",
 		s.path(listPath(first)), more, next,
 		bulk,
@@ -560,24 +553,32 @@ func listPath(q url.Values) string {
 	return "/tasks?" + q.Encode()
 }
 
-// listOrder is how a task list names its order: what the mark of the
-// column that orders it says, and the links to the first and to the next
-// page.
+// listOrder is how a task list names its order: the column that orders it,
+// what the mark of that column says, and the links to the first and to the
+// next page.
 type listOrder struct {
+	Column            string // the column that orders the list: "id", "created", or "finished"
 	Name, First, Next string
-	ByFinish          bool // the list is in the order of when its tasks finished, and shows that time
+	Time              string // the time that the list's range is of: "Created" or "Finished"
+	ByFinish          bool   // the list is in the order of when its tasks finished, and shows that time
 }
 
-// orderOf returns the order in which Client.List returns the tasks of f: a
+// orderOf returns the order in which Client.List returns the tasks of f. A
 // list of only dead tasks, only canceled tasks, or both comes by when the
-// tasks finished, the latest first, and every other list by ID, the newest
-// first.
-func orderOf(f taskmill.TaskFilter) listOrder {
+// tasks finished, the latest first, and a range on it is one of finish
+// times. On every other list, a range is one of creation times: with one,
+// the list comes by when the tasks were created, the newest first, and
+// without one by ID.
+func orderOf(f taskmill.TaskFilter, ranged bool) listOrder {
 	unfinished := func(s taskmill.State) bool { return s != taskmill.StateDead && s != taskmill.StateCanceled }
 	if len(f.States) > 0 && !slices.ContainsFunc(f.States, unfinished) {
-		return listOrder{Name: "Latest first", First: "Latest", Next: "Earlier", ByFinish: true}
+		return listOrder{Column: "finished", Name: "Latest first", First: "Latest", Next: "Earlier", Time: "Finished", ByFinish: true}
 	}
-	return listOrder{Name: "Newest first", First: "Newest", Next: "Older"}
+	order := listOrder{Column: "id", Name: "Newest first", First: "Newest", Next: "Older", Time: "Created"}
+	if ranged {
+		order.Column = "created"
+	}
+	return order
 }
 
 // taskFilter reads the task list's filters from a query.
@@ -683,11 +684,13 @@ type filterRow struct {
 	Title  string
 	Values []string
 	Mono   bool
+	Group  bool // the values are FIFO group keys
 }
 
 // bulkPage shows what a bulk action would change, with a button to do it:
-// the confirmation, with or without the script. It counts the tasks once,
-// and does not update itself.
+// the confirmation. Without the script it is a page, and with it, the
+// dialog shows it over the task list. It counts the tasks once, and does
+// not update itself.
 func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
 		return
@@ -720,7 +723,10 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	}
 	var rows []filterRow
 	for _, row := range []filterRow{
-		{"State", states, false}, {"Queue", f.Queues, false}, {"Kind", f.Kinds, true}, {"FIFO group", f.GroupKeys, true},
+		{Title: "State", Values: states},
+		{Title: "Queue", Values: f.Queues},
+		{Title: "Kind", Values: f.Kinds, Mono: true},
+		{Title: "FIFO group", Values: f.GroupKeys, Mono: true, Group: true},
 	} {
 		if len(row.Values) > 0 {
 			rows = append(rows, row)
@@ -1311,10 +1317,14 @@ func getGzip(w io.Writer) *gzip.Writer {
 // render executes a page into a buffer before it answers, so that a failed
 // template never sends half a page. A page that the client already has, by
 // its ETag, is answered with 304 Not Modified, and others are compressed when
-// the client accepts it: live updates fetch the page every few seconds.
+// the client accepts it: live updates fetch the page every few seconds. The
+// page names its time of rendering, from which the script keeps its
+// relative times counting. That time is no part of the ETag: a page that
+// says what the client's page says is the page that the client has.
 func (s *server) render(w http.ResponseWriter, r *http.Request, status int, name string, p page) {
 	p.ReadOnly = s.readOnly
 	p.Notice = notice(r.URL.Query())
+	p.Now = time.Now()
 	buf := getBuffer()
 	defer buffers.Put(buf)
 	if err := s.pages.ExecuteTemplate(buf, name, p); err != nil {
@@ -1327,8 +1337,11 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, status int, name
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Vary", "Accept-Encoding")
 	if status == http.StatusOK {
-		sum := sha256.Sum256(buf.Bytes())
-		etag := `W/"` + hex.EncodeToString(sum[:8]) + `"`
+		before, after, _ := bytes.Cut(buf.Bytes(), []byte(`data-now="`+instant(p.Now)+`"`))
+		sum := sha256.New()
+		sum.Write(before)
+		sum.Write(after)
+		etag := `W/"` + hex.EncodeToString(sum.Sum(nil)[:8]) + `"`
 		h.Set("ETag", etag)
 		if r.Header.Get("If-None-Match") == etag {
 			w.WriteHeader(http.StatusNotModified)
@@ -1395,6 +1408,7 @@ func (s *server) funcs() template.FuncMap {
 		"lastError": lastError,
 		"newest":    newestFirst,
 		"visible":   visible,
+		"outbox":    outbox,
 		"num":       number,
 		"count":     count,
 		"atLeast":   atLeast,
@@ -1516,28 +1530,30 @@ func securityHeaders(next http.Handler, ancestors string) http.Handler {
 	})
 }
 
-// ago formats how long ago t was, or how far ahead it is.
-func ago(t time.Time) string {
+// ago words how long before now t was, or how long after it: "8s ago", or
+// "3m from now". It reads both times to the second, as a clock shows them,
+// so every relative time of a page changes on the second, with the others.
+// The script counts from there in the same words: see ago in app.js.
+func ago(now, t time.Time) string {
 	if t.IsZero() {
 		return "—"
 	}
-	d := time.Since(t)
-	suffix := " ago"
+	d, suffix := now.Unix()-t.Unix(), " ago"
 	if d < 0 {
 		d, suffix = -d, " from now"
 	}
+	n, unit := d/86400, "d"
 	switch {
-	case d < time.Second:
+	case d == 0:
 		return "now"
-	case d < time.Minute:
-		return fmt.Sprintf("%ds%s", int(d.Seconds()), suffix)
-	case d < time.Hour:
-		return fmt.Sprintf("%dm%s", int(d.Minutes()), suffix)
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh%s", int(d.Hours()), suffix)
-	default:
-		return fmt.Sprintf("%dd%s", int(d.Hours()/24), suffix)
+	case d < 60:
+		n, unit = d, "s"
+	case d < 3600:
+		n, unit = d/60, "m"
+	case d < 48*3600:
+		n, unit = d/3600, "h"
 	}
+	return strconv.FormatInt(n, 10) + unit + suffix
 }
 
 func timestamp(t time.Time) string {
@@ -1618,6 +1634,24 @@ func visible(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// outboxKey is a FIFO group key that the outbox made, in its two parts.
+type outboxKey struct{ Topic, Key string }
+
+// String says the key in words, for a tooltip and a screen reader.
+func (k outboxKey) String() string { return "Outbox topic " + k.Topic + ", key " + k.Key }
+
+// outbox returns the parts of a FIFO group key that the outbox made, and nil
+// for any other key. The outbox joins a message's topic and key with the
+// unit separator, which no font draws (groupKey in package outbox): its key
+// has one separator between two parts, and no other control character.
+func outbox(group string) *outboxKey {
+	topic, key, ok := strings.Cut(group, "\x1f")
+	if !ok || topic == "" || key == "" || visible(topic+key) != topic+key {
+		return nil
+	}
+	return &outboxKey{topic, key}
 }
 
 // afterHost returns the part of a worker's ID after its host name and the

@@ -58,12 +58,13 @@ for {
 }
 ```
 
-The states that you list choose the order. The doc comment of
-[`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List)
+The states that you list, and a range of creation times, choose the order.
+The doc comment of [`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List)
 has the exact rules:
 
 | You list | The first task is | What a page reads |
 |---|---|---|
+| Any tasks, in a range of creation times | The one that was created last. Tasks created at the same time come by ID, highest first | About the tasks it shows, if you name the queue. See below |
 | Only dead tasks, only canceled tasks, or both | The one that finished last. Tasks that finished at the same time come by ID, highest first | About the tasks it shows, however many other tasks wait |
 | All tasks, the completed tasks of one queue or of all, or the pending tasks of one queue's FIFO group | The newest: the highest ID | About the tasks it shows |
 | Anything else, such as one unfinished state, or dead tasks with other states | The newest: the highest ID | The newer tasks of every queue and state first, unless its tasks are among the newest |
@@ -71,12 +72,11 @@ has the exact rules:
 - A filter can name queues, states, kinds, and FIFO group keys. A task
   matches when it matches every field you set. An empty field matches all.
 - Pass `Next` back with the same filter and range. A cursor from a list in
-  the other order returns an error that wraps `ErrInvalidArgument`.
+  another order returns an error that wraps `ErrInvalidArgument`.
 - Each page's query stops after 5 seconds, so a list never loads the
   database for longer. A list that needs more returns an error. On a very
   large table, a list of the table's last row can need more.
-- **A list of dead or canceled tasks reads more than its page in two
-  cases:**
+- **A list of dead or canceled tasks reads more than its page in two cases:**
   - **You name no queue.** A page then reads up to a page from each queue
     that has such tasks. With hundreds of queues, name the queue.
   - **Many tasks finished at the same time.** A page reads all tasks that
@@ -99,20 +99,22 @@ has the exact rules:
 - `Get` returns one task by ID, in full. `Count` counts the matching tasks
   per state, up to 10,000 per state.
 
-To see what died in a past period, such as last night, give the `params`
-above a range of finish times. Only a list of dead tasks, canceled tasks, or
-both takes one: any other returns an error that wraps `ErrInvalidArgument`.
+To see the tasks of a past period, such as last night, give the `params`
+above a range of time: of creation times, or of finish times.
 
 ```go
 night := time.Date(2026, time.March, 14, 22, 0, 0, 0, time.Local)
-params.FinishedSince, params.FinishedBefore = night, night.Add(8*time.Hour)
+params.CreatedSince, params.CreatedBefore = night, night.Add(8*time.Hour)
 ```
 
-- **A range holds the tasks that finished at `FinishedSince` or later, and
-  before `FinishedBefore`.** Set one bound or both. A page reads only tasks
-  of the range, also with a kind or a FIFO group in the filter.
-- **The bounds are instants.** A time in any time zone selects the same
-  tasks as the same moment in UTC, whatever time zone your database uses.
+- **A range holds the tasks from `Since` on, and before `Before`,** as
+  instants: a time zone changes nothing. Set one bound or both. A page reads
+  only tasks of the range, also with a kind or a FIFO group in the filter.
+- **Any list takes `CreatedSince` and `CreatedBefore`,** and is then in
+  creation order. Without a queue, a page reads up to a page of each queue.
+- **A list of only dead tasks, canceled tasks, or both takes
+  `FinishedSince` and `FinishedBefore`,** and no other list does. Set one
+  of the two ranges: both together are an `ErrInvalidArgument`.
 
 ## Retry, cancel, or delete one task
 

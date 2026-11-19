@@ -1,7 +1,7 @@
 // The interface works without this script. It keeps pages live, shows
 // another page, a filter, or the result of an action without loading the
-// page anew, shows times in the reader's time zone, confirms actions, and
-// adds a few conveniences.
+// page anew, shows times in the reader's time zone and keeps them counting,
+// confirms actions, and adds a few conveniences.
 //
 // It is careful with the network and the machine: one page request at a
 // time, each abandoned after a while, with a growing wait while the server
@@ -61,12 +61,64 @@
   // click on a slow network cannot send an action twice.
 
   const dialog = document.getElementById("confirm-dialog");
-  let confirming = null;
+  let confirming = null; // the form that the dialog asks about
   let submitting = false;
 
-  // send runs a form's action and shows the page that the server answers
-  // with, in place: the page that the action leads to, with its notice, or
-  // the page that says why the action did not apply.
+  const failure = () => document.querySelector("[data-failure]").content.firstElementChild.cloneNode(true);
+
+  // ask shows the dialog: its title, its text, what its status line says,
+  // and its main button, which reads as label and sends form. Without a
+  // form, the dialog only says something, and closes.
+  function ask(title, text, form, label = [], look = "", said = "") {
+    const [cancel, button] = dialog.querySelectorAll("button");
+    dialog.querySelector("h2").textContent = title;
+    dialog.querySelector("[data-confirm-status]").textContent = said;
+    dialog.querySelector("[data-confirm-text]").replaceChildren(...text);
+    cancel.textContent = form ? "Cancel" : "Close";
+    button.hidden = !form;
+    button.className = look;
+    button.replaceChildren(...label);
+    // Escape closes the dialog without a value: an earlier one must not count.
+    dialog.returnValue = "";
+    confirming = form;
+    if (!dialog.open) dialog.showModal();
+    if (!form) cancel.focus(); // the main button is gone, and may have had the focus
+  }
+
+  // tell shows in the dialog what a page says there, if it has a part for
+  // the dialog: what an action on many tasks would change, the next step of
+  // one, or why one failed. The part names the title. Its filters and
+  // sentences are the text, its form's button is the main button, and the
+  // page's notice, which says what the last step did, is the status.
+  function tell(result) {
+    const part = result.main.querySelector("[data-dialog-title]");
+    if (!part) return false;
+    const form = part.querySelector("form");
+    const button = form?.querySelector("button");
+    ask(part.dataset.dialogTitle, part.querySelectorAll("dl, p"), form, button?.childNodes, button?.className,
+      result.doc.querySelector("[data-toast]")?.textContent);
+    return true;
+  }
+
+  // arrive shows the page that answered an action, in place: the page that
+  // the action leads to, with its notice, or the page that says why the
+  // action did not apply.
+  function arrive(result) {
+    const url = result.url ? clean(new URL(result.url)) : new URL(location.href);
+    if (assetsOf(result.doc) !== assets) {
+      location.assign(url.href);
+      progress(true);
+      return;
+    }
+    const elsewhere = url.pathname !== location.pathname;
+    const n = address(url, elsewhere ? "push" : "replace");
+    if (n == null) return;
+    render(result, { moved: elsewhere || !result.url, n, notice: result.doc.querySelector("[data-toast]") });
+    succeeded();
+  }
+
+  // send runs the action of a form on the page, and shows the page that the
+  // server answers with.
   async function send(form) {
     const buttons = [...form.querySelectorAll("button")];
     const turn = ++turns;
@@ -86,23 +138,40 @@
     }
     if (result.kind !== "page") {
       // Nothing says whether the action reached the server.
-      notify(document.querySelector("[data-failure]").content.firstElementChild.cloneNode(true), 2 * NOTICE_MS);
+      notify(failure(), 2 * NOTICE_MS);
       return;
     }
     if (turn !== turns) return; // the reader went on to another page meanwhile
-    // The server led to the page that shows the result, or it answered with
-    // a page that says why the action did not apply.
-    const url = result.url ? clean(new URL(result.url)) : new URL(location.href);
-    if (assetsOf(result.doc) !== assets) {
-      location.assign(url.href);
-      progress(true);
+    arrive(result);
+  }
+
+  // act runs the action that the dialog asks about for a page, and keeps the
+  // dialog for the answer: the next step, or why the action failed. For the
+  // page that shows the result, the dialog closes. The status line says
+  // that the action runs, and if no answer arrived. A reader who closed the
+  // dialog meanwhile gets the answer all the same.
+  async function act() {
+    if (submitting) return; // a second press sends nothing
+    const said = dialog.querySelector("[data-confirm-status]");
+    const turn = ++turns;
+    submitting = true;
+    dialog.ariaBusy = "true";
+    said.textContent = said.dataset.busy;
+    const result = await request(confirming.action, { body: new URLSearchParams(new FormData(confirming)) });
+    submitting = false;
+    dialog.ariaBusy = null;
+    if (result.kind === "signed-out") {
+      status = "signed-out";
+      show();
+    }
+    if (result.kind !== "page") {
+      if (dialog.open) said.textContent = failure().textContent;
+      else notify(failure(), 2 * NOTICE_MS);
       return;
     }
-    const elsewhere = url.pathname !== location.pathname;
-    const n = address(url, elsewhere ? "push" : "replace");
-    if (n == null) return;
-    render(result, { moved: elsewhere || !result.url, n, notice: result.doc.querySelector("[data-toast]") });
-    succeeded();
+    if (turn !== turns || (assetsOf(result.doc) === assets && tell(result))) return;
+    dialog.close();
+    arrive(result);
   }
 
   // settle ends the pending state of every form. A page that was kept while
@@ -120,29 +189,27 @@
     if ("filters" in form.dataset) {
       event.preventDefault();
       // With the script, the form's button is the one of the filter by
-      // finish time. A range that is refused keeps its menu open.
+      // time. A range that is refused keeps its menu open.
       if (!applyFilters(form)) return;
       const sel = event.submitter?.closest("details.sel");
       if (sel) shut(sel);
+      return;
+    }
+    // The dialog's own form closes it. For a form that came with a page,
+    // the dialog stays, and shows the answer.
+    if (form.method === "dialog" && event.submitter?.value === "confirm" && confirming && confirming.ownerDocument !== document) {
+      event.preventDefault();
+      act();
       return;
     }
     if (form.method !== "post") return;
     event.preventDefault();
     if ("jsPending" in form.dataset) return;
     if (form.dataset.confirm && typeof dialog?.showModal === "function") {
-      const danger = "confirmDanger" in form.dataset;
-      const button = dialog.querySelector("[data-confirm-button]");
-      dialog.querySelector("h2").textContent = form.dataset.confirmTitle || "Are you sure?";
-      dialog.querySelector("[data-confirm-text]").textContent = form.dataset.confirm;
-      button.replaceChildren(form.dataset.confirmLabel || "Confirm");
       const icon = form.querySelector(".icon");
-      if (icon) button.prepend(icon.cloneNode(true));
-      button.classList.toggle("primary", !danger);
-      button.classList.toggle("danger-solid", danger);
-      // Escape closes the dialog without a value: an earlier one must not count.
-      dialog.returnValue = "";
-      confirming = form;
-      dialog.showModal();
+      ask(form.dataset.confirmTitle || "Are you sure?", [form.dataset.confirm], form,
+        [...(icon ? [icon.cloneNode(true)] : []), form.dataset.confirmLabel || "Confirm"],
+        "confirmDanger" in form.dataset ? "btn danger-solid" : "btn primary");
       return;
     }
     if (form.dataset.confirm && !window.confirm(`${form.dataset.confirmTitle || ""} ${form.dataset.confirm}`.trim())) return;
@@ -170,18 +237,33 @@
   const boxes = (sel) => [...sel.querySelectorAll(".chk-input")];
 
   function label(sel) {
-    const chosen = boxes(sel).filter((box) => box.checked).map((box) => box.value);
+    const chosen = boxes(sel).filter((box) => box.checked);
     const summary = sel.querySelector("summary");
     const text = summary.querySelector(".sel-label");
     const plural = sel.dataset.plural || "";
-    text.textContent = chosen.length === 0 ? `All ${plural}` : chosen.length === 1 ? chosen[0] : `${chosen.length} ${plural}`;
+    // The one choice shows as its option does.
+    if (chosen.length === 1) text.replaceChildren(...chosen[0].parentNode.querySelector(".pop-text").cloneNode(true).childNodes);
+    else text.textContent = chosen.length ? `${chosen.length} ${plural}` : `All ${plural}`;
     summary.classList.toggle("empty", chosen.length === 0);
     summary.setAttribute("aria-label", `${sel.querySelector(".pop").getAttribute("aria-label")}: ${text.textContent}`);
   }
 
-  // visible shows control characters, such as the separator in the outbox's
-  // group keys, as the server does.
+  // visible shows control characters as the server does.
   const visible = (text) => text.replace(/[\u0000-\u001f]/g, (c) => String.fromCharCode(0x2400 + c.charCodeAt(0)));
+
+  // group shows a FIFO group key as the server's "group" does: a key that
+  // the outbox made as its topic and its message key, and any other as it is.
+  function group(key) {
+    const parts = /^([^\u0000-\u001f]+)\u001f([^\u0000-\u001f]+)$/.exec(key);
+    if (!parts) return visible(key);
+    const span = (name, text) => Object.assign(document.createElement("span"), { className: name, textContent: text });
+    const shown = document.createElement("span");
+    const sep = span("topic-sep", "›");
+    sep.ariaHidden = "true";
+    shown.title = `Outbox topic ${parts[1]}, key ${parts[2]}`;
+    shown.append(span("topic", parts[1]), sep, parts[2]);
+    return shown;
+  }
 
   // shut closes a menu, and gives the focus back to its button.
   function shut(sel) {
@@ -222,7 +304,7 @@
     if (tick) mark.append(tick.cloneNode(true));
     const text = document.createElement("span");
     text.className = "mono" in sel.dataset ? "pop-text mono" : "pop-text";
-    text.textContent = visible(value);
+    text.append(sel.dataset.name === "group" ? group(value) : visible(value));
     row.append(box, mark, text);
     sel.querySelector(".pop-empty")?.remove();
     return row;
@@ -438,8 +520,8 @@
 
   // applyFilters shows the page for the filters at once. A change made while
   // the last one loads abandons it, so quick clicks cost no more than one.
-  // A range of finish times that is not one stays: its field says so, not
-  // a page of its own, and applyFilters returns false.
+  // A range of time that is not one stays: its field says so, not a page
+  // of its own, and applyFilters returns false.
   function applyFilters(form) {
     const url = new URL(form.action, location.href);
     for (const [name, value] of new FormData(form)) {
@@ -516,7 +598,10 @@
 
   // navigate shows another page, or another state of this one, in place,
   // with its place in the history as address gives it. Whatever cannot be
-  // shown in place, the browser loads, and shows what went wrong.
+  // shown in place, the browser loads, and shows what went wrong. In the
+  // mode "ask", the dialog shows the page, which asks before an action on
+  // many tasks: the page on screen stays, and so does the history. If the
+  // server is out of reach then, a notice says so.
   let turns = 0; // counts navigations and actions: a newer one takes over
 
   async function navigate(url, mode) {
@@ -525,14 +610,19 @@
     const result = await load(url.href, null, true);
     clearTimeout(slow);
     if (turn !== turns || result.kind === "aborted") return; // a newer change takes over
+    if (mode === "ask" && result.kind === "down") {
+      progress(false);
+      notify(failure(), 2 * NOTICE_MS);
+      return;
+    }
     if (result.kind !== "page" || assetsOf(result.doc) !== assets) {
       location.assign(url.href);
       progress(true);
       return;
     }
     progress(false);
-    // The server may lead to another address of the same page: a list that
-    // takes no range of finish times leads to itself without the range.
+    if (mode === "ask" && tell(result)) return;
+    // The server may lead to another address of the same page.
     const n = address(result.url ? new URL(result.url) : url, mode);
     if (n == null) return;
     render(result, { moved: mode === "push", n });
@@ -591,6 +681,7 @@
     }
     turns++; // a page or an action that is on its way was for the page before
     progress(false);
+    dialog?.close?.(); // it asked about the page before
     leave();
     result.doc.title = was.title;
     render(result, { moved: true, n, y: was.y });
@@ -637,11 +728,12 @@
     // its link is for a browser that loads the longer list as a page.
     const more = hit?.matches("a[data-more]");
     if (more) url.hash = "";
-    // A link in a menu is a filter too, a preset of the range of finish
-    // times: the one choice closes the menu.
+    // A link in a menu is a filter too, a preset of the range of time: the
+    // one choice closes the menu.
     const sel = hit?.closest("details.sel");
     if (sel) shut(sel);
-    navigate(url, more || sel ? "replace" : "push");
+    const asks = hit?.matches("a[data-dialog]") && typeof dialog?.showModal === "function";
+    navigate(url, more || sel ? "replace" : asks ? "ask" : "push");
   });
 
   document.addEventListener("keydown", (event) => {
@@ -886,7 +978,7 @@
   //
   // The server words every time in UTC, and gives the time's instant beside
   // the words, in data-time. localise words each again in the time zone of
-  // the device: the tooltip of a time and, in the filter by finish time, the
+  // the device: the tooltip of a time and, in the filter by time, the
   // range on the button, its two bounds, and the name of the zone. It
   // changes a page before the page shows, so an update finds the words that
   // it already shows, and touches nothing. The words are the server's own,
@@ -915,10 +1007,10 @@
       if (Number.isNaN(at.getTime()) || el.localName === "input") continue;
       el.title = `${dateOf(at)} ${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}.${pad(at.getMilliseconds(), 3)} ${zoneOf(at)}`;
     }
-    // The range of the filter by finish time, as the server words it: in
-    // short on the button, and in full, with the years and the zones, in
-    // its tooltip and for a screen reader. Its end is the last minute
-    // before "before", or the last second, as the fields have it.
+    // The range of the filter by time, as the server words it: in short on
+    // the button, and in full, with the years and the zones, in its tooltip
+    // and for a screen reader. Its end is the last minute before "before",
+    // or the last second, as the fields have it.
     const sel = scope.querySelector(".sel-range");
     if (!sel) return;
     const [since, before] = [...sel.querySelectorAll("input[data-time]")].map((field) => field.dataset.time && new Date(field.dataset.time));
@@ -945,7 +1037,62 @@
     if (cal) draw(sel);
   }
 
-  // The filter by finish time: a calendar, and two bounds to type
+  // Relative times that keep counting
+  //
+  // The server words a time by how far it is from the time of rendering:
+  // "8s ago". The script counts from there, second by second, in the same
+  // words and by the server's clock: the device's may be minutes off. A page
+  // brings its time of rendering, in data-now, and the time since it began
+  // to arrive is added: by the monotonic clock, or by the device's clock if
+  // that counted more, as it does where the other stops in sleep.
+
+  let ahead = NaN; // the server's clock, less the monotonic one
+  let aheadOfDevice = NaN; // and less the device's
+  let beat = 0; // the timer of the next second
+
+  // arrived takes the server's time from a page that began to arrive at since.
+  function arrived(main, since) {
+    ahead = Date.parse(main.dataset.now) - since;
+    aheadOfDevice = ahead + performance.now() - Date.now();
+  }
+  const clock = () => Math.max(ahead + performance.now(), aheadOfDevice + Date.now());
+
+  // ago words a number of seconds as ago in ui.go does.
+  function ago(s) {
+    const d = Math.abs(s);
+    const n = d < 60 ? `${d}s` : d < 3600 ? `${Math.trunc(d / 60)}m` : d < 172800 ? `${Math.trunc(d / 3600)}h` : `${Math.trunc(d / 86400)}d`;
+    return d ? `${n}${s < 0 ? " from now" : " ago"}` : "now";
+  }
+
+  // count words the relative times of a page for the clock's second, before
+  // the page shows and while it does. data-now says for which second they
+  // are worded. A relative time is the end of the text of an element with a
+  // time, if it is that time's words for that second: "paused" stays.
+  function count(main) {
+    const from = Math.floor(Date.parse(main.dataset.now) / 1000);
+    const to = Math.floor(clock() / 1000);
+    if (!(to - from)) return; // the same second, or no time of rendering
+    for (const el of main.querySelectorAll("[data-time]")) {
+      const at = Math.floor(Date.parse(el.dataset.time) / 1000);
+      const was = ago(from - at);
+      const now = ago(to - at);
+      const text = el.lastChild;
+      if (was !== now && text?.nodeValue?.endsWith(was)) text.nodeValue = text.nodeValue.slice(0, -was.length) + now;
+    }
+    main.dataset.now = new Date(to * 1000).toISOString();
+  }
+
+  // tick counts at each second: one timer, which rests in a hidden tab. A
+  // text that changes ends a selection in it, so the times wait for one.
+  function tick() {
+    clearTimeout(beat);
+    const now = clock();
+    if (document.hidden || Number.isNaN(now)) return;
+    if (window.getSelection()?.isCollapsed !== false) count(document.getElementById("main"));
+    beat = setTimeout(tick, 1000 - (now % 1000));
+  }
+
+  // The filter by time: a calendar, and two bounds to type
   //
   // To is the last minute of the range: the address takes the start of the
   // next one, as "before". So a range of days ends at 23:59, with all of
@@ -1271,6 +1418,7 @@
         // a login page, outside of the interface.
         redirect: follow ? "follow" : "manual", signal: control.signal,
       });
+      const began = performance.now();
       if (response.status === 304) return { kind: "same" };
       if (response.type === "opaqueredirect" || response.status === 401 || (response.status === 403 && !body)) {
         return { kind: "signed-out" };
@@ -1279,6 +1427,7 @@
       if (!(response.headers.get("Content-Type") || "").startsWith("text/html")) return { kind: "down" };
       const result = page(await response.text());
       if (!result) return { kind: body && response.redirected ? "signed-out" : "down" };
+      arrived(result.main, began);
       return { ...result, etag: response.headers.get("ETag"), url: response.redirected ? response.url : null };
     } catch {
       return { kind: control.signal.aborted && !timedOut ? "aborted" : "down" };
@@ -1312,6 +1461,7 @@
     const about = tipFor;
     undescribe();
     localise(result.main);
+    count(result.main);
     const main = document.getElementById("main");
     if (fresh) {
       syncAttributes(main, result.main);
@@ -1455,7 +1605,9 @@
   });
 
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) schedule(Math.max(0, REFRESH_MS - (Date.now() - lastUpdate)));
+    if (document.hidden) return;
+    schedule(Math.max(0, REFRESH_MS - (Date.now() - lastUpdate)));
+    tick();
   });
   window.addEventListener("online", () => {
     failures = 0;
@@ -1466,6 +1618,8 @@
   highlight(document);
   localise(document);
   for (const slider of document.querySelectorAll(".chart-step")) say(slider);
+  arrived(document.getElementById("main"), performance.getEntriesByType("navigation")[0]?.responseStart || performance.now());
+  tick();
   show();
   if (live) schedule(REFRESH_MS);
 })();

@@ -1,12 +1,13 @@
 # Storage schema
 
 This page maps the [task lifecycle](task-lifecycle.md) onto PostgreSQL: the
-tables and indexes, and why each was chosen. Seven more pages cover the rest:
+tables and indexes, and why each was chosen. Eight more pages cover the rest:
 
 | Page | What it covers |
 |---|---|
 | [Key statements](schema-statements.md) | The statements that enqueue, fetch, and complete tasks, and record their failures |
 | [Lists and counts](schema-lists.md) | The statements that list and count tasks, and why dead and canceled tasks come by finish time |
+| [Lists by creation time](schema-creation-order.md) | Why a list with a range of creation times has an order and two indexes of its own, and what they cost |
 | [Operator actions](schema-operations.md) | The statements that retry, cancel, and delete tasks, one or many |
 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
@@ -94,9 +95,9 @@ configurable, so several schemas can share a database. It must match
 
 Completed tasks, partitioned by `finalized_at`, one partition per UTC day. It
 is append-only: rows are never updated, and retention drops whole partitions,
-which is instant and leaves nothing for vacuum to clean up. Two indexes serve
-the list pages: `(queue, id)` for one queue, and `(id)` for `Get` and for all
-queues.
+which is instant and leaves nothing for vacuum to clean up. Three indexes
+serve the lists: `(queue, id)` for one queue, `(id)` for `Get` and for all
+queues, and `(queue, created_at, id)` for a range of creation times.
 
 History retention is one setting for the whole schema, stored in `settings`,
 because dropping a day's partition removes every queue's rows for that day.
@@ -135,9 +136,8 @@ and `freed_key_expires_at` for a [retry](schema-operations.md#a-retry-takes-its-
   live in the database rather than in each process's configuration, so every
   worker that becomes the maintainer applies the same retention.
 - `schedules` holds each schedule's definition, next run time, and pause
-  state. The maintainer loads the schedules that it defines by name, and
-  checks in Go which are due. So the table has no index but its primary key,
-  and PostgreSQL can update a schedule's row in place when it runs.
+  state. The maintainer loads its schedules by name, and checks in Go which
+  are due: the only index is the primary key, so a run updates its row in place.
 - `workers` gets a check-in from every worker process; `fillfactor = 50`
   keeps those updates HOT. A check-in sets `heartbeat_at`, which keeps its
   name: a rename would fail an older release's workers in a rolling deploy.
@@ -178,6 +178,7 @@ period and deleting old rows.
 | `tasks_running_idx` | `queue` | `running` | Lease rescue; `MaxRunning` limits; counting running tasks |
 | `tasks_pending_idx` | `queue, group_key, id` | `pending` | Promoting the next task of a group; counting pending tasks |
 | `tasks_finished_idx` | `queue, state, finalized_at` | `dead`, `canceled` | Retention; counting dead and canceled tasks; listing them, latest first |
+| `tasks_created_idx` | `queue, created_at, id` | All but `running` | Listing a range of creation times. A fetch writes no entry to it |
 
 The fetch index's key matches the fetch query's `ORDER BY` exactly. PostgreSQL
 reads the first rows of the index in order and stops at the `LIMIT`, with no
@@ -233,9 +234,8 @@ index-only scan).
   transaction, which locks `migrations` in `SHARE ROW EXCLUSIVE` mode, so
   only one process migrates at a time. The others wait for that lock, with
   no limit but their context, and then find nothing left to do. A migration
-  therefore cannot use `CREATE INDEX CONCURRENTLY`; a future migration that
-  indexes a large existing table will need a step of its own outside the
-  transaction.
+  therefore cannot use `CREATE INDEX CONCURRENTLY`: the one that indexes
+  creation times [makes writes wait](schema-creation-order.md#what-the-creation-order-costs).
 - **Only table locks, never advisory locks.** PostgreSQL lets every role of
   a database take an advisory lock, also a role with no rights on taskmill's
   schema, which could then keep `Migrate` and workers from starting. A lock

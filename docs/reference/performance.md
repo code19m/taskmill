@@ -49,7 +49,7 @@ Read them as rough sizes, not as a promise for your hardware.
 | What | Result |
 |---|---|
 | SQL statements per task, end to end | About 0.16: fetches and completions serve many tasks each |
-| WAL written per task, from fetch to history | About 0.8 KiB |
+| WAL written per task, from fetch to history | About 0.9 KiB |
 | Size of the `tasks` table during an hour at 10,000 tasks a second | At the end, at most 6% bigger than after 15 minutes |
 | Worker memory | About 17 MiB idle, plus about 8 KiB per running task |
 | Database connections | A client uses its pool. A worker uses its pool, plus 1 connection for notifications |

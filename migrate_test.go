@@ -223,6 +223,11 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 // Migrations 5 and 6 lock these tables. A fleet of the release before them
 // runs on version 4, where both are pending and run in one transaction, and
 // a fleet of the release between them on version 5.
+//
+// Migration 7 indexes tasks and then the history. A batch of DeleteMatching
+// locks the rows of tasks that it picks, deletes its completed tasks from
+// the history, and then deletes the picked tasks: the migration waits for
+// such a batch to end before it takes tasks.
 func TestMigrateDoesNotDeadlockWithTheFleet(t *testing.T) {
 	t.Parallel()
 	for _, version := range []int{4, 5} {
@@ -236,6 +241,19 @@ func TestMigrateDoesNotDeadlockWithTheFleet(t *testing.T) {
 				"INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts) VALUES ('q', 'k', 'available', now(), '{}', 1)")
 		})
 	}
+	t.Run("from version 6, a batch of a bulk delete", func(t *testing.T) {
+		t.Parallel()
+		migrateBesideTheFleet(t, 6, `WITH picked AS (SELECT id FROM {s}.tasks FOR UPDATE SKIP LOCKED)
+		                             DELETE FROM {s}.task_history WHERE id IN (SELECT id FROM picked)`,
+			"DELETE FROM {s}.tasks WHERE id = 0")
+	})
+	t.Run("from version 6, a completion", func(t *testing.T) {
+		t.Parallel()
+		migrateBesideTheFleet(t, 6, "DELETE FROM {s}.tasks WHERE id = 0",
+			`INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+			                              priority, attempt, max_attempts, payload, metadata, errors)
+			 SELECT 1, now(), 'q', now(), 'k', now(), 'w', now(), 2, 1, 1, '{}', '{}', '[]' WHERE false`)
+	})
 }
 
 // migrateBesideTheFleet migrates a schema at version while a transaction of
@@ -280,7 +298,9 @@ func migrateBesideTheFleet(t *testing.T, version int, first, then string) {
 // A schema that any earlier release left upgrades in one call, with the
 // rows of a running fleet in the tables that its migrations change, and the
 // fleet's statements work on those rows afterwards. Rows that hold what no
-// release writes, as an UPDATE by hand leaves them, are repaired.
+// release writes, as an UPDATE by hand leaves them, are repaired. The tasks
+// that the release left, in the history too, are in the indexes of creation
+// time.
 func TestMigrateUpgradesEveryEarlierVersion(t *testing.T) {
 	t.Parallel()
 	all, err := taskmill.Migrations("taskmill")
@@ -293,10 +313,14 @@ func TestMigrateUpgradesEveryEarlierVersion(t *testing.T) {
 			t.Parallel()
 			// The one row of the settings holds one pair of periods, so the
 			// versions take turns with the pairs.
-			upgradeWithRows(t, latest-from, brokenRetentions[from%len(brokenRetentions)])
+			upgradeWithRows(t, from, brokenRetentions[from%len(brokenRetentions)])
 		})
 	}
 }
+
+// refusingVersion is the migration from which the small tables refuse the
+// rows of writeRefusedRows.
+const refusingVersion = 6
 
 // brokenRetention is a pair of retention periods as SQL by hand can leave
 // them, written as its SET clause, and what an upgrade makes of them, as a
@@ -331,17 +355,24 @@ func noNegativeField(column string) string {
 		extract(hour FROM %[1]s), extract(minute FROM %[1]s), extract(second FROM %[1]s)) >= 0`, column)
 }
 
-// upgradeWithRows migrates a schema that lacks the newest pending
-// migrations and holds what a fleet of its release left: a worker, a
-// schedule, statistics, and a FIFO group that a dead task halts. It also
-// holds every kind of row that the tables refuse afterwards. Then the
-// current code must read the fleet's rows, find the others repaired, and
-// run a task beside them.
-func upgradeWithRows(t *testing.T, pending int, retention brokenRetention) {
+// upgradeWithRows migrates a schema at the version from, which holds what a
+// fleet of its release left: a worker, a schedule, statistics, a FIFO group
+// that a dead task halts, and a completed task in the history of an earlier
+// day. A schema from before refusingVersion also holds every kind of row
+// that the tables refuse afterwards. Then the current code must read the
+// fleet's rows, find the others repaired, list the tasks by creation time
+// from their indexes, and run a task beside them.
+func upgradeWithRows(t *testing.T, from int, retention brokenRetention) {
 	t.Helper()
 	pool := testdb.Pool(t)
 	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
-	applyWithoutMigrate(t, pool, e.schema, pending)
+	applyUpTo(t, pool, e.schema, from)
+	e.exec(t, `CREATE TABLE {s}.task_history_20200101 PARTITION OF {s}.task_history
+	           FOR VALUES FROM ('2020-01-01 00:00:00+00') TO ('2020-01-02 00:00:00+00')`)
+	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+	                                         priority, attempt, max_attempts, payload, metadata, errors)
+	           VALUES (1000, '2020-01-01 12:00:00+00', 'default', '2020-01-01 11:00:00+00', 'email.send', now(), 'w', now(),
+	                   2, 1, 1, '{}', '{}', '[]')`)
 	e.exec(t, `INSERT INTO {s}.workers (id, queues, kinds, hostname, version)
 	           VALUES ('old-worker', '{default}', '{email.send}', 'host', 'v0.1.0')`)
 	e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at)
@@ -352,7 +383,10 @@ func upgradeWithRows(t *testing.T, pending int, retention brokenRetention) {
 	           VALUES ('default', 'email.send', 'dead', now(), '{}', 1, 'customer', now())`)
 	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
 	           SELECT queue, group_key, 1, id, now() FROM {s}.tasks`)
-	e.writeRefusedRows(t, retention.set)
+	refused := from < refusingVersion
+	if refused {
+		e.writeRefusedRows(t, retention.set)
+	}
 
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema}); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -367,11 +401,12 @@ func upgradeWithRows(t *testing.T, pending int, retention brokenRetention) {
 	if err := errors.Join(errWorkers, errSchedules, errQueues, errGroups, errSettings); err != nil {
 		t.Fatalf("read what the old release left: %v", err)
 	}
-	// The schedules come in the order of their names: two that were
-	// repaired, the fleet's, and a third that was repaired.
+	// The schedules come in the order of their names: the fleet's, between
+	// the two that were repaired and a third.
+	fleets := slices.IndexFunc(schedules, func(s taskmill.ScheduleInfo) bool { return s.Name == "nightly" })
 	for what, ok := range map[string]bool{
 		"worker":       len(workers) == 1 && workers[0].ID == "old-worker" && !workers[0].Stale,
-		"schedule":     len(schedules) == 4 && schedules[2].Name == "nightly" && !schedules[2].Paused && !schedules[2].NextRunAt.IsZero(),
+		"schedule":     fleets >= 0 && !schedules[fleets].Paused && !schedules[fleets].NextRunAt.IsZero(),
 		"statistics":   len(queues) == 1 && queues[0].Counts[taskmill.StateScheduled].N == 1,
 		"halted group": len(groups.Groups) == 1,
 	} {
@@ -379,9 +414,22 @@ func upgradeWithRows(t *testing.T, pending int, retention brokenRetention) {
 			t.Errorf("the %s from before the upgrade: %+v, %+v, %+v, %+v", what, workers, schedules, queues, groups)
 		}
 	}
+	// The tasks from before the upgrade are in the indexes of creation time:
+	// the dead one, and the completed one, whose partition got the index of
+	// the history, as the seven that Migrate prepared did.
+	created, err := e.client.List(ctx, &taskmill.ListParams{CreatedSince: time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)})
+	if err != nil || len(created.Tasks) != 2 || created.Tasks[1].ID != 1000 || created.Tasks[1].State != taskmill.StateCompleted {
+		t.Errorf("the tasks from before the upgrade, by creation time: %+v, %v; want the dead one, and then the completed one", created, err)
+	}
+	const indexed = `SELECT count(*) FROM pg_index i
+	                 WHERE i.indisvalid AND (i.indexrelid = '{s}.tasks_created_idx'::regclass OR i.indexrelid IN (
+	                     SELECT inhrelid FROM pg_inherits WHERE inhparent = '{s}.task_history_created_idx'::regclass))`
+	if got := e.count(t, indexed); got != 1+8 {
+		t.Errorf("%d valid indexes of creation time, want that of tasks, and one for each of the 8 partitions of the history", got)
+	}
 	// The workers that the tables refuse are gone: the list above holds the
 	// fleet's worker alone. The other rows are repaired.
-	for what, repaired := range map[string]string{
+	repairs := map[string]string{
 		"a schedule whose next run had no end is paused, and due": `
 			SELECT count(*) FROM {s}.schedules WHERE name = 'never' AND paused_at IS NOT NULL AND next_run_at <= now()`,
 		"a paused schedule whose next run had no end keeps its pause": `
@@ -391,7 +439,11 @@ func upgradeWithRows(t *testing.T, pending int, retention brokenRetention) {
 		"the retention periods are repaired, to " + retention.repaired: `
 			SELECT count(*) FROM {s}.settings WHERE ` + retention.repaired + `
 			AND ` + noNegativeField("history_retention") + ` AND ` + noNegativeField("dead_retention"),
-	} {
+	}
+	if !refused {
+		repairs = nil
+	}
+	for what, repaired := range repairs {
 		if e.count(t, repaired) != 1 {
 			t.Errorf("after the upgrade, want that %s", what)
 		}

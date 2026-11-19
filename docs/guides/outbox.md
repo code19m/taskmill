@@ -133,7 +133,8 @@ The relay retries each message that fails:
 
 While the broker is down, messages wait in the database. The dashboard
 shows them in the `outbox` queue as `retryable`, or as `pending` when they
-wait behind an earlier message with the same key. When the broker is back,
+wait behind an earlier message with the same key: the topic and the key
+stand beside the queue, as "orders › order-13". When the broker is back,
 the messages go out within about 5 minutes, still in order per key.
 
 The queue's [lag](../concepts/glossary.md#lag) stays near zero during the

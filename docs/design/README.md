@@ -15,17 +15,18 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | 2 | [Storage schema](schema.md) | The tables and indexes, and the reasoning behind them |
 | 3 | [Key statements](schema-statements.md) | The statements that enqueue, fetch, and complete tasks, and record their failures |
 | 4 | [Lists and counts](schema-lists.md) | The statements that list and count tasks, and why dead and canceled tasks come by finish time |
-| 5 | [Operator actions](schema-operations.md) | The statements that retry, cancel, and delete tasks, one or many |
-| 6 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
-| 7 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
-| 8 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
-| 9 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
-| 10 | [The API's shape](api-shape.md) | Why each point of the API has its shape, and when we look at it again |
-| 11 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry has a module of its own, and how to add a dependency |
-| 12 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
-| 13 | [Releasing](releasing.md) | How the project team publishes a version |
-| 14 | [Writing docs](writing-docs.md) | The style guide and the page templates |
-| 15 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
+| 5 | [Lists by creation time](schema-creation-order.md) | Why a list with a range of creation times has an order and two indexes of its own, and what they cost |
+| 6 | [Operator actions](schema-operations.md) | The statements that retry, cancel, and delete tasks, one or many |
+| 7 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
+| 8 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
+| 9 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
+| 10 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
+| 11 | [The API's shape](api-shape.md) | Why each point of the API has its shape, and when we look at it again |
+| 12 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry has a module of its own, and how to add a dependency |
+| 13 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
+| 14 | [Releasing](releasing.md) | How the project team publishes a version |
+| 15 | [Writing docs](writing-docs.md) | The style guide and the page templates |
+| 16 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
 
 **Each page gives its decisions next to the mechanism that they explain:**
 what is so, why, and the options that we rejected. These pages are the home
@@ -128,10 +129,15 @@ What follows:
   The server knows no reader's time zone, so it words a time in UTC, and
   puts the instant beside the words. The script words it again in the zone
   of the device, with the same words, before the page shows. A range of
-  finish times is in the address as two instants: a preset is a link to a
-  fixed instant, which the server computes when it renders the page, so
-  presets need no script and no zone. We rejected a time zone in a cookie
-  or in the address: a link would then show other tasks to another reader.
+  time is in the address as two instants: a preset is a link to a fixed
+  instant, which the server computes when it renders the page, so presets
+  need no script and no zone. We rejected a time zone in a cookie or in
+  the address: a link would then show other tasks to another reader.
+- **A list has one range, of the time that orders it:** of finish times on
+  a list in finish order, and of creation times on every other list. So
+  the address of a range stays valid when the reader changes the states. We
+  rejected two ranges in the address: the reader would set a time that the
+  list does not show in order, and a list has indexes for one of them.
 - **A custom range is picked in a calendar of the dashboard's own,** which
   the script draws, with a date and a time to type for each bound. The
   browser's `datetime-local` fields look different in every browser, none

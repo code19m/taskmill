@@ -108,19 +108,30 @@ func post(t *testing.T, h http.Handler, target, fetchSite string) *httptest.Resp
 
 // TestPagesHoldWhatTheScriptReads checks the parts of a page that the script
 // finds by name. Without one of them, it loads full pages where it could show
-// one in place, or cannot say that an action failed.
+// one in place, cannot say that an action failed, or cannot ask in its
+// dialog. The pages of an action on many tasks, and those that say why
+// something failed, also name the title of the dialog that shows them.
 func TestPagesHoldWhatTheScriptReads(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
-	for _, path := range []string{"/", "/tasks", "/schedules", "/workers", "/tasks/0", "/tasks/bulk/retry?state=dead"} {
+	for path, title := range map[string]string{
+		"/": "", "/tasks": "", "/schedules": "", "/workers": "",
+		"/tasks/0":                     `data-dialog-title="Not found"`,
+		"/tasks/bulk/retry?state=dead": `data-dialog-title="Retry tasks"`,
+		"/tasks/bulk/retry":            `data-dialog-title="Choose filters first"`,
+	} {
 		_, body, _ := get(t, h, path)
 		for _, part := range []string{
-			`<main id="main"`, `<div class="main">`, `data-live-part="nav"`, "data-announce",
-			"<template data-failure>", `id="confirm-dialog"`,
+			`<main id="main"`, ` data-now="`, `<div class="main">`, `data-live-part="nav"`, "data-announce",
+			"<template data-failure>", `id="confirm-dialog"`, "data-confirm-status", "data-confirm-text", "data-confirm-button",
+			title,
 		} {
 			if !strings.Contains(body, part) {
 				t.Errorf("%s: the page has no %s", path, part)
 			}
+		}
+		if title == "" && strings.Contains(body, "data-dialog-title") {
+			t.Errorf("%s: the page names a title for the dialog, which would show it in place of the page", path)
 		}
 	}
 }
@@ -246,7 +257,7 @@ func TestPagesRender(t *testing.T) {
 	if code != http.StatusOK || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;") {
 		t.Fatalf("task page did not escape the payload: %d\n%s", code, body)
 	}
-	if !strings.Contains(body, "<dd>high</dd>") || !strings.Contains(body, "topic␟key") ||
+	if !strings.Contains(body, "<dd>high</dd>") || !strings.Contains(body, `title="Outbox topic topic, key key"`) ||
 		!strings.Contains(body, "group=topic%1Fkey") || !strings.Contains(body, `<h2>Errors <span class="subtle">0</span></h2>`) {
 		t.Fatalf("task page: want the priority's name, a visible link to the group, and the count of its errors\n%s", body)
 	}
@@ -334,6 +345,41 @@ func TestRelativeTimesHaveTheirExactTime(t *testing.T) {
 				t.Errorf("%s: a time has no exact time as its title: %s", path, said)
 			}
 		}
+	}
+}
+
+// A page says when it was rendered, and words each relative time from that
+// time and the time's own instant, both read to the second, as a clock
+// shows them. The script counts from the same two instants, in the same
+// words: a time that the server worded from another moment, or more
+// exactly, would jump at each update.
+func TestRelativeTimesAreWordedFromThePagesTimeOfRendering(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	// A worker that checked in half a minute ago, late in its second: the
+	// seconds between the two clock readings are one more than the whole
+	// seconds of its exact age, unless the page is rendered as late in its own.
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, hostname, version, started_at, heartbeat_at)
+	    VALUES ('w', '{mail}', 'h', 'v', date_trunc('second', now()) - interval '1 hour',
+	        date_trunc('second', now()) - interval '30 seconds' + interval '999 milliseconds')`); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := get(t, handler(t, client, nil), "/workers")
+	page := regexp.MustCompile(`<main id="main"[^>]* data-now="([^"]+)"`).FindStringSubmatch(body)
+	cell := regexp.MustCompile(` data-time="([^"]+\.999Z)">([^<]*)</td>`).FindStringSubmatch(body)
+	if page == nil || cell == nil {
+		t.Fatalf("the page does not say when it was rendered, or when the worker checked in:\n%s", body)
+	}
+	now, err := time.Parse(time.RFC3339, page[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, err := time.Parse(time.RFC3339, cell[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strconv.FormatInt(now.Unix()-at.Unix(), 10) + "s ago"; cell[2] != want {
+		t.Errorf("a page rendered at %s says of %s: %q, want %q", page[1], cell[1], cell[2], want)
 	}
 }
 
@@ -569,9 +615,9 @@ func TestWorkersShowTheirQueuesAndKinds(t *testing.T) {
 }
 
 // A worker built from taskmill's own tree stores Go's "(devel)" in place of a
-// version. The page shows such a word as text, without the brackets, and a
-// version as code. The tooltip has what the worker stored.
-func TestWorkersShowAVersionAsCodeAndAWordAsText(t *testing.T) {
+// version. The page says what that means, as text, and its tooltip says it
+// in full. A released version shows as it is, as code.
+func TestWorkersSayALocalBuildInPlaceOfGosWord(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
 	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, hostname, version)
@@ -581,11 +627,70 @@ func TestWorkersShowAVersionAsCodeAndAWordAsText(t *testing.T) {
 	_, body, _ := get(t, handler(t, client, nil), "/workers")
 	for _, want := range []string{
 		`<td class="mono tone-faint" title="v0.11.1">v0.11.1</td>`,
-		`<td class="tone-ghost" title="(devel)">devel</td>`,
+		`<td class="tone-ghost" title="Built from taskmill's source, not from a release">local build</td>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("want %s in\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, "devel") {
+		t.Errorf("the page shows Go's word for a local build:\n%s", body)
+	}
+}
+
+// A FIFO group key that the outbox made, of a topic and a message key, shows
+// as its two parts wherever a page shows a group key, and its tooltip says
+// both in words. The filter's value, a link, and a data-key carry the key
+// itself, so the list filters as before. A key that only looks like one,
+// with two separators, another control character, or an empty part, shows
+// as it is, its control characters as pictures.
+func TestGroupKeysOfTheOutboxShowAsTopicAndKey(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	const key = "orders\x1forder-13"
+	var id int64
+	for _, group := range []string{key, "a\x1fb\x1fc", "tab\there\x1fkey", "\x1fno-topic", "plain"} {
+		res, err := client.Enqueue(t.Context(), greet{}, &taskmill.EnqueueOptions{Queue: "mail", GroupKey: group})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if group == key {
+			id = res.ID
+		}
+	}
+	h := handler(t, client, nil)
+	const parts = `<span title="Outbox topic orders, key order-13"><span class="topic">orders</span><span class="topic-sep" aria-hidden="true">›</span>order-13</span>`
+	for path, wants := range map[string][]string{
+		// The filter's options, and each task's group beside its queue.
+		"/tasks?queue=mail": {
+			`<label class="pop-opt" data-key="` + key + `"><input type="checkbox" class="chk-input" name="group" value="` + key + `">`,
+			`<span class="pop-text mono">` + parts + `</span>`,
+			`<td title="mail, FIFO group orders › order-13">mail<span class="group">` + parts + `</span></td>`,
+			`<span class="pop-text mono">a␟b␟c</span>`, `<span class="pop-text mono">tab␉here␟key</span>`,
+			`<span class="pop-text mono">␟no-topic</span>`, `<span class="pop-text mono">plain</span>`,
+			`<td title="mail, FIFO group a␟b␟c">mail<span class="group">a␟b␟c</span></td>`,
+		},
+		// The filter's button, when the key is the one choice.
+		"/tasks?group=orders%1Forder-13": {
+			`aria-label="FIFO group: Outbox topic orders, key order-13"><span class="sel-label">` + parts + `</span>`,
+			`name="group" value="` + key + `" checked>`,
+		},
+		"/tasks?group=a%1Fb%1Fc": {`aria-label="FIFO group: a␟b␟c"><span class="sel-label">a␟b␟c</span>`},
+		// The task's page, and the page of an action on the group's tasks.
+		"/tasks/" + strconv.FormatInt(id, 10):        {`<a class="mono" href="/tasks?group=orders%1Forder-13&amp;queue=mail">` + parts + `</a>`},
+		"/tasks/bulk/cancel?group=orders%1Forder-13": {`<dt>FIFO group</dt><dd class="mono">` + parts + `</dd>`},
+		"/tasks/bulk/cancel?group=a%1Fb%1Fc":         {`<dt>FIFO group</dt><dd class="mono">a␟b␟c</dd>`},
+	} {
+		code, body, _ := get(t, h, path)
+		for _, want := range wants {
+			if !strings.Contains(body, want) {
+				t.Errorf("%s (%d): want %s in\n%s", path, code, want, body)
+			}
+		}
+	}
+	// The filter still selects by the key itself.
+	if _, tasks := listTasks(t, h, "/tasks?group=orders%1Forder-13"); !slices.Equal(tasks, []string{strconv.FormatInt(id, 10)}) {
+		t.Errorf("the list of the group shows the tasks %v, want %d", tasks, id)
 	}
 }
 
@@ -1056,6 +1161,14 @@ func TestLiveUpdateResponses(t *testing.T) {
 	if code, body, _ := get(t, h, "/workers", "If-None-Match", etag); etag == "" || code != http.StatusNotModified || body != "" {
 		t.Fatalf("unchanged page: ETag %q, got %d", etag, code)
 	}
+	// A page names its time of rendering, which is no part of what it says:
+	// a later copy that says the same is the page that the client has.
+	rendered := regexp.MustCompile(` data-now="[^"]+"`)
+	for later := plain; rendered.FindString(later) == rendered.FindString(plain); {
+		if _, later, header = get(t, h, "/workers"); header.Get("ETag") != etag {
+			t.Fatalf("a later copy of an unchanged page has the ETag %q, want %q", header.Get("ETag"), etag)
+		}
+	}
 	code, zipped, header := get(t, h, "/workers", "Accept-Encoding", "gzip")
 	if code != http.StatusOK || header.Get("Content-Encoding") != "gzip" {
 		t.Fatalf("compressed page: %d, %v", code, header)
@@ -1064,7 +1177,7 @@ func TestLiveUpdateResponses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unzipped, err := io.ReadAll(zr); err != nil || string(unzipped) != plain {
+	if unzipped, err := io.ReadAll(zr); err != nil || rendered.ReplaceAllString(string(unzipped), "") != rendered.ReplaceAllString(plain, "") {
 		t.Fatalf("compressed page differs: %v", err)
 	}
 }
@@ -1138,9 +1251,13 @@ func TestBulkActions(t *testing.T) {
 	// An action's page counts the tasks once, and confirms with or without
 	// the script.
 	code, body, _ := get(t, h, "/tasks/bulk/cancel?queue=mail")
-	if code != http.StatusOK || !strings.Contains(body, "Cancel 3 tasks</button>") || strings.Contains(body, `tabindex="-1" data-live`) ||
+	if code != http.StatusOK || !strings.Contains(body, "Cancel 3 tasks</button>") || strings.Contains(body, ` data-live>`) ||
 		!strings.Contains(body, `<form class="bulk-actions" method="post" action="/tasks/bulk/cancel?queue=mail">`) {
 		t.Fatalf("cancel page: %d\n%s", code, body)
+	}
+	// With the script, the dialog asks what the page asks, under this title.
+	if want := `data-dialog-title="Cancel 3 tasks?"`; !strings.Contains(body, want) {
+		t.Fatalf("cancel page: want %s in\n%s", want, body)
 	}
 	if rec := post(t, h, "/tasks/bulk/cancel?queue=mail", "cross-site"); rec.Code != http.StatusForbidden {
 		t.Fatalf("cross-site bulk cancel: %d", rec.Code)
@@ -1153,8 +1270,9 @@ func TestBulkActions(t *testing.T) {
 		t.Fatal("no notice after the bulk cancel")
 	}
 	// The running task was asked to stop: canceling it again is not offered.
-	if _, body, _ := get(t, h, "/tasks/bulk/cancel?queue=mail"); !strings.Contains(body, "No task matches.") || strings.Contains(body, `method="post"`) {
-		t.Fatalf("cancel page offers the running task again:\n%s", body)
+	if _, body, _ := get(t, h, "/tasks/bulk/cancel?queue=mail"); !strings.Contains(body, "No task matches.") || strings.Contains(body, `method="post"`) ||
+		!strings.Contains(body, `data-dialog-title="Cancel tasks"`) {
+		t.Fatalf("cancel page offers the running task again, or asks about no task:\n%s", body)
 	}
 
 	if rec := post(t, h, "/tasks/bulk/delete?state=canceled", "same-origin"); rec.Code != http.StatusSeeOther {
@@ -1163,8 +1281,10 @@ func TestBulkActions(t *testing.T) {
 	if code, _, _ := get(t, h, "/tasks/bulk/delete"); code != http.StatusBadRequest {
 		t.Fatalf("bulk delete page without filters: %d", code)
 	}
-	if rec := post(t, h, "/tasks/bulk/delete", "same-origin"); rec.Code != http.StatusBadRequest {
-		t.Fatalf("bulk delete without filters: %d", rec.Code)
+	// The dialog shows why an action failed, under the title of that page.
+	if rec := post(t, h, "/tasks/bulk/delete", "same-origin"); rec.Code != http.StatusBadRequest ||
+		!strings.Contains(rec.Body.String(), `data-dialog-title="Invalid request"`) {
+		t.Fatalf("bulk delete without filters: %d\n%s", rec.Code, rec.Body)
 	}
 	if code, _, _ := get(t, h, "/tasks/bulk/archive?queue=mail"); code != http.StatusNotFound {
 		t.Fatalf("unknown bulk action: %d", code)
@@ -1176,9 +1296,10 @@ func TestBulkActions(t *testing.T) {
 }
 
 // The task list offers the bulk actions that the selected states allow,
-// without counting the tasks. A list with a range of finish times offers
-// none: a bulk action acts on the filters alone, also on the tasks outside
-// the range.
+// without counting the tasks. A list with a range, of finish times or of
+// creation times, offers none: a bulk action acts on the filters alone, also
+// on the tasks outside the range. Each is a link to the page that asks,
+// marked for the script, which asks in its dialog.
 func TestTaskListOffersBulkActions(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
@@ -1191,10 +1312,17 @@ func TestTaskListOffersBulkActions(t *testing.T) {
 		// With a range of finish times.
 		"/tasks?state=dead&since=2021-03-04T11:00Z":                 nil,
 		"/tasks?state=canceled&queue=mail&before=2021-03-04T11:00Z": nil,
+		// With a range of creation times.
+		"/tasks?queue=mail&since=2021-03-04T11:00Z":                                         nil,
+		"/tasks?queue=mail&state=available&since=2021-03-04T11:00Z&before=2021-03-05T00:00": nil,
+		"/tasks?state=dead&state=running&before=2021-03-04T11:00Z":                          nil,
 	} {
 		_, body, _ := get(t, h, path)
 		if got := strings.Count(body, `href="/tasks/bulk/`); got != len(want) {
 			t.Errorf("%s offers %d bulk actions, want %d", path, got, len(want))
+		}
+		if got := len(regexp.MustCompile(`href="/tasks/bulk/[^"]*" data-dialog>`).FindAllString(body, -1)); got != len(want) {
+			t.Errorf("%s marks %d bulk actions for the dialog, want %d", path, got, len(want))
 		}
 		for _, link := range want {
 			if !strings.Contains(body, `href="`+link) {

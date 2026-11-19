@@ -131,6 +131,7 @@ These pages are for contributors.
 - [Storage schema](design/schema.md)
 - [Key statements](design/schema-statements.md)
 - [Lists and counts](design/schema-lists.md)
+- [Lists by creation time](design/schema-creation-order.md)
 - [Operator actions](design/schema-operations.md)
 - [FIFO groups and deduplication](design/schema-groups.md)
 - [Maintenance and notifications](design/schema-maintenance.md)

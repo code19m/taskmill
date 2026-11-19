@@ -114,6 +114,7 @@ type statements struct {
 	listWorkers      string
 	listTasks        string
 	listFinished     string
+	listCreated      string
 	listGroups       string
 	listQueueGroups  string
 	countStats       string
@@ -1299,8 +1300,7 @@ SELECT ` + taskColumns(`state::text`) + ` FROM (
        AND ` + inList(`kind`, `$3::text[]`) + `
        AND ` + inList(`group_key`, `$8::text[]`) + ` AND id < $4
      ORDER BY id DESC LIMIT $5)
-) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
-       created_at, run_at, attempted_at, finalized_at)
+) page(` + pageColumns + `)
 ORDER BY id DESC LIMIT $5`),
 
 		// listFinished pages through dead and canceled tasks by when they
@@ -1336,7 +1336,7 @@ ORDER BY id DESC LIMIT $5`),
 		// whatever the session's time zone.
 		//
 		// Each row ends with the task's finish time once more, as the column
-		// holds it: see finishRows. If $8, the rows are summaries.
+		// holds it: see timeRows. If $8, the rows are summaries.
 		listFinished: q(`
 WITH RECURSIVE ` + queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, listed AS (
     SELECT queue FROM finished WHERE cardinality($1::text[]) = 0 AND queue IS NOT NULL
@@ -1356,9 +1356,55 @@ CROSS JOIN LATERAL (
       AND ` + inList(`t.kind`, `$3::text[]`) + `
       AND ` + inList(`t.group_key`, `$4::text[]`) + `
     ORDER BY t.finalized_at DESC FETCH FIRST $7 ROWS WITH TIES
-) page(id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
-       created_at, run_at, attempted_at, finalized_at)
+) page(` + pageColumns + `)
 ORDER BY page.finalized_at DESC, page.id DESC LIMIT $7`),
+
+		// listCreated pages through tasks by when they were created, latest
+		// first, and by ID among the tasks of one creation time. That is the
+		// order of the two indexes of creation time within one queue, so the
+		// statement reads one range for each listed queue ($1), from the
+		// position ($5, $6) back to the start of the range of creation times
+		// ($9), up to a page ($7), and merges the ranges. No index holds
+		// tasks by creation time in the order of their IDs, in which
+		// listTasks reads: IDs follow creation time only roughly.
+		//
+		// The tasks come from three places, and the statement reads each
+		// only if the list asks for its states ($2, and $10 for completed
+		// tasks): the index of the tasks that are not running, the running
+		// tasks, and the history. The index of tasks leaves the running ones
+		// out, so that a fetch writes nothing to it. A queue runs as many
+		// tasks as its workers take at a time, so the statement reads all of
+		// them, from their own index, and sorts those of the range.
+		//
+		// With no queue named, each place finds its own queues, with one
+		// index probe each. A queue named twice is read once.
+		//
+		// The position and the start of the range are never NULL: the first
+		// page starts below the end of the range, or below the infinite
+		// time, and a range without a start begins at the other infinite
+		// time. So both are conditions of the index under any plan. The end
+		// of the range is no parameter of its own: beside the position,
+		// PostgreSQL would start to read at the position, and compare every
+		// entry from there down to the end of the range with it.
+		//
+		// Each row ends with the task's creation time once more, as the
+		// column holds it: see timeRows. If $8, the rows are summaries.
+		listCreated: q(`
+WITH RECURSIVE ` + queuesWith(`waiting`, `<> 'running'`) + `, ` +
+			queuesWith(`running`, `= 'running'`) + `, ` +
+			queuesIn(`kept`, `{s}.task_history`, `true`) + `, named AS (
+    SELECT DISTINCT q AS queue FROM unnest($1::text[]) AS q
+)
+SELECT ` + taskColumns(`state`) + `, created_at
+FROM (
+    ` + createdPages(`waiting`, `{s}.tasks`, `t.state::text`, `t.state <> 'running' AND `+inStates(`$2::text[]`),
+			`cardinality(array_remove($2::text[], 'running')) > 0`) + `
+    UNION ALL
+    ` + createdPages(`running`, `{s}.tasks`, `t.state::text`, `t.state = 'running'`, `'running' = ANY($2::text[])`) + `
+    UNION ALL
+    ` + createdPages(`kept`, `{s}.task_history`, `'completed'`, `true`, `$10`) + `
+) page(` + pageColumns + `)
+ORDER BY created_at DESC, id DESC LIMIT $7`),
 
 		// listGroups reads a page of FIFO groups in the order of the primary
 		// key, after group ($4, $5) where the last page ended, so a page with
@@ -1629,13 +1675,47 @@ func leaseSet(us, by string) string {
 // text. A copy written in other words would return the same queues, but
 // could read every task of the state to find them.
 func queuesWith(name, cond string) string {
+	return queuesIn(name, `{s}.tasks`, `state `+cond)
+}
+
+// queuesIn is queuesWith for the rows of table that meet where: a condition
+// on the row's own columns, which an index that leads with the queue holds.
+// In the history, a probe reads each partition.
+func queuesIn(name, table, where string) string {
 	return name + ` AS (
-    (SELECT queue FROM {s}.tasks WHERE state ` + cond + ` ORDER BY queue LIMIT 1)
+    (SELECT queue FROM ` + table + ` WHERE ` + where + ` ORDER BY queue LIMIT 1)
     UNION ALL
-    SELECT (SELECT t.queue FROM {s}.tasks t WHERE t.state ` + cond + ` AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
+    SELECT (SELECT t.queue FROM ` + table + ` t WHERE ` + where + ` AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
     FROM ` + name + ` x WHERE x.queue IS NOT NULL
 )`
 }
+
+// createdPages is one of the places that listCreated reads: for each listed
+// queue, the tasks t of table that meet cond, in the range of creation times
+// and below the position, the latest first and up to a page. With no queue
+// named, the queues are those of the CTE found. state is the expression for
+// a task's state. Nothing is read unless gate holds, which the planner
+// knows: it tells whether the list asks for the tasks of this place.
+func createdPages(found, table, state, cond, gate string) string {
+	return `(SELECT ` + pageColumns + `
+     FROM (SELECT queue FROM ` + found + ` WHERE cardinality($1::text[]) = 0 AND queue IS NOT NULL
+           UNION ALL
+           SELECT queue FROM named) AS l(name)
+     CROSS JOIN LATERAL (
+         SELECT ` + listColumns(state, `$8`) + `
+         FROM ` + table + ` t
+         WHERE t.queue = l.name AND ` + cond + `
+           AND t.created_at >= $9::timestamptz AND (t.created_at, t.id) < ($5::timestamptz, $6::bigint)
+           AND ` + inList(`t.kind`, `$3::text[]`) + `
+           AND ` + inList(`t.group_key`, `$4::text[]`) + `
+         ORDER BY t.created_at DESC, t.id DESC LIMIT $7
+     ) page(` + pageColumns + `)
+     WHERE ` + gate + `)`
+}
+
+// pageColumns name the columns of a page of tasks, which are listColumns.
+const pageColumns = `id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
+       created_at, run_at, attempted_at, finalized_at`
 
 // taskColumns are the columns that scanTaskInfo reads, in its order. state is
 // the expression for the task's state: the history has no such column, so a
