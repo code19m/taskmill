@@ -23,9 +23,9 @@ flowchart LR
 2. On the overview, choose **Pause** for the queue. Running tasks finish,
    and no new ones start.
 3. Open the task list. Filter by the queue and the state *dead*, and by the
-   kind if other kinds died for other reasons. Choose **Retry all**. If the
-   page says that other work held some tasks, they were busy in another
-   transaction: try again for those.
+   kind if other kinds died for other reasons. Choose **Retry all**, and
+   confirm. If the dashboard says that other work held some tasks, they
+   were busy in another transaction: try again for those.
 4. Choose **Resume** for the queue when you are ready for the load.
 
 **From code,** for example in an admin command:

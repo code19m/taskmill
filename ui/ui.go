@@ -288,6 +288,7 @@ type page struct {
 	ReadOnly bool
 	Notice   string
 	Dead     taskmill.TaskCount // dead tasks, for the navigation; zero if unknown
+	Now      time.Time          // when the page was rendered: its relative times count from here
 	Data     any
 }
 
@@ -683,11 +684,13 @@ type filterRow struct {
 	Title  string
 	Values []string
 	Mono   bool
+	Group  bool // the values are FIFO group keys
 }
 
 // bulkPage shows what a bulk action would change, with a button to do it:
-// the confirmation, with or without the script. It counts the tasks once,
-// and does not update itself.
+// the confirmation. Without the script it is a page, and with it, the
+// dialog shows it over the task list. It counts the tasks once, and does
+// not update itself.
 func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
 		return
@@ -720,7 +723,10 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	}
 	var rows []filterRow
 	for _, row := range []filterRow{
-		{"State", states, false}, {"Queue", f.Queues, false}, {"Kind", f.Kinds, true}, {"FIFO group", f.GroupKeys, true},
+		{Title: "State", Values: states},
+		{Title: "Queue", Values: f.Queues},
+		{Title: "Kind", Values: f.Kinds, Mono: true},
+		{Title: "FIFO group", Values: f.GroupKeys, Mono: true, Group: true},
 	} {
 		if len(row.Values) > 0 {
 			rows = append(rows, row)
@@ -1311,10 +1317,14 @@ func getGzip(w io.Writer) *gzip.Writer {
 // render executes a page into a buffer before it answers, so that a failed
 // template never sends half a page. A page that the client already has, by
 // its ETag, is answered with 304 Not Modified, and others are compressed when
-// the client accepts it: live updates fetch the page every few seconds.
+// the client accepts it: live updates fetch the page every few seconds. The
+// page names its time of rendering, from which the script keeps its
+// relative times counting. That time is no part of the ETag: a page that
+// says what the client's page says is the page that the client has.
 func (s *server) render(w http.ResponseWriter, r *http.Request, status int, name string, p page) {
 	p.ReadOnly = s.readOnly
 	p.Notice = notice(r.URL.Query())
+	p.Now = time.Now()
 	buf := getBuffer()
 	defer buffers.Put(buf)
 	if err := s.pages.ExecuteTemplate(buf, name, p); err != nil {
@@ -1327,8 +1337,11 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, status int, name
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Vary", "Accept-Encoding")
 	if status == http.StatusOK {
-		sum := sha256.Sum256(buf.Bytes())
-		etag := `W/"` + hex.EncodeToString(sum[:8]) + `"`
+		before, after, _ := bytes.Cut(buf.Bytes(), []byte(`data-now="`+instant(p.Now)+`"`))
+		sum := sha256.New()
+		sum.Write(before)
+		sum.Write(after)
+		etag := `W/"` + hex.EncodeToString(sum.Sum(nil)[:8]) + `"`
 		h.Set("ETag", etag)
 		if r.Header.Get("If-None-Match") == etag {
 			w.WriteHeader(http.StatusNotModified)
@@ -1395,6 +1408,7 @@ func (s *server) funcs() template.FuncMap {
 		"lastError": lastError,
 		"newest":    newestFirst,
 		"visible":   visible,
+		"outbox":    outbox,
 		"num":       number,
 		"count":     count,
 		"atLeast":   atLeast,
@@ -1516,28 +1530,30 @@ func securityHeaders(next http.Handler, ancestors string) http.Handler {
 	})
 }
 
-// ago formats how long ago t was, or how far ahead it is.
-func ago(t time.Time) string {
+// ago words how long before now t was, or how long after it: "8s ago", or
+// "3m from now". It reads both times to the second, as a clock shows them,
+// so every relative time of a page changes on the second, with the others.
+// The script counts from there in the same words: see ago in app.js.
+func ago(now, t time.Time) string {
 	if t.IsZero() {
 		return "—"
 	}
-	d := time.Since(t)
-	suffix := " ago"
+	d, suffix := now.Unix()-t.Unix(), " ago"
 	if d < 0 {
 		d, suffix = -d, " from now"
 	}
+	n, unit := d/86400, "d"
 	switch {
-	case d < time.Second:
+	case d == 0:
 		return "now"
-	case d < time.Minute:
-		return fmt.Sprintf("%ds%s", int(d.Seconds()), suffix)
-	case d < time.Hour:
-		return fmt.Sprintf("%dm%s", int(d.Minutes()), suffix)
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh%s", int(d.Hours()), suffix)
-	default:
-		return fmt.Sprintf("%dd%s", int(d.Hours()/24), suffix)
+	case d < 60:
+		n, unit = d, "s"
+	case d < 3600:
+		n, unit = d/60, "m"
+	case d < 48*3600:
+		n, unit = d/3600, "h"
 	}
+	return strconv.FormatInt(n, 10) + unit + suffix
 }
 
 func timestamp(t time.Time) string {
@@ -1618,6 +1634,24 @@ func visible(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// outboxKey is a FIFO group key that the outbox made, in its two parts.
+type outboxKey struct{ Topic, Key string }
+
+// String says the key in words, for a tooltip and a screen reader.
+func (k outboxKey) String() string { return "Outbox topic " + k.Topic + ", key " + k.Key }
+
+// outbox returns the parts of a FIFO group key that the outbox made, and nil
+// for any other key. The outbox joins a message's topic and key with the
+// unit separator, which no font draws (groupKey in package outbox): its key
+// has one separator between two parts, and no other control character.
+func outbox(group string) *outboxKey {
+	topic, key, ok := strings.Cut(group, "\x1f")
+	if !ok || topic == "" || key == "" || visible(topic+key) != topic+key {
+		return nil
+	}
+	return &outboxKey{topic, key}
 }
 
 // afterHost returns the part of a worker's ID after its host name and the

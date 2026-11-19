@@ -739,6 +739,9 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   margin-left: 8px; padding: 1px 6px; border-radius: var(--radius-chip); background: var(--glass-2);
   color: var(--ink-faint); font-family: var(--font-mono); font-size: var(--text-xs);
 }
+/* A FIFO group key of the outbox: its topic, quiet, and then its key. */
+.topic { color: var(--ink-faint); }
+.topic-sep { margin: 0 0.4em; color: var(--ink-ghost); }
 /* A task's last error is quiet text: its state, beside it, has the color. */
 .error-cell { color: var(--ink-muted); font-size: var(--text-sm); }
 /* A schedule's timetable: what its cron expression means, above the
@@ -965,8 +968,16 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .modal::backdrop { background: var(--scrim); }
 .modal form { display: block; }
 .modal h2 { margin: 0 0 10px; font-size: var(--text-ui); font-weight: var(--weight-bold); }
-.modal-text { font-size: var(--text-label); color: var(--ink-muted); line-height: 1.5; }
+.modal-text { display: grid; gap: 12px; font-size: var(--text-label); color: var(--ink-muted); line-height: 1.5; }
+.modal-text > * { margin: 0; }
+/* The filters of an action on many tasks, as a short list. */
+.modal-text .props { grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px; padding: 0; }
+/* What the last step of an action did, that it runs, or that it failed. */
+.modal-status { margin: 0 0 10px; font-size: var(--text-label); line-height: 1.5; color: var(--ink); }
+.modal-status:empty { display: none; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.modal-actions [hidden] { display: none; }
+.modal[aria-busy="true"] [data-confirm-button] { opacity: 0.55; cursor: progress; }
 
 .toast {
   position: fixed; z-index: 120; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));

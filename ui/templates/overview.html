@@ -3,7 +3,7 @@
 <header class="topbar">
   <h1>Overview</h1>
   {{/* When the maintainer last counted the tasks: quiet while it is fresh, amber once it is a reason to act. */}}
-  {{if not $d.RefreshedAt.IsZero}}<span class="counted{{if $d.Stale}} stale{{end}}" data-key="counted"{{template "at" $d.RefreshedAt}}>{{template "icon-schedules"}}Counted {{ago $d.RefreshedAt}}</span>{{end}}
+  {{if not $d.RefreshedAt.IsZero}}<span class="counted{{if $d.Stale}} stale{{end}}" data-key="counted"{{template "at" $d.RefreshedAt}}>{{template "icon-schedules"}}Counted {{ago $.Now $d.RefreshedAt}}</span>{{end}}
 </header>
 <div class="page">
 <section class="stats" aria-label="Totals">
@@ -23,7 +23,7 @@
     <span class="stat-label">{{template "state-icon" "dead"}}Dead</span>
     <span class="stat-value"{{with atLeast $d.Totals.Dead}} title="{{.}}"{{end}}>{{count $d.Totals.Dead}}</span>
   </a>
-  <a class="card stat" href="{{path "/schedules"}}"{{if $d.Schedules}} title="{{if not $d.NextRun.IsZero}}Next run {{ago $d.NextRun}}{{else}}All paused{{end}}"{{end}}>
+  <a class="card stat" href="{{path "/schedules"}}"{{if $d.Schedules}} title="{{if not $d.NextRun.IsZero}}Next run {{ago $.Now $d.NextRun}}{{else}}All paused{{end}}"{{end}}>
     <span class="stat-label">{{template "icon-schedules"}}Schedules</span>
     <span class="stat-value">{{$d.Schedules}}</span>
   </a>

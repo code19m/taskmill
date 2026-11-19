@@ -1,7 +1,7 @@
 {{define "error.html"}}{{template "head" .}}
 <header class="topbar"><h1>{{.Title}}</h1></header>
 <div class="page">
-<section class="card error-card">
+<section class="card error-card" data-dialog-title="{{.Title}}">
   <p>{{.Data.Message}}</p>
   <a class="btn" href="{{path .Data.Back}}">{{template "icon" "back"}}{{.Data.BackLabel}}</a>
 </section>

@@ -88,7 +88,7 @@ allow-list, or to link to a page from an alert.
 | `GET /tasks/{id}` | One task | — |
 | `GET /schedules` | The schedules | — |
 | `GET /workers` | The workers | — |
-| `GET /tasks/bulk/{action}` | The page that confirms a bulk action. It counts the tasks first | The filters of `/tasks`, at least one |
+| `GET /tasks/bulk/{action}` | The page that confirms a bulk action: with JavaScript, the task list shows it in a dialog. It counts the tasks first | The filters of `/tasks`, at least one |
 | `POST /tasks/bulk/{action}` | Retries, cancels, or deletes every task that the filters select. `{action}` is `retry`, `cancel`, or `delete` | The filters of `/tasks`, at least one |
 | `POST /tasks/{id}/{action}` | Retries, cancels, or deletes one task | — |
 | `POST /queues/{action}` | Pauses or resumes a queue. `{action}` is `pause` or `resume` | `name`: the queue. `range`: the period of the overview that the answer leads back to, as for `GET /` |

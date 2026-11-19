@@ -4,9 +4,10 @@
   <h1>{{.Title}}</h1>
   {{with $d.Bulk}}
   <div class="right">
-    {{with .Retry}}<a class="btn primary" href="{{.}}">{{template "icon" "retry"}}Retry all</a>{{end}}
-    {{with .Cancel}}<a class="btn" href="{{.}}">{{template "icon" "cancel"}}Cancel all</a>{{end}}
-    {{with .Delete}}<a class="btn danger" href="{{.}}">{{template "icon" "trash"}}Delete all</a>{{end}}
+    {{/* Each leads to the page that asks before it acts. With the script, the dialog asks, over the list. */ -}}
+    {{with .Retry}}<a class="btn primary" href="{{.}}" data-dialog>{{template "icon" "retry"}}Retry all</a>{{end}}
+    {{with .Cancel}}<a class="btn" href="{{.}}" data-dialog>{{template "icon" "cancel"}}Cancel all</a>{{end}}
+    {{with .Delete}}<a class="btn danger" href="{{.}}" data-dialog>{{template "icon" "trash"}}Delete all</a>{{end}}
   </div>
   {{end}}
 </header>
@@ -40,12 +41,12 @@
       <tr data-href="{{path "/tasks/"}}{{.ID}}" data-key="{{.ID}}"{{if and $i (eq $i $d.Seen)}} id="more"{{end}}>
         <td class="num"><a class="task-id" href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
         <td class="mono" title="{{.Kind}}">{{.Kind}}</td>
-        <td title="{{.Queue}}{{with .GroupKey}}, FIFO group {{visible .}}{{end}}">{{.Queue}}{{if .GroupKey}}<span class="group">{{visible .GroupKey}}</span>{{end}}</td>
+        <td title="{{.Queue}}{{with .GroupKey}}, {{with outbox .}}{{.}}{{else}}FIFO group {{visible .}}{{end}}{{end}}">{{.Queue}}{{if .GroupKey}}<span class="group">{{template "group" .GroupKey}}</span>{{end}}</td>
         <td><div class="state-cell">{{template "state" .State}}{{if ne .Priority 2}}<span class="chip priority-{{.Priority}}" title="Priority: {{.Priority}}">{{.Priority}}</span>{{end}}</div></td>
         <td class="num">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
-        <td class="tone-faint"{{template "at" .CreatedAt}}>{{ago .CreatedAt}}</td>
-        {{if $d.Order.ByFinish}}<td class="tone-faint"{{template "at" .FinalizedAt}}>{{ago .FinalizedAt}}</td>
-        {{else}}<td class="tone-faint"{{template "at" .RunAt}}>{{ago .RunAt}}</td>{{end}}
+        <td class="tone-faint"{{template "at" .CreatedAt}}>{{ago $.Now .CreatedAt}}</td>
+        {{if $d.Order.ByFinish}}<td class="tone-faint"{{template "at" .FinalizedAt}}>{{ago $.Now .FinalizedAt}}</td>
+        {{else}}<td class="tone-faint"{{template "at" .RunAt}}>{{ago $.Now .RunAt}}</td>{{end}}
         <td class="error-cell">{{with lastError .Errors}}<span title="{{printf "%.300s" .Message}}">{{printf "%.140s" .Message}}</span>{{end}}</td>
       </tr>
     {{end}}</tbody>

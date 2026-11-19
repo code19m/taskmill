@@ -25,6 +25,34 @@ All notable changes to taskmill are recorded here. The format follows
   bar again, as "Counted 4s ago" beside a clock: quiet while it is fresh,
   and amber once it is over a minute old. It was behind a hint beside the
   title. A count that stopped at its cap says so in its tooltip.
+- The dashboard's relative times keep counting between updates: "Counted
+  3s ago" becomes 4s, 5s, and 6s, second by second, where it stood still
+  until the next update and then jumped. They count by the server's clock,
+  so a device whose clock is wrong shows the same times, and no time jumps
+  when an update arrives. A page that the back button brings back shows its
+  times as they are now. The times also count while live updates are paused
+  or the server is out of reach. They rest while the tab is hidden or text
+  is selected, and then catch up. The server reads both times to the second
+  before it words one, as a clock shows them, so every time of a page
+  changes on the same second. Without JavaScript, a time stands until the
+  page loads again, as before.
+- **Retry all**, **Cancel all**, and **Delete all** on a task list ask in a
+  dialog over the list, where each led to a page of its own. The dialog
+  shows how many tasks the action will change, the filters that they match,
+  and what the action does. With very many tasks, it stays open for each
+  step: it says how many tasks are done so far, and offers to continue, or
+  to try again for the tasks that were busy. It also says so if an action
+  failed, or if its answer did not arrive. When the action is done, the
+  dialog closes, and the list shows the result. Escape and **Cancel** close
+  it, and it adds no entry to the browser's history. Without JavaScript,
+  and at the page's own address, the page asks as before.
+- A FIFO group key that the outbox made shows as its topic and its key, as
+  "orders › order-13": in the group filter and on its button, beside the
+  queue in a task list, on a task's page, and where an action on many tasks
+  lists its filters. It showed as "orders␟order-13", because the outbox
+  joins the two with a character that no font draws. The tooltip says
+  "Outbox topic orders, key order-13". The filter and the links still use
+  the key itself, and any other key shows as before.
 - The dashboard's Workers page shows each worker in one line. The Queues
   column has the first queues as text, as many as fit, and a count of the
   rest: "default, emails, images +3". The Kinds column has a count. Press a
@@ -36,8 +64,9 @@ All notable changes to taskmill are recorded here. The format follows
 - On the Workers page, the Host column has more room, the "stale" mark
   stands after the worker's ID, and the texts and marks of a row stand on
   one baseline: a mark no longer makes its row taller. A worker built from
-  taskmill's own tree shows "devel" as its version, where it showed Go's
-  "(devel)": the tooltip has what the worker stored.
+  taskmill's own tree shows "local build" as its version, where it showed
+  Go's "(devel)": its tooltip says that it was built from taskmill's source,
+  not from a release.
 - The dashboard's **Finished** filter has a calendar of its own, in place
   of the browser's date pickers. Click the first and the last day of a
   range: the calendar marks the days, and **From** and **To** show them,

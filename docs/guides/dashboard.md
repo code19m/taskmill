@@ -177,14 +177,14 @@ a yellow dot and the word "stale" mark a worker that made none for longer
 than its `LeaseDuration`, because it has stopped or cannot reach the database.
 
 At the end of the **Overview**'s top bar, "Counted 4s ago" says when the
-maintainer last counted the tasks, which it does every 10 seconds. Once that
-is over a minute ago, it turns amber: check that a worker runs as the
-maintainer ([Monitoring](../production/monitoring.md) has an alert for
-this). A count that ends in "+" stopped at its cap, as its tooltip says. A
-chart with nothing to draw says why behind a hint, a small button with an
-"i": in a browser without popovers, the hint's text stands on the page.
+maintainer last counted the tasks, which it does every 10 seconds. After a
+minute, it turns amber: check that a worker runs as the maintainer
+([Monitoring](../production/monitoring.md) has an alert). Such times keep
+counting each second, by the server's clock. A count that ends in "+"
+stopped at its cap, as its tooltip says. A chart with nothing to draw says
+why behind a hint, an "i" button: without popovers, its text is on the page.
 
-Before an action on many tasks, the dashboard shows the filters and how many
+Before an action on many tasks, a dialog shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,
 and offers to continue where it stopped. If some tasks were busy at that
 moment, it says how many, and offers to try them again.
