@@ -31,7 +31,7 @@ dependency is pgx.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-dark.png">
-  <img alt="The dashboard's overview: task counts, charts of the last hour's tasks and attempts, and the queues" src="docs/images/dashboard-light.png">
+  <img alt="The dashboard's overview: task counts, a dial of the attempts a minute, charts of the last hour's tasks and attempts, and the queues" src="docs/images/dashboard-light.png">
 </picture>
 
 The dashboard, showing the [shop example](examples/shop).
