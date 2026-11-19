@@ -1,6 +1,7 @@
 // The interface works without this script. It keeps pages live, shows
 // another page, a filter, or the result of an action without loading the
-// page anew, confirms actions, and adds a few conveniences.
+// page anew, shows times in the reader's time zone, confirms actions, and
+// adds a few conveniences.
 //
 // It is careful with the network and the machine: one page request at a
 // time, each abandoned after a while, with a growing wait while the server
@@ -117,7 +118,18 @@
     if (!(form instanceof HTMLFormElement)) return;
     if ("filters" in form.dataset) {
       event.preventDefault();
+      // With the script, the form's button is the one of the filter by
+      // finish time. A range that ends before it starts is said at its
+      // field, not on a page of its own.
+      const [since, before] = [...form.querySelectorAll("input[data-time]")];
+      if (before && sent(since) && sent(before) && sent(since) >= sent(before)) {
+        before.setCustomValidity("The range must end after it starts.");
+        before.reportValidity();
+        return;
+      }
       applyFilters(form);
+      const sel = event.submitter?.closest("details.sel");
+      if (sel) shut(sel);
       return;
     }
     if (form.method !== "post") return;
@@ -176,6 +188,12 @@
   // visible shows control characters, such as the separator in the outbox's
   // group keys, as the server does.
   const visible = (text) => text.replace(/[\u0000-\u001f]/g, (c) => String.fromCharCode(0x2400 + c.charCodeAt(0)));
+
+  // shut closes a menu, and gives the focus back to its button.
+  function shut(sel) {
+    sel.open = false;
+    sel.querySelector("summary").focus();
+  }
 
   // search shows the options that contain the query, and offers to filter
   // by the query itself when no option is exactly it.
@@ -308,6 +326,11 @@
         field.value = "";
         search(sel, "");
       }
+      // A closed menu forgets a range that was typed and not applied.
+      for (const input of sel.querySelectorAll("input[data-time]")) {
+        input.value = input.defaultValue;
+        input.setCustomValidity("");
+      }
       return;
     }
     for (const other of openMenus()) if (other !== sel) other.open = false;
@@ -345,8 +368,7 @@
     if (!sel) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      sel.open = false;
-      sel.querySelector("summary").focus();
+      shut(sel);
     } else if (event.key === "Enter" && event.target.matches(".chk-input")) {
       event.preventDefault();
       event.target.click();
@@ -357,10 +379,13 @@
       const shown = boxes(sel).filter((box) => !box.closest(".pop-opt").hidden);
       if (add && !add.hidden) addValue(sel, add.dataset.value);
       else if (shown.length === 1) shown[0].click();
-    } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !event.target.matches("input[data-time]")) {
+      // In a field of a time, the arrow keys are the browser's: they step its parts.
       event.preventDefault();
-      const items = [sel.querySelector("[data-sel-search]"), ...boxes(sel).filter((box) => !box.closest(".pop-opt").hidden)]
-        .filter(Boolean);
+      const items = [
+        sel.querySelector("[data-sel-search]"), ...boxes(sel).filter((box) => !box.closest(".pop-opt").hidden),
+        ...sel.querySelectorAll("a.pop-opt"),
+      ].filter(Boolean);
       const at = items.indexOf(document.activeElement);
       const step = event.key === "ArrowDown" ? 1 : -1;
       items[Math.min(items.length - 1, Math.max(0, at + step))]?.focus();
@@ -375,6 +400,8 @@
   document.addEventListener("input", (event) => {
     const field = event.target;
     if (field.matches?.("[data-sel-search]")) refine(field.closest(".sel"));
+    // A range that was refused is checked again once the reader changes it.
+    if (field.matches?.("input[data-time]")) field.form.elements.before.setCustomValidity("");
   });
 
   document.addEventListener("change", (event) => {
@@ -390,6 +417,11 @@
     const url = new URL(form.action, location.href);
     for (const [name, value] of new FormData(form)) {
       if (typeof value === "string" && value !== "") url.searchParams.append(name, value);
+    }
+    // The fields of the filter by finish time hold times of the reader's
+    // zone, and the address takes instants.
+    for (const field of form.querySelectorAll("input[data-time]")) {
+      if (field.value) url.searchParams.set(field.name, sent(field));
     }
     navigate(url, "replace");
   }
@@ -447,7 +479,7 @@
   async function navigate(url, mode) {
     const turn = ++turns;
     const slow = setTimeout(() => progress(true), SLOW_MS);
-    const result = await load(url.href, null);
+    const result = await load(url.href, null, true);
     clearTimeout(slow);
     if (turn !== turns || result.kind === "aborted") return; // a newer change takes over
     if (result.kind !== "page" || assetsOf(result.doc) !== assets) {
@@ -456,7 +488,9 @@
       return;
     }
     progress(false);
-    const n = address(url, mode);
+    // The server may lead to another address of the same page: a list that
+    // takes no range of finish times leads to itself without the range.
+    const n = address(result.url ? new URL(result.url) : url, mode);
     if (n == null) return;
     render(result, { moved: mode === "push", n });
     succeeded();
@@ -557,7 +591,11 @@
     // its link is for a browser that loads the longer list as a page.
     const more = hit?.matches("a[data-more]");
     if (more) url.hash = "";
-    navigate(url, more ? "replace" : "push");
+    // A link in a menu is a filter too, a preset of the range of finish
+    // times: the one choice closes the menu.
+    const sel = hit?.closest("details.sel");
+    if (sel) shut(sel);
+    navigate(url, more || sel ? "replace" : "push");
   });
 
   document.addEventListener("keydown", (event) => {
@@ -709,6 +747,70 @@
     document.querySelector("[data-announce]").textContent = svg.querySelectorAll(".col")[marked]?.textContent ?? "";
   });
 
+  // Times in the reader's time zone
+  //
+  // The server words every time in UTC, and gives the time's instant beside
+  // the words, in data-time. localise words each again in the time zone of
+  // the device: the tooltip of a time and, in the filter by finish time, the
+  // two fields, the range on the button, and the name of the zone. It
+  // changes a page before the page shows, so an update finds the words that
+  // it already shows, and touches nothing. The words are the server's own,
+  // put together from what the device says of an instant: the device knows
+  // when its zone changes its clocks.
+
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const ZONE = new Intl.DateTimeFormat().resolvedOptions().timeZone || "local time";
+  const pad = (n, width = 2) => String(n).padStart(width, "0");
+  const dateOf = (at) => `${pad(at.getFullYear(), 4)}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
+  const clockOf = (at) => `${pad(at.getHours())}:${pad(at.getMinutes())}${at.getSeconds() ? `:${pad(at.getSeconds())}` : ""}`;
+
+  // zoneOf names the zone of a time by how far it is from UTC at that time:
+  // "UTC", "UTC+5", "UTC-4", or "UTC+5:45".
+  function zoneOf(at) {
+    const minutes = -Math.round(at.getTimezoneOffset());
+    const rest = Math.abs(minutes) % 60;
+    return minutes ? `UTC${minutes < 0 ? "-" : "+"}${Math.trunc(Math.abs(minutes) / 60)}${rest ? `:${pad(rest)}` : ""}` : "UTC";
+  }
+
+  function localise(scope) {
+    for (const el of scope.querySelectorAll("[data-time]")) {
+      const at = new Date(el.dataset.time);
+      // No time, or a year that the browser does not read: the server's words stay.
+      if (Number.isNaN(at.getTime())) continue;
+      if (el.localName === "input") el.setAttribute("value", `${dateOf(at)}T${clockOf(at)}`);
+      else el.title = `${dateOf(at)} ${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}.${pad(at.getMilliseconds(), 3)} ${zoneOf(at)}`;
+    }
+    // The range of the filter by finish time, as the server words it: in
+    // short on the button, and in full, with the years and the zones, in
+    // its tooltip and for a screen reader.
+    const sel = scope.querySelector(".sel-range");
+    if (!sel) return;
+    const [since, before] = [...sel.querySelectorAll("input[data-time]")].map((field) => field.dataset.time && new Date(field.dataset.time));
+    const year = new Date().getFullYear();
+    const day = (at, always) => `${at.getDate()} ${MONTHS[at.getMonth()]}${always || at.getFullYear() !== year ? ` ${pad(at.getFullYear(), 4)}` : ""}`;
+    const brief = (at) => `${day(at)} ${clockOf(at)}`;
+    const long = (at) => `${day(at, true)} ${clockOf(at)} ${zoneOf(at)}`;
+    const words = (from, to) => (since && before ? `${from(since)} to ${to(before)}`
+      : since ? `Since ${from(since)}` : before ? `Before ${from(before)}` : "Any time");
+    const summary = sel.querySelector("summary");
+    const full = words(long, long);
+    summary.querySelector(".sel-label").textContent = words(brief, (at) => (dateOf(at) === dateOf(since) ? clockOf(at) : brief(at)));
+    summary.setAttribute("aria-label", `${sel.querySelector(".pop").getAttribute("aria-label")}: ${full}`);
+    if (since || before) summary.title = full;
+    sel.querySelector("[data-zone]").textContent = ZONE;
+  }
+
+  // sent returns the instant that a field of the filter by finish time asks
+  // for. A field that the reader left as it was asks for the instant that
+  // the server gave: where the clocks go back, one time on the clock is two
+  // instants. Any other time is read in the reader's zone, as the browser
+  // reads a time without a zone.
+  function sent(field) {
+    if (field.value === field.defaultValue) return field.dataset.time;
+    const at = new Date(field.value);
+    return Number.isNaN(at.getTime()) ? field.value : `${at.toISOString().slice(0, 19)}Z`;
+  }
+
   // Notices after an action. The server names a notice in the address of
   // the page that shows it. The address loses that right away, so a reload
   // does not show the notice again.
@@ -815,8 +917,9 @@
   // "page", "same" (not modified), "down" (out of reach, or a server error),
   // "signed-out", or "aborted". The page of an action may be one that says
   // why the action did not apply. Its url is where the server led to, if it
-  // led somewhere.
-  async function request(url, { etag = null, body = null, control = new AbortController() } = {}) {
+  // led somewhere. A request that does not follow takes a redirect for the
+  // way to a login page.
+  async function request(url, { etag = null, body = null, follow = body !== null, control = new AbortController() } = {}) {
     let timedOut = false;
     // An action may work for as long as the server lets a request take.
     const timer = setTimeout(() => { timedOut = true; control.abort(); }, body ? 3 * TIMEOUT_MS : TIMEOUT_MS);
@@ -825,9 +928,11 @@
       if (etag) headers["If-None-Match"] = etag;
       const response = await fetch(url, {
         method: body ? "POST" : "GET", body, headers, cache: "no-store", credentials: "same-origin",
-        // A page that redirects leads to a login page, outside of the
-        // interface. An action redirects to the page that shows its result.
-        redirect: body ? "follow" : "manual", signal: control.signal,
+        // An action is led to the page that shows its result, and a link
+        // or a filter may be led to another address of the interface. An
+        // update is not: its page is at its address, so a redirect leads to
+        // a login page, outside of the interface.
+        redirect: follow ? "follow" : "manual", signal: control.signal,
       });
       if (response.status === 304) return { kind: "same" };
       if (response.type === "opaqueredirect" || response.status === 401 || (response.status === 403 && !body)) {
@@ -849,12 +954,12 @@
   // abandons it.
   let inflight = null;
 
-  async function load(url, etag) {
+  async function load(url, etag, follow = false) {
     inflight?.abort();
     const control = new AbortController();
     inflight = control;
     try {
-      return await request(url, { etag, control });
+      return await request(url, { etag, follow, control });
     } finally {
       if (inflight === control) inflight = null;
     }
@@ -866,6 +971,7 @@
   // of the same page changes only where it differs. Another page, fresh,
   // replaces it whole: nothing of the reader's state belongs to it.
   function apply(result, fresh = false) {
+    localise(result.main);
     const main = document.getElementById("main");
     if (fresh) {
       syncAttributes(main, result.main);
@@ -1003,6 +1109,7 @@
   window.addEventListener("offline", show);
 
   highlight(document);
+  localise(document);
   show();
   if (live) schedule(REFRESH_MS);
 })();

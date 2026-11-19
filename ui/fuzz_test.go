@@ -10,15 +10,18 @@ import (
 )
 
 // FuzzPages requests any path and query string, as a GET or as a POST:
-// filters, ranges, cursors, searches, task IDs, and the names in actions
-// come from the browser, so a request may get an error page but never a
-// server error.
+// filters, ranges, times, cursors, searches, task IDs, and the names in
+// actions come from the browser, so a request may get an error page but
+// never a server error.
 func FuzzPages(f *testing.F) {
 	for _, target := range []string{
 		"/", "/?range=7d", "/?range=%ff",
 		"/tasks?state=dead&queue=mail&kind=greet&group=topic%1Fkey",
 		"/tasks?state=completed&state=available&cursor=MTA", "/tasks?cursor=LTE", "/tasks?cursor=%25", "/tasks?limit=250", "/tasks?limit=-1",
 		"/tasks?state=nope", "/tasks/1", "/tasks/-1", "/tasks/9223372036854775808",
+		"/tasks?state=dead&since=2026-11-19T14:05Z&before=2026-11-20T00:00:00%2B05:00", "/tasks?state=canceled&since=2026-11-19T14:05",
+		"/tasks?state=dead&before=0001-01-01T00:00:01Z", "/tasks?state=dead&since=9999-12-31T23:59:59Z&limit=250",
+		"/tasks?state=dead&since=0000-01-01T00:00Z", "/tasks?since=2026-11-19T14:05Z", "/tasks?state=dead&before=%ff",
 		"/choices/groups?search=%25_", "/schedules", "/workers", "/static/ui.css?v=0",
 		// Text that PostgreSQL rejects once failed the request.
 		"/tasks?queue=%00", "/tasks?kind=%ff", "/tasks?group=%c3", "/choices/groups?search=%00",

@@ -20,8 +20,8 @@
         <td class="wrap" title="{{$s.Cron}} {{$s.Location}}">{{with cronWords $s.Cron}}<div class="cron-words">{{.}}</div>{{end}}<code class="chip mono">{{$s.Cron}}</code> <span class="tone-ghost">{{$s.Location}}</span></td>
         <td class="mono" title="{{$s.Kind}}">{{$s.Kind}}</td>
         <td title="{{$s.Queue}}"><a href="{{path "/tasks"}}{{query "queue" $s.Queue "kind" $s.Kind}}">{{$s.Queue}}</a></td>
-        <td class="{{if $s.Paused}}tone-ghost{{end}}" title="{{timestamp $s.NextRunAt}}">{{if $s.Paused}}paused{{else}}{{ago $s.NextRunAt}}{{end}}</td>
-        <td class="tone-faint" title="{{timestamp $s.LastRunAt}}">{{ago $s.LastRunAt}}</td>
+        <td class="{{if $s.Paused}}tone-ghost{{end}}"{{template "at" $s.NextRunAt}}>{{if $s.Paused}}paused{{else}}{{ago $s.NextRunAt}}{{end}}</td>
+        <td class="tone-faint"{{template "at" $s.LastRunAt}}>{{ago $s.LastRunAt}}</td>
         {{if not $ro}}<td class="actions-col"><div class="row-actions">
           {{if $s.Paused}}
           <form method="post" action="{{path "/schedules/resume"}}{{query "name" $s.Name}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>

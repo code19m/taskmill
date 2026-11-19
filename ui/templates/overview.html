@@ -4,7 +4,7 @@
   <h1>Overview</h1>
   {{/* How old the counts are is behind the hint, and on the page only once it is a reason to act. */}}
   {{if not $d.RefreshedAt.IsZero}}
-  {{if $d.Stale}}<span class="chip warn" title="{{timestamp $d.RefreshedAt}}">counted {{ago $d.RefreshedAt}}</span>{{end}}
+  {{if $d.Stale}}<span class="chip warn"{{template "at" $d.RefreshedAt}}>counted {{ago $d.RefreshedAt}}</span>{{end}}
   {{template "hint" "counts"}}Counted by the maintainer {{ago $d.RefreshedAt}}.{{if $d.Totals.Capped}} A count that ends in + stopped at its cap: there are at least that many tasks.{{end}}{{template "hint-end"}}
   {{end}}
 </header>

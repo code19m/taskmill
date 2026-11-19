@@ -136,7 +136,7 @@ theme, and the next pages follow the device.
 | Page | What you see | What you can do |
 |---|---|---|
 | **Overview** | Task counts per queue and state, a dial of the attempts a minute, charts of tasks and attempts over the last 1, 6, or 24 hours, the number of workers, and the retention periods | Pause and resume a queue |
-| **Tasks** | Tasks filtered by state, queue, kind, and FIFO group | Retry, cancel, or delete every task that matches the filters |
+| **Tasks** | Tasks filtered by state, queue, kind, and FIFO group. Dead and canceled tasks also by when they finished | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its timetable in words and its next and last run | Pause, resume, or run it now |
 | **Workers** | Each worker, with its host, version, and queues, and which one is the [maintainer](../concepts/glossary.md#maintainer) | Nothing: this page is for looking |
@@ -196,6 +196,25 @@ tasks, as the page after 250 tasks does, has a row at its top that leads
 back to the first page. Every state has an icon in its color. The two
 states that need you also have their name in color: `dead` in red, and
 `retryable` in amber.
+
+A list of dead or canceled tasks has one more filter, **Finished**, which
+shows the tasks that finished in a range of time:
+
+| You want… | Do this |
+|---|---|
+| The tasks of the last hours or days | Choose a preset, such as **Last 6 hours**. The list starts at that time and has no end, so it shows new tasks as they finish |
+| A precise or a long period, such as last night | Fill in **From**, **To**, or both, and choose **Apply**. A task that finished exactly at **To** is not in the range |
+| Every task again | Choose **Any time** |
+
+The dashboard shows times in your time zone, and names the zone: the range
+on the button, the two fields, and the exact time in a tooltip. Without
+JavaScript, they are in UTC. The address holds the range as instants, in
+`since` and `before`, so a link shows the same tasks to everyone
+([Dashboard routes](../reference/taskmill-ui.md#dashboard-routes) has the
+forms of a time). While a range is set, the list hides **Retry all**,
+**Cancel all**, and **Delete all**: they act on every task that the other
+filters match, also outside the range. If you add another state, the list
+drops the range: only dead and canceled tasks are listed by finish time.
 
 A task list has 5 seconds to read its tasks. A list of dead or canceled
 tasks never reads tasks of other states. But with no queue in the filters,

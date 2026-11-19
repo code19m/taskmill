@@ -114,7 +114,8 @@ What follows:
 - **Two small scripts of our own,** `app.js` and `theme.js`, under a strict
   content security policy. They keep pages live, apply filters as they
   change, confirm actions in dialogs, show a chart's values under the
-  pointer, and apply the chosen theme. Every page also works without them.
+  pointer, show times in the reader's time zone, and apply the chosen
+  theme. Every page also works without them.
   Nothing needs a JavaScript build step or third-party code.
 - **The server renders every page, and the script only shows it in place.**
   For a link, the back button, or an action, the script fetches the page
@@ -123,6 +124,17 @@ What follows:
   show, such as a login page, the browser loads as a full page. We rejected
   a client-side framework: it needs a JSON API, a second set of templates,
   and a build step, for a dashboard of five pages.
+- **A time is an instant, and each side words it in the zone it knows.**
+  The server knows no reader's time zone, so it words a time in UTC, and
+  puts the instant beside the words. The script words it again in the zone
+  of the device, with the same words, before the page shows. A range of
+  finish times is in the address as two instants: a preset is a link to a
+  fixed instant, which the server computes when it renders the page, so
+  presets need no script and no zone. The two fields of a custom range are
+  the browser's own `datetime-local` fields. We rejected a calendar of our
+  own, which is much code for what every browser has. We rejected a time
+  zone in a cookie or in the address too: a link would then show other
+  tasks to another reader.
 - **A schedule's timetable in words comes from the scheduler's own parser,**
   `internal/cron`, and from the values that each field matches, never from
   the expression's text. So the words cannot read an expression in another

@@ -139,4 +139,27 @@
   </div>
 </details>{{end}}
 
+{{/* The filter of a task list by when its tasks finished. Its presets are
+   links. Its two fields, for a custom range, are the browser's own: a
+   browser without the script sends them with the form, as times in UTC.
+   The script shows the range and the fields in the reader's time zone, and
+   sends what the fields hold as instants. */}}
+{{define "finished"}}<details class="sel sel-range">
+  <summary class="ctl sel-btn{{if not .Set}} empty{{end}}" aria-label="Finished: {{.Full}}"{{if .Set}} title="{{.Full}}"{{end}}><span class="sel-label">{{.Label}}</span>{{template "icon-chevron"}}</summary>
+  <div class="pop range" role="group" aria-label="Finished">
+    <div class="range-presets">
+    {{range .Presets}}<a class="pop-opt" href="{{.Href}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>
+    {{end}}</div>
+    <div class="range-custom">
+      <label class="field">From<input class="ctl" type="datetime-local" name="since" value="{{fieldTime .Since}}" data-time="{{instant .Since}}" max="9999-12-31T23:59"{{if .Since.Second}} step="1"{{end}} autocomplete="off" aria-describedby="range-zone"></label>
+      <label class="field">To<input class="ctl" type="datetime-local" name="before" value="{{fieldTime .Before}}" data-time="{{instant .Before}}" max="9999-12-31T23:59"{{if .Before.Second}} step="1"{{end}} autocomplete="off" aria-describedby="range-zone"></label>
+      <div class="range-foot"><span class="subtle" id="range-zone">Times in <span data-zone>UTC</span></span><button class="btn primary">Apply</button></div>
+    </div>
+  </div>
+</details>{{end}}
+
+{{/* The tooltip of a time: the time in UTC, with its instant, by which the
+   script words it in the reader's time zone. */}}
+{{define "at"}} title="{{timestamp .}}" data-time="{{instant .}}"{{end}}
+
 {{define "empty"}}<p class="empty-note">{{.}}</p>{{end}}
