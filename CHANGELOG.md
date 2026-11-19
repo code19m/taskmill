@@ -20,6 +20,25 @@ All notable changes to taskmill are recorded here. The format follows
   every list that has tasks, the page also says how many it shows, and
   tells a screen reader the new number after "Load more" or a change of
   the filters.
+- The dashboard has a new look, in the same style as before:
+  - **One accent color, indigo.** The main button of a page or a dialog is
+    indigo with white text in both themes, where it was black or white.
+    Checked boxes, focus rings, and the icon of the current page use the
+    same color. The state colors are as they were.
+  - **Buttons.** They have corners of 8 pixels in place of round ends, one
+    height, and an icon each. A button that deletes has red text, and a
+    red fill only where it confirms.
+  - **Text** is a little bolder, and the title of a page is larger.
+  - **The light theme** has white cards on a light gray page.
+  - **Task lists** have denser rows. A task's ID is in the text font, and
+    bold. The last error is quiet gray text. Of the states, only `dead` and
+    `retryable` are in color, red and amber. In a window of 1200 pixels or
+    wider, the header of a list stays in view while the page scrolls.
+  - **The Live button's dot** pulses while the page is up to date. It is
+    still when updates are paused or late, and for a reader who asked the
+    system for less motion.
+  - **The logo** is a mill wheel beside the name in lowercase, in the page
+    and in the icon of the browser tab.
 
 ### Fixed
 
@@ -30,6 +49,9 @@ All notable changes to taskmill are recorded here. The format follows
   badge also fits beside a long state such as `scheduled`. On a screen of
   600 pixels or less, where the column is narrow, the badge stands under
   the state.
+- On a screen of 600 pixels or less, the dashboard's task list cut an ID of
+  five digits or more short, so that every row began with the same digits.
+  The column now has room for six digits.
 
 ## [0.10.0] - 2026-11-19
 

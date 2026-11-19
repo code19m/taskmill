@@ -3,7 +3,7 @@
 <header class="topbar">
   <a class="crumb" href="{{path "/tasks"}}{{query "queue" $t.Queue}}">{{$t.Queue}}</a>
   <span class="crumb-sep" aria-hidden="true">/</span>
-  <h1 class="task-heading"><span class="mono">#{{$t.ID}}</span>{{template "state" $t.State}}</h1>
+  <h1 class="task-heading"><span>#{{$t.ID}}</span>{{template "state" $t.State}}</h1>
   {{if not .ReadOnly}}
   <div class="right">
     {{if $t.State.CanRetry}}
@@ -27,7 +27,7 @@
 </div>
 {{else if and (eq (print $t.State) "pending") $g.Head}}
 <div class="callout" role="note">
-  <div>Waits behind <a class="mono" href="{{path "/tasks/"}}{{$g.Head.ID}}">#{{$g.Head.ID}}</a> {{template "state" $g.Head.State}} in its FIFO group.</div>
+  <div>Waits behind <a class="strong" href="{{path "/tasks/"}}{{$g.Head.ID}}">#{{$g.Head.ID}}</a> {{template "state" $g.Head.State}} in its FIFO group.</div>
   <a class="btn sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group{{template "icon" "next"}}</a>
 </div>
 {{end}}
@@ -70,7 +70,7 @@
       <dt>Priority</dt><dd>{{$t.Priority}}</dd>
       <dt>Attempts</dt>
       <dd>
-        <div class="attempts"><span class="mono">{{$t.Attempt}} of {{$t.MaxAttempts}}</span>
+        <div class="attempts"><span>{{$t.Attempt}} of {{$t.MaxAttempts}}</span>
           <svg class="progress" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="progress-track" width="100" height="6" rx="3"/><rect class="progress-fill" width="{{percent $t.Attempt $t.MaxAttempts}}" height="6" rx="3"/></svg>
         </div>
       </dd>

@@ -157,6 +157,8 @@ A task list shows the newest tasks first. A list of only dead tasks, only
 canceled tasks, or both shows the tasks that finished last first. So the
 task that died a minute ago is at the top of the **Dead** page. Such a list
 says "latest first" beside its title, and shows when each task finished.
+Every state has an icon in its color. The two states that need you also
+have their name in color: `dead` in red, and `retryable` in amber.
 
 A task list has 5 seconds to read its tasks. A list of dead or canceled
 tasks never reads tasks of other states. But with no queue in the filters,

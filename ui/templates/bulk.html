@@ -16,7 +16,7 @@
     <p>{{$d.Explain}}</p>
     <form class="bulk-actions" method="post" action="{{$d.Path}}">
       <button class="btn {{if $d.Danger}}danger-solid{{else}}primary{{end}}">{{template "icon" $d.Icon}}{{$d.Verb}} {{$d.Tasks}}</button>
-      <a class="btn quiet" href="{{$d.Back}}">Back to the tasks</a>
+      <a class="btn quiet" href="{{$d.Back}}">{{template "icon" "back"}}Back to the tasks</a>
     </form>
     {{else}}
     <p>No task matches. {{$d.None}}</p>

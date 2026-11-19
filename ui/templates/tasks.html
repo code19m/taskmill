@@ -33,11 +33,11 @@
     {{/* The first task that "Load more" added is the place that its link names. */}}
     <tbody>{{range $i, $t := $d.Tasks}}
       <tr data-href="{{path "/tasks/"}}{{.ID}}" data-key="{{.ID}}"{{if and $i (eq $i $d.Seen)}} id="more"{{end}}>
-        <td class="num"><a class="mono strong" href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
+        <td class="num"><a class="task-id" href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
         <td class="mono" title="{{.Kind}}">{{.Kind}}</td>
         <td title="{{.Queue}}{{with .GroupKey}}, FIFO group {{visible .}}{{end}}">{{.Queue}}{{if .GroupKey}}<span class="group">{{visible .GroupKey}}</span>{{end}}</td>
         <td><div class="state-cell">{{template "state" .State}}{{if ne .Priority 2}}<span class="chip priority-{{.Priority}}" title="Priority: {{.Priority}}">{{.Priority}}</span>{{end}}</div></td>
-        <td class="num mono">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
+        <td class="num">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
         <td class="tone-faint" title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>
         {{if $d.Order.ByFinish}}<td class="tone-faint" title="{{timestamp .FinalizedAt}}">{{ago .FinalizedAt}}</td>
         {{else}}<td class="tone-faint" title="{{timestamp .RunAt}}">{{ago .RunAt}}</td>{{end}}
@@ -48,7 +48,7 @@
   </div>
   <div class="pager">
     <span>{{if $d.Paged}}<a class="btn sm quiet" href="{{$d.First}}">{{template "icon" "first"}}{{$d.Order.First}}</a>{{end}}</span>
-    {{if $d.More}}<a class="btn sm" href="{{$d.More}}" data-more>Load more</a>
+    {{if $d.More}}<a class="btn sm" href="{{$d.More}}" data-more>{{template "icon" "more"}}Load more</a>
     {{else if $d.Next}}<a class="btn sm" href="{{$d.Next}}">{{$d.Order.Next}}{{template "icon" "next"}}</a>
     {{else}}<span></span>{{end}}
     <span class="subtle" data-shown>{{len $d.Tasks}} shown</span>
