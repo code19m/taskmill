@@ -6,7 +6,7 @@ upgrade, see [Upgrading](../production/upgrading.md).
 
 ## Status
 
-- The latest release is **v0.11.1**.
+- The latest release is **v0.12.0**.
 - **The API is final for v1.0.0.** v1.0.0 is not tagged yet: it waits for
   more use in production. [The API's shape](../design/api-shape.md) says
   why the API has this shape, and which other shapes we rejected.

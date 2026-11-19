@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-20
+
 ### Added
 
 - Every task list of the dashboard has a filter by time, where only the
@@ -1776,7 +1778,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/code19m/taskmill/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/code19m/taskmill/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/code19m/taskmill/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/code19m/taskmill/compare/v0.9.0...v0.10.0
