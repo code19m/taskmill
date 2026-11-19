@@ -17,6 +17,14 @@ All notable changes to taskmill are recorded here. The format follows
   color, and the loading bar and the meter of a task's attempts are gray.
   The indigo accent stays only for the focus ring and for the needle and
   the arc of the dial.
+- On the dashboard's overview, the count of the schedules stands with the
+  other counters, in one row of six, and its tooltip says when the next
+  schedule runs. The retention periods are one quiet line under the queues:
+  they are settings, and stood there as two large numbers.
+  When the maintainer last counted the tasks stands at the end of the top
+  bar again, as "Counted 4s ago" beside a clock: quiet while it is fresh,
+  and amber once it is over a minute old. It was behind a hint beside the
+  title. A count that stopped at its cap says so in its tooltip.
 
 ## [0.11.1] - 2026-11-19
 
