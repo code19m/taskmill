@@ -136,7 +136,7 @@ theme, and the next pages follow the device.
 | Page | What you see | What you can do |
 |---|---|---|
 | **Overview** | Task counts per queue and state, a dial of the attempts a minute, charts of tasks and attempts over the last 1, 6, or 24 hours, the number of workers, and the retention periods | Pause and resume a queue |
-| **Tasks** | Tasks filtered by state, queue, kind, and FIFO group. Dead and canceled tasks also by when they finished | Retry, cancel, or delete every task that matches the filters |
+| **Tasks** | Tasks filtered by state, queue, kind, FIFO group, and time: when they were created, or for dead and canceled tasks when they finished | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its timetable in words and its next and last run | Pause, resume, or run it now |
 | **Workers** | Each worker, with its host, version, queues, and kinds, and which one is the [maintainer](../concepts/glossary.md#maintainer) | Nothing: this page is for looking |
@@ -193,20 +193,20 @@ A task list shows the newest tasks first, and a list of only dead tasks,
 only canceled tasks, or both shows the tasks that finished last first, with
 the time of each: the task that died a minute ago is at the top of the
 **Dead** page. An arrow in the header marks the column that orders the
-list: **ID**, or **Finished**. The row under a list shows more of it: click
-anywhere in the row. A list that starts after other tasks, as the page after
-250 tasks does, has a row at its top that leads back to the first page.
+list: **ID**, **Finished**, or **Created** while a range of creation times
+is set. The row under a list shows more of it: click anywhere in it. A list
+that starts after other tasks has a row at its top that leads to its start.
 Every state has an icon in its color, and the two states that need you also
 have their name in color: `dead` in red, and `retryable` in amber. A badge
 beside the state marks a priority that is not normal, without a state color:
 `high` is bolder than `low`, and `critical` is filled.
 
-A list of dead or canceled tasks has one more filter, **Finished**, which
-shows the tasks that finished in a range of time:
+Every task list has a filter by time: **Finished** on a list of only dead
+or canceled tasks, and **Created** on any other. It shows a range of time:
 
 | You want… | Do this |
 |---|---|
-| The tasks of the last hours or days | Choose a preset, such as **Last 6 hours**. The list starts at that time and has no end, so it shows new tasks as they finish |
+| The tasks of the last hours or days | Choose a preset, such as **Last 6 hours**. The list starts at that time and has no end, so it shows new tasks as they come |
 | Whole days, or a precise period such as last night | Click the first and the last day in the calendar: **From** and **To** show the range, from 00:00 to 23:59. Type other times, or dates, if you need them, or empty one for a range with one end. Then choose **Apply**. The range holds the minute of **To**: in the address, `before` is the minute after it |
 | Every task again | Choose **Any time** |
 
@@ -217,19 +217,19 @@ address holds instants, `since` and `before`, so a link shows the same tasks
 to everyone ([Dashboard routes](../reference/taskmill-ui.md#dashboard-routes)
 has the forms of a time). While a range is set, the list hides **Retry all**,
 **Cancel all**, and **Delete all**: they act on every task that the other
-filters match, also outside the range. If you add another state, the list
-drops the range: only dead and canceled tasks are listed by finish time.
+filters match, also outside the range. The range is of the time that the
+button names: change the states, and it can become one of the other time.
 
 A task list has 5 seconds to read its tasks. A list of dead or canceled
 tasks never reads tasks of other states. But with no queue in the filters,
 as on the **Dead** page, it reads up to as many tasks as it shows from each
-queue that has such tasks, so a list of 250 tasks reads five times as many
-as a list of 50: with hundreds of queues, choose a queue. Some other lists
-can read many tasks that they do not show, such as the available tasks of
-all queues in a very large table. If a list runs out of time, the page says
-"Taking too long", and what may help: a queue and a state in the filters, or
-fewer filters ([Manage tasks from code](operations-api.md#find-tasks) says
-which lists are fast).
+queue that has such tasks: with hundreds of queues, choose a queue. A list
+with a range of creation times reads from each queue in the same way. Other
+lists can read many tasks that they do not show, such as the available
+tasks of all queues in a very large table. If a list runs out of time, the
+page says "Taking too long", and what may help: a queue and a state in the
+filters, or fewer filters ([Manage tasks from code](operations-api.md#find-tasks)
+says which lists are fast).
 
 A retry of a canceled task takes the task's
 [dedupe key](../concepts/glossary.md#dedupe-key) back. If another task holds

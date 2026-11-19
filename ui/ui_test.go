@@ -1296,10 +1296,10 @@ func TestBulkActions(t *testing.T) {
 }
 
 // The task list offers the bulk actions that the selected states allow,
-// without counting the tasks. A list with a range of finish times offers
-// none: a bulk action acts on the filters alone, also on the tasks outside
-// the range. Each is a link to the page that asks, marked for the script,
-// which asks in its dialog.
+// without counting the tasks. A list with a range, of finish times or of
+// creation times, offers none: a bulk action acts on the filters alone, also
+// on the tasks outside the range. Each is a link to the page that asks,
+// marked for the script, which asks in its dialog.
 func TestTaskListOffersBulkActions(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
@@ -1312,6 +1312,10 @@ func TestTaskListOffersBulkActions(t *testing.T) {
 		// With a range of finish times.
 		"/tasks?state=dead&since=2021-03-04T11:00Z":                 nil,
 		"/tasks?state=canceled&queue=mail&before=2021-03-04T11:00Z": nil,
+		// With a range of creation times.
+		"/tasks?queue=mail&since=2021-03-04T11:00Z":                                         nil,
+		"/tasks?queue=mail&state=available&since=2021-03-04T11:00Z&before=2021-03-05T00:00": nil,
+		"/tasks?state=dead&state=running&before=2021-03-04T11:00Z":                          nil,
 	} {
 		_, body, _ := get(t, h, path)
 		if got := strings.Count(body, `href="/tasks/bulk/`); got != len(want) {

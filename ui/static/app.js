@@ -189,7 +189,7 @@
     if ("filters" in form.dataset) {
       event.preventDefault();
       // With the script, the form's button is the one of the filter by
-      // finish time. A range that is refused keeps its menu open.
+      // time. A range that is refused keeps its menu open.
       if (!applyFilters(form)) return;
       const sel = event.submitter?.closest("details.sel");
       if (sel) shut(sel);
@@ -520,8 +520,8 @@
 
   // applyFilters shows the page for the filters at once. A change made while
   // the last one loads abandons it, so quick clicks cost no more than one.
-  // A range of finish times that is not one stays: its field says so, not
-  // a page of its own, and applyFilters returns false.
+  // A range of time that is not one stays: its field says so, not a page
+  // of its own, and applyFilters returns false.
   function applyFilters(form) {
     const url = new URL(form.action, location.href);
     for (const [name, value] of new FormData(form)) {
@@ -622,8 +622,7 @@
     }
     progress(false);
     if (mode === "ask" && tell(result)) return;
-    // The server may lead to another address of the same page: a list that
-    // takes no range of finish times leads to itself without the range.
+    // The server may lead to another address of the same page.
     const n = address(result.url ? new URL(result.url) : url, mode);
     if (n == null) return;
     render(result, { moved: mode === "push", n });
@@ -729,8 +728,8 @@
     // its link is for a browser that loads the longer list as a page.
     const more = hit?.matches("a[data-more]");
     if (more) url.hash = "";
-    // A link in a menu is a filter too, a preset of the range of finish
-    // times: the one choice closes the menu.
+    // A link in a menu is a filter too, a preset of the range of time: the
+    // one choice closes the menu.
     const sel = hit?.closest("details.sel");
     if (sel) shut(sel);
     const asks = hit?.matches("a[data-dialog]") && typeof dialog?.showModal === "function";
@@ -979,7 +978,7 @@
   //
   // The server words every time in UTC, and gives the time's instant beside
   // the words, in data-time. localise words each again in the time zone of
-  // the device: the tooltip of a time and, in the filter by finish time, the
+  // the device: the tooltip of a time and, in the filter by time, the
   // range on the button, its two bounds, and the name of the zone. It
   // changes a page before the page shows, so an update finds the words that
   // it already shows, and touches nothing. The words are the server's own,
@@ -1008,10 +1007,10 @@
       if (Number.isNaN(at.getTime()) || el.localName === "input") continue;
       el.title = `${dateOf(at)} ${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}.${pad(at.getMilliseconds(), 3)} ${zoneOf(at)}`;
     }
-    // The range of the filter by finish time, as the server words it: in
-    // short on the button, and in full, with the years and the zones, in
-    // its tooltip and for a screen reader. Its end is the last minute
-    // before "before", or the last second, as the fields have it.
+    // The range of the filter by time, as the server words it: in short on
+    // the button, and in full, with the years and the zones, in its tooltip
+    // and for a screen reader. Its end is the last minute before "before",
+    // or the last second, as the fields have it.
     const sel = scope.querySelector(".sel-range");
     if (!sel) return;
     const [since, before] = [...sel.querySelectorAll("input[data-time]")].map((field) => field.dataset.time && new Date(field.dataset.time));
@@ -1093,7 +1092,7 @@
     beat = setTimeout(tick, 1000 - (now % 1000));
   }
 
-  // The filter by finish time: a calendar, and two bounds to type
+  // The filter by time: a calendar, and two bounds to type
   //
   // To is the last minute of the range: the address takes the start of the
   // next one, as "before". So a range of days ends at 23:59, with all of

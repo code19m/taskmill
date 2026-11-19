@@ -414,26 +414,22 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
 		return
 	}
-	since, before, err := finishRange(q)
+	since, before, err := listRange(q)
 	if err != nil {
 		back := problem{err.Error(), listPath(withRange(first, time.Time{}, time.Time{})), "Clear the range"}
 		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
 		return
 	}
-	order, ranged := orderOf(f), !since.IsZero() || !before.IsZero()
-	if ranged && !order.ByFinish {
-		// Only a list in finish order takes a range. A reader who sets one,
-		// and then adds another state, arrives here: the list that they
-		// asked for is the same list without the range, and its address
-		// says so.
-		target := s.path(listPath(withRange(q, time.Time{}, time.Time{})))
-		http.Redirect(w, r, target, http.StatusSeeOther) //nolint:gosec // the request adds only a query to the path of the task list
-		return
-	}
+	ranged := !since.IsZero() || !before.IsZero()
+	order := orderOf(f, ranged)
 	first = withRange(first, since, before)
-	// The list shows no payload, no metadata, and only each task's last error.
-	params := &taskmill.ListParams{
-		Filter: f, FinishedSince: since, FinishedBefore: before, Cursor: q.Get("cursor"), Limit: limit, Summary: true,
+	// The list shows no payload, no metadata, and only each task's last
+	// error. Its range is of the time that orders it.
+	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: limit, Summary: true}
+	if order.ByFinish {
+		params.FinishedSince, params.FinishedBefore = since, before
+	} else {
+		params.CreatedSince, params.CreatedBefore = since, before
 	}
 	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -448,7 +444,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
 		return
 	}
-	filtered := len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
+	filtered := ranged || len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
 	if err != nil {
 		hint := ""
 		if filtered {
@@ -482,21 +478,17 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		groupFilter.Source = s.path("/choices/groups")
 	}
 	// A bulk action acts on every task that the filters select, also outside
-	// a range of finish times: a list with a range does not offer it.
+	// a range of time: a list with a range does not offer it.
 	var bulk *bulkLinks
 	if filtered && !ranged && !s.readOnly {
 		bulk = s.bulkLinks(f)
-	}
-	var finished *finishFilter
-	if order.ByFinish {
-		finished = s.finishFilter(first, since, before, time.Now())
 	}
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
 		Tasks                         []taskmill.TaskInfo
 		Seen                          int // tasks before those that the last "Load more" added
 		Order                         listOrder
 		States, Queues, Kinds, Groups filter
-		Finished                      *finishFilter // nil for a list that is not in finish order
+		Range                         *rangeFilter
 		Filtered, Paged               bool
 		First, More, Next             string
 		Bulk                          *bulkLinks
@@ -508,7 +500,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		newFilter("queue", "Queue", "queues", names, f.Queues).searchable(),
 		newFilter("kind", "Kind", "kinds", offered.kinds, f.Kinds).searchable(),
 		groupFilter,
-		finished,
+		s.rangeFilter(order.Time, first, since, before, time.Now()),
 		filtered, params.Cursor != "",
 		s.path(listPath(first)), more, next,
 		bulk,
@@ -561,24 +553,32 @@ func listPath(q url.Values) string {
 	return "/tasks?" + q.Encode()
 }
 
-// listOrder is how a task list names its order: what the mark of the
-// column that orders it says, and the links to the first and to the next
-// page.
+// listOrder is how a task list names its order: the column that orders it,
+// what the mark of that column says, and the links to the first and to the
+// next page.
 type listOrder struct {
+	Column            string // the column that orders the list: "id", "created", or "finished"
 	Name, First, Next string
-	ByFinish          bool // the list is in the order of when its tasks finished, and shows that time
+	Time              string // the time that the list's range is of: "Created" or "Finished"
+	ByFinish          bool   // the list is in the order of when its tasks finished, and shows that time
 }
 
-// orderOf returns the order in which Client.List returns the tasks of f: a
+// orderOf returns the order in which Client.List returns the tasks of f. A
 // list of only dead tasks, only canceled tasks, or both comes by when the
-// tasks finished, the latest first, and every other list by ID, the newest
-// first.
-func orderOf(f taskmill.TaskFilter) listOrder {
+// tasks finished, the latest first, and a range on it is one of finish
+// times. On every other list, a range is one of creation times: with one,
+// the list comes by when the tasks were created, the newest first, and
+// without one by ID.
+func orderOf(f taskmill.TaskFilter, ranged bool) listOrder {
 	unfinished := func(s taskmill.State) bool { return s != taskmill.StateDead && s != taskmill.StateCanceled }
 	if len(f.States) > 0 && !slices.ContainsFunc(f.States, unfinished) {
-		return listOrder{Name: "Latest first", First: "Latest", Next: "Earlier", ByFinish: true}
+		return listOrder{Column: "finished", Name: "Latest first", First: "Latest", Next: "Earlier", Time: "Finished", ByFinish: true}
 	}
-	return listOrder{Name: "Newest first", First: "Newest", Next: "Older"}
+	order := listOrder{Column: "id", Name: "Newest first", First: "Newest", Next: "Older", Time: "Created"}
+	if ranged {
+		order.Column = "created"
+	}
+	return order
 }
 
 // taskFilter reads the task list's filters from a query.

@@ -129,10 +129,15 @@ What follows:
   The server knows no reader's time zone, so it words a time in UTC, and
   puts the instant beside the words. The script words it again in the zone
   of the device, with the same words, before the page shows. A range of
-  finish times is in the address as two instants: a preset is a link to a
-  fixed instant, which the server computes when it renders the page, so
-  presets need no script and no zone. We rejected a time zone in a cookie
-  or in the address: a link would then show other tasks to another reader.
+  time is in the address as two instants: a preset is a link to a fixed
+  instant, which the server computes when it renders the page, so presets
+  need no script and no zone. We rejected a time zone in a cookie or in
+  the address: a link would then show other tasks to another reader.
+- **A list has one range, of the time that orders it:** of finish times on
+  a list in finish order, and of creation times on every other list. So
+  the address of a range stays valid when the reader changes the states. We
+  rejected two ranges in the address: the reader would set a time that the
+  list does not show in order, and a list has indexes for one of them.
 - **A custom range is picked in a calendar of the dashboard's own,** which
   the script draws, with a date and a time to type for each bound. The
   browser's `datetime-local` fields look different in every browser, none

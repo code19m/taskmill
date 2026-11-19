@@ -148,17 +148,19 @@
   </div>
 </details>{{end}}
 
-{{/* The filter of a task list by when its tasks finished. Its presets are
-   links. A custom range has two bounds. With the script, the menu has a
-   calendar, where the reader picks the first and the last day, and each
-   bound is a date and a time to type, in the reader's time zone: the script
-   draws the month, fills these fields from the instants of the range, and
-   sends what they hold as instants. They have no name, so a form never
-   sends them. Without the script, the two bounds are the browser's own
-   fields, which the form sends as times in UTC. */}}
-{{define "finished"}}<details class="sel sel-range">
-  <summary class="ctl sel-btn{{if not .Set}} empty{{end}}" aria-label="Finished: {{.Full}}"{{if .Set}} title="{{.Full}}"{{end}}><span class="sel-label">{{.Label}}</span>{{template "icon-chevron"}}</summary>
-  <div class="pop range" role="group" aria-label="Finished">
+{{/* The filter of a task list by the time that orders it: when its tasks
+   were created or, on a list in finish order, when they finished. Its
+   button names the time. Its presets are links. A custom range has two
+   bounds. With the script, the menu has a calendar, where the reader picks
+   the first and the last day, and each bound is a date and a time to type,
+   in the reader's time zone: the script draws the month, fills these fields
+   from the instants of the range, and sends what they hold as instants.
+   They have no name, so a form never sends them. Without the script, the
+   two bounds are the browser's own fields, which the form sends as times in
+   UTC. */}}
+{{define "range"}}<details class="sel sel-range">
+  <summary class="ctl sel-btn{{if not .Set}} empty{{end}}" aria-label="{{.Title}}: {{.Full}}"{{if .Set}} title="{{.Full}}"{{end}}><span class="sel-name">{{.Title}}:</span><span class="sel-label">{{.Label}}</span>{{template "icon-chevron"}}</summary>
+  <div class="pop range" role="group" aria-label="{{.Title}}">
     <div class="range-presets">
     {{range .Presets}}<a class="pop-opt" href="{{.Href}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}}</a>
     {{end}}</div>

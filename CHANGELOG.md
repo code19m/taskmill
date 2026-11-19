@@ -9,6 +9,13 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Added
 
+- Every task list of the dashboard has a filter by time, where only the
+  lists of dead and canceled tasks had one. On those lists it is
+  "Finished", as before. On every other list it is "Created", and shows the
+  tasks that were created in a range of time, with the same presets, the
+  same calendar, and the same fields. The button names the time. With a
+  range of creation times, the list comes in the order of that time, the
+  newest first, and the arrow in the header marks the "Created" column.
 - `ListParams.CreatedSince` and `ListParams.CreatedBefore` limit
   `Client.List` to the tasks created in a range of time: at `CreatedSince`
   or later, and before `CreatedBefore`. Any list takes the range, whatever
@@ -33,6 +40,12 @@ All notable changes to taskmill are recorded here. The format follows
   has the measurements, and the options that we rejected.
 
 ### Changed
+
+- In the dashboard, the range in the address of a task list, `since` and
+  `before`, is of the time that orders the list: of finish times on a list
+  of only dead and canceled tasks, and of creation times on any other. So
+  a range stays when you change the states, where a list with another
+  state dropped it and led to itself without it.
 
 - The dashboard's main buttons are neutral, where v0.11.0 made them indigo.
   The main action of a page or a dialog has the surface of the other
