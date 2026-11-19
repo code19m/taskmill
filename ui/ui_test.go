@@ -457,20 +457,78 @@ func TestWorkersShowTheirIDsWithoutTheHost(t *testing.T) {
 	}
 }
 
-func TestWorkersShowTheirKinds(t *testing.T) {
+// A worker's row is one line, however much the worker handles. It shows the
+// first queues that fit, and counts the rest and the kinds. Each count is a
+// button, and both open the worker's one list of all its queues and kinds,
+// each a link to its tasks: a popover, which has an id for an update to know
+// it by. A row with nothing more to show has no button and no list.
+func TestWorkersShowTheirQueuesAndKinds(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
-	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, kinds, hostname, version)
-	    VALUES ('mailer', '{mail}', '{email.send,"orders&refunds"}', 'h', 'v'), ('single', '{mail}', '{email.send}', 'h', 'v')`); err != nil {
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, kinds, hostname, version) VALUES
+	    ('many', '{default,emails,images,ledger,outbox,partner-api}', '{email.send,"orders&refunds"}', 'h', 'v'),
+	    ('fits', '{default,orders,orders-priority}', '{email.send}', 'h', 'v'),
+	    ('long', '{a-queue-with-a-name-longer-than-its-column,b}', '{}', 'h', 'v'),
+	    ('words', '{почта,заказы,отчёты,склад}', '{}', 'h', 'v'),
+	    ('lead', '{}', '{}', 'h', 'v')`); err != nil {
 		t.Fatal(err)
 	}
 	_, body, _ := get(t, handler(t, client, nil), "/workers")
-	// Each worker shows how many kinds it has handlers for, and lists them,
-	// each linked to its tasks.
+	rows := map[string]string{}
+	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {
+		rows[row[1]] = row[2]
+	}
+	for _, c := range []struct {
+		worker    string
+		want, not []string
+	}{
+		{"many", []string{
+			`<span title="default, emails, images, ledger, outbox, partner-api">default, emails, images</span>`,
+			`popovertarget="lists-many">+3<span class="visually-hidden"> more queues</span></button>`,
+			`popovertarget="lists-many">2 kinds<`,
+			`id="lists-many" popover`,
+			`<h2>Queues <span class="subtle">6</span></h2>`, `<a href="/tasks?queue=partner-api">partner-api</a>`,
+			`<h2>Kinds <span class="subtle">2</span></h2>`, `<a href="/tasks?kind=orders%26refunds">orders&amp;refunds</a>`,
+		}, nil},
+		// A count takes room, so the queues that fit without one show whole.
+		{"fits", []string{`>default, orders, orders-priority</span></div>`, `popovertarget="lists-fits">1 kind<`}, []string{">+"}},
+		// The first queue shows, whatever its length. Without kinds, the
+		// list has the queues alone.
+		{"long", []string{
+			`>a-queue-with-a-name-longer-than-its-column</span><button`, `>+1<span class="visually-hidden"> more queue</span>`,
+			`<span class="tone-ghost">none</span><div class="hint-pop lists" id="lists-long" popover`,
+		}, []string{"<h2>Kinds"}},
+		// The room is in characters, not bytes.
+		{"words", []string{`>почта, заказы, отчёты, склад</span></div>`}, []string{"popover"}},
+		{"lead", []string{`<span class="tone-ghost">maintenance only</span>`, `<span class="tone-ghost">none</span></td>`}, []string{"popover"}},
+	} {
+		for _, want := range c.want {
+			if !strings.Contains(rows[c.worker], want) {
+				t.Errorf("the row of %q lacks %s\n%s", c.worker, want, rows[c.worker])
+			}
+		}
+		for _, not := range c.not {
+			if strings.Contains(rows[c.worker], not) {
+				t.Errorf("the row of %q has %s\n%s", c.worker, not, rows[c.worker])
+			}
+		}
+	}
+}
+
+// A worker built from taskmill's own tree stores Go's "(devel)" in place of a
+// version. The page shows such a word as text, without the brackets, and a
+// version as code. The tooltip has what the worker stored.
+func TestWorkersShowAVersionAsCodeAndAWordAsText(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, hostname, version)
+	    VALUES ('released', '{mail}', 'h', 'v0.11.1'), ('built', '{mail}', 'h', '(devel)')`); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := get(t, handler(t, client, nil), "/workers")
 	for _, want := range []string{
-		">2 kinds<", ">1 kind<",
-		`href="/tasks?kind=email.send">email.send<`,
-		`href="/tasks?kind=orders%26refunds">orders&amp;refunds<`,
+		`<td class="mono tone-faint" title="v0.11.1">v0.11.1</td>`,
+		`<td class="tone-ghost" title="(devel)">devel</td>`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("want %s in\n%s", want, body)

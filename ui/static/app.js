@@ -302,20 +302,30 @@
 
   // A hint opens beside its button, toward the middle of the window: there
   // it has room, whatever its size. Its place is on the page, so it moves
-  // with the page as that scrolls. The place is set before the hint shows.
+  // with the page as that scrolls. The place is set before the hint shows,
+  // and again after an update, which can move the button: the row of a
+  // worker moves when another worker comes or goes. A worker's lists are a
+  // hint with two buttons: where the browser says which one opened it, it
+  // opens beside that one.
   let hint = null; // the hint that opened last
+  let beside = null; // the button that opened it, if the browser said
+
+  function settle() {
+    const at = (beside?.isConnected ? beside : hint.previousElementSibling).getBoundingClientRect();
+    const down = at.top < root.clientHeight / 2;
+    const forward = at.left < root.clientWidth / 2;
+    hint.style.top = down ? `${at.bottom + scrollY + 6}px` : "auto";
+    hint.style.bottom = down ? "auto" : `${root.clientHeight - at.top - scrollY + 6}px`;
+    hint.style.left = forward ? `${at.left + scrollX}px` : "auto";
+    hint.style.right = forward ? "auto" : `${root.clientWidth - at.right - scrollX}px`;
+  }
 
   document.addEventListener("beforetoggle", (event) => {
     const pop = event.target;
     if (event.newState !== "open" || !pop.matches?.(".hint-pop")) return;
     hint = pop;
-    const at = pop.previousElementSibling.getBoundingClientRect();
-    const down = at.top < root.clientHeight / 2;
-    const forward = at.left < root.clientWidth / 2;
-    pop.style.top = down ? `${at.bottom + scrollY + 6}px` : "auto";
-    pop.style.bottom = down ? "auto" : `${root.clientHeight - at.top - scrollY + 6}px`;
-    pop.style.left = forward ? `${at.left + scrollX}px` : "auto";
-    pop.style.right = forward ? "auto" : `${root.clientWidth - at.right - scrollX}px`;
+    beside = event.source;
+    settle();
   }, true);
 
   document.addEventListener("toggle", (event) => {
@@ -344,8 +354,10 @@
     pointerDown = true;
     for (const sel of openMenus()) if (!sel.contains(event.target)) sel.open = false;
     // The browser closes a hint on a click elsewhere, but not every browser
-    // takes a tap on plain text for a click.
-    if (hint?.matches(":popover-open") && !hint.parentElement.contains(event.target)) hint.hidePopover();
+    // takes a tap on plain text for a click. A press on a button of the
+    // hint is not elsewhere: the click that follows closes it.
+    if (hint?.matches(":popover-open") && !hint.parentElement.contains(event.target) &&
+      event.target.closest?.("[popovertarget]")?.popoverTargetElement !== hint) hint.hidePopover();
   }, true);
   // A press ends when the pointer lifts. A context menu, on macOS and Linux,
   // and a window that comes to the front take the lift with them: the live
@@ -1042,6 +1054,7 @@
     highlight(main);
     for (const slider of main.querySelectorAll(".chart-step")) say(slider);
     if (traced) trace(); // the update took the guide off its chart, or the chart off the page
+    if (hint?.matches(":popover-open")) settle();
     // The newer copy lists every option of a menu, and none that a search
     // found on the server: an open menu shows its search again.
     for (const sel of openMenus()) refine(sel);

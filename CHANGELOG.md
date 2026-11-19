@@ -25,6 +25,19 @@ All notable changes to taskmill are recorded here. The format follows
   bar again, as "Counted 4s ago" beside a clock: quiet while it is fresh,
   and amber once it is over a minute old. It was behind a hint beside the
   title. A count that stopped at its cap says so in its tooltip.
+- The dashboard's Workers page shows each worker in one line. The Queues
+  column has the first queues as text, as many as fit, and a count of the
+  rest: "default, emails, images +3". The Kinds column has a count. Press a
+  count to list all the queues and kinds of the worker beside it, each a
+  link to its tasks. The list opens over the table: the kinds no longer
+  open a row under the worker's row. It stays open while the page updates,
+  beside its worker, and closes on Escape or a press elsewhere. A browser
+  without popovers shows the counts as text.
+- On the Workers page, the Host column has more room, the "stale" mark
+  stands after the worker's ID, and the texts and marks of a row stand on
+  one baseline: a mark no longer makes its row taller. A worker built from
+  taskmill's own tree shows "devel" as its version, where it showed Go's
+  "(devel)": the tooltip has what the worker stored.
 
 ## [0.11.1] - 2026-11-19
 

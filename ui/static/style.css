@@ -521,7 +521,6 @@ a.chip:hover { text-decoration: none; color: var(--ink); border-color: var(--lin
    On a small screen it goes under the state, in a row that is taller. */
 .state-cell { display: flex; align-items: center; gap: 10px; }
 .state-cell .chip { padding: 0 7px; line-height: 17px; }
-.chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
 /* ---------- status ---------- */
 
@@ -621,10 +620,10 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table col.c-kind { width: 18%; }
 .table col.c-queue { width: 12%; }
 .table col.c-cron { width: 264px; }
-.table col.c-worker { width: 256px; }
-.table col.c-host { width: 18%; }
-.table col.c-version { width: 110px; }
-.table col.c-kinds { width: 110px; }
+.table col.c-worker { width: 240px; }
+.table col.c-version { width: 100px; }
+.table col.c-queues { width: 256px; }
+.table col.c-kinds { width: 120px; }
 .table col.c-act-1 { width: 128px; }
 .table col.c-act-2 { width: 220px; }
 .table-tasks { min-width: 1140px; }
@@ -633,6 +632,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table-schedules col.c-kind { width: 15%; }
 .table-schedules col.c-queue { width: 10%; }
 .table-workers { min-width: 1120px; }
+.table-workers col.c-time { width: 108px; } /* the room is the host's, which has the longest name */
 .table th {
   padding: 10px 16px; text-align: left; white-space: nowrap;
   font-size: var(--text-sm); font-weight: var(--weight-normal); color: var(--ink-muted); background: var(--glass-1); border-bottom: 1px solid var(--line);
@@ -837,31 +837,56 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 
 /* ---------- workers ---------- */
 
-.health { flex-shrink: 0; width: 7px; height: 7px; margin-right: 3px; border-radius: 50%; background: var(--ok); }
+/* A row of workers has text in two fonts and two sizes, and marks beside
+   it: all of it stands on one baseline. */
+.table-workers td { vertical-align: baseline; }
+.health { flex-shrink: 0; align-self: center; width: 7px; height: 7px; margin-right: 3px; border-radius: 50%; background: var(--ok); }
 .health.stale { background: var(--warn); }
 /* A worker shows the part of its ID after its host's name: its column has
    room for it beside the mark of the maintainer. A longer ID gives way to
-   the marks beside it, "stale" and "maintainer", which stay in view. */
-.worker { display: flex; align-items: center; gap: 6px; }
-.worker > .mono { overflow: hidden; text-overflow: ellipsis; }
-.worker > .chip { flex-shrink: 0; }
-/* A worker can handle dozens of kinds. Its row shows how many; opening the
-   count shows them all in the row below, across the table. On a narrow
-   screen the list stays in view while the table scrolls sideways. */
-.kinds > summary {
-  display: inline-flex; align-items: center; gap: 6px; list-style: none;
-  color: var(--ink-soft); cursor: pointer; user-select: none; -webkit-user-select: none;
+   the marks after it, "stale" and "maintainer", which stay in view. A mark
+   is no taller than the text, so every row is as tall as the next. */
+.worker { display: flex; align-items: baseline; gap: 6px; }
+.worker > .mono { overflow: hidden; text-overflow: ellipsis; font-size: var(--text-sm); }
+.worker > .chip { flex-shrink: 0; padding: 0 7px; line-height: 16px; }
+/* A worker's queues and kinds, in one line. The first queues are plain
+   text, as many as the server found room for, and the rest are a count; the
+   kinds are a count. A count is a quiet button, and both open the worker's
+   one list of all of them: a popover, placed and closed as a hint's text
+   is. It is no larger than the room that every button has toward the middle
+   of the window: half its width, and less than half its height. Its two
+   lists stand side by side, on a phone too, and each scrolls if it is long.
+   A name that is too long breaks, and is never cut. */
+.queues { display: flex; align-items: baseline; gap: 8px; }
+.queues > span { overflow: hidden; text-overflow: ellipsis; }
+.lists-btn {
+  position: relative; flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; margin: -2px -6px; padding: 2px 6px;
+  border: 0; border-radius: var(--radius-chip); background: none; color: var(--ink-soft); font: inherit; cursor: pointer;
 }
-.kinds > summary::-webkit-details-marker { display: none; }
-.kinds > summary .chev { color: var(--ink-faint); transition: transform var(--motion-fast) var(--ease-out); }
-.kinds[open] > summary .chev { transform: rotate(180deg); }
-.table-scroll:has(> .table-workers) { container-type: inline-size; }
-.table .kinds-row { display: none; }
-.table tr:has(.kinds[open]) > td { border-bottom: 0; }
-.table tr:has(.kinds[open]) + .kinds-row { display: table-row; }
-.kinds-row > td { padding-top: 0; overflow: visible; } /* a clipping cell would hold the list still */
-.kinds-row .chips { position: sticky; left: 16px; max-width: calc(100cqw - 32px); }
-.kinds-row .chip { font-family: var(--font-mono); white-space: normal; overflow-wrap: anywhere; }
+.queues > .lists-btn, .lists-btn .chev { color: var(--ink-faint); }
+.lists-btn .chev { transition: transform var(--motion-fast) var(--ease-out); }
+@media (hover: hover) { .lists-btn:hover { background: var(--fill-hover); color: var(--ink); } }
+.table-workers tr:has(:popover-open) { background: var(--fill-hover); }
+.table-workers tr:has(:popover-open) .lists-btn { background: var(--fill-selected); color: var(--ink); }
+.table-workers tr:has(:popover-open) .chev { transform: rotate(180deg); }
+.lists:popover-open {
+  display: grid; grid-template-rows: auto minmax(0, 1fr); grid-auto-flow: column; grid-auto-columns: fit-content(360px); column-gap: 6px;
+  max-width: calc(50vw - 16px); max-height: min(400px, 50vh - 40px); padding: 6px;
+}
+.lists h2 { padding: 6px 10px 4px; color: var(--ink-muted); font-size: var(--text-xs); font-weight: var(--weight-normal); white-space: nowrap; }
+.lists ul {
+  min-height: 0; margin: 0; padding: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable;
+  list-style: none; font-size: var(--text-label);
+}
+.lists ul.mono { font-size: var(--text-sm); }
+.lists a { display: block; padding: 4px 10px; border-radius: var(--radius-chip); color: var(--ink-soft); line-height: 20px; overflow-wrap: anywhere; }
+.lists a:hover { background: var(--fill-selected); color: var(--ink); text-decoration: none; }
+.lists a:focus-visible { outline-offset: -2px; }
+/* A browser without popovers cannot open the list: there a count is text. */
+@supports not selector(:popover-open) {
+  .lists, .lists-btn .chev { display: none; }
+  .lists-btn { pointer-events: none; }
+}
 
 /* ---------- modal and toast ---------- */
 
@@ -936,14 +961,17 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
      other columns are a swipe away. */
   .table-schedules { min-width: 1056px; }
   .table-schedules col.c-cron { width: 200px; }
+  .lists:popover-open { max-width: none; } /* as wide as the page, as a hint is */
 }
 @media (pointer: coarse) {
   .btn, .btn.sm, .pop-opt, .sel-btn, .field .ctl, .pager, .pager-link { min-height: 44px; }
   /* A hint and a segment keep their size, and take the touch around them: a
      target of 44 pixels. A segment takes none from the one beside it. */
   .seg :is(button, a) { position: relative; min-width: 44px; justify-content: center; }
-  .seg :is(button, a)::after, .hint > button::after { content: ""; position: absolute; inset: -10px 0; }
+  .seg :is(button, a)::after, .hint > button::after, .lists-btn::after { content: ""; position: absolute; inset: -10px 0; }
   .hint > button::after { inset: -10px; }
+  .lists-btn::after { inset: -11px -8px; }
+  .lists a { padding-top: 12px; padding-bottom: 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
