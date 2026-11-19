@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-19
+
 ### Changed
 
 - The dashboard moves between its pages without loading each one anew. A
@@ -1428,7 +1430,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/code19m/taskmill/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/code19m/taskmill/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/code19m/taskmill/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/code19m/taskmill/compare/v0.6.0...v0.7.0
