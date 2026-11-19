@@ -18,6 +18,14 @@ All notable changes to taskmill are recorded here. The format follows
   second, before it drops the schema. Where that wait cannot tell, through
   a proxy such as PgBouncer or while other tests use the same pool, it
   tries a drop again that PostgreSQL ended as a deadlock.
+- After a worker stopped, it could happen that no worker led for up to 10
+  seconds: no scheduled task or retry was promoted, no task whose lease had
+  run out was rescued, and no schedule ran. A worker that stops gives up
+  the statements that it has sent, and resigns as maintainer. If one of
+  those statements was its election, the database could still run it after
+  the resignation, and give the lease to the worker that had stopped. Now a
+  worker that stops waits for the answer to its election, for up to 5
+  seconds, before it resigns.
 
 ## [0.11.0] - 2026-11-19
 

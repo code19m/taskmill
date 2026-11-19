@@ -50,6 +50,17 @@ maintainer counts the queues.
   [Rows that taskmill did not write](schema-rows.md).
 - **A worker that stops deletes its lease,** also when it does not know that
   it holds one, as after a renewal whose answer was lost.
+- **It waits for its election first.** A worker that is told to stop gives
+  up the statements that it has sent, and the database may still run one of
+  them later. An election that ran after the lease was deleted would give
+  the role to a worker that has stopped, and nobody would lead until that
+  lease ran out. So the election does not end when the worker stops: the
+  worker waits for its answer, starts no other election, and then deletes
+  the lease. It waits up to 5 seconds, as long as the deletion itself may
+  take, so that a database that does not answer cannot hold the stop up
+  for longer. Then it gives the election up. Should the database run it
+  only after that, the lease lasts until it runs out, as a crashed
+  worker's does.
 - **A worker's silence is judged by its own lease.** A worker checks in
   every third of its `LeaseDuration`, and stores the lease in its row. After
   one lease without a check-in it is stale: its tasks' leases have run out.

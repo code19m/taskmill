@@ -237,12 +237,17 @@ func TestElectionIgnoresALeaseThatNoWorkerWrites(t *testing.T) {
 }
 
 // TestMaintainerStoppedWhileRenewingResigns checks that a maintainer that
-// stops while it renews its lease still resigns, so that another worker
-// takes over at once, not once the lease expires.
+// stops while its renewal gets no answer still resigns, so that another
+// worker takes over then, not once the lease expires.
 func TestMaintainerStoppedWhileRenewingResigns(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	stop := runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	w := newWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	// A worker that stops waits for its renewal for the rest of the
+	// renewal's time, one lease, which is short here, and for 5 seconds at
+	// most.
+	taskmill.SetTiming(w, taskmill.Timing{LeaderLease: 500 * time.Millisecond})
+	stop := startWorker(t, w)
 	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
 
 	// The test holds the lease's row, so the next renewal waits, as it does
@@ -256,8 +261,9 @@ func TestMaintainerStoppedWhileRenewingResigns(t *testing.T) {
 		stop()
 	}()
 
-	// A worker that resigns waits for the row too, until the transaction
-	// ends; one that does not stops at once.
+	// The worker gives the renewal up then, and resigns. A worker that
+	// resigns waits for the row too, until the transaction ends; one that
+	// does not stops at once.
 	waitFor(t, "the worker to resign or stop", func() bool {
 		select {
 		case <-stopped:
@@ -274,6 +280,72 @@ func TestMaintainerStoppedWhileRenewingResigns(t *testing.T) {
 	<-stopped
 	if n := e.count(t, "SELECT count(*) FROM {s}.leader"); n != 0 {
 		t.Fatal("the maintainer stopped without resigning; another worker waits for its lease to expire")
+	}
+}
+
+// A worker that stops gives up the statements that it had sent, and the
+// database may run one of them later, after the worker has cleaned up. If
+// that is the election, it gives the lease to a worker that has resigned and
+// stopped, and nobody leads until that lease runs out. So a worker that
+// stops waits for the answer to its election before it resigns.
+//
+// Here the renewal that is under way when the worker stops goes on in the
+// database whatever its client does: it outlives a request to cancel it, as
+// a statement does that the server had not read by then. It ends when the
+// worker's running task ends, which is after the resignation of a worker
+// that did not wait.
+func TestMaintainerResignsAfterTheElectionThatWasUnderWay(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.exec(t, `
+CREATE FUNCTION {s}.wait_for_the_test() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    LOOP
+        BEGIN
+            PERFORM pg_advisory_xact_lock_shared(hashtextextended('{s}', 0));
+            RETURN NEW;
+        EXCEPTION WHEN query_canceled THEN
+            NULL;
+        END;
+    END LOOP;
+END $$`)
+	e.exec(t, `CREATE TRIGGER wait_for_the_test BEFORE INSERT ON {s}.leader
+	           FOR EACH ROW EXECUTE FUNCTION {s}.wait_for_the_test()`)
+
+	// The task runs until the worker cancels it: DrainTimeout after the
+	// worker was told to stop, when one that does not wait has resigned
+	// long ago. Then it lets the election go on.
+	tx := e.begin(t)
+	started := make(chan struct{}, 1)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			if err := tx.Rollback(context.WithoutCancel(ctx)); err != nil {
+				return err
+			}
+			return ctx.Err()
+		}, nil),
+		Queues:       defaultQueue(1),
+		DrainTimeout: 200 * time.Millisecond,
+	})
+	// While the worker runs, its election has one lease's time: far longer
+	// than the test takes. Once it is told to stop, 5 seconds more.
+	taskmill.SetTiming(w, taskmill.Timing{LeaderLease: time.Minute})
+	stop := startWorker(t, w)
+	e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the task to start")
+	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+
+	e.txExec(t, tx, "SELECT pg_advisory_xact_lock(hashtextextended('{s}', 0))")
+	e.waitBlocked(t, "INSERT INTO {s}.leader")
+	stop()
+	waitFor(t, "the election to end", func() bool {
+		return e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND strpos(query, $1) > 0",
+			replaceSchema("INSERT INTO {s}.leader", e.schema)) == 0
+	})
+	if n := e.count(t, "SELECT count(*) FROM {s}.leader"); n != 0 {
+		t.Fatal("the stopped worker holds the maintainer's lease: the database ran its election after its resignation")
 	}
 }
 
