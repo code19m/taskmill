@@ -148,8 +148,9 @@ func TestPagesRender(t *testing.T) {
 	}
 
 	code, body, _ = get(t, h, "/admin/tasks/tasks?queue=mail&state=available")
-	if code != http.StatusOK || !strings.Contains(body, `href="/admin/tasks/tasks/`+id+`"`) {
-		t.Fatalf("task list: %d\n%s", code, body)
+	if code != http.StatusOK || !strings.Contains(body, `href="/admin/tasks/tasks/`+id+`"`) ||
+		!strings.Contains(body, `title="Priority: high">high</span>`) {
+		t.Fatalf("task list: want the task with its priority: %d\n%s", code, body)
 	}
 	code, body, _ = get(t, h, "/admin/tasks/tasks/"+id)
 	if code != http.StatusOK || strings.Contains(body, "<script>alert") || !strings.Contains(body, "&lt;script&gt;") {
