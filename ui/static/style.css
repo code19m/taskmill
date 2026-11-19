@@ -981,6 +981,22 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .toast.failed .toast-icon { color: var(--err); }
 .toast.leaving { opacity: 0; transition: opacity var(--motion-normal) var(--ease-out); }
 
+/* ---------- tooltip ---------- */
+
+/* The script's tooltip: one for the page, shown without a wait and moved by
+   its transform. It stands on ink, as a critical badge does, where a hint
+   is glass: solid, it reads over a table and over an open hint alike, and
+   costs no blur as the pointer crosses a page. It is a popover, which the
+   browser draws above everything; where there are no popovers, its z-index
+   does. Its border is the edge where the system forces its own colors. */
+.tooltip {
+  position: fixed; inset: 0 auto auto 0; z-index: 130; max-width: min(360px, calc(100vw - 16px)); margin: 0; padding: 4px 8px;
+  background: var(--ink); border: 1px solid transparent; border-radius: var(--radius-control);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.16);
+  color: var(--surface-raised); font-size: var(--text-xs); line-height: 1.4; font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere; pointer-events: none;
+}
+
 /* ---------- small screens ---------- */
 
 @media (max-width: 900px) {

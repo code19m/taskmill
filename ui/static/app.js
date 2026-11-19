@@ -484,6 +484,7 @@
   // place of a hint, which is a style attribute.
   function leave() {
     untrace();
+    undescribe(); // the page is kept with its titles
     for (const pop of document.querySelectorAll(".hint-pop[style]")) pop.removeAttribute("style");
     const parts = [document.getElementById("main"), ...document.querySelectorAll("[data-live-part]")];
     pages.delete(entry);
@@ -703,6 +704,86 @@
       pre.replaceChildren(out);
     }
   }
+
+  // Tooltips
+  //
+  // The browser shows a title only after a wait. The page shows it right
+  // away, in a tooltip of its own, for what is under the pointer or has the
+  // keyboard's focus: the nearest title, or else the whole text of what an
+  // ellipsis cuts short. A title that only repeats text that shows whole
+  // says nothing. The tooltip holds the title meanwhile, so the browser
+  // shows none, and a screen reader hears it as before, in aria-description.
+
+  const tooltip = document.createElement("div");
+  tooltip.className = "tooltip";
+  tooltip.popover = "manual"; // above everything, an open hint too
+  tooltip.setAttribute("aria-hidden", "true");
+  let asked = null; // what the tooltip was last asked about
+  let described = null; // the element that it is about
+  let held = ""; // the title that it took from that element
+
+  const nearest = (el, test) => {
+    while (el && !test(el)) el = el.parentElement;
+    return el;
+  };
+  const cuts = (el) => el.scrollWidth > el.clientWidth && getComputedStyle(el).textOverflow === "ellipsis";
+
+  // describe shows the tooltip of target, inside the window: over its
+  // element, or under it where there is no room. It measures the tooltip
+  // once. With no target, or nothing to say, it hides the tooltip.
+  function describe(target) {
+    if (held) {
+      if (!described.hasAttribute("title")) described.title = held; // one that it got meanwhile is newer
+      described.removeAttribute("aria-description");
+    }
+    asked = target;
+    const box = nearest(target, cuts);
+    described = nearest(target, (el) => el.title) ?? box;
+    held = described?.title;
+    if (held) {
+      described.removeAttribute("title");
+      described.setAttribute("aria-description", held);
+    }
+    // innerText is the text as it shows. Words that only a screen reader
+    // reads are on lines of their own in it, and complete no title.
+    tooltip.textContent = held ? (box || !described.innerText?.includes(held) ? held : "") : described?.innerText ?? "";
+    if (!tooltip.textContent) {
+      tooltip.remove();
+      return;
+    }
+    if (!tooltip.isConnected) {
+      document.body.append(tooltip);
+      tooltip.showPopover?.();
+    }
+    const at = described.getBoundingClientRect();
+    // Its text starts where the element's does, after the padding of each.
+    const x = Math.min(at.left + parseFloat(getComputedStyle(described).paddingLeft) - 9, root.clientWidth - tooltip.offsetWidth - 8);
+    const y = at.top - tooltip.offsetHeight - 6;
+    tooltip.style.transform = `translate(${Math.round(Math.max(8, x))}px, ${Math.round(y < 8 ? at.bottom + 6 : y)}px)`;
+  }
+
+  // The tooltip goes with a press, a key, a scroll, and the focus, and when
+  // the pointer leaves the window.
+  const undescribe = () => {
+    if (asked) describe(null);
+  };
+  for (const type of ["pointerdown", "keydown", "focusout", "scroll"]) document.addEventListener(type, undescribe, true);
+  root.addEventListener("pointerleave", undescribe);
+  document.addEventListener("pointerover", (event) => {
+    if (event.pointerType !== "touch" && !event.buttons) describe(event.target);
+  });
+  // The focus may scroll the page to its element, which hides the tooltip:
+  // it shows after that, in the same frame.
+  document.addEventListener("focusin", ({ target }) => {
+    requestAnimationFrame(() => {
+      if (target.matches?.(":focus-visible")) describe(target);
+    });
+  });
+  // A finger cannot hover: a tap on text that leads nowhere shows the
+  // tooltip, until the next tap.
+  document.addEventListener("click", ({ target }) => {
+    if (coarse.matches && target.closest?.("a, button, summary, label, [data-href]") === null) describe(target);
+  });
 
   // Charts: the values of a step
   //
@@ -1227,6 +1308,9 @@
   // of the same page changes only where it differs. Another page, fresh,
   // replaces it whole: nothing of the reader's state belongs to it.
   function apply(result, fresh = false) {
+    // The page changes with its titles on it. Then the tooltip shows again.
+    const about = asked;
+    undescribe();
     localise(result.main);
     const main = document.getElementById("main");
     if (fresh) {
@@ -1248,6 +1332,7 @@
     // The newer copy lists every option of a menu, and none that a search
     // found on the server: an open menu shows its search again.
     for (const sel of openMenus()) refine(sel);
+    if (about?.isConnected) describe(about);
   }
 
   // Live updates: every few seconds the page fetches itself and updates in
@@ -1283,6 +1368,7 @@
       offline: `This device is offline. Last update at ${since}.`,
       "signed-out": "The session ended. Click to reload the page.",
     }[state];
+    if (described === toggle) describe(asked); // its tooltip says the new title
   }
 
   // The reader is busy during a press, an action, or a scroll, while a

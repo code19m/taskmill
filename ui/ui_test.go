@@ -284,6 +284,59 @@ func TestTimesShowInUTC(t *testing.T) {
 	}
 }
 
+// A page says most times by how long ago they were, or how far ahead they
+// are. Each of these has the exact time as its title, with its instant: the
+// tooltip that says when, in the reader's time zone with the script. The
+// axis of a chart is no such time: it is a scale that counts back from now,
+// and the chart's guide tells the time of each step.
+func TestRelativeTimesHaveTheirExactTime(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	// What these pages tell the time of was minutes ago, or is minutes ahead.
+	storeCounts(t, pool, schema, "5 minutes", false)
+	var id int64
+	if err := pool.QueryRow(t.Context(), `
+	    WITH schedule AS (
+	        INSERT INTO `+schema+`.schedules (name, queue, kind, cron, timezone, next_run_at, last_run_at)
+	        VALUES ('nightly', 'mail', 'greet', '0 3 * * *', 'UTC', now() + interval '3 minutes', now() - interval '4 minutes')
+	    ), worker AS (
+	        INSERT INTO `+schema+`.workers (id, queues, hostname, version, started_at, heartbeat_at)
+	        VALUES ('w', '{mail}', 'h', 'v', now() - interval '6 minutes', now() - interval '2 minutes')
+	    )
+	    INSERT INTO `+schema+`.tasks (queue, kind, state, payload, attempt, max_attempts, created_at, run_at, attempted_at, finalized_at, errors)
+	    VALUES ('mail', 'greet', 'dead', '{}', 1, 1, now() - interval '9 minutes', now() - interval '8 minutes',
+	        now() - interval '7 minutes', now() - interval '7 minutes',
+	        jsonb_build_array(jsonb_build_object('attempt', 1, 'at', now() - interval '7 minutes', 'message', 'boom')))
+	    RETURNING id`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, nil)
+	var (
+		axis     = regexp.MustCompile(`<div class="chart-x"[^>]*>.*?</div>`)
+		relative = regexp.MustCompile(`<[^<>]*>[^<>]*\d+[smhd] (?:ago|from now)`) // with the tag that it stands in
+		exact    = regexp.MustCompile(`^<[^<>]* title="\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} UTC" data-time="[^"]+Z">`)
+	)
+	for path, want := range map[string]int{
+		"/":                                   3, // the age of the counts, in the hint and beside it, and the next run
+		"/tasks":                              2, // created, and run at
+		"/tasks?state=dead":                   2, // created, and finished
+		"/tasks/" + strconv.FormatInt(id, 10): 5, // created, run at, last attempt, finished, and the error
+		"/schedules":                          2, // the next run, and the last one
+		"/workers":                            2, // started, and checked in
+	} {
+		_, body, _ := get(t, h, path)
+		times := relative.FindAllString(axis.ReplaceAllString(body, ""), -1)
+		if len(times) != want {
+			t.Errorf("%s says %d times by how far they are from now, want %d: %q", path, len(times), want, times)
+		}
+		for _, said := range times {
+			if !exact.MatchString(said) {
+				t.Errorf("%s: a time has no exact time as its title: %s", path, said)
+			}
+		}
+	}
+}
+
 func TestNavShowsTheStoredDeadCount(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {

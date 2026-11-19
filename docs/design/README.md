@@ -114,8 +114,8 @@ What follows:
 - **Two small scripts of our own,** `app.js` and `theme.js`, under a strict
   content security policy. They keep pages live, apply filters as they
   change, confirm actions in dialogs, show a chart's values under the
-  pointer, show times in the reader's time zone, and apply the chosen
-  theme. Every page also works without them.
+  pointer and a tooltip without a wait, show times in the reader's time
+  zone, and apply the chosen theme. Every page also works without them.
   Nothing needs a JavaScript build step or third-party code.
 - **The server renders every page, and the script only shows it in place.**
   For a link, the back button, or an action, the script fetches the page

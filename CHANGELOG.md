@@ -51,6 +51,18 @@ All notable changes to taskmill are recorded here. The format follows
   screen reader. It offers no day after today, and its week starts on
   Monday, or on the first day that the browser's language has. Without the
   script, the browser's own fields remain, in UTC: **From** and **Before**.
+- The dashboard shows a tooltip right away, where the browser showed it
+  after about a second. Point at a time such as "4s ago" to read the exact
+  time in your time zone, and at text that ends in "…" to read the whole
+  text, also where such text had no tooltip, as a long value on the button
+  of a filter. A tooltip shows too while its element has the keyboard's
+  focus, and it goes with Escape. On a touch screen, tap a time, or text
+  that is cut short: the tooltip stays until the next tap. A tap on a link,
+  a button, or a row of a task list still leads where it led. A tooltip that
+  would only repeat text that the page shows whole no longer appears. On
+  the overview, the age of the counts in their hint and the next run of the
+  schedules have their exact time as well. Without JavaScript, the browser
+  shows the tooltips as before.
 
 ## [0.11.1] - 2026-11-19
 
