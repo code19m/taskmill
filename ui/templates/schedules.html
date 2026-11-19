@@ -17,7 +17,7 @@
     <tbody>{{range $s := .Data}}
       <tr data-key="{{$s.Name}}">
         <td title="{{$s.Name}}"><span class="strong">{{$s.Name}}</span>{{if $s.Paused}} <span class="chip warn">paused</span>{{end}}</td>
-        <td><code class="chip mono">{{$s.Cron}}</code> <span class="tone-ghost">{{$s.Location}}</span></td>
+        <td class="wrap" title="{{$s.Cron}} {{$s.Location}}">{{with cronWords $s.Cron}}<div class="cron-words">{{.}}</div>{{end}}<code class="chip mono">{{$s.Cron}}</code> <span class="tone-ghost">{{$s.Location}}</span></td>
         <td class="mono" title="{{$s.Kind}}">{{$s.Kind}}</td>
         <td title="{{$s.Queue}}"><a href="{{path "/tasks"}}{{query "queue" $s.Queue "kind" $s.Kind}}">{{$s.Queue}}</a></td>
         <td class="{{if $s.Paused}}tone-ghost{{end}}" title="{{timestamp $s.NextRunAt}}">{{if $s.Paused}}paused{{else}}{{ago $s.NextRunAt}}{{end}}</td>

@@ -546,7 +546,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table col.c-count { width: 92px; }
 .table col.c-kind { width: 18%; }
 .table col.c-queue { width: 12%; }
-.table col.c-cron { width: 200px; }
+.table col.c-cron { width: 264px; }
 .table col.c-host { width: 22%; }
 .table col.c-version { width: 110px; }
 .table col.c-kinds { width: 110px; }
@@ -554,7 +554,9 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table col.c-act-2 { width: 220px; }
 .table-tasks { min-width: 1140px; }
 .table-queues { min-width: 980px; }
-.table-schedules { min-width: 1080px; }
+.table-schedules { min-width: 1144px; }
+.table-schedules col.c-kind { width: 15%; }
+.table-schedules col.c-queue { width: 10%; }
 .table-workers { min-width: 1050px; }
 .table th {
   padding: 10px 16px; text-align: left; white-space: nowrap;
@@ -601,6 +603,12 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 }
 /* A task's last error is quiet text: its state, beside it, has the color. */
 .error-cell { color: var(--ink-muted); font-size: var(--text-sm); }
+/* A schedule's timetable: what its cron expression means, above the
+   expression and its time zone. A long expression or zone breaks and is
+   never cut short: the times are in that zone. */
+.cron-words { margin-bottom: 3px; }
+.table-schedules td.wrap { overflow-wrap: anywhere; }
+.table-schedules td.wrap .chip { max-width: 100%; white-space: normal; }
 /* A browser without the script opens a longer list at the first task that
    "Load more" added. The margin keeps that row clear of the sticky header,
    which is two rows tall on a small screen. */
@@ -829,6 +837,10 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
      badge beside it, so the badge goes under the state. A wider column would
      take that room from the kind. */
   .state-cell { flex-wrap: wrap; row-gap: 2px; }
+  /* A phone shows a schedule's name and its timetable side by side; the
+     other columns are a swipe away. */
+  .table-schedules { min-width: 1056px; }
+  .table-schedules col.c-cron { width: 200px; }
 }
 @media (pointer: coarse) {
   .btn, .btn.sm, .pop-opt, .sel-btn { min-height: 44px; }

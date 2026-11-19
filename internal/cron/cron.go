@@ -18,13 +18,19 @@ import (
 	"time"
 )
 
-// Schedule is a parsed cron expression.
+// Schedule is a parsed cron expression, as [Parse] returns it. Its fields
+// say what the expression matches, for the dashboard, which puts it into
+// words.
 type Schedule struct {
-	minute, hour, dom, month, dow uint64
+	// Minute, Hour, Dom, Month, and Dow are the values that each field
+	// matches, as sets of bits: bit v is set if the field matches v. Dow
+	// counts the days of the week from Sunday, 0, to Saturday, 6.
+	Minute, Hour, Dom, Month, Dow uint64
 
-	// domAny and dowAny record a "*" day field, which decides how the two
-	// day fields combine.
-	domAny, dowAny bool
+	// EitherDay says how the two day fields combine. If it is true, a day
+	// matches when Dom or Dow matches it: that is so when neither field is
+	// "*". If it is false, a day matches when both match it.
+	EitherDay bool
 }
 
 type field struct {
@@ -74,24 +80,26 @@ func Parse(expr string) (*Schedule, error) {
 
 	var s Schedule
 	var err error
-	if s.minute, _, err = minuteField.parse(fields[0]); err != nil {
+	var domAny, dowAny bool
+	if s.Minute, _, err = minuteField.parse(fields[0]); err != nil {
 		return nil, err
 	}
-	if s.hour, _, err = hourField.parse(fields[1]); err != nil {
+	if s.Hour, _, err = hourField.parse(fields[1]); err != nil {
 		return nil, err
 	}
-	if s.dom, s.domAny, err = domField.parse(fields[2]); err != nil {
+	if s.Dom, domAny, err = domField.parse(fields[2]); err != nil {
 		return nil, err
 	}
-	if s.month, _, err = monthField.parse(fields[3]); err != nil {
+	if s.Month, _, err = monthField.parse(fields[3]); err != nil {
 		return nil, err
 	}
-	if s.dow, s.dowAny, err = dowField.parse(fields[4]); err != nil {
+	if s.Dow, dowAny, err = dowField.parse(fields[4]); err != nil {
 		return nil, err
 	}
-	if s.dow&(1<<7) != 0 { // 7 is Sunday too
-		s.dow = s.dow&^(1<<7) | 1
+	if s.Dow&(1<<7) != 0 { // 7 is Sunday too
+		s.Dow = s.Dow&^(1<<7) | 1
 	}
+	s.EitherDay = !domAny && !dowAny
 	return &s, nil
 }
 
@@ -275,7 +283,7 @@ wrap:
 	if c.Year() > limit {
 		return time.Time{}, errNoTime
 	}
-	for s.month&(1<<uint(c.Month())) == 0 {
+	for s.Month&(1<<uint(c.Month())) == 0 {
 		c = time.Date(c.Year(), c.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 		if c.Month() == time.January {
 			goto wrap
@@ -287,13 +295,13 @@ wrap:
 			goto wrap
 		}
 	}
-	for s.hour&(1<<uint(c.Hour())) == 0 {
+	for s.Hour&(1<<uint(c.Hour())) == 0 {
 		c = c.Truncate(time.Hour).Add(time.Hour)
 		if c.Hour() == 0 {
 			goto wrap
 		}
 	}
-	for s.minute&(1<<uint(c.Minute())) == 0 {
+	for s.Minute&(1<<uint(c.Minute())) == 0 {
 		c = c.Add(time.Minute)
 		if c.Minute() == 0 {
 			goto wrap
@@ -303,10 +311,10 @@ wrap:
 }
 
 func (s *Schedule) dayMatches(t time.Time) bool {
-	dom := s.dom&(1<<uint(t.Day())) != 0
-	dow := s.dow&(1<<uint(t.Weekday())) != 0
-	if s.domAny || s.dowAny {
-		return dom && dow
+	dom := s.Dom&(1<<uint(t.Day())) != 0
+	dow := s.Dow&(1<<uint(t.Weekday())) != 0
+	if s.EitherDay {
+		return dom || dow
 	}
-	return dom || dow
+	return dom && dow
 }

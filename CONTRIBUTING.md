@@ -103,7 +103,7 @@ Every change meets the same bar:
 | Shorten timers instead of waiting for them. | A test that waits for the worker's internal timers, such as the maintainer's interval, may shorten them with `taskmill.SetTiming` from `export_test.go`. |
 | Fix a bug with a test. | The test fails without the fix. |
 | Keep `Example` functions running. | They compile with the tests. Those that need no database have an `// Output:` comment, so they run as tests too. |
-| Fuzz input from outside. | The dashboard's query parameters, list cursors, and task payloads each have a fuzz target. Every test run replays the seeds. When a fuzzer finds a bug, add its input as a seed. |
+| Fuzz input from outside. | The dashboard's query parameters, list cursors, task payloads, and cron expressions each have a fuzz target. Every test run replays the seeds. When a fuzzer finds a bug, add its input as a seed. |
 
 Every test also checks the FIFO group invariants when it ends.
 

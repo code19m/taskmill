@@ -138,7 +138,7 @@ theme, and the next pages follow the device.
 | **Overview** | Task counts per queue and state, a dial of the attempts a minute, charts of tasks and attempts over the last 1, 6, or 24 hours, and the number of workers | Pause and resume a queue |
 | **Tasks** | Tasks filtered by state, queue, kind, and FIFO group | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
-| **Schedules** | Each schedule, with its next and last run | Pause, resume, or run it now |
+| **Schedules** | Each schedule, with its timetable in words and its next and last run | Pause, resume, or run it now |
 | **Workers** | Each worker, with its host, version, and queues, and which one is the [maintainer](../concepts/glossary.md#maintainer) | Nothing: this page is for looking |
 
 On the **Overview**, the **Activity** card shows the last 1, 6, or 24 hours,
@@ -157,6 +157,14 @@ So the needle reads against the busiest step of the period that you chose:
 near the top of the scale, the workers are as busy as at their peak. Workers
 write their counts every 10 seconds, so the dial reads a step 15 seconds
 after it ends, not sooner.
+
+On the **Schedules** page, the **Cron** column says each timetable in
+words, such as "Weekdays at 09:00", above the cron expression. The times are
+in the schedule's time zone, which stands beside the expression. The words
+are there only when they say exactly what the expression does, in a few
+words: an expression with both day fields set, or with more than three
+times, shows alone. [Write the timetable](schedules.md#write-the-timetable)
+says how an expression is read, and what happens when the clocks change.
 
 On the **Workers** page, the **Kinds** column counts the kinds that the
 worker has handlers for: click the count to list them. The **Checked in**
