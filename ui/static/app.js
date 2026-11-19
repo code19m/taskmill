@@ -447,16 +447,25 @@
   // page.
   function render(result, { moved, n, y = 0, notice = null }) {
     inflight?.abort(); // an update of the page that this one replaces
+    const focused = document.activeElement;
     apply(result, moved);
     entry = n;
     shown = here();
     if (notice) notify(notice);
-    if (!moved) return;
     const main = document.getElementById("main");
+    const announcer = document.querySelector("[data-announce]");
+    if (!moved) {
+      // The change may remove the element that had focus, as the last "Load
+      // more" removes its link: the page takes the focus, not the body. And
+      // a list that is longer, or has other filters, tells a screen reader
+      // how many tasks it shows now. An action says what it did itself.
+      if (focused?.isConnected === false) main.focus({ preventScroll: true });
+      if (!notice && announcer) announcer.textContent = main.querySelector("[data-shown]")?.textContent ?? "";
+      return;
+    }
     scrollTo(0, y);
     main.focus({ preventScroll: true });
     if (!reducedMotion.matches) main.animate?.([{ opacity: 0.4 }, { opacity: 1 }], { duration: FADE_MS, easing: "ease-out" });
-    const announcer = document.querySelector("[data-announce]");
     if (announcer) announcer.textContent = document.title;
   }
 
@@ -520,7 +529,12 @@
     // A click that ends a selection of text in a row is no click on the row.
     if (!url || (hit?.localName === "tr" && window.getSelection()?.isCollapsed === false)) return;
     event.preventDefault();
-    navigate(url, "push");
+    // More of a list is another state of its page, as a filter is: it
+    // changes in place, and the reader stays where they are. The place in
+    // its link is for a browser that loads the longer list as a page.
+    const more = hit?.matches("a[data-more]");
+    if (more) url.hash = "";
+    navigate(url, more ? "replace" : "push");
   });
 
   document.addEventListener("keydown", (event) => {

@@ -17,7 +17,7 @@ func FuzzPages(f *testing.F) {
 	for _, target := range []string{
 		"/", "/?range=7d", "/?range=%ff",
 		"/tasks?state=dead&queue=mail&kind=greet&group=topic%1Fkey",
-		"/tasks?state=completed&state=available&cursor=MTA", "/tasks?cursor=LTE", "/tasks?cursor=%25",
+		"/tasks?state=completed&state=available&cursor=MTA", "/tasks?cursor=LTE", "/tasks?cursor=%25", "/tasks?limit=250", "/tasks?limit=-1",
 		"/tasks?state=nope", "/tasks/1", "/tasks/-1", "/tasks/9223372036854775808",
 		"/choices/groups?search=%25_", "/schedules", "/workers", "/static/ui.css?v=0",
 		// Text that PostgreSQL rejects once failed the request.

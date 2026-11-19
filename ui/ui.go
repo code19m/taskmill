@@ -85,7 +85,8 @@ const (
 )
 
 const (
-	pageSize       = 50
+	pageSize       = 50               // tasks that the task list shows at first, and that "Load more" adds
+	maxShown       = 250              // most tasks that the task list shows on one page, which it reads at every update
 	requestTimeout = 10 * time.Second // bound on one request, so a slow database cannot hold it
 	maxChoices     = 100              // most values of one filter that a request may choose
 	gzipMin        = 1024             // smallest response worth compressing
@@ -398,13 +399,19 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := taskFilter(q)
-	// The list shows no payload, no metadata, and only each task's last error.
-	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: pageSize, Summary: true}
-	res, err := s.client.List(r.Context(), params)
 	first := maps.Clone(q) // the list's first page
-	for _, key := range []string{"cursor", "done", "count", "conflicts"} {
+	for _, key := range []string{"cursor", "limit", "done", "count", "conflicts"} {
 		first.Del(key)
 	}
+	limit, err := shown(q.Get("limit"))
+	if err != nil {
+		back := problem{err.Error(), listPath(first), "Back to the first page"}
+		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
+		return
+	}
+	// The list shows no payload, no metadata, and only each task's last error.
+	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: limit, Summary: true}
+	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		// The error names what the client refused: the filter, or the
 		// cursor. With a cursor in the address, the filter may be fine, so
@@ -436,12 +443,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		names = append(names, kq.Name)
 	}
 	offered := s.filterChoices(r)
-	next := ""
-	if res.Next != "" {
-		v := maps.Clone(first)
-		v.Set("cursor", res.Next)
-		next = s.path("/tasks?" + v.Encode())
-	}
+	more, next := s.continuation(first, params, res.Next)
 	states := filterQuery(f)["state"]
 	nav, title := "tasks", "Tasks"
 	if slices.Equal(states, []string{string(taskmill.StateDead)}) {
@@ -461,22 +463,61 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
 		Tasks                         []taskmill.TaskInfo
+		Seen                          int // tasks before those that the last "Load more" added
 		Order                         listOrder
 		States, Queues, Kinds, Groups filter
 		Filtered, Paged               bool
-		First, Next                   string
+		First, More, Next             string
 		Bulk                          *bulkLinks
 	}{
 		res.Tasks,
+		limit - pageSize,
 		orderOf(f),
 		newFilter("state", "State", "states", stateNames, states),
 		newFilter("queue", "Queue", "queues", names, f.Queues).searchable(),
 		newFilter("kind", "Kind", "kinds", offered.kinds, f.Kinds).searchable(),
 		groupFilter,
 		filtered, params.Cursor != "",
-		s.path(listPath(first)), next,
+		s.path(listPath(first)), more, next,
 		bulk,
 	}})
+}
+
+// continuation returns the link that leads on from a task list: none if no
+// task follows its last one, where the cursor after continues. The list
+// continues in place: more leads to the same list with a page more of it,
+// so that the live updates keep every task on screen up to date. It names
+// the first task that it adds, "more": a browser without the script loads
+// the longer list, and opens it there. Each update reads all the tasks on
+// screen, so the list stops growing at maxShown. From there, next leads to
+// a page of its own, which starts after the list's last task.
+func (s *server) continuation(first url.Values, params *taskmill.ListParams, after string) (more, next string) {
+	if after == "" {
+		return "", ""
+	}
+	v := maps.Clone(first)
+	if params.Limit >= maxShown {
+		v.Set("cursor", after)
+		return "", s.path("/tasks?" + v.Encode())
+	}
+	if params.Cursor != "" {
+		v.Set("cursor", params.Cursor)
+	}
+	v.Set("limit", strconv.Itoa(min(params.Limit+pageSize, maxShown)))
+	return s.path("/tasks?" + v.Encode() + "#more"), ""
+}
+
+// shown returns how many tasks the task list shows, as the limit in its
+// address says: a page, if it says nothing.
+func shown(limit string) (int, error) {
+	if limit == "" {
+		return pageSize, nil
+	}
+	n, err := strconv.Atoi(limit)
+	if err != nil || n < 1 || n > maxShown {
+		return 0, fmt.Errorf("the limit must be a number from 1 to %d", maxShown)
+	}
+	return n, nil
 }
 
 // listPath returns the path of the task list with the query q, if it has

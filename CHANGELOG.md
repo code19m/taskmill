@@ -7,6 +7,20 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard's task list has a "Load more" button in place of the link
+  to the next page. It shows the same list with 50 more tasks: the tasks
+  that you saw stay where they are, and the live updates keep all of them
+  up to date. Without the script, the browser loads the longer list, and
+  opens it at the first task that the button added. The address holds how
+  many tasks the list shows, as `limit`, so a reload shows as many. A list
+  shows up to 250 tasks, because every update reads them all. After that,
+  it continues from its last task on a page of its own, as before. Under
+  every list that has tasks, the page also says how many it shows, and
+  tells a screen reader the new number after "Load more" or a change of
+  the filters.
+
 ### Fixed
 
 - In the dashboard's task list, the priority badge of a task stood right

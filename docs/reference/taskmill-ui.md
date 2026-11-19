@@ -84,7 +84,7 @@ allow-list, or to link to a page from an alert.
 | Method and path | What it does | Query parameters |
 |---|---|---|
 | `GET /` | The overview: queues, counts, and charts | `range`: `1h` (the default), `6h`, or `24h` |
-| `GET /tasks` | The task list, 50 tasks per page | `state`, `queue`, `kind`, `group`: each can repeat, and its first 100 values count. `cursor`: the next page |
+| `GET /tasks` | The task list: 50 tasks, and up to 250 as you load more | `state`, `queue`, `kind`, `group`: each can repeat, and its first 100 values count. `limit`: how many tasks to show, from 1 to 250. `cursor`: the task that a later page starts after |
 | `GET /tasks/{id}` | One task | — |
 | `GET /schedules` | The schedules | — |
 | `GET /workers` | The workers | — |
@@ -112,7 +112,7 @@ queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.
 | 303 | An action worked. The redirect leads to a page that says so |
 | 304 | The page did not change since the browser's copy |
 | 307 | With a prefix: the prefix without its last slash, such as `/admin/tasks`, or a path that is not clean, such as one with a double slash. The redirect leads to the clean path under the prefix |
-| 400 | A filter value is not valid, such as an unknown state. Or the `cursor` is not one that this list made, as in a bookmark from before an upgrade. Or a bulk action, or its page, got no filter. Or an action on a queue or a schedule got no valid `name` |
+| 400 | A filter value is not valid, such as an unknown state. Or the `cursor` is not one that this list made, as in a bookmark from before an upgrade. Or the `limit` is not a number from 1 to 250. Or a bulk action, or its page, got no filter. Or an action on a queue or a schedule got no valid `name` |
 | 401 | The login is missing or wrong, when basic authentication is on |
 | 403 | An action in read-only mode, or a `POST` from another site |
 | 404 | No such page, task, or schedule. With a prefix, also a path that only starts like it, such as `/admin/tasksx` |

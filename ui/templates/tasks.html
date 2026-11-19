@@ -30,8 +30,9 @@
       <th class="num">ID</th><th>Kind</th><th>Queue</th><th>State</th><th class="num">Attempt</th>
       <th>Created</th><th>{{if $d.Order.ByFinish}}Finished{{else}}Run at{{end}}</th><th>Last error</th>
     </tr></thead>
-    <tbody>{{range $d.Tasks}}
-      <tr data-href="{{path "/tasks/"}}{{.ID}}" data-key="{{.ID}}">
+    {{/* The first task that "Load more" added is the place that its link names. */}}
+    <tbody>{{range $i, $t := $d.Tasks}}
+      <tr data-href="{{path "/tasks/"}}{{.ID}}" data-key="{{.ID}}"{{if and $i (eq $i $d.Seen)}} id="more"{{end}}>
         <td class="num"><a class="mono strong" href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
         <td class="mono" title="{{.Kind}}">{{.Kind}}</td>
         <td title="{{.Queue}}{{with .GroupKey}}, FIFO group {{visible .}}{{end}}">{{.Queue}}{{if .GroupKey}}<span class="group">{{visible .GroupKey}}</span>{{end}}</td>
@@ -45,12 +46,13 @@
     {{end}}</tbody>
   </table>
   </div>
-  {{if or $d.Next $d.Paged}}
   <div class="pager">
-    {{if $d.Paged}}<a class="btn sm quiet" href="{{$d.First}}">{{template "icon" "first"}}{{$d.Order.First}}</a>{{else}}<span></span>{{end}}
-    {{if $d.Next}}<a class="btn sm" href="{{$d.Next}}">{{$d.Order.Next}}{{template "icon" "next"}}</a>{{end}}
+    <span>{{if $d.Paged}}<a class="btn sm quiet" href="{{$d.First}}">{{template "icon" "first"}}{{$d.Order.First}}</a>{{end}}</span>
+    {{if $d.More}}<a class="btn sm" href="{{$d.More}}" data-more>Load more</a>
+    {{else if $d.Next}}<a class="btn sm" href="{{$d.Next}}">{{$d.Order.Next}}{{template "icon" "next"}}</a>
+    {{else}}<span></span>{{end}}
+    <span class="subtle" data-shown>{{len $d.Tasks}} shown</span>
   </div>
-  {{end}}
   {{else}}<div class="card-body">{{template "empty" (print (or (and $d.Filtered "No tasks match these filters") "No tasks yet"))}}</div>{{end}}
 </section>
 </div>
