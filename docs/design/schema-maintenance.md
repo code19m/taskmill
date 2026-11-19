@@ -34,7 +34,9 @@ maintainer counts the queues.
   holds days, as the default retention periods do, is subtracted from that
   time: subtracted from `now()`, a day of a period is a day of the session's
   zone, 23 or 25 hours long when its clocks change. An error's time is
-  stored as text, so it is written in UTC too.
+  stored as text, so it is written in UTC too. The tests run in sessions 24
+  hours and 45 minutes ahead of UTC, where a statement that reads the zone
+  gets another day at any time of day.
 - **Retention drops only the history that it detached.** A pass marks a
   partition with a comment before it detaches it. It drops a table that is
   no partition only with that mark, so one that an operator detached stays.

@@ -6,6 +6,10 @@
 // a run that tested nothing cannot pass: see [URL]. Each test gets its own
 // schema, so tests can run in parallel and leave nothing behind.
 //
+// The tests run far from UTC, so that code that depends on a time zone
+// fails: the sessions of a [Pool] in a time zone of their own, and the
+// process of a package whose TestMain calls [Main] in another.
+//
 // To run the tests through a transaction-pooling proxy such as PgBouncer,
 // point TASKMILL_TEST_DATABASE_URL at the proxy and TASKMILL_TEST_LISTEN_URL
 // at the database itself: workers then listen for notifications on a direct
@@ -74,8 +78,32 @@ func ListenConfig(tb testing.TB) *pgx.ConnConfig {
 	return cfg
 }
 
+// timeZone is the time zone of a pool's sessions: 24 hours and 45 minutes
+// ahead of UTC, which no place on earth is. There, a statement that reads
+// the session's time zone, where it means UTC or a moment, gets another day
+// at any time of day, and hours that start a quarter past UTC's, so its test
+// fails whenever it runs. In a real zone the day differs from UTC's only for
+// a part of each day. The zone has no daylight saving time, because what
+// that changes depends on the date: a test of it sets the database's clock.
+const timeZone = "<+2445>-24:45"
+
+// Main runs the tests of a package, as m.Run does, in a process whose local
+// time zone is 13 hours and 45 minutes ahead of UTC, as the Chatham Islands
+// are in summer. The driver reads a time into the local zone, so Go code
+// that formats such a time, or takes its day or its hour, without naming a
+// zone, gets another hour at any time of day, and another day for most of
+// it. The machines of CI run in UTC, where such code passes.
+//
+// A package's tests call it from their TestMain:
+//
+//	func TestMain(m *testing.M) { testdb.Main(m) }
+func Main(m *testing.M) {
+	time.Local = time.FixedZone("+1345", (13*60+45)*60)
+	os.Exit(m.Run())
+}
+
 // Pool returns a pool of up to 8 connections to the test database, closed
-// when the test ends.
+// when the test ends. Its sessions run in a time zone far from UTC.
 func Pool(tb testing.TB) *pgxpool.Pool {
 	tb.Helper()
 	return PoolSize(tb, 8)
@@ -90,6 +118,7 @@ func PoolSize(tb testing.TB, conns int32) *pgxpool.Pool {
 		tb.Fatalf("testdb: parse %s: %v", EnvURL, err)
 	}
 	cfg.MaxConns = conns
+	cfg.ConnConfig.RuntimeParams["timezone"] = timeZone
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

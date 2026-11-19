@@ -1216,7 +1216,7 @@ func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ss) != 1 || ss[0].Kind != "email.send" || ss[0].Queue != taskmill.DefaultQueue || ss[0].NextRunAt.Minute() != 0 {
+	if len(ss) != 1 || ss[0].Kind != "email.send" || ss[0].Queue != taskmill.DefaultQueue || ss[0].NextRunAt.UTC().Minute() != 0 {
 		t.Fatalf("got %+v", ss)
 	}
 	if n := tasks(); n != 0 {

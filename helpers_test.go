@@ -21,6 +21,9 @@ import (
 	"github.com/code19m/taskmill/internal/testdb"
 )
 
+// TestMain runs the tests in a process far from UTC: see testdb.Main.
+func TestMain(m *testing.M) { testdb.Main(m) }
+
 // sendEmail is the task most tests enqueue.
 type sendEmail struct {
 	To     string `json:"to"`
