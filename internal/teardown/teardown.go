@@ -17,6 +17,10 @@ import (
 // likely in use, by somebody that DropSchema must not wait for.
 const closeLimit = time.Second
 
+// retries bounds the drops that DropSchema tries again after a deadlock. The
+// server ends each after its deadlock_timeout, a second by default.
+const retries = 5
+
 // DropSchema drops schema, if it exists, on a connection of pool, once the
 // statements that the pool's users gave up have ended.
 //
@@ -31,15 +35,15 @@ const closeLimit = time.Second
 // The wait cannot always tell that the statements have ended: not on a pool
 // that others use meanwhile, not after closeLimit, and not through a proxy,
 // which closes the connection at once while the server works on. Only then,
-// DropSchema tries a drop again that PostgreSQL ended as a deadlock.
-// Otherwise such a deadlock is a mistake in the order of the caller's
+// DropSchema tries a drop again that PostgreSQL ended as a deadlock, a few
+// times. Otherwise such a deadlock is a mistake in the order of the caller's
 // clean-up, and DropSchema returns it.
 func DropSchema(ctx context.Context, pool *pgxpool.Pool, schema string) error {
 	closed := waitClosed(ctx, pool)
-	for {
+	for try := 0; ; try++ {
 		_, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+pgx.Identifier{schema}.Sanitize()+" CASCADE")
 		pgErr, ok := errors.AsType[*pgconn.PgError](err)
-		if !ok || pgErr.Code != "40P01" || closed && direct(ctx, pool) { // deadlock_detected
+		if !ok || pgErr.Code != "40P01" || try == retries || closed && direct(ctx, pool) { // deadlock_detected
 			return err
 		}
 	}
