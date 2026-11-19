@@ -56,7 +56,7 @@ type chart struct {
 	From, Mid    string // labels of the x axis, before "now"
 	Series       []series
 	Columns      []column
-	Note         string // shown over a chart with nothing to draw
+	Note         string // why a chart has nothing to draw, behind a hint
 }
 
 type series struct {
@@ -90,7 +90,7 @@ func newChart(title, unit string, w window, now time.Time, lines []line) chart {
 	}
 	top = niceTop(top)
 	c := chart{
-		Title: title, Steps: w.steps, Note: "Nothing recorded yet",
+		Title: title, Steps: w.steps, Note: "Nothing recorded yet.",
 		Start: w.start.Unix(), Step: int64(w.step / time.Second),
 		Top: formatValue(top), Half: formatValue(top / 2),
 		From: compact(w.step*time.Duration(w.steps)) + " ago", Mid: compact(w.step*time.Duration(w.steps)/2) + " ago",
@@ -192,29 +192,31 @@ func taskChart(points []taskmill.Activity, w window, now time.Time) chart {
 	return newChart("Tasks", "", w, now, lines)
 }
 
-// attemptChart charts the attempts that completed and failed, per minute.
-// The step in progress is left out: its rate would read as a drop.
+// attemptChart charts the attempts that completed and failed, per minute,
+// in the steps whose counts are complete: the rate of a later step would
+// read as a drop.
 func attemptChart(points []taskmill.Activity, w window, now time.Time) chart {
 	lines := []line{
 		{name: "Completed", class: "state-completed", area: true, values: blank(w.steps)},
 		{name: "Failed", class: "state-dead", values: blank(w.steps)},
 	}
 	minutes := w.step.Minutes()
-	inProgress := false
+	complete := w.complete(now)
+	counting := false
 	for _, p := range points {
 		i, ok := w.index(p.At)
 		switch {
 		case !ok:
-		case i == w.steps-1:
-			inProgress = true
+		case i >= complete:
+			counting = true
 		default:
 			lines[0].values[i] = float64(p.Completed) / minutes
 			lines[1].values[i] = float64(p.Failed) / minutes
 		}
 	}
 	c := newChart("Attempts", " a minute", w, now, lines)
-	if c.Note != "" && inProgress {
-		c.Note = "The first point shows when this " + stepName(w.step) + " ends"
+	if c.Note != "" && counting {
+		c.Note = "The first point shows when the count of its " + stepName(w.step) + " is complete."
 	}
 	return c
 }
@@ -232,25 +234,33 @@ func stepName(d time.Duration) string {
 // takes a moment.
 const settle = 15 * time.Second
 
+// complete returns how many of the window's steps have a complete count of
+// attempts at now. The last step is in progress, and the one before it is
+// complete only settle after it ended: read sooner, it would pull the dial's
+// needle and the end of the chart's line down for a moment at the start of
+// every step. The dial and the chart of the attempts both go by this rule.
+func (w window) complete(now time.Time) int {
+	n := w.steps - 1
+	if now.Sub(w.start.Add(time.Duration(n)*w.step)) < settle {
+		n--
+	}
+	return n
+}
+
 // throughput returns the attempts a minute in the newest step whose count is
 // complete, NaN if nothing was recorded in it, and the highest rate of the
-// steps before the one in progress. A step that ended less than settle ago
-// does not count as complete: read as it is, it would pull the dial's needle
-// down for a moment at the start of every step.
+// steps with a complete count.
 func throughput(points []taskmill.Activity, w window, now time.Time) (rate, peak float64) {
-	newest := w.steps - 2
-	if now.Sub(w.start.Add(time.Duration(w.steps-1)*w.step)) < settle {
-		newest--
-	}
+	complete := w.complete(now)
 	rate = math.NaN()
 	for _, p := range points {
 		i, ok := w.index(p.At)
-		if !ok || i == w.steps-1 {
+		if !ok || i >= complete {
 			continue
 		}
 		r := (float64(p.Completed) + float64(p.Failed)) / w.step.Minutes()
 		peak = max(peak, r)
-		if i == newest {
+		if i == complete-1 {
 			rate = r
 		}
 	}

@@ -74,10 +74,11 @@
 {{define "icon-device"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="1.75" y="2.5" width="12.5" height="8.5" rx="1.5"/><path d="M5.5 14h5M8 11v3"/></svg>{{end}}
 {{define "icon-sun"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="3"/><path d="M8 1v1M8 14v1M1 8h1M14 8h1M3 3l.7.7M12.3 12.3l.7.7M3 13l.7-.7M12.3 3.7l.7-.7"/></svg>{{end}}
 {{define "icon-moon"}}<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.8 9.5A6 6 0 0 1 6.5 2.2 6 6 0 1 0 13.8 9.5Z"/></svg>{{end}}
-{{define "icon-chevron"}}<svg class="chev" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>{{end}}
-{{define "icon-tick"}}<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>{{end}}
+{{/* The chevron and the tick are icons of the sprite, at sizes and weights of their own. */}}
+{{define "icon-chevron"}}<svg class="chev" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-chevron"/></svg>{{end}}
+{{define "icon-tick"}}<svg width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-check"/></svg>{{end}}
 {{define "icon-alert"}}<svg class="toast-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 4.75v3.75M8 11.2v.05"/></svg>{{end}}
-{{define "icon-check"}}<svg class="toast-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5"/></svg>{{end}}
+{{define "icon-check"}}<svg class="toast-icon" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#i-check"/></svg>{{end}}
 
 {{/* A task state: a ring icon, so that color is never the only cue, and its name. */}}
 {{define "state"}}<span class="status status-{{.}}">{{template "state-icon" .}}<span>{{.}}</span></span>{{end}}
@@ -105,7 +106,7 @@
   <symbol id="i-back" viewBox="0 0 16 16"><path d="M13 8H3m4-4L3 8l4 4"/></symbol>
   <symbol id="i-first" viewBox="0 0 16 16"><path d="M3 3.5v9M13 8H5.5M9 4.5 5.5 8 9 11.5"/></symbol>
   <symbol id="i-next" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></symbol>
-  <symbol id="i-more" viewBox="0 0 16 16"><path d="M4 6l4 4 4-4"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 16 16"><path d="M4 6l4 4 4-4"/></symbol>
 </svg>{{end}}
 
 {{/* An icon of the sprite, drawn in the color of its text. */}}
@@ -118,8 +119,10 @@
    Its text follows it, up to "hint-end". Its argument is one word for what
    the text is about: it names the button, and the text on the page. The
    text is a popover, so the browser opens and closes it, with or without
-   the script, above everything else on the page. */}}
-{{define "hint"}}<span class="hint"><button type="button" popovertarget="hint-{{.}}" aria-label="About the {{.}}" aria-describedby="hint-{{.}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 7.5v3.5M8 4.75v.05"/></svg></button><span class="hint-pop" id="hint-{{.}}" popover role="note">{{end}}
+   the script, above everything else on the page. The hint has a key, so
+   that an update never takes it for the element before it, and it stays
+   open, with the focus, while what stands around it comes and goes. */}}
+{{define "hint"}}<span class="hint" data-key="hint-{{.}}"><button type="button" popovertarget="hint-{{.}}" aria-label="About the {{.}}" aria-describedby="hint-{{.}}"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 7.5v3.5M8 4.75v.05"/></svg></button><span class="hint-pop" id="hint-{{.}}" popover role="note">{{end}}
 {{define "hint-end"}}</span></span>{{end}}
 
 {{/* A multiple choice filter: a menu of checkboxes. Without the script it

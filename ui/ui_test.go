@@ -171,10 +171,39 @@ func TestPagesDefineTheIconsTheyUse(t *testing.T) {
 			}
 		}
 	}
-	used["i-check"] = true // the script shows it in place of the copy icon, once the payload is copied
 	for _, m := range regexp.MustCompile(`<symbol id="(i-[^"]+)"`).FindAllStringSubmatch(body, -1) {
 		if !used[m[1]] {
 			t.Errorf("no page of this test uses the icon %q: nothing uses it, or the test no longer reaches its button", m[1])
+		}
+	}
+}
+
+// Every custom property that the stylesheet uses is one that it defines: a
+// name that it does not have, such as one that was renamed, silently gives
+// the browser's default, as a box with square corners. And every one that
+// it defines is used, so that no name of an old design stays behind.
+func TestStylesDefineThePropertiesTheyUse(t *testing.T) {
+	t.Parallel()
+	code, sheet, _ := get(t, handler(t, setup(t), nil), "/static/style.css")
+	if code != http.StatusOK {
+		t.Fatalf("stylesheet: %d", code)
+	}
+	defined, used := map[string]bool{}, map[string]bool{}
+	for _, m := range regexp.MustCompile(`[{;\s](--[a-z0-9-]+)\s*:`).FindAllStringSubmatch(sheet, -1) {
+		defined[m[1]] = true
+	}
+	for _, m := range regexp.MustCompile(`var\(\s*(--[a-z0-9-]+)`).FindAllStringSubmatch(sheet, -1) {
+		used[m[1]] = true
+		if !defined[m[1]] {
+			t.Errorf("the stylesheet uses %s, which it does not define", m[1])
+		}
+	}
+	if len(used) == 0 {
+		t.Fatal("the stylesheet uses no custom property in the form that this test reads")
+	}
+	for name := range defined {
+		if !used[name] {
+			t.Errorf("the stylesheet defines %s, which nothing uses", name)
 		}
 	}
 }
@@ -198,6 +227,10 @@ func TestPagesRender(t *testing.T) {
 	if code != http.StatusOK || !strings.Contains(body, "mail") || !strings.Contains(body, "max 3") {
 		t.Fatalf("overview: %d\n%s", code, body)
 	}
+	// A card that lists things says how many, beside its title.
+	if want := `<h2 id="queues-title">Queues <span class="subtle">1</span></h2>`; !strings.Contains(body, want) {
+		t.Errorf("overview: want %s in\n%s", want, body)
+	}
 	for _, path := range []string{"/admin/tasks/schedules", "/admin/tasks/workers"} {
 		if code, _, _ := get(t, h, path); code != http.StatusOK {
 			t.Fatalf("%s: %d", path, code)
@@ -214,8 +247,8 @@ func TestPagesRender(t *testing.T) {
 		t.Fatalf("task page did not escape the payload: %d\n%s", code, body)
 	}
 	if !strings.Contains(body, "<dd>high</dd>") || !strings.Contains(body, "topic␟key") ||
-		!strings.Contains(body, "group=topic%1Fkey") {
-		t.Fatalf("task page: want the priority's name and a visible link to the group\n%s", body)
+		!strings.Contains(body, "group=topic%1Fkey") || !strings.Contains(body, `<h2>Errors <span class="subtle">0</span></h2>`) {
+		t.Fatalf("task page: want the priority's name, a visible link to the group, and the count of its errors\n%s", body)
 	}
 	code, body, _ = get(t, h, "/admin/tasks/tasks?queue=mail&group=topic%1Fkey")
 	if code != http.StatusOK || !strings.Contains(body, `href="/admin/tasks/tasks/`+id+`"`) {
@@ -296,14 +329,16 @@ func storeCounts(t *testing.T, pool *pgxpool.Pool, schema, age string, capped bo
 // maintainer counted, and what a count at its cap means. A hint is a button
 // that opens the text after it, which is how the browser and the script
 // find the text. How old the counts are is on the page itself only once it
-// is a reason to act: when no maintainer has counted for over a minute.
+// is a reason to act: when no maintainer has counted for over a minute. The
+// hint and that mark each have a key: a live update that brings the mark
+// must not take the hint for it, and close a hint that is open.
 func TestOverviewKeepsTheAgeOfItsCountsBehindAHint(t *testing.T) {
 	t.Parallel()
 	const (
-		hint  = `<button type="button" popovertarget="hint-counts" aria-label="About the counts" aria-describedby="hint-counts">`
+		hint  = `<span class="hint" data-key="hint-counts"><button type="button" popovertarget="hint-counts" aria-label="About the counts" aria-describedby="hint-counts">`
 		text  = `</button><span class="hint-pop" id="hint-counts" popover role="note">Counted by the maintainer `
 		atCap = "stopped at its cap"
-		late  = `>counted 5m ago</span>`
+		late  = `<span class="chip warn" data-key="stale" title="`
 	)
 	for _, tc := range []struct {
 		name, age     string // the age of the counts; none are stored if it is empty
@@ -313,7 +348,7 @@ func TestOverviewKeepsTheAgeOfItsCountsBehindAHint(t *testing.T) {
 		{"not counted yet", "", false, nil, []string{"hint-counts", "ounted "}},
 		{"counted now", "0 seconds", false, []string{hint, text}, []string{atCap, ">counted "}},
 		{"at the cap", "0 seconds", true, []string{hint, text, "10,000&#43;", atCap}, []string{">counted "}},
-		{"not counted for a minute", "5 minutes", false, []string{hint, text + "5m ago.", late}, []string{atCap}},
+		{"not counted for a minute", "5 minutes", false, []string{hint, text + "5m ago.", late, ">counted 5m ago</span>"}, []string{atCap}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -388,6 +423,40 @@ func TestWorkersPageMarksTheMaintainer(t *testing.T) {
 	}
 	if ids := marked("-1 minute"); len(ids) != 0 {
 		t.Errorf("the page marks %v as the maintainer after the lease ran out", ids)
+	}
+}
+
+// The Host column names a worker's host, so the Worker column shows the part
+// of the ID after it: the process ID and the random suffix, which tell the
+// workers of one host apart, and which a long host name would push out of
+// view. The whole ID is in the tooltip, and in the text that a screen reader
+// reads. An ID that does not start with the host shows whole.
+func TestWorkersShowTheirIDsWithoutTheHost(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, hostname, version)
+	    VALUES ('web-1.example.com-4242-ab12cd', '{mail}', 'web-1.example.com', 'v'),
+	           ('web-1.example.com-4242-ffffff', '{mail}', 'web-1.example.com', 'v'),
+	           ('lead', '{mail}', 'web-2', 'v'), ('web-3-', '{mail}', 'web-3', 'v'), ('-7-aa', '{mail}', '', 'v')`); err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := get(t, handler(t, client, nil), "/workers")
+	name, shown := regexp.MustCompile(`<span class="mono">(.*?)</span>(?:<span class="chip">|</div>)`), map[string]string{}
+	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {
+		if m := name.FindStringSubmatch(row[2]); len(m) == 2 && strings.Contains(row[2], `<td title="`+row[1]+`">`) {
+			shown[row[1]] = m[1]
+		}
+	}
+	for id, want := range map[string]string{
+		"web-1.example.com-4242-ab12cd": `<span class="visually-hidden">web-1.example.com-</span>4242-ab12cd`,
+		"web-1.example.com-4242-ffffff": `<span class="visually-hidden">web-1.example.com-</span>4242-ffffff`,
+		"lead":                          "lead",
+		"web-3-":                        "web-3-",
+		"-7-aa":                         "-7-aa",
+	} {
+		if shown[id] != want {
+			t.Errorf("the worker %q shows as %q, want %q, with its ID as the tooltip\n%s", id, shown[id], want, body)
+		}
 	}
 }
 
@@ -532,9 +601,13 @@ func TestOverviewShowsTheAttemptsOfAStep(t *testing.T) {
 	h := handler(t, client, nil)
 
 	// Nothing is recorded yet: the needle rests on zero, and the dial says so.
+	// Each chart says so behind a hint beside its title, not over its plot.
 	_, body, _ := get(t, h, "/")
 	for _, want := range []string{
 		`aria-label="Attempts a minute: no data"`, `aria-hidden="true">—</p>`, `class="dial-needle"[^>]* transform="rotate\(0\)"`,
+		`<span class="chart-title">Tasks<span class="hint" data-key="hint-tasks"><button [^>]*popovertarget="hint-tasks"`,
+		`<span class="hint-pop" id="hint-tasks" popover role="note">Nothing recorded yet\.</span></span></span>`,
+		`<span class="hint-pop" id="hint-attempts" popover role="note">Nothing recorded yet\.</span>`,
 	} {
 		if !regexp.MustCompile(want).MatchString(body) {
 			t.Errorf("without activity: want %s in\n%s", want, body)
@@ -562,17 +635,70 @@ func TestOverviewShowsTheAttemptsOfAStep(t *testing.T) {
 	if n := strings.Count(body, `transform="rotate(118.8)"`); n != 2 {
 		t.Errorf("%d shapes are turned by 118.8 degrees, want the needle and the arc\n%s", n, body)
 	}
-	// The chart can take focus, says when its steps start, and holds one
-	// value per step for each series, with nothing for a step without one.
-	// The legend names the series in the same order.
+	// The chart is a picture with a name, says when its steps start, and
+	// holds one value per step for each series, with nothing for a step
+	// without one: the step in progress, and the one before it while its
+	// count may still grow. The legend names the series in the same order.
+	// The range field after the picture is the chart's slider, for the
+	// script: one stop per step, on the newest one. A chart that draws
+	// something has no hint.
 	for _, want := range []string{
-		`tabindex="0" data-start="\d+" data-step="60">`,
-		`<g class="state-completed" data-values=" *(600 ){2,4}">`, `<g class="state-dead" data-values=" *(60 ){2,4}">`,
+		`<svg [^>]*role="img" aria-label="Attempts over the last 1h" data-start="\d+" data-step="60">`,
+		`<g class="state-completed" data-values=" *(600 ){2,4} ?">`, `<g class="state-dead" data-values=" *(60 ){2,4} ?">`,
 		`<span class="state-completed"><i></i>Completed</span><span class="state-dead"><i></i>Failed</span>`,
+		`</svg>\s*<input class="chart-step js-only" type="range" min="1" max="60" value="60" aria-label="Attempts over the last 1h, step by step" autocomplete="off">`,
+		`<span class="chart-title">Attempts</span>`,
 	} {
 		if !regexp.MustCompile(want).MatchString(body) {
 			t.Errorf("want %s in\n%s", want, body)
 		}
+	}
+	if strings.Contains(body, `tabindex="0"`) {
+		t.Errorf("a picture takes the focus: without the script it does nothing with it\n%s", body)
+	}
+}
+
+// Pause and Resume on the overview lead back to the overview with the period
+// of the charts that the reader chose: each form carries the period of its
+// page, and the server takes only a period that it knows. The first period
+// is the overview's plain address. An action that is refused leads back
+// there too.
+func TestQueueActionsKeepThePeriodOfTheCharts(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	if err := client.UpdateQueue(t.Context(), "mail", func(*taskmill.QueueSettings) {}); err != nil {
+		t.Fatal(err)
+	}
+	h := handler(t, client, &ui.Config{Prefix: "/admin"})
+	for _, c := range []struct{ page, back string }{
+		{"/admin/?range=24h", "/admin/?range=24h"},
+		{"/admin/?range=6h", "/admin/?range=6h"},
+		{"/admin/", "/admin/"},
+		{"/admin/?range=1h", "/admin/"},
+		{"/admin/?range=7y", "/admin/"},
+	} {
+		for _, step := range [][2]string{{"Pause", "queue-pause"}, {"Resume", "queue-resume"}} {
+			sep := "?"
+			if strings.Contains(c.back, "?") {
+				sep = "&"
+			}
+			rec := post(t, h, rowForms(t, h, c.page, "mail")[step[0]], "same-origin")
+			if got, want := rec.Header().Get("Location"), c.back+sep+"done="+step[1]; rec.Code != http.StatusSeeOther || got != want {
+				t.Errorf("%s on %s: status %d to %q, want 303 to %q", step[0], c.page, rec.Code, got, want)
+			}
+		}
+	}
+	// What the address of an action says is not trusted: only a period's name
+	// reaches the address that the action leads to.
+	for _, period := range []string{"24h%26done%3Dretry", "%2F%2Fexample.com", "24h%0d%0aSet-Cookie:x"} {
+		rec := post(t, h, "/admin/queues/pause?name=mail&range="+period, "same-origin")
+		if got := rec.Header().Get("Location"); rec.Code != http.StatusSeeOther || got != "/admin/?done=queue-pause" {
+			t.Errorf("Pause with the period %q: status %d to %q, want 303 to the overview's plain address", period, rec.Code, got)
+		}
+	}
+	rec := post(t, h, "/admin/queues/pause?range=24h", "same-origin") // no queue
+	if body := rec.Body.String(); rec.Code != http.StatusBadRequest || !strings.Contains(body, `<a class="btn" href="/admin/?range=24h">`) {
+		t.Errorf("Pause without a queue on the 24h overview: status %d, want 400 and the way back to that overview\n%s", rec.Code, body)
 	}
 }
 

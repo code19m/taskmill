@@ -4,7 +4,7 @@
   <h1>Overview</h1>
   {{/* How old the counts are is behind the hint, and on the page only once it is a reason to act. */}}
   {{if not $d.RefreshedAt.IsZero}}
-  {{if $d.Stale}}<span class="chip warn"{{template "at" $d.RefreshedAt}}>counted {{ago $d.RefreshedAt}}</span>{{end}}
+  {{if $d.Stale}}<span class="chip warn" data-key="stale"{{template "at" $d.RefreshedAt}}>counted {{ago $d.RefreshedAt}}</span>{{end}}
   {{template "hint" "counts"}}Counted by the maintainer {{ago $d.RefreshedAt}}.{{if $d.Totals.Capped}} A count that ends in + stopped at its cap: there are at least that many tasks.{{end}}{{template "hint-end"}}
   {{end}}
 </header>
@@ -46,8 +46,7 @@
 
 <section class="card flush" aria-labelledby="queues-title">
   <div class="card-head">
-    <h2 id="queues-title">Queues</h2>
-    <span class="subtle">{{len $d.Queues}}</span>
+    <h2 id="queues-title">Queues <span class="subtle">{{len $d.Queues}}</span></h2>
   </div>
   {{if $d.Queues}}
   <div class="table-scroll">
@@ -72,8 +71,8 @@
         {{end}}
         <td class="num{{if not $q.Workers}} zero{{end}}">{{$q.Workers}}</td>
         {{if not $ro}}<td class="actions-col">
-          {{if $q.Paused}}<form method="post" action="{{path "/queues/resume"}}{{query "name" $q.Name}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
-          {{else}}<form method="post" action="{{path "/queues/pause"}}{{query "name" $q.Name}}" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{$q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
+          {{if $q.Paused}}<form method="post" action="{{path "/queues/resume"}}{{query "name" $q.Name "range" $d.Range}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
+          {{else}}<form method="post" action="{{path "/queues/pause"}}{{query "name" $q.Name "range" $d.Range}}" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{$q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
         </td>{{end}}
       </tr>
     {{end}}
@@ -123,21 +122,25 @@
 {{/* A chart drawn on the server; see chart.go. Each step is a column whose
    tooltip lists its values. The script shows the values of the step under
    the pointer instead: it reads them from each series, names them by the
-   legend, and tells the step's time by data-start and data-step. */}}
+   legend, and tells the step's time by data-start and data-step. The chart
+   is a picture with a name. With the script, the range field after it is
+   its slider: it chooses a step with the keys, from the newest one, and the
+   script gives it the tooltip of that step as the words of its value. A
+   chart with nothing to draw says why behind a hint. */}}
 {{define "chart"}}<figure class="chart">
   <figcaption class="chart-head">
-    <span class="chart-title">{{.Title}}</span>
+    <span class="chart-title">{{.Title}}{{with .Note}}{{template "hint" (lower $.Title)}}{{.}}{{template "hint-end"}}{{end}}</span>
     <span class="legend">{{range .Series}}<span class="{{.Class}}"><i></i>{{.Name}}</span>{{end}}</span>
   </figcaption>
   <div class="chart-body">
     <div class="chart-y" aria-hidden="true"><span>{{.Top}}</span><span>{{.Half}}</span><span>0</span></div>
     <div class="chart-plot">
-      <svg viewBox="0 0 {{.Steps}} 100" preserveAspectRatio="none" role="img" aria-label="{{.Label}}" tabindex="0" data-start="{{.Start}}" data-step="{{.Step}}">
+      <svg viewBox="0 0 {{.Steps}} 100" preserveAspectRatio="none" role="img" aria-label="{{.Label}}" data-start="{{.Start}}" data-step="{{.Step}}">
         <path class="grid-line" d="M0 4H{{.Steps}}M0 50H{{.Steps}}M0 96H{{.Steps}}"/>
         {{range .Series}}<g class="{{.Class}}" data-values="{{.Values}}">{{with .Area}}<path class="area" d="{{.}}"/>{{end}}<path class="series" d="{{.Line}}"/></g>{{end}}
         {{range .Columns}}<rect class="col" x="{{.X}}" width="1" height="100"><title>{{.Title}}</title></rect>{{end}}
       </svg>
-      {{with .Note}}<p class="chart-note">{{.}}</p>{{end}}
+      <input class="chart-step js-only" type="range" min="1" max="{{.Steps}}" value="{{.Steps}}" aria-label="{{.Label}}, step by step" autocomplete="off">
     </div>
     <div class="chart-x" aria-hidden="true"><span>{{.From}}</span><span>{{.Mid}}</span><span>now</span></div>
   </div>
