@@ -281,6 +281,24 @@
     if (box.bottom > innerHeight - 8 && sel.getBoundingClientRect().top > box.height + 16) pop.classList.add("pop-up");
   }
 
+  // A hint opens beside its button, toward the middle of the window: there
+  // it has room, whatever its size. Its place is on the page, so it moves
+  // with the page as that scrolls. The place is set before the hint shows.
+  let hint = null; // the hint that opened last
+
+  document.addEventListener("beforetoggle", (event) => {
+    const pop = event.target;
+    if (event.newState !== "open" || !pop.matches?.(".hint-pop")) return;
+    hint = pop;
+    const at = pop.previousElementSibling.getBoundingClientRect();
+    const down = at.top < root.clientHeight / 2;
+    const forward = at.left < root.clientWidth / 2;
+    pop.style.top = down ? `${at.bottom + scrollY + 6}px` : "auto";
+    pop.style.bottom = down ? "auto" : `${root.clientHeight - at.top - scrollY + 6}px`;
+    pop.style.left = forward ? `${at.left + scrollX}px` : "auto";
+    pop.style.right = forward ? "auto" : `${root.clientWidth - at.right - scrollX}px`;
+  }, true);
+
   document.addEventListener("toggle", (event) => {
     const sel = event.target;
     if (!(sel instanceof HTMLDetailsElement) || !sel.matches(".sel")) return;
@@ -301,6 +319,9 @@
   document.addEventListener("pointerdown", (event) => {
     pointerDown = true;
     for (const sel of openMenus()) if (!sel.contains(event.target)) sel.open = false;
+    // The browser closes a hint on a click elsewhere, but not every browser
+    // takes a tap on plain text for a click.
+    if (hint?.matches(":popover-open") && !hint.parentElement.contains(event.target)) hint.hidePopover();
   }, true);
   for (const type of ["pointerup", "pointercancel"]) {
     document.addEventListener(type, () => { pointerDown = false; }, true);
@@ -722,10 +743,12 @@
   // of it, touching only what differs. Rows with a data-key are matched by
   // it, so a new row slides in without rebuilding the others. State that
   // belongs to the reader stays: an open menu, a checkbox or field they
-  // changed, and attributes the script set, named data-js-*.
+  // changed, and attributes the script set: those named data-js-*, and the
+  // place of a hint, in its style. The server never sends a style attribute:
+  // the content security policy would refuse it.
 
   const keyOf = (node) => (node.nodeType === 1 ? node.getAttribute("data-key") ?? (node.id || null) : null);
-  const kept = (node, name) => name.startsWith("data-js-") || (name === "open" && node.localName === "details");
+  const kept = (node, name) => name.startsWith("data-js-") || name === "style" || (name === "open" && node.localName === "details");
 
   function syncAttributes(node, next) {
     for (const { name } of [...node.attributes]) {

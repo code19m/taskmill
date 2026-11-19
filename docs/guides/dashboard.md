@@ -135,7 +135,7 @@ theme, and the next pages follow the device.
 
 | Page | What you see | What you can do |
 |---|---|---|
-| **Overview** | Task counts per queue and state, a dial of the attempts a minute, charts of tasks and attempts over the last 1, 6, or 24 hours, and the number of workers | Pause and resume a queue |
+| **Overview** | Task counts per queue and state, a dial of the attempts a minute, charts of tasks and attempts over the last 1, 6, or 24 hours, the number of workers, and the retention periods | Pause and resume a queue |
 | **Tasks** | Tasks filtered by state, queue, kind, and FIFO group | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its timetable in words and its next and last run | Pause, resume, or run it now |
@@ -173,6 +173,14 @@ column shows the worker's last
 "stale" mark a worker that made no check-in for longer than its
 `LeaseDuration`: it has stopped, or it cannot reach the database.
 
+The pages show data, and keep what explains it behind a hint: a small
+button with an "i" that shows a short text. On the **Overview**, the hint
+beside the title says when the maintainer last counted the tasks. It
+counts every 10 seconds. If the last count is over a minute old, the page
+says so beside its title, in amber: check that a worker runs as the
+maintainer ([Monitoring](../production/monitoring.md) has an alert for
+this).
+
 Before an action on many tasks, the dashboard shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,
 and offers to continue where it stopped. If some tasks were busy at that
@@ -181,9 +189,13 @@ moment, it says how many, and offers to try them again.
 A task list shows the newest tasks first. A list of only dead tasks, only
 canceled tasks, or both shows the tasks that finished last first. So the
 task that died a minute ago is at the top of the **Dead** page. Such a list
-says "latest first" beside its title, and shows when each task finished.
-Every state has an icon in its color. The two states that need you also
-have their name in color: `dead` in red, and `retryable` in amber.
+shows when each task finished. An arrow in the header marks the column
+that orders the list: **ID**, or **Finished**. The row under a list shows
+more of it: click anywhere in the row. A list that starts after other
+tasks, as the page after 250 tasks does, has a row at its top that leads
+back to the first page. Every state has an icon in its color. The two
+states that need you also have their name in color: `dead` in red, and
+`retryable` in amber.
 
 A task list has 5 seconds to read its tasks. A list of dead or canceled
 tasks never reads tasks of other states. But with no queue in the filters,

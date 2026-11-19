@@ -2,7 +2,6 @@
 {{$d := .Data}}
 <header class="topbar">
   <h1>{{.Title}}</h1>
-  {{with or (and $d.Paged $d.Order.Later) $d.Order.Start}}<span class="meta">{{.}}</span>{{end}}
   {{with $d.Bulk}}
   <div class="right">
     {{with .Retry}}<a class="btn primary" href="{{.}}">{{template "icon" "retry"}}Retry all</a>{{end}}
@@ -22,13 +21,18 @@
 </form>
 
 <section class="card flush">
+  {{/* A later page of a list starts with the way back to its first page. */}}
+  {{if $d.Paged}}<a class="pager-link pager-top" href="{{$d.First}}">{{template "icon" "first"}}{{$d.Order.First}}</a>{{end}}
   {{if $d.Tasks}}
   <div class="table-scroll">
   <table class="table table-tasks">
     <colgroup><col class="c-id"><col class="c-kind"><col class="c-queue"><col class="c-state"><col class="c-attempt"><col class="c-time"><col class="c-time"><col></colgroup>
+    {{/* An arrow marks the column that orders the list, and names the order. */}}
     <thead><tr>
-      <th class="num">ID</th><th>Kind</th><th>Queue</th><th>State</th><th class="num">Attempt</th>
-      <th>Created</th><th>{{if $d.Order.ByFinish}}Finished{{else}}Run at{{end}}</th><th>Last error</th>
+      {{if $d.Order.ByFinish}}<th class="num">ID</th>{{else}}<th class="num" aria-sort="descending">ID{{template "icon-sort" $d.Order.Name}}</th>{{end}}
+      <th>Kind</th><th>Queue</th><th>State</th><th class="num">Attempt</th><th>Created</th>
+      {{if $d.Order.ByFinish}}<th aria-sort="descending">Finished{{template "icon-sort" $d.Order.Name}}</th>{{else}}<th>Run at</th>{{end}}
+      <th>Last error</th>
     </tr></thead>
     {{/* The first task that "Load more" added is the place that its link names. */}}
     <tbody>{{range $i, $t := $d.Tasks}}
@@ -46,14 +50,13 @@
     {{end}}</tbody>
   </table>
   </div>
+  {{/* The whole row leads on: the link lies under the count, which no click stops at. */}}
   <div class="pager">
-    <span>{{if $d.Paged}}<a class="btn sm quiet" href="{{$d.First}}">{{template "icon" "first"}}{{$d.Order.First}}</a>{{end}}</span>
-    {{if $d.More}}<a class="btn sm" href="{{$d.More}}" data-more>{{template "icon" "more"}}Load more</a>
-    {{else if $d.Next}}<a class="btn sm" href="{{$d.Next}}">{{$d.Order.Next}}{{template "icon" "next"}}</a>
-    {{else}}<span></span>{{end}}
+    {{if $d.More}}<a class="pager-link" href="{{$d.More}}" data-more>{{template "icon" "more"}}Load more</a>
+    {{else if $d.Next}}<a class="pager-link" href="{{$d.Next}}">{{$d.Order.Next}}{{template "icon" "next"}}</a>{{end}}
     <span class="subtle" data-shown>{{len $d.Tasks}} shown</span>
   </div>
-  {{else}}<div class="card-body">{{template "empty" (print (or (and $d.Filtered "No tasks match these filters") "No tasks yet"))}}</div>{{end}}
+  {{else}}<div class="card-body">{{template "empty" (print (or (and $d.Paged "No more tasks") (and $d.Filtered "No tasks match these filters") "No tasks yet"))}}</div>{{end}}
 </section>
 </div>
 {{template "foot" .}}{{end}}
