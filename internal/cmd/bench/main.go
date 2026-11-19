@@ -31,6 +31,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
+	"github.com/code19m/taskmill/internal/teardown"
 	"github.com/code19m/taskmill/outbox"
 )
 
@@ -149,7 +150,7 @@ func connectTraced(ctx context.Context, url string, conns int32, tracer pgx.Quer
 
 // fresh recreates the benchmark schema and returns a client for it.
 func fresh(ctx context.Context, pool *pgxpool.Pool) *taskmill.Client {
-	if _, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
+	if err := teardown.DropSchema(ctx, pool, schema); err != nil {
 		fail(err)
 	}
 	return client(ctx, pool, true)

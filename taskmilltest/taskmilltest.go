@@ -28,14 +28,23 @@ import (
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/argkind"
 	"github.com/code19m/taskmill/internal/recovered"
+	"github.com/code19m/taskmill/internal/teardown"
 )
 
 // workLimit bounds how long Work waits for the queues to empty.
 const workLimit = time.Minute
 
 // NewClient migrates a new schema with a random name in the database that
-// pool connects to, and returns a client for it. The schema is dropped when
-// the test ends. cfg may be nil; its Schema must be empty.
+// pool connects to, and returns a client for it. cfg may be nil; its Schema
+// must be empty.
+//
+// The schema is dropped when the test ends, on a connection of pool. A worker
+// that the test stopped may have left a statement that the database still
+// runs, and a drop that met it could fail the test with a deadlock. So the
+// drop first waits until pool has closed the connections of such statements,
+// for up to a second. Where that cannot tell, through a proxy such as
+// PgBouncer or on a pool that other tests use, a drop that PostgreSQL ended
+// as a deadlock is tried again.
 func NewClient(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *taskmill.Client {
 	tb.Helper()
 	var c taskmill.ClientConfig
@@ -54,7 +63,7 @@ func NewClient(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *t
 		// The test's context is canceled before cleanups run.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if _, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+c.Schema+" CASCADE"); err != nil {
+		if err := teardown.DropSchema(ctx, pool, c.Schema); err != nil {
 			tb.Errorf("taskmilltest: drop schema %s: %v", c.Schema, err)
 		}
 	})

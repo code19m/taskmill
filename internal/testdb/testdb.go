@@ -21,14 +21,16 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/code19m/taskmill/internal/teardown"
 )
 
 // Environment variables that configure the test database.
@@ -137,7 +139,7 @@ func PoolSize(tb testing.TB, conns int32) *pgxpool.Pool {
 }
 
 // Schema returns a fresh schema name, and drops that schema when the test
-// ends, on a connection of pool.
+// ends, on a connection of pool: see [teardown.DropSchema].
 func Schema(tb testing.TB, pool *pgxpool.Pool) string {
 	tb.Helper()
 	var b [6]byte
@@ -146,42 +148,56 @@ func Schema(tb testing.TB, pool *pgxpool.Pool) string {
 	tb.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := drop(ctx, pool, schema); err != nil {
+		if err := teardown.DropSchema(ctx, pool, schema); err != nil {
 			tb.Errorf("testdb: drop schema %s: %v", schema, err)
 		}
 	})
 	return schema
 }
 
-// drop drops schema once the statements that its test gave up have ended.
-//
-// A statement whose context ended can go on in the database. Its caller has
-// returned, so a worker that was told to stop has stopped, and the pool
-// closes the statement's connection in the background, until the server has
-// ended the statement. Until then the statement may take locks, in another
-// order than a drop of its schema does: PostgreSQL ends one of the two as a
-// deadlock, and the test fails if that is the drop. The pool counts such a
-// connection as acquired until it is closed, so the drop waits until the
-// pool has none.
-//
-// A proxy closes the connection at once, and the server works on: nothing
-// then tells when the statement has ended. So a run through a proxy, and
-// only that, tries a drop again that PostgreSQL ended as a deadlock. Without
-// a proxy, such a deadlock is a mistake in the order of a test's clean-up,
-// and fails the test.
-func drop(ctx context.Context, pool *pgxpool.Pool, schema string) error {
-	for pool.Stat().AcquiredConns() > 0 {
-		if ctx.Err() != nil {
-			return errors.New("the pool's connections are still in use")
+// GiveUp runs a statement on pool and gives it up, as a worker that is told
+// to stop gives up the statements that it had sent, and returns while the
+// statement goes on in the database. The statement locks the table held,
+// outlives the request to cancel it, as a statement does that the server had
+// not read by then, and 300 milliseconds later locks the table wanted. A drop
+// of the tables' schema that begins meanwhile, and locks wanted first, waits
+// for the statement, and the statement for the drop.
+func GiveUp(tb testing.TB, pool *pgxpool.Pool, held, wanted string) {
+	tb.Helper()
+	statement := fmt.Sprintf(`DO $$
+BEGIN
+    LOCK TABLE %s IN ACCESS SHARE MODE;
+    BEGIN
+        PERFORM pg_sleep(30);
+    EXCEPTION WHEN query_canceled THEN
+        PERFORM pg_sleep(0.3);
+    END;
+    LOCK TABLE %s IN ACCESS SHARE MODE;
+END $$`, held, wanted)
+	ctx, giveUp := context.WithCancel(context.Background())
+	defer giveUp()
+	done := make(chan error, 1)
+	go func() {
+		_, err := pool.Exec(ctx, statement)
+		done <- err
+	}()
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var sleeps bool
+		err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND strpos(query, $1) > 0)`,
+			"LOCK TABLE "+held).Scan(&sleeps)
+		if err != nil {
+			tb.Fatalf("testdb: give up a statement: %v", err)
 		}
-		time.Sleep(time.Millisecond)
+		if sleeps {
+			break
+		}
+		if time.Now().After(deadline) {
+			tb.Fatal("testdb: give up a statement: it did not start")
+		}
 	}
-	proxied := os.Getenv(EnvListenURL) != ""
-	for {
-		_, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
-		if pgErr, ok := errors.AsType[*pgconn.PgError](err); !proxied || !ok || pgErr.Code != "40P01" { // deadlock_detected
-			return err
-		}
+	giveUp()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		tb.Fatalf("testdb: give up a statement: it returned %v, want context.Canceled", err)
 	}
 }
 

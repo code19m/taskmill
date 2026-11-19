@@ -7,6 +7,18 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A test that uses `taskmilltest` no longer fails at its end with
+  `deadlock detected` while `NewClient` drops the test's schema. A worker
+  that stops gives up the statements that it had sent, and the database
+  could still run one of them when the drop began: the two waited for each
+  other's locks, and PostgreSQL ended the drop. `NewClient` now waits until
+  the pool has closed the connections of such statements, for up to a
+  second, before it drops the schema. Where that wait cannot tell, through
+  a proxy such as PgBouncer or while other tests use the same pool, it
+  tries a drop again that PostgreSQL ended as a deadlock.
+
 ## [0.11.0] - 2026-11-19
 
 ### Added
