@@ -13,7 +13,9 @@ All notable changes to taskmill are recorded here. The format follows
   against its state, a little lower than the text, and made its row taller
   than the others. It now stands apart from the state, in line with it, and
   every row has the same height. The State column is wider, so that the
-  badge also fits beside a long state such as `scheduled`.
+  badge also fits beside a long state such as `scheduled`. On a screen of
+  600 pixels or less, where the column is narrow, the badge stands under
+  the state.
 
 ## [0.10.0] - 2026-11-19
 

@@ -708,6 +708,10 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   .table-tasks col.c-state { width: 122px; }
   .table-tasks col:is(:nth-child(3), :nth-child(n+5)) { width: 0; }
   .table-tasks :is(th, td):is(:nth-child(3), :nth-child(n+5)) { padding: 0; font-size: 0; }
+  /* The State column has room for a state there, but not for a priority
+     badge beside it, so the badge goes under the state. A wider column would
+     take that room from the kind. */
+  .state-cell { flex-wrap: wrap; row-gap: 2px; }
 }
 @media (pointer: coarse) {
   .pop-opt, .sel-btn { min-height: 44px; }
