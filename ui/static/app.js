@@ -718,7 +718,7 @@
   tooltip.className = "tooltip";
   tooltip.popover = "manual"; // above everything, an open hint too
   tooltip.setAttribute("aria-hidden", "true");
-  let asked = null; // what the tooltip was last asked about
+  let tipFor = null; // what the tooltip was last asked about
   let described = null; // the element that it is about
   let held = ""; // the title that it took from that element
 
@@ -736,7 +736,7 @@
       if (!described.hasAttribute("title")) described.title = held; // one that it got meanwhile is newer
       described.removeAttribute("aria-description");
     }
-    asked = target;
+    tipFor = target;
     const box = nearest(target, cuts);
     described = nearest(target, (el) => el.title) ?? box;
     held = described?.title;
@@ -765,7 +765,7 @@
   // The tooltip goes with a press, a key, a scroll, and the focus, and when
   // the pointer leaves the window.
   const undescribe = () => {
-    if (asked) describe(null);
+    if (tipFor) describe(null);
   };
   for (const type of ["pointerdown", "keydown", "focusout", "scroll"]) document.addEventListener(type, undescribe, true);
   root.addEventListener("pointerleave", undescribe);
@@ -1309,7 +1309,7 @@
   // replaces it whole: nothing of the reader's state belongs to it.
   function apply(result, fresh = false) {
     // The page changes with its titles on it. Then the tooltip shows again.
-    const about = asked;
+    const about = tipFor;
     undescribe();
     localise(result.main);
     const main = document.getElementById("main");
@@ -1368,7 +1368,7 @@
       offline: `This device is offline. Last update at ${since}.`,
       "signed-out": "The session ended. Click to reload the page.",
     }[state];
-    if (described === toggle) describe(asked); // its tooltip says the new title
+    if (described === toggle) describe(tipFor); // its tooltip says the new title
   }
 
   // The reader is busy during a press, an action, or a scroll, while a

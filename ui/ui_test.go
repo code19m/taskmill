@@ -313,11 +313,11 @@ func TestRelativeTimesHaveTheirExactTime(t *testing.T) {
 	h := handler(t, client, nil)
 	var (
 		axis     = regexp.MustCompile(`<div class="chart-x"[^>]*>.*?</div>`)
-		relative = regexp.MustCompile(`<[^<>]*>[^<>]*\d+[smhd] (?:ago|from now)`) // with the tag that it stands in
+		relative = regexp.MustCompile(`<[^<>]*>(?:<svg[^<>]*>(?:<[^<>]*>)*</svg>)?[^<>]*\d+[smhd] (?:ago|from now)`) // with the tag that it stands in, and its icon
 		exact    = regexp.MustCompile(`^<[^<>]* title="\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} UTC" data-time="[^"]+Z">`)
 	)
 	for path, want := range map[string]int{
-		"/":                                   3, // the age of the counts, in the hint and beside it, and the next run
+		"/":                                   1, // the age of the counts
 		"/tasks":                              2, // created, and run at
 		"/tasks?state=dead":                   2, // created, and finished
 		"/tasks/" + strconv.FormatInt(id, 10): 5, // created, run at, last attempt, finished, and the error
