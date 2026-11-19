@@ -62,3 +62,21 @@ func TestURLSkipsWithoutADatabaseButFailsInCI(t *testing.T) {
 		})
 	}
 }
+
+// A statement that a test gave up can go on in the database, and take its
+// locks in another order than a drop of its schema does: here it holds the
+// second table and then wants the first, and a drop locks the tables in the
+// order of their creation, as a rule. A drop that began meanwhile would wait
+// for the statement, and the statement for the drop: PostgreSQL would end the
+// drop, as a deadlock, and the test would fail.
+func TestSchemaIsDroppedAfterTheStatementsThatItsTestGaveUp(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	schema := testdb.Schema(t, pool)
+	setup := strings.ReplaceAll("CREATE SCHEMA {s}; CREATE TABLE {s}.first (); CREATE TABLE {s}.second ()", "{s}", schema)
+	if _, err := pool.Exec(t.Context(), setup); err != nil {
+		t.Fatal(err)
+	}
+	testdb.GiveUp(t, pool, schema+".second", schema+".first")
+	// The test ends here, and Schema drops the schema.
+}

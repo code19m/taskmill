@@ -5,8 +5,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -177,4 +179,69 @@ func TestRunReportsAHandlerThatDidNotRun(t *testing.T) {
 func TestExampleRuns(t *testing.T) {
 	t.Parallel()
 	testSignUp(t, testdb.Pool(t), func(int64) error { return nil })
+}
+
+// A worker that a test stops gives up the statements that it had sent, and
+// the database can still run one of them when the test ends. It takes its
+// locks in another order than the drop of the test's schema does: here it
+// holds the activity table and then wants the tasks, which a drop locks long
+// before the activity, as a rule. A drop that began meanwhile would wait for
+// the statement, and the statement for the drop: PostgreSQL would end the
+// drop, as a deadlock, and the test would fail at its end.
+func TestNewClientDropsItsSchemaAfterTheStatementsThatItsTestGaveUp(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		shared bool // other tests use the pool while the schema is dropped
+	}{
+		{name: "on a pool of its own"},
+		{name: "on a pool that other tests use", shared: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pool := testdb.Pool(t)
+			if tt.shared {
+				stop, stopped := make(chan struct{}), make(chan struct{})
+				go func() {
+					defer close(stopped)
+					for {
+						select {
+						case <-stop:
+							return
+						case <-time.After(time.Millisecond):
+							_, _ = pool.Exec(context.Background(), "SELECT 1")
+						}
+					}
+				}()
+				// Clean-ups run last first: this one after the schema's drop.
+				t.Cleanup(func() {
+					close(stop)
+					<-stopped
+				})
+			}
+			client := taskmilltest.NewClient(t, pool, nil)
+			schema := schemaOf(t, pool, client)
+			testdb.GiveUp(t, pool, schema+".activity", schema+".tasks")
+			// The test ends here, and NewClient drops the schema.
+		})
+	}
+}
+
+// schemaOf returns the schema that NewClient made for client: the one of the
+// tasks table that an enqueue locks.
+func schemaOf(t *testing.T, pool *pgxpool.Pool, client *taskmill.Client) string {
+	t.Helper()
+	var schema string
+	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+		if _, err := client.EnqueueTx(t.Context(), taskmill.Pgx(tx), greet{}, nil); err != nil {
+			return err
+		}
+		return tx.QueryRow(t.Context(), `
+SELECT n.nspname FROM pg_locks l JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE l.pid = pg_backend_pid() AND c.relname = 'tasks'`).Scan(&schema)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return schema
 }

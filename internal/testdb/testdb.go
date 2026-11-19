@@ -20,6 +20,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -27,6 +29,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/code19m/taskmill/internal/teardown"
 )
 
 // Environment variables that configure the test database.
@@ -135,7 +139,7 @@ func PoolSize(tb testing.TB, conns int32) *pgxpool.Pool {
 }
 
 // Schema returns a fresh schema name, and drops that schema when the test
-// ends.
+// ends, on a connection of pool: see [teardown.DropSchema].
 func Schema(tb testing.TB, pool *pgxpool.Pool) string {
 	tb.Helper()
 	var b [6]byte
@@ -144,11 +148,57 @@ func Schema(tb testing.TB, pool *pgxpool.Pool) string {
 	tb.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if _, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
+		if err := teardown.DropSchema(ctx, pool, schema); err != nil {
 			tb.Errorf("testdb: drop schema %s: %v", schema, err)
 		}
 	})
 	return schema
+}
+
+// GiveUp runs a statement on pool and gives it up, as a worker that is told
+// to stop gives up the statements that it had sent, and returns while the
+// statement goes on in the database. The statement locks the table held,
+// outlives the request to cancel it, as a statement does that the server had
+// not read by then, and 300 milliseconds later locks the table wanted. A drop
+// of the tables' schema that begins meanwhile, and locks wanted first, waits
+// for the statement, and the statement for the drop.
+func GiveUp(tb testing.TB, pool *pgxpool.Pool, held, wanted string) {
+	tb.Helper()
+	statement := fmt.Sprintf(`DO $$
+BEGIN
+    LOCK TABLE %s IN ACCESS SHARE MODE;
+    BEGIN
+        PERFORM pg_sleep(30);
+    EXCEPTION WHEN query_canceled THEN
+        PERFORM pg_sleep(0.3);
+    END;
+    LOCK TABLE %s IN ACCESS SHARE MODE;
+END $$`, held, wanted)
+	ctx, giveUp := context.WithCancel(context.Background())
+	defer giveUp()
+	done := make(chan error, 1)
+	go func() {
+		_, err := pool.Exec(ctx, statement)
+		done <- err
+	}()
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		var sleeps bool
+		err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND strpos(query, $1) > 0)`,
+			"LOCK TABLE "+held).Scan(&sleeps)
+		if err != nil {
+			tb.Fatalf("testdb: give up a statement: %v", err)
+		}
+		if sleeps {
+			break
+		}
+		if time.Now().After(deadline) {
+			tb.Fatal("testdb: give up a statement: it did not start")
+		}
+	}
+	giveUp()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		tb.Fatalf("testdb: give up a statement: it returned %v, want context.Canceled", err)
+	}
 }
 
 // CheckGroups fails the test unless every FIFO group of schema satisfies
