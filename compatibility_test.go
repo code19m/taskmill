@@ -135,13 +135,21 @@ func TestStoredErrorNamesNeverChange(t *testing.T) {
 	taskmill.Rescue(t.Context(), w)
 	for what, id := range map[string]int64{"a failed attempt": failed, "the note of a snooze": snoozed, "a rescued attempt": rescued} {
 		var names []string
+		var at string
 		err := e.pool.QueryRow(t.Context(),
-			"SELECT array(SELECT jsonb_object_keys(errors -> -1) ORDER BY 1) FROM "+e.schema+".tasks WHERE id = $1", id).Scan(&names)
+			"SELECT array(SELECT jsonb_object_keys(errors -> -1) ORDER BY 1), errors -> -1 ->> 'at' FROM "+e.schema+".tasks WHERE id = $1",
+			id).Scan(&names, &at)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if want := []string{"at", "attempt", "code", "message"}; !slices.Equal(names, want) {
 			t.Errorf("%s is stored under the names %q, want %q. %s", what, names, want, breaks)
+		}
+		// The time is text, so it is written in UTC: in the time zone of the
+		// session that records it, an entry would read differently for each
+		// writer, and Go cannot read every offset that PostgreSQL writes.
+		if _, err := time.Parse("2006-01-02T15:04:05Z", at); err != nil {
+			t.Errorf("%s stores its time as %q, want UTC, such as 2026-01-02T03:04:05.678901Z", what, at)
 		}
 	}
 }

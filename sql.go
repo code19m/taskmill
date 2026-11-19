@@ -212,6 +212,12 @@ func newStatements(schema string) *statements {
 		// period's days are days of the session's time zone, which are 23 or
 		// 25 hours long when its clocks change.
 		"{utc}", "(now() AT TIME ZONE 'UTC')",
+		// {at} is the database's time as an error entry stores it: text, in
+		// UTC, in the format of RFC 3339. As a value, jsonb would write it
+		// with the offset of the session's time zone: an entry would read
+		// differently for each writer, and Go cannot read every offset that
+		// PostgreSQL accepts, such as one of more than a day.
+		"{at}", `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
 	)
 	q := func(sql string) string { return r.Replace(sql) }
 	pick := func(cond, gates string) string {
@@ -865,7 +871,7 @@ SET state = CASE WHEN cancel_requested_at IS NOT NULL THEN 'canceled' ELSE $3::{
                   THEN now() + $4 * interval '1 microsecond' ELSE run_at END,
     finalized_at = CASE WHEN cancel_requested_at IS NOT NULL OR $3::{s}.task_state = 'dead' THEN now() END,
     lease_expires_at = NULL,
-    errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt, 'at', now()) || $5::jsonb)
+    errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt, 'at', {at}) || $5::jsonb)
 WHERE id = $1 AND lease_token = $2 AND {leased}
 RETURNING queue, coalesce(group_key, ''), state::text`),
 
@@ -888,7 +894,7 @@ SET state = CASE
     finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
     lease_expires_at = NULL,
     errors = CASE WHEN $4::jsonb IS NOT NULL
-                  THEN {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt - 1, 'at', now()) || $4::jsonb)
+                  THEN {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt - 1, 'at', {at}) || $4::jsonb)
                   WHEN $5 THEN {unnoted}
                   ELSE errors
              END
@@ -1039,7 +1045,7 @@ SET state = CASE
         END,
     finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
     lease_expires_at = NULL,
-    errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', now(),
+    errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', {at},
                  'message', $3::text, 'code', 'lease_lost'))
 FROM expired
 WHERE t.id = expired.id
@@ -1155,7 +1161,8 @@ DELETE FROM {s}.workers WHERE heartbeat_at < now() - greatest($1 * interval '1 s
 		// nothing changed it later: the statement sets it for the schedules
 		// among $1, which are the caller's. It does so only once it is an
 		// hour old, so that most passes write nothing. So a schedule is
-		// deleted 23 to 24 hours after a maintainer last defined it.
+		// deleted 23 to 24 hours after a maintainer last defined it. The day
+		// is written as 24 hours: see {utc}.
 		//
 		// The statement first locks the rows that it changes, and skips the
 		// ones that another transaction holds, such as one that runs, pauses,
@@ -1165,7 +1172,7 @@ DELETE FROM {s}.workers WHERE heartbeat_at < now() - greatest($1 * interval '1 s
 		pruneSchedules: q(`
 WITH old AS (
     SELECT name, name = ANY($1) AS defined FROM {s}.schedules
-    WHERE updated_at < now() - CASE WHEN name = ANY($1) THEN interval '1 hour' ELSE interval '1 day' END
+    WHERE updated_at < now() - CASE WHEN name = ANY($1) THEN interval '1 hour' ELSE interval '24 hours' END
     FOR UPDATE SKIP LOCKED
 ), marked AS (
     UPDATE {s}.schedules s SET updated_at = now() FROM old WHERE s.name = old.name AND old.defined

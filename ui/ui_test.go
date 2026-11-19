@@ -30,6 +30,9 @@ import (
 	"github.com/code19m/taskmill/ui"
 )
 
+// TestMain runs the tests in a process far from UTC: see testdb.Main.
+func TestMain(m *testing.M) { testdb.Main(m) }
+
 type greet struct {
 	Name string `json:"name"`
 }
@@ -227,6 +230,23 @@ func TestPagesRender(t *testing.T) {
 	}
 	if code, _, _ = get(t, h, "/admin/tasks/static/style.css"); code != http.StatusOK {
 		t.Fatalf("stylesheet: %d", code)
+	}
+}
+
+// A time shows in UTC, whatever the time zones of the database's sessions,
+// of the dashboard's process, and of the time that the application passed:
+// the tests run with three zones that are not UTC.
+func TestTimesShowInUTC(t *testing.T) {
+	t.Parallel()
+	client := setup(t)
+	runAt := time.Date(2031, time.March, 4, 5, 6, 7, 89_000_000, time.FixedZone("", -(9*60+30)*60))
+	res, err := client.Enqueue(t.Context(), greet{}, &taskmill.EnqueueOptions{RunAt: runAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, body, _ := get(t, handler(t, client, nil), "/tasks/"+strconv.FormatInt(res.ID, 10))
+	if want := "2031-03-04 14:36:07.089 UTC"; !strings.Contains(body, want) {
+		t.Errorf("the page of a task that runs at %s does not show %s", runAt.Format(time.RFC3339Nano), want)
 	}
 }
 

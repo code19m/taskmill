@@ -774,6 +774,51 @@ func TestRetentionCountsDaysOf24Hours(t *testing.T) {
 	}
 }
 
+// A schedule that is gone from the code is kept for a day of 24 hours too:
+// here in sessions whose clocks went forward 11 hours ago, so that their
+// last day was 23 hours long.
+func TestRemovedScheduleIsKeptFor24Hours(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, time.March, 29, 12, 0, 0, 0, time.UTC)
+	e, setNow := newClockEnv(t, at, "Europe/London")
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Schedules: []taskmill.Schedule{{Name: "kept", Cron: "@yearly", Args: sendEmail{}}},
+	})
+	// In half an hour, no maintainer will have defined it for 24 hours.
+	e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at, updated_at)
+	           VALUES ('removed', 'default', 'email.send', '@daily', now(), '2026-03-28 12:30:00+00')`)
+	stored := func() int { return e.count(t, "SELECT count(*) FROM {s}.schedules WHERE name = 'removed'") }
+
+	taskmill.PruneSchedules(t.Context(), w)
+	if stored() != 1 {
+		t.Fatal("half an hour early, the removed schedule was deleted")
+	}
+	setNow(at.Add(time.Hour))
+	taskmill.PruneSchedules(t.Context(), w)
+	if stored() != 0 {
+		t.Fatal("half an hour late, the removed schedule was kept")
+	}
+}
+
+// The history's days are UTC days, whatever the sessions' time zone: here
+// one that has no 30 December 2011, the day that Samoa left out when it
+// moved across the date line.
+func TestHistoryDaysAreUTCDays(t *testing.T) {
+	t.Parallel()
+	// Migrate prepares the partitions up to 30 December.
+	at := time.Date(2011, time.December, 24, 12, 0, 0, 0, time.UTC)
+	e, setNow := newClockEnv(t, at, "Pacific/Apia")
+	w := newWorker(t, e, &taskmill.WorkerConfig{NoMaintainer: true})
+
+	// A day later, 31 December is the only day without one.
+	setNow(at.AddDate(0, 0, 1))
+	taskmill.RunRetention(t.Context(), w)
+	want := []string{"task_history_20111230", "task_history_20111231"}
+	if got := e.historyPartitions(t, want); !slices.Equal(got, want) {
+		t.Fatalf("of the days %v, the history has %v", want, got)
+	}
+}
+
 // A period can be longer than any history: the longest duration is how Go
 // code says "for good", and SQL can store up to 300 years, a little more.
 func TestLongestHistoryRetentionKeepsHistory(t *testing.T) {

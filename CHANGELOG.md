@@ -67,6 +67,29 @@ All notable changes to taskmill are recorded here. The format follows
 - On a screen of 600 pixels or less, the dashboard's task list cut an ID of
   five digits or more short, so that every row began with the same digits.
   The column now has room for six digits.
+- taskmill works the same in every time zone of the database's sessions.
+  Three statements read that zone.
+  [Use any time zone](docs/production/database.md#use-any-time-zone) says
+  where a time zone shows.
+  - **A schedule that is gone from the code** is kept for 24 hours after a
+    maintainer last defined it. The maintainer counted a day of the
+    session's time zone. So on a day when that zone's clocks change, it
+    deleted the stored schedule, with its pause, an hour early or an hour
+    late.
+  - **The time of an entry in a task's error history** is stored in UTC,
+    such as `2026-11-19T10:24:12.923859Z`. It was stored with the offset
+    of the session's time zone, so one moment read differently for each
+    writer, and `AttemptError.At` had that offset as its location. The
+    entries that are stored already stay as they are, and read as the same
+    moments. PostgreSQL also accepts a zone that is more than a day from
+    UTC, which Go cannot read: `TaskInfo.Errors` left out the entries of
+    such a session.
+  - **The history partitions** are prepared also in a session whose time
+    zone leaves out a calendar day, as `Pacific/Apia` left out 30 December
+    2011. In the days before such a day, each pass failed with `relation
+    "task_history_…" already exists` and prepared no partition. So the
+    tasks that completed in the first minutes of the day after it skipped
+    history.
 
 ## [0.10.0] - 2026-11-19
 

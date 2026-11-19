@@ -82,14 +82,17 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 
 // missingHistoryDays returns the days among the next historyDaysAhead, from
 // today, that have no history partition, in order. Today is the database's:
-// its clock sets the day of a completed task.
+// its clock sets the day of a completed task. The days are UTC days, and a
+// day's name is printed from a time without a time zone: to_char reads a
+// date as midnight on the clock of the session's time zone, which a zone
+// that leaves a day out does not have.
 func missingHistoryDays(ctx context.Context, tx pgx.Tx, schema string) ([]time.Time, error) {
 	r, err := tx.Query(ctx, `
 SELECT d.day
 FROM (SELECT (now() AT TIME ZONE 'UTC')::date + i AS day FROM generate_series(0, $2::integer - 1) AS i) d
 WHERE NOT EXISTS (
     SELECT FROM pg_inherits h JOIN pg_class c ON c.oid = h.inhrelid
-    WHERE h.inhparent = $1::regclass AND c.relname = 'task_history_' || to_char(d.day, 'YYYYMMDD'))
+    WHERE h.inhparent = $1::regclass AND c.relname = 'task_history_' || to_char(d.day::timestamp, 'YYYYMMDD'))
 ORDER BY d.day`, schema+".task_history", historyDaysAhead)
 	if err != nil {
 		return nil, err

@@ -42,10 +42,10 @@ configurable, so several schemas can share a database. It must match
 5. **Frequent updates touch no indexed column.** Lease renewals change only
    `lease_expires_at`, which no index contains, so PostgreSQL can update the
    row in place (a HOT update) without writing to any index.
-6. **Every timestamp that taskmill sets comes from the database clock:**
-   `now()`, or `clock_timestamp()` for a lease, which counts from the moment
-   the task is taken. The days of the history partitions come from it too.
-   Only a run time that the application passes in comes from its own clock.
+6. **Every time is a `timestamptz` that the database clock sets:** `now()`,
+   or `clock_timestamp()` for a lease, which counts from the moment the task
+   is taken. Only a run time that the application passes in comes from its
+   own clock. [No statement reads the session's time zone](schema-maintenance.md#maintenance).
 
 ## Tables
 
