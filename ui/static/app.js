@@ -6,8 +6,9 @@
 // It is careful with the network and the machine: one page request at a
 // time, each abandoned after a while, with a growing wait while the server
 // is out of reach. An update changes only the parts of the page that
-// changed, so nothing flickers, and focus, scroll, and open menus stay as
-// they are. Whatever it cannot show in place, the browser loads as a page.
+// changed, so nothing flickers, and scroll, open menus, and the focus stay
+// as they are, unless what had the focus is gone. Whatever it cannot show in
+// place, the browser loads as a page.
 (() => {
   "use strict";
 
@@ -346,9 +347,12 @@
     // takes a tap on plain text for a click.
     if (hint?.matches(":popover-open") && !hint.parentElement.contains(event.target)) hint.hidePopover();
   }, true);
-  for (const type of ["pointerup", "pointercancel"]) {
-    document.addEventListener(type, () => { pointerDown = false; }, true);
-  }
+  // A press ends when the pointer lifts. A context menu, on macOS and Linux,
+  // and a window that comes to the front take the lift with them: the live
+  // updates must not wait for it.
+  const lift = () => { pointerDown = false; };
+  for (const type of ["pointerup", "pointercancel", "contextmenu"]) document.addEventListener(type, lift, true);
+  window.addEventListener("blur", lift);
 
   // A live update waits while the reader scrolls: rows changing under a
   // scroll make it stutter on a slow machine.
@@ -434,18 +438,22 @@
   const stamp = () => Date.now() + Math.random();
   const here = () => location.pathname + location.search;
   let entry = history.state?.n; // of the page on screen
-  let shown = here(); // the address of the page on screen
+  let onScreen = here(); // the address of the page on screen
   if (entry == null) {
     entry = stamp();
     history.replaceState({ n: entry }, "");
   }
 
-  // leave keeps the page on screen, before another one takes its place,
-  // without the guide of a chart: that is the script's, not the page's.
+  // leave keeps the page on screen, before another one takes its place:
+  // its title, its content, and the parts around it that an update changes.
+  // What the script put there stays out: the guide of a chart, and the
+  // place of a hint, which is a style attribute.
   function leave() {
     untrace();
+    for (const pop of document.querySelectorAll(".hint-pop[style]")) pop.removeAttribute("style");
+    const parts = [document.getElementById("main"), ...document.querySelectorAll("[data-live-part]")];
     pages.delete(entry);
-    pages.set(entry, { html: root.outerHTML, y: scrollY });
+    pages.set(entry, { title: document.title, html: parts.map((part) => part.outerHTML).join(""), y: scrollY });
     if (pages.size > KEEP_PAGES) pages.delete(pages.keys().next().value);
   }
 
@@ -507,7 +515,8 @@
     const focused = document.activeElement;
     apply(result, moved);
     entry = n;
-    shown = here();
+    onScreen = here();
+    show(); // the page may be one that does not update itself
     if (notice) notify(notice);
     const main = document.getElementById("main");
     const announcer = document.querySelector("[data-announce]");
@@ -515,9 +524,10 @@
       // The change may remove the element that had focus, as the last "Load
       // more" removes its link: the page takes the focus, not the body. And
       // a list that is longer, or has other filters, tells a screen reader
-      // how many tasks it shows now. An action says what it did itself.
+      // how many tasks it shows now, or that it shows none. An action says
+      // what it did itself.
       if (focused?.isConnected === false) main.focus({ preventScroll: true });
-      if (!notice && announcer) announcer.textContent = main.querySelector("[data-shown]")?.textContent ?? "";
+      if (!notice && announcer) announcer.textContent = main.querySelector("[data-shown], .empty-note")?.textContent ?? "";
       return;
     }
     scrollTo(0, y);
@@ -533,7 +543,7 @@
     // Another place on the page that is on screen, as the link to its
     // content leads to: the browser scrolls there. Its entry is new to the
     // script, and gets the page's number.
-    if (n == null && here() === shown) {
+    if (n == null && here() === onScreen) {
       n = entry;
       history.replaceState({ n }, "");
     }
@@ -547,6 +557,7 @@
     turns++; // a page or an action that is on its way was for the page before
     progress(false);
     leave();
+    result.doc.title = was.title;
     render(result, { moved: true, n, y: was.y });
     settle();
     schedule(0);
@@ -662,24 +673,22 @@
   // Charts: the values of a step
   //
   // A guide marks the step of a chart that is under the pointer or a pressed
-  // finger, or that the arrow keys choose in a chart with focus. A note
-  // beside it gives the step's time and values. The page holds them all:
-  // each series has its values as text, and the legend names them. The guide
-  // is an element in the chart, so it scrolls and resizes with it. A live
-  // update removes it, as it removes whatever the server did not render,
-  // and draws it again from the newer values before the browser paints.
+  // finger, or that the chart's slider is on. A note beside it gives the
+  // step's time and values. The page holds them all: each series has its
+  // values as text, and the legend names them. The guide is an element in
+  // the chart, so it scrolls and resizes with it. A live update removes it,
+  // as it removes whatever the server did not render, and draws it again
+  // from the newer values before the browser paints.
 
   const guide = document.createElement("div");
   guide.className = "chart-guide";
   guide.id = "chart-guide"; // a name of its own: an update never takes it for a part of the page
-  guide.setAttribute("aria-hidden", "true"); // the arrow keys announce the step
+  guide.setAttribute("aria-hidden", "true"); // the chart's slider says the step
   const tip = guide.appendChild(document.createElement("div"));
   tip.className = "chart-tip";
-  let traced = null; // the chart with the guide, and the pointer's place or the step that the keys chose: { svg, x } or { svg, i }
+  let traced = null; // the chart with the guide, and the pointer's place or the step that its slider is on: { svg, x } or { svg, i }
   let marked = 0; // the step that the guide marks
   let tracing = 0; // the frame that will draw the guide: pointer moves between two frames draw once
-
-  const clock = (seconds) => new Date(seconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 
   function untrace() {
     traced = null;
@@ -700,11 +709,14 @@
     const plot = svg.parentNode;
     if (i === marked && guide.parentNode === plot) return; // still on the step that it marks
     marked = i;
-    const step = Number(svg.dataset.step);
-    const start = Number(svg.dataset.start) + i * step;
+    const step = 1000 * svg.dataset.step;
+    const start = 1000 * svg.dataset.start + i * step;
     const time = document.createElement("span");
     time.className = "chart-tip-time";
-    time.textContent = step > 60 ? `${clock(start)} – ${clock(start + step)}` : clock(start);
+    // The time of the step, on the reader's clock, with its zone as every
+    // exact time of the page names it.
+    const from = new Date(start);
+    time.textContent = `${clockOf(from)}${step > 60000 ? ` to ${clockOf(new Date(start + step))}` : ""} ${zoneOf(from)}`;
     tip.replaceChildren(time, ...[...svg.closest(".chart").querySelectorAll(".legend span")].flatMap((name, k) => {
       const value = document.createElement("b");
       value.textContent = series[k]?.[i] || "—";
@@ -728,23 +740,31 @@
   document.addEventListener("pointerout", (event) => {
     if (traced?.svg.contains(event.target) && !traced.svg.contains(event.relatedTarget)) untrace();
   });
-  document.addEventListener("focusout", (event) => {
-    if (traced?.svg === event.target) untrace();
-  });
 
-  // In a chart with focus, the arrow keys move the guide, from the newest
-  // step if the chart has none, and Escape hides it. A screen reader hears
-  // the step as the tooltip of its column words it.
+  // A chart has a slider for the keyboard and for a screen reader: a range
+  // field over the plot, which nobody sees. The browser moves it, from the
+  // newest step, and the guide follows it while it has the focus; Escape
+  // hides the guide. say gives the slider the words of its step, the
+  // tooltip of the step's column: a screen reader reads them as its value.
+  function say(slider) {
+    const words = slider.previousElementSibling.querySelectorAll(".col")[slider.value - 1]?.textContent ?? "";
+    if (slider.getAttribute("aria-valuetext") !== words) slider.setAttribute("aria-valuetext", words);
+  }
+
+  for (const type of ["focusin", "input"]) {
+    document.addEventListener(type, (event) => {
+      const slider = event.target;
+      if (!slider.matches?.(".chart-step")) return;
+      say(slider);
+      traced = { svg: slider.previousElementSibling, i: slider.value - 1 };
+      trace();
+    });
+  }
+  document.addEventListener("focusout", (event) => {
+    if (traced?.svg.nextElementSibling === event.target) untrace();
+  });
   document.addEventListener("keydown", (event) => {
-    const svg = event.target.closest?.(".chart-plot > svg");
-    if (!svg || event.metaKey || event.ctrlKey || event.altKey) return;
-    if (event.key === "Escape") untrace();
-    const move = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
-    if (!move) return;
-    event.preventDefault();
-    traced = { svg, i: guide.parentNode === svg.parentNode ? marked + move : Infinity };
-    trace();
-    document.querySelector("[data-announce]").textContent = svg.querySelectorAll(".col")[marked]?.textContent ?? "";
+    if (event.key === "Escape" && event.target.matches?.(".chart-step")) untrace();
   });
 
   // Times in the reader's time zone
@@ -842,15 +862,26 @@
   }
 
   // Updating a page in place. morph changes the page to match a newer copy
-  // of it, touching only what differs. Rows with a data-key are matched by
-  // it, so a new row slides in without rebuilding the others. State that
-  // belongs to the reader stays: an open menu, a checkbox or field they
-  // changed, and attributes the script set: those named data-js-*, and the
-  // place of a hint, in its style. The server never sends a style attribute:
-  // the content security policy would refuse it.
+  // of it, touching only what differs. State that belongs to the reader
+  // stays: an open menu, a checkbox or field they changed, and what the
+  // script set: attributes named data-js-*, the words of a chart's slider,
+  // and the place of a hint, in its style. No copy brings a style attribute:
+  // the content security policy would refuse it, so the server sends none,
+  // and a page that is kept leaves it behind.
+  //
+  // A child with a data-key or an id is matched by it, wherever it stands.
+  // What stands before the match gives way: a child that the copy lacks,
+  // and text between keyed children, are removed. A child that the copy has
+  // further on is in the way. If the match is the element right after it,
+  // that child is the one out of place: it is set aside, and moves when the
+  // copy comes to it. Otherwise the match moves before it. So a row that
+  // comes, goes, or moves, up or down, is the one row that is touched, and
+  // it keeps the focus. The keys are read once, when a child is first out
+  // of place: the work grows with the number of children, not its square.
 
   const keyOf = (node) => (node.nodeType === 1 ? node.getAttribute("data-key") ?? (node.id || null) : null);
-  const kept = (node, name) => name.startsWith("data-js-") || name === "style" || (name === "open" && node.localName === "details");
+  const kept = (node, name) => name.startsWith("data-js-") || name === "style" || name === "aria-valuetext" ||
+    (name === "open" && node.localName === "details");
 
   function syncAttributes(node, next) {
     for (const { name } of [...node.attributes]) {
@@ -871,23 +902,46 @@
       node.checked = node.defaultChecked;
       node.value = node.defaultValue;
     }
+    const children = [...next.childNodes];
     let current = node.firstChild;
-    for (const wanted of [...next.childNodes]) {
+    let ahead = null; // the keyed children that the copy has too, and has not come to yet, by key
+    let aside = null; // those of them that are set aside, behind current
+    for (const [at, wanted] of children.entries()) {
       const key = keyOf(wanted);
-      let match = null;
-      if (key !== null) {
+      const inPlace = current && keyOf(current) === key ? current : null;
+      if (!inPlace && key !== null && !ahead) {
+        const keys = new Set(children.slice(at).map(keyOf));
+        ahead = new Map();
+        aside = new Set();
         for (let n = current; n; n = n.nextSibling) {
-          if (keyOf(n) === key) { match = n; break; }
+          const k = keyOf(n);
+          if (k !== null && keys.has(k) && !ahead.has(k)) ahead.set(k, n);
         }
-      } else if (current && keyOf(current) === null) {
-        match = current;
       }
+      const match = ahead?.get(key) ?? inPlace;
+      if (match && match !== current && !aside.has(match)) {
+        while (current !== match) {
+          const before = current;
+          const stays = ahead.get(keyOf(before)) === before;
+          if (stays && match.previousElementSibling !== before) break;
+          current = before.nextSibling;
+          if (stays) aside.add(before);
+          else before.remove();
+        }
+      }
+      ahead?.delete(key);
       if (!match || match.nodeType !== wanted.nodeType || match.nodeName !== wanted.nodeName) {
+        if (aside?.has(match)) match.remove(); // of another kind now, and behind current, where nothing else removes it
         node.insertBefore(wanted, current);
         continue;
       }
-      if (match === current) current = current.nextSibling;
-      else node.insertBefore(match, current);
+      if (match === current) {
+        current = current.nextSibling;
+      } else {
+        const focused = match.contains(document.activeElement) && document.activeElement;
+        node.insertBefore(match, current);
+        if (focused) focused.focus({ preventScroll: true });
+      }
       if (match.nodeType !== 1) {
         if (match.nodeValue !== wanted.nodeValue) match.nodeValue = wanted.nodeValue;
       } else if (match.hasAttribute("data-json")) {
@@ -986,6 +1040,7 @@
     if (result.doc.title) document.title = result.doc.title;
     shownETag = result.etag;
     highlight(main);
+    for (const slider of main.querySelectorAll(".chart-step")) say(slider);
     if (traced) trace(); // the update took the guide off its chart, or the chart off the page
     // The newer copy lists every option of a menu, and none that a search
     // found on the server: an open menu shows its search again.
@@ -994,7 +1049,9 @@
 
   // Live updates: every few seconds the page fetches itself and updates in
   // place, unless the reader is busy with it. The button in the header shows
-  // whether the page is live, paused, out of date, or signed out.
+  // whether the page is live, paused, out of date, or signed out. Its dot
+  // pulses while updates run: not on a page that does not update itself,
+  // nor while they wait for the reader.
 
   const toggle = document.querySelector("[data-live-toggle]");
   const LABELS = { live: "Live", paused: "Paused", stale: "Reconnecting", offline: "Offline", "signed-out": "Signed out" };
@@ -1003,6 +1060,7 @@
   let failures = 0;
   let lastUpdate = Date.now();
   let timer = 0;
+  let waiting = false; // the last update waited for the reader
 
   const livePage = () => document.getElementById("main")?.hasAttribute("data-live") ?? false;
 
@@ -1011,6 +1069,7 @@
     let state = live ? status : "paused";
     if (state === "stale" && navigator.onLine === false) state = "offline";
     toggle.dataset.state = state;
+    toggle.classList.toggle("running", state === "live" && !waiting && livePage());
     toggle.setAttribute("aria-pressed", String(live));
     toggle.querySelector(".live-label").textContent = LABELS[state];
     const since = new Date(lastUpdate).toLocaleTimeString();
@@ -1023,6 +1082,9 @@
     }[state];
   }
 
+  // The reader is busy during a press, an action, or a scroll, while a
+  // dialog or a menu is open or text is selected, and while a field has the
+  // focus: also the slider of a chart, whose steps must not change under it.
   function busy() {
     if (submitting || pointerDown || dialog?.open || document.querySelector("details.sel[open]")) return true;
     if (Date.now() - scrolledAt < 1000) return true;
@@ -1047,9 +1109,13 @@
   async function update() {
     timer = 0;
     if (!live || status === "signed-out" || document.hidden || !livePage()) return;
+    if (waiting !== busy()) {
+      waiting = !waiting;
+      show();
+    }
     // A request in flight is a navigation: it must not be abandoned for an
     // update of the page it replaces.
-    if (busy() || inflight) {
+    if (waiting || inflight) {
       schedule(1000);
       return;
     }
@@ -1110,6 +1176,7 @@
 
   highlight(document);
   localise(document);
+  for (const slider of document.querySelectorAll(".chart-step")) say(slider);
   show();
   if (live) schedule(REFRESH_MS);
 })();

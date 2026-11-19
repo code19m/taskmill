@@ -45,7 +45,7 @@
     </section>
     {{end}}
     <section class="card flush">
-      <div class="card-head"><h2>Errors</h2><span class="subtle">{{len $t.Errors}}</span></div>
+      <div class="card-head"><h2>Errors <span class="subtle">{{len $t.Errors}}</span></h2></div>
       {{with $t.Errors}}
       <ol class="timeline">{{range newest .}}
         <li class="{{if .Code}}code-{{.Code}}{{end}}">

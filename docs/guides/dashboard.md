@@ -143,9 +143,11 @@ theme, and the next pages follow the device.
 
 On the **Overview**, the **Activity** card shows the last 1, 6, or 24 hours,
 in steps of 1, 5, or 15 minutes. To read the values of one step, point at a
-chart, or press and drag on a touch screen. From the keyboard, move to a
-chart with Tab and press the left and right arrow keys; Escape hides the
-values. The **Throughput** dial reads like this:
+chart, or press and drag on a touch screen: a note shows them, with the
+step's time on your clock. From the keyboard, a chart is a slider that a
+screen reader reads step by step: the arrow keys, Home, and End move it, and
+Escape hides the values. While a chart has the focus, the page waits with
+its updates. The **Throughput** dial reads like this:
 
 | Part of the dial | What it shows |
 |---|---|
@@ -156,7 +158,7 @@ values. The **Throughput** dial reads like this:
 So the needle reads against the busiest step of the period that you chose:
 near the top of the scale, the workers are as busy as at their peak. Workers
 write their counts every 10 seconds, so the dial reads a step 15 seconds
-after it ends, not sooner.
+after it ends, not sooner, and the **Attempts** chart draws it then.
 
 On the **Schedules** page, the **Cron** column says each timetable in
 words, such as "Weekdays at 09:00", above the cron expression. The times are
@@ -166,36 +168,38 @@ words: an expression with both day fields set, or with more than three
 times, shows alone. [Write the timetable](schedules.md#write-the-timetable)
 says how an expression is read, and what happens when the clocks change.
 
-On the **Workers** page, the **Kinds** column counts the kinds that the
-worker has handlers for: click the count to list them. The **Checked in**
-column shows the worker's last
-[check-in](../concepts/glossary.md#check-in). A yellow dot and the word
-"stale" mark a worker that made no check-in for longer than its
-`LeaseDuration`: it has stopped, or it cannot reach the database.
+On the **Workers** page, the **Worker** column shows the part of a worker's
+ID after its host name, which the **Host** column has: the tooltip has the
+whole ID. Click the count in the **Kinds** column to list the kinds that the
+worker has handlers for. **Checked in** is the worker's last
+[check-in](../concepts/glossary.md#check-in): a yellow dot and the word
+"stale" mark a worker that made none for longer than its `LeaseDuration`,
+because it has stopped or cannot reach the database.
 
 The pages show data, and keep what explains it behind a hint: a small
-button with an "i" that shows a short text. On the **Overview**, the hint
-beside the title says when the maintainer last counted the tasks. It
-counts every 10 seconds. If the last count is over a minute old, the page
-says so beside its title, in amber: check that a worker runs as the
-maintainer ([Monitoring](../production/monitoring.md) has an alert for
-this).
+button with an "i". On the **Overview**, the hint beside the title says when
+the maintainer last counted the tasks, which it does every 10 seconds. If
+the last count is over a minute old, the page says so in amber: check that a
+worker runs as the maintainer ([Monitoring](../production/monitoring.md) has
+an alert for this). A chart with nothing to draw says why in a hint. In a
+browser without popovers, a hint's text stands on the page.
 
 Before an action on many tasks, the dashboard shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,
 and offers to continue where it stopped. If some tasks were busy at that
 moment, it says how many, and offers to try them again.
 
-A task list shows the newest tasks first. A list of only dead tasks, only
-canceled tasks, or both shows the tasks that finished last first. So the
-task that died a minute ago is at the top of the **Dead** page. Such a list
-shows when each task finished. An arrow in the header marks the column
-that orders the list: **ID**, or **Finished**. The row under a list shows
-more of it: click anywhere in the row. A list that starts after other
-tasks, as the page after 250 tasks does, has a row at its top that leads
-back to the first page. Every state has an icon in its color. The two
-states that need you also have their name in color: `dead` in red, and
-`retryable` in amber.
+A task list shows the newest tasks first, and a list of only dead tasks,
+only canceled tasks, or both shows the tasks that finished last first, with
+the time of each: the task that died a minute ago is at the top of the
+**Dead** page. An arrow in the header marks the column that orders the
+list: **ID**, or **Finished**. The row under a list shows more of it: click
+anywhere in the row. A list that starts after other tasks, as the page after
+250 tasks does, has a row at its top that leads back to the first page.
+Every state has an icon in its color, and the two states that need you also
+have their name in color: `dead` in red, and `retryable` in amber. A badge
+beside the state marks a priority that is not normal, without a state color:
+`high` is bolder than `low`, and `critical` is filled.
 
 A list of dead or canceled tasks has one more filter, **Finished**, which
 shows the tasks that finished in a range of time:
@@ -219,15 +223,13 @@ drops the range: only dead and canceled tasks are listed by finish time.
 A task list has 5 seconds to read its tasks. A list of dead or canceled
 tasks never reads tasks of other states. But with no queue in the filters,
 as on the **Dead** page, it reads up to as many tasks as it shows from each
-queue that has such tasks. "Load more" makes the list longer, up to 250
-tasks, and multiplies that read: a list of 250 tasks reads up to 250 from
-each queue, five times as many as a list of 50. With hundreds of queues,
-choose a queue. Some other lists can read many tasks that they do not show,
-such as the available tasks of all queues in a very large table. If a list
-runs out of time, the page says "Taking too long", and what may help: a
-queue and a state in the filters, or fewer filters
-([Manage tasks from code](operations-api.md#find-tasks) says which lists
-are fast).
+queue that has such tasks, so a list of 250 tasks reads five times as many
+as a list of 50: with hundreds of queues, choose a queue. Some other lists
+can read many tasks that they do not show, such as the available tasks of
+all queues in a very large table. If a list runs out of time, the page says
+"Taking too long", and what may help: a queue and a state in the filters, or
+fewer filters ([Manage tasks from code](operations-api.md#find-tasks) says
+which lists are fast).
 
 A retry of a canceled task takes the task's
 [dedupe key](../concepts/glossary.md#dedupe-key) back. If another task holds

@@ -6,7 +6,8 @@
    Surfaces and text are neutral. One accent, indigo, marks the main action
    and what is selected; the state colors say a task's state, nothing else.
    Radii: 6px chips, 8px controls, 12px cards. Weights: a little above 400,
-   500, and 600; a font that lacks one uses its nearest.
+   500, and 600; a font that lacks one uses its nearest. One light weight is
+   only for a large number that stands alone, as the dial's.
    ============================================================ */
 
 :root {
@@ -21,6 +22,7 @@
   --text-body: 16px;
   --text-ui: 17px;
   --text-heading: 21px;
+  --weight-light: 300;
   --weight-normal: 450;
   --weight-medium: 550;
   --weight-bold: 650;
@@ -107,7 +109,7 @@
   --ok: #31764d;
   --err: #b83b35;
   --review: #7950a4;
-  --warn: #94650c;
+  --warn: #8a5e0b;
   --button-fill: #ffffff;
   --button-fill-hover: #f6f6f7;
   --button-fill-pressed: #ededee;
@@ -144,7 +146,7 @@
     --ok: #31764d;
     --err: #b83b35;
     --review: #7950a4;
-    --warn: #94650c;
+    --warn: #8a5e0b;
     --button-fill: #ffffff;
     --button-fill-hover: #f6f6f7;
     --button-fill-pressed: #ededee;
@@ -222,6 +224,12 @@ button, input { font-weight: inherit; } /* not the browser's 400 */
   max-width: 1320px; margin: 0 auto; height: 56px; padding: 0 28px;
   display: flex; align-items: center; gap: 24px;
 }
+/* What the browser scrolls to, for the focus or for a place that an address
+   names, stops clear of the sticky bars: the header, two rows tall on a
+   small screen, and on a wide one the header of a table under it. A control
+   of the header is never under them. */
+html { scroll-padding-top: 104px; }
+html:has(.appbar :focus) { scroll-padding-top: 0; }
 /* The wheel sits close to the name: one mark. */
 .logo {
   display: flex; align-items: center; gap: 7px; flex-shrink: 0;
@@ -244,14 +252,16 @@ button, input { font-weight: inherit; } /* not the browser's 400 */
 .nav-item .count { font-size: var(--text-xs); color: var(--err); font-variant-numeric: tabular-nums; }
 .nav-item .count:empty { display: none; }
 .appbar-tools { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
-/* While the page is live and up to date, a soft ring pulses out of the dot
+/* While updates run, as the script says, a soft ring pulses out of the dot
    of the Live button: by transform and opacity alone, and not for a reader
-   who asked for less motion. In every other state the dot is still. */
+   who asked for less motion. Otherwise the dot is still: in every other
+   state, on a page that does not update itself, and while the updates wait
+   for the reader. */
 .btn.live { gap: 8px; }
 .live-dot { width: 8px; display: inline-grid; place-items: center; }
 .live-dot::before { content: ""; grid-area: 1 / 1; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
 @media (prefers-reduced-motion: no-preference) {
-  .live[data-state="live"] .live-dot::after {
+  .live.running .live-dot::after {
     content: ""; grid-area: 1 / 1; width: 7px; height: 7px; border-radius: 50%; background: var(--ok);
     animation: live-pulse 1.8s var(--ease-out) infinite;
   }
@@ -378,9 +388,7 @@ form { display: inline; margin: 0; }
   box-shadow: var(--shadow-raised); color: var(--ink); font-family: var(--font-sans); font-size: 15px; line-height: 20px;
   transition: background var(--motion-fast);
 }
-.ctl::placeholder { color: var(--ink-ghost); }
 .ctl:hover, .sel[open] > .sel-btn { background: var(--button-fill-hover); }
-select.ctl option { background: var(--surface-raised); color: var(--ink); }
 
 .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .filters > .sel { flex: 0 1 200px; min-width: 0; }
@@ -479,8 +487,13 @@ a.pop-opt:focus-visible { outline-offset: -2px; }
 }
 .hint-pop[style] { position: absolute; }
 @media (max-width: 600px) { .hint-pop { left: 16px !important; right: 16px !important; width: auto; max-width: none; } }
-/* A browser without popovers would show the text of every hint, over the page. */
-@supports not selector(:popover-open) { .hint { display: none; } }
+/* A browser without popovers cannot open the text of a hint: there the
+   text stands in its place, as quiet text that wraps, without the button. */
+@supports not selector(:popover-open) {
+  .hint { display: contents; }
+  .hint > button { display: none; }
+  .hint-pop { all: unset; color: var(--ink-ghost); font: var(--weight-normal) var(--text-xs)/1.5 var(--font-sans); }
+}
 
 .chip {
   display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: var(--radius-chip);
@@ -490,13 +503,16 @@ a.pop-opt:focus-visible { outline-offset: -2px; }
 code.chip { font-family: var(--font-mono); }
 a.chip:hover { text-decoration: none; color: var(--ink); border-color: var(--line-strong); }
 .chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
-.chip.priority-high { color: var(--warn); }
-.chip.priority-critical { color: var(--err); }
+/* A priority is not a state, and has no state color: the more urgent it is,
+   the heavier its badge, and a critical one stands on ink. */
+.chip.priority-high { color: var(--ink); font-weight: var(--weight-medium); }
+.chip.priority-critical { background: var(--ink); border-color: transparent; color: var(--surface-raised); font-weight: var(--weight-bold); }
 /* A task's state in a list, with its priority beside it unless that is
-   normal. The badge stands apart from the state, and is no taller than its
-   text, so that every row has the same height. */
+   normal. The badge stands apart from the state. Beside it, the badge is no
+   taller than the state's text, and adds nothing to the height of the row.
+   On a small screen it goes under the state, in a row that is taller. */
 .state-cell { display: flex; align-items: center; gap: 10px; }
-.state-cell .chip { padding: 0 7px; line-height: 18px; }
+.state-cell .chip { padding: 0 7px; line-height: 17px; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
 /* ---------- status ---------- */
@@ -534,6 +550,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   padding: 12px 16px; border-bottom: 1px solid var(--line);
 }
 .card-head h2 { font-size: var(--text-body); font-weight: var(--weight-bold); color: var(--ink); }
+.card-head h2 .subtle { margin-left: 4px; font-weight: var(--weight-normal); } /* the count of what the card lists */
 .card-body { padding: 14px; }
 .stack { display: grid; gap: 16px; align-content: start; min-width: 0; }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; }
@@ -593,7 +610,8 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table col.c-kind { width: 18%; }
 .table col.c-queue { width: 12%; }
 .table col.c-cron { width: 264px; }
-.table col.c-host { width: 22%; }
+.table col.c-worker { width: 256px; }
+.table col.c-host { width: 18%; }
 .table col.c-version { width: 110px; }
 .table col.c-kinds { width: 110px; }
 .table col.c-act-1 { width: 128px; }
@@ -603,7 +621,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table-schedules { min-width: 1144px; }
 .table-schedules col.c-kind { width: 15%; }
 .table-schedules col.c-queue { width: 10%; }
-.table-workers { min-width: 1050px; }
+.table-workers { min-width: 1120px; }
 .table th {
   padding: 10px 16px; text-align: left; white-space: nowrap;
   font-size: var(--text-sm); font-weight: var(--weight-normal); color: var(--ink-muted); background: var(--glass-1); border-bottom: 1px solid var(--line);
@@ -655,10 +673,6 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .cron-words { margin-bottom: 3px; }
 .table-schedules td.wrap { overflow-wrap: anywhere; }
 .table-schedules td.wrap .chip { max-width: 100%; white-space: normal; }
-/* A browser without the script opens a longer list at the first task that
-   "Load more" added. The margin keeps that row clear of the sticky header,
-   which is two rows tall on a small screen. */
-.table tr:target { scroll-margin-top: 104px; }
 /* The mark of the column that orders a list. */
 .sort { margin-left: 4px; vertical-align: -1.5px; }
 /* A task list leads on through whole rows. The row under it shows more of
@@ -737,7 +751,8 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 }
 .chart { margin: 0; padding: 12px 16px; min-width: 0; background: var(--surface-raised); }
 .chart-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
-.chart-title { font-size: var(--text-label); font-weight: var(--weight-medium); color: var(--ink-soft); }
+.chart-title { display: flex; align-items: center; gap: 6px; font-size: var(--text-label); font-weight: var(--weight-medium); color: var(--ink-soft); }
+.chart-title > .hint { margin: -3px 0 -3px -4px; } /* close to the title, which is as tall with a hint as without */
 .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: var(--text-xs); color: var(--ink-faint); }
 .legend span, .chart-tip span { display: inline-flex; align-items: center; gap: 6px; }
 .legend i, .chart-tip i { width: 10px; height: 2px; border-radius: 1px; background: var(--c); }
@@ -756,10 +771,10 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .chart .area { fill: var(--c); opacity: .08; }
 .chart .col { fill: transparent; }
 .chart .col:hover { fill: var(--fill-hover); }
-.chart-note {
-  position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
-  font-size: var(--text-xs); color: var(--ink-ghost);
-}
+/* The slider of a chart lies over the plot, unseen: the plot shows that it
+   has the focus, and the pointer still reaches the picture under it. */
+.chart-step { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; pointer-events: none; }
+.chart-plot:has(> .chart-step:focus-visible) { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .chart-x {
   grid-column: 2; display: flex; justify-content: space-between;
   font-size: var(--text-xs); color: var(--ink-faint); font-variant-numeric: tabular-nums;
@@ -775,11 +790,14 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .chart-guide { position: absolute; inset: 0; border-left: 1px solid var(--ink-ghost); pointer-events: none; }
 .chart-tip {
   position: absolute; top: 4px; left: 8px; display: grid; grid-template-columns: auto auto; gap: 4px 14px; padding: 7px 9px;
-  background: var(--surface-control); border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--surface-control); border: 1px solid var(--line-strong); border-radius: var(--radius-control);
   color: var(--ink-soft); font-size: var(--text-xs); line-height: 1.25; white-space: nowrap; font-variant-numeric: tabular-nums;
+  max-width: calc(50% + 8px);
 }
-.chart-guide.flip .chart-tip { left: auto; right: calc(100% + 8px); }
-.chart-tip-time { grid-column: 1 / -1; color: var(--ink-faint); }
+/* The note is on the side of the guide with more room. It is no wider than
+   half the plot and the chart's own edge: a long time, with its zone, breaks. */
+.chart-guide.flip .chart-tip { left: -8px; transform: translateX(-100%); }
+.chart-tip-time { grid-column: 1 / -1; color: var(--ink-faint); white-space: normal; }
 .chart-tip b { color: var(--ink); font-weight: var(--weight-medium); text-align: right; }
 
 /* The dial is drawn at its own size, so that its lines and labels stay sharp.
@@ -802,7 +820,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .dial-hub { fill: var(--surface-raised); stroke: var(--ink); stroke-width: 1.4; }
 .dial-pin { fill: var(--ink); }
 .dial-value {
-  font-size: 34px; font-weight: 300; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
+  font-size: 34px; font-weight: var(--weight-light); line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
 }
 .dial-unit { margin-top: 2px; font-size: var(--text-xs); color: var(--ink-faint); }
 
@@ -810,8 +828,9 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 
 .health { flex-shrink: 0; width: 7px; height: 7px; margin-right: 3px; border-radius: 50%; background: var(--ok); }
 .health.stale { background: var(--warn); }
-/* A worker's ID is long. It gives way to the marks beside it, "stale" and
-   "maintainer", which stay in view. */
+/* A worker shows the part of its ID after its host's name: its column has
+   room for it beside the mark of the maintainer. A longer ID gives way to
+   the marks beside it, "stale" and "maintainer", which stay in view. */
 .worker { display: flex; align-items: center; gap: 6px; }
 .worker > .mono { overflow: hidden; text-overflow: ellipsis; }
 .worker > .chip { flex-shrink: 0; }
@@ -884,6 +903,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   .nav { order: 3; flex-basis: 100%; justify-content: space-between; margin: 0 -8px; padding-bottom: 8px; }
   .nav-item { padding: 6px 8px; font-size: var(--text-sm); }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stats > :last-child:nth-child(odd) { grid-column: 1 / -1; } /* no card alone in half a row */
   .stat-value { font-size: 24px; }
   .table th, .table td { padding-left: 12px; padding-right: 12px; }
   .toast { right: 16px; width: calc(100vw - 32px); }
@@ -909,7 +929,11 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 }
 @media (pointer: coarse) {
   .btn, .btn.sm, .pop-opt, .sel-btn, .field .ctl, .pager, .pager-link { min-height: 44px; }
-  .hint > button::after { content: ""; position: absolute; inset: -10px; } /* a target of 44 pixels */
+  /* A hint and a segment keep their size, and take the touch around them: a
+     target of 44 pixels. A segment takes none from the one beside it. */
+  .seg :is(button, a) { position: relative; min-width: 44px; justify-content: center; }
+  .seg :is(button, a)::after, .hint > button::after { content: ""; position: absolute; inset: -10px 0; }
+  .hint > button::after { inset: -10px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

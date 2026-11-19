@@ -64,6 +64,46 @@ func TestThroughputReadsTheNewestCompleteStep(t *testing.T) {
 	}
 }
 
+// The chart of the attempts draws the steps that the dial reads: a step in
+// progress is not on it, and neither is the step before it until its count
+// is complete, 15 seconds after it ended. Drawn sooner, the line would end
+// in a dip at the start of every step.
+func TestAttemptChartDrawsTheStepsThatAreComplete(t *testing.T) {
+	t.Parallel()
+	minute := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	points := []taskmill.Activity{
+		{At: minute.Add(-2 * time.Minute), Completed: 500, Failed: 20},
+		{At: minute.Add(-time.Minute), Completed: 510, Failed: 3}, // workers still add to it for a moment
+		{At: minute, Completed: 5},
+	}
+	const counting = "The first point shows when the count of its minute is complete."
+	for _, c := range []struct {
+		name              string
+		points            []taskmill.Activity
+		after             time.Duration // since the minute started
+		completed, failed string        // the values of the last four steps
+		note              string
+	}{
+		{"a minute that has just ended waits", points, 5 * time.Second, " 500  ", " 20  ", ""},
+		{"until its count is complete", points, 14 * time.Second, " 500  ", " 20  ", ""},
+		{"then it is drawn", points, 15 * time.Second, " 500 510 ", " 20 3 ", ""},
+		{"only steps that still count", points[1:], 5 * time.Second, "   ", "   ", counting},
+		{"only the step in progress", points[2:], 30 * time.Second, "   ", "   ", counting},
+		{"nothing recorded", nil, 30 * time.Second, "   ", "   ", "Nothing recorded yet."},
+	} {
+		now := minute.Add(c.after)
+		chart := attemptChart(c.points, windowOf(chartRanges[0], now), now)
+		for k, want := range []string{c.completed, c.failed} {
+			if got := chart.Series[k].Values; !strings.HasSuffix(got, want) || strings.TrimSpace(got) != strings.TrimSpace(want) {
+				t.Errorf("%s: the chart holds the %s attempts %q, want them to end with %q", c.name, strings.ToLower(chart.Series[k].Name), got, want)
+			}
+		}
+		if chart.Note != c.note {
+			t.Errorf("%s: the chart's note is %q, want %q", c.name, chart.Note, c.note)
+		}
+	}
+}
+
 func TestDialTopIsTheSmallestRoundScale(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct{ peak, top float64 }{

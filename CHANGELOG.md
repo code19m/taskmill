@@ -16,11 +16,16 @@ All notable changes to taskmill are recorded here. The format follows
   period, so the needle reads against the busiest step of the last 1, 6,
   or 24 hours. With the script, the needle glides to each new value, unless
   the device asks for reduced motion.
-- The overview's charts show the values of one step. Point at a chart,
-  press and drag on a touch screen, or move to a chart with Tab and press
-  the left and right arrow keys: a guide marks the step, and a note beside
-  it lists the step's time and the value of each series. Escape hides them.
-  Without the script, the tooltip of a step lists its values, as before.
+- The overview's charts show the values of one step. Point at a chart, or
+  press and drag on a touch screen: a guide marks the step, and a note
+  beside it lists the value of each series, and the step's time on your
+  clock, with its time zone. From the keyboard, move to a chart with Tab:
+  it is a slider, on the newest step. The arrow keys, Home, and End move
+  it, and Escape hides the values. A screen reader reads the values of
+  each step as the slider's value. While a chart has the focus, the page
+  waits with its updates, so that the steps do not change under you.
+  Without the script, a chart is a picture with a name, and the tooltip of
+  a step lists its values, as before.
 - The dashboard's Schedules page says each schedule's cron expression in
   words, above the expression: "Every 15 minutes", "Weekdays at 09:00", or
   "On the 1st of every month at 03:00". The times are in the schedule's time
@@ -66,7 +71,8 @@ All notable changes to taskmill are recorded here. The format follows
   it continues from its last task on a page of its own, as before. Under
   every list that has tasks, the page also says how many it shows, and
   tells a screen reader the new number after "Load more" or a change of
-  the filters.
+  the filters. If the filters match no task, it tells the screen reader
+  that.
 - With the script, the dashboard shows exact times in the reader's time
   zone, where it showed them in UTC: the time in a tooltip, such as
   "2026-11-19 19:05:07.089 UTC+5", and the range and the fields of the new
@@ -81,11 +87,24 @@ All notable changes to taskmill are recorded here. The format follows
     "counted 4s ago": it says when the maintainer last counted the tasks,
     and what a count that ends in "+" means. If the last count is over a
     minute old, the page says so beside the title, in amber: no worker
-    runs as the maintainer, or it cannot count.
+    runs as the maintainer, or it cannot count. A chart with nothing to
+    draw says why behind a hint beside its title, where the text stood
+    over the plot. A browser without popovers cannot open a hint: there,
+    the text stands on the page, in small gray type.
   - **Overview.** The Workers card no longer names the maintainer: the
     **Workers** page marks it, now also beside a long worker ID, which
     used to push the mark out of view. The Retention card shows both
-    periods as values, each with the tasks that it holds for.
+    periods as values, each with the tasks that it holds for. The count
+    of the queues stands beside the title of their card, as the counts of
+    the schedules and of the workers stand beside theirs, and so does the
+    count of a task's errors. On a screen of 600 pixels or less, the
+    Workers card is as wide as the page: it stood alone in half a row.
+  - **Workers.** The **Worker** column shows the part of a worker's ID
+    after its host name: the process ID and the random suffix, which tell
+    the workers of one host apart. The **Host** column has the name. A
+    long host name cut the ID short, so that two workers of one host read
+    the same. The tooltip has the whole ID, and a screen reader reads it
+    whole.
   - **Task lists.** An arrow in the header marks the column that orders
     the list, **ID** or **Finished**, in place of the words "latest first"
     beside the title. "Load more" is the whole row under the list, not a
@@ -112,14 +131,47 @@ All notable changes to taskmill are recorded here. The format follows
     bold. The last error is quiet gray text. Of the states, only `dead` and
     `retryable` are in color, red and amber. In a window of 1200 pixels or
     wider, the header of a list stays in view while the page scrolls.
-  - **The Live button's dot** pulses while the page is up to date. It is
-    still when updates are paused or late, and for a reader who asked the
-    system for less motion.
+  - **A priority badge** has no state color: amber and red are for the
+    states `retryable` and `dead`, and a running task of critical priority
+    showed the red of a dead one. Now `high` is bolder than `low`, and
+    `critical` is white on black, or black on white in the dark theme.
+  - **Amber text in the light theme** is a darker shade. The old one had
+    too little contrast on a row under the pointer, and in the mark of
+    counts that are late.
+  - **The Live button's dot** pulses while updates run. It is still when
+    updates are paused or late, on a page that does not update itself,
+    while the updates wait because you are using the page, and for a
+    reader who asked the system for less motion.
   - **The logo** is a mill wheel beside the name in lowercase, in the page
     and in the icon of the browser tab.
 
 ### Fixed
 
+- In the dashboard, a live update no longer takes the focus from a list
+  whose rows change. When a row left a list, as a task does that is
+  retried or deleted, the update moved every row below it: in a list of
+  250 tasks, up to 249 rows, and a link in one of them lost the focus. Now
+  an update touches only the row that comes, goes, or moves.
+- The dashboard's live updates no longer stop after a right-click. On
+  macOS and Linux, the page waited for the end of a press that the context
+  menu had taken, and showed "Live" while nothing updated, until the next
+  click. A press now also ends when the menu opens, or when another window
+  comes to the front.
+- Pause and Resume on the dashboard's overview keep the period of the
+  charts. On the overview of the last 6 or 24 hours, they led back to the
+  last hour.
+- With the keyboard, the focus no longer goes under the dashboard's header.
+  Shift+Tab to a link that stood under the header, or under the header of
+  a task list, left it there, out of sight. The browser now scrolls it
+  into view. So does a link to a place on a page, such as the one that
+  "Load more" uses without the script.
+- The dashboard's **Attempts** chart no longer ends in a dip at the start
+  of every step. Workers write their counts every 10 seconds, and the
+  chart drew a step as soon as it ended, before its count was complete. It
+  now draws a step 15 seconds after it ends, as the dial reads it.
+- On a touch screen, the dashboard's theme buttons and the period links of
+  its charts take a touch 44 pixels tall and wide, as its other buttons
+  do. They took one of about 25 pixels.
 - In the dashboard's task list, the priority badge of a task stood right
   against its state, a little lower than the text, and made its row taller
   than the others. It now stands apart from the state, in line with it, and

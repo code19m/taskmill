@@ -53,7 +53,7 @@
   </div>
   {{/* The whole row leads on: the link lies under the count, which no click stops at. */}}
   <div class="pager">
-    {{if $d.More}}<a class="pager-link" href="{{$d.More}}" data-more>{{template "icon" "more"}}Load more</a>
+    {{if $d.More}}<a class="pager-link" href="{{$d.More}}" data-more>{{template "icon" "chevron"}}Load more</a>
     {{else if $d.Next}}<a class="pager-link" href="{{$d.Next}}">{{$d.Order.Next}}{{template "icon" "next"}}</a>{{end}}
     <span class="subtle" data-shown>{{len $d.Tasks}} shown</span>
   </div>

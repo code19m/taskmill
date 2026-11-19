@@ -363,7 +363,7 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 	tasksChart, attemptsChart := taskChart(activity, win, now), attemptChart(activity, win, now)
 	rate, peak := throughput(activity, win, now)
 	if err != nil {
-		tasksChart.Note, attemptsChart.Note = "History is unavailable", "History is unavailable"
+		tasksChart.Note, attemptsChart.Note = "History is unavailable.", "History is unavailable."
 	}
 	var nextRun time.Time
 	for _, sc := range schedules {
@@ -1070,7 +1070,9 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 // queueAction pauses or resumes the queue that the query names. A name is
 // any text, and a path cannot carry every name: a browser resolves a segment
 // of dots away, escaped or not. So the name travels as the filters of a bulk
-// action do.
+// action do. The query also names the period of the overview's charts, and
+// the action leads back to the overview of that period: the charts stay as
+// the reader set them.
 func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w) {
 		return
@@ -1078,6 +1080,10 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 	var err error
 	var notice, action string
 	name := r.URL.Query().Get("name")
+	back := "/"
+	if span := rangeOf(r.URL.Query().Get("range")); span != chartRanges[0] {
+		back = "/?range=" + span.Name
+	}
 	switch r.PathValue("action") {
 	case "pause":
 		err, notice, action = s.client.PauseQueue(r.Context(), name), "queue-pause", "pause queue"
@@ -1087,7 +1093,7 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r)
 		return
 	}
-	s.finishAction(w, r, err, "/", notice, action, name)
+	s.finishAction(w, r, err, back, notice, action, name)
 }
 
 // scheduleAction pauses, resumes, or runs the schedule that the query names,
@@ -1114,7 +1120,8 @@ func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 }
 
 // finishAction logs an action that succeeded and redirects to target with
-// its notice, or explains why the action did not apply.
+// its notice, or explains why the action did not apply. The target may have
+// a query of its own.
 func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error, target, notice, action, name string) {
 	if err != nil {
 		s.actionFailed(w, r, err, target)
@@ -1122,7 +1129,11 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 	}
 	s.logger.LogAttrs(r.Context(), slog.LevelInfo, "dashboard action",
 		slog.String(logKeyAction, action), slog.String(logKeyTarget, name))
-	http.Redirect(w, r, s.path(target+"?done="+notice), http.StatusSeeOther)
+	sep := "?"
+	if strings.Contains(target, "?") {
+		sep = "&"
+	}
+	http.Redirect(w, r, s.path(target+sep+"done="+notice), http.StatusSeeOther)
 }
 
 // actionFailed explains why an action did not apply: the error says it, as
@@ -1388,6 +1399,7 @@ func (s *server) funcs() template.FuncMap {
 		"percent":   percent,
 		"period":    period,
 		"cronWords": cronWords,
+		"afterHost": afterHost,
 		"dict":      dict,
 		"lower":     strings.ToLower,
 		"query": func(pairs ...string) string {
@@ -1593,6 +1605,18 @@ func visible(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// afterHost returns the part of a worker's ID after its host name and the
+// dash that joins them: the process ID and the random suffix, which tell the
+// workers of one host apart. It returns nothing for an ID that does not start
+// with the host, or that has nothing after it.
+func afterHost(id, host string) string {
+	rest, ok := strings.CutPrefix(id, host+"-")
+	if !ok || host == "" {
+		return ""
+	}
+	return rest
 }
 
 // lastError returns the most recent attempt error, or nil.
