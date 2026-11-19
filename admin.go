@@ -164,15 +164,34 @@ type ListParams struct {
 	// Filter selects the tasks. Empty means every task.
 	Filter TaskFilter
 
+	// FinishedSince limits the list to the tasks that finished at this time
+	// or later: those whose [TaskInfo.FinalizedAt] is not before it. Zero
+	// means no lower bound. Only a list in finish order takes it, which is a
+	// list of only dead tasks, only canceled tasks, or both: see
+	// [Client.List]. On any other list it is an error that wraps
+	// [ErrInvalidArgument].
+	//
+	// The time is an instant: its location does not matter, and neither
+	// does the time zone of the database or of the process. It must be a
+	// time that PostgreSQL can store, from 4713 BC to 294276 AD, and it
+	// must be before FinishedBefore if both are set.
+	FinishedSince time.Time
+
+	// FinishedBefore limits the list to the tasks that finished before this
+	// time, under the rules of FinishedSince. Zero means no upper bound. A
+	// task that finished at this very time is left out, so two ranges that
+	// meet at a time share no task.
+	FinishedBefore time.Time
+
 	// Limit is the page size. It must not be negative. Default: 100.
 	// Maximum: 1,000.
 	Limit int
 
 	// Cursor continues from a previous page's [ListResult.Next]. Empty means
-	// the first page. Pass it with the filter that it came from: each of
-	// the two orders of [Client.List] has cursors of its own, and a cursor
-	// of the other order, like any text that is not a cursor, is an error
-	// that wraps [ErrInvalidArgument].
+	// the first page. Pass it with the filter and the range of finish times
+	// that it came from: each of the two orders of [Client.List] has cursors
+	// of its own, and a cursor of the other order, like any text that is not
+	// a cursor, is an error that wraps [ErrInvalidArgument].
 	Cursor string
 
 	// Summary leaves out what makes a task large, for a list that shows one
@@ -485,6 +504,12 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 // with hundreds of queues, name the queue. A filter by kind or FIFO group
 // reads a queue's dead or canceled tasks until it has a page.
 //
+// [ListParams.FinishedSince] and [ListParams.FinishedBefore] limit a list of
+// dead or canceled tasks to those that finished in a range of time, which
+// reaches a past period without the pages before it. A page then reads no
+// task outside the range, so a filter by kind or FIFO group reads at most
+// the tasks of the range.
+//
 // A list in ID order reads about the tasks it returns where an index holds
 // them newest first: with no filter, for the completed tasks of one queue
 // or of all, and for the pending tasks of one queue's FIFO group. Other
@@ -562,6 +587,10 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 	}
 	unfinished := func(state string) bool { return state != string(StateDead) && state != string(StateCanceled) }
 	page.byFinish = !m.history && !slices.ContainsFunc(m.states, unfinished)
+	since, until, err := finishRange(p, page.byFinish)
+	if err != nil {
+		return nil, err
+	}
 	if page.byFinish {
 		// The first page starts below the latest finish time there is.
 		at, before := pgtype.Timestamptz{InfinityModifier: pgtype.Infinity, Valid: true}, int64(math.MaxInt64)
@@ -571,7 +600,7 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 			}
 		}
 		page.settings, page.sql = finishedSettings, c.sql.listFinished
-		page.args = []any{m.queues, m.states, m.kinds, m.groups, at, before, page.limit + 1, p.Summary}
+		page.args = []any{m.queues, m.states, m.kinds, m.groups, at, before, page.limit + 1, p.Summary, since, until}
 		return &page, nil
 	}
 	before := int64(math.MaxInt64)
@@ -582,6 +611,44 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 	}
 	page.args = []any{m.queues, m.states, m.kinds, before, page.limit + 1, len(m.states) > 0, m.history, m.groups, p.Summary}
 	return &page, nil
+}
+
+// finishRange checks the range of finish times that p asks for, which only a
+// list in finish order takes, and returns its bounds as listFinished takes
+// them: the first finish time of the range, and the time that ends it, each
+// NULL where p sets no bound.
+func finishRange(p *ListParams, byFinish bool) (since, until pgtype.Timestamptz, err error) {
+	from, to := p.FinishedSince, p.FinishedBefore
+	switch {
+	case from.IsZero() && to.IsZero():
+		return since, until, nil
+	case !byFinish:
+		return since, until, invalidArgument("FinishedSince and FinishedBefore need a list of only dead tasks, only canceled tasks, or both")
+	case !from.IsZero() && !to.IsZero() && !from.Before(to):
+		return since, until, invalidArgument("FinishedSince must be before FinishedBefore")
+	}
+	if since, err = finishBound("FinishedSince", from); err != nil {
+		return since, until, err
+	}
+	until, err = finishBound("FinishedBefore", to)
+	return since, until, err
+}
+
+// finishBound returns the bound t of a range of finish times as the database
+// compares it: NULL for the zero time, which is no bound, and otherwise t
+// rounded up to the microsecond. PostgreSQL keeps microseconds, so the finish
+// times that are not before t are those that are not before the rounded
+// time. The driver rounds down, which would put a task that finished in t's
+// microsecond, before t, on the wrong side of either bound. what names the
+// bound in the error for a time that PostgreSQL cannot store.
+func finishBound(what string, t time.Time) (pgtype.Timestamptz, error) {
+	if t.IsZero() {
+		return pgtype.Timestamptz{}, nil
+	}
+	if past := time.Duration(t.Nanosecond()) % time.Microsecond; past > 0 {
+		t = t.Add(time.Microsecond - past)
+	}
+	return pgtype.Timestamptz{Time: t, Valid: true}, checkTime(what, t)
 }
 
 // finishRows are the rows of listFinished: each is a task, and then the

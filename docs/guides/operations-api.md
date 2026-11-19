@@ -70,8 +70,8 @@ has the exact rules:
 
 - A filter can name queues, states, kinds, and FIFO group keys. A task
   matches when it matches every field you set. An empty field matches all.
-- Pass `Next` back with the same filter. A cursor from a list in the other
-  order returns an error that wraps `ErrInvalidArgument`.
+- Pass `Next` back with the same filter and range. A cursor from a list in
+  the other order returns an error that wraps `ErrInvalidArgument`.
 - Each page's query stops after 5 seconds, so a list never loads the
   database for longer. A list that needs more returns an error. On a very
   large table, a list of the table's last row can need more.
@@ -98,6 +98,21 @@ has the exact rules:
   page of 1,000 tasks can hold 1 GiB of payloads.
 - `Get` returns one task by ID, in full. `Count` counts the matching tasks
   per state, up to 10,000 per state.
+
+To see what died in a past period, such as last night, give the `params`
+above a range of finish times. Only a list of dead tasks, canceled tasks, or
+both takes one: any other returns an error that wraps `ErrInvalidArgument`.
+
+```go
+night := time.Date(2026, time.March, 14, 22, 0, 0, 0, time.Local)
+params.FinishedSince, params.FinishedBefore = night, night.Add(8*time.Hour)
+```
+
+- **A range holds the tasks that finished at `FinishedSince` or later, and
+  before `FinishedBefore`.** Set one bound or both. A page reads only tasks
+  of the range, also with a kind or a FIFO group in the filter.
+- **The bounds are instants.** A time in any time zone selects the same
+  tasks as the same moment in UTC, whatever time zone your database uses.
 
 ## Retry, cancel, or delete one task
 

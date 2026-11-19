@@ -6,26 +6,29 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/code19m/taskmill"
 )
 
-// FuzzList lists tasks with any filters, page size, and cursor, as a service
-// passes them on from its own users: List returns a page or
-// ErrInvalidArgument, and each page's cursor leads to the next page, in the
-// order of the list.
+// FuzzList lists tasks with any filters, range of finish times, page size,
+// and cursor, as a service passes them on from its own users: List returns a
+// page or ErrInvalidArgument, and each page's cursor leads to the next page,
+// in the order of the list and inside the range. A bound is a number of
+// microseconds since the year 2000, as a cursor counts them, and 0 is none.
 func FuzzList(f *testing.F) {
-	f.Add("", 0, "", "", "", "")
-	f.Add("MTA", 1, "available", taskmill.DefaultQueue, "email.send", "g")
-	f.Add("LTE", 1000, "completed", "", "", "")
-	f.Add("OTIyMzM3MjAzNjg1NDc3NTgwOA", 1001, "nope", "", "", "") // the cursor is 2^63
-	f.Add("!", -1, "", "", "", "")
+	f.Add("", 0, "", "", "", "", int64(0), int64(0))
+	f.Add("MTA", 1, "available", taskmill.DefaultQueue, "email.send", "g", int64(0), int64(0))
+	f.Add("LTE", 1000, "completed", "", "", "", int64(0), int64(0))
+	f.Add("OTIyMzM3MjAzNjg1NDc3NTgwOA", 1001, "nope", "", "", "", int64(0), int64(0)) // the cursor is 2^63
+	f.Add("!", -1, "", "", "", "", int64(0), int64(0))
 	// Text that PostgreSQL rejects once failed the call.
-	f.Add("", 0, "", "\x00", "\xff", "\xc3")
+	f.Add("", 0, "", "\x00", "\xff", "\xc3", int64(0), int64(0))
 	// Cursors of a list in finish order, which hold a finish time as
 	// PostgreSQL stores it, and an ID: the first and the last time that a
 	// column can hold, the two infinite times, and times and text that no
@@ -34,8 +37,26 @@ func FuzzList(f *testing.F) {
 		"f0,2", "f-211813488000000000,1", "f9223371331199999999,1", "f9223372036854775807,9223372036854775807",
 		"f-9223372036854775808,0", "f-211813488000000001,1", "f9223371331200000000,1", "f1,", "f,1", "f1.5,1",
 	} {
-		f.Add(base64.RawURLEncoding.EncodeToString([]byte(position)), 1, "canceled", "", "", "")
+		f.Add(base64.RawURLEncoding.EncodeToString([]byte(position)), 1, "canceled", "", "", "", int64(0), int64(0))
 	}
+	// Ranges of finish times: the hours around now, the first and the last
+	// time that a column can hold, times that none holds, and a range that
+	// ends before it starts.
+	const y2k = 946_684_800 // the year 2000 in Unix seconds
+	now := (time.Now().Unix() - y2k) * 1e6
+	for _, r := range [][2]int64{
+		{now - 3_600e6, now + 3_600e6},
+		{now, 0},
+		{0, now},
+		{-211813488000000000, 9223371331199999999},
+		{-211813488000000001, 0},
+		{0, 9223371331200000000},
+		{math.MinInt64, math.MaxInt64},
+		{2, 1},
+	} {
+		f.Add("", 1, "canceled", "", "", "", r[0], r[1])
+	}
+	f.Add("", 1, "available", "", "", "", now, int64(0)) // not a list in finish order
 	e := newEnv(f)
 	for i := range 3 {
 		res, err := e.client.Enqueue(f.Context(), sendEmail{UserID: int64(i)}, &taskmill.EnqueueOptions{GroupKey: "g"})
@@ -48,10 +69,16 @@ func FuzzList(f *testing.F) {
 			}
 		}
 	}
+	bound := func(micros int64) time.Time {
+		if micros == 0 {
+			return time.Time{}
+		}
+		return time.Unix(y2k+micros/1e6, micros%1e6*1e3)
+	}
 
-	f.Fuzz(func(t *testing.T, cursor string, limit int, state, queue, kind, group string) {
+	f.Fuzz(func(t *testing.T, cursor string, limit int, state, queue, kind, group string, since, before int64) {
 		p := &taskmill.ListParams{
-			Cursor: cursor, Limit: limit,
+			Cursor: cursor, Limit: limit, FinishedSince: bound(since), FinishedBefore: bound(before),
 			Filter: taskmill.TaskFilter{States: only(taskmill.State(state)), Queues: only(queue), Kinds: only(kind), GroupKeys: only(group)},
 		}
 		if _, err := e.client.List(t.Context(), p); errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -64,7 +91,8 @@ func FuzzList(f *testing.F) {
 // listPages lists every page of p, which names one state at most, and fails
 // t unless the tasks come in the order of the list: dead or canceled tasks
 // by when they finished and then by ID, and others by ID, the latest and
-// the newest first.
+// the newest first. It also fails t for a task that finished outside the
+// range of p.
 func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
 	t.Helper()
 	states := p.Filter.States
@@ -85,6 +113,9 @@ func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
 				t.Fatalf("List(%+v): task %d, finished at %s, follows task %d, finished at %s",
 					p, task.ID, task.FinalizedAt, last.ID, last.FinalizedAt)
 			}
+			if outsideRange(p, task.FinalizedAt) {
+				t.Fatalf("List(%+v): task %d finished at %s, outside the range", p, task.ID, task.FinalizedAt)
+			}
 			last = task
 		}
 		if res.Next == "" {
@@ -92,6 +123,13 @@ func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
 		}
 		p.Cursor = res.Next
 	}
+}
+
+// outsideRange reports whether a task that finished at the given time is
+// outside the range of finish times of p.
+func outsideRange(p *taskmill.ListParams, finished time.Time) bool {
+	return !p.FinishedSince.IsZero() && finished.Before(p.FinishedSince) ||
+		!p.FinishedBefore.IsZero() && !finished.Before(p.FinishedBefore)
 }
 
 // only returns a filter that holds v, or no filter if v is empty.

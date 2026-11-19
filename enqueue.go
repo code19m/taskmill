@@ -34,14 +34,24 @@ const (
 	maxEnqueueBytes     = 64 << 20 // most payload and metadata of one enqueue call
 )
 
-// PostgreSQL stores the times from minRunAt up to, but not including,
-// endRunAt. The driver does not check: it sends a later time as a number
+// PostgreSQL stores the times from minTime up to, but not including,
+// endTime. The driver does not check: it sends a later time as a number
 // that wraps around, which PostgreSQL reads as a time in the past, or
 // rejects.
 var (
-	minRunAt = time.Date(-4713, time.November, 24, 0, 0, 0, 0, time.UTC) // 4714 BC
-	endRunAt = time.Date(294277, time.January, 1, 0, 0, 0, 0, time.UTC)
+	minTime = time.Date(-4713, time.November, 24, 0, 0, 0, 0, time.UTC) // 4714 BC
+	endTime = time.Date(294277, time.January, 1, 0, 0, 0, 0, time.UTC)
 )
+
+// checkTime checks that PostgreSQL can store t. what names the time in the
+// error.
+func checkTime(what string, t time.Time) error {
+	if t.Before(minTime) || !t.Before(endTime) {
+		return invalidArgument("%s %s is outside the range that PostgreSQL stores, 4713 BC to 294276 AD",
+			what, t.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
 
 // EnqueueOptions control how a task is enqueued. Zero values mean "not set":
 // a field set in the call wins over the kind's defaults (see
@@ -771,11 +781,7 @@ func (t *resolvedTask) validate() error {
 	if t.dedupeWindow < 0 {
 		return invalidArgument("dedupe window must not be negative")
 	}
-	if t.runAt.Before(minRunAt) || !t.runAt.Before(endRunAt) {
-		return invalidArgument("run time %s is outside the range that PostgreSQL stores, 4713 BC to 294276 AD",
-			t.runAt.UTC().Format(time.RFC3339))
-	}
-	return nil
+	return checkTime("run time", t.runAt)
 }
 
 // add appends t, with its encoded metadata, to the batch. now is the batch's
