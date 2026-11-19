@@ -35,7 +35,7 @@
         <td class="num"><a class="mono strong" href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
         <td class="mono" title="{{.Kind}}">{{.Kind}}</td>
         <td title="{{.Queue}}{{with .GroupKey}}, FIFO group {{visible .}}{{end}}">{{.Queue}}{{if .GroupKey}}<span class="group">{{visible .GroupKey}}</span>{{end}}</td>
-        <td>{{template "state" .State}}{{if ne .Priority 2}} <span class="chip priority-{{.Priority}}">{{.Priority}}</span>{{end}}</td>
+        <td><div class="state-cell">{{template "state" .State}}{{if ne .Priority 2}}<span class="chip priority-{{.Priority}}" title="Priority: {{.Priority}}">{{.Priority}}</span>{{end}}</div></td>
         <td class="num mono">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
         <td class="tone-faint" title="{{timestamp .CreatedAt}}">{{ago .CreatedAt}}</td>
         {{if $d.Order.ByFinish}}<td class="tone-faint" title="{{timestamp .FinalizedAt}}">{{ago .FinalizedAt}}</td>

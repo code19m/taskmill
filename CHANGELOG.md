@@ -7,6 +7,14 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- In the dashboard's task list, the priority badge of a task stood right
+  against its state, a little lower than the text, and made its row taller
+  than the others. It now stands apart from the state, in line with it, and
+  every row has the same height. The State column is wider, so that the
+  badge also fits beside a long state such as `scheduled`.
+
 ## [0.10.0] - 2026-11-19
 
 ### Changed

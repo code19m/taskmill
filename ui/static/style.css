@@ -415,6 +415,11 @@ a.chip:hover { text-decoration: none; color: var(--ink); border-color: var(--lin
 .chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
 .chip.priority-high { color: var(--warn); }
 .chip.priority-critical { color: var(--err); }
+/* A task's state in a list, with its priority beside it unless that is
+   normal. The badge stands apart from the state, and is no taller than its
+   text, so that every row has the same height. */
+.state-cell { display: flex; align-items: center; gap: 10px; }
+.state-cell .chip { padding: 0 7px; line-height: 18px; }
 .chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
 /* ---------- status ---------- */
@@ -495,7 +500,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table th, .table td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .table td.wrap { white-space: normal; }
 .table col.c-id { width: 92px; }
-.table col.c-state { width: 150px; }
+.table col.c-state { width: 190px; }
 .table col.c-attempt { width: 96px; }
 .table col.c-time { width: 124px; }
 .table col.c-count { width: 92px; }
@@ -507,7 +512,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table col.c-kinds { width: 110px; }
 .table col.c-act-1 { width: 128px; }
 .table col.c-act-2 { width: 220px; }
-.table-tasks { min-width: 1100px; }
+.table-tasks { min-width: 1140px; }
 .table-queues { min-width: 980px; }
 .table-schedules { min-width: 1080px; }
 .table-workers { min-width: 1050px; }
