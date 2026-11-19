@@ -351,6 +351,12 @@ func runCurrent(t *testing.T, pool *pgxpool.Pool) string {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// The statements that the stopped worker gave up may still run on the
+		// server, where the drop can deadlock with them. The pool counts
+		// their connections as acquired until it has closed them.
+		for pool.Stat().AcquiredConns() > 0 && ctx.Err() == nil {
+			time.Sleep(time.Millisecond)
+		}
 		if _, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
 			t.Errorf("drop schema %s: %v", schema, err)
 		}

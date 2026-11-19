@@ -20,12 +20,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -135,7 +137,7 @@ func PoolSize(tb testing.TB, conns int32) *pgxpool.Pool {
 }
 
 // Schema returns a fresh schema name, and drops that schema when the test
-// ends.
+// ends, on a connection of pool.
 func Schema(tb testing.TB, pool *pgxpool.Pool) string {
 	tb.Helper()
 	var b [6]byte
@@ -144,11 +146,43 @@ func Schema(tb testing.TB, pool *pgxpool.Pool) string {
 	tb.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if _, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
+		if err := drop(ctx, pool, schema); err != nil {
 			tb.Errorf("testdb: drop schema %s: %v", schema, err)
 		}
 	})
 	return schema
+}
+
+// drop drops schema once the statements that its test gave up have ended.
+//
+// A statement whose context ended can go on in the database. Its caller has
+// returned, so a worker that was told to stop has stopped, and the pool
+// closes the statement's connection in the background, until the server has
+// ended the statement. Until then the statement may take locks, in another
+// order than a drop of its schema does: PostgreSQL ends one of the two as a
+// deadlock, and the test fails if that is the drop. The pool counts such a
+// connection as acquired until it is closed, so the drop waits until the
+// pool has none.
+//
+// A proxy closes the connection at once, and the server works on: nothing
+// then tells when the statement has ended. So a run through a proxy, and
+// only that, tries a drop again that PostgreSQL ended as a deadlock. Without
+// a proxy, such a deadlock is a mistake in the order of a test's clean-up,
+// and fails the test.
+func drop(ctx context.Context, pool *pgxpool.Pool, schema string) error {
+	for pool.Stat().AcquiredConns() > 0 {
+		if ctx.Err() != nil {
+			return errors.New("the pool's connections are still in use")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	proxied := os.Getenv(EnvListenURL) != ""
+	for {
+		_, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE")
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); !proxied || !ok || pgErr.Code != "40P01" { // deadlock_detected
+			return err
+		}
+	}
 }
 
 // CheckGroups fails the test unless every FIFO group of schema satisfies

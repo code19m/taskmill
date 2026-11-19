@@ -2427,8 +2427,11 @@ func TestCompleteTxWithDatabaseSQL(t *testing.T) {
 
 func TestCompleteTxThenMoreWorkKeepsTheAttempt(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
 	causes := make(chan error, 2)
+	completed, release := make(chan struct{}, 2), make(chan struct{})
+	defer close(release)
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
 			err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
@@ -2436,17 +2439,36 @@ func TestCompleteTxThenMoreWorkKeepsTheAttempt(t *testing.T) {
 					return err
 				}
 				// More work in the same transaction, for longer than the lease.
-				time.Sleep(time.Second)
+				completed <- struct{}{}
+				<-release
 				return nil
 			})
 			causes <- context.Cause(ctx)
 			return err
 		}, nil),
-		Queues:        defaultQueue(1),
-		LeaseDuration: 300 * time.Millisecond,
+		Queues: defaultQueue(1),
+		// Until the handler completes the task, only check-ins keep the
+		// lease. It is long enough that a loaded machine does not miss them
+		// for all of it.
+		LeaseDuration: time.Second,
 	})
 
+	// The transaction stays open until the lease has ended, and the worker
+	// and the maintainer have then each looked twice for such leases. The
+	// transaction holds the task's row, so no check-in renews the lease, and
+	// other sessions see the task as it was before.
 	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, completed, "the handler to complete the task in its transaction")
+	var ends time.Time
+	if err := e.pool.QueryRow(t.Context(), replaceSchema("SELECT lease_expires_at FROM {s}.tasks WHERE id = $1", e.schema), id).Scan(&ends); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the task's lease to end", func() bool { return e.count(t, "SELECT count(*) WHERE now() > $1", ends) == 1 })
+	sent.reset()
+	waitFor(t, "the worker and the maintainer to look for ended leases twice", func() bool {
+		return sent.count("renewed AS") >= 2 && sent.count("t.lease_expires_at < now()") >= 2
+	})
+	release <- struct{}{}
 	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 {
 		t.Fatalf("completed on attempt %d, want 1", info.Attempt)
 	}
@@ -2674,16 +2696,21 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	}
 }
 
-// runTaskWorker returns a worker for the RunTask tests, and a count of the
-// batches its batch handler ran.
-func runTaskWorker(t *testing.T, e *env) (*taskmill.Worker, *atomic.Int32) {
+// runTaskWorker returns a worker for the RunTask tests, a count of the batches
+// its batch handler ran, and a channel that says when the handler of a
+// "blocked" task waits for its context to end.
+func runTaskWorker(t *testing.T, e *env) (*taskmill.Worker, *atomic.Int32, <-chan struct{}) {
 	t.Helper()
+	blocked := make(chan struct{}, 1)
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
 		switch task.Args.To {
 		case "slow":
-			time.Sleep(3500 * time.Millisecond) // more than three leases
+			// Longer than the lease, and than the renewal that would find
+			// it ended.
+			time.Sleep(3500 * time.Millisecond)
 		case "blocked":
+			blocked <- struct{}{}
 			<-ctx.Done()
 			return ctx.Err()
 		}
@@ -2692,14 +2719,15 @@ func runTaskWorker(t *testing.T, e *env) (*taskmill.Worker, *atomic.Int32) {
 	var batches atomic.Int32
 	taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { batches.Add(1) }), nil)
 	// A lease long enough that a loaded machine does not miss renewals for
-	// all of it.
-	return newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, LeaseDuration: time.Second}), &batches
+	// all of it: each has a third of it, which through a proxy that many
+	// tests share was too little of one second.
+	return newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, LeaseDuration: 2 * time.Second}), &batches, blocked
 }
 
 func TestRunTask(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	w, batches := runTaskWorker(t, e)
+	w, batches, blocked := runTaskWorker(t, e)
 	run := func(t *testing.T, ctx context.Context, id int64, want taskmill.State) *taskmill.TaskInfo {
 		t.Helper()
 		info, err := w.RunTask(ctx, id)
@@ -2727,8 +2755,17 @@ func TestRunTask(t *testing.T) {
 	t.Run("canceled context", func(t *testing.T) {
 		t.Parallel()
 		id := e.enqueue(t, sendEmail{To: "blocked"}, nil)
-		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		// The context ends once the handler waits for its end, and not after
+		// a fixed time: a loaded machine can take longer to lease the task.
+		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
+		go func() {
+			select {
+			case <-blocked:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
 		if info := run(t, ctx, id, taskmill.StateAvailable); info.Attempt != 0 {
 			t.Fatalf("released with attempt %d, want 0", info.Attempt)
 		}
@@ -2772,7 +2809,7 @@ func TestRunTaskOfAKindWithoutHistory(t *testing.T) {
 func TestRunTaskRefuses(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	w, _ := runTaskWorker(t, e)
+	w, _, _ := runTaskWorker(t, e)
 	completed := e.enqueue(t, sendEmail{}, nil)
 	if _, err := w.RunTask(t.Context(), completed); err != nil {
 		t.Fatal(err)
