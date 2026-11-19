@@ -383,7 +383,7 @@ func TestOverviewShowsBothRetentionPeriods(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, body, _ := get(t, handler(t, client, nil), "/")
-	for _, want := range []string{`>completed</dt><dd class="stat-value">3 days</dd>`, `>dead and canceled</dt><dd class="stat-value">36 hours</dd>`} {
+	for _, want := range []string{`<dt>Completed</dt><dd>3 days</dd>`, `<dt>Dead and canceled</dt><dd>36 hours</dd>`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("want %s in\n%s", want, body)
 		}

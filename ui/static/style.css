@@ -553,19 +553,22 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .card-head h2 .subtle { margin-left: 4px; font-weight: var(--weight-normal); } /* the count of what the card lists */
 .card-body { padding: 14px; }
 .stack { display: grid; gap: 16px; align-content: start; min-width: 0; }
-.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 12px; }
 
-.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); gap: 12px; }
+/* Six counters: one row, two rows of three, or three rows of two, so that
+   no row is left with a gap. */
+.stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1100px) { .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 .stat { gap: 6px; }
 .stat-label { display: inline-flex; align-items: center; gap: 7px; font-size: var(--text-label); font-weight: var(--weight-medium); color: var(--ink-soft); }
 .stat-label > svg:not(.ring) { color: var(--ink-faint); }
 .stat-value { font-size: 30px; font-weight: var(--weight-bold); letter-spacing: -0.02em; line-height: 1.15; font-variant-numeric: tabular-nums; }
 .stat.failed .stat-value { color: var(--err); }
-.stat-note { font-size: var(--text-xs); color: var(--ink-ghost); font-variant-numeric: tabular-nums; }
 /* Two values in one card, each over its label. */
-.stat-pair { display: flex; flex-wrap: wrap; gap: 6px 32px; margin: 0; }
-.stat-pair > div { display: flex; flex-direction: column-reverse; gap: 6px; }
-.stat-pair dd { margin: 0; }
+.retention { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 32px; padding-block: 12px; }
+.retention dl { display: flex; flex-wrap: wrap; gap: 4px 32px; margin: 0; font-size: var(--text-label); }
+.retention dl > div { display: flex; gap: 8px; }
+.retention dt { color: var(--ink-faint); }
+.retention dd { margin: 0; font-weight: var(--weight-medium); font-variant-numeric: tabular-nums; }
 
 .empty-note {
   padding: 12px 8px; border: 1px dashed rgb(var(--tone-rgb) / 0.06); border-radius: var(--radius-control);
@@ -903,7 +906,6 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   .nav { order: 3; flex-basis: 100%; justify-content: space-between; margin: 0 -8px; padding-bottom: 8px; }
   .nav-item { padding: 6px 8px; font-size: var(--text-sm); }
   .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .stats > :last-child:nth-child(odd) { grid-column: 1 / -1; } /* no card alone in half a row */
   .stat-value { font-size: 24px; }
   .table th, .table td { padding-left: 12px; padding-right: 12px; }
   .toast { right: 16px; width: calc(100vw - 32px); }

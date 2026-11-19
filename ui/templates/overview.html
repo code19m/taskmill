@@ -26,6 +26,10 @@
     <span class="stat-label">{{template "state-icon" "dead"}}Dead</span>
     <span class="stat-value">{{count $d.Totals.Dead}}</span>
   </a>
+  <a class="card stat" href="{{path "/schedules"}}"{{if $d.Schedules}} title="{{if not $d.NextRun.IsZero}}Next run {{ago $d.NextRun}}{{else}}All paused{{end}}"{{end}}>
+    <span class="stat-label">{{template "icon-schedules"}}Schedules</span>
+    <span class="stat-value">{{$d.Schedules}}</span>
+  </a>
   <a class="card stat" href="{{path "/workers"}}">
     <span class="stat-label">{{template "icon-workers"}}Workers</span>
     <span class="stat-value">{{$d.Workers}}</span>
@@ -82,21 +86,14 @@
   {{else}}<div class="card-body">{{template "empty" "No queues yet"}}</div>{{end}}
 </section>
 
-<div class="grid-2">
-  <a class="card stat" href="{{path "/schedules"}}">
-    <span class="stat-label">{{template "icon-schedules"}}Schedules</span>
-    <span class="stat-value">{{$d.Schedules}}</span>
-    {{if $d.Schedules}}<span class="stat-note">{{if not $d.NextRun.IsZero}}next run {{ago $d.NextRun}}{{else}}all paused{{end}}</span>{{end}}
-  </a>
-  {{/* How long finished tasks are kept: each period over the states that it holds for. */}}
-  <div class="card stat">
-    <span class="stat-label">{{template "icon-tasks"}}Retention</span>
-    <dl class="stat-pair">
-      <div><dt class="stat-note">completed</dt><dd class="stat-value">{{period $d.Settings.HistoryRetention}}</dd></div>
-      <div><dt class="stat-note">dead and canceled</dt><dd class="stat-value">{{period $d.Settings.DeadRetention}}</dd></div>
-    </dl>
-  </div>
-</div>
+{{/* How long finished tasks are kept. These are settings, not counts: one quiet line. */}}
+<section class="card retention" aria-labelledby="retention-title">
+  <h2 class="stat-label" id="retention-title">{{template "icon-tasks"}}Retention</h2>
+  <dl>
+    <div><dt>Completed</dt><dd>{{period $d.Settings.HistoryRetention}}</dd></div>
+    <div><dt>Dead and canceled</dt><dd>{{period $d.Settings.DeadRetention}}</dd></div>
+  </dl>
+</section>
 </div>
 {{template "foot" .}}{{end}}
 
