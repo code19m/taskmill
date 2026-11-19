@@ -221,6 +221,19 @@ The daily history partitions follow the database's clock, in UTC: the
 database says which days need a partition, and which partitions have
 expired. So a worker whose clock is wrong cannot drop history too early.
 
+## Use any time zone
+
+Set the `TimeZone` of your database, of its roles, and of your servers as
+you like: taskmill works the same in each. Every time that it stores is a
+`timestamptz`, a moment that is the same in every time zone.
+
+| Where a time zone shows | Which one |
+|---|---|
+| A day of history, and a day of a retention period | UTC, and always 24 hours |
+| The expression of a [schedule](../guides/schedules.md) | The schedule's `Location`: UTC unless you set it |
+| A time that the Go API returns | A moment: compare two with `Equal`, and choose a zone with `In` to show one |
+| The dashboard | UTC |
+
 ## See also
 
 - [Backups, failover, and replicas](backups-and-failover.md): restore, fail over, and what to check after

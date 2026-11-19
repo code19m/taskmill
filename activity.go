@@ -29,7 +29,9 @@ type ActivityParams struct {
 	Since time.Time
 
 	// Step is how much time each point covers, in whole minutes. Default: a
-	// minute. Maximum: a day.
+	// minute. Maximum: a day. Steps are counted from midnight UTC on 1
+	// January 2000, whatever the time zone: a step of an hour starts on the
+	// hour in UTC, and a step of a day at midnight UTC.
 	Step time.Duration
 }
 

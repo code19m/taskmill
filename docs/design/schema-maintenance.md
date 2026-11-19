@@ -29,6 +29,12 @@ maintainer counts the queues.
   transaction holds, so two maintainers never wait for each other.
 - **The database's clock decides the history's days:** which days need a
   partition, and which partitions have expired, in UTC.
+- **No statement reads the session's time zone.** Each one compares moments,
+  and where it needs a day, it takes the clock's time in UTC. A period that
+  holds days, as the default retention periods do, is subtracted from that
+  time: subtracted from `now()`, a day of a period is a day of the session's
+  zone, 23 or 25 hours long when its clocks change. An error's time is
+  stored as text, so it is written in UTC too.
 - **Retention drops only the history that it detached.** A pass marks a
   partition with a comment before it detaches it. It drops a table that is
   no partition only with that mark, so one that an operator detached stays.

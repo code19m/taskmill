@@ -69,6 +69,9 @@ type Schedule struct {
 	Cron string
 
 	// Location is the time zone the expression is read in. Default: UTC.
+	// The time zones of the database and of the worker's process play no
+	// part, except with time.Local: it is the zone of each worker's own
+	// process, so workers in different zones read different timetables.
 	Location *time.Location
 
 	// Args is the task to enqueue, with the limits of any payload: see

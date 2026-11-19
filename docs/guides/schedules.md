@@ -90,8 +90,16 @@ weekdays.
 sets those itself.
 
 The expression is read on the wall clock of `Location`. Without a
-`Location`, the time is UTC. Each time that the expression names on that
-clock runs once, also when the clocks change:
+`Location`, the time is UTC: the time zones of the database and of the
+worker's machine play no part.
+
+- **Name the zone,** as the example does. With `time.Local`, each worker
+  reads the expression on the clock of its own machine.
+- **`time.LoadLocation` needs the time zone database.** An image without
+  it, such as `scratch`, gets it when your program imports `time/tzdata`.
+
+Each time that the expression names on that clock runs once, also when the
+clocks change:
 
 | When the clocks… | What happens | Example, in Berlin |
 |---|---|---|
