@@ -665,7 +665,7 @@ func TestGroupKeysOfTheOutboxShowAsTopicAndKey(t *testing.T) {
 		"/tasks?queue=mail": {
 			`<label class="pop-opt" data-key="` + key + `"><input type="checkbox" class="chk-input" name="group" value="` + key + `">`,
 			`<span class="pop-text mono">` + parts + `</span>`,
-			`<td title="mail, Outbox topic orders, key order-13">mail<span class="group">` + parts + `</span></td>`,
+			`<td title="mail, FIFO group orders › order-13">mail<span class="group">` + parts + `</span></td>`,
 			`<span class="pop-text mono">a␟b␟c</span>`, `<span class="pop-text mono">tab␉here␟key</span>`,
 			`<span class="pop-text mono">␟no-topic</span>`, `<span class="pop-text mono">plain</span>`,
 			`<td title="mail, FIFO group a␟b␟c">mail<span class="group">a␟b␟c</span></td>`,
