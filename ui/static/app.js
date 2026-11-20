@@ -1061,21 +1061,31 @@
   function ago(s) {
     const d = Math.abs(s);
     const n = d < 60 ? `${d}s` : d < 3600 ? `${Math.trunc(d / 60)}m` : d < 172800 ? `${Math.trunc(d / 3600)}h` : `${Math.trunc(d / 86400)}d`;
-    return d ? `${n}${s < 0 ? " from now" : " ago"}` : "now";
+    return !d ? "now" : s < 0 ? `in ${n}` : `${n} ago`;
+  }
+
+  // span words the seconds of a gap that counts as span in ui.go does.
+  function span(s) {
+    s = Math.max(0, s);
+    const [n, unit, rest, sub] = s < 60 ? [s, "s", 0] : s < 3600 ? [s / 60, "m", s % 60, "s"]
+      : s < 172800 ? [s / 3600, "h", (s / 60) % 60, "m"] : [s / 86400, "d", (s / 3600) % 24, "h"];
+    return `${Math.trunc(n)}${unit}${Math.trunc(rest) ? ` ${Math.trunc(rest)}${sub}` : ""}`;
   }
 
   // count words the relative times of a page for the clock's second, before
   // the page shows and while it does. data-now says for which second they
   // are worded. A relative time is the end of the text of an element with a
-  // time, if it is that time's words for that second: "paused" stays.
+  // time, if it is that time's words for that second: "paused" stays. A gap
+  // that lasts until now, from the time in data-since, counts in the same way.
   function count(main) {
     const from = Math.floor(Date.parse(main.dataset.now) / 1000);
     const to = Math.floor(clock() / 1000);
     if (!(to - from)) return; // the same second, or no time of rendering
-    for (const el of main.querySelectorAll("[data-time]")) {
-      const at = Math.floor(Date.parse(el.dataset.time) / 1000);
-      const was = ago(from - at);
-      const now = ago(to - at);
+    for (const el of main.querySelectorAll("[data-time], [data-since]")) {
+      const [time, words] = el.dataset.since ? [el.dataset.since, span] : [el.dataset.time, ago];
+      const at = Math.floor(Date.parse(time) / 1000);
+      const was = words(from - at);
+      const now = words(to - at);
       const text = el.lastChild;
       if (was !== now && text?.nodeValue?.endsWith(was)) text.nodeValue = text.nodeValue.slice(0, -was.length) + now;
     }

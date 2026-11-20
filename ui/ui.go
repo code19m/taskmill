@@ -1407,6 +1407,7 @@ func (s *server) funcs() template.FuncMap {
 		"states":    func() []taskmill.State { return listedStates },
 		"lastError": lastError,
 		"newest":    newestFirst,
+		"timeline":  timeline,
 		"visible":   visible,
 		"outbox":    outbox,
 		"num":       number,
@@ -1531,16 +1532,16 @@ func securityHeaders(next http.Handler, ancestors string) http.Handler {
 }
 
 // ago words how long before now t was, or how long after it: "8s ago", or
-// "3m from now". It reads both times to the second, as a clock shows them,
-// so every relative time of a page changes on the second, with the others.
-// The script counts from there in the same words: see ago in app.js.
+// "in 3m". It reads both times to the second, as a clock shows them, so
+// every relative time of a page changes on the second, with the others. The
+// script counts from there in the same words: see ago in app.js.
 func ago(now, t time.Time) string {
 	if t.IsZero() {
 		return "—"
 	}
-	d, suffix := now.Unix()-t.Unix(), " ago"
+	d, ahead := now.Unix()-t.Unix(), false
 	if d < 0 {
-		d, suffix = -d, " from now"
+		d, ahead = -d, true
 	}
 	n, unit := d/86400, "d"
 	switch {
@@ -1553,7 +1554,241 @@ func ago(now, t time.Time) string {
 	case d < 48*3600:
 		n, unit = d/3600, "h"
 	}
-	return strconv.FormatInt(n, 10) + unit + suffix
+	if ahead {
+		return "in " + strconv.FormatInt(n, 10) + unit
+	}
+	return strconv.FormatInt(n, 10) + unit + " ago"
+}
+
+// span words a length of time: tenths below ten seconds, as "0.2s" and
+// "1.3s", which is the scale of a handler's run, then "13s", "3m 12s", "2h 5m",
+// and from two days, as ago, "3d 4h". Each part is cut down, never rounded
+// up, as ago does, and a whole number of seconds has no tenths. Below a tenth
+// of a second it is "<0.1s", where "0.0s" would read as no time; no time is
+// "0s". A gap that counts is whole seconds, and the script counts it in the
+// same words: see span in app.js.
+func span(d time.Duration) string {
+	switch {
+	case d <= 0:
+		return "0s"
+	case d < 100*time.Millisecond:
+		return "<0.1s"
+	case d < 10*time.Second:
+		tenths := int(d / (100 * time.Millisecond))
+		if tenths%10 == 0 {
+			return strconv.Itoa(tenths/10) + "s"
+		}
+		return strconv.Itoa(tenths/10) + "." + strconv.Itoa(tenths%10) + "s"
+	}
+	s := int64(d / time.Second)
+	pair := func(n int64, unit string, rest int64, sub string) string {
+		if rest == 0 {
+			return strconv.FormatInt(n, 10) + unit
+		}
+		return strconv.FormatInt(n, 10) + unit + " " + strconv.FormatInt(rest, 10) + sub
+	}
+	switch {
+	case s < 60:
+		return pair(s, "s", 0, "")
+	case s < 3600:
+		return pair(s/60, "m", s%60, "s")
+	case s < 48*3600:
+		return pair(s/3600, "h", s/60%60, "m")
+	}
+	return pair(s/86400, "d", s/3600%24, "h")
+}
+
+// dueSlack is how long after its creation a task may be due and still be
+// due at once. A task enqueued without a due time is due at its creation to
+// the microsecond, as one statement sets both. A due time that the
+// application took from its own clock is a few milliseconds off, by that
+// clock and the trip to the database, and one before the creation was due
+// when the task was created. The page shows a wait in tenths of a second:
+// closer than half of one, the two times are one time to the reader.
+const dueSlack = 50 * time.Millisecond
+
+// entry is a line of a task's timeline: a step, or the gap between two
+// steps. A step is a fact, or a plan that is yet to come.
+type entry struct {
+	Step   string             // a step's name, such as "Started"; empty for a gap
+	At     time.Time          // when the step was or is due; zero for one with no time yet
+	Note   string             // a step's second line, such as "attempt 2"
+	Plan   bool               // the step is yet to come
+	Gap    string             // a gap's words, such as "waited 0.2s"
+	Since  time.Time          // for a gap that lasts until now, when it began: the script counts the end of its words
+	Behind *taskmill.TaskInfo // for a gap, the task that this one waits behind in its FIFO group
+	Tone   string             // the color of a step's dot or of a gap's words: "run", "ok", "err", or "warn"
+}
+
+// timeline returns the steps of task t at now, with the time between them:
+// when it was created, due, started, and finished, from the times that its
+// row keeps, and what is yet to come. head is the task that t waits behind
+// in its FIFO group, if any.
+//
+// The row keeps the start of the last attempt only, and one due time, which
+// a retry and a snooze both move: so the timeline shows the last attempt,
+// and leaves out what the row cannot tell, such as whether a due time came
+// from a retry, or how long a wait was when the due time of the wait is
+// gone. A gap between two times out of order, as the clocks of two machines
+// can make them, is left out too.
+func timeline(now time.Time, t, head *taskmill.TaskInfo) []entry {
+	s := steps{now: now, t: t, started: t.AttemptedAt}
+	if t.Attempt == 0 {
+		s.started = time.Time{} // a snooze or a stop gave the attempt back
+	}
+	switch t.State {
+	case taskmill.StateScheduled:
+		s.created()
+	case taskmill.StatePending, taskmill.StateAvailable:
+		s.waiting(head)
+	case taskmill.StateRunning:
+		due := s.created()
+		s.gap("waited", due, s.started, "")
+		if s.start("run") {
+			s.tl = append(s.tl, entry{Gap: "running for " + s.lasting(s.started), Since: s.started, Tone: "run"})
+		}
+	case taskmill.StateRetryable:
+		s.retrying()
+	case taskmill.StateCompleted:
+		due := s.created()
+		s.gap("waited", due, s.started, "")
+		s.start("")
+		s.gap("ran", s.started, t.FinalizedAt, "")
+		s.step("Completed", t.FinalizedAt, "", "ok")
+	case taskmill.StateDead:
+		due := s.created()
+		s.gap("waited", due, s.started, "")
+		s.start("")
+		s.gap("failed after", s.started, t.FinalizedAt, "err")
+		s.step("Died", t.FinalizedAt, "", "err")
+	case taskmill.StateCanceled:
+		s.canceled()
+	default:
+	}
+	return s.tl
+}
+
+// steps builds the timeline of a task.
+type steps struct {
+	now     time.Time
+	t       *taskmill.TaskInfo
+	started time.Time // the start of the last attempt that counts; zero if none
+	tl      []entry
+}
+
+func (s *steps) step(name string, at time.Time, note, tone string) {
+	s.tl = append(s.tl, entry{Step: name, At: at, Note: note, Tone: tone})
+}
+
+// plan adds a step that is yet to come until its time, or has no time yet.
+func (s *steps) plan(name string, at time.Time, note string) {
+	s.tl = append(s.tl, entry{Step: name, At: at, Note: note, Plan: at.IsZero() || at.After(s.now)})
+}
+
+// gap adds the time from one step to the next, unless a time is missing or
+// the two are out of order.
+func (s *steps) gap(words string, from, to time.Time, tone string) {
+	if !from.IsZero() && !to.IsZero() && !to.Before(from) {
+		s.tl = append(s.tl, entry{Gap: words + " " + span(to.Sub(from)), Tone: tone})
+	}
+}
+
+// lasting words the time from since until now, in whole seconds of the
+// clock, as ago reads them.
+func (s *steps) lasting(since time.Time) string {
+	return span(max(0, s.now.Truncate(time.Second).Sub(since.Truncate(time.Second))))
+}
+
+// created adds the step Created and, unless the task was due at once, the
+// step Due. It returns the time from which the task waited.
+func (s *steps) created() time.Time {
+	if s.t.RunAt.Sub(s.t.CreatedAt) <= dueSlack {
+		s.step("Created", s.t.CreatedAt, "due at once", "")
+		return s.t.CreatedAt
+	}
+	s.step("Created", s.t.CreatedAt, "", "")
+	s.plan("Due", s.t.RunAt, "")
+	return s.t.RunAt
+}
+
+// start adds the start of the last attempt, if one counts, and reports
+// whether it did.
+func (s *steps) start(tone string) bool {
+	if s.started.IsZero() {
+		return false
+	}
+	note := ""
+	if s.t.Attempt > 1 {
+		note = "attempt " + strconv.Itoa(s.t.Attempt)
+	}
+	s.step("Started", s.started, note, tone)
+	return true
+}
+
+// failed returns when the last attempt failed, if its error ends the
+// history: an error from its start on that is no note of a wait for a
+// handler. It returns zero otherwise.
+func (s *steps) failed() time.Time {
+	e := lastError(s.t.Errors)
+	if e == nil || s.started.IsZero() || e.At.Before(s.started) || e.Code == taskmill.CodeNoHandler {
+		return time.Time{}
+	}
+	return e.At
+}
+
+// waiting adds the steps of a task that waits to start: once it is due, it
+// waits, and in a FIFO group behind the task before it.
+func (s *steps) waiting(head *taskmill.TaskInfo) {
+	wait := entry{Behind: head}
+	if head != nil {
+		wait.Tone = "warn"
+	}
+	if due := s.created(); !due.After(s.now) {
+		wait.Gap, wait.Since = "waiting "+s.lasting(due), due
+	}
+	if wait.Gap != "" || head != nil {
+		s.tl = append(s.tl, wait)
+	}
+	s.plan("Start", time.Time{}, "")
+}
+
+// retrying adds the steps of a task that failed and runs again. Its due
+// time is the next attempt's: the last one's is gone. A history of one
+// error is that of a first attempt, which waited from the task's creation.
+func (s *steps) retrying() {
+	s.step("Created", s.t.CreatedAt, "", "")
+	if len(s.t.Errors) == 1 {
+		s.gap("waited", s.t.CreatedAt, s.started, "")
+	}
+	s.start("")
+	s.gap("failed after", s.started, s.failed(), "err")
+	s.plan("Due again", s.t.RunAt, "attempt "+strconv.Itoa(s.t.Attempt+1))
+}
+
+// canceled adds the steps that a canceled task reached: its due time if
+// that came before the cancel, as the due time of its attempt if it came
+// before the start, or else of the next attempt, after the start.
+func (s *steps) canceled() {
+	end := s.t.FinalizedAt
+	reached := !s.t.RunAt.After(end)
+	first := s.started.IsZero() || !s.t.RunAt.After(s.started)
+	if reached && first {
+		due := s.created()
+		s.gap("waited", due, s.started, "")
+	} else {
+		s.step("Created", s.t.CreatedAt, "", "")
+	}
+	if s.start("") {
+		s.gap("failed after", s.started, s.failed(), "err")
+		if reached && !first {
+			s.step("Due", s.t.RunAt, "", "")
+		}
+	}
+	note := ""
+	if !reached {
+		note = "was due in " + span(s.t.RunAt.Sub(end))
+	}
+	s.step("Canceled", end, note, "")
 }
 
 func timestamp(t time.Time) string {

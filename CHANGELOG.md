@@ -7,6 +7,32 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A task's page in the dashboard has a timeline under its details, in
+  place of its four times: when the task was created, due, started, and
+  finished, with the time between two steps, such as "waited 0.2s", "ran
+  3s", or "failed after 2s", and what comes next, such as its next attempt.
+  How long a task has waited or run so far counts each second, by the
+  server's clock, and a task that waits in a FIFO group names the task
+  before it. The timeline shows what the task's row keeps: its last attempt
+  and one due time. So it leaves out what the row cannot tell, such as
+  whether a due time came from a retry or a snooze.
+
+### Changed
+
+- The dashboard says a time ahead as "in 3m", where it said "3m from now",
+  and the task list's "Run at" column is "Due".
+- On a task's page, the two columns end on one line: when the payload and
+  the errors are shorter than the details, the last card grows to match,
+  and the note of a task with no errors fills it.
+
+### Fixed
+
+- On a task's page, the meter of the attempts draws a short bar for a few
+  attempts of many, where it drew a dot, and a kind as long as
+  `taskmill.outbox.message` fits on one line.
+
 ## [0.12.0] - 2026-11-20
 
 ### Added

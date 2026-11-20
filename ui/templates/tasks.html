@@ -34,7 +34,7 @@
       {{if eq $d.Order.Column "id"}}<th class="num" aria-sort="descending">ID{{template "icon-sort" $d.Order.Name}}</th>{{else}}<th class="num">ID</th>{{end}}
       <th>Kind</th><th>Queue</th><th>State</th><th class="num">Attempt</th>
       {{if eq $d.Order.Column "created"}}<th aria-sort="descending">Created{{template "icon-sort" $d.Order.Name}}</th>{{else}}<th>Created</th>{{end}}
-      {{if $d.Order.ByFinish}}<th aria-sort="descending">Finished{{template "icon-sort" $d.Order.Name}}</th>{{else}}<th>Run at</th>{{end}}
+      {{if $d.Order.ByFinish}}<th aria-sort="descending">Finished{{template "icon-sort" $d.Order.Name}}</th>{{else}}<th>Due</th>{{end}}
       <th>Last error</th>
     </tr></thead>
     {{/* The first task that "Load more" added is the place that its link names. */}}
