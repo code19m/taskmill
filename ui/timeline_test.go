@@ -219,17 +219,23 @@ func TestTaskErrorsMarkARetry(t *testing.T) {
 		name, errors string
 		want         []string
 	}{
-		{"retried after it died", `[{"attempt": 1, "at": "2026-11-19T11:35:27Z", "message": "boom"},
+		{
+			"retried after it died", `[{"attempt": 1, "at": "2026-11-19T11:35:27Z", "message": "boom"},
 		    {"attempt": 1, "at": "2026-11-19T18:33:17Z", "message": "boom"}]`,
-			[]string{"Attempt 1", "retried", "Attempt 1"}},
-		{"retried after its third attempt", `[{"attempt": 2, "at": "2026-11-19T10:00:00Z", "message": "a"},
+			[]string{"Attempt 1", "retried", "Attempt 1"},
+		},
+		{
+			"retried after its third attempt", `[{"attempt": 2, "at": "2026-11-19T10:00:00Z", "message": "a"},
 		    {"attempt": 3, "at": "2026-11-19T10:01:00Z", "message": "b"},
 		    {"attempt": 2, "at": "2026-11-19T12:00:00Z", "message": "c"}]`,
-			[]string{"Attempt 2", "retried", "Attempt 3", "Attempt 2"}},
-		{"a note between two attempts", `[{"attempt": 2, "at": "2026-11-19T10:00:00Z", "message": "a"},
+			[]string{"Attempt 2", "retried", "Attempt 3", "Attempt 2"},
+		},
+		{
+			"a note between two attempts", `[{"attempt": 2, "at": "2026-11-19T10:00:00Z", "message": "a"},
 		    {"attempt": 2, "at": "2026-11-19T10:01:00Z", "code": "no_handler", "message": "no handler"},
 		    {"attempt": 3, "at": "2026-11-19T10:02:00Z", "message": "b"}]`,
-			[]string{"Attempt 3", "Attempt 2", "Attempt 2"}},
+			[]string{"Attempt 3", "Attempt 2", "Attempt 2"},
+		},
 	} {
 		var id int64
 		if err := pool.QueryRow(t.Context(), `INSERT INTO `+schema+`.tasks (queue, kind, payload, state, attempt, max_attempts, errors, run_at, finalized_at)
