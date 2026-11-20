@@ -32,16 +32,16 @@ const (
 	logKeyWorker    = "worker_id"
 )
 
-// failures logs the failures of an operation that the worker repeats, such
-// as a fetch. While the database is down, such an operation fails at every
-// try, so it logs only now and then: a warning when an incident starts, an
-// error at most once per timing.failureReport while it lasts, and the
-// recovery. An incident lasts while failures come less than a report
+// incidentLog logs the failures of an operation that the worker repeats,
+// such as a fetch. While the database is down, such an operation fails at
+// every try, so it logs only now and then: a warning when an incident
+// starts, an error at most once per timing.failureReport while it lasts, and
+// the recovery. An incident lasts while failures come less than a report
 // interval apart, even with successes between them, so an operation that
 // fails at every other try escalates too, and logs no more. Without a try
 // between them, as for work that runs only now and then, failures may come
 // up to two intervals apart.
-type failures struct {
+type incidentLog struct {
 	w         *Worker
 	operation string
 	attrs     []slog.Attr // more about the operation, such as its queue
@@ -56,13 +56,13 @@ type failures struct {
 	logged  time.Time // when the last line was logged
 }
 
-func newFailures(w *Worker, operation string, attrs ...slog.Attr) *failures {
-	return &failures{w: w, operation: operation, attrs: attrs}
+func newIncidentLog(w *Worker, operation string, attrs ...slog.Attr) *incidentLog {
+	return &incidentLog{w: w, operation: operation, attrs: attrs}
 }
 
 // observe takes the outcome of one try: err is nil if it succeeded. A
 // failure after ctx was canceled does not count: the worker is stopping.
-func (f *failures) observe(ctx context.Context, err error) {
+func (f *incidentLog) observe(ctx context.Context, err error) {
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
@@ -108,7 +108,7 @@ func (f *failures) observe(ctx context.Context, err error) {
 }
 
 // recovered logs that the incident's operation works again.
-func (f *failures) recovered(ctx context.Context, now time.Time) {
+func (f *incidentLog) recovered(ctx context.Context, now time.Time) {
 	f.w.logger.LogAttrs(ctx, slog.LevelInfo, "operation recovered",
 		f.with(slog.Int(logKeyFailures, f.count), slog.Duration(logKeyDuration, f.last.Sub(f.since)))...)
 	f.pending, f.paired, f.logged = false, false, now
@@ -116,14 +116,14 @@ func (f *failures) recovered(ctx context.Context, now time.Time) {
 
 // reset forgets the current incident without a line, for an operation that
 // starts running here again, such as the maintainer's work in a new term.
-func (f *failures) reset() {
+func (f *incidentLog) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.count, f.failing, f.pending, f.paired, f.logged = 0, false, false, false, time.Time{}
 }
 
 // with returns the attributes of a line: the operation's, then attrs.
-func (f *failures) with(attrs ...slog.Attr) []slog.Attr {
+func (f *incidentLog) with(attrs ...slog.Attr) []slog.Attr {
 	all := make([]slog.Attr, 0, 1+len(f.attrs)+len(attrs))
 	all = append(append(all, slog.String(logKeyOperation, f.operation)), f.attrs...)
 	return append(all, attrs...)

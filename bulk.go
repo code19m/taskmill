@@ -390,7 +390,7 @@ func (c *Client) inBatches(ctx context.Context, run *bulkRun, batch batchFunc) (
 func (c *Client) nextBatch(ctx context.Context, run *bulkRun, batch batchFunc) (step, error) {
 	var ends time.Time
 	if !run.windowed {
-		s, err := c.runBatch(ctx, run, batch, openSettings, &ends)
+		s, err := c.runBulkBatch(ctx, run, batch, openSettings, &ends)
 		// Before the transaction began, ends is not set.
 		if pgCode(err) != codeQueryCanceled || ends.IsZero() {
 			return s, err
@@ -405,7 +405,7 @@ func (c *Client) nextBatch(ctx context.Context, run *bulkRun, batch batchFunc) (
 			return step{}, err
 		}
 	}
-	return c.runBatch(ctx, run, batch, bulkSettings, &ends)
+	return c.runBulkBatch(ctx, run, batch, bulkSettings, &ends)
 }
 
 // nextWindow sets the window of the next batches: the next bulkWindow tasks
@@ -433,11 +433,11 @@ func (c *Client) nextWindow(ctx context.Context, run *bulkRun) error {
 	})
 }
 
-// runBatch runs batch in a transaction of its own, which starts with
+// runBulkBatch runs batch in a transaction of its own, which starts with
 // settings and ends with liftLockTimeout. Once the transaction began, the
 // batch continues if ctx ends meanwhile, until ends: batchTimeout from now,
 // unless a transaction of the same batch set it before.
-func (c *Client) runBatch(ctx context.Context, run *bulkRun, batch batchFunc, settings string, ends *time.Time) (step, error) {
+func (c *Client) runBulkBatch(ctx context.Context, run *bulkRun, batch batchFunc, settings string, ends *time.Time) (step, error) {
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return step{}, err
@@ -465,10 +465,10 @@ func (c *Client) runBatch(ctx context.Context, run *bulkRun, batch batchFunc, se
 type bulkTask struct {
 	id           int64
 	queue, group string
-	held         bool  // the action holds its lock, and it still matches
-	state        State // if held
-	inGroup      bool  // if held: its group has a row, which the action holds
-	keyed        bool  // if held: its cancel freed a dedupe key whose window still lasts
+	locked       bool  // the action holds its lock, and it still matches
+	state        State // if locked
+	inGroup      bool  // if locked: its group has a row, which the action holds
+	keyed        bool  // if locked: its cancel freed a dedupe key whose window still lasts
 }
 
 // pick reads the next batch of the tasks that run matches, with one of the pick
@@ -492,7 +492,7 @@ func pick(ctx context.Context, q querier, sql string, run *bulkRun) ([]bulkTask,
 	for r.Next() {
 		var t bulkTask
 		var state string
-		if err := r.Scan(&t.id, &t.queue, &t.group, &t.held, &state, &t.inGroup, &t.keyed); err != nil {
+		if err := r.Scan(&t.id, &t.queue, &t.group, &t.locked, &state, &t.inGroup, &t.keyed); err != nil {
 			return nil, err
 		}
 		t.state = State(state)
@@ -518,12 +518,12 @@ func idsOf(ts []bulkTask) []int64 {
 	return ids
 }
 
-// held returns the tasks among ts that the batch holds, and counts the
+// locked returns the tasks among ts that the batch holds, and counts the
 // others as skipped.
-func (s *step) held(ts []bulkTask) []bulkTask {
+func (s *step) locked(ts []bulkTask) []bulkTask {
 	var out []bulkTask
 	for _, t := range ts {
-		if t.held {
+		if t.locked {
 			out = append(out, t)
 		} else {
 			s.skip(t, nil)
@@ -534,12 +534,12 @@ func (s *step) held(ts []bulkTask) []bulkTask {
 
 // skip counts a task that the action leaves. A retry, which passes left,
 // also leaves the task's group, recorded there, for the rest of the action.
-func (s *step) skip(t bulkTask, left map[groupKey]bool) {
+func (s *step) skip(t bulkTask, left map[groupID]bool) {
 	s.skipped++
 	if s.firstSkipped == 0 || t.id < s.firstSkipped {
 		s.firstSkipped = t.id
 	}
-	key := groupKey{t.queue, t.group}
+	key := groupID{t.queue, t.group}
 	if left != nil && t.group != "" && !left[key] {
 		left[key] = true
 		s.left.add(t.queue, t.group)
@@ -558,31 +558,31 @@ func (c *Client) retryBatch(ctx context.Context, q querier, run *bulkRun) (step,
 		return step{}, err
 	}
 	s := step{end: run.end(idsOf(ts))}
-	left := make(map[groupKey]bool)
+	left := make(map[groupID]bool)
 	for i := range run.left.queues {
-		left[groupKey{run.left.queues[i], run.left.groups[i]}] = true
+		left[groupID{run.left.queues[i], run.left.groups[i]}] = true
 	}
-	var held []bulkTask
+	var locked []bulkTask
 	for _, t := range ts {
-		if t.held && (t.group == "" || !left[groupKey{t.queue, t.group}]) {
-			held = append(held, t)
+		if t.locked && (t.group == "" || !left[groupID{t.queue, t.group}]) {
+			locked = append(locked, t)
 		} else {
 			s.skip(t, left)
 		}
 	}
 	// The keys come before the groups' counts, which cannot be undone for
 	// a task that does not get its key.
-	if held, err = c.takeKeysBack(ctx, q, held, &s, left); err != nil {
+	if locked, err = c.takeKeysBack(ctx, q, locked, &s, left); err != nil {
 		return step{}, err
 	}
-	if len(held) == 0 {
+	if len(locked) == 0 {
 		return s, nil
 	}
-	retried, pending, err := c.rejoinGroups(ctx, q, held)
+	retried, pending, err := c.rejoinGroups(ctx, q, locked)
 	if err != nil {
 		return step{}, err
 	}
-	if err := c.leaveOut(ctx, q, held, retried, &s, left); err != nil {
+	if err := c.leaveOut(ctx, q, locked, retried, &s, left); err != nil {
 		return step{}, err
 	}
 	var available []string
@@ -601,12 +601,12 @@ func (c *Client) retryBatch(ctx context.Context, q querier, run *bulkRun) (step,
 	return s, err
 }
 
-// leaveOut skips the tasks of held that are not among retried: those that
+// leaveOut skips the tasks of locked that are not among retried: those that
 // rejoinGroups left out. Such a task stays canceled, so it gives away again
 // the dedupe key that it took back.
-func (c *Client) leaveOut(ctx context.Context, q querier, held, retried []bulkTask, s *step, left map[groupKey]bool) error {
+func (c *Client) leaveOut(ctx context.Context, q querier, locked, retried []bulkTask, s *step, left map[groupID]bool) error {
 	var keyed []int64
-	for _, t := range held {
+	for _, t := range locked {
 		if slices.ContainsFunc(retried, func(r bulkTask) bool { return r.id == t.id }) {
 			continue
 		}
@@ -630,7 +630,7 @@ func (c *Client) leaveOut(ctx context.Context, q querier, held, retried []bulkTa
 // a later run, with the later tasks of their groups. The tasks of ts have
 // passed the groups that the action left before: a task ahead of one that
 // was left is still retried, and so keeps the key that it takes here.
-func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *step, left map[groupKey]bool) ([]bulkTask, error) {
+func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *step, left map[groupID]bool) ([]bulkTask, error) {
 	var keyed []int64
 	for _, t := range ts {
 		if t.keyed {
@@ -649,9 +649,9 @@ func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *
 		return nil, err
 	}
 	var out []bulkTask
-	leftNow := make(map[groupKey]bool) // the groups of the tasks that are left here
+	leftNow := make(map[groupID]bool) // the groups of the tasks that are left here
 	for _, t := range ts {
-		group := groupKey{t.queue, t.group}
+		group := groupID{t.queue, t.group}
 		switch {
 		case t.keyed && !taken, t.group != "" && leftNow[group]:
 			s.skip(t, left)
@@ -696,15 +696,15 @@ func (c *Client) cancelBatch(ctx context.Context, q querier, run *bulkRun) (step
 		return step{}, err
 	}
 	s := step{end: run.end(idsOf(ts))}
-	held := s.held(ts)
-	if len(held) == 0 {
+	locked := s.locked(ts)
+	if len(locked) == 0 {
 		return s, nil
 	}
-	if _, err := q.exec(ctx, c.sql.cancelTasks, idsOf(held), c.schema); err != nil {
+	if _, err := q.exec(ctx, c.sql.cancelTasks, idsOf(locked), c.schema); err != nil {
 		return step{}, err
 	}
-	s.changed = len(held)
-	return s, c.leaveAll(ctx, q, held, func(t bulkTask) bool { return t.state != StateRunning })
+	s.changed = len(locked)
+	return s, c.leaveAll(ctx, q, locked, func(t bulkTask) bool { return t.state != StateRunning })
 }
 
 // deleteBatch deletes a batch of the tasks that run matches, unfinished, dead,
@@ -734,7 +734,7 @@ func (c *Client) deleteBatch(ctx context.Context, q querier, run *bulkRun) (step
 	}
 	// The tasks after the end come again in the next batch.
 	beyond := func(t bulkTask) bool { return t.id > s.end }
-	ts, completed = s.held(slices.DeleteFunc(ts, beyond)), s.held(slices.DeleteFunc(completed, beyond))
+	ts, completed = s.locked(slices.DeleteFunc(ts, beyond)), s.locked(slices.DeleteFunc(completed, beyond))
 	if len(completed) > 0 {
 		if _, err := q.exec(ctx, c.sql.deleteCompleted, idsOf(completed)); err != nil {
 			return step{}, err
@@ -770,7 +770,7 @@ func (c *Client) pickCompleted(ctx context.Context, q querier, run *bulkRun) ([]
 	var out []bulkTask
 	for r.Next() {
 		t := bulkTask{state: StateCompleted}
-		if err := r.Scan(&t.id, &t.held); err != nil {
+		if err := r.Scan(&t.id, &t.locked); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

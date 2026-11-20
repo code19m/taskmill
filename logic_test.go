@@ -83,7 +83,7 @@ func TestScheduledFor(t *testing.T) {
 		{time.FixedZone("seconds", 60*60+17), "22:30"},
 	} {
 		s := compiledSchedule{Schedule: Schedule{Name: "nightly", Location: tt.loc}}
-		info := TaskInfo{Metadata: s.ownMetadata(s.scheduledFor(at))}
+		info := TaskInfo{Metadata: s.reservedMetadata(s.scheduledFor(at))}
 		if got := info.ScheduledFor(); !got.Equal(at) || got.Format("15:04") != tt.want {
 			t.Errorf("in %s: got %s, want %s at %s", tt.loc, got.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), tt.want)
 		}
@@ -384,8 +384,8 @@ func TestWhileLeased(t *testing.T) {
 	// next try, so the test measures its waits exactly.
 	synctest.Test(t, func(t *testing.T) {
 		w := &Worker{cfg: WorkerConfig{LeaseDuration: 400 * time.Millisecond}, logger: slog.New(slog.DiscardHandler)}
-		w.resultFailures = newFailures(w, "record results")
-		ts := []*tracked{{renewedAt: time.Now()}}
+		w.resultFailures = newIncidentLog(w, "record results")
+		ts := []*liveAttempt{{renewedAt: time.Now()}}
 
 		calls := 0
 		err := w.whileLeased(t.Context(), ts, func(context.Context) error {
@@ -402,7 +402,7 @@ func TestWhileLeased(t *testing.T) {
 		// that persists still ends them. Tries that followed the renewals
 		// would never end: the tenth succeeds, which fails the test.
 		start, calls := time.Now(), 0
-		ts = []*tracked{{renewedAt: start}}
+		ts = []*liveAttempt{{renewedAt: start}}
 		err = w.whileLeased(t.Context(), ts, func(context.Context) error {
 			if calls++; calls == 10 {
 				return nil
@@ -544,10 +544,10 @@ func TestNotifierForgetsQueuesAfterTheirWindow(t *testing.T) {
 // newFailureLines returns the failures of an operation with a report
 // interval of every, and the lines it logs. Its tests run in a synctest
 // bubble, where the clock moves only when they sleep.
-func newFailureLines(every time.Duration) (*failures, *lineLog) {
+func newFailureLines(every time.Duration) (*incidentLog, *lineLog) {
 	l := &lineLog{}
 	w := &Worker{logger: slog.New(l), timing: timing{failureReport: every}}
-	return newFailures(w, "fetch tasks"), l
+	return newIncidentLog(w, "fetch tasks"), l
 }
 
 // lineLog is a slog handler that keeps each line's level, message, and

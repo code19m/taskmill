@@ -84,12 +84,22 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 
 // schemaVersion returns the schema's migration version, or 0 if it has none.
 func schemaVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int, error) {
-	var version int
-	sql := fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)
-	err := pool.QueryRow(ctx, sql, unprepared).Scan(&version)
+	version, err := readVersion(ctx, pool, schema)
 	if pgCode(err) == codeUndefinedTable {
 		return 0, nil
 	}
+	return version, err
+}
+
+// readVersion reads the version of the latest migration that the schema's
+// migrations table records, on q, a pool or a transaction. NewClient reads
+// it with the pool's isolation level instead: see schemaVersionSQL.
+func readVersion(ctx context.Context, q interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}, schema string,
+) (int, error) {
+	var version int
+	err := q.QueryRow(ctx, "SELECT coalesce(max(version), 0) FROM "+schema+".migrations", unprepared).Scan(&version)
 	return version, err
 }
 
@@ -155,8 +165,8 @@ func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrat
 		return err
 	}
 
-	var current int
-	if err := tx.QueryRow(ctx, fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)).Scan(&current); err != nil {
+	current, err := readVersion(ctx, tx, schema)
+	if err != nil {
 		return err
 	}
 	for _, m := range all[min(current, len(all)):] {

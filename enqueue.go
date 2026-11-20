@@ -277,10 +277,9 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 	}
 	views := make([]*EnqueueTask, len(tasks))
 	for i, t := range tasks {
-		meta := make(map[string]string, len(t.meta)+len(t.own)) // t.meta may belong to the caller
-		maps.Copy(meta, t.meta)
-		maps.Copy(meta, t.own)
-		views[i] = &EnqueueTask{Queue: t.queue, Kind: t.kind, Metadata: meta}
+		// A copy: the middleware may change it, and t.meta may belong to the
+		// caller.
+		views[i] = &EnqueueTask{Queue: t.queue, Kind: t.kind, Metadata: t.metadataCopy()}
 	}
 	var results []EnqueueResult
 	err := through(ctx, c.enqueueMiddleware, views, func(ctx context.Context) error {
@@ -345,7 +344,7 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 		b.add(t, meta, now)
 	}
 
-	results, err := c.runEnqueue(ctx, q, &b)
+	results, err := c.insertWithRetry(ctx, q, &b)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +372,11 @@ func inBatch(err error, i, n int) error {
 	return fmt.Errorf("%w (task %d of %d)", err, i+1, n)
 }
 
-func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]EnqueueResult, error) {
+// insertWithRetry runs the enqueue statement on a batch, and runs it again
+// after a deadlock when it is a transaction of its own, on the client's
+// pool. It then finds the tasks of the duplicates that the statement could
+// not see.
+func (c *Client) insertWithRetry(ctx context.Context, q querier, b *enqueueBatch) ([]EnqueueResult, error) {
 	notify := make([]string, 0, len(b.due))
 	for queue := range b.due {
 		if c.notifier.allow(ctx, queue) {
@@ -383,7 +386,7 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 
 	// Only on the client's own pool is the enqueue statement known to be a
 	// transaction of its own: any other executor may be in the caller's.
-	own := q == querier(pgxExecutor{q: c.pool})
+	ownTx := q == querier(pgxExecutor{q: c.pool})
 	var results []EnqueueResult
 	var missing [][]byte // duplicates whose existing task the statement could not see
 	var err error
@@ -395,7 +398,7 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		// statement is a transaction of its own, so nothing of it stays,
 		// and it runs again, as Cancel does: see inLockOrder. In the
 		// caller's transaction it cannot: that transaction is over.
-		if try == lockOrderTries || !isDeadlock(err) || !own {
+		if try == deadlockTries || !isDeadlock(err) || !ownTx {
 			break
 		}
 	}
@@ -404,7 +407,7 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 	}
 	if len(missing) > 0 {
 		if err := c.resolveDuplicates(ctx, q, b, results, missing); err != nil {
-			if !own {
+			if !ownTx {
 				return nil, err // the caller rolls back
 			}
 			// The tasks are committed, and the read only fills in IDs. An
@@ -513,18 +516,24 @@ type resolvedTask struct {
 	dedupeWindow       time.Duration
 	payload            []byte
 	meta               map[string]string // may belong to the caller or the kind: never modified
-	own                map[string]string // taskmill's own metadata, of a schedule's run: stored over meta
+	reservedMeta       map[string]string // taskmill's own metadata, of a schedule's run: stored over meta
 }
 
 // metadata returns the task's metadata as it is stored: meta, and over it
-// taskmill's own.
+// reservedMeta. Without reserved keys, it is meta itself, which the caller
+// must not change.
 func (t *resolvedTask) metadata() map[string]string {
-	if len(t.own) == 0 {
+	if len(t.reservedMeta) == 0 {
 		return t.meta
 	}
-	all := make(map[string]string, len(t.meta)+len(t.own))
+	return t.metadataCopy()
+}
+
+// metadataCopy returns the task's metadata as it is stored, in a new map.
+func (t *resolvedTask) metadataCopy() map[string]string {
+	all := make(map[string]string, len(t.meta)+len(t.reservedMeta))
 	maps.Copy(all, t.meta)
-	maps.Copy(all, t.own)
+	maps.Copy(all, t.reservedMeta)
 	return all
 }
 

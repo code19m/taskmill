@@ -9,7 +9,7 @@ import (
 
 // This file holds the session settings that start a transaction, and why
 // each is set. set_config(..., true) holds a setting until the transaction
-// ends, so it never reaches the next statement of the connection, and one
+// ends, so it never reaches the connection's next transaction, and one
 // round trip can carry the settings with the statement that needs them: see
 // readAlone.
 

@@ -43,7 +43,7 @@ func (w *Worker) everyThirdOfLease(ctx context.Context, fn func(context.Context)
 // canceled, and records in the worker's row that it is alive.
 func (w *Worker) checkIn(ctx context.Context) {
 	w.mu.Lock()
-	ts := make([]*tracked, 0, len(w.attempts))
+	ts := make([]*liveAttempt, 0, len(w.attempts))
 	for _, t := range w.attempts {
 		ts = append(ts, t)
 	}
@@ -95,7 +95,7 @@ func (w *Worker) Health() error {
 
 // renewLeases renews the leases of ts, and cancels the attempts that lost
 // theirs or whose tasks were canceled.
-func (w *Worker) renewLeases(ctx context.Context, ts []*tracked) {
+func (w *Worker) renewLeases(ctx context.Context, ts []*liveAttempt) {
 	if len(ts) == 0 {
 		return
 	}
@@ -195,7 +195,7 @@ func (w *Worker) acquireForRenewal(ctx context.Context) (*pgxpool.Conn, error) {
 	return conn, err
 }
 
-func (w *Worker) loseLease(ctx context.Context, t *tracked) {
+func (w *Worker) loseLease(ctx context.Context, t *liveAttempt) {
 	t.mu.Lock()
 	running := t.state == attemptRunning
 	t.mu.Unlock()
@@ -211,7 +211,7 @@ func (w *Worker) loseLease(ctx context.Context, t *tracked) {
 
 // requestCancel cancels the attempt because its task's cancellation was
 // requested.
-func (t *tracked) requestCancel() {
+func (t *liveAttempt) requestCancel() {
 	if !t.cancelRequested.Swap(true) {
 		t.cancelAttempt(ErrTaskCanceled)
 	}
@@ -219,7 +219,7 @@ func (t *tracked) requestCancel() {
 
 // cancelAttempt cancels the attempt's context, if it has started. Batches
 // keep running: a canceled or lost task's result is handled when it ends.
-func (t *tracked) cancelAttempt(cause error) {
+func (t *liveAttempt) cancelAttempt(cause error) {
 	t.mu.Lock()
 	cancel := t.cancel
 	t.mu.Unlock()
@@ -233,7 +233,7 @@ func (t *tracked) cancelAttempt(cause error) {
 // then the tasks are rescued, and a result recorded later would be refused.
 // A database outage or failover shorter than a lease thus loses no results,
 // while an error that persists ends the tries. Each try gets its own timeout.
-func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context.Context) error) error {
+func (w *Worker) whileLeased(ctx context.Context, ts []*liveAttempt, fn func(context.Context) error) error {
 	// The deadline is fixed now: the leases are still renewed while the
 	// tries continue, which would otherwise never let them end.
 	deadline := w.leaseEnd(ts)
@@ -257,7 +257,7 @@ func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context
 
 // leaseEnd returns when the first of the leases of ts may expire, as far as
 // the worker knows.
-func (w *Worker) leaseEnd(ts []*tracked) time.Time {
+func (w *Worker) leaseEnd(ts []*liveAttempt) time.Time {
 	var end time.Time
 	for i, t := range ts {
 		t.mu.Lock()
@@ -277,7 +277,7 @@ func (w *Worker) leaseEnd(ts []*tracked) time.Time {
 // before a check-in found out. t takes that attempt's place, so no check-in
 // sees it again. The new lease proves that the older attempt lost its own,
 // so track cancels its context with ErrLeaseLost, and its result is ignored.
-func (w *Worker) track(ctx context.Context, t *tracked) {
+func (w *Worker) track(ctx context.Context, t *liveAttempt) {
 	w.mu.Lock()
 	old := w.attempts[t.att.id]
 	w.attempts[t.att.id] = t
@@ -299,7 +299,7 @@ func (w *Worker) track(ctx context.Context, t *tracked) {
 	}
 }
 
-func (w *Worker) untrack(t *tracked) {
+func (w *Worker) untrack(t *liveAttempt) {
 	w.mu.Lock()
 	if w.attempts[t.att.id] == t {
 		delete(w.attempts, t.att.id)

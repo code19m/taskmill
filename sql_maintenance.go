@@ -154,7 +154,7 @@ RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.att
 //
 // The index of finished tasks leads with the queue, so old tasks are
 // a range of it only within one queue. The statement finds the
-// queues with one index probe each, as countStats does, and reads
+// queues with one index probe each, as countStatsSQL does, and reads
 // each queue's range, up to a batch: that limit lets the planner read
 // the range in order and stop, not collect all of it first. With a
 // filter by age alone, the planner, which cannot know the cutoff that

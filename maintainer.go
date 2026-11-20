@@ -36,22 +36,23 @@ type maintainer struct {
 	lastTakeover time.Time // when a notification that the maintainer resigned last made this worker try to lead
 
 	// The failures of each kind of work, which it logs only now and then.
-	election, promotion, waking, rescues, schedules, pruning, stats, retention *failures
+	electionFailures, promotionFailures, wakeFailures, rescueFailures *incidentLog
+	scheduleFailures, pruneFailures, statsFailures, retentionFailures *incidentLog
 }
 
 func newMaintainer(w *Worker) *maintainer {
 	return &maintainer{
-		w:         w,
-		c:         w.client,
-		term:      make(chan struct{}, 1),
-		election:  newFailures(w, "elect maintainer"),
-		promotion: newFailures(w, "promote due tasks"),
-		waking:    newFailures(w, "wake queues"),
-		rescues:   newFailures(w, "rescue expired leases"),
-		schedules: newFailures(w, "run schedules"),
-		pruning:   newFailures(w, "delete removed schedules"),
-		stats:     newFailures(w, "refresh statistics"),
-		retention: newFailures(w, "apply retention"),
+		w:                 w,
+		c:                 w.client,
+		term:              make(chan struct{}, 1),
+		electionFailures:  newIncidentLog(w, "elect maintainer"),
+		promotionFailures: newIncidentLog(w, "promote due tasks"),
+		wakeFailures:      newIncidentLog(w, "wake queues"),
+		rescueFailures:    newIncidentLog(w, "rescue expired leases"),
+		scheduleFailures:  newIncidentLog(w, "run schedules"),
+		pruneFailures:     newIncidentLog(w, "delete removed schedules"),
+		statsFailures:     newIncidentLog(w, "refresh statistics"),
+		retentionFailures: newIncidentLog(w, "apply retention"),
 	}
 }
 
@@ -232,12 +233,12 @@ func (m *maintainer) elect(ctx context.Context) bool {
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = nil // another worker leads
 	}
-	m.election.observe(ctx, err)
+	m.electionFailures.observe(ctx, err)
 	was := m.leader.Load() // only the main loop changes it
 	if leader && !was {
 		// A term starts without the incidents of the last one, whose work
 		// may have failed after it ended.
-		for _, f := range []*failures{m.promotion, m.waking, m.rescues, m.schedules, m.pruning, m.stats, m.retention} {
+		for _, f := range []*incidentLog{m.promotionFailures, m.wakeFailures, m.rescueFailures, m.scheduleFailures, m.pruneFailures, m.statsFailures, m.retentionFailures} {
 			f.reset()
 		}
 	}
@@ -278,7 +279,7 @@ func (m *maintainer) promote(ctx context.Context) {
 		var promoted int
 		err := m.c.pool.QueryRow(ctx, m.c.sql.promoteDue, m.c.schema).Scan(&promoted)
 		if err != nil || promoted < maintenanceBatch {
-			m.promotion.observe(ctx, err)
+			m.promotionFailures.observe(ctx, err)
 			return
 		}
 	}
@@ -295,7 +296,7 @@ func (m *maintainer) promote(ctx context.Context) {
 // changes nothing; a queue whose tasks start right away is not.
 func (m *maintainer) wake(ctx context.Context, heartbeat bool) bool {
 	_, err := m.c.pool.Exec(ctx, m.c.sql.wakeQueues, m.c.schema, m.w.timing.maintainer.Microseconds(), heartbeat)
-	m.waking.observe(ctx, err)
+	m.wakeFailures.observe(ctx, err)
 	return err == nil
 }
 
@@ -314,7 +315,7 @@ func (m *maintainer) rescue(ctx context.Context) {
 			m.rescued(ctx, batch)
 		}
 		if err != nil || len(batch) < maintenanceBatch {
-			m.rescues.observe(ctx, err)
+			m.rescueFailures.observe(ctx, err)
 			return
 		}
 	}
@@ -392,7 +393,7 @@ func collectRescued(r rows) ([]rescuedTask, error) {
 // ready, drops expired ones, and deletes old dead and canceled tasks, expired
 // dedupe keys, old activity, and workers that stopped without unregistering.
 func (m *maintainer) retain(ctx context.Context) {
-	m.retention.observe(ctx, m.applyRetention(ctx))
+	m.retentionFailures.observe(ctx, m.applyRetention(ctx))
 }
 
 // applyRetention does the work of retain, and returns the errors of the
@@ -464,31 +465,32 @@ const (
 // failures of its queue's retryable tasks, and stores them for
 // [Client.Queues] and the counts for the current minute's activity.
 func (m *maintainer) refreshStats(ctx context.Context) {
-	m.stats.observe(ctx, m.countStats(ctx))
+	m.statsFailures.observe(ctx, m.recountStats(ctx))
 }
 
-// countStats does the work of refreshStats, in one transaction with JIT off.
+// recountStats does the work of refreshStats, in one transaction with JIT
+// off.
 // The count only reads, so the transaction takes its locks at the end, when
 // it stores the counts.
-func (m *maintainer) countStats(ctx context.Context) error {
+func (m *maintainer) recountStats(ctx context.Context) error {
 	return pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, statsSettings); err != nil {
 			return fmt.Errorf("count tasks: %w", err)
 		}
-		c, err := readStats(ctx, tx, m.c.sql.countStats)
+		stats, err := readStats(ctx, tx, m.c.sql.countStats)
 		if err != nil {
 			return fmt.Errorf("count tasks: %w", err)
 		}
-		if err := c.store(ctx, tx, m.c.sql); err != nil {
+		if err := stats.store(ctx, tx, m.c.sql); err != nil {
 			return fmt.Errorf("store counts: %w", err)
 		}
 		return nil
 	})
 }
 
-// counted holds one refresh's statistics as storeStats takes them, with one
-// entry per queue and state.
-type counted struct {
+// statsSnapshot holds one refresh's statistics as storeStats takes them,
+// with one entry per queue and state.
+type statsSnapshot struct {
 	queues, states []string
 	counts         []int64
 	capped         []bool
@@ -500,8 +502,8 @@ type counted struct {
 
 // readStats runs the statement sql that counts the tasks, and caps the
 // counts.
-func readStats(ctx context.Context, tx pgx.Tx, sql string) (*counted, error) {
-	var c counted
+func readStats(ctx context.Context, tx pgx.Tx, sql string) (*statsSnapshot, error) {
+	var stats statsSnapshot
 	var dueTotal int64 // scheduled and retryable tasks counted, in all queues
 	// Each cap is read one past, so that a count that ends exactly at its cap
 	// is not taken for one with more tasks left.
@@ -522,31 +524,31 @@ func readStats(ctx context.Context, tx pgx.Tx, sql string) (*counted, error) {
 		if s := State(state); s == StateScheduled || s == StateRetryable {
 			dueTotal += n
 		}
-		c.queues, c.states, c.counts = append(c.queues, queue), append(c.states, state), append(c.counts, min(n, statsQueueCap))
-		c.capped, c.oldest = append(c.capped, n > statsQueueCap), append(c.oldest, due)
-		c.halted, c.failures = append(c.halted, h), append(c.failures, f)
+		stats.queues, stats.states, stats.counts = append(stats.queues, queue), append(stats.states, state), append(stats.counts, min(n, statsQueueCap))
+		stats.capped, stats.oldest = append(stats.capped, n > statsQueueCap), append(stats.oldest, due)
+		stats.halted, stats.failures = append(stats.halted, h), append(stats.failures, f)
 	}
 	if err := r.Err(); err != nil {
 		return nil, err
 	}
 	// The scheduled and retryable counts share one cap: once it is passed,
 	// any queue may have more of them than counted, even none counted.
-	c.dueCapped = dueTotal > statsDueCap
-	if c.dueCapped {
-		for i, s := range c.states {
+	stats.dueCapped = dueTotal > statsDueCap
+	if stats.dueCapped {
+		for i, s := range stats.states {
 			if s := State(s); s == StateScheduled || s == StateRetryable {
-				c.capped[i] = true
+				stats.capped[i] = true
 			}
 		}
 	}
-	return &c, nil
+	return &stats, nil
 }
 
-// store replaces the stored statistics with c, and copies its counts into
+// store replaces the stored statistics with s, and copies its counts into
 // the current minute's activity. One refresh stores at a time, so that two
 // maintainers whose terms overlap both store what they counted: see
 // lockStats.
-func (c *counted) store(ctx context.Context, tx pgx.Tx, sql *statements) error {
+func (s *statsSnapshot) store(ctx context.Context, tx pgx.Tx, sql *statements) error {
 	if _, err := tx.Exec(ctx, sql.lockStats); err != nil {
 		return err
 	}
@@ -554,14 +556,14 @@ func (c *counted) store(ctx context.Context, tx pgx.Tx, sql *statements) error {
 		return err
 	}
 	_, err := tx.Exec(ctx, sql.storeStats,
-		c.queues,    // $1
-		c.states,    // $2
-		c.counts,    // $3
-		c.capped,    // $4
-		c.oldest,    // $5
-		c.dueCapped, // $6
-		c.halted,    // $7
-		c.failures,  // $8
+		s.queues,    // $1
+		s.states,    // $2
+		s.counts,    // $3
+		s.capped,    // $4
+		s.oldest,    // $5
+		s.dueCapped, // $6
+		s.halted,    // $7
+		s.failures,  // $8
 	)
 	if err != nil {
 		return err

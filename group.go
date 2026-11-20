@@ -20,9 +20,9 @@ type groupLeave struct {
 	head         bool // it was the group's head, not a pending task behind it
 }
 
-// groupKey identifies a FIFO group, as the key of a map: a group's key is
+// groupID identifies a FIFO group, as the key of a map: a group's key is
 // unique only within its queue.
-type groupKey struct{ queue, group string }
+type groupID struct{ queue, group string }
 
 // groupSet holds groups as two parallel slices, as statements take them.
 type groupSet struct {
@@ -70,10 +70,10 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	}
 	var asked groupSet
 	ids := make([]int64, len(left))
-	leaves := make(map[groupKey]leave, len(left)) // by group, until its row is read back
+	leaves := make(map[groupID]leave, len(left)) // by group, until its row is read back
 	for i, l := range left {
 		ids[i] = l.id
-		key := groupKey{l.queue, l.group}
+		key := groupID{l.queue, l.group}
 		g, seen := leaves[key]
 		if !seen {
 			asked.add(l.queue, l.group)
@@ -82,7 +82,7 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	}
 	counts := make([]int, len(asked.queues))
 	for i := range counts {
-		counts[i] = -leaves[groupKey{asked.queues[i], asked.groups[i]}].tasks
+		counts[i] = -leaves[groupID{asked.queues[i], asked.groups[i]}].tasks
 	}
 	r, err := q.query(ctx, c.sql.recountGroups,
 		asked.queues, // $1
@@ -102,7 +102,7 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 			r.Close()
 			return err
 		}
-		key := groupKey{queue, group}
+		key := groupID{queue, group}
 		head := leaves[key].head
 		delete(leaves, key)
 		switch {
@@ -279,13 +279,13 @@ func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (re
 // groupTasks sorts the grouped tasks of ts, except those of skip, by group:
 // the groups that have a row, and those that have none. A group's tasks
 // stay in ID order, as picked.
-func groupTasks(ts []bulkTask, skip map[int64]bool) (counted, missing groupSet, byGroup map[groupKey][]bulkTask) {
-	byGroup = make(map[groupKey][]bulkTask)
+func groupTasks(ts []bulkTask, skip map[int64]bool) (counted, missing groupSet, byGroup map[groupID][]bulkTask) {
+	byGroup = make(map[groupID][]bulkTask)
 	for _, t := range ts {
 		if t.group == "" || skip[t.id] {
 			continue
 		}
-		key := groupKey{t.queue, t.group}
+		key := groupID{t.queue, t.group}
 		switch {
 		case byGroup[key] != nil:
 		case t.inGroup:
@@ -301,8 +301,8 @@ func groupTasks(ts []bulkTask, skip map[int64]bool) (counted, missing groupSet, 
 // createGroups creates the rows of groups s, which had none, and returns
 // those it created. A concurrent enqueue may be creating the same row: the
 // batch then waits for it for at most its lock timeout, and creates none.
-func (c *Client) createGroups(ctx context.Context, q querier, s groupSet, byGroup map[groupKey][]bulkTask) ([]groupKey, error) {
-	var created []groupKey
+func (c *Client) createGroups(ctx context.Context, q querier, s groupSet, byGroup map[groupID][]bulkTask) ([]groupID, error) {
+	var created []groupID
 	done, err := briefly(ctx, q, func() error {
 		r, err := q.query(ctx, c.sql.createGroups, s.queues, s.groups, s.sizes(byGroup))
 		if err != nil {
@@ -310,7 +310,7 @@ func (c *Client) createGroups(ctx context.Context, q querier, s groupSet, byGrou
 		}
 		defer r.Close()
 		for r.Next() {
-			var key groupKey
+			var key groupID
 			if err := r.Scan(&key.queue, &key.group); err != nil {
 				return err
 			}
@@ -325,19 +325,19 @@ func (c *Client) createGroups(ctx context.Context, q querier, s groupSet, byGrou
 }
 
 // tasks returns the tasks of byGroup in the groups of s.
-func (s *groupSet) tasks(byGroup map[groupKey][]bulkTask) []bulkTask {
+func (s *groupSet) tasks(byGroup map[groupID][]bulkTask) []bulkTask {
 	var out []bulkTask
 	for i := range s.queues {
-		out = append(out, byGroup[groupKey{s.queues[i], s.groups[i]}]...)
+		out = append(out, byGroup[groupID{s.queues[i], s.groups[i]}]...)
 	}
 	return out
 }
 
 // sizes returns how many of the tasks of byGroup are in each group of s.
-func (s *groupSet) sizes(byGroup map[groupKey][]bulkTask) []int {
+func (s *groupSet) sizes(byGroup map[groupID][]bulkTask) []int {
 	out := make([]int, len(s.queues))
 	for i := range s.queues {
-		out[i] = len(byGroup[groupKey{s.queues[i], s.groups[i]}])
+		out[i] = len(byGroup[groupID{s.queues[i], s.groups[i]}])
 	}
 	return out
 }

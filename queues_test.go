@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -385,4 +387,97 @@ func (n retryUntil) Backoff(attempt int) time.Duration {
 		return time.Millisecond
 	}
 	return time.Hour
+}
+
+// A worker that cannot read its queues' settings keeps the ones that it has:
+// a paused queue stays paused. Here no read can end, whichever loop of the
+// worker starts it, and the worker gives each one up by itself.
+func TestFailedSettingsRefreshKeepsQueuesPaused(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
+		t.Fatal(err)
+	}
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: noopHandlers(),
+		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}, "canary": {}},
+	})
+	// The worker reads the settings this often, and a read may take as long.
+	taskmill.SetTiming(w, taskmill.Timing{Settings: 100 * time.Millisecond})
+	startWorker(t, w)
+	// The canary's queue is not paused. A worker fetches nothing before it
+	// has read the settings, so the canary's task shows that it has.
+	canary := &taskmill.EnqueueOptions{Queue: "canary"}
+	e.waitState(t, e.enqueue(t, sendEmail{}, canary), taskmill.StateCompleted)
+
+	// From here on, every read of the settings waits for the queues' table.
+	tx := e.begin(t)
+	e.txExec(t, tx, "LOCK TABLE {s}.queues IN ACCESS EXCLUSIVE MODE")
+	waitFor(t, "the worker to give up a read of the settings", func() bool {
+		return len(operationLines(logs.all())["load queue settings"]) > 0
+	})
+
+	// The canary, enqueued after the paused queue's task, shows that the
+	// worker is fetching.
+	id := e.enqueue(t, sendEmail{}, nil)
+	e.waitState(t, e.enqueue(t, sendEmail{}, canary), taskmill.StateCompleted)
+	e.wantState(t, id, taskmill.StateAvailable)
+}
+
+// Pause is a tool for incidents: a worker must not fetch from a queue before
+// it knows the queue's settings. Here its first read of them cannot end. The
+// worker gives that read up by itself, fetches nothing, says that it is not
+// ready, and reads again until a read works.
+func TestWorkerDoesNotFetchBeforeItKnowsItsQueuesSettings(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
+		t.Fatal(err)
+	}
+	paused := e.enqueue(t, sendEmail{}, nil)
+	ran := make(chan string, 2)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			ran <- task.Queue
+			return nil
+		}, nil),
+		Queues:       map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}, "canary": {}},
+		NoMaintainer: true,
+	})
+	// A read may take as long as the interval between two reads.
+	taskmill.SetTiming(w, taskmill.Timing{Settings: 100 * time.Millisecond})
+
+	// The worker starts while a read of the settings cannot end.
+	tx := e.begin(t)
+	e.txExec(t, tx, "LOCK TABLE {s}.queues IN ACCESS EXCLUSIVE MODE")
+	stop := startWorker(t, w)
+	waitFor(t, "the worker to give up its read of the settings", func() bool {
+		return len(operationLines(logs.all())["load queue settings"]) > 0
+	})
+	// A worker that takes no task is not ready, and says why.
+	if err := w.Health(); err == nil || !strings.Contains(err.Error(), "settings") {
+		t.Errorf("a worker that has not read its queues' settings reports the health %v", err)
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The canary's queue is not paused: its task shows that the worker read
+	// the settings again, and fetches.
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "canary"})
+	if queue := recv(t, ran, "the canary's task to run"); queue != "canary" {
+		t.Fatalf("a task of the paused queue %q ran: the worker fetched before it knew the queue's settings", queue)
+	}
+	if err := w.Health(); err != nil {
+		t.Errorf("the worker read its queues' settings, and reports the health %v", err)
+	}
+	// A worker that stops gives back a task that it fetched and did not
+	// start, so the task's state alone does not show a fetch.
+	stop()
+	if info := e.get(t, paused); info.State != taskmill.StateAvailable || !info.AttemptedAt.IsZero() {
+		t.Fatalf("the worker fetched a task of the paused queue before it knew the queue's settings: it is %s, fetched at %s",
+			info.State, info.AttemptedAt)
+	}
 }

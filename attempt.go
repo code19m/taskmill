@@ -18,7 +18,7 @@ import (
 )
 
 // runOne runs a single attempt and records its outcome.
-func (w *Worker) runOne(parent context.Context, t *tracked) {
+func (w *Worker) runOne(parent context.Context, t *liveAttempt) {
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
 	t.mu.Lock()
@@ -53,7 +53,7 @@ func (w *Worker) runOne(parent context.Context, t *tracked) {
 // runBatch runs a batch handler for tasks. Middleware still wraps each task:
 // each one's chain runs in its own goroutine, and the batch starts once every
 // chain has either reached the handler or returned early.
-func (w *Worker) runBatch(parent context.Context, tasks []*tracked) {
+func (w *Worker) runBatch(parent context.Context, tasks []*liveAttempt) {
 	reg := tasks[0].reg
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
@@ -130,7 +130,7 @@ func safeBatch(ctx context.Context, reg *registration, infos []*TaskInfo, atts [
 // invoke runs call through the worker's middleware, by the rules of through,
 // turning panics into errors: a panic of call reaches the middleware as an
 // error from its next.
-func (w *Worker) invoke(ctx context.Context, t *tracked, call func(context.Context) error) (err error) {
+func (w *Worker) invoke(ctx context.Context, t *liveAttempt, call func(context.Context) error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = panicFailure(r)
@@ -185,7 +185,7 @@ const (
 // must not end the worker's process, and with it every other attempt. It
 // fails the attempt instead, as a handler's panic does: the task is retried
 // after the default backoff, or is dead after its last attempt.
-func outcomeOf(t *tracked, err, cause error) (o outcome) {
+func outcomeOf(t *liveAttempt, err, cause error) (o outcome) {
 	defer func() {
 		if r := recover(); r != nil {
 			f := panicFailure(r)
@@ -205,7 +205,7 @@ func outcomeOf(t *tracked, err, cause error) (o outcome) {
 // classify turns a handler's result into the outcome to record. It may
 // panic, as the application's code that it runs may: call it through
 // outcomeOf.
-func classify(t *tracked, err, cause error) outcome {
+func classify(t *liveAttempt, err, cause error) outcome {
 	switch {
 	case t.lost.Load():
 		return outcome{kind: outcomeDiscard}
@@ -259,7 +259,7 @@ func classify(t *tracked, err, cause error) outcome {
 // back, removes the note instead, and so does a retry of a task that was
 // canceled while it waited. After any of these, the next worker without a
 // handler starts a new wait.
-func (w *Worker) unknownKind(ctx context.Context, t *tracked) outcome {
+func (w *Worker) unknownKind(ctx context.Context, t *liveAttempt) outcome {
 	limit := w.timing.noHandlerWait
 	var since time.Time
 	for _, e := range slices.Backward(t.info.Errors) {
@@ -293,7 +293,7 @@ func (w *Worker) unknownKind(ctx context.Context, t *tracked) outcome {
 
 // finish records an attempt's outcome, unless shutdown already released its
 // task. start is when the handler started, or zero if none ran.
-func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.Time) {
+func (w *Worker) finish(ctx context.Context, t *liveAttempt, o outcome, start time.Time) {
 	t.mu.Lock()
 	if t.state != attemptRunning {
 		t.mu.Unlock()
@@ -326,7 +326,7 @@ func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.T
 
 	switch {
 	case o.kind == outcomeComplete && t.direct:
-		done := w.completeWaiting(context.WithoutCancel(ctx), []*tracked{t})
+		done := w.completeWaiting(context.WithoutCancel(ctx), []*liveAttempt{t})
 		t.completedDirectly = len(done) == 1
 	case o.kind == outcomeComplete:
 		w.completions <- t // Run stops the completer only after every result is in
@@ -337,7 +337,7 @@ func (w *Worker) finish(ctx context.Context, t *tracked, o outcome, start time.T
 
 // record writes an outcome other than completion to the database, and
 // counts the attempt once that commits.
-func (w *Worker) record(ctx context.Context, t *tracked, o outcome) {
+func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 	defer w.untrack(t)
 	if o.kind == outcomeDiscard && t.att.completedInTx.Load() {
 		w.tally.add(t.info.Queue, 1, 0) // the handler's transaction completed it
@@ -352,7 +352,7 @@ func (w *Worker) record(ctx context.Context, t *tracked, o outcome) {
 	// Only a grouped task's outcome takes several statements that must
 	// commit together.
 	var ended attemptEnd
-	err := w.whileLeased(ctx, []*tracked{t}, func(ctx context.Context) error {
+	err := w.whileLeased(ctx, []*liveAttempt{t}, func(ctx context.Context) error {
 		var err error
 		if t.info.GroupKey == "" {
 			ended, err = w.recordTx(ctx, pgxExecutor{q: w.client.pool}, t, o)
@@ -384,7 +384,7 @@ const (
 	endedCompleted            // the handler's transaction had completed its task
 )
 
-func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome) (attemptEnd, error) {
+func (w *Worker) recordTx(ctx context.Context, q querier, t *liveAttempt, o outcome) (attemptEnd, error) {
 	sql := w.client.sql
 	id, token := t.att.id, t.att.token
 	var queue, group string

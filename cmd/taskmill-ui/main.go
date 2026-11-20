@@ -31,7 +31,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -43,6 +42,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
+	"github.com/code19m/taskmill/internal/buildinfo"
 	"github.com/code19m/taskmill/ui"
 )
 
@@ -211,7 +211,7 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 		logger.LogAttrs(ctx, slog.LevelWarn,
 			"the dashboard has no password: set TASKMILL_UI_PASSWORD, unless something in front of it authenticates")
 	}
-	logger.LogAttrs(ctx, slog.LevelInfo, "taskmill-ui listening", slog.String(logKeyVersion, version()),
+	logger.LogAttrs(ctx, slog.LevelInfo, "taskmill-ui listening", slog.String(logKeyVersion, buildinfo.Version()),
 		slog.String(logKeyAddr, ln.Addr().String()), slog.String(logKeyPrefix, cfg.prefix), slog.Bool(logKeyReadOnly, cfg.readOnly))
 
 	errs := make(chan error, 1)
@@ -224,20 +224,6 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 	shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdown)
-}
-
-// version returns taskmill's version as built into the binary, such as v1.0.0.
-func version() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-	for _, m := range append([]*debug.Module{&info.Main}, info.Deps...) {
-		if m.Path == "github.com/code19m/taskmill" {
-			return m.Version
-		}
-	}
-	return "unknown"
 }
 
 // handler returns the dashboard for client, set up as cfg says, and the

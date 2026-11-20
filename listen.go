@@ -265,7 +265,7 @@ func followHints(ctx context.Context, hints <-chan struct{}, read func(context.C
 // late, for an earlier run of a task, finds nothing. If the read fails, or
 // takes as long as a check-in may, the next check-in reads the requests.
 func (w *Worker) cancelHinted(ctx context.Context) {
-	hinted := map[int64]*tracked{}
+	hinted := map[int64]*liveAttempt{}
 	var ids []int64
 	var tokens []int32
 	w.mu.Lock()

@@ -87,7 +87,7 @@ func Rescue(ctx context.Context, w *Worker) {
 // RefreshStats counts the tasks and stores the statistics once, as w's
 // maintainer does every 10 seconds.
 func RefreshStats(ctx context.Context, w *Worker) error {
-	return newMaintainer(w).countStats(ctx)
+	return newMaintainer(w).recountStats(ctx)
 }
 
 // PruneSchedules deletes the stored schedules that w does not define, as its

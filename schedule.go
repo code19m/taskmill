@@ -218,7 +218,7 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 	opts.RunAt, opts.DedupeWindow = time.Now(), defaultDedupeWindow
 	run, err := resolve(EnqueueParams{Args: s.Args, Options: &opts})
 	if err == nil {
-		run.own = c.ownMetadata(longestScheduledFor)
+		run.reservedMeta = c.reservedMetadata(longestScheduledFor)
 		_, err = encodeMetadata(run.metadata())
 	}
 	if err != nil {
@@ -241,9 +241,9 @@ func (s *compiledSchedule) scheduledFor(at time.Time) string {
 	return at.Format(time.RFC3339Nano)
 }
 
-// ownMetadata returns taskmill's own metadata of a run of s, which is stored
-// over the metadata of the schedule's task.
-func (s *compiledSchedule) ownMetadata(scheduledFor string) map[string]string {
+// reservedMetadata returns taskmill's reserved metadata of a run of s, which
+// is stored over the metadata of the schedule's task.
+func (s *compiledSchedule) reservedMetadata(scheduledFor string) map[string]string {
 	return map[string]string{MetadataSchedule: s.Name, MetadataScheduledFor: scheduledFor}
 }
 
@@ -258,7 +258,7 @@ type scheduleState struct {
 // runSchedules enqueues the due runs of the worker's schedules.
 func (m *maintainer) runSchedules(ctx context.Context) {
 	if len(m.w.schedules) > 0 {
-		m.schedules.observe(ctx, m.enqueueDue(ctx))
+		m.scheduleFailures.observe(ctx, m.enqueueDue(ctx))
 	}
 }
 
@@ -276,24 +276,30 @@ func (m *maintainer) enqueueDue(ctx context.Context) error {
 	var errs []error
 	for i := range m.w.schedules {
 		s := &m.w.schedules[i]
-		if err := m.runSchedule(ctx, s, states[s.Name], now); err != nil {
+		if err := m.syncSchedule(ctx, s, states[s.Name], now); err != nil {
 			errs = append(errs, fmt.Errorf("schedule %s: %w", s.Name, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleState, error) {
+// scheduleNames returns the names of the worker's schedules.
+func (m *maintainer) scheduleNames() []string {
 	names := make([]string, len(m.w.schedules))
 	for i, s := range m.w.schedules {
 		names[i] = s.Name
 	}
-	r, err := m.c.pool.Query(ctx, m.c.sql.loadSchedules, names)
+	return names
+}
+
+// loadSchedules reads the stored state of the worker's schedules, by name.
+func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleState, error) {
+	r, err := m.c.pool.Query(ctx, m.c.sql.loadSchedules, m.scheduleNames())
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	states := make(map[string]*scheduleState, len(names))
+	states := make(map[string]*scheduleState, len(m.w.schedules))
 	for r.Next() {
 		var name string
 		st := &scheduleState{}
@@ -305,9 +311,9 @@ func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleSta
 	return states, r.Err()
 }
 
-// runSchedule brings a schedule's row up to date with its definition, and
+// syncSchedule brings a schedule's row up to date with its definition, and
 // enqueues its run if one is due.
-func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *scheduleState, now time.Time) error {
+func (m *maintainer) syncSchedule(ctx context.Context, s *compiledSchedule, st *scheduleState, now time.Time) error {
 	payload, err := json.Marshal(s.Args)
 	if err != nil {
 		return fmt.Errorf("encode args: %w", err)
@@ -389,7 +395,7 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		}
 		// The enqueue middleware sees taskmill's own metadata, and cannot
 		// change it: a handler must find the run's time whatever it does.
-		run.own = s.ownMetadata(s.scheduledFor(due))
+		run.reservedMeta = s.reservedMetadata(s.scheduledFor(due))
 		if _, err = m.c.storeThrough(ctx, pgxExecutor{q: tx}, []*resolvedTask{run}); err != nil {
 			return err
 		}
@@ -410,12 +416,8 @@ func (m *maintainer) pruneSchedules(ctx context.Context) {
 	if len(m.w.schedules) == 0 {
 		return
 	}
-	names := make([]string, len(m.w.schedules))
-	for i, s := range m.w.schedules {
-		names[i] = s.Name
-	}
-	_, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, names)
-	m.pruning.observe(ctx, err)
+	_, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, m.scheduleNames())
+	m.pruneFailures.observe(ctx, err)
 }
 
 // jsonEqual reports whether a and b hold the same JSON value, as PostgreSQL's

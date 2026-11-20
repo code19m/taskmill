@@ -10,13 +10,14 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/code19m/taskmill/internal/buildinfo"
 )
 
 // Worker defaults.
@@ -34,8 +35,8 @@ const (
 	maxFetch          = 1000                   // most tasks one fetch leases
 	completionBatch   = 500                    // most completions recorded in one statement
 	completionLinger  = 2 * time.Millisecond   // wait for more completions to batch with
-	heldRetryDelay    = 20 * time.Millisecond  // first wait before retrying completions whose rows were held
-	heldRetryMax      = time.Second            // longest wait before retrying them
+	blockedRetryDelay = 20 * time.Millisecond  // first wait before retrying completions whose rows other transactions held
+	blockedRetryMax   = time.Second            // longest wait before retrying them
 	hintCooldown      = 20 * time.Millisecond  // pause after a read of cancel requests or settings that notifications asked for
 	errorMessageLimit = 4096                   // bytes of an error message that are kept
 )
@@ -67,7 +68,7 @@ var defaultTiming = timing{
 	maintainer:      time.Second,
 	heartbeat:       5 * time.Second,
 	election:        2 * time.Second,
-	leaderLease:     10 * time.Second, // at most doubled or halved by a release: see electLeader
+	leaderLease:     10 * time.Second, // at most doubled or halved by a release: see electMaintainerSQL
 	retention:       time.Minute,
 	stats:           10 * time.Second,
 	activity:        10 * time.Second,
@@ -124,15 +125,15 @@ type Worker struct {
 	recording sync.WaitGroup            // Run's attempts whose results are being recorded
 
 	mu       sync.Mutex
-	attempts map[int64]*tracked // attempts that Run and RunTask are running or recording
+	attempts map[int64]*liveAttempt // attempts that Run and RunTask are running or recording
 
 	// What notifications said since the worker last read the database for
 	// them: the listener only signals here, and a loop of its own reads.
-	cancelHints chan struct{} // cancellations of attempts' tasks were requested: see tracked.hinted
+	cancelHints chan struct{} // cancellations of attempts' tasks were requested: see liveAttempt.hinted
 	queueHints  chan struct{} // settings of the worker's queues changed
 
-	completions   chan *tracked // successful attempts of Run, for the completer
-	completerDone chan struct{} // closed when the current Run's completer returns
+	completions   chan *liveAttempt // successful attempts of Run, for the completer
+	completerDone chan struct{}     // closed when the current Run's completer returns
 
 	poolWarned atomic.Int64 // when renewing leases last warned that the pool was full, in Unix nanoseconds
 
@@ -140,8 +141,8 @@ type Worker struct {
 	// only now and then. Leases and results are renewed and recorded by
 	// RunTask too; Run's loops get theirs anew for each run, and each
 	// queue's fetches and the maintainer's work have their own.
-	leaseFailures, resultFailures                                       *failures
-	checkInFailures, settingsFailures, activityFailures, listenFailures *failures
+	leaseFailures, resultFailures                                       *incidentLog
+	checkInFailures, settingsFailures, activityFailures, listenFailures *incidentLog
 }
 
 // WorkerConfig configures a [Worker]. The zero value is valid: a worker
@@ -290,12 +291,12 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		timing:      defaultTiming,
 		logger:      client.logger.With(slog.String(logKeyWorker, id)),
 		listen:      c.ListenConfig,
-		version:     moduleVersion(),
-		attempts:    make(map[int64]*tracked),
+		version:     buildinfo.Version(),
+		attempts:    make(map[int64]*liveAttempt),
 		resigned:    make(chan struct{}, 1),
 		cancelHints: make(chan struct{}, 1),
 		queueHints:  make(chan struct{}, 1),
-		completions: make(chan *tracked, completionBatch),
+		completions: make(chan *liveAttempt, completionBatch),
 	}
 	if c.Handlers != nil {
 		for kind, reg := range c.Handlers.byKind {
@@ -319,8 +320,8 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 	if w.listen == nil {
 		w.listen = client.pool.Config().ConnConfig.Copy()
 	}
-	w.leaseFailures = newFailures(w, "renew leases")
-	w.resultFailures = newFailures(w, "record results")
+	w.leaseFailures = newIncidentLog(w, "renew leases")
+	w.resultFailures = newIncidentLog(w, "record results")
 	var err error
 	if w.schedules, err = compileSchedules(c.Schedules); err != nil {
 		return nil, err
@@ -405,8 +406,8 @@ func (q *queueState) nudge() {
 	}
 }
 
-// tracked is an attempt the worker is running or recording.
-type tracked struct {
+// liveAttempt is an attempt the worker is running or recording.
+type liveAttempt struct {
 	att     *attempt
 	info    *TaskInfo
 	reg     *registration // nil if no handler knows the kind, or the task is invalid
@@ -418,7 +419,7 @@ type tracked struct {
 
 	mu        sync.Mutex
 	cancel    context.CancelCauseFunc // set once a single attempt starts
-	state     trackedState
+	state     attemptState
 	renewedAt time.Time // last confirmation that the lease is held
 
 	lost            atomic.Bool // the lease is gone: the result must be discarded
@@ -426,16 +427,16 @@ type tracked struct {
 	hinted          atomic.Bool // a notification said so, and the row is not read yet
 }
 
-type trackedState int
+type attemptState int
 
 const (
-	attemptRunning   trackedState = iota // the handler is running
+	attemptRunning   attemptState = iota // the handler is running
 	attemptRecording                     // the handler returned; its result is being recorded
 	attemptAbandoned                     // released at shutdown, or its task was leased again; the result is ignored
 )
 
-// run is the state of one call to [Worker.Run].
-type run struct {
+// runState is the state of one call to [Worker.Run].
+type runState struct {
 	attemptCtx context.Context // parent of every attempt; canceled with ErrShutdown once DrainTimeout passes
 	fetching   sync.WaitGroup  // the fetch loops
 	inflight   sync.WaitGroup  // the running attempts and batches
@@ -508,10 +509,10 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	now := time.Now()
 	w.reached.Store(&now)
-	w.checkInFailures = newFailures(w, "record check-in")
-	w.settingsFailures = newFailures(w, "load queue settings")
-	w.activityFailures = newFailures(w, "record activity")
-	w.listenFailures = newFailures(w, "listen for notifications")
+	w.checkInFailures = newIncidentLog(w, "record check-in")
+	w.settingsFailures = newIncidentLog(w, "load queue settings")
+	w.activityFailures = newIncidentLog(w, "record activity")
+	w.listenFailures = newIncidentLog(w, "listen for notifications")
 	w.prepareHistory(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
@@ -536,7 +537,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	attemptCtx, stopAttempts := context.WithCancelCause(base)
-	r := &run{attemptCtx: attemptCtx}
+	r := &runState{attemptCtx: attemptCtx}
 	for _, q := range w.queues {
 		r.fetching.Go(func() { w.fetchLoop(ctx, r, q) })
 	}
@@ -565,7 +566,7 @@ func (w *Worker) Run(ctx context.Context) error {
 // drain ends a run whose context has ended. It waits for the fetch loops and
 // for the running attempts. Once DrainTimeout has passed, it cancels the
 // attempts, and it releases the tasks of those that do not return in time.
-func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelCauseFunc) {
+func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.CancelCauseFunc) {
 	done := make(chan struct{})
 	go func() {
 		r.fetching.Wait() // the fetch loops start attempts, so they end first
@@ -599,7 +600,7 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 	// the fetch loops have returned, so none escapes this.
 	r.fetching.Wait()
 	w.mu.Lock()
-	var abandoned []*tracked
+	var abandoned []*liveAttempt
 	for _, t := range w.attempts {
 		t.mu.Lock()
 		if t.state == attemptRunning && !t.direct {
@@ -620,7 +621,7 @@ func (w *Worker) drain(ctx context.Context, r *run, stopAttempts context.CancelC
 // deadline bounds all of it: a database that does not answer then delays
 // the shutdown once, and not once for each task. A task that is not released
 // by then is rescued when its lease runs out.
-func (w *Worker) release(ctx context.Context, ts []*tracked) {
+func (w *Worker) release(ctx context.Context, ts []*liveAttempt) {
 	ctx, cancel := context.WithTimeout(ctx, recordTimeout)
 	defer cancel()
 	for _, t := range ts {
@@ -670,13 +671,13 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	renewCtx, stopRenewing := context.WithCancel(context.WithoutCancel(ctx))
 	var renewing sync.WaitGroup
 	renewing.Go(func() {
-		w.everyThirdOfLease(renewCtx, func(ctx context.Context) { w.renewLeases(ctx, []*tracked{t}) })
+		w.everyThirdOfLease(renewCtx, func(ctx context.Context) { w.renewLeases(ctx, []*liveAttempt{t}) })
 	})
 
 	attemptCtx, stopAttempt := context.WithCancelCause(context.WithoutCancel(ctx))
 	stopAfter := context.AfterFunc(ctx, func() { stopAttempt(ErrShutdown) })
 	if t.reg != nil && t.reg.runBatch != nil {
-		w.runBatch(attemptCtx, []*tracked{t})
+		w.runBatch(attemptCtx, []*liveAttempt{t})
 	} else {
 		w.runOne(attemptCtx, t)
 	}
@@ -697,7 +698,7 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 }
 
 // leaseTask leases one task for RunTask, or explains why it cannot.
-func (w *Worker) leaseTask(ctx context.Context, id int64) (*tracked, error) {
+func (w *Worker) leaseTask(ctx context.Context, id int64) (*liveAttempt, error) {
 	fail := func(err error) error { return fmt.Errorf("taskmill: run task %d: %w", id, err) }
 	r, err := w.client.pool.Query(ctx, w.client.sql.leaseTask, id, w.cfg.LeaseDuration.Microseconds(), w.id)
 	if err != nil {
@@ -729,23 +730,6 @@ func workerID(host string) string {
 	var b [3]byte
 	_, _ = rand.Read(b[:]) // never returns an error
 	return fmt.Sprintf("%s-%d-%s", host, os.Getpid(), hex.EncodeToString(b[:]))
-}
-
-// moduleVersion returns taskmill's version as built into the binary.
-func moduleVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-	if info.Main.Path == "github.com/code19m/taskmill" {
-		return info.Main.Version
-	}
-	for _, dep := range info.Deps {
-		if dep.Path == "github.com/code19m/taskmill" {
-			return dep.Version
-		}
-	}
-	return "unknown"
 }
 
 // WorkerInfo describes a worker process.
