@@ -40,24 +40,24 @@ func TestThroughputReadsTheNewestCompleteStep(t *testing.T) {
 	}
 	for _, c := range []struct {
 		name       string
-		span       chartRange
+		period     chartPeriod
 		points     []taskmill.Activity
 		now        time.Time
 		rate, peak float64
 	}{
-		{"the minute before this one", chartRanges[0], hour, minute.Add(30 * time.Second), 660, 1000},
+		{"the minute before this one", chartPeriods[0], hour, minute.Add(30 * time.Second), 660, 1000},
 		// Workers may still add to a minute that has just ended.
-		{"a minute that has just ended waits", chartRanges[0], hour, minute.Add(5 * time.Second), 520, 1000},
-		{"nothing recorded in it", chartRanges[0], hour[:2], minute.Add(30 * time.Second), math.NaN(), 1000},
-		{"nothing recorded at all", chartRanges[0], nil, minute.Add(30 * time.Second), math.NaN(), 0},
+		{"a minute that has just ended waits", chartPeriods[0], hour, minute.Add(5 * time.Second), 520, 1000},
+		{"nothing recorded in it", chartPeriods[0], hour[:2], minute.Add(30 * time.Second), math.NaN(), 1000},
+		{"nothing recorded at all", chartPeriods[0], nil, minute.Add(30 * time.Second), math.NaN(), 0},
 		// A longer step counts as its mean rate.
-		{"a step of five minutes", chartRanges[1], []taskmill.Activity{
+		{"a step of five minutes", chartPeriods[1], []taskmill.Activity{
 			{At: ago(2, 5*time.Minute), Completed: 4000},
 			{At: ago(1, 5*time.Minute), Completed: 3000, Failed: 300},
 			{At: minute, Completed: 9000},
 		}, minute.Add(time.Minute), 660, 800},
 	} {
-		rate, peak := throughput(c.points, windowOf(c.span, c.now), c.now)
+		rate, peak := throughput(c.points, windowOf(c.period, c.now), c.now)
 		if rate != c.rate && !(math.IsNaN(rate) && math.IsNaN(c.rate)) || peak != c.peak {
 			t.Errorf("%s: got %v a minute and a peak of %v, want %v and %v", c.name, rate, peak, c.rate, c.peak)
 		}
@@ -92,7 +92,7 @@ func TestAttemptChartDrawsTheStepsThatAreComplete(t *testing.T) {
 		{"nothing recorded", nil, 30 * time.Second, "   ", "   ", "Nothing recorded yet."},
 	} {
 		now := minute.Add(c.after)
-		chart := attemptChart(c.points, windowOf(chartRanges[0], now), now)
+		chart := attemptChart(c.points, windowOf(chartPeriods[0], now), now)
 		for k, want := range []string{c.completed, c.failed} {
 			if got := chart.Series[k].Values; !strings.HasSuffix(got, want) || strings.TrimSpace(got) != strings.TrimSpace(want) {
 				t.Errorf("%s: the chart holds the %s attempts %q, want them to end with %q", c.name, strings.ToLower(chart.Series[k].Name), got, want)
@@ -161,6 +161,7 @@ func TestDialTurnsTheNeedleByTheRate(t *testing.T) {
 
 func TestDialDrawsItsScale(t *testing.T) {
 	t.Parallel()
+
 	// Zero is on the left of the hub, half of the scale above it, and the top
 	// on the right.
 	for _, c := range []struct{ share, x, y float64 }{{0, -50, 0}, {0.25, -35.36, -35.36}, {0.5, 0, -50}, {1, 50, 0}} {
@@ -168,6 +169,7 @@ func TestDialDrawsItsScale(t *testing.T) {
 			t.Errorf("dialPoint(%v, 50) = %.2f, %.2f; want %v, %v", c.share, x, y, c.x, c.y)
 		}
 	}
+
 	// A label at every quarter of the scale, in few characters, each at a
 	// major tick, with four minor ticks between two of them. The labels of
 	// zero and of the top stand under the ends of the scale, where a needle
@@ -177,17 +179,21 @@ func TestDialDrawsItsScale(t *testing.T) {
 	for _, m := range d.Marks {
 		texts = append(texts, m.Text)
 	}
+
 	if want := []string{"0", "250", "500", "750", "1k"}; !slices.Equal(texts, want) {
 		t.Fatalf("labels: got %v, want %v", texts, want)
 	}
+
 	zero, half, top := d.Marks[0], d.Marks[2], d.Marks[4]
 	if !strings.HasPrefix(zero.X, "-") || strings.HasPrefix(zero.Y, "-") || zero.Y == "0" ||
 		half.X != "0" || !strings.HasPrefix(half.Y, "-") || zero.X != "-"+top.X || zero.Y != top.Y {
 		t.Errorf("labels: got 0 at %s,%s, the half at %s,%s, and the top at %s,%s", zero.X, zero.Y, half.X, half.Y, top.X, top.Y)
 	}
+
 	if major, minor := strings.Count(d.Major, "M"), strings.Count(d.Minor, "M"); major != 5 || minor != 16 {
 		t.Errorf("got %d major and %d minor ticks, want 5 and 16", major, minor)
 	}
+
 	for v, want := range map[float64]string{
 		0: "0", 2.5: "2.5", 37.5: "37.5", 250: "250", 1000: "1k", 1250: "1.25k", 37500: "37.5k", 1e6: "1M", 1.25e6: "1.25M",
 	} {
@@ -202,17 +208,21 @@ func TestChartHoldsItsValuesForTheScript(t *testing.T) {
 	now := time.Date(2026, 11, 19, 12, 0, 30, 0, time.UTC)
 	w := window{start: now.Add(-3 * time.Minute).Truncate(time.Minute), step: time.Minute, steps: 4}
 	c := newChart("Tasks", "", w, now, []line{{name: "Waiting", values: []float64{1234, math.NaN(), 0.5, 7}}})
+
 	// One value per step, as the page words it, and nothing for a gap.
 	if got := c.Series[0].Values; got != "1,234  0.5 7" {
 		t.Errorf("values: got %q", got)
 	}
+
 	if c.Start != w.start.Unix() || c.Step != 60 {
 		t.Errorf("got steps of %d seconds from %d, want 60 from %d", c.Step, c.Start, w.start.Unix())
 	}
+
 	// The columns' tooltips say the same.
 	if got := c.Columns[0].Title; got != "3 min ago: 1,234 waiting" {
 		t.Errorf("tooltip: got %q", got)
 	}
+
 	if got := c.Columns[1].Title; got != "2 min ago: no data" {
 		t.Errorf("tooltip of a gap: got %q", got)
 	}

@@ -3,26 +3,14 @@
 <header class="topbar">
   <h1>Overview</h1>
   {{/* When the maintainer last counted the tasks: quiet while it is fresh, amber once it is a reason to act. */}}
-  {{if not $d.RefreshedAt.IsZero}}<span class="counted{{if $d.Stale}} stale{{end}}" data-key="counted"{{template "at" $d.RefreshedAt}}>{{template "icon-schedules"}}Counted {{ago $.Now $d.RefreshedAt}}</span>{{end}}
+  {{if not $d.RefreshedAt.IsZero}}<span class="counted{{if $d.Stale}} stale{{end}}" data-key="counted"{{template "time-attrs" $d.RefreshedAt}}>{{template "icon-schedules"}}Counted {{ago $.Now $d.RefreshedAt}}</span>{{end}}
 </header>
 <div class="page">
 <section class="stats" aria-label="Totals">
-  <a class="card stat" href="{{path "/tasks?state=available"}}">
-    <span class="stat-label">{{template "state-icon" "available"}}Available</span>
-    <span class="stat-value"{{with atLeast $d.Totals.Available}} title="{{.}}"{{end}}>{{count $d.Totals.Available}}</span>
-  </a>
-  <a class="card stat" href="{{path "/tasks?state=running"}}">
-    <span class="stat-label">{{template "state-icon" "running"}}Running</span>
-    <span class="stat-value"{{with atLeast $d.Totals.Running}} title="{{.}}"{{end}}>{{count $d.Totals.Running}}</span>
-  </a>
-  <a class="card stat" href="{{path "/tasks?state=scheduled"}}">
-    <span class="stat-label">{{template "state-icon" "scheduled"}}Waiting</span>
-    <span class="stat-value"{{with atLeast $d.Totals.Waiting}} title="{{.}}"{{end}}>{{count $d.Totals.Waiting}}</span>
-  </a>
-  <a class="card stat{{if $d.Totals.Dead.N}} failed{{end}}" href="{{path "/tasks?state=dead"}}">
-    <span class="stat-label">{{template "state-icon" "dead"}}Dead</span>
-    <span class="stat-value"{{with atLeast $d.Totals.Dead}} title="{{.}}"{{end}}>{{count $d.Totals.Dead}}</span>
-  </a>
+  {{template "stat" (dict "State" "available" "Label" "Available" "Count" $d.Totals.Available)}}
+  {{template "stat" (dict "State" "running" "Label" "Running" "Count" $d.Totals.Running)}}
+  {{template "stat" (dict "State" "scheduled" "Label" "Waiting" "Count" $d.Totals.Waiting)}}
+  {{template "stat" (dict "State" "dead" "Label" "Dead" "Count" $d.Totals.Dead "Failed" $d.Totals.Dead.N)}}
   <a class="card stat" href="{{path "/schedules"}}"{{if $d.Schedules}} title="{{if not $d.NextRun.IsZero}}Next run {{ago $.Now $d.NextRun}}{{else}}All paused{{end}}"{{end}}>
     <span class="stat-label">{{template "icon-schedules"}}Schedules</span>
     <span class="stat-value">{{$d.Schedules}}</span>
@@ -36,7 +24,7 @@
 <section class="card flush activity" aria-labelledby="activity-title">
   <div class="card-head">
     <h2 id="activity-title">Activity</h2>
-    <nav class="seg seg-sm" aria-label="Period">{{range $d.Ranges}}<a href="{{path "/"}}?range={{.Name}}"{{if eq .Name $d.Range}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
+    <nav class="seg seg-sm" aria-label="Period">{{range $d.Periods}}<a href="{{path "/"}}?range={{.Name}}"{{if eq .Name $d.Period}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
   </div>
   <div class="charts">
     {{template "dial" $d.Dial}}
@@ -72,8 +60,8 @@
         {{end}}
         <td class="num{{if not $q.Workers}} zero{{end}}">{{$q.Workers}}</td>
         {{if not $ro}}<td class="actions-col">
-          {{if $q.Paused}}<form method="post" action="{{path "/queues/resume"}}{{query "name" $q.Name "range" $d.Range}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
-          {{else}}<form method="post" action="{{path "/queues/pause"}}{{query "name" $q.Name "range" $d.Range}}" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{$q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
+          {{if $q.Paused}}<form method="post" action="{{path "/queues/resume"}}{{query "name" $q.Name "range" $d.Period}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
+          {{else}}<form method="post" action="{{path "/queues/pause"}}{{query "name" $q.Name "range" $d.Period}}" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{$q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
         </td>{{end}}
       </tr>
     {{end}}
@@ -93,6 +81,14 @@
 </section>
 </div>
 {{template "foot" .}}{{end}}
+
+{{/* A total of tasks: a card that leads to their list. Its arguments are
+   the State of the list and of the icon, the Label, the Count, and Failed,
+   which marks a count of tasks that need a person. */}}
+{{define "stat"}}<a class="card stat{{if .Failed}} failed{{end}}" href="{{path (print "/tasks?state=" .State)}}">
+    <span class="stat-label">{{template "state-icon" .State}}{{.Label}}</span>
+    <span class="stat-value"{{with atLeast .Count}} title="{{.}}"{{end}}>{{count .Count}}</span>
+  </a>{{end}}
 
 {{/* The dial of the attempts a minute; see chart.go. The arc of the value is
    half a ring that hides below the scale's zero line, and comes out as far
@@ -123,7 +119,7 @@
    chart with nothing to draw says why behind a hint. */}}
 {{define "chart"}}<figure class="chart">
   <figcaption class="chart-head">
-    <span class="chart-title">{{.Title}}{{with .Note}}{{template "hint" (lower $.Title)}}{{.}}{{template "hint-end"}}{{end}}</span>
+    <span class="chart-title">{{.Title}}{{with .Note}}{{template "hint" (dict "Name" (lower $.Title) "Text" .)}}{{end}}</span>
     <span class="legend">{{range .Series}}<span class="{{.Class}}"><i></i>{{.Name}}</span>{{end}}</span>
   </figcaption>
   <div class="chart-body">

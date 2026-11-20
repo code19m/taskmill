@@ -182,6 +182,7 @@ func TestCronWordsNameTheRuns(t *testing.T) {
 		}
 		exprs = longer
 	}
+
 	for _, expr := range exprs {
 		wordsNameTheRuns(t, expr)
 	}
@@ -226,10 +227,12 @@ func wordsNameTheRuns(tb testing.TB, expr string) {
 	if words == "" {
 		return
 	}
+
 	s, err := cron.Parse(expr)
 	if err != nil {
 		tb.Fatalf("cronWords(%q) = %q, but the parser refuses the expression: %v", expr, words, err)
 	}
+
 	onDay, times := said(tb, words)
 	last, runs := comparedFrom.Add(-time.Minute), 0
 	for day := comparedFrom; day.Before(comparedTo); day = day.AddDate(0, 0, 1) {
@@ -250,6 +253,7 @@ func wordsNameTheRuns(tb testing.TB, expr string) {
 			}
 		}
 	}
+
 	if run, err := s.Next(last); err == nil && run.Before(comparedTo) {
 		tb.Fatalf("cronWords(%q) = %q, which names no time from %s to %s, but the schedule runs at %s",
 			expr, words, last, comparedTo, run)
@@ -280,6 +284,7 @@ func said(tb testing.TB, words string) (onDay func(time.Time) bool, times []int)
 		}
 		return everyDay, times
 	}
+
 	if m := everyHours.FindStringSubmatch(words); m != nil {
 		marks := []string{":00"}
 		if m[2] != "" {
@@ -292,13 +297,16 @@ func said(tb testing.TB, words string) (onDay func(time.Time) bool, times []int)
 		}
 		return everyDay, times
 	}
+
 	days, clocks, ok := strings.Cut(words, " at ")
 	if !ok {
 		tb.Fatalf("the words %q have no form that the test reads", words)
 	}
+
 	for _, clock := range listed.Split(clocks, -1) {
 		times = append(times, saidTime(tb, "15:04", clock))
 	}
+
 	return saidDays(tb, days), times
 }
 
@@ -308,6 +316,7 @@ func saidStep(tb testing.TB, text string) int {
 	if text == "" {
 		return 1
 	}
+
 	n, err := strconv.Atoi(text)
 	if err != nil || n < 2 {
 		tb.Fatalf("the words say every %q of a unit", text)
@@ -337,9 +346,11 @@ func saidDays(tb testing.TB, days string) func(time.Time) bool {
 	case "Weekends":
 		return weekend
 	}
+
 	if m := onMonthDays.FindStringSubmatch(days); m != nil {
 		return saidMonthDays(tb, m[1], m[2])
 	}
+
 	named := map[time.Weekday]bool{}
 	for _, name := range listed.Split(days, -1) {
 		day := time.Sunday
@@ -351,6 +362,7 @@ func saidDays(tb testing.TB, days string) func(time.Time) bool {
 		}
 		named[day] = true
 	}
+
 	return func(t time.Time) bool { return named[t.Weekday()] }
 }
 
@@ -364,12 +376,14 @@ func saidMonthDays(tb testing.TB, ordinals, of string) func(time.Time) bool {
 	for month := time.January; month <= time.December; month++ {
 		months[month] = of == "every month"
 	}
+
 	if of != "every month" {
 		year = 2024 // a leap year
 		for _, name := range listed.Split(of, -1) {
 			months[saidMonth(tb, name)] = true
 		}
 	}
+
 	days := map[int]bool{}
 	for _, ordinal := range listed.Split(ordinals, -1) {
 		m := monthDay.FindStringSubmatch(ordinal)
@@ -384,6 +398,7 @@ func saidMonthDays(tb testing.TB, ordinals, of string) func(time.Time) bool {
 			}
 		}
 	}
+
 	return func(t time.Time) bool { return days[t.Day()] && months[t.Month()] }
 }
 

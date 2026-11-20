@@ -8,10 +8,10 @@
    before an action, under the title that it names. A page of a cause that
    may pass tries its address again, with the script, and its note says
    when. */}}
-{{define "status"}}{{$d := .Data}}<div class="state" data-dialog-title="{{.Title}}">
-  <span class="state-glyph">{{template "glyph" $d.Glyph}}</span>
+{{define "status"}}{{$d := .Data}}<div class="status-page" data-dialog-title="{{.Title}}">
+  <span class="status-glyph">{{template "glyph" $d.Glyph}}</span>
   <h1>{{.Title}}</h1>
   <p>{{$d.Text}}</p>
-  {{if $d.Retry}}<span class="state-note js-only" data-retry></span>{{end}}
-  <div class="state-actions">{{range $i, $a := $d.Actions}}<a class="btn {{if $i}}quiet{{else}}primary{{end}}" href="{{with $a.Href}}{{path .}}{{end}}">{{template "icon" $a.Icon}}{{$a.Label}}</a>{{end}}</div>
+  {{if $d.Retry}}<span class="status-note js-only" data-retry></span>{{end}}
+  <div class="status-actions">{{range $i, $a := $d.Actions}}<a class="btn {{if $i}}quiet{{else}}primary{{end}}" href="{{with $a.Href}}{{path .}}{{end}}">{{template "icon" $a.Icon}}{{$a.Label}}</a>{{end}}</div>
 </div>{{end}}

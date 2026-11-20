@@ -23,19 +23,21 @@
        keeps it open. */}}
     <tbody>{{range .Data}}{{$own := afterHost .ID .Hostname}}{{$queues := fit .Queues}}
       <tr data-key="{{.ID}}">
-        <td title="{{.ID}}"><div class="worker"><span class="health{{if .Stale}} stale{{end}}" title="{{if .Stale}}No check-in for longer than its lease{{else}}Healthy{{end}}"></span><span class="mono">{{if $own}}<span class="visually-hidden">{{.Hostname}}-</span>{{$own}}{{else}}{{.ID}}{{end}}</span>{{if .Stale}}<span class="chip warn">stale</span>{{end}}{{if .Maintainer}}<span class="chip">maintainer</span>{{end}}</div></td>
+        <td title="{{.ID}}"><div class="worker"><span class="health{{if .Stale}} stale{{end}}" title="{{if .Stale}}No check-in for longer than its lease{{else}}Healthy{{end}}"></span><span class="mono">
+          {{- if $own}}<span class="visually-hidden">{{.Hostname}}-</span>{{$own}}{{else}}{{.ID}}{{end}}</span>
+          {{- if .Stale}}<span class="chip warn">stale</span>{{end}}{{if .Maintainer}}<span class="chip">maintainer</span>{{end}}</div></td>
         <td title="{{.Hostname}}">{{.Hostname}}</td>
         {{/* A word in place of a version is not code. Go's word for a build from taskmill's own tree, "(devel)", is said plainly. */ -}}
         {{if eq .Version "(devel)"}}<td class="tone-ghost" title="Built from taskmill's source, not from a release">local build</td>
         {{- else}}<td class="{{if eq .Version "unknown"}}tone-ghost{{else}}mono tone-faint{{end}}" title="{{.Version}}">{{.Version}}</td>{{end}}
-        <td>{{if .Queues}}<div class="queues"><span title="{{join .Queues ", "}}">{{$queues.Line}}</span>{{if $queues.More}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">+{{$queues.More}}<span class="visually-hidden"> more {{if eq $queues.More 1}}queue{{else}}queues{{end}}</span></button>{{end}}</div>{{else}}<span class="tone-ghost">maintenance only</span>{{end}}</td>
-        <td>{{if .Kinds}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">{{len .Kinds}} {{if eq (len .Kinds) 1}}kind{{else}}kinds{{end}}{{template "icon-chevron"}}</button>{{else}}<span class="tone-ghost">none</span>{{end}}
+        <td>{{if .Queues}}<div class="queues"><span title="{{join .Queues ", "}}">{{$queues.Line}}</span>{{if $queues.More}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">+{{$queues.More}}<span class="visually-hidden"> more {{plural $queues.More "queue" "queues"}}</span></button>{{end}}</div>{{else}}<span class="tone-ghost">maintenance only</span>{{end}}</td>
+        <td>{{if .Kinds}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">{{len .Kinds}} {{plural (len .Kinds) "kind" "kinds"}}{{template "icon-chevron"}}</button>{{else}}<span class="tone-ghost">none</span>{{end}}
           {{- if or .Kinds $queues.More}}<div class="hint-pop lists" id="lists-{{.ID}}" popover role="group" aria-label="Queues and kinds of {{.ID}}">
             {{- with .Queues}}<h2>Queues <span class="subtle">{{len .}}</span></h2><ul>{{range .}}<li><a href="{{path "/tasks"}}{{query "queue" .}}">{{.}}</a></li>{{end}}</ul>{{end}}
             {{- with .Kinds}}<h2>Kinds <span class="subtle">{{len .}}</span></h2><ul class="mono">{{range .}}<li><a href="{{path "/tasks"}}{{query "kind" .}}">{{.}}</a></li>{{end}}</ul>{{end -}}
           </div>{{end}}</td>
-        <td class="tone-faint"{{template "at" .StartedAt}}>{{ago $.Now .StartedAt}}</td>
-        <td class="{{if .Stale}}tone-warn{{else}}tone-faint{{end}}"{{template "at" .CheckedInAt}}>{{ago $.Now .CheckedInAt}}</td>
+        <td class="tone-faint"{{template "time-attrs" .StartedAt}}>{{ago $.Now .StartedAt}}</td>
+        <td class="{{if .Stale}}tone-warn{{else}}tone-faint{{end}}"{{template "time-attrs" .CheckedInAt}}>{{ago $.Now .CheckedInAt}}</td>
       </tr>
     {{end}}</tbody>
   </table>

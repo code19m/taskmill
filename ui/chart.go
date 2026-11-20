@@ -10,27 +10,27 @@ import (
 	"github.com/code19m/taskmill"
 )
 
-// chartRange is a span of time the overview's charts can show, with the step
+// chartPeriod is a span of time the overview's charts can show, with the step
 // of their points.
-type chartRange struct {
+type chartPeriod struct {
 	Name       string
 	span, step time.Duration
 }
 
-var chartRanges = []chartRange{
+var chartPeriods = []chartPeriod{
 	{"1h", time.Hour, time.Minute},
 	{"6h", 6 * time.Hour, 5 * time.Minute},
 	{"24h", 24 * time.Hour, 15 * time.Minute},
 }
 
-// rangeOf returns the range named name, or the first one.
-func rangeOf(name string) chartRange {
-	for _, r := range chartRanges {
-		if r.Name == name {
-			return r
+// periodOf returns the period named name, or the first one.
+func periodOf(name string) chartPeriod {
+	for _, p := range chartPeriods {
+		if p.Name == name {
+			return p
 		}
 	}
-	return chartRanges[0]
+	return chartPeriods[0]
 }
 
 // window is the steps a chart shows, ending with the step that holds now.
@@ -40,9 +40,9 @@ type window struct {
 	steps int
 }
 
-func windowOf(r chartRange, now time.Time) window {
-	end := now.Truncate(r.step).Add(r.step)
-	return window{start: end.Add(-r.span), step: r.step, steps: int(r.span / r.step)}
+func windowOf(p chartPeriod, now time.Time) window {
+	end := now.Truncate(p.step).Add(p.step)
+	return window{start: end.Add(-p.span), step: p.step, steps: int(p.span / p.step)}
 }
 
 // chart is a line chart that the server draws as SVG, so that it needs no
@@ -88,6 +88,7 @@ func newChart(title, unit string, w window, now time.Time, lines []line) chart {
 			}
 		}
 	}
+
 	top = niceTop(top)
 	c := chart{
 		Title: title, Steps: w.steps, Note: "Nothing recorded yet.",
@@ -96,6 +97,7 @@ func newChart(title, unit string, w window, now time.Time, lines []line) chart {
 		From: compact(w.step*time.Duration(w.steps)) + " ago", Mid: compact(w.step*time.Duration(w.steps)/2) + " ago",
 	}
 	c.Label = fmt.Sprintf("%s over the last %s", title, compact(w.step*time.Duration(w.steps)))
+
 	// Each value is worded once, for the tooltip of its column and for the
 	// script, which shows the values of the step under the pointer.
 	texts := make([][]string, len(lines))
@@ -112,6 +114,7 @@ func newChart(title, unit string, w window, now time.Time, lines []line) chart {
 		}
 		c.Series = append(c.Series, s)
 	}
+
 	for i := range w.steps {
 		at := w.start.Add(time.Duration(i) * w.step)
 		var parts []string
@@ -167,6 +170,7 @@ func draw(values []float64, top float64) (line, area string, drawn bool) {
 			fmt.Fprintf(&a, "L%s 96Z", x)
 		}
 	}
+
 	return l.String(), a.String(), l.Len() > 0
 }
 
@@ -189,6 +193,7 @@ func taskChart(points []taskmill.Activity, w window, now time.Time) chart {
 		lines[2].values[i] = float64(c[taskmill.StateRunning])
 		lines[3].values[i] = float64(c[taskmill.StateDead])
 	}
+
 	return newChart("Tasks", "", w, now, lines)
 }
 
@@ -214,10 +219,12 @@ func attemptChart(points []taskmill.Activity, w window, now time.Time) chart {
 			lines[1].values[i] = float64(p.Failed) / minutes
 		}
 	}
+
 	c := newChart("Attempts", " a minute", w, now, lines)
 	if c.Note != "" && counting {
 		c.Note = "The first point shows when the count of its " + stepName(w.step) + " is complete."
 	}
+
 	return c
 }
 
@@ -264,6 +271,7 @@ func throughput(points []taskmill.Activity, w window, now time.Time) (rate, peak
 			rate = r
 		}
 	}
+
 	return rate, peak
 }
 
@@ -308,6 +316,7 @@ func newDial(rate, peak float64) dial {
 		d.Label = d.Value + " " + d.Unit + ", on a dial from 0 to " + formatValue(top)
 		d.Angle = coord(180 * min(max(rate/top, 0), 1))
 	}
+
 	var minor, major strings.Builder
 	for i := range dialTicks + 1 {
 		share := float64(i) / dialTicks
@@ -323,6 +332,7 @@ func newDial(rate, peak float64) dial {
 		}
 		d.Marks = append(d.Marks, dialMark{coord(x), coord(y), short(top * share)})
 	}
+
 	d.Minor, d.Major = minor.String(), major.String()
 	return d
 }
@@ -333,6 +343,7 @@ func dialTop(peak float64) float64 {
 	if math.IsNaN(peak) || peak <= 10 {
 		return 10
 	}
+
 	power := math.Pow(10, math.Floor(math.Log10(peak)))
 	for _, m := range []float64{1, 2, 5} {
 		if m*power >= peak {

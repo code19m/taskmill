@@ -1,0 +1,32 @@
+{{/* A task state: a ring icon, so that color is never the only cue, and its name. */}}
+{{define "task-state"}}<span class="task-state task-state-{{.}}">{{template "state-icon" .}}<span>{{.}}</span></span>{{end}}
+
+{{/* A hint: a small button that shows a short text about what is beside it.
+   Its argument has the Text, and the Name of what the text is about, one
+   word: it names the button, and the text on the page. The text is a
+   popover, so the browser opens and closes it, with or without the script,
+   above everything else on the page. The hint has a key, so that an update
+   never takes it for the element before it, and it stays open, with the
+   focus, while what stands around it comes and goes. */}}
+{{define "hint"}}<span class="hint" data-key="hint-{{.Name}}"><button type="button" popovertarget="hint-{{.Name}}" aria-label="About the {{.Name}}" aria-describedby="hint-{{.Name}}">
+  {{- template "icon-info"}}</button><span class="hint-pop" id="hint-{{.Name}}" popover role="note">{{.Text}}</span></span>{{end}}
+
+{{/* A FIFO group key, as text to read. A key that the outbox made shows as
+   its two parts, the topic and the message key: the character that joins
+   them is one that no font draws. Its tooltip says both in words. Any other
+   key shows as it is, with its control characters as pictures. A value, a
+   link, and a data-key carry the key itself. The script's "group" shows a
+   key in the same way. */}}
+{{define "group"}}{{with outbox .}}<span><span class="topic">{{.Topic}}</span><span class="topic-sep" aria-hidden="true">›</span>{{.Key}}</span>{{else}}{{visible .}}{{end}}{{end}}
+
+{{/* The attributes of an element that shows a time: its tooltip, the time in
+   UTC, and its instant, by which the script words it in the reader's time
+   zone. */}}
+{{define "time-attrs"}} title="{{timestamp .}}" data-time="{{instant .}}"{{end}}
+
+{{/* What an empty list says, in its card: a picture, what is not there,
+   and why, or what may help, with a link that does. Its argument is an
+   emptyNote, or a dict of its fields: Glyph, Title, Text, and a link's
+   Href, Label, and Icon. */}}
+{{define "empty"}}<div class="empty-note">{{with .Glyph}}<span class="empty-glyph">{{template "glyph" .}}</span>{{end}}<p class="empty-title">{{.Title}}</p>
+  {{- with .Text}}<p>{{.}}</p>{{end}}{{with .Href}}<a class="btn sm" href="{{.}}">{{template "icon" $.Icon}}{{$.Label}}</a>{{end}}</div>{{end}}

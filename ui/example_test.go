@@ -19,6 +19,7 @@ func ExampleNew() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/taskmill/", requireAdmin(dashboard))
 	server := &http.Server{Addr: "localhost:8080", Handler: mux, ReadHeaderTimeout: 10 * time.Second}
@@ -36,6 +37,7 @@ func ExampleNew_dashboard() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	server := &http.Server{Addr: ":8443", Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	log.Fatal(server.ListenAndServeTLS("cert.pem", "key.pem"))
 }

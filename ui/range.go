@@ -26,6 +26,7 @@ func queryTime(q url.Values, name string) (time.Time, error) {
 	if v == "" {
 		return time.Time{}, nil
 	}
+
 	// A query spells a space as "+". So the plus of an offset arrives as a
 	// space, unless whoever wrote the address escaped it. No time has a
 	// space of its own.
@@ -132,20 +133,21 @@ type preset struct {
 	Current     bool // it is the range of the list
 }
 
-// rangeFilter returns the filter by the time called title of the list with
-// the query first, whose range is from since to before. A preset leads to
+// newRangeFilter returns the filter by the time called title of the list
+// with the query first, whose range is from since to before. A preset leads to
 // the same list from a time ago, with no end, so the list stays open to the
 // tasks that come next. Its address holds that time as an instant: the
 // server needs no time zone for it, and a link that is shared shows the same
 // tasks. The time is rounded down to the minute, so the page changes once a
 // minute, not with every update.
-func (s *server) rangeFilter(title string, first url.Values, since, before, now time.Time) *rangeFilter {
+func (s *server) newRangeFilter(title string, first url.Values, since, before, now time.Time) *rangeFilter {
 	f := &rangeFilter{Title: title, Since: since, Before: before, Set: !since.IsZero() || !before.IsZero()}
 	f.Label, f.Full = rangeWords(since, before, now)
 	for _, p := range presets {
 		from := now.Add(-p.last).Truncate(time.Minute)
 		f.Presets = append(f.Presets, preset{Label: p.label, Href: s.path(listPath(withRange(first, from, time.Time{})))})
 	}
+
 	whole := s.path(listPath(withRange(first, time.Time{}, time.Time{})))
 	f.Presets = append(f.Presets, preset{Label: "Any time", Href: whole, Current: !f.Set})
 	return f
@@ -181,6 +183,7 @@ func rangeWords(since, before, now time.Time) (short, full string) {
 	case since.IsZero():
 		return "Before " + brief(before), "Before " + long(before)
 	}
+
 	end := brief(before)
 	if since.Format(time.DateOnly) == before.Format(time.DateOnly) {
 		end = clock(before)
