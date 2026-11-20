@@ -19,6 +19,11 @@ All notable changes to taskmill are recorded here. The format follows
   to the fair-share recipe. Split work across services adds the contract,
   versions, traces, and tests between services.
 
+### Changed
+
+- The dashboard's tooltips take the colors of the theme: a raised surface
+  with the edge and the shadow of a menu, where they were inverted.
+
 ## [0.12.2] - 2026-11-20
 
 ### Changed
