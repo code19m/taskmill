@@ -324,14 +324,14 @@ func TestRelativeTimesHaveTheirExactTime(t *testing.T) {
 	h := handler(t, client, nil)
 	var (
 		axis     = regexp.MustCompile(`<div class="chart-x"[^>]*>.*?</div>`)
-		relative = regexp.MustCompile(`<[^<>]*>(?:<svg[^<>]*>(?:<[^<>]*>)*</svg>)?[^<>]*\d+[smhd] (?:ago|from now)`) // with the tag that it stands in, and its icon
+		relative = regexp.MustCompile(`<[^<>]*>(?:<svg[^<>]*>(?:<[^<>]*>)*</svg>)?[^<>]*(?:\d+[smhd] ago|in \d+[smhd])`) // with the tag that it stands in, and its icon
 		exact    = regexp.MustCompile(`^<[^<>]* title="\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} UTC" data-time="[^"]+Z">`)
 	)
 	for path, want := range map[string]int{
 		"/":                                   1, // the age of the counts
-		"/tasks":                              2, // created, and run at
+		"/tasks":                              2, // created, and due
 		"/tasks?state=dead":                   2, // created, and finished
-		"/tasks/" + strconv.FormatInt(id, 10): 5, // created, run at, last attempt, finished, and the error
+		"/tasks/" + strconv.FormatInt(id, 10): 5, // created, due, started, and died, and the error
 		"/schedules":                          2, // the next run, and the last one
 		"/workers":                            2, // started, and checked in
 	} {
@@ -1035,7 +1035,7 @@ func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
 		t.Errorf("the list of dead tasks starts with %v, want the 50 that died last", ids)
 	}
 	mixed, ids := listTasks(t, h, "/tasks?state=dead&state=available")
-	if !slices.Equal(ids[:3], []string{"261", "260", "259"}) || !strings.Contains(mixed, "<th>Run at</th>") || !strings.Contains(mixed, "Load more") {
+	if !slices.Equal(ids[:3], []string{"261", "260", "259"}) || !strings.Contains(mixed, "<th>Due</th>") || !strings.Contains(mixed, "Load more") {
 		t.Errorf("a list of dead and available tasks starts with %v, or shows when its tasks finished\n%s", ids[:3], mixed)
 	}
 	if column, order := sortedBy(t, mixed); column != "ID" || order != "Newest first" {

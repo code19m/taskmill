@@ -47,9 +47,9 @@
     <section class="card flush">
       <div class="card-head"><h2>Errors <span class="subtle">{{len $t.Errors}}</span></h2></div>
       {{with $t.Errors}}
-      <ol class="timeline">{{range newest .}}
+      <ol class="errors">{{range newest .}}
         <li class="{{if .Code}}code-{{.Code}}{{end}}">
-          <div class="timeline-head">
+          <div class="error-head">
             <span class="strong">{{if .Attempt}}Attempt {{.Attempt}}{{else}}Note{{end}}</span>
             {{with .Code}}<span class="chip mono">{{.}}</span>{{end}}
             <time class="subtle"{{template "at" .At}}>{{ago $.Now .At}}</time>
@@ -71,14 +71,19 @@
       <dt>Attempts</dt>
       <dd>
         <div class="attempts"><span>{{$t.Attempt}} of {{$t.MaxAttempts}}</span>
-          <svg class="progress" viewBox="0 0 100 6" preserveAspectRatio="none" aria-hidden="true"><rect class="progress-track" width="100" height="6" rx="3"/><rect class="progress-fill" width="{{percent $t.Attempt $t.MaxAttempts}}" height="6" rx="3"/></svg>
+          <svg class="progress" aria-hidden="true"><rect width="{{percent $t.Attempt $t.MaxAttempts}}%" height="100%"/></svg>
         </div>
       </dd>
-      <dt>Created</dt><dd{{template "at" $t.CreatedAt}}>{{ago $.Now $t.CreatedAt}}</dd>
-      <dt>Run at</dt><dd{{template "at" $t.RunAt}}>{{ago $.Now $t.RunAt}}</dd>
-      {{if not $t.AttemptedAt.IsZero}}<dt>Last attempt</dt><dd{{template "at" $t.AttemptedAt}}>{{ago $.Now $t.AttemptedAt}}</dd>{{end}}
-      {{if not $t.FinalizedAt.IsZero}}<dt>Finished</dt><dd{{template "at" $t.FinalizedAt}}>{{ago $.Now $t.FinalizedAt}}</dd>{{end}}
     </dl>
+    {{/* The task's steps, with the time between them; see timeline in ui.go.
+       A step's dot is drawn by its style, and its name, time, and note are
+       in the order to read them. */}}
+    <h3 class="timeline-title" id="timeline-title">Timeline</h3>
+    <ol class="timeline" aria-labelledby="timeline-title">{{range $e := timeline $.Now $t $g.Head}}
+      {{if .Step}}<li class="step{{with .Tone}} {{.}}{{end}}{{if .Plan}} plan{{end}}"><span>{{.Step}}</span> {{if .At.IsZero}}<span>not yet</span>{{else}}<time{{template "at" .At}}>{{ago $.Now .At}}</time>{{end}}{{with .Note}} <span class="step-note">{{.}}</span>{{end}}</li>
+      {{- else}}<li class="gap{{with .Tone}} {{.}}{{end}}">{{if .Since.IsZero}}{{.Gap}}{{else}}<span data-since="{{instant .Since}}">{{.Gap}}</span>{{end}}{{with .Behind}}{{if $e.Gap}}, {{end}}behind <a href="{{path "/tasks/"}}{{.ID}}" aria-label="task {{.ID}}">#{{.ID}}</a>{{end}}</li>{{end}}
+    {{- end}}
+    </ol>
   </aside>
 </div>
 </div>
