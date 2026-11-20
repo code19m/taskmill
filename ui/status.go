@@ -15,11 +15,11 @@ import (
 	"github.com/code19m/taskmill"
 )
 
-// status is what a status page shows under its title, in place of a page
+// statusPage is what a status page shows under its title, in place of a page
 // that the dashboard cannot show: a picture of what happened, what it means
 // and what to do, in plain words, and where to go. The details of an error
 // stay in the server log.
-type status struct {
+type statusPage struct {
 	Glyph   string // the picture: a name of the "glyph" template
 	Text    string
 	Actions []link // the most useful first
@@ -32,19 +32,26 @@ type link struct {
 	Href, Label, Icon string
 }
 
+// emptyNote is what an empty list says, in its card: a picture, what is not
+// there, and why, or what may help, with a link that does, if any.
+type emptyNote struct {
+	Glyph, Title, Text string
+	link
+}
+
 // status answers with a status page.
-func (s *server) status(w http.ResponseWriter, r *http.Request, code int, title string, st status) {
+func (s *server) status(w http.ResponseWriter, r *http.Request, code int, title string, st statusPage) {
 	s.render(w, r, code, "status.html", page{Title: title, Retry: st.Retry, Data: st})
 }
 
 // refuse answers a request that the dashboard refuses, and says why: a value
 // that is not valid, or an action that does not fit.
 func (s *server) refuse(w http.ResponseWriter, r *http.Request, code int, title, why string, back link) {
-	s.status(w, r, code, title, status{Glyph: "refused", Text: why, Actions: []link{back}})
+	s.status(w, r, code, title, statusPage{Glyph: "refused", Text: why, Actions: []link{back}})
 }
 
 func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
-	s.status(w, r, http.StatusNotFound, "Page not found", status{
+	s.status(w, r, http.StatusNotFound, "Page not found", statusPage{
 		Glyph:   "search",
 		Text:    "Nothing exists at this address.",
 		Actions: []link{{"/", "Back to the overview", "back"}},
@@ -52,7 +59,7 @@ func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) taskNotFound(w http.ResponseWriter, r *http.Request, id int64) {
-	s.status(w, r, http.StatusNotFound, "Task not found", status{
+	s.status(w, r, http.StatusNotFound, "Task not found", statusPage{
 		Glyph:   "search",
 		Text:    fmt.Sprintf("Task %d does not exist. It may have been deleted, or removed after its retention period.", id),
 		Actions: []link{{"/tasks", "Back to the tasks", "back"}},
@@ -63,11 +70,14 @@ func (s *server) taskNotFound(w http.ResponseWriter, r *http.Request, id int64) 
 // page that got no answer from the dashboard: the network is down, the
 // dashboard is, or a proxy in front of it answered in its place. Its action
 // leads to the address that the page has then.
-var unreachablePage = page{Title: "Can’t reach the dashboard", Data: status{
+var unreachablePage = page{Title: "Can’t reach the dashboard", Data: statusPage{
 	Glyph:   "offline",
 	Text:    "No answer came from the dashboard. The network may be down, or the dashboard may be restarting.",
 	Actions: []link{{"", "Try again", "retry"}}, Retry: true,
 }}
+
+// unreachable returns unreachablePage, which every page holds as a template.
+func unreachable() page { return unreachablePage }
 
 // backTo is the way back to where an action leads.
 func backTo(target string) link {
@@ -123,10 +133,10 @@ func timeLimit(err error) bool {
 	return ok && pgErr.Code == "57014" // query_canceled
 }
 
-// unreachable reports whether err is a failure to connect to the database:
+// cannotConnect reports whether err is a failure to connect to the database:
 // it is down, out of reach, or refuses the dashboard's login. Then no
 // statement ran.
-func unreachable(err error) bool {
+func cannotConnect(err error) bool {
 	_, ok := errors.AsType[*pgconn.ConnectError](err)
 	return ok
 }
@@ -166,7 +176,7 @@ func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hin
 		if code == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", "5")
 		}
-		s.status(w, r, code, title, status{Glyph: glyph, Text: text + hint, Actions: actions, Retry: true})
+		s.status(w, r, code, title, statusPage{Glyph: glyph, Text: text + hint, Actions: actions, Retry: true})
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || timeLimit(err) {
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request timed out",
@@ -179,7 +189,7 @@ func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hin
 	}
 	s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request failed",
 		slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
-	if unreachable(err) {
+	if cannotConnect(err) {
 		answer(http.StatusServiceUnavailable, "Can’t reach the database", "database",
 			"The dashboard is running, but it cannot connect to its database.")
 		return

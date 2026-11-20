@@ -10,27 +10,27 @@ import (
 	"github.com/code19m/taskmill"
 )
 
-// chartRange is a span of time the overview's charts can show, with the step
+// chartPeriod is a span of time the overview's charts can show, with the step
 // of their points.
-type chartRange struct {
+type chartPeriod struct {
 	Name       string
 	span, step time.Duration
 }
 
-var chartRanges = []chartRange{
+var chartPeriods = []chartPeriod{
 	{"1h", time.Hour, time.Minute},
 	{"6h", 6 * time.Hour, 5 * time.Minute},
 	{"24h", 24 * time.Hour, 15 * time.Minute},
 }
 
-// rangeOf returns the range named name, or the first one.
-func rangeOf(name string) chartRange {
-	for _, r := range chartRanges {
-		if r.Name == name {
-			return r
+// periodOf returns the period named name, or the first one.
+func periodOf(name string) chartPeriod {
+	for _, p := range chartPeriods {
+		if p.Name == name {
+			return p
 		}
 	}
-	return chartRanges[0]
+	return chartPeriods[0]
 }
 
 // window is the steps a chart shows, ending with the step that holds now.
@@ -40,9 +40,9 @@ type window struct {
 	steps int
 }
 
-func windowOf(r chartRange, now time.Time) window {
-	end := now.Truncate(r.step).Add(r.step)
-	return window{start: end.Add(-r.span), step: r.step, steps: int(r.span / r.step)}
+func windowOf(p chartPeriod, now time.Time) window {
+	end := now.Truncate(p.step).Add(p.step)
+	return window{start: end.Add(-p.span), step: p.step, steps: int(p.span / p.step)}
 }
 
 // chart is a line chart that the server draws as SVG, so that it needs no

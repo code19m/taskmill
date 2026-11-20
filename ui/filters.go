@@ -24,6 +24,16 @@ var listedStates = []taskmill.State{
 	taskmill.StateRetryable, taskmill.StateCompleted, taskmill.StateDead, taskmill.StateCanceled,
 }
 
+// listedStateNames are the names of listedStates: the options of the filter
+// by state.
+var listedStateNames = func() []string {
+	names := make([]string, len(listedStates))
+	for i, st := range listedStates {
+		names[i] = string(st)
+	}
+	return names
+}()
+
 // taskFilter reads the task list's filters from a query.
 func taskFilter(q url.Values) taskmill.TaskFilter {
 	f := taskmill.TaskFilter{Queues: selected(q["queue"]), Kinds: selected(q["kind"]), GroupKeys: selected(q["group"])}

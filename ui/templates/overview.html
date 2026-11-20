@@ -36,7 +36,7 @@
 <section class="card flush activity" aria-labelledby="activity-title">
   <div class="card-head">
     <h2 id="activity-title">Activity</h2>
-    <nav class="seg seg-sm" aria-label="Period">{{range $d.Ranges}}<a href="{{path "/"}}?range={{.Name}}"{{if eq .Name $d.Range}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
+    <nav class="seg seg-sm" aria-label="Period">{{range $d.Periods}}<a href="{{path "/"}}?range={{.Name}}"{{if eq .Name $d.Period}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
   </div>
   <div class="charts">
     {{template "dial" $d.Dial}}
@@ -72,8 +72,8 @@
         {{end}}
         <td class="num{{if not $q.Workers}} zero{{end}}">{{$q.Workers}}</td>
         {{if not $ro}}<td class="actions-col">
-          {{if $q.Paused}}<form method="post" action="{{path "/queues/resume"}}{{query "name" $q.Name "range" $d.Range}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
-          {{else}}<form method="post" action="{{path "/queues/pause"}}{{query "name" $q.Name "range" $d.Range}}" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{$q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
+          {{if $q.Paused}}<form method="post" action="{{path "/queues/resume"}}{{query "name" $q.Name "range" $d.Period}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
+          {{else}}<form method="post" action="{{path "/queues/pause"}}{{query "name" $q.Name "range" $d.Period}}" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{$q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
         </td>{{end}}
       </tr>
     {{end}}

@@ -132,14 +132,14 @@ type preset struct {
 	Current     bool // it is the range of the list
 }
 
-// rangeFilter returns the filter by the time called title of the list with
-// the query first, whose range is from since to before. A preset leads to
+// newRangeFilter returns the filter by the time called title of the list
+// with the query first, whose range is from since to before. A preset leads to
 // the same list from a time ago, with no end, so the list stays open to the
 // tasks that come next. Its address holds that time as an instant: the
 // server needs no time zone for it, and a link that is shared shows the same
 // tasks. The time is rounded down to the minute, so the page changes once a
 // minute, not with every update.
-func (s *server) rangeFilter(title string, first url.Values, since, before, now time.Time) *rangeFilter {
+func (s *server) newRangeFilter(title string, first url.Values, since, before, now time.Time) *rangeFilter {
 	f := &rangeFilter{Title: title, Since: since, Before: before, Set: !since.IsZero() || !before.IsZero()}
 	f.Label, f.Full = rangeWords(since, before, now)
 	for _, p := range presets {

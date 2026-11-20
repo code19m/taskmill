@@ -147,7 +147,7 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.Handle("GET /static/{name}", s.static())
 	mux.HandleFunc("GET /{$}", s.overview)
-	mux.HandleFunc("GET /tasks", s.tasks)
+	mux.HandleFunc("GET /tasks", s.taskList)
 	mux.HandleFunc("GET /tasks/{id}", s.task)
 	mux.HandleFunc("GET /choices/groups", s.groupChoicesJSON)
 	mux.HandleFunc("GET /schedules", s.schedules)
@@ -217,4 +217,11 @@ type page struct {
 	Dead     taskmill.TaskCount // dead tasks, for the navigation; zero if unknown
 	Now      time.Time          // when the page was rendered: its relative times count from here
 	Data     any
+}
+
+// Live reports whether the script updates the page every few seconds: a page
+// of a section does, unless it is Static. A status page of a cause that may
+// pass tries its address again instead, as Retry says.
+func (p page) Live() bool {
+	return p.Nav != "" && !p.Static
 }

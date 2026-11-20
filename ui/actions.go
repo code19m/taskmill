@@ -28,15 +28,15 @@ func (s *server) bulkLinks(f taskmill.TaskFilter) *bulkLinks {
 	if len(states) == 0 {
 		states = listedStates
 	}
-	query := filterQuery(f).Encode()
-	link := func(name string, allows func(taskmill.State) bool) string {
+	q := filterQuery(f).Encode()
+	href := func(name string, allows func(taskmill.State) bool) string {
 		if !slices.ContainsFunc(states, allows) {
 			return ""
 		}
-		return s.path(bulkActions[name].path + "?" + query)
+		return s.path(bulkActions[name].path + "?" + q)
 	}
 	return &bulkLinks{
-		link("retry", taskmill.State.CanRetry), link("cancel", taskmill.State.CanCancel), link("delete", taskmill.State.CanDelete),
+		href("retry", taskmill.State.CanRetry), href("cancel", taskmill.State.CanCancel), href("delete", taskmill.State.CanDelete),
 	}
 }
 
@@ -85,6 +85,16 @@ type filterRow struct {
 	Values []string
 	Mono   bool
 	Group  bool // the values are FIFO group keys
+}
+
+// bulkData is what a bulk action's page shows.
+type bulkData struct {
+	bulkAction
+	Filters []filterRow
+	N       int64  // the tasks that the action would change
+	Tasks   string // N in words
+	Path    string // where its form sends the action
+	Back    string // the task list of the filters
 }
 
 // bulkPage shows what a bulk action would change, with a button to do it:
@@ -136,13 +146,10 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
 		action.Set("cursor", cursor)
 	}
-	s.render(w, r, http.StatusOK, "bulk.html", page{Title: a.Verb + " tasks", Nav: "tasks", Static: true, Dead: s.deadCount(r), Data: struct {
-		bulkAction
-		Filters    []filterRow
-		N          int64
-		Tasks      string
-		Path, Back string
-	}{a, rows, n.N, tasks(n), s.path(a.path + "?" + action.Encode()), s.path("/tasks?" + filterQuery(f).Encode())}})
+	s.render(w, r, http.StatusOK, "bulk.html", page{Title: a.Verb + " tasks", Nav: "tasks", Static: true, Dead: s.deadCount(r), Data: bulkData{
+		bulkAction: a, Filters: rows, N: n.N, Tasks: tasks(n),
+		Path: s.path(a.path + "?" + action.Encode()), Back: s.path("/tasks?" + filterQuery(f).Encode()),
+	}})
 }
 
 // notices are the messages shown after an action, by the code in the
@@ -208,19 +215,19 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	target := "/tasks/" + strconv.FormatInt(id, 10)
-	var notice string
+	var done string
 	switch r.PathValue("action") {
 	case "retry":
-		err, notice = s.client.Retry(ctx, id), "retry"
+		err, done = s.client.Retry(ctx, id), "retry"
 	case "cancel":
-		err, notice = s.client.Cancel(ctx, id), "cancel"
+		err, done = s.client.Cancel(ctx, id), "cancel"
 	case "delete":
-		err, notice, target = s.client.Delete(ctx, id), "delete", "/tasks"
+		err, done, target = s.client.Delete(ctx, id), "delete", "/tasks"
 	default:
 		s.notFound(w, r)
 		return
 	}
-	s.finishAction(w, r, err, target, notice, notice+" task", strconv.FormatInt(id, 10))
+	s.finishAction(w, r, err, target, done, done+" task", strconv.FormatInt(id, 10))
 }
 
 // queueAction pauses or resumes the queue that the query names. A name is
@@ -234,22 +241,22 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	var notice, action string
+	var done, action string
 	name := r.URL.Query().Get("name")
 	back := "/"
-	if span := rangeOf(r.URL.Query().Get("range")); span != chartRanges[0] {
-		back = "/?range=" + span.Name
+	if p := periodOf(r.URL.Query().Get("range")); p != chartPeriods[0] {
+		back = "/?range=" + p.Name
 	}
 	switch r.PathValue("action") {
 	case "pause":
-		err, notice, action = s.client.PauseQueue(r.Context(), name), "queue-pause", "pause queue"
+		err, done, action = s.client.PauseQueue(r.Context(), name), "queue-pause", "pause queue"
 	case "resume":
-		err, notice, action = s.client.ResumeQueue(r.Context(), name), "queue-resume", "resume queue"
+		err, done, action = s.client.ResumeQueue(r.Context(), name), "queue-resume", "resume queue"
 	default:
 		s.notFound(w, r)
 		return
 	}
-	s.finishAction(w, r, err, back, notice, action, name)
+	s.finishAction(w, r, err, back, done, action, name)
 }
 
 // scheduleAction pauses, resumes, or runs the schedule that the query names,
@@ -259,26 +266,26 @@ func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var err error
-	var notice, action string
+	var done, action string
 	name := r.URL.Query().Get("name")
 	switch r.PathValue("action") {
 	case "pause":
-		err, notice, action = s.client.PauseSchedule(r.Context(), name), "schedule-pause", "pause schedule"
+		err, done, action = s.client.PauseSchedule(r.Context(), name), "schedule-pause", "pause schedule"
 	case "resume":
-		err, notice, action = s.client.ResumeSchedule(r.Context(), name), "schedule-resume", "resume schedule"
+		err, done, action = s.client.ResumeSchedule(r.Context(), name), "schedule-resume", "resume schedule"
 	case "run":
-		err, notice, action = s.client.RunSchedule(r.Context(), name), "schedule-run", "run schedule"
+		err, done, action = s.client.RunSchedule(r.Context(), name), "schedule-run", "run schedule"
 	default:
 		s.notFound(w, r)
 		return
 	}
-	s.finishAction(w, r, err, "/schedules", notice, action, name)
+	s.finishAction(w, r, err, "/schedules", done, action, name)
 }
 
 // finishAction logs an action that succeeded and redirects to target with
-// its notice, or explains why the action did not apply. The target may have
-// a query of its own.
-func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error, target, notice, action, name string) {
+// the code of its notice, done, or explains why the action did not apply.
+// The target may have a query of its own.
+func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error, target, done, action, name string) {
 	if err != nil {
 		s.actionFailed(w, r, err, target)
 		return
@@ -289,7 +296,7 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 	if strings.Contains(target, "?") {
 		sep = "&"
 	}
-	http.Redirect(w, r, s.path(target+sep+"done="+notice), http.StatusSeeOther)
+	http.Redirect(w, r, s.path(target+sep+"done="+done), http.StatusSeeOther)
 }
 
 // actionFailed explains why an action did not apply: the error says it, as
@@ -303,7 +310,7 @@ func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error,
 		if strings.HasPrefix(back, "/tasks/") {
 			back = "/tasks" // the task's own page is gone too
 		}
-		s.status(w, r, http.StatusNotFound, "Not found", status{
+		s.status(w, r, http.StatusNotFound, "Not found", statusPage{
 			Glyph: "search",
 			Text:  "What the action was for no longer exists. It may have been deleted meanwhile.", Actions: []link{backTo(back)},
 		})
@@ -336,8 +343,8 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := taskFilter(r.URL.Query())
-	deadline, _ := r.Context().Deadline() // the deadline handler sets one
-	ctx, cancel := context.WithDeadlineCause(r.Context(), time.Now().Add(time.Until(deadline)/2), errBudget)
+	end, _ := r.Context().Deadline() // the deadline handler sets one
+	ctx, cancel := context.WithDeadlineCause(r.Context(), time.Now().Add(time.Until(end)/2), errBudget)
 	defer cancel()
 	res, err := a.do(s.client, ctx, &taskmill.BulkParams{Filter: f, Cursor: r.URL.Query().Get("cursor")})
 	more := err != nil && errors.Is(context.Cause(ctx), errBudget)
@@ -350,25 +357,25 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		s.actionFailed(w, r, err, "/tasks?"+filterQuery(f).Encode())
 		return
 	}
-	query := filterQuery(f)
-	query.Set("count", strconv.FormatInt(res.Changed, 10))
+	q := filterQuery(f)
+	q.Set("count", strconv.FormatInt(res.Changed, 10))
 	target := "/tasks?"
 	switch {
 	case more:
 		target = a.path + "?"
-		query.Set("done", name+"-more")
-		query.Set("cursor", res.Next)
+		q.Set("done", name+"-more")
+		q.Set("cursor", res.Next)
 	case res.Skipped > 0:
 		target = a.path + "?"
-		query.Set("done", name+"-skipped")
-		query.Set("skipped", strconv.FormatInt(res.Skipped, 10))
+		q.Set("done", name+"-skipped")
+		q.Set("skipped", strconv.FormatInt(res.Skipped, 10))
 	case res.Conflicts > 0:
-		query.Set("done", name+"-conflicts")
-		query.Set("conflicts", strconv.FormatInt(res.Conflicts, 10))
+		q.Set("done", name+"-conflicts")
+		q.Set("conflicts", strconv.FormatInt(res.Conflicts, 10))
 	default:
-		query.Set("done", name+"-all")
+		q.Set("done", name+"-all")
 	}
-	http.Redirect(w, r, s.path(target+query.Encode()), http.StatusSeeOther)
+	http.Redirect(w, r, s.path(target+q.Encode()), http.StatusSeeOther)
 }
 
 // refuseIfReadOnly refuses an action of a read-only dashboard, and says so.
@@ -376,7 +383,7 @@ func (s *server) refuseIfReadOnly(w http.ResponseWriter, r *http.Request) bool {
 	if !s.readOnly {
 		return false
 	}
-	s.status(w, r, http.StatusForbidden, "Read-only dashboard", status{
+	s.status(w, r, http.StatusForbidden, "Read-only dashboard", statusPage{
 		Glyph:   "lock",
 		Text:    "This dashboard shows the tasks, and does not change them.",
 		Actions: []link{{"/", "Back to the overview", "back"}},

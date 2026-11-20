@@ -140,7 +140,7 @@ func getGzip(w io.Writer) *gzip.Writer {
 // page names its time of rendering, from which the script keeps its
 // relative times counting. That time is no part of the ETag: a page that
 // says what the client's page says is the page that the client has.
-func (s *server) render(w http.ResponseWriter, r *http.Request, status int, name string, p page) {
+func (s *server) render(w http.ResponseWriter, r *http.Request, code int, name string, p page) {
 	p.ReadOnly = s.readOnly
 	p.Notice = notice(r.URL.Query())
 	p.Now = time.Now()
@@ -155,7 +155,7 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, status int, name
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Vary", "Accept-Encoding")
-	if status == http.StatusOK {
+	if code == http.StatusOK {
 		before, after, _ := bytes.Cut(buf.Bytes(), []byte(`data-now="`+instant(p.Now)+`"`))
 		sum := sha256.New()
 		sum.Write(before)
@@ -179,7 +179,7 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, status int, name
 		h.Set("Content-Encoding", "gzip")
 	}
 	h.Set("Content-Length", strconv.Itoa(len(body)))
-	w.WriteHeader(status)
+	w.WriteHeader(code)
 	_, _ = w.Write(body) // the client may be gone; there is no one to tell
 }
 

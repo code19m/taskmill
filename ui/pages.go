@@ -33,7 +33,6 @@ var queueStates = []taskmill.State{
 // totals sums the task counts of every queue.
 type totals struct {
 	Available, Running, Waiting, Dead taskmill.TaskCount
-	Capped                            bool // some count stopped at its cap
 }
 
 func sumQueues(queues []taskmill.QueueInfo) totals {
@@ -49,11 +48,25 @@ func sumQueues(queues []taskmill.QueueInfo) totals {
 			add(&t.Waiting, q.Counts[st])
 		}
 		add(&t.Dead, q.Counts[taskmill.StateDead])
-		for _, n := range q.Counts {
-			t.Capped = t.Capped || n.Capped
-		}
 	}
 	return t
+}
+
+// overviewData is what the overview shows.
+type overviewData struct {
+	Queues          []taskmill.QueueInfo
+	States          []taskmill.State // the columns of the queue table
+	Totals          totals
+	Workers         int
+	Schedules       int
+	NextRun         time.Time // of the schedules that are not paused
+	Settings        *taskmill.Settings
+	RefreshedAt     time.Time // when the maintainer last counted the tasks
+	Stale           bool      // the counts are old enough to say so on the page
+	Periods         []chartPeriod
+	Period          string // the name of the period that the charts show
+	Dial            dial
+	Tasks, Attempts chart
 }
 
 func (s *server) overview(w http.ResponseWriter, r *http.Request) {
@@ -79,8 +92,8 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	span := rangeOf(r.URL.Query().Get("range"))
-	win := windowOf(span, now)
+	p := periodOf(r.URL.Query().Get("range"))
+	win := windowOf(p, now)
 	// The charts are not worth failing the page for: without their history,
 	// they say so.
 	activity, err := s.client.Activity(ctx, &taskmill.ActivityParams{Since: win.start, Step: win.step})
@@ -105,28 +118,28 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	t := sumQueues(queues)
-	s.render(w, r, http.StatusOK, "overview.html", page{Title: "Overview", Nav: "overview", Dead: t.Dead, Data: struct {
-		Queues          []taskmill.QueueInfo
-		States          []taskmill.State
-		Totals          totals
-		Workers         int
-		Schedules       int
-		NextRun         time.Time
-		Settings        *taskmill.Settings
-		RefreshedAt     time.Time
-		Stale           bool // the counts are old enough to say so on the page
-		Ranges          []chartRange
-		Range           string
-		Dial            dial
-		Tasks, Attempts chart
-	}{
-		queues, queueStates, t, len(workers), len(schedules), nextRun, settings, refreshed,
-		!refreshed.IsZero() && now.Sub(refreshed) > staleCounts,
-		chartRanges, span.Name, newDial(rate, peak), tasksChart, attemptsChart,
+	s.render(w, r, http.StatusOK, "overview.html", page{Title: "Overview", Nav: "overview", Dead: t.Dead, Data: overviewData{
+		Queues: queues, States: queueStates, Totals: t,
+		Workers: len(workers), Schedules: len(schedules), NextRun: nextRun,
+		Settings: settings, RefreshedAt: refreshed, Stale: !refreshed.IsZero() && now.Sub(refreshed) > staleCounts,
+		Periods: chartPeriods, Period: p.Name, Dial: newDial(rate, peak), Tasks: tasksChart, Attempts: attemptsChart,
 	}})
 }
 
-func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
+// taskListData is what a task list shows.
+type taskListData struct {
+	Tasks                         []taskmill.TaskInfo
+	Seen                          int // tasks before those that the last "Load more" added
+	Order                         listOrder
+	States, Queues, Kinds, Groups filter
+	Range                         *rangeFilter
+	Filtered, Paged               bool
+	First, More, Next             string
+	Bulk                          *bulkLinks
+	Empty                         emptyNote // what the list says when it shows no task
+}
+
+func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := taskFilter(q)
 	first := maps.Clone(q) // the list's first page
@@ -193,10 +206,6 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	if slices.Equal(states, []string{string(taskmill.StateDead)}) {
 		nav, title = "dead", "Dead tasks"
 	}
-	stateNames := make([]string, len(listedStates))
-	for i, st := range listedStates {
-		stateNames[i] = string(st)
-	}
 	groupFilter := newFilter("group", "FIFO group", "groups", offered.groups, f.GroupKeys).searchable()
 	if offered.moreGroups {
 		groupFilter.Source = s.path("/choices/groups")
@@ -207,28 +216,45 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	if filtered && !ranged && !s.readOnly {
 		bulk = s.bulkLinks(f)
 	}
-	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: struct {
-		Tasks                         []taskmill.TaskInfo
-		Seen                          int // tasks before those that the last "Load more" added
-		Order                         listOrder
-		States, Queues, Kinds, Groups filter
-		Range                         *rangeFilter
-		Filtered, Paged               bool
-		First, More, Next             string
-		Bulk                          *bulkLinks
-	}{
-		res.Tasks,
-		limit - pageSize,
-		order,
-		newFilter("state", "State", "states", stateNames, states),
-		newFilter("queue", "Queue", "queues", names, f.Queues).searchable(),
-		newFilter("kind", "Kind", "kinds", offered.kinds, f.Kinds).searchable(),
-		groupFilter,
-		s.rangeFilter(order.Time, first, since, before, time.Now()),
-		filtered, params.Cursor != "",
-		s.path(listPath(first)), more, next,
-		bulk,
-	}})
+	d := taskListData{
+		Tasks: res.Tasks, Seen: limit - pageSize, Order: order,
+		States:   newFilter("state", "State", "states", listedStateNames, states),
+		Queues:   newFilter("queue", "Queue", "queues", names, f.Queues).searchable(),
+		Kinds:    newFilter("kind", "Kind", "kinds", offered.kinds, f.Kinds).searchable(),
+		Groups:   groupFilter,
+		Range:    s.newRangeFilter(order.Time, first, since, before, time.Now()),
+		Filtered: filtered, Paged: params.Cursor != "",
+		First: s.path(listPath(first)), More: more, Next: next,
+		Bulk: bulk,
+	}
+	if len(res.Tasks) == 0 {
+		d.Empty = s.noTasks(&d, nav == "dead")
+	}
+	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: d})
+}
+
+// noTasks says why a task list shows no task: its page is past the end of
+// the list, no task is dead, the filters select none, or no task is there
+// yet. dead is true for a list of dead tasks.
+func (s *server) noTasks(d *taskListData, dead bool) emptyNote {
+	switch {
+	case d.Paged:
+		return emptyNote{
+			Glyph: "inbox", Title: "No more tasks", Text: "The list ends before this page.",
+			link: link{d.First, d.Order.First, "first"},
+		}
+	case dead && !d.Range.Set && d.Queues.Empty && d.Kinds.Empty && d.Groups.Empty:
+		return emptyNote{
+			Glyph: "done", Title: "No dead tasks",
+			Text: "A task that fails all its attempts shows here, until you retry or delete it.",
+		}
+	case d.Filtered:
+		return emptyNote{
+			Glyph: "filter", Title: "No tasks match these filters", Text: "Fewer filters, or a longer range of time, may find some.",
+			link: link{s.path("/tasks"), "Clear the filters", "clear"},
+		}
+	}
+	return emptyNote{Glyph: "inbox", Title: "No tasks yet", Text: "Tasks show here once your app enqueues them."}
 }
 
 // continuation returns the link that leads on from a task list: none if no
@@ -311,6 +337,21 @@ type group struct {
 	Head    *taskmill.TaskInfo // the task that a pending task waits behind, in summary
 }
 
+// Waits says how many tasks wait behind a dead task: "1 task waits", or
+// "3 tasks wait".
+func (g group) Waits() string {
+	if g.Waiting == (taskmill.TaskCount{N: 1}) {
+		return "1 task waits"
+	}
+	return tasks(g.Waiting) + " wait"
+}
+
+// taskData is what a task's page shows.
+type taskData struct {
+	Task  *taskmill.TaskInfo
+	Group group
+}
+
 func (s *server) task(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
@@ -332,10 +373,7 @@ func (s *server) task(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.render(w, r, http.StatusOK, "task.html", page{Title: fmt.Sprintf("Task %d", id), Nav: "tasks", Dead: s.deadCount(r), Data: struct {
-		Task  *taskmill.TaskInfo
-		Group group
-	}{info, g}})
+	s.render(w, r, http.StatusOK, "task.html", page{Title: fmt.Sprintf("Task %d", id), Nav: "tasks", Dead: s.deadCount(r), Data: taskData{Task: info, Group: g}})
 }
 
 // groupOf finds, for a dead task of a FIFO group, how many tasks wait behind
@@ -355,7 +393,7 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 		}
 		g.Waiting = counts.States[taskmill.StatePending]
 	case taskmill.StatePending:
-		page, err := s.client.List(r.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{
+		ahead, err := s.client.List(r.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{
 			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, States: []taskmill.State{
 				taskmill.StateScheduled, taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateRetryable, taskmill.StateDead,
 			},
@@ -363,8 +401,8 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 		if err != nil {
 			return g, err
 		}
-		if len(page.Tasks) > 0 {
-			g.Head = &page.Tasks[0]
+		if len(ahead.Tasks) > 0 {
+			g.Head = &ahead.Tasks[0]
 		}
 	default:
 	}

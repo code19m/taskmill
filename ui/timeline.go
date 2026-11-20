@@ -23,7 +23,7 @@ type entry struct {
 	At     time.Time          // when the step was or is due; zero for one with no time yet
 	Note   string             // a step's second line, such as "attempt 2"
 	Plan   bool               // the step is yet to come
-	Gap    string             // a gap's words, such as "Waited"
+	Gap    string             // a gap's words, such as "Waited", or "Waiting, behind" the task in Behind
 	Took   string             // a gap's length of time, such as "0.2s"; empty if it has none
 	Work   bool               // the gap is an attempt that ran, not a wait: its line is solid, not dashed
 	Since  time.Time          // for a gap that lasts until now, when it began: the script counts its length
@@ -152,11 +152,16 @@ func (s *steps) failed() time.Time {
 // waits, and in a FIFO group behind the task before it.
 func (s *steps) waiting(head *taskmill.TaskInfo) {
 	wait := entry{Behind: head}
-	if head != nil {
-		wait.Tone = "warn"
-	}
 	if due := s.created(); !due.After(s.now) {
 		wait.Gap, wait.Took, wait.Since = "Waiting", s.lasting(due), due
+	}
+	if head != nil {
+		wait.Tone = "warn"
+		if wait.Gap == "" {
+			wait.Gap = "Behind"
+		} else {
+			wait.Gap += ", behind"
+		}
 	}
 	if wait.Took != "" || head != nil {
 		s.tl = append(s.tl, wait)

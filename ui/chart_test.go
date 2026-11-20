@@ -40,24 +40,24 @@ func TestThroughputReadsTheNewestCompleteStep(t *testing.T) {
 	}
 	for _, c := range []struct {
 		name       string
-		span       chartRange
+		period     chartPeriod
 		points     []taskmill.Activity
 		now        time.Time
 		rate, peak float64
 	}{
-		{"the minute before this one", chartRanges[0], hour, minute.Add(30 * time.Second), 660, 1000},
+		{"the minute before this one", chartPeriods[0], hour, minute.Add(30 * time.Second), 660, 1000},
 		// Workers may still add to a minute that has just ended.
-		{"a minute that has just ended waits", chartRanges[0], hour, minute.Add(5 * time.Second), 520, 1000},
-		{"nothing recorded in it", chartRanges[0], hour[:2], minute.Add(30 * time.Second), math.NaN(), 1000},
-		{"nothing recorded at all", chartRanges[0], nil, minute.Add(30 * time.Second), math.NaN(), 0},
+		{"a minute that has just ended waits", chartPeriods[0], hour, minute.Add(5 * time.Second), 520, 1000},
+		{"nothing recorded in it", chartPeriods[0], hour[:2], minute.Add(30 * time.Second), math.NaN(), 1000},
+		{"nothing recorded at all", chartPeriods[0], nil, minute.Add(30 * time.Second), math.NaN(), 0},
 		// A longer step counts as its mean rate.
-		{"a step of five minutes", chartRanges[1], []taskmill.Activity{
+		{"a step of five minutes", chartPeriods[1], []taskmill.Activity{
 			{At: ago(2, 5*time.Minute), Completed: 4000},
 			{At: ago(1, 5*time.Minute), Completed: 3000, Failed: 300},
 			{At: minute, Completed: 9000},
 		}, minute.Add(time.Minute), 660, 800},
 	} {
-		rate, peak := throughput(c.points, windowOf(c.span, c.now), c.now)
+		rate, peak := throughput(c.points, windowOf(c.period, c.now), c.now)
 		if rate != c.rate && !(math.IsNaN(rate) && math.IsNaN(c.rate)) || peak != c.peak {
 			t.Errorf("%s: got %v a minute and a peak of %v, want %v and %v", c.name, rate, peak, c.rate, c.peak)
 		}
@@ -92,7 +92,7 @@ func TestAttemptChartDrawsTheStepsThatAreComplete(t *testing.T) {
 		{"nothing recorded", nil, 30 * time.Second, "   ", "   ", "Nothing recorded yet."},
 	} {
 		now := minute.Add(c.after)
-		chart := attemptChart(c.points, windowOf(chartRanges[0], now), now)
+		chart := attemptChart(c.points, windowOf(chartPeriods[0], now), now)
 		for k, want := range []string{c.completed, c.failed} {
 			if got := chart.Series[k].Values; !strings.HasSuffix(got, want) || strings.TrimSpace(got) != strings.TrimSpace(want) {
 				t.Errorf("%s: the chart holds the %s attempts %q, want them to end with %q", c.name, strings.ToLower(chart.Series[k].Name), got, want)

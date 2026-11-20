@@ -13,6 +13,8 @@ import (
 	"github.com/code19m/taskmill"
 )
 
+// funcs returns the functions that the templates call, each by the name of
+// its Go function.
 func (s *server) funcs() template.FuncMap {
 	return template.FuncMap{
 		"path":        s.path,
@@ -21,16 +23,15 @@ func (s *server) funcs() template.FuncMap {
 		"timestamp":   timestamp,
 		"instant":     instant,
 		"fieldTime":   fieldTime,
-		"json":        prettyJSON,
-		"states":      func() []taskmill.State { return listedStates },
+		"prettyJSON":  prettyJSON,
 		"lastError":   lastError,
-		"newest":      newestFirst,
+		"newestFirst": newestFirst,
 		"timeline":    timeline,
 		"visible":     visible,
 		"outbox":      outbox,
-		"num":         number,
 		"count":       count,
 		"atLeast":     atLeast,
+		"plural":      plural,
 		"percent":     percent,
 		"period":      period,
 		"cronWords":   cronWords,
@@ -38,21 +39,26 @@ func (s *server) funcs() template.FuncMap {
 		"fit":         fit,
 		"join":        strings.Join,
 		"dict":        dict,
-		"unreachable": func() page { return unreachablePage },
+		"query":       query,
+		"unreachable": unreachable,
 		"lower":       strings.ToLower,
-		"query": func(pairs ...string) string {
-			v := url.Values{}
-			for i := 0; i+1 < len(pairs); i += 2 {
-				if pairs[i+1] != "" {
-					v.Set(pairs[i], pairs[i+1])
-				}
-			}
-			if len(v) == 0 {
-				return ""
-			}
-			return "?" + v.Encode()
-		},
 	}
+}
+
+// query returns the query of an address, from pairs of names and values: a
+// value that is empty is left out, and so is the whole query if every
+// value is.
+func query(pairs ...string) string {
+	v := url.Values{}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		if pairs[i+1] != "" {
+			v.Set(pairs[i], pairs[i+1])
+		}
+	}
+	if len(v) == 0 {
+		return ""
+	}
+	return "?" + v.Encode()
 }
 
 // ago words how long before now t was, or how long after it: "8s ago", or
@@ -170,6 +176,14 @@ func period(d time.Duration) string {
 		return strconv.Itoa(h) + " hours"
 	}
 	return "1 hour"
+}
+
+// plural returns one for a count of 1, and many for any other count.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // percent returns part of whole as a percentage, from 0 to 100.

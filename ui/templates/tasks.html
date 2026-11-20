@@ -59,11 +59,7 @@
     {{else if $d.Next}}<a class="pager-link" href="{{$d.Next}}">{{$d.Order.Next}}{{template "icon" "next"}}</a>{{end}}
     <span class="subtle" data-shown>{{len $d.Tasks}} shown</span>
   </div>
-  {{else}}<div class="card-body">
-  {{- if $d.Paged}}{{template "empty" (dict "Glyph" "inbox" "Title" "No more tasks" "Text" "The list ends before this page." "Href" $d.First "Label" $d.Order.First "Icon" "first")}}
-  {{- else if and (eq $.Nav "dead") (not $d.Range.Set) $d.Queues.Empty $d.Kinds.Empty $d.Groups.Empty}}{{template "empty" (dict "Glyph" "done" "Title" "No dead tasks" "Text" "A task that fails all its attempts shows here, until you retry or delete it.")}}
-  {{- else if $d.Filtered}}{{template "empty" (dict "Glyph" "filter" "Title" "No tasks match these filters" "Text" "Fewer filters, or a longer range of time, may find some." "Href" (path "/tasks") "Label" "Clear the filters" "Icon" "clear")}}
-  {{- else}}{{template "empty" (dict "Glyph" "inbox" "Title" "No tasks yet" "Text" "Tasks show here once your app enqueues them.")}}{{end}}
+  {{else}}<div class="card-body">{{template "empty" $d.Empty}}
   </div>{{end}}
 </section>
 </div>
