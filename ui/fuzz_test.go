@@ -30,6 +30,7 @@ func FuzzPages(f *testing.F) {
 	} {
 		f.Add(target, false)
 	}
+
 	for _, target := range []string{
 		"/tasks/1/retry", "/tasks/1/cancel", "/queues/pause?name=mail", "/queues/resume?name=%ff", "/queues/pause",
 		// Text that PostgreSQL rejects once failed the request.
@@ -37,11 +38,13 @@ func FuzzPages(f *testing.F) {
 	} {
 		f.Add(target, true)
 	}
+
 	client := setup(f)
 	if _, err := client.Enqueue(f.Context(), greet{Name: "a"},
 		&taskmill.EnqueueOptions{Queue: "mail", GroupKey: "topic\x1fkey"}); err != nil {
 		f.Fatal(err)
 	}
+
 	h := handler(f, client, nil)
 
 	f.Fuzz(func(t *testing.T, target string, post bool) {
@@ -49,10 +52,12 @@ func FuzzPages(f *testing.F) {
 		if err != nil {
 			return // no browser sends it
 		}
+
 		method := http.MethodGet
 		if post {
 			method = http.MethodPost
 		}
+
 		req := httptest.NewRequestWithContext(t.Context(), method, "/", nil)
 		req.URL, req.RequestURI = u, target
 		rec := httptest.NewRecorder()

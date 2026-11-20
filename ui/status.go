@@ -102,6 +102,7 @@ func reason(err error) string {
 			text = after
 		}
 	}
+
 	first, size := utf8.DecodeRuneInString(text)
 	text = string(unicode.ToUpper(first)) + text[size:]
 	if !strings.HasSuffix(text, ".") {
@@ -165,6 +166,7 @@ func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hin
 	if r.URL.Path != "/" {
 		actions = append(actions, backTo("/"))
 	}
+
 	failed := "The dashboard could not read what this page shows. "
 	if r.Method != http.MethodGet {
 		if back == "" {
@@ -172,6 +174,7 @@ func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hin
 		}
 		actions, failed, hint = []link{backTo(back)}, "", unfinished
 	}
+
 	answer := func(code int, title, glyph, text string) {
 		if code == http.StatusServiceUnavailable {
 			w.Header().Set("Retry-After", "5")
@@ -184,9 +187,11 @@ func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hin
 		answer(http.StatusServiceUnavailable, "Taking too long", "slow", "The database did not answer in time.")
 		return
 	}
+
 	if ctx.Err() != nil {
 		return
 	}
+
 	s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request failed",
 		slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
 	if cannotConnect(err) {

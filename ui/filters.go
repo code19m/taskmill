@@ -87,6 +87,7 @@ func newFilter(name, title, plural string, all, chosen []string) filter {
 	for _, v := range all {
 		f.Options = append(f.Options, option{v, slices.Contains(chosen, v)})
 	}
+
 	switch len(chosen) {
 	case 0:
 		f.Label = "All " + plural
@@ -141,6 +142,7 @@ func (s *server) filterChoices(r *http.Request) choices {
 		return c
 	}
 	s.choices.mu.Unlock()
+
 	c, complete := s.readChoices(r)
 	if complete {
 		s.choices.mu.Lock()
@@ -179,6 +181,7 @@ func (s *server) readChoices(r *http.Request) (c choices, complete bool) {
 	}
 	slices.Sort(c.kinds)
 	c.kinds = slices.Compact(c.kinds)
+
 	found, err := s.client.Groups(ctx, &taskmill.GroupParams{Limit: groupChoices})
 	if err != nil {
 		warn("groups", err)
@@ -189,6 +192,7 @@ func (s *server) readChoices(r *http.Request) (c choices, complete bool) {
 	}
 	slices.Sort(c.groups)
 	c.groups, c.moreGroups = slices.Compact(c.groups), found.Next != ""
+
 	return c, complete
 }
 
@@ -207,11 +211,13 @@ func (s *server) groupChoicesJSON(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "taskmill: search failed", http.StatusServiceUnavailable)
 		return
 	}
+
 	keys := make([]string, 0, len(found.Groups))
 	for _, g := range found.Groups {
 		keys = append(keys, g.Key)
 	}
 	slices.Sort(keys)
+
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(slices.Compact(keys)) // the client may be gone; there is no one to tell
 }

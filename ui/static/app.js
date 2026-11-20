@@ -178,6 +178,7 @@
       node.checked = node.defaultChecked;
       node.value = node.defaultValue;
     }
+
     const children = [...next.childNodes];
     let current = node.firstChild;
     let ahead = null; // the keyed children that the copy has too, and has not come to yet, by key
@@ -213,6 +214,7 @@
         morph(match, wanted);
       }
     }
+
     while (current) {
       const after = current.nextSibling;
       current.remove();
@@ -260,16 +262,19 @@
     } else {
       morph(main, result.main);
     }
+
     for (const part of result.doc.querySelectorAll("[data-live-part]")) {
       const mine = document.querySelector(`[data-live-part="${CSS.escape(part.dataset.livePart)}"]`);
       if (mine) morph(mine, part);
     }
+
     if (result.doc.title) document.title = result.doc.title;
     shownETag = result.etag;
     highlight(main);
     for (const slider of main.querySelectorAll(".chart-step")) say(slider);
     if (traced) trace(); // the update took the guide off its chart, or the chart off the page
     if (hint?.matches(":popover-open")) placeHint();
+
     // The newer copy lists every option of a menu, and none that a search
     // found on the server: an open menu shows its search again.
     for (const sel of openMenus()) refine(sel);
@@ -349,6 +354,7 @@
       loadWhole(url.href);
       return;
     }
+
     if (mode === "ask" && showDialogPart(result)) return;
     const n = address(url, mode);
     if (n == null) return;
@@ -363,6 +369,7 @@
     doc.head.append(...[...document.head.querySelectorAll("script[src], link[rel=stylesheet]")].map((node) => node.cloneNode()));
     const main = doc.body.appendChild(document.getElementById("main").cloneNode());
     main.dataset.live = "retry";
+
     // No section is the current one, as on the server's status pages.
     const nav = doc.body.appendChild(document.querySelector("[data-live-part=nav]").cloneNode(true));
     for (const item of nav.querySelectorAll("[aria-current]")) item.removeAttribute("aria-current");
@@ -395,6 +402,7 @@
       if (!notice && announcer) announcer.textContent = main.querySelector("[data-shown], .empty-title")?.textContent ?? "";
       return;
     }
+
     scrollTo(0, y);
     main.focus({ preventScroll: true });
     if (!reducedMotion.matches) main.animate?.([{ opacity: 0.4 }, { opacity: 1 }], { duration: FADE_MS, easing: "ease-out" });
@@ -418,6 +426,7 @@
       location.reload();
       return;
     }
+
     nextTurn(); // a page or an action that is on its way was for the page before
     progress(false);
     dialog?.close?.(); // it asked about the page before
@@ -445,6 +454,7 @@
       if (url.hash && url.pathname === location.pathname && url.search === location.search) return null;
       return url;
     }
+
     const row = event.target.closest?.("tr[data-href]");
     if (!row || event.target.closest(CONTROLS)) return null;
     return new URL(row.dataset.href, location.href);
@@ -459,15 +469,18 @@
       window.open(hit.dataset.href, "_blank", "noopener");
       return;
     }
+
     const url = destination(event);
     // A click that ends a selection of text in a row is no click on the row.
     if (!url || (hit?.localName === "tr" && window.getSelection()?.isCollapsed === false)) return;
     event.preventDefault();
+
     // More of a list is another state of its page, as a filter is: it
     // changes in place, and the reader stays where they are. The place in
     // its link is for a browser that loads the longer list as a page.
     const more = hit?.matches("a[data-more]");
     if (more) url.hash = "";
+
     // A link in a menu is a filter too, a preset of the range of time: the
     // one choice closes the menu.
     const sel = hit?.closest("details.sel");
@@ -601,12 +614,14 @@
     const wasWaiting = waiting;
     waiting = busy();
     if (waiting !== wasWaiting) showLiveStatus();
+
     // A request in flight is a navigation: it must not be abandoned for an
     // update of the page it replaces.
     if (waiting || inflight) {
       schedule(1000);
       return;
     }
+
     const started = Date.now();
     showRetry();
     const result = await load(location.href, shownETag);
@@ -643,6 +658,7 @@
       if (retrying()) render(result, { moved: true, n: entry });
       else apply(result);
     }
+
     succeeded(Date.now() - started);
   }
 
@@ -651,6 +667,7 @@
       location.reload();
       return;
     }
+
     live = !live;
     local.set(LIVE_KEY, live ? null : "off");
     showLiveStatus();
@@ -719,6 +736,7 @@
     button.hidden = !form;
     button.className = look;
     button.replaceChildren(...content);
+
     // Escape closes the dialog without a value: an earlier one must not count.
     dialog.returnValue = "";
     confirming = form;
@@ -750,6 +768,7 @@
       loadWhole(url.href);
       return;
     }
+
     const elsewhere = url.pathname !== location.pathname;
     const n = address(url, elsewhere ? "push" : "replace");
     if (n == null) return;
@@ -770,9 +789,11 @@
     const turn = nextTurn();
     setPending(form, true);
     submitting = true;
+
     const slow = setTimeout(() => progress(true), SLOW_MS);
     const offline = navigator.onLine === false;
     const result = await request(form.action, { body: new URLSearchParams(new FormData(form)) });
+
     clearTimeout(slow);
     submitting = false;
     progress(false);
@@ -781,6 +802,7 @@
       notify(failureToast(unanswered(result, offline)), 2 * NOTICE_MS);
       return;
     }
+
     if (turn !== turns) return; // the reader went on to another page meanwhile
     showActionResult(result);
   }
@@ -806,6 +828,7 @@
       else notify(failureToast(text), 2 * NOTICE_MS);
       return;
     }
+
     if (turn !== turns) return;
     if (assetsOf(result.doc) === assets && showDialogPart(result)) return;
     dialog.close();
@@ -830,6 +853,7 @@
       if (sel) shut(sel);
       return;
     }
+
     // The dialog's own form closes it. For a form that came with a page,
     // the dialog stays, and shows the answer.
     if (form.method === "dialog" && event.submitter?.value === "confirm" && confirming && confirming.ownerDocument !== document) {
@@ -847,6 +871,7 @@
         "confirmDanger" in form.dataset ? "btn danger-solid" : "btn primary");
       return;
     }
+
     if (form.dataset.confirm && !window.confirm(`${form.dataset.confirmTitle || ""} ${form.dataset.confirm}`.trim())) return;
     send(form);
   });
@@ -909,6 +934,7 @@
     const summary = sel.querySelector("summary");
     const text = summary.querySelector(".sel-label");
     const plural = sel.dataset.plural || "";
+
     // The one choice shows as its option does.
     if (chosen.length === 1) text.replaceChildren(...chosen[0].parentNode.querySelector(".pop-text").cloneNode(true).childNodes);
     else text.textContent = chosen.length ? `${chosen.length} ${plural}` : `All ${plural}`;
@@ -946,6 +972,7 @@
     for (const row of sel.querySelectorAll(".pop-list .pop-opt")) {
       row.hidden = q !== "" && !row.textContent.toLowerCase().includes(q);
     }
+
     const add = sel.querySelector("[data-sel-add]");
     if (!add) return;
     const value = query.trim();
@@ -1056,6 +1083,7 @@
       }
       return;
     }
+
     for (const other of openMenus()) if (other !== sel) other.open = false;
     if (sel.matches(".sel-range")) openCalendar(sel);
     placeMenu(sel);
@@ -1129,6 +1157,7 @@
     for (const [name, value] of new FormData(form)) {
       if (typeof value === "string" && value !== "") url.searchParams.append(name, value);
     }
+
     // The address takes the bounds as instants, not what the browser's fields hold.
     const range = form.querySelector(".sel-range");
     if (range) {
@@ -1146,6 +1175,7 @@
       if (asks[0]) url.searchParams.set("since", asks[0]);
       if (asks[1]) url.searchParams.set("before", asks[1]);
     }
+
     navigate(url, "replace");
     return true;
   }
@@ -1197,6 +1227,7 @@
     if (date.value === date.defaultValue && time.value === time.defaultValue) {
       return sel.querySelector(`[name=${name}]`).dataset.time;
     }
+
     if (!date.value && !time.value) return "";
     const day = dayOf(date.value || today());
     const m = /^(\d\d?):?(\d\d)(?::?(\d\d))?$/.exec(time.value.trim() || (last ? "23:59" : "00:00"));
@@ -1235,18 +1266,22 @@
       cal = null;
       return;
     }
+
     scope ??= sel;
     const grid = scope.querySelector(".cal-grid");
     if (!grid.firstChild) {
       grid.innerHTML = `<div class="cal-row" role="row">${'<button type="button" role="gridcell"></button>'.repeat(7)}</div>`.repeat(6);
     }
+
     const now = today();
     const month = cal.at.slice(0, 7);
     const [from, to] = ["since", "before"].map((name) => dayOf(boundOf(sel, name)[0].value));
+
     // The range of the fields, or the one that a click would make.
     const [lo, hi] = cal.first && cal.over ? [cal.first, cal.over].sort() : [from, to];
     const first = Date.parse(`${month}-01`);
     const start = first - ((new Date(first).getUTCDay() - weekStart + 7) % 7) * DAY;
+
     // The title is said when it changes: only then is it written.
     const title = scope.querySelector(".cal-title");
     if (title.textContent !== monthName.format(first)) title.textContent = monthName.format(first);
@@ -1295,6 +1330,7 @@
       move(months(cal.at, +hit.dataset.calStep));
       return;
     }
+
     const sel = hit.closest(".sel");
     const days = [cal.first || day, day].sort();
     for (const [i, name] of ["since", "before"].entries()) {
@@ -1302,6 +1338,7 @@
       date.value = days[i];
       time.value = i ? "23:59" : "00:00";
     }
+
     cal.first = cal.first ? null : day;
     cal.over = null;
     changed(sel, day);
@@ -1387,6 +1424,7 @@
       const time = `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}.${pad(at.getMilliseconds(), 3)}`;
       el.title = `${dateOf(at)} ${time} ${zoneOf(at)}`;
     }
+
     // The range of the filter by time, as the server words it: in short on
     // the button, and in full, with the years and the zones, in its tooltip
     // and for a screen reader. Its end is the last minute before "before",
@@ -1417,6 +1455,7 @@
       date.setAttribute("value", at ? dateOf(at) : "");
       time.setAttribute("value", at ? clock(at) : "");
     }
+
     if (cal) draw(sel);
   }
 
@@ -1459,6 +1498,7 @@
       const text = el.lastChild;
       if (was !== now && text?.nodeValue?.endsWith(was)) text.nodeValue = text.nodeValue.slice(0, -was.length) + now;
     }
+
     main.dataset.now = new Date(to * 1000).toISOString();
   }
 
@@ -1538,6 +1578,7 @@
       if (!el.hasAttribute("title")) el.title = title; // one that it got meanwhile is newer
       el.removeAttribute("aria-description");
     }
+
     held = [];
     tipFor = target;
     const box = nearest(target, cuts);
@@ -1548,6 +1589,7 @@
       el.setAttribute("aria-description", el.title);
       el.removeAttribute("title");
     }
+
     const title = described && held[0]?.[0] === described ? held[0][1] : "";
     // innerText is the text as it shows. Words that only a screen reader
     // reads are on lines of their own in it, and complete no title.
@@ -1559,10 +1601,12 @@
       tooltip.remove();
       return;
     }
+
     if (!tooltip.isConnected) {
       document.body.append(tooltip);
       tooltip.showPopover?.();
     }
+
     const at = described.getBoundingClientRect();
     // Its text starts where the element's does, after the padding of each.
     const x = Math.min(at.left + parseFloat(getComputedStyle(described).paddingLeft) - 9,
@@ -1626,6 +1670,7 @@
       untrace();
       return;
     }
+
     const steps = series[0].length;
     const box = svg.getBoundingClientRect();
     const i = Math.min(steps - 1, Math.max(0, traced.i ?? Math.floor(((traced.x - box.left) / box.width) * steps)));
@@ -1702,6 +1747,7 @@
   on("keydown", (event) => {
     if (event.key !== "/" || event.metaKey || event.ctrlKey || event.altKey) return;
     if (event.target.closest?.("input, select, textarea, dialog, [contenteditable]")) return;
+
     // "/" opens the kind filter, ready to search.
     const sel = document.querySelector('.filters details.sel[data-name="kind"]');
     if (sel) {
@@ -1724,6 +1770,7 @@
     } catch {
       text.textContent = "Select and copy";
     }
+
     setTimeout(() => {
       text.textContent = "Copy";
       icon.setAttribute("href", "#i-copy");

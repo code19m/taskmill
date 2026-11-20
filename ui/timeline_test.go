@@ -20,6 +20,7 @@ import (
 func TestTaskTimeline(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
+
 	// A dead task that halts its FIFO group, where a task waits behind it.
 	if _, err := pool.Exec(t.Context(), `
 	    INSERT INTO `+schema+`.groups (queue, group_key, tasks, halted_task_id, halted_at) VALUES ('mail', 'g', 2, 127, now() - interval '4h');
@@ -27,6 +28,7 @@ func TestTaskTimeline(t *testing.T) {
 	    OVERRIDING SYSTEM VALUE VALUES (127, 'mail', 'greet', 'dead', '{}', 1, 1, 'g', now() - interval '4h', now() - interval '4h', now() - interval '4h')`); err != nil {
 		t.Fatal(err)
 	}
+
 	// The columns of a task, after its queue, kind, and payload.
 	const cols = `state, attempt, max_attempts, group_key, created_at, run_at, attempted_at, errors, finalized_at`
 	for _, c := range []struct {
@@ -126,6 +128,7 @@ func TestTaskTimeline(t *testing.T) {
 	         now() - interval '20m10s', now() - interval '19m10s', now() - interval '19m11s', now() - interval '19m8s')`); err != nil {
 		t.Fatal(err)
 	}
+
 	checkTimeline(t, client, 1001, "completed", []string{
 		"step: Created 9m ago due at once",
 		"gap wait: Waited 200ms",
@@ -160,6 +163,7 @@ func checkTimeline(t *testing.T, client *taskmill.Client, id int64, name string,
 	if list == nil {
 		t.Fatalf("%s: the page has no timeline:\n%s", name, body)
 	}
+
 	var got []string
 	var stepAt string
 	for _, li := range timelineLine.FindAllStringSubmatch(list[1], -1) {
@@ -175,9 +179,11 @@ func checkTimeline(t *testing.T, client *taskmill.Client, id int64, name string,
 		}
 		got = append(got, li[1]+": "+words)
 	}
+
 	if !slices.Equal(got, want) {
 		t.Errorf("%s: the timeline says\n\t%s\nwant\n\t%s", name, strings.Join(got, "\n\t"), strings.Join(want, "\n\t"))
 	}
+
 	// The task that it waits behind is a link, which a screen reader names
 	// as a task.
 	if strings.Contains(list[1], "behind") && !strings.Contains(list[1], `behind <a href="/tasks/127" aria-label="task 127">#127</a>`) {
@@ -196,6 +202,7 @@ func TestTaskColumnsEndTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ := get(t, handler(t, client, nil), "/tasks/"+strconv.FormatInt(res.ID, 10))
 	columns := regexp.MustCompile(`(?s)<div class="task-layout">\s*<div class="stack">.*<h2>Metadata</h2>.*` +
 		`<section class="card flush">\s*<div class="card-head"><h2>Errors <span class="subtle">0</span></h2></div>\s*` +

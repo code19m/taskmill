@@ -55,6 +55,7 @@ func query(pairs ...string) string {
 			v.Set(pairs[i], pairs[i+1])
 		}
 	}
+
 	if len(v) == 0 {
 		return ""
 	}
@@ -69,10 +70,12 @@ func ago(now, t time.Time) string {
 	if t.IsZero() {
 		return "—"
 	}
+
 	d, ahead := now.Unix()-t.Unix(), false
 	if d < 0 {
 		d, ahead = -d, true
 	}
+
 	n, unit := d/86400, "d"
 	switch {
 	case d == 0:
@@ -84,6 +87,7 @@ func ago(now, t time.Time) string {
 	case d < 48*3600:
 		n, unit = d/3600, "h"
 	}
+
 	if ahead {
 		return "in " + strconv.FormatInt(n, 10) + unit
 	}
@@ -112,6 +116,7 @@ func span(d time.Duration) string {
 		}
 		return strconv.Itoa(tenths/10) + "." + strconv.Itoa(tenths%10) + "s"
 	}
+
 	s := int64(d / time.Second)
 	pair := func(n int64, unit string, rest int64, sub string) string {
 		if rest == 0 {
@@ -270,14 +275,17 @@ func fit(names []string) fitted {
 	if len(names) == 0 {
 		return fitted{}
 	}
+
 	const comma = ", "
 	total := (len(names) - 1) * len(comma)
 	for _, name := range names {
 		total += utf8.RuneCountInString(name)
 	}
+
 	if total <= queuesRoom {
 		return fitted{Line: strings.Join(names, comma)}
 	}
+
 	n, used := 1, utf8.RuneCountInString(names[0])
 	for ; n < len(names); n++ {
 		used += len(comma) + utf8.RuneCountInString(names[n])

@@ -47,6 +47,7 @@ func timeline(now time.Time, t, head *taskmill.TaskInfo) []entry {
 	if t.Attempt == 0 {
 		s.started = time.Time{} // a snooze or a stop gave the attempt back
 	}
+
 	switch t.State {
 	case taskmill.StateScheduled:
 		s.created()
@@ -76,6 +77,7 @@ func timeline(now time.Time, t, head *taskmill.TaskInfo) []entry {
 		s.canceled()
 	default:
 	}
+
 	return s.tl
 }
 
@@ -129,6 +131,7 @@ func (s *steps) start(tone string) bool {
 	if s.started.IsZero() {
 		return false
 	}
+
 	note := ""
 	if s.t.Attempt > 1 {
 		note = "attempt " + strconv.Itoa(s.t.Attempt)
@@ -163,6 +166,7 @@ func (s *steps) waiting(head *taskmill.TaskInfo) {
 			wait.Gap += ", behind"
 		}
 	}
+
 	if wait.Took != "" || head != nil {
 		s.tl = append(s.tl, wait)
 	}
@@ -195,12 +199,14 @@ func (s *steps) canceled() {
 	} else {
 		s.step("Created", s.t.CreatedAt, "", "")
 	}
+
 	if s.start("") {
 		s.gap("Failed after", s.started, s.failed(), "err")
 		if reached && !first {
 			s.step("Due", s.t.RunAt, "", "")
 		}
 	}
+
 	note := ""
 	if !reached {
 		note = "was due in " + span(s.t.RunAt.Sub(end))

@@ -65,6 +65,7 @@ func TestPagesDefineTheIconsTheyUse(t *testing.T) {
 	storeSchedules(t, client, []taskmill.Schedule{
 		{Name: "nightly", Cron: "@daily", Args: greet{}}, {Name: "weekly", Cron: "@weekly", Args: greet{}},
 	})
+
 	// A paused schedule and queue, and one of each that runs; a task that
 	// waits; and more dead tasks than a list shows, so that it continues.
 	if err := errors.Join(
@@ -74,6 +75,7 @@ func TestPagesDefineTheIconsTheyUse(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
+
 	waiting, err := client.Enqueue(ctx, greet{Name: "a"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +84,7 @@ func TestPagesDefineTheIconsTheyUse(t *testing.T) {
 		SELECT 'mail', 'greet', 'dead', now(), '{}', 1, now() FROM generate_series(1, 260)`); err != nil {
 		t.Fatal(err)
 	}
+
 	h := handler(t, client, nil)
 	body, dead := listTasks(t, h, "/tasks?limit=250&state=dead")
 	pages := []string{
@@ -100,6 +103,7 @@ func TestPagesDefineTheIconsTheyUse(t *testing.T) {
 			}
 		}
 	}
+
 	for _, m := range regexp.MustCompile(`<symbol id="(i-[^"]+)"`).FindAllStringSubmatch(body, -1) {
 		if !used[m[1]] {
 			t.Errorf("no page of this test uses the icon %q: nothing uses it, or the test no longer reaches its button", m[1])
@@ -117,19 +121,23 @@ func TestStylesDefineThePropertiesTheyUse(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("stylesheet: %d", code)
 	}
+
 	defined, used := map[string]bool{}, map[string]bool{}
 	for _, m := range regexp.MustCompile(`[{;\s](--[a-z0-9-]+)\s*:`).FindAllStringSubmatch(sheet, -1) {
 		defined[m[1]] = true
 	}
+
 	for _, m := range regexp.MustCompile(`var\(\s*(--[a-z0-9-]+)`).FindAllStringSubmatch(sheet, -1) {
 		used[m[1]] = true
 		if !defined[m[1]] {
 			t.Errorf("the stylesheet uses %s, which it does not define", m[1])
 		}
 	}
+
 	if len(used) == 0 {
 		t.Fatal("the stylesheet uses no custom property in the form that this test reads")
 	}
+
 	for name := range defined {
 		if !used[name] {
 			t.Errorf("the stylesheet defines %s, which nothing uses", name)
@@ -146,11 +154,13 @@ func TestStylesWriteTheLightThemeTwiceAlike(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	chosen := regexp.MustCompile(`(?s):root\[data-theme="light"\] \{(.*?)\}`).FindSubmatch(sheet)
 	preferred := regexp.MustCompile(`(?s)\(prefers-color-scheme: light\) \{\s*:root:not\(\[data-theme\]\) \{(.*?)\}`).FindSubmatch(sheet)
 	if chosen == nil || preferred == nil {
 		t.Fatal("the stylesheet has no light theme in the form that this test reads")
 	}
+
 	if a, b := strings.Fields(string(chosen[1])), strings.Fields(string(preferred[1])); !slices.Equal(a, b) {
 		t.Errorf("the two light themes differ:\n%s\n%s", strings.Join(a, " "), strings.Join(b, " "))
 	}
@@ -171,6 +181,7 @@ func TestPagesRender(t *testing.T) {
 	if err := client.UpdateQueue(ctx, "mail", func(s *taskmill.QueueSettings) { s.MaxRunning = 3 }); err != nil {
 		t.Fatal(err)
 	}
+
 	h := handler(t, client, &ui.Config{Prefix: "/admin/tasks"})
 	id := strconv.FormatInt(res.ID, 10)
 
@@ -211,11 +222,13 @@ func TestPagesRender(t *testing.T) {
 			if code != c.code {
 				t.Fatalf("%s: %d, want %d", c.path, code, c.code)
 			}
+
 			for _, part := range c.want {
 				if !strings.Contains(body, part) {
 					t.Errorf("%s: want %s in\n%s", c.path, part, body)
 				}
 			}
+
 			for _, part := range c.not {
 				if strings.Contains(body, part) {
 					t.Errorf("%s: want no %s in\n%s", c.path, part, body)
@@ -237,6 +250,7 @@ func TestTimesShowInUTC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ := get(t, handler(t, client, nil), "/tasks/"+strconv.FormatInt(res.ID, 10))
 	if want := `title="2031-03-04 14:36:07.089 UTC" data-time="2031-03-04T14:36:07.089Z"`; !strings.Contains(body, want) {
 		t.Errorf("the page of a task that runs at %s does not show %s", runAt.Format(time.RFC3339Nano), want)
@@ -251,6 +265,7 @@ func TestTimesShowInUTC(t *testing.T) {
 func TestRelativeTimesHaveTheirExactTime(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
+
 	// What these pages tell the time of was minutes ago, or is minutes ahead.
 	storeCounts(t, pool, schema, "5 minutes", false)
 	var id int64
@@ -269,6 +284,7 @@ func TestRelativeTimesHaveTheirExactTime(t *testing.T) {
 	    RETURNING id`).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
+
 	h := handler(t, client, nil)
 	var (
 		axis     = regexp.MustCompile(`<div class="chart-x"[^>]*>.*?</div>`)
@@ -304,6 +320,7 @@ func TestRelativeTimesHaveTheirExactTime(t *testing.T) {
 func TestRelativeTimesAreWordedFromThePagesTimeOfRendering(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
+
 	// A worker that checked in half a minute ago, late in its second: the
 	// seconds between the two clock readings are one more than the whole
 	// seconds of its exact age, unless the page is rendered as late in its own.
@@ -312,20 +329,24 @@ func TestRelativeTimesAreWordedFromThePagesTimeOfRendering(t *testing.T) {
 	        date_trunc('second', now()) - interval '30 seconds' + interval '999 milliseconds')`); err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ := get(t, handler(t, client, nil), "/workers")
 	page := regexp.MustCompile(`<main id="main"[^>]* data-now="([^"]+)"`).FindStringSubmatch(body)
 	cell := regexp.MustCompile(` data-time="([^"]+\.999Z)">([^<]*)</td>`).FindStringSubmatch(body)
 	if page == nil || cell == nil {
 		t.Fatalf("the page does not say when it was rendered, or when the worker checked in:\n%s", body)
 	}
+
 	now, err := time.Parse(time.RFC3339, page[1])
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	at, err := time.Parse(time.RFC3339, cell[1])
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if want := strconv.FormatInt(now.Unix()-at.Unix(), 10) + "s ago"; cell[2] != want {
 		t.Errorf("a page rendered at %s says of %s: %q, want %q", page[1], cell[1], cell[2], want)
 	}
@@ -352,6 +373,7 @@ func TestNavShowsTheStoredDeadCount(t *testing.T) {
 			    VALUES ('mail', 'dead', $1, $2, now())`, tc.tasks, tc.capped); err != nil {
 				t.Fatal(err)
 			}
+
 			h := handler(t, client, nil)
 			for _, path := range []string{"/", "/tasks?state=dead", "/workers"} {
 				if _, body, _ := get(t, h, path); !strings.Contains(body, `<span>Dead</span><span class="count">`+tc.want+`</span>`) {
@@ -400,12 +422,14 @@ func TestOverviewSaysWhenItsCountsWereTaken(t *testing.T) {
 			if tc.age != "" {
 				storeCounts(t, pool, schema, tc.age, tc.capped)
 			}
+
 			_, body, _ := get(t, handler(t, client, nil), "/")
 			for _, want := range tc.want {
 				if !strings.Contains(body, want) {
 					t.Errorf("want %s in\n%s", want, body)
 				}
 			}
+
 			for _, without := range tc.without {
 				if strings.Contains(body, without) {
 					t.Errorf("want no %s in\n%s", without, body)
@@ -426,6 +450,7 @@ func TestOverviewShowsBothRetentionPeriods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ := get(t, handler(t, client, nil), "/")
 	for _, want := range []string{`<dt>Completed</dt><dd>3 days</dd>`, `<dt>Dead and canceled</dt><dd>36 hours</dd>`} {
 		if !strings.Contains(body, want) {
@@ -437,6 +462,7 @@ func TestOverviewShowsBothRetentionPeriods(t *testing.T) {
 func TestOverviewPeriods(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
+
 	// The charts' period is chosen in the address; an unknown one shows the
 	// last hour. A day has steps of 15 minutes, and an hour steps of one: the
 	// script tells the time of a step by them.
@@ -479,6 +505,7 @@ func TestOverviewShowsTheAttemptsOfAStep(t *testing.T) {
 	    SELECT date_trunc('minute', now()) - n * interval '1 minute', 'mail', 600, 60 FROM generate_series(0, 3) n`); err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ = get(t, h, "/")
 	for _, want := range []string{
 		`aria-label="660 attempts a minute, on a dial from 0 to 1,000"`, `aria-hidden="true">660</p>`,
@@ -488,11 +515,13 @@ func TestOverviewShowsTheAttemptsOfAStep(t *testing.T) {
 			t.Errorf("want %s in\n%s", want, body)
 		}
 	}
+
 	// The needle and the arc of the value turn together, 660 of 1,000 of a
 	// half turn.
 	if n := strings.Count(body, `transform="rotate(118.8)"`); n != 2 {
 		t.Errorf("%d shapes are turned by 118.8 degrees, want the needle and the arc\n%s", n, body)
 	}
+
 	// The chart is a picture with a name, says when its steps start, and
 	// holds one value per step for each series, with nothing for a step
 	// without one: the step in progress, and the one before it while its
@@ -511,6 +540,7 @@ func TestOverviewShowsTheAttemptsOfAStep(t *testing.T) {
 			t.Errorf("want %s in\n%s", want, body)
 		}
 	}
+
 	if strings.Contains(body, `tabindex="0"`) {
 		t.Errorf("a picture takes the focus: without the script it does nothing with it\n%s", body)
 	}
@@ -526,6 +556,7 @@ func TestWorkersPageMarksTheMaintainer(t *testing.T) {
 	    VALUES ('lead', '{mail}', 'h', 'v'), ('other', '{mail}', 'h', 'v')`); err != nil {
 		t.Fatal(err)
 	}
+
 	h := handler(t, client, nil)
 	const mark = `<span class="chip">maintainer</span>`
 	marked := func(lease string) []string {
@@ -535,6 +566,7 @@ func TestWorkersPageMarksTheMaintainer(t *testing.T) {
 		    ON CONFLICT (name) DO UPDATE SET expires_at = EXCLUDED.expires_at`); err != nil {
 			t.Fatal(err)
 		}
+
 		_, body, _ := get(t, h, "/workers")
 		var ids []string
 		for _, row := range strings.Split(body, `<tr data-key="`)[1:] {
@@ -547,6 +579,7 @@ func TestWorkersPageMarksTheMaintainer(t *testing.T) {
 	if ids := marked("1 minute"); !slices.Equal(ids, []string{"lead"}) {
 		t.Errorf("the page marks %v as the maintainer, want the worker that holds the lease", ids)
 	}
+
 	if ids := marked("-1 minute"); len(ids) != 0 {
 		t.Errorf("the page marks %v as the maintainer after the lease ran out", ids)
 	}
@@ -566,6 +599,7 @@ func TestWorkersShowTheirIDsWithoutTheHost(t *testing.T) {
 	           ('lead', '{mail}', 'web-2', 'v'), ('web-3-', '{mail}', 'web-3', 'v'), ('-7-aa', '{mail}', '', 'v')`); err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ := get(t, handler(t, client, nil), "/workers")
 	name, shown := regexp.MustCompile(`<span class="mono">(.*?)</span>(?:<span class="chip">|</div>)`), map[string]string{}
 	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {
@@ -573,6 +607,7 @@ func TestWorkersShowTheirIDsWithoutTheHost(t *testing.T) {
 			shown[row[1]] = m[1]
 		}
 	}
+
 	for id, want := range map[string]string{
 		"web-1.example.com-4242-ab12cd": `<span class="visually-hidden">web-1.example.com-</span>4242-ab12cd`,
 		"web-1.example.com-4242-ffffff": `<span class="visually-hidden">web-1.example.com-</span>4242-ffffff`,
@@ -602,11 +637,13 @@ func TestWorkersShowTheirQueuesAndKinds(t *testing.T) {
 	    ('lead', '{}', '{}', 'h', 'v')`); err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ := get(t, handler(t, client, nil), "/workers")
 	rows := map[string]string{}
 	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {
 		rows[row[1]] = row[2]
 	}
+
 	for _, c := range []struct {
 		worker    string
 		want, not []string
@@ -654,6 +691,7 @@ func TestWorkersSayALocalBuildInPlaceOfGosWord(t *testing.T) {
 	    VALUES ('released', '{mail}', 'h', 'v0.11.1'), ('built', '{mail}', 'h', '(devel)')`); err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ := get(t, handler(t, client, nil), "/workers")
 	for _, want := range []string{
 		`<td class="mono tone-faint" title="v0.11.1">v0.11.1</td>`,
@@ -663,6 +701,7 @@ func TestWorkersSayALocalBuildInPlaceOfGosWord(t *testing.T) {
 			t.Errorf("want %s in\n%s", want, body)
 		}
 	}
+
 	if strings.Contains(body, "devel") {
 		t.Errorf("the page shows Go's word for a local build:\n%s", body)
 	}
@@ -678,6 +717,7 @@ func TestWorkersAreStaleByTheirOwnLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -704,6 +744,7 @@ func TestWorkersAreStaleByTheirOwnLease(t *testing.T) {
 				break
 			}
 		}
+
 		_, body, _ := get(t, h, "/workers")
 		dots, words := strings.Count(body, `class="health stale"`), strings.Count(body, `<span class="chip warn">stale</span>`)
 		if dots != words {
@@ -714,6 +755,7 @@ func TestWorkersAreStaleByTheirOwnLease(t *testing.T) {
 	if n := stale(1, "5 minutes"); n != 0 {
 		t.Error("a worker that checked in within its lease of 10 minutes shows as stale")
 	}
+
 	if n := stale(1, "11 minutes"); n != 1 {
 		t.Error("a worker that made no check-in for longer than its lease shows as healthy")
 	}
@@ -724,9 +766,11 @@ func TestWorkersAreStaleByTheirOwnLease(t *testing.T) {
 	    VALUES ('old', '{}', 'h', 'v')`); err != nil {
 		t.Fatal(err)
 	}
+
 	if n := stale(2, "20 seconds"); n != 0 {
 		t.Errorf("%d workers that checked in 20 seconds ago show as stale", n)
 	}
+
 	if n := stale(2, "40 seconds"); n != 1 {
 		t.Errorf("%d workers show as stale 40 seconds after their check-ins, want the one without a lease", n)
 	}
@@ -752,6 +796,7 @@ func TestGroupKeysOfTheOutboxShowAsTopicAndKey(t *testing.T) {
 			id = res.ID
 		}
 	}
+
 	h := handler(t, client, nil)
 	const parts = `<span><span class="topic">orders</span><span class="topic-sep" aria-hidden="true">›</span>order-13</span>`
 	for path, wants := range map[string][]string{
@@ -782,6 +827,7 @@ func TestGroupKeysOfTheOutboxShowAsTopicAndKey(t *testing.T) {
 			}
 		}
 	}
+
 	// The filter still selects by the key itself.
 	if _, tasks := listTasks(t, h, "/tasks?group=orders%1Forder-13"); !slices.Equal(tasks, []string{strconv.FormatInt(id, 10)}) {
 		t.Errorf("the list of the group shows the tasks %v, want %d", tasks, id)
@@ -801,6 +847,7 @@ func TestSchedulesSayTheirCronInWords(t *testing.T) {
 	           ('unreadable', 'default', 'greet', '<every> day', 'UTC', now())`); err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ := get(t, handler(t, client, nil), "/schedules")
 	cronCell, cells := regexp.MustCompile(`(?s)<td class="wrap"[^>]*>(.*?)</td>`), map[string]string{}
 	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {
@@ -808,6 +855,7 @@ func TestSchedulesSayTheirCronInWords(t *testing.T) {
 			cells[row[1]] = cell[1]
 		}
 	}
+
 	for name, want := range map[string]string{
 		"nightly":     `<div class="cron-words">Every day at 03:00</div><code class="chip mono">0 3 * * *</code> <span class="tone-ghost">Europe/Berlin</span>`,
 		"friday-13th": `<code class="chip mono">0 0 13 * 5</code> <span class="tone-ghost">UTC</span>`,
@@ -862,6 +910,7 @@ func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, s
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	read, trips = new(atomic.Int64), &roundTrips{}
 	cfg.ConnConfig.Tracer = trips
 	cfg.ConnConfig.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -876,9 +925,11 @@ func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, s
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		t.Fatal(err)
 	}
+
 	if client, err = taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema}); err != nil {
 		t.Fatal(err)
 	}
+
 	return client, pool, schema, read, trips
 }
 
@@ -899,23 +950,28 @@ func TestTaskPagesReadNoPayloadsTheyDoNotShow(t *testing.T) {
 			GroupKey: "g", Metadata: map[string]string{"trace": strings.Repeat("m", payload/10)},
 		}}
 	}
+
 	res, err := client.EnqueueMany(ctx, params)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	// Every task has a full error history, and the group's head is dead.
 	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET errors = (
 	        SELECT jsonb_agg(jsonb_build_object('attempt', n, 'at', now(), 'message', repeat('e', 1000) || n))
 	        FROM generate_series(1, 20) n)`); err != nil {
 		t.Fatal(err)
 	}
+
 	head, next := strconv.FormatInt(res[0].ID, 10), strconv.FormatInt(res[1].ID, 10)
 	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, res[0].ID); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.groups SET halted_task_id = $1, halted_at = now()`, res[0].ID); err != nil {
 		t.Fatal(err)
 	}
+
 	h := handler(t, client, nil)
 
 	// What a page reads must not grow with what its tasks hold: the limit is
@@ -951,6 +1007,7 @@ func TestPagesMakeFewRoundTrips(t *testing.T) {
 	t.Parallel()
 	client, pool, schema, _, trips := setupCounting(t)
 	ctx := t.Context()
+
 	// One enqueue for the three tasks: the client sends a later notification
 	// for enqueues that follow each other closely, and that would count.
 	grouped := taskmill.EnqueueParams{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}}
@@ -958,13 +1015,16 @@ func TestPagesMakeFewRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ids := []int64{res[0].ID, res[1].ID, res[2].ID}
 	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, ids[0]); err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.groups SET halted_task_id = $1, halted_at = now()`, ids[0]); err != nil {
 		t.Fatal(err)
 	}
+
 	h := handler(t, client, nil)
 	get(t, h, "/tasks") // reads the filters' choices, which the next pages reuse
 

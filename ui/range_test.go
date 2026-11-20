@@ -44,6 +44,7 @@ func storeCreated(t *testing.T, pool *pgxpool.Pool, schema, state string, first 
 			SELECT $2 + i - 1, now(), 'mail', at, 'greet', now(), 'w', now(), 2, 1, 1, '{}', '{}', '[]'
 			FROM unnest($1::timestamptz[]) WITH ORDINALITY AS u(at, i)`
 	}
+
 	if _, err := pool.Exec(t.Context(), sql, at, first); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +96,7 @@ func readRangeFilter(t *testing.T, body string) rangeFilter {
 	if button == nil {
 		t.Fatalf("the button of the filter by time does not name its time and its range\n%s", body)
 	}
+
 	var f rangeFilter
 	f.name, f.label = html.UnescapeString(button[1]), html.UnescapeString(button[2])
 	f.full, _ = attrOf(summary, "aria-label")
@@ -119,6 +121,7 @@ func readRangeFilter(t *testing.T, body string) rangeFilter {
 func TestTaskListTakesARangeOfFinishTimes(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
+
 	// Tasks 1, 2, and 3 died at 10:00, 11:00, and 12:00 UTC. Task 4 was
 	// canceled at 11:30.
 	storeFinished(t, pool, schema, "dead", utc(t, "10:00:00"), utc(t, "11:00:00"), utc(t, "12:00:00"))
@@ -159,6 +162,7 @@ func TestTaskListTakesARangeOfFinishTimes(t *testing.T) {
 func TestTaskListTakesARangeOfCreationTimes(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
+
 	// Tasks 1, 2, and 3 were created at 12:00, 11:00, and 10:00 UTC, and
 	// wait. Task 4 was created at 11:30 and completed, and task 5 at 10:30,
 	// and died.
@@ -197,6 +201,7 @@ func TestTaskListTakesARangeOfCreationTimes(t *testing.T) {
 			t.Errorf("/tasks?%s marks its order on %q as %q, want Created, newest first", c.query, column, order)
 		}
 	}
+
 	body, ids := listTasks(t, h, "/tasks")
 	if column, _ := sortedBy(t, body); column != "ID" || !slices.Equal(ids, []string{"5", "4", "3", "2", "1"}) {
 		t.Errorf("without a range, the list is %v and marks its order on %q, want the order of the IDs", ids, column)
@@ -212,6 +217,7 @@ func TestTaskListTakesARangeOfCreationTimes(t *testing.T) {
 func TestRangeIsOfTheTimeThatOrdersTheList(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
+
 	// Task 1 was created at 10:00 UTC and died at 12:00. Task 2 was created
 	// at 12:00 and died at 14:00. Task 3 was created at 10:30, and waits.
 	storeCreated(t, pool, schema, "dead", 1, utc(t, "10:00:00"), utc(t, "12:00:00"))
@@ -353,6 +359,7 @@ func TestRangeFilterOffersPresets(t *testing.T) {
 func TestTaskListKeepsItsRangeOfFinishTimes(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
+
 	// Task i of 260 died (7i mod 260) minutes before noon, as the tasks of
 	// deadTasks do before now. Task 261 died a day before them, and task 262
 	// a day after.
@@ -362,6 +369,7 @@ func TestTaskListKeepsItsRangeOfFinishTimes(t *testing.T) {
 		at[i-1] = noon.Add(-time.Duration(i*7%260) * time.Minute)
 		latestFirst[i*7%260] = strconv.Itoa(i)
 	}
+
 	storeFinished(t, pool, schema, "dead", at...)
 	h := handler(t, client, nil)
 
@@ -371,6 +379,7 @@ func TestTaskListKeepsItsRangeOfFinishTimes(t *testing.T) {
 	if !slices.Equal(ids, latestFirst[:50]) {
 		t.Fatalf("the list starts with %v, want the 50 tasks that died last in the range", ids)
 	}
+
 	for want := 100; want <= 250; want += 50 {
 		more := linkNamed(t, body, "Load more")
 		if more != "/tasks?"+strings.Replace(kept, "&since", "&limit="+strconv.Itoa(want)+"&since", 1)+"#more" {
@@ -380,14 +389,17 @@ func TestTaskListKeepsItsRangeOfFinishTimes(t *testing.T) {
 			t.Fatalf("%s shows %d tasks %v, want the %d that died last in the range", more, len(ids), ids, want)
 		}
 	}
+
 	earlier := linkNamed(t, body, "Earlier")
 	if link, err := url.Parse(earlier); err != nil || link.Query().Get("since") != "2021-03-04T07:41:00Z" || link.Query().Get("before") != "2021-03-04T12:01:00Z" {
 		t.Fatalf("the page after 250 tasks is %s, want it with the range", earlier)
 	}
+
 	body, later := listTasks(t, h, earlier)
 	if !slices.Equal(later, latestFirst[250:]) {
 		t.Errorf("the page after 250 tasks shows %v, want the 10 that died first in the range", later)
 	}
+
 	if latest, cleared := linkNamed(t, body, "Latest"), linkNamed(t, body, "Clear"); latest != "/tasks?"+kept || cleared != "/tasks" {
 		t.Errorf("the last page leads back to %s, want the first page with the range, and clears the filters at %s", latest, cleared)
 	}
@@ -399,6 +411,7 @@ func TestTaskListKeepsItsRangeOfFinishTimes(t *testing.T) {
 func TestTaskListKeepsItsRangeOfCreationTimes(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
+
 	// Task i of 260 was created (7i mod 260) minutes before noon. Task 261
 	// was created a day before them, and task 262 a day after.
 	noon := utc(t, "12:00:00")
@@ -407,6 +420,7 @@ func TestTaskListKeepsItsRangeOfCreationTimes(t *testing.T) {
 		at[i-1] = noon.Add(-time.Duration(i*7%260) * time.Minute)
 		newestFirst[i*7%260] = strconv.Itoa(i)
 	}
+
 	storeCreated(t, pool, schema, "available", 1, at...)
 	h := handler(t, client, nil)
 
@@ -415,6 +429,7 @@ func TestTaskListKeepsItsRangeOfCreationTimes(t *testing.T) {
 	if !slices.Equal(ids, newestFirst[:50]) {
 		t.Fatalf("the list starts with %v, want the 50 tasks that were created last in the range", ids)
 	}
+
 	for want := 100; want <= 250; want += 50 {
 		more := linkNamed(t, body, "Load more")
 		if more != "/tasks?"+strings.Replace(kept, "&queue", "&limit="+strconv.Itoa(want)+"&queue", 1)+"#more" {
@@ -424,23 +439,28 @@ func TestTaskListKeepsItsRangeOfCreationTimes(t *testing.T) {
 			t.Fatalf("%s shows %d tasks %v, want the %d that were created last in the range", more, len(ids), ids, want)
 		}
 	}
+
 	older := linkNamed(t, body, "Older")
 	if link, err := url.Parse(older); err != nil || link.Query().Get("since") != "2021-03-04T07:41:00Z" || link.Query().Get("before") != "2021-03-04T12:01:00Z" {
 		t.Fatalf("the page after 250 tasks is %s, want it with the range", older)
 	}
+
 	body, later := listTasks(t, h, older)
 	if !slices.Equal(later, newestFirst[250:]) {
 		t.Errorf("the page after 250 tasks shows %v, want the 10 that were created first in the range", later)
 	}
+
 	if newest, cleared := linkNamed(t, body, "Newest"), linkNamed(t, body, "Clear"); newest != "/tasks?"+kept || cleared != "/tasks" {
 		t.Errorf("the last page leads back to %s, want the first page with the range, and clears the filters at %s", newest, cleared)
 	}
+
 	// The cursor of that page is one of the creation order: the same list
 	// without the range, which is in the order of the IDs, refuses it.
 	link, err := url.Parse(older)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if code, body, _ := get(t, h, "/tasks?queue=mail&cursor="+link.Query().Get("cursor")); code != http.StatusBadRequest || !strings.Contains(body, "Back to the first page") {
 		t.Errorf("the list without the range takes the cursor of the list with it: status %d\n%s", code, body)
 	}
@@ -530,9 +550,11 @@ func TestRangeFilterHoldsWhatItsPickerReads(t *testing.T) {
 	if role, _ := attrOf(grid, "role"); role != "grid" || title == "" || !regexp.MustCompile(`<span class="cal-title" id="`+title+`"`).MatchString(menu) {
 		t.Errorf("the calendar is %s, want a grid that the title of the month names\n%s", grid, menu)
 	}
+
 	if week := tagOf(t, menu, `(?s)<div class="cal-row cal-week"[^>]*>.*?</div>`); strings.Count(week, "<span>") != 7 {
 		t.Errorf("the calendar's row of weekdays is %s, want seven days", week)
 	}
+
 	for step, name := range map[string]string{"-1": "Previous month", "1": "Next month"} {
 		button := tagOf(t, menu, `<button[^>]* data-cal-step="`+step+`"[^>]*>`)
 		kind, _ := attrOf(button, "type")
@@ -550,6 +572,7 @@ func TestRangeFilterHoldsWhatItsPickerReads(t *testing.T) {
 		f.placeholder, _ = attrOf(tag, "placeholder")
 		fields = append(fields, f)
 	}
+
 	want := []field{
 		{"since", "From, date", "YYYY-MM-DD"},
 		{"since", "From, time", "HH:MM"},
@@ -565,6 +588,7 @@ func TestRangeFilterHoldsWhatItsPickerReads(t *testing.T) {
 			t.Errorf("the menu has no %s: the picker must not show without the script", part)
 		}
 	}
+
 	for name, label := range map[string]string{"since": "From", "before": "Before"} {
 		if !regexp.MustCompile(`<label class="field">` + label + `<input[^>]* type="datetime-local" name="` + name + `"`).MatchString(menu) {
 			t.Errorf("without the script, the menu has no field %q for %s\n%s", label, name, menu)

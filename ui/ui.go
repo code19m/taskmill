@@ -128,10 +128,12 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	if cfg == nil {
 		cfg = &Config{}
 	}
+
 	ancestors, err := checkConfig(client, cfg)
 	if err != nil {
 		return nil, err
 	}
+
 	s := &server{
 		client:   client,
 		prefix:   strings.TrimRight(cfg.Prefix, "/"),
@@ -142,6 +144,7 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
 	}
+
 	s.pages = template.Must(template.New("").Funcs(s.funcs()).ParseFS(assets, "templates/*.html"))
 
 	mux := http.NewServeMux()
@@ -184,11 +187,13 @@ func checkConfig(client *taskmill.Client, cfg *Config) (ancestors string, err er
 	case cfg.BasicAuth != nil && (cfg.BasicAuth.Username == "" || cfg.BasicAuth.Password == ""):
 		return "", invalid("BasicAuth needs a username and a password")
 	}
+
 	for _, o := range cfg.FrameAncestors {
 		if o == "" || strings.ContainsAny(o, " \t\r\n,;") {
 			return "", invalid("FrameAncestors entry %q is empty or holds a space, comma, or semicolon", o)
 		}
 	}
+
 	if len(cfg.FrameAncestors) == 0 {
 		return "'none'", nil
 	}

@@ -48,6 +48,7 @@ func setupOn(tb testing.TB, pool *pgxpool.Pool) (*taskmill.Client, *pgxpool.Pool
 	if err := taskmill.Migrate(tb.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		tb.Fatal(err)
 	}
+
 	client, err := taskmill.NewClient(tb.Context(), pool, &taskmill.ClientConfig{Schema: schema})
 	if err != nil {
 		tb.Fatal(err)
@@ -77,6 +78,7 @@ func get(t *testing.T, h http.Handler, target string, headers ...string) (int, s
 	for i := 0; i+1 < len(headers); i += 2 {
 		req.Header.Set(headers[i], headers[i+1])
 	}
+
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	body, _ := io.ReadAll(rec.Body)
@@ -90,6 +92,7 @@ func post(t *testing.T, h http.Handler, target, fetchSite string) *httptest.Resp
 	if fetchSite != "" {
 		req.Header.Set("Sec-Fetch-Site", fetchSite)
 	}
+
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -103,6 +106,7 @@ func storeSchedules(t *testing.T, client *taskmill.Client, schedules []taskmill.
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx, stop := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -111,6 +115,7 @@ func storeSchedules(t *testing.T, client *taskmill.Client, schedules []taskmill.
 			t.Fatal("the schedules were not stored")
 		}
 	}
+
 	stop()
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -125,6 +130,7 @@ func schedulesThat(t *testing.T, client *taskmill.Client, match func(taskmill.Sc
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var names []string
 	for _, sc := range stored {
 		if match == nil || match(sc) {
@@ -141,6 +147,7 @@ func pausedQueues(t *testing.T, client *taskmill.Client) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var names []string
 	for _, q := range queues {
 		if q.Paused {
@@ -165,6 +172,7 @@ func rowForms(t *testing.T, h http.Handler, target, name string) map[string]stri
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_, body, _ := get(t, h, target)
 	found := map[string]string{}
 	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {

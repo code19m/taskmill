@@ -76,47 +76,56 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+
 	workers, err := s.client.Workers(ctx)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+
 	schedules, err := s.client.Schedules(ctx)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+
 	settings, err := s.client.Settings(ctx)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+
 	now := time.Now()
 	p := periodOf(r.URL.Query().Get("range"))
 	win := windowOf(p, now)
+
 	// The charts are not worth failing the page for: without their history,
 	// they say so.
 	activity, err := s.client.Activity(ctx, &taskmill.ActivityParams{Since: win.start, Step: win.step})
 	if err != nil && ctx.Err() == nil {
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "read activity failed", slog.Any(logKeyError, err))
 	}
+
 	tasksChart, attemptsChart := taskChart(activity, win, now), attemptChart(activity, win, now)
 	rate, peak := throughput(activity, win, now)
 	if err != nil {
 		tasksChart.Note, attemptsChart.Note = "History is unavailable.", "History is unavailable."
 	}
+
 	var nextRun time.Time
 	for _, sc := range schedules {
 		if !sc.Paused && (nextRun.IsZero() || sc.NextRunAt.Before(nextRun)) {
 			nextRun = sc.NextRunAt
 		}
 	}
+
 	var refreshed time.Time
 	for _, q := range queues {
 		if q.RefreshedAt.After(refreshed) {
 			refreshed = q.RefreshedAt
 		}
 	}
+
 	t := sumQueues(queues)
 	s.render(w, r, http.StatusOK, "overview.html", page{Title: "Overview", Nav: "overview", Dead: t.Dead, Data: overviewData{
 		Queues: queues, States: queueStates, Totals: t,
@@ -146,20 +155,24 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 	for _, key := range []string{"cursor", "limit", "done", "count", "conflicts"} {
 		first.Del(key)
 	}
+
 	limit, err := shown(q.Get("limit"))
 	if err != nil {
 		s.refuse(w, r, http.StatusBadRequest, "Invalid request", reason(err), link{listPath(first), "Back to the first page", "first"})
 		return
 	}
+
 	since, before, err := listRange(q)
 	if err != nil {
 		s.refuse(w, r, http.StatusBadRequest, "Invalid request", reason(err),
 			link{listPath(withRange(first, time.Time{}, time.Time{})), "Clear the range", "clear"})
 		return
 	}
+
 	ranged := !since.IsZero() || !before.IsZero()
 	order := orderOf(f, ranged)
 	first = withRange(first, since, before)
+
 	// The list shows no payload, no metadata, and only each task's last
 	// error. Its range is of the time that orders it.
 	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: limit, Summary: true}
@@ -168,6 +181,7 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 	} else {
 		params.CreatedSince, params.CreatedBefore = since, before
 	}
+
 	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		// The error names what the client refused: the filter, or the
@@ -181,6 +195,7 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, r, http.StatusBadRequest, "Invalid request", text, back)
 		return
 	}
+
 	filtered := ranged || len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
 	if err != nil {
 		hint := ""
@@ -190,32 +205,39 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 		s.failWith(w, r, err, hint, "")
 		return
 	}
+
 	known, err := s.client.Queues(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+
 	names := make([]string, 0, len(known))
 	for _, kq := range known {
 		names = append(names, kq.Name)
 	}
+
 	offered := s.filterChoices(r)
 	more, next := s.continuation(first, params, res.Next)
+
 	states := filterQuery(f)["state"]
 	nav, title := "tasks", "Tasks"
 	if slices.Equal(states, []string{string(taskmill.StateDead)}) {
 		nav, title = "dead", "Dead tasks"
 	}
+
 	groupFilter := newFilter("group", "FIFO group", "groups", offered.groups, f.GroupKeys).searchable()
 	if offered.moreGroups {
 		groupFilter.Source = s.path("/choices/groups")
 	}
+
 	// A bulk action acts on every task that the filters select, also outside
 	// a range of time: a list with a range does not offer it.
 	var bulk *bulkLinks
 	if filtered && !ranged && !s.readOnly {
 		bulk = s.bulkLinks(f)
 	}
+
 	d := taskListData{
 		Tasks: res.Tasks, Seen: limit - pageSize, Order: order,
 		States:   newFilter("state", "State", "states", listedStateNames, states),
@@ -230,6 +252,7 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 	if len(res.Tasks) == 0 {
 		d.Empty = s.noTasks(&d, nav == "dead")
 	}
+
 	s.render(w, r, http.StatusOK, "tasks.html", page{Title: title, Nav: nav, Dead: sumQueues(known).Dead, Data: d})
 }
 
@@ -269,11 +292,13 @@ func (s *server) continuation(first url.Values, params *taskmill.ListParams, aft
 	if after == "" {
 		return "", ""
 	}
+
 	v := maps.Clone(first)
 	if params.Limit >= maxShown {
 		v.Set("cursor", after)
 		return "", s.path("/tasks?" + v.Encode())
 	}
+
 	if params.Cursor != "" {
 		v.Set("cursor", params.Cursor)
 	}
@@ -324,6 +349,7 @@ func orderOf(f taskmill.TaskFilter, ranged bool) listOrder {
 	if len(f.States) > 0 && !slices.ContainsFunc(f.States, unfinished) {
 		return listOrder{Column: "finished", Name: "Latest first", First: "Latest", Next: "Earlier", Time: "Finished", ByFinish: true}
 	}
+
 	order := listOrder{Column: "id", Name: "Newest first", First: "Newest", Next: "Older", Time: "Created"}
 	if ranged {
 		order.Column = "created"
@@ -358,6 +384,7 @@ func (s *server) task(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r)
 		return
 	}
+
 	ctx := r.Context()
 	info, err := s.client.Get(ctx, id)
 	if errors.Is(err, taskmill.ErrNotFound) {
@@ -368,11 +395,13 @@ func (s *server) task(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+
 	g, err := s.groupOf(r, info)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+
 	s.render(w, r, http.StatusOK, "task.html", page{Title: fmt.Sprintf("Task %d", id), Nav: "tasks", Dead: s.deadCount(r), Data: taskData{Task: info, Group: g}})
 }
 
@@ -406,6 +435,7 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 		}
 	default:
 	}
+
 	return g, nil
 }
 

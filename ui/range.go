@@ -26,6 +26,7 @@ func queryTime(q url.Values, name string) (time.Time, error) {
 	if v == "" {
 		return time.Time{}, nil
 	}
+
 	// A query spells a space as "+". So the plus of an offset arrives as a
 	// space, unless whoever wrote the address escaped it. No time has a
 	// space of its own.
@@ -146,6 +147,7 @@ func (s *server) newRangeFilter(title string, first url.Values, since, before, n
 		from := now.Add(-p.last).Truncate(time.Minute)
 		f.Presets = append(f.Presets, preset{Label: p.label, Href: s.path(listPath(withRange(first, from, time.Time{})))})
 	}
+
 	whole := s.path(listPath(withRange(first, time.Time{}, time.Time{})))
 	f.Presets = append(f.Presets, preset{Label: "Any time", Href: whole, Current: !f.Set})
 	return f
@@ -181,6 +183,7 @@ func rangeWords(since, before, now time.Time) (short, full string) {
 	case since.IsZero():
 		return "Before " + brief(before), "Before " + long(before)
 	}
+
 	end := brief(before)
 	if since.Format(time.DateOnly) == before.Format(time.DateOnly) {
 		end = clock(before)

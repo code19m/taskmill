@@ -23,10 +23,12 @@ func TestTaskFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	news, err := client.Enqueue(ctx, greet{Name: "b"}, &taskmill.EnqueueOptions{Queue: "news", GroupKey: "acct-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	h := handler(t, client, &ui.Config{Prefix: "/admin/tasks"})
 	link := func(id int64) string { return `href="/admin/tasks/tasks/` + strconv.FormatInt(id, 10) + `"` }
 	for _, c := range []struct {
@@ -51,6 +53,7 @@ func TestTaskFilters(t *testing.T) {
 	if _, body, _ := get(t, h, "/admin/tasks/tasks"); !strings.Contains(body, `name="group" value="acct-1"`) {
 		t.Fatalf("the group filter does not offer acct-1\n%s", body)
 	}
+
 	code, body, header := get(t, h, "/admin/tasks/choices/groups?search=T-2")
 	if code != http.StatusOK || header.Get("Content-Type") != "application/json" || strings.TrimSpace(body) != `["acct-2"]` {
 		t.Fatalf("group search: %d %q", code, body)
@@ -73,10 +76,12 @@ func deadTasks(t *testing.T) (h http.Handler, latestFirst []string) {
 	if _, err := client.Enqueue(t.Context(), greet{Name: "a"}, nil); err != nil {
 		t.Fatal(err)
 	}
+
 	latestFirst = make([]string, 260)
 	for i := 1; i <= 260; i++ {
 		latestFirst[i*7%260] = strconv.Itoa(i)
 	}
+
 	return handler(t, client, nil), latestFirst
 }
 
@@ -93,6 +98,7 @@ func listTasks(t *testing.T, h http.Handler, target string) (body string, ids []
 	if code != http.StatusOK {
 		t.Fatalf("GET %s: status %d", target, code)
 	}
+
 	for _, m := range taskRow.FindAllStringSubmatch(body, -1) {
 		ids = append(ids, m[1])
 	}
@@ -131,13 +137,16 @@ func TestListOfDeadTasksShowsTheLatestFirst(t *testing.T) {
 	if column, order := sortedBy(t, body); column != "Finished" || order != "Latest first" {
 		t.Errorf("the list of dead tasks marks its order on %q as %q, want Finished, latest first", column, order)
 	}
+
 	if !slices.Equal(ids, latestFirst[:50]) {
 		t.Errorf("the list of dead tasks starts with %v, want the 50 that died last", ids)
 	}
+
 	mixed, ids := listTasks(t, h, "/tasks?state=dead&state=available")
 	if !slices.Equal(ids[:3], []string{"261", "260", "259"}) || !strings.Contains(mixed, "<th>Due</th>") || !strings.Contains(mixed, "Load more") {
 		t.Errorf("a list of dead and available tasks starts with %v, or shows when its tasks finished\n%s", ids[:3], mixed)
 	}
+
 	if column, order := sortedBy(t, mixed); column != "ID" || order != "Newest first" {
 		t.Errorf("a list of dead and available tasks marks its order on %q as %q, want ID, newest first", column, order)
 	}
@@ -156,6 +165,7 @@ func TestTaskListLoadsMore(t *testing.T) {
 	if strings.Contains(body, `id="more"`) || strings.Contains(body, ">Latest<") {
 		t.Errorf("the first 50 dead tasks have one named \"more\", or lead back to themselves\n%s", body)
 	}
+
 	for want := 100; want <= 250; want += 50 {
 		more := linkNamed(t, body, "Load more")
 		if more != "/tasks?limit="+strconv.Itoa(want)+"&state=dead#more" {
@@ -168,13 +178,16 @@ func TestTaskListLoadsMore(t *testing.T) {
 			t.Errorf("%s: want the list's task %d, and no other, named \"more\"", more, want-49)
 		}
 	}
+
 	if strings.Contains(body, "Load more") {
 		t.Errorf("the list of 250 dead tasks still offers to load more\n%s", body)
 	}
+
 	earlier := linkNamed(t, body, "Earlier")
 	if strings.Contains(earlier, "limit=") {
 		t.Errorf("the page after 250 dead tasks is %s, want no limit in its address", earlier)
 	}
+
 	body, later := listTasks(t, h, earlier)
 	if !slices.Equal(slices.Concat(ids, later), latestFirst) {
 		t.Errorf("the page after 250 dead tasks shows %v, want the 10 that died first", later)
@@ -212,6 +225,7 @@ func TestTaskListSaysHowItContinues(t *testing.T) {
 			t.Errorf("GET %s: status %d, want a page with %s, and without %s\n%s", c.target, code, c.want, c.not, body)
 		}
 	}
+
 	if _, body, _ := get(t, h, "/tasks?cursor=MQ"); linkNamed(t, body, "Newest") != "/tasks" {
 		t.Errorf("the page after the last task does not lead back to the first page\n%s", body)
 	}
@@ -260,6 +274,7 @@ func TestTaskListThatRunsOutOfTime(t *testing.T) {
 	client, pool, schema := setupDB(t)
 	ctx := t.Context()
 	h := handler(t, client, nil)
+
 	// The list waits for the table, and the database ends its statement, as
 	// it does at the time limit: here, because the test cancels it.
 	tx, err := pool.Begin(ctx)
@@ -270,6 +285,7 @@ func TestTaskListThatRunsOutOfTime(t *testing.T) {
 	if _, err := tx.Exec(ctx, `LOCK TABLE `+schema+`.tasks IN ACCESS EXCLUSIVE MODE`); err != nil {
 		t.Fatal(err)
 	}
+
 	const hint = "A queue and a state in the filters, or fewer filters, may help."
 	for target, hinted := range map[string]bool{"/tasks?state=dead": true, "/tasks": false} {
 		type answer struct {

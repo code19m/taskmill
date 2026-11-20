@@ -38,6 +38,7 @@ func TestStatusPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	id := strconv.FormatInt(res.ID, 10)
 	serve := func(method, target string) *httptest.ResponseRecorder {
 		if method == http.MethodPost {
@@ -100,6 +101,7 @@ func TestStatusPages(t *testing.T) {
 	if code, _, _ := get(t, h, "/"); code != http.StatusOK {
 		t.Errorf("the overview with its database back: %d", code)
 	}
+
 	// The log has what the pages leave out.
 	logs.mu.Lock()
 	defer logs.mu.Unlock()
@@ -126,12 +128,14 @@ func checkStatusPage(t *testing.T, what string, rec *httptest.ResponseRecorder, 
 	for _, m := range regexp.MustCompile(`<a class="btn (primary|quiet)" href="([^"]*)">.*?</svg>([^<]+)</a>`).FindAllStringSubmatch(page, -1) {
 		actions = append(actions, m[1]+" "+html.UnescapeString(m[2])+" "+m[3])
 	}
+
 	if rec.Code != w.code || !strings.Contains(page, "<h1>"+w.title+"</h1>") || !strings.Contains(page, w.text) ||
 		!slices.Equal(actions, w.actions) || strings.Contains(page, `data-live="retry"`) != w.retry ||
 		strings.Contains(page, "data-retry") != w.retry || (rec.Header().Get("Retry-After") != "") != (w.code == http.StatusServiceUnavailable) {
 		t.Errorf("%s: %d, actions %q, want %d %q saying %q, actions %q, trying again: %t\n%s",
 			what, rec.Code, actions, w.code, w.title, w.text, w.actions, w.retry, page)
 	}
+
 	for _, detail := range []string{"taskmill:", "127.0.0.1", "dial tcp", "refused", "failed to connect", "user=", "SQLSTATE", "workers_gone", schema} {
 		if strings.Contains(page, detail) {
 			t.Errorf("%s: the page shows %q, a detail of the error\n%s", what, detail, page)
@@ -147,6 +151,7 @@ func poolThatCanFail(t *testing.T) (*pgxpool.Pool, *atomic.Bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	down := new(atomic.Bool)
 	dial := cfg.ConnConfig.DialFunc
 	cfg.ConnConfig.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -202,6 +207,7 @@ func TestRequestsPastTheirDeadline(t *testing.T) {
 			t.Errorf("%s %s from a client that went away: an answer of %d bytes, want none", r.method, r.target, rec.Body.Len())
 		}
 	}
+
 	want := slices.Repeat([]string{"dashboard request timed out"}, len(requests))
 	if !slices.Equal(logs.messages, want) {
 		t.Errorf("logged %q, want one %q for each request past its deadline, and nothing else", logs.messages, want[0])

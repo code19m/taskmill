@@ -40,10 +40,12 @@ func TestAgoWordsATimeToTheSecond(t *testing.T) {
 			t.Errorf("a time %v before the page was rendered shows as %q, want %q", c.before, got, c.want)
 		}
 	}
+
 	// No time, and times farther away than a duration can hold.
 	if got := ago(now, time.Time{}); got != "—" {
 		t.Errorf("no time shows as %q, want a dash", got)
 	}
+
 	if got := ago(now, now.AddDate(400, 0, 0)); got != "in 146097d" {
 		t.Errorf("a time 400 years ahead shows as %q, want in 146097d", got)
 	}

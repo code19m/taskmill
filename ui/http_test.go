@@ -17,6 +17,7 @@ import (
 func TestLiveUpdateResponses(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
+
 	// Live updates ask for a page they already show, and are told it did not
 	// change; a client that accepts it gets the page compressed.
 	_, plain, header := get(t, h, "/workers")
@@ -24,6 +25,7 @@ func TestLiveUpdateResponses(t *testing.T) {
 	if code, body, _ := get(t, h, "/workers", "If-None-Match", etag); etag == "" || code != http.StatusNotModified || body != "" {
 		t.Fatalf("unchanged page: ETag %q, got %d", etag, code)
 	}
+
 	// A page names its time of rendering, which is no part of what it says:
 	// a later copy that says the same is the page that the client has.
 	rendered := regexp.MustCompile(` data-now="[^"]+"`)
@@ -32,10 +34,12 @@ func TestLiveUpdateResponses(t *testing.T) {
 			t.Fatalf("a later copy of an unchanged page has the ETag %q, want %q", header.Get("ETag"), etag)
 		}
 	}
+
 	code, zipped, header := get(t, h, "/workers", "Accept-Encoding", "gzip")
 	if code != http.StatusOK || header.Get("Content-Encoding") != "gzip" {
 		t.Fatalf("compressed page: %d, %v", code, header)
 	}
+
 	zr, err := gzip.NewReader(strings.NewReader(zipped))
 	if err != nil {
 		t.Fatal(err)
@@ -61,12 +65,14 @@ func TestBasicAuth(t *testing.T) {
 			t.Fatalf("credentials %q: got %d, %v", creds, rec.Code, rec.Header())
 		}
 	}
+
 	// A live update after the password changed must not open a login prompt
 	// every few seconds: the page shows that the session ended instead.
 	code, _, header := get(t, h, "/", "X-Taskmill-Live", "1")
 	if code != http.StatusUnauthorized || header.Get("WWW-Authenticate") != "" {
 		t.Fatalf("live update without credentials: %d, %v", code, header)
 	}
+
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	req.SetBasicAuth("ops", "s3cret")
 	rec := httptest.NewRecorder()
@@ -175,10 +181,12 @@ func TestStaticFilesAreVersionedAndCached(t *testing.T) {
 	if m == nil {
 		t.Fatalf("no versioned stylesheet link in\n%s", body)
 	}
+
 	code, _, header := get(t, h, m[1])
 	if code != http.StatusOK || !strings.Contains(header.Get("Cache-Control"), "immutable") {
 		t.Fatalf("stylesheet: %d, %v", code, header)
 	}
+
 	// A page from another version of the server links other versions, which
 	// must not be cached as this one.
 	code, _, header = get(t, h, "/static/style.css?v=00000000")

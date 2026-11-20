@@ -47,6 +47,7 @@ func underPrefix(prefix string, h http.Handler) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+
 		clean := path.Clean("/" + rest)
 		if strings.HasSuffix(rest, "/") && clean != "/" {
 			clean += "/" // which path.Clean removes
@@ -60,6 +61,7 @@ func underPrefix(prefix string, h http.Handler) http.Handler {
 			http.Redirect(w, r, target, http.StatusTemporaryRedirect) //nolint:gosec // the request adds only a path and a query after the prefix
 			return
 		}
+
 		strip.ServeHTTP(w, r)
 	})
 }
@@ -90,6 +92,7 @@ func basicAuth(next http.Handler, auth BasicAuth) http.Handler {
 			http.Error(w, "taskmill: log in to continue", http.StatusUnauthorized)
 			return
 		}
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -108,6 +111,7 @@ func securityHeaders(next http.Handler, ancestors string) http.Handler {
 		if ancestors == "'none'" {
 			h.Set("X-Frame-Options", "DENY") // for browsers without frame-ancestors
 		}
+
 		next.ServeHTTP(w, r)
 	})
 }
@@ -152,6 +156,7 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, code int, name s
 		http.Error(w, "taskmill: the page failed to render; the server log has the details", http.StatusInternalServerError)
 		return
 	}
+
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Vary", "Accept-Encoding")
@@ -167,6 +172,7 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, code int, name s
 			return
 		}
 	}
+
 	body := buf.Bytes()
 	if len(body) >= gzipMin && acceptsGzip(r) {
 		zbuf := getBuffer()
@@ -178,6 +184,7 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, code int, name s
 		body = zbuf.Bytes()
 		h.Set("Content-Encoding", "gzip")
 	}
+
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(code)
 	_, _ = w.Write(body) // the client may be gone; there is no one to tell
@@ -229,6 +236,7 @@ func loadStatic() (map[string]staticFile, map[string]string) {
 		}
 		files[e.Name()] = f
 	}
+
 	return files, versions
 }
 
@@ -243,6 +251,7 @@ func (s *server) static() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+
 		h := w.Header()
 		h.Set("Content-Type", f.contentType)
 		h.Set("Vary", "Accept-Encoding")
@@ -251,11 +260,13 @@ func (s *server) static() http.Handler {
 		} else {
 			h.Set("Cache-Control", "no-cache")
 		}
+
 		body := f.body
 		if f.gzipped != nil && acceptsGzip(r) {
 			body = f.gzipped
 			h.Set("Content-Encoding", "gzip")
 		}
+
 		h.Set("Content-Length", strconv.Itoa(len(body)))
 		_, _ = w.Write(body) // the client may be gone; there is no one to tell
 	})

@@ -48,22 +48,26 @@ func cronWords(expr string) string {
 	if err != nil {
 		return ""
 	}
+
 	days, listed := dayWords(s)
 	if days == daily {
 		if repeat := repeatWords(s); repeat != "" {
 			return repeat
 		}
 	}
+
 	minutes, hours := values(s.Minute), values(s.Hour)
 	if days == "" || listed*len(hours)*len(minutes) > maxListed {
 		return ""
 	}
+
 	times := make([]int, 0, maxListed)
 	for _, h := range hours {
 		for _, m := range minutes {
 			times = append(times, 60*h+m)
 		}
 	}
+
 	return days + " at " + list(times, func(t int) string { return fmt.Sprintf("%02d:%02d", t/60, t%60) })
 }
 
@@ -79,10 +83,12 @@ func repeatWords(s *cron.Schedule) string {
 	if hourStep == 1 && minuteStep > 0 && minuteStep < 60 {
 		return every(minuteStep, "minute")
 	}
+
 	marks := values(s.Minute)
 	if len(marks) > maxListed {
 		return ""
 	}
+
 	words := every(hourStep, "hour")
 	if minuteStep == 60 {
 		return words // on the hour
@@ -98,10 +104,12 @@ func dayWords(s *cron.Schedule) (words string, listed int) {
 	if s.EitherDay && byMonthDay != byWeekDay {
 		byMonthDay, byWeekDay = false, false // the other field matches every day
 	}
+
 	var named []int // the months, if the schedule does not run in all of them
 	if s.Month != everyMonth {
 		named = values(s.Month)
 	}
+
 	switch {
 	case byMonthDay && byWeekDay:
 		return "", 0 // two rules for the day
@@ -135,6 +143,7 @@ func monthDayWords(dom uint64, named []int) (words string, listed int) {
 	for _, m := range named {
 		last = min(last, monthLength[m-1])
 	}
+
 	if bits.Len64(dom)-1 > last {
 		return "", 0
 	}
@@ -149,6 +158,7 @@ func step(set uint64, size int) int {
 	if held == 0 || size%held != 0 {
 		return 0
 	}
+
 	n := size / held
 	for v := 0; v < size; v += n {
 		if set&(1<<v) == 0 {

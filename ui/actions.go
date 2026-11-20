@@ -28,6 +28,7 @@ func (s *server) bulkLinks(f taskmill.TaskFilter) *bulkLinks {
 	if len(states) == 0 {
 		states = listedStates
 	}
+
 	q := filterQuery(f).Encode()
 	href := func(name string, allows func(taskmill.State) bool) string {
 		if !slices.ContainsFunc(states, allows) {
@@ -105,17 +106,20 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w, r) {
 		return
 	}
+
 	a, ok := bulkActions[r.PathValue("action")]
 	if !ok {
 		s.notFound(w, r)
 		return
 	}
+
 	f := taskFilter(r.URL.Query())
 	if len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) == 0 {
 		s.refuse(w, r, http.StatusBadRequest, "Choose filters first",
 			"A bulk action acts on the tasks that the task list's filters select.", link{"/tasks", "Back to the tasks", "back"})
 		return
 	}
+
 	counts, err := s.client.Count(r.Context(), &f)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		s.refuse(w, r, http.StatusBadRequest, "Invalid filter", reason(err), link{"/tasks", "Clear the filters", "clear"})
@@ -125,6 +129,7 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+
 	var states []string
 	for _, st := range f.States {
 		states = append(states, string(st))
@@ -141,11 +146,13 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	n := a.count(counts)
+
 	// The form carries where a run that stopped early continues.
 	action := filterQuery(f)
 	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
 		action.Set("cursor", cursor)
 	}
+
 	s.render(w, r, http.StatusOK, "bulk.html", page{Title: a.Verb + " tasks", Nav: "tasks", Static: true, Dead: s.deadCount(r), Data: bulkData{
 		bulkAction: a, Filters: rows, N: n.N, Tasks: tasks(n),
 		Path: s.path(a.path + "?" + action.Encode()), Back: s.path("/tasks?" + filterQuery(f).Encode()),
@@ -184,10 +191,12 @@ func notice(q url.Values) string {
 	if !strings.Contains(text, "{tasks}") {
 		return text
 	}
+
 	n, err := strconv.ParseInt(q.Get("count"), 10, 64)
 	if err != nil || n < 0 {
 		return ""
 	}
+
 	text = strings.Replace(text, "{tasks}", tasks(taskmill.TaskCount{N: n}), 1)
 	for _, key := range []string{"skipped", "conflicts"} {
 		text = strings.Replace(text, "{"+key+"}", tasks(taskmill.TaskCount{N: queryNumber(q, key)}), 1)
@@ -208,11 +217,13 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w, r) {
 		return
 	}
+
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		s.notFound(w, r)
 		return
 	}
+
 	ctx := r.Context()
 	target := "/tasks/" + strconv.FormatInt(id, 10)
 	var done string
@@ -227,6 +238,7 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r)
 		return
 	}
+
 	s.finishAction(w, r, err, target, done, done+" task", strconv.FormatInt(id, 10))
 }
 
@@ -240,6 +252,7 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w, r) {
 		return
 	}
+
 	var err error
 	var done, action string
 	name := r.URL.Query().Get("name")
@@ -247,6 +260,7 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 	if p := periodOf(r.URL.Query().Get("range")); p != chartPeriods[0] {
 		back = "/?range=" + p.Name
 	}
+
 	switch r.PathValue("action") {
 	case "pause":
 		err, done, action = s.client.PauseQueue(r.Context(), name), "queue-pause", "pause queue"
@@ -256,6 +270,7 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r)
 		return
 	}
+
 	s.finishAction(w, r, err, back, done, action, name)
 }
 
@@ -265,6 +280,7 @@ func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w, r) {
 		return
 	}
+
 	var err error
 	var done, action string
 	name := r.URL.Query().Get("name")
@@ -279,6 +295,7 @@ func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w, r)
 		return
 	}
+
 	s.finishAction(w, r, err, "/schedules", done, action, name)
 }
 
@@ -290,8 +307,10 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 		s.actionFailed(w, r, err, target)
 		return
 	}
+
 	s.logger.LogAttrs(r.Context(), slog.LevelInfo, "dashboard action",
 		slog.String(logKeyAction, action), slog.String(logKeyTarget, name))
+
 	sep := "?"
 	if strings.Contains(target, "?") {
 		sep = "&"
@@ -336,16 +355,19 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w, r) {
 		return
 	}
+
 	name := r.PathValue("action")
 	a, ok := bulkActions[name]
 	if !ok {
 		s.notFound(w, r)
 		return
 	}
+
 	f := taskFilter(r.URL.Query())
 	end, _ := r.Context().Deadline() // the deadline handler sets one
 	ctx, cancel := context.WithDeadlineCause(r.Context(), time.Now().Add(time.Until(end)/2), errBudget)
 	defer cancel()
+
 	res, err := a.do(s.client, ctx, &taskmill.BulkParams{Filter: f, Cursor: r.URL.Query().Get("cursor")})
 	more := err != nil && errors.Is(context.Cause(ctx), errBudget)
 	if err == nil || more || res.Changed > 0 {
@@ -357,6 +379,7 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		s.actionFailed(w, r, err, "/tasks?"+filterQuery(f).Encode())
 		return
 	}
+
 	q := filterQuery(f)
 	q.Set("count", strconv.FormatInt(res.Changed, 10))
 	target := "/tasks?"
@@ -375,6 +398,7 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		q.Set("done", name+"-all")
 	}
+
 	http.Redirect(w, r, s.path(target+q.Encode()), http.StatusSeeOther)
 }
 
