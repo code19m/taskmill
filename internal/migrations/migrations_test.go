@@ -27,9 +27,9 @@ func TestAllRendersEveryMigrationInOrder(t *testing.T) {
 
 // Every migration after the first changes tables that may be busy. A lock
 // timeout makes one that waits for a lock fail, instead of blocking the
-// statements that queue up behind it (CONTRIBUTING.md). It is the migration's
-// first statement, so that it holds for every lock the migration waits for,
-// and it is the 5 seconds that docs/production/deploys.md promises.
+// statements that queue up behind it. It is the migration's first
+// statement, so that it holds for every lock the migration waits for, and it
+// is the 5 seconds that docs/production/deploys.md promises.
 func TestMigrationsAfterTheFirstSetALockTimeout(t *testing.T) {
 	t.Parallel()
 	all, err := All("billing")
