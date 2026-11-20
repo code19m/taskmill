@@ -102,6 +102,7 @@ type statements struct {
 	deleteActivity   string
 	expiredHistory   string
 	pruneSchedules   string
+	otherSchedules   string
 	loadSchedules    string
 	upsertSchedule   string
 	advanceSchedule  string
@@ -215,6 +216,7 @@ func newStatements(schema string) *statements {
 		deleteActivity:   q(deleteActivitySQL),
 		expiredHistory:   q(expiredHistorySQL),
 		pruneSchedules:   q(pruneSchedulesSQL),
+		otherSchedules:   q(otherSchedulesSQL),
 		loadSchedules:    q(loadSchedulesSQL),
 		upsertSchedule:   q(upsertScheduleSQL),
 		advanceSchedule:  q(advanceScheduleSQL),

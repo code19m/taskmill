@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/code19m/taskmill"
@@ -454,7 +456,92 @@ func (s *server) workers(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.render(w, r, http.StatusOK, "workers.html", page{Title: "Workers", Nav: "workers", Dead: s.deadCount(r), Data: workers})
+	s.render(w, r, http.StatusOK, "workers.html", page{Title: "Workers", Nav: "workers", Dead: s.deadCount(r), Data: workerRows(workers)})
+}
+
+// workerRow is a worker as a row of the Workers page shows it.
+type workerRow struct {
+	taskmill.WorkerInfo
+
+	// ScheduleList holds the worker's schedules, and the maintainer's that
+	// it lacks, those that differ first. It is empty for a worker that
+	// stores none.
+	ScheduleList []scheduleItem
+	Differs      bool // its schedules differ from the maintainer's, by name
+}
+
+// scheduleItem is a schedule in a worker's list.
+type scheduleItem struct {
+	Name     string
+	Missing  bool // the maintainer defines it, and the worker does not
+	OnlyHere bool // the worker defines it, and the maintainer does not
+}
+
+// workerRows returns the rows of the Workers page, with the schedules of
+// each live worker compared with the maintainer's, as the maintainer
+// compares them. The page compares their names alone: the definitions are
+// only in the workers' table, and the maintainer's log names those that
+// differ. A worker that stores no schedules, or a maintainer that stores
+// none, compares with nothing.
+func workerRows(workers []taskmill.WorkerInfo) []workerRow {
+	var lead map[string]bool // the maintainer's schedules; nil if it stores none
+	for _, w := range workers {
+		if w.Maintainer && w.Schedules != nil {
+			lead = make(map[string]bool, len(w.Schedules))
+			for _, name := range w.Schedules {
+				lead[name] = true
+			}
+		}
+	}
+
+	rows := make([]workerRow, len(workers))
+	for i, w := range workers {
+		rows[i] = workerRow{WorkerInfo: w}
+		if w.Schedules == nil {
+			continue
+		}
+
+		compared := lead
+		if w.Stale {
+			compared = nil
+		}
+		rows[i].ScheduleList = scheduleItems(w.Schedules, compared)
+		rows[i].Differs = slices.ContainsFunc(rows[i].ScheduleList, func(s scheduleItem) bool { return s.Missing || s.OnlyHere })
+	}
+	return rows
+}
+
+// scheduleItems lists the schedules own, and those of lead that own lacks,
+// and marks each one that one of the two lacks. Those that differ come
+// first: the missing ones, then those that lead lacks, then the others,
+// each by name. Without lead, it lists own alone.
+func scheduleItems(own []string, lead map[string]bool) []scheduleItem {
+	mine := make(map[string]bool, len(own))
+	list := make([]scheduleItem, 0, len(own))
+	for _, name := range own {
+		mine[name] = true
+		list = append(list, scheduleItem{Name: name, OnlyHere: lead != nil && !lead[name]})
+	}
+	for name := range lead {
+		if !mine[name] {
+			list = append(list, scheduleItem{Name: name, Missing: true})
+		}
+	}
+
+	rank := func(s scheduleItem) int {
+		switch {
+		case s.Missing:
+			return 0
+		case s.OnlyHere:
+			return 1
+		default:
+			return 2
+		}
+	}
+	slices.SortFunc(list, func(a, b scheduleItem) int {
+		return cmp.Or(cmp.Compare(rank(a), rank(b)), strings.Compare(a.Name, b.Name))
+	})
+	return list
 }
 
 // deadCount returns the dead tasks of every queue, or zero if they cannot be

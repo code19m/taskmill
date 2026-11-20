@@ -15,7 +15,7 @@ and counters, from taskmill's logs, and from PostgreSQL.
 | [Halted FIFO groups](../concepts/glossary.md#halted-group): `taskmill_queue_halted_groups` | Above 0 | [Tasks wait in `pending`](troubleshooting.md#tasks-wait-in-pending) |
 | Tasks that keep failing: `taskmill_queue_most_failures` | 10 or more, in the last 15 minutes | [Tasks keep failing, and lag stays low](troubleshooting.md#tasks-keep-failing-and-lag-stays-low) |
 | Failed enqueues: `messaging_client_sent_messages_total` with an `error_type` | More than 5% of the tasks, for 5 minutes | [Enqueue calls fail](troubleshooting.md#enqueue-calls-fail) |
-| An Error line in taskmill's logs | Any, except [the two that can be expected](#logs-which-levels-matter) | Each one needs a person: [Log messages](../reference/log-messages.md) |
+| An Error line in taskmill's logs | Any, except [the three that can be expected](#logs-which-levels-matter) | Each one needs a person: [Log messages](../reference/log-messages.md) |
 | The Warn line `rescued tasks whose workers lost their leases`: the maintainer [rescued](../concepts/glossary.md#rescue) the tasks of a lost worker | When no crash, outage, or killed pod explains it | [A task ran twice](troubleshooting.md#a-task-ran-twice) |
 | A transaction that blocks vacuum: the queries in [Database](database.md#keep-long-transactions-from-slowing-the-queue) | Open for 10 minutes, or a slot's age that keeps growing | [Throughput falls over hours](troubleshooting.md#throughput-falls-over-hours) |
 | Worker pods not ready | For 5 minutes | [Kubernetes marks workers as not ready](troubleshooting.md#kubernetes-marks-workers-as-not-ready) |
@@ -164,12 +164,13 @@ Alert a person on every Error line. Look at Warn lines when they repeat.
 Keep Info lines if you need a record of what was done in the dashboard.
 [Levels](../reference/log-messages.md#levels) says what each level means.
 
-Two Error lines can be expected. Silence them only in these cases:
+Three Error lines can be expected. Silence them only in these cases:
 
 | Error line | Expected when |
 |---|---|
 | `operation still failing` for `apply retention`, with `detach` and `timeout` in its `error` | A long transaction uses the history, such as a `pg_dump` backup. The line stops when that transaction ends |
 | `notifications disabled; polling only` | A worker starts behind a pooler in transaction mode, and you chose not to set `ListenConfig` ([Connection poolers](connection-poolers.md)) |
+| `the schedules of other workers differ from the maintainer's` | A rollout that changes a schedule runs the old and the new version side by side for longer than the maintainer waits ([Fixed timings and limits](../reference/defaults-and-limits.md#the-maintainer)). The line stops when the rollout ends |
 
 When an operation keeps failing, such as fetching tasks while the database
 is down, taskmill does not log every try.

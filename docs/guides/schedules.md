@@ -115,14 +115,39 @@ workers. Then a worker runs the task like any other.
 > [!WARNING]
 > The maintainer runs only the schedules that **it** defines. Give every
 > worker the same `Schedules` list, or set `NoMaintainer` on the workers
-> without it. Otherwise your schedules stop while such a worker is the
-> maintainer, and no error or log line tells you.
+> without it. Otherwise a schedule stops, or changes, while such a worker
+> is the maintainer.
 
 If no maintainer runs at the run time, the run waits. When a maintainer
 that defines the schedule starts again, it enqueues **one** run for all the
 times it missed. That run is for the first time it missed: its
 `ScheduledFor()` returns that time. A paused schedule works the same way
 when you resume it.
+
+## Know when the workers' schedules differ
+
+The maintainer compares its schedules with those of the other workers
+that can become the maintainer, again and again. It compares their names,
+and what each schedule enqueues and when. Workers with `NoMaintainer` are
+not compared, and neither is a worker that is stopping.
+
+| What differs | What happens while such a worker is the maintainer |
+|---|---|
+| The worker lacks a schedule | The schedule does not run |
+| The worker defines a schedule in another way, such as another `Cron` | The schedule runs as that worker defines it |
+
+When the schedules keep differing for longer than a rolling deploy takes,
+the maintainer logs an error that names the workers and the schedules. It
+logs it again now and then while they differ, and logs one line when they
+match again. [Log messages](../reference/log-messages.md#the-maintainer)
+explains both lines, and
+[Fixed timings and limits](../reference/defaults-and-limits.md#the-maintainer)
+says when they come. So a rolling deploy that changes a schedule logs
+nothing. If both versions run side by side for longer, as in a slow
+rollout, the maintainer logs the error.
+
+The dashboard's **Workers** page lists each worker's schedules, and marks
+the workers whose schedule names differ from the maintainer's.
 
 ## Keep runs from overlapping
 

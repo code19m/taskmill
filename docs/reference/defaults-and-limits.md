@@ -57,6 +57,7 @@ by election, that does the shared work.
 | [Promote](../concepts/glossary.md#promote) due tasks: delayed tasks, retries, and snoozed tasks | As they come due, at most 20 times a second. So a task becomes available within about 1 second of its [run time](../concepts/glossary.md#run-time) |
 | [Rescue](../concepts/glossary.md#rescue) tasks whose leases ran out | Every second |
 | Enqueue due schedule runs | Every second |
+| Compare the schedules of the workers that can become the maintainer | Every minute. A difference is logged once it has lasted 10 minutes, then at most once an hour |
 | Dedupe window of a schedule run | 24 hours, or twice the time to the schedule's next run if that is longer |
 | Refresh queue statistics | Every 10 seconds |
 | Apply retention | Every minute |

@@ -137,8 +137,11 @@ Rolling back one release is safe too ([Upgrading](upgrading.md)).
 **Schedules.** The [maintainer](../concepts/glossary.md#maintainer) runs only
 the schedules that it defines itself. So define the same `Schedules` on every
 worker that can become the maintainer, and give other workers
-`NoMaintainer: true`. Otherwise, your schedules stop silently while such a
-worker is the maintainer.
+`NoMaintainer: true`. Otherwise, your schedules stop while such a worker is
+the maintainer. When the schedules keep differing, the maintainer logs an
+error that names itself and the workers whose schedules differ from its own:
+[Log messages](../reference/log-messages.md#the-maintainer) says which one
+to fix.
 
 ## Add a new kind during a rollout
 

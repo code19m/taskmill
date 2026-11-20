@@ -18,6 +18,18 @@ All notable changes to taskmill are recorded here. The format follows
   Deploys, several regions to Backups, failover, and replicas, and tenants
   to the fair-share recipe. Split work across services adds the contract,
   versions, traces, and tests between services.
+- The maintainer says when the workers' schedules differ. A worker that
+  lacks a schedule stopped it silently while it was the maintainer, and one
+  that defined it in another way changed it. Now the maintainer compares its
+  schedules with those of the other workers that can become the maintainer:
+  their names, and what each one enqueues and when. When they keep differing
+  for longer than a rolling deploy takes, it logs an error that names the
+  workers and the schedules, again now and then while they differ, and a
+  line when they match again.
+  `WorkerInfo.Schedules` lists a worker's schedules, and the dashboard's
+  Workers page lists them too, and marks a worker whose schedule names
+  differ from the maintainer's. Migration 8 adds two columns, and a check,
+  to the small workers table.
 
 ### Changed
 

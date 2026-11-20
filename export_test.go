@@ -21,20 +21,23 @@ const HistoryDrops = historyDrops
 // them, and one makes an interval so long that it does not end. Zero fields
 // keep their defaults.
 type Timing struct {
-	Maintainer    time.Duration
-	Heartbeat     time.Duration
-	Election      time.Duration
-	LeaderLease   time.Duration
-	Stats         time.Duration
-	Settings      time.Duration
-	ShutdownGrace time.Duration
-	Reconnect     time.Duration
-	NoHandlerWait time.Duration
-	FailureReport time.Duration
-	IdlePoll      time.Duration
-	Quiet         time.Duration
-	Listen        time.Duration
-	LockWait      time.Duration
+	Maintainer     time.Duration
+	Heartbeat      time.Duration
+	Election       time.Duration
+	LeaderLease    time.Duration
+	Stats          time.Duration
+	Settings       time.Duration
+	ShutdownGrace  time.Duration
+	Reconnect      time.Duration
+	NoHandlerWait  time.Duration
+	FailureReport  time.Duration
+	IdlePoll       time.Duration
+	Quiet          time.Duration
+	Listen         time.Duration
+	LockWait       time.Duration
+	ScheduleCheck  time.Duration
+	ScheduleGrace  time.Duration
+	ScheduleReport time.Duration
 }
 
 // SetTiming applies t to w before it runs.
@@ -60,6 +63,9 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.quiet, t.Quiet)
 	set(&w.timing.listen, t.Listen)
 	set(&w.timing.lockWait, t.LockWait)
+	set(&w.timing.scheduleCheck, t.ScheduleCheck)
+	set(&w.timing.scheduleGrace, t.ScheduleGrace)
+	set(&w.timing.scheduleReport, t.ScheduleReport)
 }
 
 // Notifying reports whether the maintainer's heartbeats reach w.

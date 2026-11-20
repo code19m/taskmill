@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math/big"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -21,10 +25,16 @@ import (
 // Schedule enqueues a task on a cron schedule, once per scheduled time across
 // all workers. Define the same schedules on every worker that takes part in
 // the maintainer election: the elected maintainer runs its own definitions.
-// If it defines any, it also deletes the stored schedules that it does not
-// define, once no maintainer has defined them for about a day. Until then a
-// stored schedule keeps its state, such as a pause: a rolling deploy or a
-// rollback in which some workers do not define it loses nothing.
+// It compares them with those of the other workers, by name and by
+// definition, and logs an error when they keep differing for longer than a
+// rolling deploy takes: the [schedules guide] says when. A definition is all
+// that decides when a run happens and which task it enqueues, except the
+// metadata, so args that hold a value of each process, such as the time
+// that the worker started, count as a difference. If it defines any,
+// it also deletes the stored schedules that it does not define, once no
+// maintainer has defined them for about a day. Until then a stored schedule
+// keeps its state, such as a pause: a rolling deploy or a rollback in which
+// some workers do not define it loses nothing.
 //
 // Runs that are missed while no maintainer runs, or while the schedule is
 // paused, collapse into one run, for the first time that was missed. Each
@@ -159,6 +169,7 @@ type compiledSchedule struct {
 	Schedule
 	expr *cron.Schedule
 	opts EnqueueOptions
+	hash string // of its definition: see definitionHash
 }
 
 func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
@@ -228,7 +239,68 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 	if err != nil {
 		return compiledSchedule{}, fmt.Errorf("%w (schedule %q)", err, s.Name)
 	}
+
+	// A payload whose encoding changes from call to call, such as one that
+	// holds the time, changes the stored row in every pass anyway. An
+	// encoding that fails returns nothing, which equals no payload.
+	again, _ := encodeJSON(s.Args)
+	c.hash = definitionHash(&c, run, !jsonEqual(run.payload, again))
 	return c, nil
+}
+
+// definitionHash returns a short hash of what decides when a run of schedule
+// s happens, and which task it enqueues, which run holds resolved: the
+// expression, the time zone, the queue, the kind, the priority, the most
+// attempts, the FIFO group, and the payload, unless it varies. The payload
+// counts as a JSON value, as jsonEqual compares it. A zone named Local is
+// each process's own, so its offsets count too. A run's dedupe key and
+// window follow from the schedule's name and timetable. The metadata is left
+// out: it may hold values of each process, such as a trace's. A release that
+// changes what the hash covers makes the schedules differ during its rolling
+// deploy, which ends before the maintainer logs that.
+func definitionHash(s *compiledSchedule, run *resolvedTask, varies bool) string {
+	var b bytes.Buffer
+	for _, field := range []string{
+		s.Cron, zoneName(s.Location), run.queue, run.kind, strconv.Itoa(int(run.priority)), strconv.Itoa(run.maxAttempts), run.group,
+	} {
+		b.WriteString(strconv.Quote(field))
+	}
+
+	if !varies {
+		var v any
+		_ = decodeJSON(run.payload, &v) // never fails: resolve encoded the payload
+		writeJSON(&b, v)
+	}
+
+	sum := sha256.Sum256(b.Bytes())
+	return hex.EncodeToString(sum[:8])
+}
+
+// zoneName returns the name of loc, and for a zone named Local, which is the
+// zone of each process, its offsets from UTC in January and in July, which
+// tell most zones apart.
+func zoneName(loc *time.Location) string {
+	name := loc.String()
+	if name != "Local" {
+		return name
+	}
+
+	_, january := time.Date(2025, time.January, 15, 12, 0, 0, 0, time.UTC).In(loc).Zone()
+	_, july := time.Date(2025, time.July, 15, 12, 0, 0, 0, time.UTC).In(loc).Zone()
+	return name + " " + strconv.Itoa(january) + " " + strconv.Itoa(july)
+}
+
+// scheduleSums returns the names of schedules ss, sorted, and the hash of
+// each one's definition, in the same order: what a worker stores of its
+// schedules, so that the maintainer can compare them. Both are empty, not
+// nil, for no schedules: the columns hold arrays.
+func scheduleSums(ss []compiledSchedule) (names, hashes []string) {
+	sorted := slices.SortedFunc(slices.Values(ss), func(a, b compiledSchedule) int { return cmp.Compare(a.Name, b.Name) })
+	names, hashes = make([]string, len(sorted)), make([]string, len(sorted))
+	for i, s := range sorted {
+		names[i], hashes[i] = s.Name, s.hash
+	}
+	return names, hashes
 }
 
 // longestScheduledFor takes as much room as any value of
@@ -288,18 +360,9 @@ func (m *maintainer) enqueueDue(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// scheduleNames returns the names of the worker's schedules.
-func (m *maintainer) scheduleNames() []string {
-	names := make([]string, len(m.w.schedules))
-	for i, s := range m.w.schedules {
-		names[i] = s.Name
-	}
-	return names
-}
-
 // loadSchedules reads the stored state of the worker's schedules, by name.
 func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleState, error) {
-	r, err := m.c.pool.Query(ctx, m.c.sql.loadSchedules, m.scheduleNames())
+	r, err := m.c.pool.Query(ctx, m.c.sql.loadSchedules, m.w.scheduleNames)
 	if err != nil {
 		return nil, err
 	}
@@ -432,8 +495,151 @@ func (m *maintainer) pruneSchedules(ctx context.Context) {
 	if len(m.w.schedules) == 0 {
 		return
 	}
-	_, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, m.scheduleNames())
+	_, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, m.w.scheduleNames)
 	m.pruneFailures.observe(ctx, err)
+}
+
+// compareSchedules compares the schedules of the other live workers that
+// take part in the maintainer election with this maintainer's, by name and
+// by definition, and logs a difference that lasts: see scheduleWatch. It
+// compares them also when this maintainer defines none, which is the worst
+// case: then no schedule runs.
+func (m *maintainer) compareSchedules(ctx context.Context) {
+	diff, err := m.otherSchedules(ctx)
+	m.compareFailures.observe(ctx, err)
+	if err == nil {
+		m.watch.observe(ctx, m.w, diff)
+	}
+}
+
+// otherSchedules returns how the schedules of up to 10 other live workers
+// differ from this maintainer's.
+func (m *maintainer) otherSchedules(ctx context.Context) (*scheduleDiff, error) {
+	r, err := m.c.pool.Query(ctx, m.c.sql.otherSchedules, m.w.scheduleNames, m.w.scheduleHashes)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	d := &scheduleDiff{missingHere: map[string]bool{}, missingThere: map[string]bool{}, definedDifferently: map[string]bool{}}
+	for r.Next() {
+		var id string
+		var names, hashes []string
+		if err := r.Scan(&id, &names, &hashes); err != nil {
+			return nil, err
+		}
+		d.add(id, m.ownHashes, byName(names, hashes))
+	}
+	return d, r.Err()
+}
+
+// byName returns the hash of each schedule by its name. The table holds a
+// hash for each name.
+func byName(names, hashes []string) map[string]string {
+	out := make(map[string]string, len(names))
+	for i, name := range names {
+		out[name] = hashes[i]
+	}
+	return out
+}
+
+// scheduleDiff says how the schedules of other workers differ from the
+// maintainer's.
+type scheduleDiff struct {
+	workers []string // the workers whose schedules differ; none if they all match
+
+	// The schedules that the workers define and the maintainer does not,
+	// those that it defines and some of them do not, and those that both
+	// define differently.
+	missingHere, missingThere, definedDifferently map[string]bool
+}
+
+// add adds the worker id, whose schedules are theirs, to d if they differ
+// from ours, the maintainer's. Both map each schedule's name to its hash.
+func (d *scheduleDiff) add(id string, ours, theirs map[string]string) {
+	differs := false
+	for name, hash := range theirs {
+		switch h, ok := ours[name]; {
+		case !ok:
+			d.missingHere[name], differs = true, true
+		case h != hash:
+			d.definedDifferently[name], differs = true, true
+		}
+	}
+	for name := range ours {
+		if _, ok := theirs[name]; !ok {
+			d.missingThere[name], differs = true, true
+		}
+	}
+
+	if differs {
+		d.workers = append(d.workers, id)
+	}
+}
+
+// schedulesLogged is how many names of each list of schedules a line names
+// at most. It says how many more there are after them.
+const schedulesLogged = 20
+
+// attrs returns the attributes of a line about d, which has lasted for
+// lasted.
+func (d *scheduleDiff) attrs(lasted time.Duration) []slog.Attr {
+	sorted := func(set map[string]bool) []string {
+		names := slices.AppendSeq(make([]string, 0, len(set)), maps.Keys(set)) // not nil: none logs as []
+		slices.Sort(names)
+		if more := len(names) - schedulesLogged; more > 0 {
+			names = append(names[:schedulesLogged], "and "+strconv.Itoa(more)+" more")
+		}
+		return names
+	}
+	return []slog.Attr{
+		slog.Any(logKeyWorkers, d.workers),
+		slog.Any(logKeyMissingHere, sorted(d.missingHere)),
+		slog.Any(logKeyMissingThere, sorted(d.missingThere)),
+		slog.Any(logKeyDefinedDifferently, sorted(d.definedDifferently)),
+		slog.Duration(logKeyDuration, lasted),
+	}
+}
+
+// scheduleWatch follows a difference between the schedules of other workers
+// and the maintainer's. A rolling deploy that changes a schedule makes one
+// for a few minutes, so it logs nothing until the difference has lasted for
+// timing.scheduleGrace: then an error, again at most once per
+// timing.scheduleReport while it lasts, and a line when it ends. It starts
+// over in each term of the maintainer.
+type scheduleWatch struct {
+	mu     sync.Mutex
+	since  time.Time // when the comparison first found the difference; zero while there is none
+	logged time.Time // when it was last logged; zero if not yet
+}
+
+// observe takes the outcome of one comparison.
+func (s *scheduleWatch) observe(ctx context.Context, w *Worker, d *scheduleDiff) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	switch {
+	case len(d.workers) == 0:
+		if !s.logged.IsZero() {
+			w.logger.LogAttrs(ctx, slog.LevelInfo, "the schedules of other workers match the maintainer's again",
+				slog.Duration(logKeyDuration, now.Sub(s.since)))
+		}
+		s.since, s.logged = time.Time{}, time.Time{}
+	case s.since.IsZero():
+		s.since = now
+	case now.Sub(s.since) >= w.timing.scheduleGrace && now.Sub(s.logged) >= w.timing.scheduleReport:
+		w.logger.LogAttrs(ctx, slog.LevelError, "the schedules of other workers differ from the maintainer's",
+			d.attrs(now.Sub(s.since))...)
+		s.logged = now
+	}
+}
+
+// reset forgets the difference without a line, at the start of a term.
+func (s *scheduleWatch) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.since, s.logged = time.Time{}, time.Time{}
 }
 
 // jsonEqual reports whether a and b hold the same JSON value, as PostgreSQL's
@@ -467,6 +673,39 @@ func sameJSON(x, y any) bool {
 		return ok && maps.EqualFunc(x, y, sameJSON)
 	default: // a string, a bool, or null
 		return x == y
+	}
+}
+
+// writeJSON writes v, a value from decodeJSON, to b in one form for all the
+// values that sameJSON finds equal: each number as its exact value, and the
+// keys of each object in order.
+func writeJSON(b *bytes.Buffer, v any) {
+	switch v := v.(type) {
+	case json.Number:
+		if r, ok := new(big.Rat).SetString(v.String()); ok {
+			b.WriteString("n" + r.Num().Text(16) + "/" + r.Denom().Text(16) + " ")
+		} else {
+			b.WriteString("t" + v.String() + " ") // a number that only its own text equals: see sameNumber
+		}
+	case []any:
+		b.WriteString("[")
+		for _, x := range v {
+			writeJSON(b, x)
+		}
+		b.WriteString("]")
+	case map[string]any:
+		b.WriteString("{")
+		for _, key := range slices.Sorted(maps.Keys(v)) {
+			b.WriteString(strconv.Quote(key))
+			writeJSON(b, v[key])
+		}
+		b.WriteString("}")
+	case string:
+		b.WriteString(strconv.Quote(v))
+	case bool:
+		b.WriteString(strconv.FormatBool(v) + " ")
+	default: // null
+		b.WriteString("null ")
 	}
 }
 

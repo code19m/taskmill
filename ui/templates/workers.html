@@ -15,26 +15,36 @@
        is in the tooltip, and a screen reader reads it whole.
 
        A row is one line, however much its worker handles: the first queues
-       that fit, with a count of the rest, and a count of the kinds. Each
-       count is a button, and both open the worker's one list of its queues
-       and kinds, each a link to its tasks. The list is a popover, as a
-       hint's text is: the browser opens it above the table, and closes it,
-       with or without the script. It has an id, which is its key: an update
-       keeps it open. */}}
+       that fit, with a count of the rest, and a count of the kinds, or of the
+       schedules of a worker without kinds. Each count is a button, and all
+       open the worker's one list of its queues and kinds, each a link to its
+       tasks, and of its schedules. The list is a popover, as a hint's text
+       is: the browser opens it above the table, and closes it, with or
+       without the script. It has an id, which is its key: an update keeps it
+       open.
+
+       A worker whose schedules differ from the maintainer's, by name, has a
+       mark beside its ID, which opens the same list: there, each schedule
+       that only one of the two defines says so, and comes first. */}}
     <tbody>{{range .Data}}{{$own := afterHost .ID .Hostname}}{{$queues := fit .Queues}}
       <tr data-key="{{.ID}}">
         <td title="{{.ID}}"><div class="worker"><span class="health{{if .Stale}} stale{{end}}" title="{{if .Stale}}No check-in for longer than its lease{{else}}Healthy{{end}}"></span><span class="mono">
           {{- if $own}}<span class="visually-hidden">{{.Hostname}}-</span>{{$own}}{{else}}{{.ID}}{{end}}</span>
-          {{- if .Stale}}<span class="chip warn">stale</span>{{end}}{{if .Maintainer}}<span class="chip">maintainer</span>{{end}}</div></td>
+          {{- if .Stale}}<span class="chip warn">stale</span>{{end}}{{if .Maintainer}}<span class="chip">maintainer</span>{{end}}
+          {{- if .Differs}}<button type="button" class="chip" popovertarget="lists-{{.ID}}" title="Its schedules differ from the maintainer's">schedules differ</button>{{end}}</div></td>
         <td title="{{.Hostname}}">{{.Hostname}}</td>
         {{/* A word in place of a version is not code. Go's word for a build from taskmill's own tree, "(devel)", is said plainly. */ -}}
         {{if eq .Version "(devel)"}}<td class="tone-ghost" title="Built from taskmill's source, not from a release">local build</td>
         {{- else}}<td class="{{if eq .Version "unknown"}}tone-ghost{{else}}mono tone-faint{{end}}" title="{{.Version}}">{{.Version}}</td>{{end}}
         <td>{{if .Queues}}<div class="queues"><span title="{{join .Queues ", "}}">{{$queues.Line}}</span>{{if $queues.More}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">+{{$queues.More}}<span class="visually-hidden"> more {{plural $queues.More "queue" "queues"}}</span></button>{{end}}</div>{{else}}<span class="tone-ghost">maintenance only</span>{{end}}</td>
-        <td>{{if .Kinds}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">{{len .Kinds}} {{plural (len .Kinds) "kind" "kinds"}}{{template "icon-chevron"}}</button>{{else}}<span class="tone-ghost">none</span>{{end}}
-          {{- if or .Kinds $queues.More}}<div class="hint-pop lists" id="lists-{{.ID}}" popover role="group" aria-label="Queues and kinds of {{.ID}}">
+        <td>{{if .Kinds}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">{{len .Kinds}} {{plural (len .Kinds) "kind" "kinds"}}{{template "icon-chevron"}}</button>
+          {{- else if .Schedules}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">{{len .Schedules}} {{plural (len .Schedules) "schedule" "schedules"}}{{template "icon-chevron"}}</button>
+          {{- else}}<span class="tone-ghost">none</span>{{end}}
+          {{- if or .Kinds $queues.More .ScheduleList}}<div class="hint-pop lists" id="lists-{{.ID}}" popover role="group" aria-label="Queues, kinds, and schedules of {{.ID}}">
             {{- with .Queues}}<h2>Queues <span class="subtle">{{len .}}</span></h2><ul>{{range .}}<li><a href="{{path "/tasks"}}{{query "queue" .}}">{{.}}</a></li>{{end}}</ul>{{end}}
-            {{- with .Kinds}}<h2>Kinds <span class="subtle">{{len .}}</span></h2><ul class="mono">{{range .}}<li><a href="{{path "/tasks"}}{{query "kind" .}}">{{.}}</a></li>{{end}}</ul>{{end -}}
+            {{- with .Kinds}}<h2>Kinds <span class="subtle">{{len .}}</span></h2><ul class="mono">{{range .}}<li><a href="{{path "/tasks"}}{{query "kind" .}}">{{.}}</a></li>{{end}}</ul>{{end}}
+            {{- with .ScheduleList}}<h2 class="wide">Schedules <span class="subtle">{{len .}}</span></h2><ul class="wide">{{range .}}<li class="item">{{.Name}}
+              {{- if .Missing}} <span class="subtle">missing</span>{{else if .OnlyHere}} <span class="subtle">not on the maintainer</span>{{end}}</li>{{end}}</ul>{{end -}}
           </div>{{end}}</td>
         <td class="tone-faint"{{template "time-attrs" .StartedAt}}>{{ago $.Now .StartedAt}}</td>
         <td class="{{if .Stale}}tone-warn{{else}}tone-faint{{end}}"{{template "time-attrs" .CheckedInAt}}>{{ago $.Now .CheckedInAt}}</td>

@@ -603,7 +603,8 @@ a.pop-opt:focus-visible { outline-offset: -2px; }
   color: var(--ink-muted); font-family: var(--font-sans); font-size: var(--text-xs); white-space: nowrap;
 }
 code.chip { font-family: var(--font-mono); }
-a.chip:hover { text-decoration: none; color: var(--ink); border-color: var(--line-strong); }
+a.chip:hover, button.chip:hover { text-decoration: none; color: var(--ink); border-color: var(--line-strong); }
+button.chip { font-weight: inherit; cursor: pointer; }
 .chip.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
 /* A priority is not a state, and has no state color: the more urgent it is,
    the heavier its badge, and a critical one stands on ink. */
@@ -740,10 +741,10 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table col.c-kind { width: 18%; }
 .table col.c-queue { width: 12%; }
 .table col.c-cron { width: 264px; }
-.table col.c-worker { width: 240px; }
+.table col.c-worker { width: 264px; } /* room for an ID and a mark beside it */
 .table col.c-version { width: 100px; }
 .table col.c-queues { width: 256px; }
-.table col.c-kinds { width: 120px; }
+.table col.c-kinds { width: 140px; } /* room for a count of schedules: "100 schedules" */
 .table col.c-act-1 { width: 128px; }
 .table col.c-act-2 { width: 220px; }
 .table-tasks { min-width: 1140px; }
@@ -751,7 +752,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .table-schedules { min-width: 1144px; }
 .table-schedules col.c-kind { width: 15%; }
 .table-schedules col.c-queue { width: 10%; }
-.table-workers { min-width: 1120px; }
+.table-workers { min-width: 1164px; }
 .table-workers col.c-time { width: 108px; } /* the room is the host's, which has the longest name */
 .table th {
   padding: 10px 16px; text-align: left;
@@ -1050,11 +1051,13 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 /* A worker's queues and kinds, in one line: the first queues, as many as the
    server found room for, a count of the rest, and a count of the kinds. A
    count is a quiet button, and both open the worker's one list of all of
-   them: a popover, placed and closed as a hint's text is. It is no larger
-   than the room that every button has toward the middle of the window: half
-   its width, and less than half its height. Its two lists stand side by side,
-   on a phone too, and each scrolls if it is long. A name that is too long
-   breaks, and is never cut. */
+   them, and of its schedules: a popover, placed and closed as a hint's text
+   is. It is no larger than the room that every button has toward the middle
+   of the window: half its width, and less than half its height. Its lists
+   stand side by side, and each scrolls if it is long. On a phone, the
+   schedules, which can be many, take a row of their own under the others. A
+   name that is too long breaks, and is never cut. A schedule is no link: no
+   page shows one schedule. */
 .queues { display: flex; align-items: baseline; gap: 8px; }
 .queues > span { overflow: hidden; text-overflow: ellipsis; }
 .lists-btn {
@@ -1077,14 +1080,25 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   list-style: none; font-size: var(--text-label);
 }
 .lists ul.mono { font-size: var(--text-sm); }
-.lists a { display: block; padding: 4px 10px; border-radius: var(--radius-chip); color: var(--ink-soft); line-height: 20px; overflow-wrap: anywhere; }
+.lists :is(a, .item) { display: block; padding: 4px 10px; border-radius: var(--radius-chip); color: var(--ink-soft); line-height: 20px; overflow-wrap: anywhere; }
 .lists a:hover { background: var(--fill-selected); color: var(--ink); text-decoration: none; }
 .lists a:focus-visible { outline-offset: -2px; }
-@media (max-width: 600px) { .lists:popover-open { max-width: none; } } /* as wide as the page, as a hint is */
-/* A browser without popovers cannot open the list: there a count is text. */
+@media (max-width: 600px) {
+  .lists:popover-open { max-width: none; } /* as wide as the page, as a hint is */
+  /* The queues and the kinds take the room of six names at most, and the
+     schedules the rest. */
+  .lists:popover-open:has(> .wide) {
+    grid-template-columns: fit-content(50%) minmax(0, 1fr); grid-template-rows: auto fit-content(168px) auto minmax(0, 1fr);
+  }
+  .lists > .wide { grid-column: 1 / -1; }
+  .lists > h2.wide { grid-row: 3; }
+  .lists > ul.wide { grid-row: 4; }
+}
+/* A browser without popovers cannot open the list: there a count, and the
+   mark of schedules that differ, are text. */
 @supports not selector(:popover-open) {
   .lists, .lists-btn .chev { display: none; }
-  .lists-btn { pointer-events: none; }
+  .lists-btn, .worker > button.chip { pointer-events: none; }
 }
 
 /* ---------- modal and toast ---------- */
@@ -1151,7 +1165,10 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   /* A hint and a segment keep their size, and take the touch around them: a
      target of 44 pixels. A segment takes none from the one beside it. */
   .seg :is(button, a) { position: relative; min-width: 44px; justify-content: center; }
-  .seg :is(button, a)::after, .hint > button::after, .lists-btn::after { content: ""; position: absolute; inset: -10px 0; }
+  .worker > button.chip { position: relative; }
+  .seg :is(button, a)::after, .hint > button::after, .lists-btn::after, .worker > button.chip::after {
+    content: ""; position: absolute; inset: -10px 0;
+  }
   .hint > button::after { inset: -10px; }
   .lists-btn::after { inset: -11px -8px; }
   .lists a { padding-top: 12px; padding-bottom: 12px; }

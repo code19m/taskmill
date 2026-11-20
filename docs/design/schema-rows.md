@@ -38,6 +38,7 @@ writes one gets the error, with the constraint's name:
 | `workers_times_check` | An infinite `started_at` or `heartbeat_at` |
 | `workers_names_check` | `queues` or `kinds` with a `NULL`, or with more than one dimension |
 | `workers_lease_check` | A `lease_duration` below zero or above 300 years, or with a negative field |
+| `workers_schedules_check` | `schedules` or `schedule_hashes` with a `NULL`, or with more than one dimension, or two lists of different lengths, or one without the other |
 | `schedules_times_check` | An infinite `next_run_at` or `last_run_at` |
 | `settings_retention_check` | A retention period below 1 hour or above 300 years, or with a negative field |
 

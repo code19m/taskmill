@@ -84,7 +84,7 @@ billing's workers first.
 - **Each service keeps its own schedules.** In a shared schema, only the
   [maintainer's](../concepts/glossary.md#maintainer) schedules run. If it
   has schedules of its own, it even deletes the others after a day. They
-  stop with no error.
+  stop, and the maintainer logs an error when they keep differing.
 - **Each service runs only its own tasks.** In a shared schema, a worker
   takes tasks of any kind from its queues. If both services use the
   `default` queue, each one fetches the other's tasks and snoozes them. Those

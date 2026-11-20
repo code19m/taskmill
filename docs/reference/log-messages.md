@@ -24,7 +24,7 @@ Each message has one level, chosen by what it asks of you.
 
 | Level | Meaning | What you do |
 |---|---|---|
-| Error | Something needs a person: a task is dead, an operation has failed for a minute, or a privilege is missing. | Act on each one. |
+| Error | Something needs a person: a task is dead, an operation has failed for a minute, a privilege is missing, or the workers' schedules differ. | Act on each one. |
 | Warn | Something failed or looks wrong, but taskmill continues and recovers by itself. | Act if it repeats or lasts. |
 | Info | Lifecycle: a worker starts or stops, the [maintainer](../concepts/glossary.md#maintainer) changes, a migration runs, an operation recovers, someone acts in the dashboard. | Nothing. Keep these lines if you need a record of what was done in the dashboard. |
 | Debug | Routine events of single tasks, such as a retry. | Turn it on to follow one kind's retries. |
@@ -44,6 +44,7 @@ The same key always means the same thing.
 | `retry_in` | The wait before the next attempt |
 | `released` | Tasks given back to their queue at shutdown |
 | `queues`, `kinds`, `group`, `partition` | Names of queues, kinds, a FIFO group, a history partition |
+| `workers`, `missing_here`, `missing_there`, `defined_differently` | Workers whose schedules differ from the maintainer's, and the names of those schedules (see [The maintainer](#the-maintainer)) |
 | `max_conns`, `timeout` | Settings named by the line |
 | `version`, `name` | A migration, or the version of `taskmill-ui` |
 | `action`, `target`, `skipped`, `path`, `page` | The dashboard's actions and requests |
@@ -94,9 +95,10 @@ successes between them.
 | `refresh statistics` | Counts tasks for `Client.Queues` | Every 10 seconds | The database |
 | `apply retention` | Prepares history partitions, and deletes old history and rows | Every minute | That the role that runs workers owns the taskmill tables. If `error` says `detach …: timeout`, a long transaction, such as a backup, uses the history: the maintainer tries again every minute |
 | `delete removed schedules` | Deletes stored schedules that are gone from the code | Every minute | The database |
+| `compare schedules` | Reads the schedules of the other workers, to compare them with the maintainer's | Every minute | The database |
 
 `elect maintainer` runs on every worker that takes part in the election.
-The seven operations after it run only on the maintainer.
+The eight operations after it run only on the maintainer.
 
 ## Messages
 
@@ -146,10 +148,12 @@ backticks.
 | Message | Level | What it means | What to do |
 |---|---|---|---|
 | `elected maintainer` | Info | This worker now does the shared work. | Nothing. |
-| `no longer maintainer` | Info | Another worker took over, or the election failed. Incidents of the maintainer's operations end here, without `operation recovered`. | Nothing. |
+| `no longer maintainer` | Info | Another worker took over, or the election failed. Incidents of the maintainer's operations end here, without `operation recovered`, and so does a difference of the schedules, without the line that they match again. | Nothing. |
 | `resign maintainer failed; another worker takes over when the lease runs out` | Warn | A stopping maintainer could not hand over. The next one starts within about 12 seconds. | Nothing, unless it repeats. |
 | `rescued tasks whose workers lost their leases` | Warn | `tasks` attempts failed because their workers stopped renewing their leases: a worker crashed, was killed, or lost the database. The tasks are retried. Those with no attempts left become dead. | If it repeats, look for crashed or killed workers, and check the grace period at shutdown and the pool size. |
 | `dropped expired history` | Info | Retention dropped the history `partition`. | Nothing. |
+| `the schedules of other workers differ from the maintainer's` | Error | For `duration`, at least 10 minutes, the workers in `workers`, up to 10, have defined other schedules than this maintainer, which `worker_id` names. `missing_here`: schedules that they define, and the maintainer does not: these don't run now. `missing_there`: schedules that the maintainer defines, and some of them do not: these stop while one of them leads. `defined_differently`: schedules that they define in another way, such as another timetable, priority, or payload. Each list names up to 20 schedules, then how many more. Logged again at most once an hour while it lasts. A rolling deploy that changes a schedule ends well before, and a worker that is stopping is not compared. | Fix the side that lacks schedules. When the maintainer lacks them (`missing_here`), as when it defines none, `workers` lists the workers that are right, and the one to fix is `worker_id`. Give every worker that can become the maintainer the same `Schedules`, or set `NoMaintainer` on the others: [Run tasks on a schedule](../guides/schedules.md). |
+| `the schedules of other workers match the maintainer's again` | Info | The workers define the same schedules again, after the error above. `duration` says how long they differed. | Nothing. |
 
 ### Notifications
 

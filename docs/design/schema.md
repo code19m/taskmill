@@ -59,7 +59,7 @@ configurable, so several schemas can share a database. It must match
 | `queues` | Per-queue state: paused, and the `MaxRunning` limit | Cold |
 | `settings` | Retention for the whole schema, in a single row | Cold |
 | `schedules` | Recurring schedules and their next run times | Cold |
-| `workers` | Running worker processes | Cold: a check-in per process every third of `LeaseDuration`, 10 s by default |
+| `workers` | Running worker processes, with the schedules that [the maintainer compares](schema-maintenance.md#maintenance) | Cold: a check-in per process every third of `LeaseDuration`, 10 s by default |
 | `leader` | The elected maintainer | Cold |
 | `queue_stats` | Task counts per queue and state, with each count's oldest due task, and each queue's halted groups and most failures in a row, refreshed by the maintainer | Cold |
 | `activity` | Task counts and ended attempts per minute and queue, for a day | Cold: a few rows every 10 s |

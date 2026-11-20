@@ -346,6 +346,7 @@ func ExampleMigrations() {
 	// 0005_worker_leases_and_freed_keys
 	// 0006_refused_rows
 	// 0007_created_order
+	// 0008_worker_schedules
 }
 
 // This example retries every dead task of one queue, once the cause of their
