@@ -33,7 +33,9 @@ That gives you three things:
 | Your services exchange many events through Kafka, NATS, or RabbitMQ | Your broker, with taskmill's outbox to publish to it | The outbox publishes only what your transaction committed. |
 
 We recommend taskmill when your service already runs on PostgreSQL and its
-background work must not get lost.
+background work must not get lost. To see where its parts go in a monolith,
+modules, services, serverless functions, regions, or an app with tenants,
+read [Fit taskmill to your architecture](architectures.md).
 
 ## taskmill and River
 
@@ -59,19 +61,25 @@ production.
 
 ## What taskmill does not do
 
-- **Workflows.** Tasks do not wait for each other. A handler can enqueue the
-  next task in its own transaction, which covers simple chains.
-- **Deliver messages between services.** The outbox hands messages to your
-  broker; it is not a broker.
-- **Exactly-once delivery across systems.** Through a broker, each message
-  arrives at least once, and consumers drop duplicates by message ID.
-- **Other databases.** taskmill runs on PostgreSQL only.
-- **Users and roles in the dashboard.** It has one optional user with a
-  password. For more, put your own login in front of it.
-- **A command-line tool.** You run migrations with `Migrate`, and manage
-  tasks in the dashboard or from Go code.
-- **A public SQL interface.** taskmill's tables may change in any release.
-  Read and change tasks through the `Client`, not with SQL.
+Each row says what to do instead:
+
+| Not provided | Do this instead |
+|---|---|
+| Workflows: tasks that wait for other tasks | A handler enqueues the next task in its own transaction, which covers simple chains |
+| A broker between services | The outbox hands messages to your broker, once your transaction commits |
+| Exactly-once delivery across systems | Through a broker, each message arrives at least once: consumers drop duplicates by message ID |
+| Other databases | None: taskmill runs on PostgreSQL only |
+| Users and roles in the dashboard | It has one optional user with a password. For more, put your own login in front of it |
+| A command-line tool | Run migrations with `Migrate`. Manage tasks in the dashboard or from Go code |
+| A public SQL interface, such as a SQL function to enqueue | Read and change tasks through the `Client`: the tables may change in any release |
+| Handlers in other languages | Handlers are Go. Other languages enqueue through your Go service: [Work with other languages](../recipes/work-with-other-languages.md) |
+| An enqueue by kind name, with a raw payload | Declare the task's Go type, or a copy of it. For callers outside Go, map each allowed kind to its type |
+| A worker that takes only some kinds of a queue | A worker reads whole queues: give those kinds a queue of their own |
+| Priorities across queues or services | A priority orders the tasks of one queue. Give urgent work a queue of its own |
+| A limit of running tasks per tenant | A few [FIFO groups](../concepts/glossary.md#fifo-group) per tenant: [Share a queue fairly between customers or tenants](../recipes/share-a-queue-between-customers.md) |
+| Schedules of several services in one schema | A schema per service: [Split work across services](../recipes/split-across-services.md) |
+| A worker that stops when the queue is empty | `Run` with a deadline: [Run on serverless platforms](../production/deploys.md#run-on-serverless-platforms) |
+| The schema as an attribute of the `otel` metrics | Tell services apart by the label of each service in your metrics, such as Prometheus's `job` |
 
 ## What you need
 
@@ -95,4 +103,4 @@ promises, and which Go and PostgreSQL versions we support.
 - [Performance](../reference/performance.md): how fast, and how light
 - [Shop example](../../examples/shop/README.md): most features in one small program
 
-**Next:** [Quickstart](quickstart.md)
+**Next:** [Fit taskmill to your architecture](architectures.md)

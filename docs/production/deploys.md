@@ -160,6 +160,25 @@ the flow.
 > workers' rollout fails. Fix the rollout, then retry the tasks: see
 > [Recover from an incident](../recipes/recover-from-an-incident.md).
 
+## Run on serverless platforms
+
+Platforms such as AWS Lambda and Google Cloud Run start and stop your code
+with the load. Functions can enqueue. A worker must keep renewing its
+[leases](../concepts/glossary.md#lease) while it runs, so it needs a CPU
+that never pauses:
+
+| What runs there | What to do |
+|---|---|
+| A function that enqueues | Create the pool and the `Client` once per instance, outside the request handler: `NewClient` checks the schema once per cold start. Give the pool only the connections that one instance's requests use at the same time, such as 2 on Lambda. Many instances open many connections, so put RDS Proxy or PgBouncer in front of the database ([Connection poolers](connection-poolers.md)) |
+| A worker that runs all the time | A process that stays up, with its CPU always on: on Cloud Run, instance-based billing, which keeps the CPU allocated, and at least one instance. A worker whose CPU slows down between requests can't renew its leases, so other workers run its tasks again |
+| A worker with a time limit: a Kubernetes CronJob, Cloud Run jobs, or one Lambda invocation (15 minutes at most) | Pass `Run` a context with a deadline that leaves `DrainTimeout` plus 10 seconds before the platform's limit. When the deadline comes, the worker stops as it does on `SIGTERM` |
+
+Delayed tasks, retries, and schedules move only while some worker runs:
+the [maintainer](../concepts/glossary.md#maintainer) makes them due. With
+workers that run on a timetable only, a retry or a schedule waits for the
+next run. taskmill has no "run until the queue is empty" mode: give `Run` a
+deadline instead.
+
 ## See also
 
 - [Kubernetes](kubernetes.md): grace period, probes, and a migration Job

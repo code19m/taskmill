@@ -13,7 +13,7 @@ Each row is one recipe, in reading order:
 | Charge a card once, although a task may run twice | An idempotency key from the task ID, and `Task.CompleteTx` for your own data | [Do work once](do-work-once.md) |
 | Respect a partner's limit: 4 calls at the same time, or 600 a minute | Its own queue with `MaxRunning`, one row that spaces the calls, and `Snooze` on HTTP 429 | [Call a rate-limited API](call-a-rate-limited-api.md) |
 | Apply one account's events in order | A `GroupKey` per account | [Keep order per key](keep-order-per-key.md) |
-| Stop one customer's big batch from delaying all the others | A queue for batch work, and a `GroupKey` per customer | [Share a queue fairly between customers](share-a-queue-between-customers.md) |
+| Stop one customer's big batch from delaying all the others, or serve many tenants | A queue for batch work, a `GroupKey` per customer, and one schema for all tenants | [Share a queue fairly between customers or tenants](share-a-queue-between-customers.md) |
 | Run one refresh for 50 changes to the same product | A flag in your own row, set in the transaction that enqueues | [Keep at most one waiting task per key](one-waiting-task-per-key.md) |
 | Stop a reminder when the customer pays, or move it to another day | `CancelTx` in the transaction that changes your data, and a check in the handler | [Cancel or replace a delayed task](cancel-a-delayed-task.md) |
 | Send each customer a summary at 09:00 local time | A due time per customer in your own table, and one schedule that enqueues what is due | [Run a task at each customer's local time](run-at-each-customers-local-time.md) |
@@ -22,7 +22,9 @@ Each row is one recipe, in reading order:
 | Change a payload, rename a kind, or move it to another queue | A new kind, in three deploys | [Change a task safely](change-a-task-safely.md) |
 | Run tasks that take 10 minutes or more | A longer `Timeout` and `DrainTimeout`. Split work that takes hours | [Run long tasks](run-long-tasks.md) |
 | Retry 5,000 dead tasks after a fix | Pause the queue, `RetryMatching`, then resume | [Recover from an incident](recover-from-an-incident.md) |
+| Keep each module's tasks apart in one binary | A package of task types and a queue per module, and one schema | [Organize tasks by module](organize-tasks-by-module.md) |
 | Run several services, or give work to another one | One schema per service, and a `Client` for the other's schema | [Split work across services](split-across-services.md) |
+| Start a Go service's task from Node.js, Python, or another language | An HTTP endpoint that enqueues, with a map of the allowed kinds | [Work with other languages](work-with-other-languages.md) |
 | See every service in one admin app | A dashboard in each service. The admin app forwards a path to each | [One dashboard for many services](one-dashboard-for-many-services.md) |
 | Use goose, Atlas, or Flyway | Apply `taskmill.Migrations` with your tool | [Use your own migration tool](use-your-migration-tool.md) |
 

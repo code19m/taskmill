@@ -30,9 +30,9 @@ make check
 ```
 
 `make check` runs the same checks as CI (see [Checks](#checks)). It runs
-them in every module of the repository: the core, and the `otel` module in
-`otel/`, which has its own go.mod. The first run installs the pinned
-development tools into `./bin`.
+them in every module: the core, `otel/`, and `examples/orms/`, each with
+its own go.mod. The first run installs the pinned development tools into
+`./bin`.
 
 `make help` lists every target. These are the ones you need most:
 

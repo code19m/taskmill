@@ -7,6 +7,18 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Docs for each architecture: a new page, "Fit taskmill to your
+  architecture", says where taskmill's parts go in a monolith, a modular
+  monolith, services, serverless functions, several regions, and an app with
+  many tenants. New recipes show how to organize tasks by module and how to
+  work with other languages, with example programs that the tests run. The
+  guides add GORM and ent to the transactions table, serverless platforms to
+  Deploys, several regions to Backups, failover, and replicas, and tenants
+  to the fair-share recipe. Split work across services adds the contract,
+  versions, traces, and tests between services.
+
 ## [0.12.2] - 2026-11-20
 
 ### Changed

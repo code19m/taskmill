@@ -76,13 +76,15 @@ linters:
       # dependency means editing this list and recording why, in the same
       # pull request, in docs/design/dependencies.md. The otel module, linted
       # with this file too, has its own lists: one for the code that its users
-      # build, and a wider one for its tests.
+      # build, and a wider one for its tests. So has the module of the ORM
+      # examples, which nobody imports.
       rules:
         main:
           list-mode: strict
           files:
             - $all
             - "!**/otel/*.go"
+            - "!**/examples/orms/**"
           allow:
             - $gostd
             - github.com/code19m/taskmill
@@ -108,6 +110,16 @@ linters:
             - github.com/code19m/taskmill
             - github.com/jackc/pgx/v5 # the tests connect to PostgreSQL
             - go.opentelemetry.io/otel # with the SDK: the tests read what the module reports
+        orms:
+          list-mode: strict
+          files:
+            - "**/examples/orms/**"
+          allow:
+            - $gostd
+            - github.com/code19m/taskmill
+            - github.com/jackc/pgx/v5
+            - entgo.io/ent # docs/design/dependencies.md
+            - gorm.io
 
     errcheck:
       check-type-assertions: true
@@ -121,7 +133,7 @@ linters:
           msg: a library must not write to stdout; use an injected *slog.Logger
 
     gomoddirectives:
-      replace-local: true # otel/go.mod builds against the core next to it
+      replace-local: true # otel/go.mod and examples/orms/go.mod build against the core next to them
 
     gocognit:
       min-complexity: 20

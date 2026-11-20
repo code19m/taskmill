@@ -19,6 +19,7 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 ## Get started
 
 - [Why taskmill](docs/start/why-taskmill.md): you want to know if taskmill fits your project, and what it does not do
+- [Fit taskmill to your architecture](docs/start/architectures.md): you want to know where taskmill's parts go in a monolith, modules, services, serverless functions, several regions, or an app with tenants
 - [Quickstart](docs/start/quickstart.md): you want to run your first task and see it in the dashboard, in about 15 minutes
 
 ## Tutorial
@@ -63,7 +64,7 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Do work once](docs/recipes/do-work-once.md): Charge a card once, although a task may run twice. An idempotency key from the task ID, and `Task.CompleteTx` for your own data
 - [Call a rate-limited API](docs/recipes/call-a-rate-limited-api.md): Respect a partner's limit: 4 calls at the same time, or 600 a minute. Its own queue with `MaxRunning`, one row that spaces the calls, and `Snooze` on HTTP 429
 - [Keep order per key](docs/recipes/keep-order-per-key.md): Apply one account's events in order. A `GroupKey` per account
-- [Share a queue fairly between customers](docs/recipes/share-a-queue-between-customers.md): Stop one customer's big batch from delaying all the others. A queue for batch work, and a `GroupKey` per customer
+- [Share a queue fairly between customers or tenants](docs/recipes/share-a-queue-between-customers.md): Stop one customer's big batch from delaying all the others, or serve many tenants. A queue for batch work, a `GroupKey` per customer, and one schema for all tenants
 - [Keep at most one waiting task per key](docs/recipes/one-waiting-task-per-key.md): Run one refresh for 50 changes to the same product. A flag in your own row, set in the transaction that enqueues
 - [Cancel or replace a delayed task](docs/recipes/cancel-a-delayed-task.md): Stop a reminder when the customer pays, or move it to another day. `CancelTx` in the transaction that changes your data, and a check in the handler
 - [Run a task at each customer's local time](docs/recipes/run-at-each-customers-local-time.md): Send each customer a summary at 09:00 local time. A due time per customer in your own table, and one schedule that enqueues what is due
@@ -72,7 +73,9 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Change a task safely](docs/recipes/change-a-task-safely.md): Change a payload, rename a kind, or move it to another queue. A new kind, in three deploys
 - [Run long tasks](docs/recipes/run-long-tasks.md): Run tasks that take 10 minutes or more. A longer `Timeout` and `DrainTimeout`. Split work that takes hours
 - [Recover from an incident](docs/recipes/recover-from-an-incident.md): Retry 5,000 dead tasks after a fix. Pause the queue, `RetryMatching`, then resume
+- [Organize tasks by module](docs/recipes/organize-tasks-by-module.md): Keep each module's tasks apart in one binary. A package of task types and a queue per module, and one schema
 - [Split work across services](docs/recipes/split-across-services.md): Run several services, or give work to another one. One schema per service, and a `Client` for the other's schema
+- [Work with other languages](docs/recipes/work-with-other-languages.md): Start a Go service's task from Node.js, Python, or another language. An HTTP endpoint that enqueues, with a map of the allowed kinds
 - [One dashboard for many services](docs/recipes/one-dashboard-for-many-services.md): See every service in one admin app. A dashboard in each service. The admin app forwards a path to each
 - [Use your own migration tool](docs/recipes/use-your-migration-tool.md): Use goose, Atlas, or Flyway. Apply `taskmill.Migrations` with your tool
 
@@ -81,8 +84,8 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Production checklist](docs/production/checklist.md): you prepare to go live
 - [Database](docs/production/database.md): you set up PostgreSQL: roles, isolation level, connections, vacuum, and what happens when it fails
 - [Connection poolers](docs/production/connection-poolers.md): you use PgBouncer, RDS Proxy, Supabase, or Neon
-- [Backups, failover, and replicas](docs/production/backups-and-failover.md): you plan backups, restore one, or fail over to another server
-- [Deploys](docs/production/deploys.md): you ship a new version of your app, or change a task
+- [Backups, failover, and replicas](docs/production/backups-and-failover.md): you plan backups, restore one, fail over to another server, or run in several regions
+- [Deploys](docs/production/deploys.md): you ship a new version of your app, change a task, or run on a serverless platform
 - [Kubernetes](docs/production/kubernetes.md): you want manifests to copy
 - [Autoscaling](docs/production/autoscaling.md): you want KEDA to add and remove workers
 - [Capacity planning](docs/production/capacity.md): you estimate workers, connections, and disk
@@ -116,7 +119,7 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Queue statistics and health](docs/design/schema-statistics.md): How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read
 - [Rows that taskmill did not write](docs/design/schema-rows.md): Which values the tables refuse, and how the code survives the others
 - [The API's shape](docs/design/api-shape.md): Why each point of the API has its shape, and when we look at it again
-- [Dependencies and modules](docs/design/dependencies.md): Why pgx is the only dependency, why OpenTelemetry has a module of its own, and how to add a dependency
+- [Dependencies and modules](docs/design/dependencies.md): Why pgx is the only dependency, why OpenTelemetry and the ORM examples have modules of their own, and how to add a dependency
 - [Benchmarks](docs/design/benchmarks.md): The performance targets, how we measure them, and the latest results
 - [Releasing](docs/design/releasing.md): How the project team publishes a version
 - [Writing docs](docs/design/writing-docs.md): The style guide and the page templates

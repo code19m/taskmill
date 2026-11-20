@@ -9,6 +9,7 @@ commit with your data, run at least once, and survive a crashed worker.
 |---|---|
 | Decide if taskmill fits my project | [Why taskmill](start/why-taskmill.md) |
 | Run my first task in 15 minutes | [Quickstart](start/quickstart.md) |
+| Fit taskmill to my monolith, modules, services, serverless functions, regions, or tenants | [Fit taskmill to your architecture](start/architectures.md) |
 | Learn by building a small shop, step by step | [Tutorial](tutorial/README.md) |
 | Understand how it works | [How it works](concepts/how-it-works.md) |
 | Use a feature: retries, schedules, the outbox… | [Guides](guides/README.md) |
@@ -39,6 +40,7 @@ that, open a [guide](guides/README.md) when you need a feature.
 ### [Get started](start/README.md)
 
 - [Why taskmill](start/why-taskmill.md)
+- [Fit taskmill to your architecture](start/architectures.md)
 - [Quickstart](start/quickstart.md)
 
 ### [Tutorial](tutorial/README.md)
@@ -83,7 +85,7 @@ that, open a [guide](guides/README.md) when you need a feature.
 - [Do work once](recipes/do-work-once.md)
 - [Call a rate-limited API](recipes/call-a-rate-limited-api.md)
 - [Keep order per key](recipes/keep-order-per-key.md)
-- [Share a queue fairly between customers](recipes/share-a-queue-between-customers.md)
+- [Share a queue fairly between customers or tenants](recipes/share-a-queue-between-customers.md)
 - [Keep at most one waiting task per key](recipes/one-waiting-task-per-key.md)
 - [Cancel or replace a delayed task](recipes/cancel-a-delayed-task.md)
 - [Run a task at each customer's local time](recipes/run-at-each-customers-local-time.md)
@@ -92,7 +94,9 @@ that, open a [guide](guides/README.md) when you need a feature.
 - [Change a task safely](recipes/change-a-task-safely.md)
 - [Run long tasks](recipes/run-long-tasks.md)
 - [Recover from an incident](recipes/recover-from-an-incident.md)
+- [Organize tasks by module](recipes/organize-tasks-by-module.md)
 - [Split work across services](recipes/split-across-services.md)
+- [Work with other languages](recipes/work-with-other-languages.md)
 - [One dashboard for many services](recipes/one-dashboard-for-many-services.md)
 - [Use your own migration tool](recipes/use-your-migration-tool.md)
 

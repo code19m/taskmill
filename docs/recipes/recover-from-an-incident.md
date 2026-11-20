@@ -104,4 +104,4 @@ Find the cause. Then run the function again, or call `ResumeQueue`.
 - [Keep order per key](keep-order-per-key.md): fix one halted group
 - [`Client.RetryMatching` example](https://pkg.go.dev/github.com/code19m/taskmill#example-Client.RetryMatching) on pkg.go.dev
 
-**Next:** [Split work across services](split-across-services.md)
+**Next:** [Organize tasks by module](organize-tasks-by-module.md)

@@ -129,6 +129,29 @@ instead, with `read only connection`.
 > A read-only dashboard only reads, so it can work on a replica. taskmill
 > does not test that. Its numbers are then as old as the replica's delay.
 
+## Run in several regions
+
+taskmill needs one primary that every process writes to. Run the workers,
+and so the maintainer, in the primary's region:
+
+| Process | In another region than the primary |
+|---|---|
+| A producer | Works. Each enqueue call costs one round trip to the primary. `EnqueueMany` sends up to 10,000 tasks in one call |
+| A worker | Avoid it. Every fetch, completion, and lease renewal crosses the distance, so each task starts and ends later. If you must, keep `LeaseDuration` far above the round-trip time |
+| The dashboard | Works. Each page waits for its reads to cross the distance |
+
+taskmill does not support several primaries that all accept writes, such as
+BDR or pgEdge. It relies on one server for its row locks, its task IDs, and
+its [notifications](../concepts/glossary.md#notification). With two
+primaries, two workers could take the same task, and a notification reaches
+only the workers of the server that sent it. Nor does taskmill support a
+replica that forwards writes to the primary, such as Aurora's write
+forwarding: a replica can't listen for notifications, and taskmill does not
+test such setups.
+
+When a region fails, fail over to a primary in another region as
+[above](#fail-over-to-a-new-primary), and start the workers in that region.
+
 ## See also
 
 - [Database](database.md): roles, pool size, and what taskmill does when the database fails

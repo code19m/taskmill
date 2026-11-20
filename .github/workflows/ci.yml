@@ -21,7 +21,8 @@ concurrency:
 # Every job runs a Makefile target, so `make check` reproduces CI locally,
 # except the GoReleaser job (`make release-check`) and the API job (`make
 # api`, which needs a committed tree). The targets check every module of the
-# repository: the core and otel/, and internal/compat where it applies.
+# repository: the core, otel/, and examples/orms/, and internal/compat where
+# it applies.
 jobs:
   lint:
     name: Lint
@@ -37,6 +38,7 @@ jobs:
           cache-dependency-path: | # one cache per job, so that each job can save its own
             go.sum
             otel/go.sum
+            examples/orms/go.sum
             internal/compat/go.sum
             Makefile
             .golangci.yml
@@ -70,6 +72,7 @@ jobs:
           cache-dependency-path: |
             go.sum
             otel/go.sum
+            examples/orms/go.sum
       # The same database as `make db` locally, with the same settings.
       - run: make db TEST_POSTGRES=postgres:${{ matrix.postgres }}-alpine
       - run: make test
@@ -139,6 +142,7 @@ jobs:
           cache-dependency-path: |
             go.sum
             otel/go.sum
+            examples/orms/go.sum
       - run: make db
       - run: make test-pgbouncer
 
@@ -157,6 +161,7 @@ jobs:
           cache-dependency-path: |
             go.sum
             otel/go.sum
+            examples/orms/go.sum
             Makefile
       - run: make vuln
 

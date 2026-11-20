@@ -1,8 +1,9 @@
 # Dependencies and modules
 
-taskmill's core module has one dependency, pgx, and its OpenTelemetry
-integration is a module of its own. This page says why, which options we
-rejected, and what a pull request that adds a dependency must do.
+taskmill's core module has one dependency, pgx. Its OpenTelemetry
+integration, and the examples for GORM and ent, are modules of their own.
+This page says why, which options we rejected, and what a pull request that
+adds a dependency must do.
 
 ## The rule: the standard library first
 
@@ -16,7 +17,7 @@ most of what a task queue needs: `database/sql`, `log/slog`, `context`,
 | Rule | How it works |
 |---|---|
 | The standard library first | A third-party module comes in only when the standard library cannot do the job well, and this page says why |
-| The allowlist is enforced | The `depguard` linter runs in strict mode on the list in [.golangci.yml](../../.golangci.yml): the standard library, this module, and pgx. The `otel` module has [lists of its own](#the-opentelemetry-module) there |
+| The allowlist is enforced | The `depguard` linter runs in strict mode on the list in [.golangci.yml](../../.golangci.yml): the standard library, this module, and pgx. The `otel` module has [lists of its own](#the-opentelemetry-module) there, and so has the module of the [ORM examples](#the-module-of-the-orm-examples) |
 | An integration that needs a third-party module is a Go module of its own | Users who do not need it never download it. The core offers plain extension points, such as middleware, that such modules build on |
 | Tests use only the standard library | No assertion frameworks and no container libraries. The tests connect to the PostgreSQL server that an environment variable names, and CI provides one for each supported version |
 | Development tools stay out of `go.mod` | Linters and scanners are pinned in the [Makefile](../../Makefile) and installed into `./bin`. A `tool` directive in `go.mod` would add their requirements to every user's module graph, where they can raise the versions of modules that users share with them |
@@ -129,7 +130,7 @@ reports.
   a minor release that its changelog announces.
 
 The cost: releasing takes one more step when the module needs new core
-features, and the repository has two modules to keep tidy, linted, and
+features, and the repository has one more module to keep tidy, linted, and
 scanned.
 
 ### What the core provides for it
@@ -164,6 +165,26 @@ adds:
 One limit follows from the consumer span's parent. The trace of a task
 that retries for hours stays open for hours, and a backend that limits how
 long a trace may last can split it.
+
+## The module of the ORM examples
+
+[Use your own transactions](../guides/transactions.md) shows how to enqueue
+in a GORM or an ent transaction, and a program that compiles checks each of
+those rows. GORM and ent are third-party modules, so by the rule the
+examples are a module of their own: `examples/orms`, with its own `go.mod`.
+Nobody imports it, and it is never released.
+
+| Decision | Why |
+|---|---|
+| A module of its own, not examples in the core | In the core, the two ORMs would add 18 modules to every user's module graph, such as ent's Atlas and HCL |
+| `make check` and CI lint, test, and scan it, as they do the core | An example that no longer works would mislead its readers. Its tests run each ORM's transaction against PostgreSQL, with a commit that fails after the enqueue |
+| A `replace` line to the core next to it | The examples test the core of the same commit, as the `otel` module does. They are never released, so they need no release check |
+| ent's generated client is committed | The module then builds with `go build` alone, and readers see the code that ent writes. `go generate ./ent` in the module writes it again, with the `sql/execquery` feature that the example needs |
+| A `depguard` list of its own | It may import GORM and ent, and nothing else new |
+| Dependabot updates it together with the other modules | It shares pgx with the core, so a pgx update must change every module in one pull request |
+
+The cost: about 3,300 lines of generated code in the repository, and one
+more module for CI to download and check.
 
 ## See also
 

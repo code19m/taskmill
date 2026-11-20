@@ -22,7 +22,7 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | 9 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
 | 10 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
 | 11 | [The API's shape](api-shape.md) | Why each point of the API has its shape, and when we look at it again |
-| 12 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry has a module of its own, and how to add a dependency |
+| 12 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry and the ORM examples have modules of their own, and how to add a dependency |
 | 13 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
 | 14 | [Releasing](releasing.md) | How the project team publishes a version |
 | 15 | [Writing docs](writing-docs.md) | The style guide and the page templates |
