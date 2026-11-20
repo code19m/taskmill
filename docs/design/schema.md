@@ -15,8 +15,8 @@ tables and indexes, and why each was chosen. Eight more pages cover the rest:
 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
 
 The exact definitions are in [`internal/migrations`](../../internal/migrations),
-and the exact statements in [`sql.go`](../../sql.go). The statements were
-measured on PostgreSQL 15 and 18 with 1.7 million tasks.
+and the statements in the `sql_*.go` files that [`sql.go`](../../sql.go)
+lists, measured on PostgreSQL 15 and 18 with 1.7 million tasks.
 
 All objects live in one schema, `taskmill` by default. The name is
 configurable, so several schemas can share a database. It must match

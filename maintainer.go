@@ -222,7 +222,7 @@ func (m *maintainer) elect(ctx context.Context) bool {
 	electCtx, cancel := outlive(ctx, m.w.timing.leaderLease, cleanupTimeout)
 	defer cancel()
 	var id string
-	err := m.c.pool.QueryRow(electCtx, m.c.sql.electLeader, m.w.id, m.w.timing.leaderLease.Microseconds()).Scan(&id)
+	err := m.c.pool.QueryRow(electCtx, m.c.sql.electMaintainer, m.w.id, m.w.timing.leaderLease.Microseconds()).Scan(&id)
 	if err != nil && ctx.Err() != nil {
 		// The worker stops, and the statement may have committed all the
 		// same. Whatever this worker knows, resign gives the lease up.
@@ -265,7 +265,7 @@ func (m *maintainer) resign(ctx context.Context) {
 	led := m.leader.Swap(false)
 	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
-	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignLeader, m.w.id, m.c.schema); err != nil && led {
+	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignMaintainer, m.w.id, m.c.schema); err != nil && led {
 		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "resign maintainer failed; another worker takes over when the lease runs out",
 			slog.Any(logKeyError, err))
 	}
@@ -552,7 +552,16 @@ func (c *counted) store(ctx context.Context, tx pgx.Tx, sql *statements) error {
 	if _, err := tx.Exec(ctx, sql.clearStats); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, sql.storeStats, c.queues, c.states, c.counts, c.capped, c.oldest, c.dueCapped, c.halted, c.failures)
+	_, err := tx.Exec(ctx, sql.storeStats,
+		c.queues,    // $1
+		c.states,    // $2
+		c.counts,    // $3
+		c.capped,    // $4
+		c.oldest,    // $5
+		c.dueCapped, // $6
+		c.halted,    // $7
+		c.failures,  // $8
+	)
 	if err != nil {
 		return err
 	}

@@ -215,7 +215,12 @@ func (c *Client) Count(ctx context.Context, filter *TaskFilter) (*TaskCounts, er
 		states = append(states, string(StateCompleted))
 	}
 	out := &TaskCounts{States: make(map[State]TaskCount, len(states))}
-	args := []any{m.queues, m.kinds, m.groups, states}
+	args := []any{
+		m.queues, // $1
+		m.kinds,  // $2
+		m.groups, // $3
+		states,   // $4
+	}
 	err = c.readAlone(ctx, countSettings, c.sql.countTasks, args, func(r pgx.Rows) error {
 		var state string
 		var n, unflagged int64
@@ -447,7 +452,12 @@ func (c *Client) nextBatch(ctx context.Context, m *matching, batch batchFunc) (s
 // The statement runs in a transaction of its own with windowSettings, all in
 // one round trip: see readAlone.
 func (c *Client) nextWindow(ctx context.Context, m *matching) error {
-	args := []any{m.after, m.last, len(m.states) > 0, m.history}
+	args := []any{
+		m.after,           // $1
+		m.last,            // $2
+		len(m.states) > 0, // $3
+		m.history,         // $4
+	}
 	return c.readAlone(ctx, windowSettings, c.sql.windowEnd, args, func(r pgx.Rows) error {
 		return r.Scan(&m.until)
 	})
@@ -494,7 +504,16 @@ type bulkTask struct {
 // pick reads the next batch of the tasks that match m, with one of the pick
 // statements, and locks those it can.
 func pick(ctx context.Context, q querier, sql string, m *matching) ([]bulkTask, error) {
-	r, err := q.query(ctx, sql, m.queues, m.kinds, m.groups, m.states, m.after, m.until, m.left.queues, m.left.groups)
+	r, err := q.query(ctx, sql,
+		m.queues,      // $1
+		m.kinds,       // $2
+		m.groups,      // $3
+		m.states,      // $4
+		m.after,       // $5
+		m.until,       // $6
+		m.left.queues, // $7
+		m.left.groups, // $8
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -602,7 +621,12 @@ func (c *Client) retryBatch(ctx context.Context, q querier, m *matching) (step, 
 			available = append(available, t.queue)
 		}
 	}
-	_, err = q.exec(ctx, c.sql.retryTasks, idsOf(retried), pending, c.schema, c.notifiable(ctx, available))
+	_, err = q.exec(ctx, c.sql.retryTasks,
+		idsOf(retried),               // $1
+		pending,                      // $2
+		c.schema,                     // $3
+		c.notifiable(ctx, available), // $4
+	)
 	s.changed = len(retried)
 	return s, err
 }
@@ -762,7 +786,13 @@ func (c *Client) deleteBatch(ctx context.Context, q querier, m *matching) (step,
 
 // pickCompleted is pick for the completed tasks in history.
 func (c *Client) pickCompleted(ctx context.Context, q querier, m *matching) ([]bulkTask, error) {
-	r, err := q.query(ctx, c.sql.pickCompleted, m.queues, m.kinds, m.groups, m.after, m.until)
+	r, err := q.query(ctx, c.sql.pickCompleted,
+		m.queues, // $1
+		m.kinds,  // $2
+		m.groups, // $3
+		m.after,  // $4
+		m.until,  // $5
+	)
 	if err != nil {
 		return nil, err
 	}

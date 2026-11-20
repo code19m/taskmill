@@ -66,7 +66,12 @@ func (c *Client) Activity(ctx context.Context, params *ActivityParams) ([]Activi
 		return nil, err
 	}
 	var out []Activity
-	args := []any{p.Since, time.Now().Add(time.Minute), int64(p.Step / time.Second), queues}
+	args := []any{
+		p.Since,                     // $1
+		time.Now().Add(time.Minute), // $2
+		int64(p.Step / time.Second), // $3
+		queues,                      // $4
+	}
 	err = c.readAlone(ctx, activitySettings, c.sql.activity, args, func(r pgx.Rows) error {
 		a, err := scanActivity(r)
 		if err != nil {
@@ -245,7 +250,12 @@ func (w *Worker) flushActivity(ctx context.Context) {
 		minutes[i], queues[i] = time.Unix(k.minute, 0), k.queue
 		completed[i], failed[i] = int32(min(c.completed, 1<<31-1)), int32(min(c.failed, 1<<31-1)) //nolint:gosec // capped
 	}
-	_, err := w.client.pool.Exec(ctx, w.client.sql.addActivity, minutes, queues, completed, failed)
+	_, err := w.client.pool.Exec(ctx, w.client.sql.addActivity,
+		minutes,   // $1
+		queues,    // $2
+		completed, // $3
+		failed,    // $4
+	)
 	w.activityFailures.observe(ctx, err)
 	if err != nil {
 		w.tally.restore(counts)

@@ -1,77 +1,38 @@
 package taskmill
 
 import (
-	"math"
-	"regexp"
 	"strconv"
 	"strings"
 )
 
-// keptErrors is how many of a task's most recent attempt errors are kept.
-const keptErrors = 20
-
-// schemaPattern is what a schema name must match, so that it can be used in
-// statements and as a notification channel without quoting.
-var schemaPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
-
-// validateSchema checks a schema name and applies the default.
-func validateSchema(schema string) (string, error) {
-	if schema == "" {
-		return defaultSchema, nil
-	}
-	if !schemaPattern.MatchString(schema) {
-		return "", invalidArgument("schema %q must match %s", schema, schemaPattern)
-	}
-	return schema, nil
-}
+// This file holds what the statements share, and the table that fills in
+// their values. Each statement is a constant in the file of its topic, as
+// the design pages tell them apart, and each file's header links its page:
+// https://github.com/code19m/taskmill/blob/main/docs/design/schema-statements.md
+// has the lifecycle's key statements.
+//
+// A statement's comment starts with its parameters. A placeholder in braces
+// stands for a value: {s} the schema, {batch} maintenanceBatch, {window}
+// bulkWindow, {cap} countCap, {keptErrors} keptErrors, and {available},
+// {cancel}, {heartbeat}, and {resigned} the start of a notification's
+// payload. A fragment that statements share is a constant of its own, and
+// the statements add it to their text.
 
 // statements holds the statements of the task lifecycle and of the
-// operations API, with the schema name filled in, so each has fixed text and
-// can be prepared once per connection. Statements that build names at run
-// time, such as those for history partitions, live with their callers, and so
-// do the session settings that start a transaction, such as bulkSettings.
+// operations API, with the values filled in, so each has fixed text and can
+// be prepared once per connection. Statements that build names at run time,
+// such as those for history partitions, live with their callers. The session
+// settings that start a transaction need no schema: they are in
+// sql_session.go.
 type statements struct {
 	schemaVersion string
 
+	// sql_enqueue.go: enqueue tasks.
 	enqueue      string
 	enqueuePlain string
 	dedupeLookup string
 
-	complete string
-
-	getTask       string
-	lockTask      string
-	takeKeys      string
-	keyHolder     string
-	releaseKeys   string
-	deleteTask    string
-	deleteHistory string
-	taskExists    string
-
-	haltGroup         string
-	lockGroups        string
-	lockLeased        string
-	recountGroups     string
-	deleteEmptyGroups string
-	promoteGroups     string
-	lockPendingGroup  string
-	enterGroup        string
-	resumeHaltedHead  string
-
-	lastTask        string
-	windowEnd       string
-	pickRetry       string
-	pickCancel      string
-	pickDelete      string
-	releaseHalts    string
-	createGroups    string
-	retryTasks      string
-	cancelTasks     string
-	deleteTasks     string
-	pickCompleted   string
-	deleteCompleted string
-	countTasks      string
-
+	// sql_attempts.go: fetch tasks, and record how their attempts end.
 	fetch         string
 	fetchKind     string
 	leaseTask     string
@@ -80,1589 +41,255 @@ type statements struct {
 	countRunning  string
 	renewLeases   string
 	cancelRequest string
+	complete      string
+	lockLeased    string
 	fail          string
 	snooze        string
 	release       string
-	queueSettings string
-	upsertWorker  string
-	checkInWorker string
-	deleteWorker  string
-	electLeader   string
-	resignLeader  string
-	promoteDue    string
-	nextDue       string
-	wakeQueues    string
-	rescue        string
 
-	expiredHistory  string
-	deleteFinished  string
-	pruneSchedules  string
-	loadSchedules   string
-	upsertSchedule  string
-	advanceSchedule string
-	listSchedules   string
-	pauseSchedule   string
+	// sql_groups.go: change the rows of FIFO groups.
+	haltGroup         string
+	lockGroups        string
+	recountGroups     string
+	deleteEmptyGroups string
+	promoteGroups     string
+	lockPendingGroup  string
+	enterGroup        string
+	resumeHaltedHead  string
+	releaseHalts      string
+	createGroups      string
+
+	// sql_operations.go: what an operator changes: tasks, queues, settings, and schedules.
+	lockTask        string
+	takeKeys        string
+	keyHolder       string
+	releaseKeys     string
+	deleteTask      string
+	deleteHistory   string
+	taskExists      string
+	lastTask        string
+	windowEnd       string
+	pickRetry       string
+	pickCancel      string
+	pickDelete      string
+	retryTasks      string
+	cancelTasks     string
+	deleteTasks     string
+	pickCompleted   string
+	deleteCompleted string
+	readQueue       string
+	swapQueue       string
+	pauseQueue      string
+	queueSettings   string
+	readSettings    string
+	swapSettings    string
 	runSchedule     string
+	pauseSchedule   string
 
-	readQueue        string
-	swapQueue        string
-	pauseQueue       string
-	listQueues       string
-	queueStats       string
-	readSettings     string
-	swapSettings     string
-	listWorkers      string
-	listTasks        string
-	listFinished     string
-	listCreated      string
-	listGroups       string
-	listQueueGroups  string
-	countStats       string
-	lockStats        string
-	clearStats       string
-	storeStats       string
-	storeActivity    string
-	addActivity      string
-	deleteActivity   string
-	activity         string
+	// sql_maintenance.go: the maintainer's work, and the workers' rows.
+	upsertWorker     string
+	checkInWorker    string
+	deleteWorker     string
+	electMaintainer  string
+	resignMaintainer string
+	promoteDue       string
+	nextDue          string
+	wakeQueues       string
+	rescue           string
+	deleteFinished   string
 	deleteDedupeKeys string
 	deleteWorkers    string
+	deleteActivity   string
+	expiredHistory   string
+	pruneSchedules   string
+	loadSchedules    string
+	upsertSchedule   string
+	advanceSchedule  string
+
+	// sql_lists.go: read tasks, groups, queues, workers, and schedules.
+	getTask         string
+	listTasks       string
+	listFinished    string
+	listCreated     string
+	countTasks      string
+	listGroups      string
+	listQueueGroups string
+	listQueues      string
+	listWorkers     string
+	listSchedules   string
+
+	// sql_stats.go: count the queues, and keep their activity.
+	countStats    string
+	lockStats     string
+	clearStats    string
+	storeStats    string
+	queueStats    string
+	storeActivity string
+	addActivity   string
+	activity      string
 }
 
-// leasedColumns are the columns that scanLeased reads, in its order.
-const leasedColumns = `t.id, t.queue, t.kind, t.priority, t.attempt, t.max_attempts, t.lease_token,
-          coalesce(t.group_key, ''), t.metadata, t.payload, t.errors, t.created_at, t.run_at, t.attempted_at`
-
-// taskFilter matches the tasks t of queues $1, kinds $2, and FIFO groups $3;
-// an empty filter matches every task.
-const taskFilter = `(cardinality($1::text[]) = 0 OR t.queue = ANY($1::text[]))
-  AND (cardinality($2::text[]) = 0 OR t.kind = ANY($2::text[]))
-  AND (cardinality($3::text[]) = 0 OR t.group_key = ANY($3::text[]))`
-
-// groupFree matches the tasks t that have no FIFO group, whose group's row it
-// locks, or whose group has no row. It skips group rows that other
-// transactions hold, so a statement never waits for them.
-const groupFree = `(t.group_key IS NULL
-       OR EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key
-                  FOR UPDATE SKIP LOCKED)
-       OR NOT EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key))`
-
-// keyFree matches the tasks t that hold no dedupe key, or whose key's row it
-// locks. It skips key rows that other transactions hold, such as an enqueue
-// that tried to claim the key in an open transaction, so a statement never
-// waits for them.
-const keyFree = `(NOT EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id)
-       OR EXISTS (SELECT FROM {s}.dedupe_keys d WHERE d.task_id = t.id FOR UPDATE SKIP LOCKED))`
-
 func newStatements(schema string) *statements {
-	r := strings.NewReplacer(
+	q := strings.NewReplacer(
 		"{s}", schema,
 		"{batch}", strconv.Itoa(maintenanceBatch),
 		"{window}", strconv.Itoa(bulkWindow),
 		"{cap}", strconv.Itoa(countCap),
-		// {available} and {cancel} start the payloads of notifications.
+		"{keptErrors}", strconv.Itoa(keptErrors),
 		"{available}", notifyAvailable+"|",
 		"{cancel}", notifyCancel+"|",
 		"{heartbeat}", notifyHeartbeat+"|",
 		"{resigned}", notifyResigned+"|",
-		// {trimmed} is a task's errors without the oldest entry once it holds
-		// keptErrors, so that appending one keeps at most keptErrors. Errors
-		// that are not an array count as none, and appending replaces them:
-		// their length is an error, which in the statement that rescues
-		// expired leases would keep every task of its batch from being
-		// rescued.
-		"{trimmed}", "(CASE WHEN jsonb_typeof(errors) <> 'array' THEN '[]' WHEN jsonb_array_length(errors) >= "+
-			strconv.Itoa(keptErrors)+" THEN errors - 0 ELSE errors END)",
-		// {attempt} and {token} are what a fetch counts a task's attempt and
-		// lease token up to. Both stay in the range of their columns for any
-		// row, so that one row cannot fail the fetch of every task taken with
-		// it. The attempt stops at the task's maximum: a row can wait in a
-		// queue with no attempt left, such as a dead task that an UPDATE by
-		// hand made available, and then runs once more. The token stops at
-		// the largest integer, where the worker makes the task dead: a token
-		// that cannot grow cannot tell the next attempt from this one.
-		"{attempt}", "least(t.attempt + 1, t.max_attempts)",
-		"{token}", "least(t.lease_token, "+strconv.Itoa(math.MaxInt32-1)+") + 1",
-		// {unnoted} is a task's errors without a no_handler note at their
-		// end. The note says that the task waits for a worker with a handler
-		// for its kind: the wait is over once such a worker has the task, or
-		// an operator retries it.
-		"{unnoted}", "(CASE WHEN (errors -> -1) ->> 'code' = '"+string(CodeNoHandler)+"' THEN errors - (-1) ELSE errors END)",
-		// {leased} checks that a task is leased. The statements that find
-		// tasks by their attempts look each one up by ID, and compare the
-		// state as text, so that the planner cannot read tasks_running_idx
-		// instead: statistics taken while few tasks ran make that index look
-		// small, but until vacuum it keeps an entry for every task that ran.
-		// Those that take a batch of attempts join from the attempts to the
-		// tasks, one lookup per attempt. The planner expects very few
-		// running tasks, so when the tasks are matched against the list of
-		// attempts instead, it compares every task with every attempt.
-		"{leased}", "state::text = 'running'",
-		// {keyed} matches the tasks t that must take a dedupe key back when
-		// they are retried: they are canceled, their cancel freed a key, and
-		// stored it with them, and the key's window still lasts. Only a
-		// canceled task gave its key away. A task in another state that
-		// stores one was retried by the previous release, which leaves the
-		// columns as they are: it ran on without its key, and so asks for
-		// none when it is dead. A stored key that is not one, which only a
-		// write by hand leaves, counts as none: the table of the keys would
-		// refuse it, and fail the retry.
-		"{keyed}", `(t.state = 'canceled' AND t.freed_key_expires_at > now() AND octet_length(t.freed_key) = 32)`,
-		// {utc} is the database's time in UTC, without a time zone. A
-		// retention period is subtracted from it, not from now(): there, a
-		// period's days are days of the session's time zone, which are 23 or
-		// 25 hours long when its clocks change.
-		"{utc}", "(now() AT TIME ZONE 'UTC')",
-		// {at} is the database's time as an error entry stores it: text, in
-		// UTC, in the format of RFC 3339. As a value, jsonb would write it
-		// with the offset of the session's time zone: an entry would read
-		// differently for each writer, and Go cannot read every offset that
-		// PostgreSQL accepts, such as one of more than a day.
-		"{at}", `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
-	)
-	q := func(sql string) string { return r.Replace(sql) }
-	pick := func(cond, gates string) string {
-		return q(`
-WITH candidates AS (
-    SELECT t.id, t.queue, coalesce(t.group_key, '') AS group_key FROM {s}.tasks t
-    WHERE ` + cond + ` AND t.id > $5 AND t.id <= $6
-      AND t.state = ANY($4::text[]::{s}.task_state[]) AND ` + taskFilter + `
-    ORDER BY t.id
-    LIMIT {batch}
-), picked AS (
-    SELECT t.id, t.state::text AS state,
-           EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key) AS in_group,
-           coalesce({keyed}, false) AS keyed
-    FROM {s}.tasks t
-    WHERE t.id = ANY(ARRAY(SELECT id FROM candidates)) AND ` + cond + `
-      AND t.state = ANY($4::text[]::{s}.task_state[])
-      AND NOT EXISTS (SELECT FROM unnest($7::text[], $8::text[]) AS u(queue, group_key)
-                      WHERE u.queue = t.queue AND u.group_key = t.group_key)
-      AND ` + groupFree + gates + `
-    FOR UPDATE OF t SKIP LOCKED
-)
-SELECT c.id, c.queue, c.group_key, p.id IS NOT NULL, coalesce(p.state, ''), coalesce(p.in_group, false),
-       coalesce(p.keyed, false)
-FROM candidates c LEFT JOIN picked p ON p.id = c.id
-ORDER BY c.id`)
-	}
-
+	).Replace
 	return &statements{
-		schemaVersion: q(`
-SELECT coalesce(max(version), 0), current_setting('default_transaction_isolation') FROM {s}.migrations`),
-
-		// enqueue inserts a batch of tasks in one round trip. It claims dedupe
-		// keys first, counts admitted tasks into their FIFO groups, places each
-		// task in its starting state, and notifies the listed queues. For a
-		// duplicate, it returns the task that holds the key, or 0 if it cannot
-		// see that task: the holder committed while the statement waited for
-		// the key. A holder whose window ended is such a case: the statement
-		// would have claimed its key, had another enqueue not done so
-		// meanwhile. The client then reads the key again.
-		//
-		// A task whose key the statement sees as held is a duplicate right
-		// away: it gets no ID, and the statement does not try to claim its
-		// key. So a duplicate writes nothing: a claim that fails locks the
-		// key's row, and so takes a transaction ID and writes WAL, and an ID
-		// is a write to the sequence. Deduplication stays exact, because
-		// every task that is created still goes through the claim, which
-		// alone decides. Skipping the claim only gives its answer early. A
-		// held key's row changes in one way: the cancel or the delete of its
-		// task removes it. Only an expired key is claimed again. So for a
-		// key that the statement sees as held, the claim would report the
-		// same duplicate, unless such a removal is under way, or commits
-		// while the statement runs: then the claim would wait for it, and
-		// take the key. The statement reports the duplicate that was true
-		// when it began, as if it had run just before the removal.
-		//
-		// That holds only if the statement sees the keys as they are when it
-		// begins, as at READ COMMITTED. A caller's transaction at REPEATABLE
-		// READ or SERIALIZABLE sees them as they were when the transaction
-		// began: a key that it sees as held may have been free for long.
-		// There every key goes through the claim, which looks at the rows as
-		// they are now.
-		enqueue: q(`
-WITH input AS (
-    SELECT queue, kind, priority, run_at, max_attempts, group_key,
-           dedupe_key, dedupe_window_us, payload, metadata, ord
-    FROM unnest($1::text[], $2::text[], $3::smallint[], $4::timestamptz[], $5::smallint[],
-                $6::text[], $7::bytea[], $8::bigint[], $9::jsonb[], $10::jsonb[])
-        WITH ORDINALITY AS t(queue, kind, priority, run_at, max_attempts, group_key,
-                             dedupe_key, dedupe_window_us, payload, metadata, ord)
-), ids AS (
-    SELECT input.*,
-           CASE WHEN dedupe_key IS NOT NULL
-                     AND current_setting('transaction_isolation') NOT IN ('repeatable read', 'serializable')
-                     AND EXISTS (SELECT FROM {s}.dedupe_keys k
-                                 WHERE k.key = input.dedupe_key AND k.expires_at > now())
-                THEN NULL
-                ELSE nextval('{s}.tasks_id_seq') END AS id
-    FROM input
-), claimed AS (
-    INSERT INTO {s}.dedupe_keys AS d (key, task_id, expires_at)
-    SELECT dedupe_key, id, now() + dedupe_window_us * interval '1 microsecond'
-    FROM ids
-    WHERE dedupe_key IS NOT NULL AND id IS NOT NULL
-    ORDER BY dedupe_key
-    ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
-        WHERE d.expires_at <= now()
-    RETURNING task_id
-), admitted AS (
-    SELECT ids.*
-    FROM ids
-    WHERE ids.dedupe_key IS NULL OR ids.id IN (SELECT task_id FROM claimed)
-), added AS (
-    SELECT queue, group_key, count(*) AS n
-    FROM admitted
-    WHERE group_key IS NOT NULL
-    GROUP BY queue, group_key
-), grouped AS (
-    INSERT INTO {s}.groups AS g (queue, group_key, tasks)
-    SELECT queue, group_key, n FROM added
-    ORDER BY queue COLLATE "C", group_key COLLATE "C"
-    ON CONFLICT (queue, group_key) DO UPDATE SET tasks = g.tasks + EXCLUDED.tasks, updated_at = now()
-    RETURNING queue, group_key, tasks
-), placed AS (
-    SELECT a.*,
-           CASE
-               WHEN a.group_key IS NOT NULL AND gr.tasks - ad.n > 0 THEN 'pending'
-               WHEN a.group_key IS NOT NULL
-                    AND row_number() OVER (PARTITION BY a.queue, a.group_key ORDER BY a.ord) > 1 THEN 'pending'
-               WHEN coalesce(a.run_at, now()) > now() THEN 'scheduled'
-               ELSE 'available'
-           END::{s}.task_state AS state
-    FROM admitted a
-    LEFT JOIN grouped gr ON gr.queue = a.queue AND gr.group_key = a.group_key
-    LEFT JOIN added ad ON ad.queue = a.queue AND ad.group_key = a.group_key
-), inserted AS (
-    INSERT INTO {s}.tasks (id, queue, kind, state, priority, run_at, group_key, payload, metadata, max_attempts)
-    OVERRIDING SYSTEM VALUE
-    SELECT id, queue, kind, state, priority, coalesce(run_at, now()), group_key, payload, metadata, max_attempts
-    FROM placed
-    ORDER BY ord
-    RETURNING id
-), notified AS (
-    SELECT count(pg_notify($11, '{available}' || q)) AS n FROM unnest($12::text[]) AS q
-)
-SELECT ids.ord, coalesce(i.id, d.task_id, 0), i.id IS NULL
-FROM ids
-LEFT JOIN inserted i ON i.id = ids.id
-LEFT JOIN {s}.dedupe_keys d ON i.id IS NULL AND d.key = ids.dedupe_key AND d.expires_at > now()
-CROSS JOIN notified
-ORDER BY ids.ord`),
-
-		// enqueuePlain is enqueue for batches without dedupe keys or FIFO
-		// groups, the common case: it skips their bookkeeping. It takes the
-		// same parameters and returns the same rows.
-		enqueuePlain: q(`
-WITH ids AS (
-    SELECT queue, kind, priority, run_at, max_attempts, payload, metadata, ord,
-           nextval('{s}.tasks_id_seq') AS id
-    FROM unnest($1::text[], $2::text[], $3::smallint[], $4::timestamptz[], $5::smallint[],
-                $6::text[], $7::bytea[], $8::bigint[], $9::jsonb[], $10::jsonb[])
-        WITH ORDINALITY AS t(queue, kind, priority, run_at, max_attempts, group_key,
-                             dedupe_key, dedupe_window_us, payload, metadata, ord)
-), inserted AS (
-    INSERT INTO {s}.tasks (id, queue, kind, state, priority, run_at, payload, metadata, max_attempts)
-    OVERRIDING SYSTEM VALUE
-    SELECT id, queue, kind,
-           CASE WHEN coalesce(run_at, now()) > now() THEN 'scheduled' ELSE 'available' END::{s}.task_state,
-           priority, coalesce(run_at, now()), payload, metadata, max_attempts
-    FROM ids
-    ORDER BY ord
-), notified AS (
-    SELECT count(pg_notify($11, '{available}' || q)) AS n FROM unnest($12::text[]) AS q
-)
-SELECT ids.ord, ids.id, false FROM ids CROSS JOIN notified ORDER BY ids.ord`),
-
-		dedupeLookup: q(`SELECT key, task_id FROM {s}.dedupe_keys WHERE key = ANY($1::bytea[])`),
-
-		// complete finishes running tasks whose attempts still hold their
-		// leases: it moves them to history, except tasks $3, which it only
-		// deletes.
-		//
-		// It waits for a row that another transaction holds. So it first
-		// locks the tasks that the attempts own, in the order of their IDs,
-		// and then deletes the tasks it holds. While it waits for a task, it
-		// holds only tasks with lower IDs, and cannot deadlock with a
-		// transaction that takes tasks in that order too, such as one that
-		// cancels several. A delete alone takes the rows as its plan meets
-		// them: in the order of the attempts, or in that of the table, where
-		// a renewed lease moves a row behind newer ones. A read that locks
-		// sorts first, whatever its plan.
-		complete: q(`
-WITH held AS (
-    SELECT t.id FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
-    JOIN {s}.tasks t USING (id, lease_token)
-    WHERE {leased}
-    ORDER BY t.id
-    FOR UPDATE OF t
-), done AS (
-    DELETE FROM {s}.tasks
-    WHERE id = ANY(ARRAY(SELECT id FROM held))
-    RETURNING id, created_at, run_at, attempted_at, priority, attempt, max_attempts,
-              queue, kind, group_key, attempted_by, payload, metadata, errors
-), kept AS (
-    INSERT INTO {s}.task_history (id, finalized_at, created_at, run_at, attempted_at, priority, attempt,
-                                  max_attempts, queue, kind, group_key, attempted_by, payload, metadata, errors)
-    SELECT id, now(), created_at, run_at, attempted_at, priority, attempt,
-           max_attempts, queue, kind, group_key, attempted_by, payload, metadata, errors
-    FROM done
-    WHERE done.id <> ALL($3::bigint[])
-)
-SELECT id, queue, coalesce(group_key, '') FROM done`),
-
-		getTask: q(`
-SELECT ` + taskColumns(`state::text`) + ` FROM {s}.tasks WHERE id = $1
-UNION ALL
-SELECT ` + taskColumns(`'completed'`) + `
-FROM {s}.task_history WHERE id = $1
-LIMIT 1`),
-
-		// lockTask locks a task's row and returns its state; if $2, only if
-		// the task is pending, and without waiting for the row of a task that
-		// is not. Statements that change the task run after it, as statements
-		// of their own, so that they read the row as it is once locked.
-		lockTask: q(`
-SELECT state::text, queue, coalesce(group_key, '')
-FROM {s}.tasks WHERE id = $1 AND (NOT $2 OR state = 'pending') FOR UPDATE`),
-
-		// takeKeys gives the tasks $1, which a retry holds, the dedupe keys
-		// that their cancels freed, for the rest of each key's window. It
-		// claims a key as an enqueue does: only if no task holds it, or its
-		// holder's window has ended. A task whose key's window has ended
-		// asks for no key. It returns the tasks that did not get their key:
-		// another task holds it, which may be an older task of $1.
-		//
-		// Like an enqueue, it waits for a transaction that claims or holds
-		// the same key, so a retry runs it before it takes a FIFO group's
-		// row, the order of an enqueue.
-		takeKeys: q(`
-WITH wanted AS (
-    SELECT t.id, t.freed_key AS key, t.freed_key_expires_at AS expires_at
-    FROM {s}.tasks t
-    WHERE t.id = ANY($1::bigint[]) AND {keyed}
-), taken AS (
-    INSERT INTO {s}.dedupe_keys AS d (key, task_id, expires_at)
-    SELECT DISTINCT ON (key) key, id, expires_at FROM wanted ORDER BY key, id
-    ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
-        WHERE d.expires_at <= now()
-    RETURNING d.task_id
-)
-SELECT id FROM wanted WHERE id NOT IN (SELECT task_id FROM taken)`),
-
-		// keyHolder reads who holds the dedupe key that task $1 stores, for
-		// the error of a retry that takeKeys refused: the task that holds
-		// it, and the end of that task's window, if it ends. The task is 0
-		// if it no longer exists: a completed task keeps its key for its
-		// window, also after its history is gone. It returns no row if no
-		// task holds the key any more.
-		keyHolder: q(`
-SELECT coalesce(h.id, 0), CASE WHEN isfinite(d.expires_at) THEN d.expires_at END
-FROM {s}.tasks t
-JOIN {s}.dedupe_keys d ON d.key = t.freed_key AND d.expires_at > now()
-LEFT JOIN LATERAL (
-    SELECT id FROM {s}.tasks WHERE id = d.task_id
-    UNION ALL
-    SELECT id FROM {s}.task_history WHERE id = d.task_id
-    LIMIT 1
-) h ON true
-WHERE t.id = $1`),
-
-		// releaseKeys frees the dedupe keys that tasks $1 hold, so that the
-		// keys can be enqueued again.
-		releaseKeys: q(`DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])`),
-
-		// deleteTask deletes task $1 unless it is running, and returns the
-		// state it was in; if $2, only if the task is pending, as lockTask
-		// does.
-		deleteTask: q(`
-DELETE FROM {s}.tasks WHERE id = $1 AND state <> 'running' AND (NOT $2 OR state = 'pending')
-RETURNING state::text, queue, coalesce(group_key, '')`),
-
-		deleteHistory: q(`DELETE FROM {s}.task_history WHERE id = $1`),
-
-		taskExists: q(`
-SELECT state::text FROM {s}.tasks WHERE id = $1
-UNION ALL
-SELECT 'completed' FROM {s}.task_history WHERE id = $1
-LIMIT 1`),
-
-		// haltGroup marks a group halted by its dead head, which stays
-		// counted.
-		haltGroup: q(`
-UPDATE {s}.groups SET halted_task_id = $3, halted_at = now(), updated_at = now()
-WHERE queue = $1 AND group_key = $2`),
-
-		// lockGroups locks the rows of groups ($1, $2) that no other
-		// transaction holds. It returns each locked group with true, and each
-		// existing group with false, so a group it does not return has no row.
-		// Skipping held rows means a batch never waits for another
-		// transaction.
-		lockGroups: q(`
-WITH wanted AS (
-    SELECT DISTINCT queue, group_key FROM unnest($1::text[], $2::text[]) AS u(queue, group_key)
-), locked AS (
-    SELECT g.queue, g.group_key FROM {s}.groups g
-    JOIN wanted w ON g.queue = w.queue AND g.group_key = w.group_key
-    FOR UPDATE OF g SKIP LOCKED
-)
-SELECT queue, group_key, true FROM locked
-UNION ALL
-SELECT g.queue, g.group_key, false FROM {s}.groups g
-JOIN wanted w ON g.queue = w.queue AND g.group_key = w.group_key`),
-
-		// lockLeased locks the rows of the attempts ($1, $2) that still own
-		// their tasks, skipping rows that other transactions hold. It returns
-		// each locked task with true, and each owned task with false. Taken
-		// after lockGroups, it keeps a batch from ever waiting while it holds
-		// group rows.
-		lockLeased: q(`
-WITH attempts AS (
-    SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
-), locked AS (
-    SELECT t.id FROM attempts JOIN {s}.tasks t USING (id, lease_token)
-    WHERE {leased}
-    FOR UPDATE OF t SKIP LOCKED
-)
-SELECT id, true FROM locked
-UNION ALL
-SELECT t.id, false FROM attempts JOIN {s}.tasks t USING (id, lease_token)
-WHERE {leased}`),
-
-		// recountGroups adds $3, which is negative for tasks that left, to the
-		// counts of groups ($1, $2), and returns each group that has a row,
-		// with its count and whether it is still halted. A group is named
-		// once: an UPDATE changes a row once.
-		//
-		// $4 are the tasks that left, or none. If one of them halts its
-		// group, the halt ends here, with the task's place in the count. A
-		// halt that stayed would name a task that is no longer counted, or
-		// no longer exists: a retry of that task would end the halt and
-		// count the task as still there, and nothing could end the halt of
-		// a task that is gone. A task that taskmill halted a group by is
-		// dead, and leaves only when it is deleted, but a row written by
-		// hand can name any task.
-		//
-		// It locks the rows, and waits for one that another transaction
-		// holds. The plan decides in which order it takes the rows of
-		// several groups: a nested loop takes them in the order of the
-		// arrays, and a hash join can take them as they lie in the table.
-		//
-		// A count stops at zero. Only a row that taskmill did not write
-		// counts fewer tasks than its group holds, and a count below zero
-		// breaks the table's rule: the error would fail the caller's
-		// transaction, which in a rescue ends the expired leases of every
-		// queue, and in a completion the tasks of every other group in the
-		// batch.
-		recountGroups: q(`
-UPDATE {s}.groups g
-SET tasks = greatest(g.tasks + u.n, 0),
-    halted_task_id = CASE WHEN g.halted_task_id = ANY($4::bigint[]) THEN NULL ELSE g.halted_task_id END,
-    halted_at = CASE WHEN g.halted_task_id = ANY($4::bigint[]) THEN NULL ELSE g.halted_at END,
-    updated_at = now()
-FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
-WHERE g.queue = u.queue AND g.group_key = u.group_key
-RETURNING g.queue, g.group_key, g.tasks, g.halted_task_id IS NOT NULL`),
-
-		deleteEmptyGroups: q(`
-DELETE FROM {s}.groups g USING unnest($1::text[], $2::text[]) AS u(queue, group_key)
-WHERE g.queue = u.queue AND g.group_key = u.group_key AND g.tasks = 0`),
-
-		// promoteGroups makes the oldest pending task of each group ($1, $2)
-		// its head, and notifies channel $3 of the queues in $4 that got an
-		// available task. It must run as its own statement after
-		// recountGroups, so that it sees tasks enqueued while recountGroups
-		// waited for a group's lock.
-		promoteGroups: q(`
-WITH next AS (
-    SELECT p.id FROM unnest($1::text[], $2::text[]) AS u(queue, group_key)
-    CROSS JOIN LATERAL (
-        SELECT id FROM {s}.tasks
-        WHERE queue = u.queue AND group_key = u.group_key AND state = 'pending'
-        ORDER BY id
-        LIMIT 1
-        FOR UPDATE
-    ) p
-), promoted AS (
-    UPDATE {s}.tasks t
-    SET state = CASE WHEN t.run_at > now() THEN 'scheduled' ELSE 'available' END::{s}.task_state
-    FROM next
-    WHERE t.id = next.id
-    RETURNING t.queue, t.state
-)
-SELECT count(pg_notify($3, '{available}' || queue))
-FROM (SELECT DISTINCT queue FROM promoted WHERE state = 'available' AND queue = ANY($4)) q`),
-
-		// lockPendingGroup locks the group of task $1 if the task is pending,
-		// and returns a row if it did. A pending task's row is locked only
-		// after its group's, the order in which promotion takes them, so the
-		// two cannot deadlock. The statement reads the task before it waits
-		// for the group's row, so the task may no longer be pending once it
-		// holds that row: takeTask checks, where it can start again.
-		lockPendingGroup: q(`
-SELECT true FROM {s}.groups g JOIN {s}.tasks t ON t.queue = g.queue AND t.group_key = g.group_key
-WHERE t.id = $1 AND t.state = 'pending'
-FOR UPDATE OF g`),
-
-		enterGroup: q(`
-INSERT INTO {s}.groups AS g (queue, group_key, tasks) VALUES ($1, $2, 1)
-ON CONFLICT (queue, group_key) DO UPDATE SET tasks = g.tasks + 1, updated_at = now()
-RETURNING tasks`),
-
-		// resumeHaltedHead ends the halt of group ($1, $2) if task $3 halts
-		// it: it changes a row only then. Callers run it as its own statement
-		// after locking the task, so that it sees the latest halt: only
-		// statements that hold the task's lock change whether the task halts
-		// its group.
-		resumeHaltedHead: q(`
-UPDATE {s}.groups SET halted_task_id = NULL, halted_at = NULL, updated_at = now()
-WHERE queue = $1 AND group_key = $2 AND halted_task_id = $3`),
-
-		// lastTask returns the ID of the newest task, unfinished or in history.
-		lastTask: q(`
-SELECT greatest((SELECT coalesce(max(id), 0) FROM {s}.tasks), (SELECT coalesce(max(id), 0) FROM {s}.task_history))`),
-
-		// windowEnd returns where the window of a bulk action's next batches
-		// ends: the ID of the {window}th task after $1, in the tasks table
-		// if $3 and in the history if $4, whichever comes first, and at most
-		// $2. With windowSettings, it reads that many index entries of each
-		// table, in ID order, and no row beyond them.
-		windowEnd: q(`
-SELECT least($2::bigint,
-    (SELECT id FROM {s}.tasks WHERE $3 AND id > $1 AND id <= $2 ORDER BY id OFFSET {window} - 1 LIMIT 1),
-    (SELECT id FROM {s}.task_history WHERE $4 AND id > $1 AND id <= $2 ORDER BY id OFFSET {window} - 1 LIMIT 1))`),
-
-		// The pick statements read the next batch of the tasks that a bulk
-		// action changes, in ID order after $5 up to $6, the action's last
-		// task or the end of the batch's window: those of states $4 that
-		// match the filters. Each batch starts where the last one ended, so
-		// a bulk action reads each task once, and the oldest tasks of a FIFO
-		// group come first. They return each of them, and whether they hold
-		// its lock: they skip the tasks, the FIFO groups, and the dedupe
-		// keys that other transactions hold, the groups ($7, $8) that the
-		// action left before, and tasks that changed meanwhile. They report
-		// whether each task's group had a row, which they then hold. A
-		// cancel skips running tasks already asked to stop. They also report
-		// the tasks that must take a dedupe key back if they are retried.
-		pickRetry: pick(`t.state IN ('dead', 'canceled')`, ``),
-		pickCancel: pick(`t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
-      AND t.cancel_requested_at IS NULL`, ` AND `+keyFree),
-		pickDelete: pick(`t.state <> 'running'`, ` AND `+keyFree),
-
-		// releaseHalts ends the halts of the groups that tasks $1 halt, and
-		// returns those tasks. The caller holds the tasks' and the groups'
-		// locks.
-		releaseHalts: q(`
-WITH halting AS (
-    SELECT queue, group_key, halted_task_id AS id FROM {s}.groups WHERE halted_task_id = ANY($1::bigint[])
-)
-UPDATE {s}.groups g SET halted_task_id = NULL, halted_at = NULL, updated_at = now()
-FROM halting h
-WHERE g.queue = h.queue AND g.group_key = h.group_key
-RETURNING h.id`),
-
-		// createGroups creates the rows of groups ($1, $2) with $3 tasks each,
-		// and returns those it created: a group whose row another transaction
-		// created meanwhile is left out.
-		createGroups: q(`
-INSERT INTO {s}.groups (queue, group_key, tasks)
-SELECT queue, group_key, n FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
-ORDER BY queue COLLATE "C", group_key COLLATE "C"
-ON CONFLICT DO NOTHING
-RETURNING queue, group_key`),
-
-		// retryTasks makes the tasks $1 run again, one task or a batch, those
-		// of $2 as pending, and notifies channel $3 of queues $4. The caller
-		// holds the tasks' rows, and has seen that they are dead or canceled.
-		// It forgets the dedupe keys that the tasks' cancels freed: takeKeys
-		// ran before.
-		retryTasks: q(`
-WITH retried AS (
-    UPDATE {s}.tasks
-    SET state = CASE WHEN id = ANY($2::bigint[]) THEN 'pending' ELSE 'available' END::{s}.task_state,
-        attempt = 0, run_at = now(), finalized_at = NULL, cancel_requested_at = NULL, errors = {unnoted},
-        freed_key = NULL, freed_key_expires_at = NULL
-    WHERE id = ANY($1::bigint[])
-), notified AS (
-    SELECT count(pg_notify($3, '{available}' || q)) AS n FROM unnest($4::text[]) AS q
-)
-SELECT n FROM notified`),
-
-		// cancelTasks cancels the tasks $1, whose rows the caller holds, and
-		// frees their dedupe keys, so that the keys can be enqueued again. It
-		// stores each freed key with its task, and the end of the key's
-		// window, so that a retry can take the key back: see takeKeys. It
-		// flags the running tasks, and asks their workers on channel $2 to
-		// stop them. A task that holds no key keeps what an earlier cancel
-		// stored: a running task can be flagged twice.
-		cancelTasks: q(`
-WITH released AS (
-    DELETE FROM {s}.dedupe_keys d WHERE d.task_id = ANY($1::bigint[]) RETURNING d.task_id, d.key, d.expires_at
-), canceled AS (
-    UPDATE {s}.tasks t
-    SET state = CASE WHEN t.state = 'running' THEN t.state ELSE 'canceled' END,
-        finalized_at = CASE WHEN t.state = 'running' THEN NULL ELSE now() END,
-        cancel_requested_at = now(),
-        freed_key = coalesce(r.key, t.freed_key),
-        freed_key_expires_at = coalesce(r.expires_at, t.freed_key_expires_at)
-    FROM unnest($1::bigint[]) AS u(id) LEFT JOIN released r ON r.task_id = u.id
-    WHERE t.id = u.id
-    RETURNING t.id, t.state
-)
-SELECT count(pg_notify($2, '{cancel}' || id)) FROM canceled WHERE state = 'running'`),
-
-		// deleteTasks deletes the picked tasks $1 and releases their dedupe
-		// keys.
-		deleteTasks: q(`
-WITH released AS (
-    DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])
-)
-DELETE FROM {s}.tasks WHERE id = ANY($1::bigint[])`),
-
-		// pickCompleted is a pick statement for the completed tasks in history,
-		// after $4 up to $5.
-		pickCompleted: q(`
-WITH candidates AS (
-    SELECT t.id FROM {s}.task_history t
-    WHERE t.id > $4 AND t.id <= $5 AND ` + taskFilter + `
-    ORDER BY t.id
-    LIMIT {batch}
-), picked AS (
-    SELECT t.id FROM {s}.task_history t
-    WHERE t.id = ANY(ARRAY(SELECT id FROM candidates)) AND ` + keyFree + `
-    FOR UPDATE SKIP LOCKED
-)
-SELECT c.id, p.id IS NOT NULL FROM candidates c LEFT JOIN picked p ON p.id = c.id ORDER BY c.id`),
-
-		// deleteCompleted deletes the picked completed tasks $1, and releases
-		// their dedupe keys.
-		deleteCompleted: q(`
-WITH released AS (
-    DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])
-)
-DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[])`),
-
-		// countTasks counts the tasks in each state of $4 that match the
-		// filters, up to {cap} per state. Each state has a branch of its own,
-		// which reads that state's index.
-		countTasks: q(countTasks()),
-
-		// fetch leases up to $2 available tasks of queue $1 for $3
-		// microseconds, in priority, run time, and enqueue order. It updates
-		// the picked tasks through an array of their IDs: a join with the
-		// picked rows can make a generic plan scan the whole table, as the
-		// planner cannot know how few rows LIMIT $2 returns.
-		//
-		// The lease counts from clock_timestamp(), the moment the task is
-		// taken, not from now(), the start of the transaction: the fetch of
-		// a queue with a MaxRunning limit waits for the queue's row first,
-		// and that wait must not be taken off the lease.
-		fetch: q(`
-WITH picked AS (
-    SELECT id FROM {s}.tasks
-    WHERE state = 'available' AND queue = $1
-    ORDER BY priority DESC, run_at, id
-    LIMIT $2
-    FOR UPDATE SKIP LOCKED
-)
-UPDATE {s}.tasks t
-SET ` + leaseSet(`$3`, `$4`) + `
-WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
-RETURNING ` + leasedColumns),
-
-		// fetchKind is fetch for tasks of kind $5 only, to fill a batch. It
-		// looks at no more than the first $6 available tasks of the queue,
-		// so filling a batch in a queue of many kinds stays cheap. It locks
-		// the candidates of its kind one by one, in their order, and stops
-		// at $2 of them: ordered by the columns of the locked rows, they
-		// would all be read and sorted first.
-		fetchKind: q(`
-WITH candidates AS (
-    SELECT id, kind, priority, run_at FROM {s}.tasks
-    WHERE state = 'available' AND queue = $1
-    ORDER BY priority DESC, run_at, id
-    LIMIT $6
-), picked AS (
-    SELECT t.id FROM candidates c
-    CROSS JOIN LATERAL (
-        SELECT id FROM {s}.tasks WHERE id = c.id AND state = 'available' FOR UPDATE SKIP LOCKED
-    ) t
-    WHERE c.kind = $5
-    ORDER BY c.priority DESC, c.run_at, c.id
-    LIMIT $2
-)
-UPDATE {s}.tasks t
-SET ` + leaseSet(`$3`, `$4`) + `
-WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
-RETURNING ` + leasedColumns),
-
-		// leaseTask leases task $1 for $2 microseconds, whatever its run time,
-		// unless it is pending, running, or finished. It locks the task's row
-		// before it updates it, so that the lease counts from the end of a
-		// wait for a row that another transaction holds: an UPDATE alone
-		// computes the row's new values before it waits.
-		leaseTask: q(`
-WITH picked AS (
-    SELECT id FROM {s}.tasks
-    WHERE id = $1 AND state IN ('scheduled', 'available', 'retryable')
-    FOR UPDATE
-)
-UPDATE {s}.tasks t
-SET ` + leaseSet(`$2`, `$3`) + `
-WHERE t.id = (SELECT id FROM picked)
-RETURNING ` + leasedColumns),
-
-		// atLimit reports whether queue $1 runs as many tasks as its limit
-		// allows, or more; a queue without a limit never does. It locks
-		// nothing, so its answer may be out of date right away: a fetch uses it
-		// only to skip the transaction below, never to lease.
-		atLimit: q(`
-SELECT coalesce((
-    SELECT (SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND state = 'running') >= q.max_running
-    FROM {s}.queues q WHERE q.name = $1), false)`),
-
-		// lockQueue serializes fetches from a queue with a MaxRunning limit.
-		// countRunning then runs as its own statement, so it sees the tasks
-		// that fetches committed while lockQueue waited.
-		lockQueue:    q(`SELECT max_running FROM {s}.queues WHERE name = $1 FOR UPDATE`),
-		countRunning: q(`SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND state = 'running'`),
-
-		// renewLeases renews the leases of attempts that still own their
-		// tasks. It skips rows that other transactions lock, so that one
-		// locked task cannot block the renewal of all the others. It returns
-		// each renewed task with true, and each task the attempts still own
-		// with false, both with whether its cancellation was requested; a task
-		// it does not return lost its lease.
-		renewLeases: q(`
-WITH attempts AS (
-    SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
-), locked AS (
-    SELECT t.id FROM attempts JOIN {s}.tasks t USING (id, lease_token)
-    WHERE {leased}
-    FOR UPDATE OF t SKIP LOCKED
-), renewed AS (
-    UPDATE {s}.tasks t
-    SET lease_expires_at = now() + $3 * interval '1 microsecond'
-    FROM locked
-    WHERE t.id = locked.id
-    RETURNING t.id, t.cancel_requested_at IS NOT NULL AS cancel_requested
-)
-SELECT id, true, cancel_requested FROM renewed
-UNION ALL
-SELECT t.id, false, t.cancel_requested_at IS NOT NULL FROM attempts JOIN {s}.tasks t USING (id, lease_token)
-WHERE {leased}`),
-
-		// cancelRequest returns, of the tasks $1 that the attempts with the
-		// lease tokens $2 still own, those whose cancellation was requested.
-		cancelRequest: q(`
-WITH attempts AS (
-    SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
-)
-SELECT t.id FROM attempts JOIN {s}.tasks t USING (id, lease_token)
-WHERE {leased} AND t.cancel_requested_at IS NOT NULL`),
-
-		// fail records a failed attempt: retryable after a delay of $4
-		// microseconds, or dead. $5 is the error as a JSON object. A task
-		// whose cancellation was requested is canceled instead.
-		fail: q(`
-UPDATE {s}.tasks
-SET state = CASE WHEN cancel_requested_at IS NOT NULL THEN 'canceled' ELSE $3::{s}.task_state END,
-    run_at = CASE WHEN cancel_requested_at IS NULL AND $3::{s}.task_state = 'retryable'
-                  THEN now() + $4 * interval '1 microsecond' ELSE run_at END,
-    finalized_at = CASE WHEN cancel_requested_at IS NOT NULL OR $3::{s}.task_state = 'dead' THEN now() END,
-    lease_expires_at = NULL,
-    errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt, 'at', {at}) || $5::jsonb)
-WHERE id = $1 AND lease_token = $2 AND {leased}
-RETURNING queue, coalesce(group_key, ''), state::text`),
-
-		// snooze runs the task again after $3 microseconds and gives the
-		// attempt back, recording $4 as a note if it is not null; the note
-		// carries the number of attempts used. If $5 is set, the worker has
-		// a handler for the task, so the task's wait for one is over: its
-		// errors lose the note of that wait. A task whose cancellation was
-		// requested is canceled instead. The cast makes $3 a bigint: compared
-		// with 0 alone, it would be an integer, which holds only 35 minutes.
-		snooze: q(`
-UPDATE {s}.tasks
-SET state = CASE
-            WHEN cancel_requested_at IS NOT NULL THEN 'canceled'
-            WHEN $3::bigint > 0 THEN 'scheduled'
-            ELSE 'available'
-        END::{s}.task_state,
-    run_at = CASE WHEN cancel_requested_at IS NULL THEN now() + $3 * interval '1 microsecond' ELSE run_at END,
-    attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
-    finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
-    lease_expires_at = NULL,
-    errors = CASE WHEN $4::jsonb IS NOT NULL
-                  THEN {trimmed} || jsonb_build_array(jsonb_build_object('attempt', attempt - 1, 'at', {at}) || $4::jsonb)
-                  WHEN $5 THEN {unnoted}
-                  ELSE errors
-             END
-WHERE id = $1 AND lease_token = $2 AND {leased}
-RETURNING queue, coalesce(group_key, ''), state::text`),
-
-		// release ends an attempt that the worker stopped: it cancels the
-		// task if its cancellation was requested, and otherwise gives it
-		// back, attempt included. It records a shutdown, and an attempt that
-		// ended after the worker read a cancel request. So the task's row
-		// decides, as in fail and snooze: no statement cancels a running
-		// task whose row has no request. If $3 is set, the worker has a
-		// handler for the task, and its errors lose the note of a wait for
-		// one, as in snooze.
-		release: q(`
-UPDATE {s}.tasks
-SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'canceled' END::{s}.task_state,
-    attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
-    finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
-    lease_expires_at = NULL,
-    errors = CASE WHEN $3 THEN {unnoted} ELSE errors END
-WHERE id = $1 AND lease_token = $2 AND {leased}
-RETURNING queue, coalesce(group_key, ''), state::text`),
-
-		queueSettings: q(`SELECT name, paused_at IS NOT NULL, coalesce(max_running, 0) FROM {s}.queues WHERE name = ANY($1)`),
-
-		// upsertWorker registers worker $1, with its lease of $6 microseconds:
-		// the worker checks in every third of it, so listWorkers and
-		// deleteWorkers judge by it how long the worker may be silent.
-		upsertWorker: q(`
-INSERT INTO {s}.workers (id, queues, kinds, hostname, version, lease_duration)
-VALUES ($1, $2, $5, $3, $4, $6 * interval '1 microsecond')
-ON CONFLICT (id) DO UPDATE
-SET queues = EXCLUDED.queues, kinds = EXCLUDED.kinds, hostname = EXCLUDED.hostname, version = EXCLUDED.version,
-    lease_duration = EXCLUDED.lease_duration, started_at = now(), heartbeat_at = now()`),
-		// The column heartbeat_at holds the worker's last check-in. It keeps
-		// its name: renaming it needs a migration, and the workers of an older
-		// release would fail on the renamed column during a rolling deploy.
-		checkInWorker: q(`UPDATE {s}.workers SET heartbeat_at = now() WHERE id = $1`),
-		deleteWorker:  q(`DELETE FROM {s}.workers WHERE id = $1`),
-
-		// electLeader takes or renews the maintainer's lease for $2
-		// microseconds. It returns a row only if $1 is the leader. It
-		// proposes its row only if no other worker's lease lasts: a conflict
-		// locks the leader's row even when it then changes nothing, which
-		// makes every try of every other worker a write.
-		//
-		// Another worker's lease lasts only if it ends within two leases
-		// from now. A worker writes a lease that ends one lease from now, by
-		// the database's clock, so a lease that ends later is no worker's: a
-		// row written by hand. No constraint can refuse it, because a CHECK
-		// cannot read the clock, and obeyed, it would keep every worker from
-		// leading for as long as it says. Taken as no lease, it does so for
-		// two leases at most. The second lease is room for a release that
-		// changes the lease: its workers and the previous release's take
-		// each other's leases for real ones if it at most doubles or halves
-		// it. Otherwise two workers can lead for a moment, which the
-		// maintainer's work allows: the lease never gave exclusive access.
-		electLeader: q(`
-INSERT INTO {s}.leader AS l (name, worker_id, elected_at, expires_at)
-SELECT 'maintainer', $1, now(), now() + $2 * interval '1 microsecond'
-WHERE NOT EXISTS (SELECT FROM {s}.leader WHERE name = 'maintainer' AND worker_id <> $1
-                  AND expires_at BETWEEN now() AND now() + $2 * interval '2 microseconds')
-ON CONFLICT (name) DO UPDATE
-SET worker_id = EXCLUDED.worker_id,
-    elected_at = CASE WHEN l.worker_id = EXCLUDED.worker_id THEN l.elected_at ELSE now() END,
-    expires_at = EXCLUDED.expires_at
-WHERE l.worker_id = EXCLUDED.worker_id
-   OR l.expires_at NOT BETWEEN now() AND now() + $2 * interval '2 microseconds'
-RETURNING worker_id`),
-		// resignLeader gives up $1's lease, and tells the workers on channel
-		// $2, so that another takes over right away.
-		resignLeader: q(`
-WITH resigned AS (
-    DELETE FROM {s}.leader WHERE name = 'maintainer' AND worker_id = $1 RETURNING 1
-)
-SELECT pg_notify($2, '{resigned}') FROM resigned`),
-
-		// promoteDue makes a batch of due scheduled and retryable tasks
-		// available, notifies their queues on channel $1, and returns how
-		// many it promoted. It reads the notified CTE, so that it runs. Batch
-		// limits are part of the text, so that a generic plan stays bounded
-		// too. Other maintenance statements have no ORDER BY: they repeat
-		// until they handle less than a batch, so order does not matter, and
-		// without one the planner never sorts. This one orders by run time,
-		// the order of its index, to keep the planner on that index: past run
-		// times belong to available tasks too, so the statistics, which see
-		// state and run time apart, can suggest that many tasks are due, and a
-		// scan of the whole table looks cheaper. Like the fetch, it updates
-		// the tasks through an array of their IDs.
-		promoteDue: q(`
-WITH due AS (
-    SELECT id FROM {s}.tasks
-    WHERE state IN ('scheduled', 'retryable') AND run_at <= now()
-    ORDER BY run_at
-    LIMIT {batch}
-    FOR UPDATE SKIP LOCKED
-), promoted AS (
-    UPDATE {s}.tasks t SET state = 'available' WHERE t.id = ANY(ARRAY(SELECT id FROM due)) RETURNING t.queue
-), notified AS (
-    SELECT count(pg_notify($1, '{available}' || queue)) AS n FROM (SELECT DISTINCT queue FROM promoted) q
-)
-SELECT (SELECT count(*) FROM promoted) FROM notified`),
-
-		nextDue: q(`
-SELECT extract(epoch FROM min(run_at) - now()) FROM {s}.tasks WHERE state IN ('scheduled', 'retryable')`),
-
-		// wakeQueues notifies, on channel $1, every queue that is not paused
-		// and whose next task waited longer than $2 microseconds, then, if $3,
-		// sends the maintainer's heartbeat, which shows workers that this ran
-		// and that notifications reach them. Its queues and their next tasks
-		// are found with one index probe each. It reads the woken CTE, so that
-		// it runs.
-		wakeQueues: q(`
-WITH RECURSIVE ` + queuesWith(`available`, `= 'available'`) + `, woken AS (
-    SELECT count(pg_notify($1, '{available}' || x.queue)) FROM available x
-    WHERE x.queue IS NOT NULL
-      AND (SELECT t.run_at FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue
-           ORDER BY t.priority DESC, t.run_at, t.id LIMIT 1) < now() - $2 * interval '1 microsecond'
-      AND NOT EXISTS (SELECT FROM {s}.queues q WHERE q.name = x.queue AND q.paused_at IS NOT NULL)
-)
-SELECT CASE WHEN $3 THEN pg_notify($1, '{heartbeat}') END FROM woken`),
-
-		// rescue fails the attempts whose leases expired: their workers
-		// crashed or lost the database. $1 and $2 are the default backoff's
-		// base and maximum in seconds; the exponent is capped so that tasks
-		// with thousands of attempts cannot overflow it. It locks a grouped
-		// task's group first, skipping groups that other transactions hold,
-		// such as one that enqueues into the group: it never waits for them,
-		// and a later run rescues those tasks.
-		rescue: q(`
-WITH expired AS (
-    SELECT t.id FROM {s}.tasks t
-    WHERE t.state = 'running' AND t.lease_expires_at < now() AND ` + groupFree + `
-    LIMIT {batch}
-    FOR UPDATE OF t SKIP LOCKED
-)
-UPDATE {s}.tasks t
-SET state = CASE
-            WHEN t.cancel_requested_at IS NOT NULL THEN 'canceled'
-            WHEN t.attempt >= t.max_attempts THEN 'dead'
-            ELSE 'retryable'
-        END::{s}.task_state,
-    run_at = CASE
-            WHEN t.cancel_requested_at IS NULL AND t.attempt < t.max_attempts
-            THEN now() + make_interval(secs => least($1 * power(2, least(t.attempt - 1, 30)), $2) * (0.9 + random() * 0.2))
-            ELSE t.run_at
-        END,
-    finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR t.attempt >= t.max_attempts THEN now() END,
-    lease_expires_at = NULL,
-    errors = {trimmed} || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', {at},
-                 'message', $3::text, 'code', 'lease_lost'))
-FROM expired
-WHERE t.id = expired.id
-RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`),
-
-		// expiredHistory lists $1 of the history partitions whose whole UTC
-		// day is older than the history retention. Each comes with whether it
-		// is still attached, and whether its detach was interrupted, which
-		// must be finalized before it can be dropped. The database applies
-		// the period to its own clock, so the application's clock and
-		// arithmetic cannot expire history. A partition's name ends in its
-		// day, so names compare as days do, and the pattern keeps to names
-		// that are safe in the text of a statement.
-		//
-		// An interrupted detach comes first: PostgreSQL allows a table one at
-		// a time, so no other partition can be detached before it. Then come
-		// the partitions, the oldest first, so an interrupted detach is always
-		// the oldest partition's. When the retention grows, it is then the
-		// last partition to leave the list. In another order it could leave
-		// while older partitions stay, and none of them could be detached.
-		//
-		// The detached tables come last, in random order. Some cannot be
-		// dropped, such as one that a view depends on, and no state says
-		// which: in a fixed order, enough of them would fill every pass, and
-		// keep the others for good.
-		//
-		// A partition that a pass detached and could not drop is a table of
-		// its own, which the history no longer names. So the statement reads
-		// the schema's tables by name. Of those that are no partition, it
-		// takes only the ones with the comment $2, which a pass sets before
-		// it detaches: a table that an operator detached or copied, to keep
-		// it, has none.
-		//
-		// The cutoff is a day of our era, and not after today, because the
-		// settings refuse a period of more than 300 years, and one with a
-		// negative field. to_char prints a year before our era without a
-		// sign, like a year after today, so such a cutoff would expire every
-		// partition, as a cutoff after today does.
-		expiredHistory: q(`
-SELECT c.relname, i.inhrelid IS NOT NULL, coalesce(i.inhdetachpending, false)
-FROM pg_class c
-LEFT JOIN pg_inherits i ON i.inhrelid = c.oid AND i.inhparent = '{s}.task_history'::regclass
-WHERE c.relnamespace = '{s}'::regnamespace
-  AND c.relkind = 'r'
-  AND (i.inhrelid IS NOT NULL OR NOT c.relispartition AND obj_description(c.oid, 'pg_class') = $2)
-  AND c.relname ~ '^task_history_[0-9]{8}$'
-  AND c.relname < 'task_history_' || to_char({utc} - (SELECT history_retention FROM {s}.settings), 'YYYYMMDD')
-ORDER BY coalesce(i.inhdetachpending, false) DESC, i.inhrelid IS NULL,
-         CASE WHEN i.inhrelid IS NOT NULL THEN c.relname END, random()
-LIMIT $1`),
-
-		// deleteFinished deletes dead and canceled tasks older than the dead
-		// retention, except the dead heads that keep their groups halted. It
-		// locks the rows it picks and skips locked ones, so a task that an
-		// operator is retrying is never deleted.
-		//
-		// The index of finished tasks leads with the queue, so old tasks are
-		// a range of it only within one queue. The statement finds the
-		// queues with one index probe each, as countStats does, and reads
-		// each queue's range, up to a batch: that limit lets the planner read
-		// the range in order and stop, not collect all of it first. With a
-		// filter by age alone, the planner, which cannot know the cutoff that
-		// the statement reads from the settings, expects old tasks everywhere,
-		// and scans the whole table for them.
-		//
-		// A dead task halts only its own group, so its halt is found by the
-		// group's key, with one lookup per old task. OFFSET 0 keeps it a
-		// lookup: joined to the groups instead, the statement can read every
-		// halted group for each queue, or every old task before it deletes
-		// the first.
-		deleteFinished: q(`
-WITH RECURSIVE ` + queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, old AS (
-    SELECT o.id FROM finished x
-    CROSS JOIN LATERAL (
-        SELECT t.id FROM {s}.tasks t
-        WHERE t.queue = x.queue AND t.state IN ('dead', 'canceled')
-          AND t.finalized_at < ({utc} - (SELECT dead_retention FROM {s}.settings)) AT TIME ZONE 'UTC'
-          AND NOT EXISTS (SELECT FROM {s}.groups g
-                          WHERE g.queue = t.queue AND g.group_key = t.group_key AND g.halted_task_id = t.id
-                          OFFSET 0)
-        LIMIT {batch}
-        FOR UPDATE SKIP LOCKED
-    ) o
-    LIMIT {batch}
-)
-DELETE FROM {s}.tasks t USING old WHERE t.id = old.id`),
-
-		// deleteDedupeKeys deletes expired dedupe keys, skipping keys that an
-		// enqueue is claiming again.
-		deleteDedupeKeys: q(`
-WITH expired AS (
-    SELECT key FROM {s}.dedupe_keys WHERE expires_at < now() LIMIT {batch} FOR UPDATE SKIP LOCKED
-)
-DELETE FROM {s}.dedupe_keys d USING expired WHERE d.key = expired.key`),
-
-		// deleteWorkers deletes the workers that stopped without
-		// unregistering: those that made no check-in for $1 seconds, or for
-		// twice their lease if that is longer. A worker checks in every third
-		// of its lease, so one with a long lease is silent for long while it
-		// is healthy. A worker of a release that stores no lease has only
-		// the $1 seconds. The table refuses a lease of more than 300 years,
-		// and one with a negative field, so a time can always be moved back
-		// by twice a lease.
-		deleteWorkers: q(`
-DELETE FROM {s}.workers WHERE heartbeat_at < now() - greatest($1 * interval '1 second', 2 * lease_duration)`),
-
-		// pruneSchedules deletes the schedules that no maintainer has defined
-		// for a day: they were removed from the code. The day keeps a rolling
-		// deploy, a canary, or a rollback, in which some workers do not define
-		// a schedule, from losing its state, such as its pause.
-		//
-		// A schedule's updated_at says when a maintainer last defined it, if
-		// nothing changed it later: the statement sets it for the schedules
-		// among $1, which are the caller's. It does so only once it is an
-		// hour old, so that most passes write nothing. So a schedule is
-		// deleted 23 to 24 hours after a maintainer last defined it. The day
-		// is written as 24 hours: see {utc}.
-		//
-		// The statement first locks the rows that it changes, and skips the
-		// ones that another transaction holds, such as one that runs, pauses,
-		// marks, or deletes the schedule: the next pass finds what is left to
-		// do. So it waits for no row, and two maintainers that prune at the
-		// same time cannot deadlock, whatever each one defines.
-		pruneSchedules: q(`
-WITH old AS (
-    SELECT name, name = ANY($1) AS defined FROM {s}.schedules
-    WHERE updated_at < now() - CASE WHEN name = ANY($1) THEN interval '1 hour' ELSE interval '24 hours' END
-    FOR UPDATE SKIP LOCKED
-), marked AS (
-    UPDATE {s}.schedules s SET updated_at = now() FROM old WHERE s.name = old.name AND old.defined
-)
-DELETE FROM {s}.schedules s USING old WHERE s.name = old.name AND NOT old.defined`),
-
-		loadSchedules: q(`
-SELECT name, queue, kind, cron, timezone, payload, next_run_at, paused_at IS NOT NULL
-FROM {s}.schedules WHERE name = ANY($1)`),
-
-		// upsertSchedule stores a schedule's definition. Its next run time is
-		// replaced only when $8 says the timing changed.
-		upsertSchedule: q(`
-INSERT INTO {s}.schedules AS s (name, queue, kind, cron, timezone, payload, next_run_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-ON CONFLICT (name) DO UPDATE
-SET queue = EXCLUDED.queue, kind = EXCLUDED.kind, cron = EXCLUDED.cron, timezone = EXCLUDED.timezone,
-    payload = EXCLUDED.payload,
-    next_run_at = CASE WHEN $8 THEN EXCLUDED.next_run_at ELSE s.next_run_at END,
-    updated_at = now()`),
-
-		// advanceSchedule claims the run due at $3; it changes nothing if
-		// another maintainer claimed it first or the schedule was paused.
-		advanceSchedule: q(`
-UPDATE {s}.schedules SET next_run_at = $2, last_run_at = now(), updated_at = now()
-WHERE name = $1 AND next_run_at = $3 AND paused_at IS NULL`),
-
-		listSchedules: q(`
-SELECT name, queue, kind, cron, timezone, next_run_at, last_run_at, paused_at IS NOT NULL
-FROM {s}.schedules ORDER BY name`),
-
-		// readQueue reads queue $1's settings, which are NULL when it has no
-		// row.
-		readQueue: q(`SELECT (SELECT max_running FROM {s}.queues WHERE name = $1)`),
-
-		// swapQueue writes queue $1's settings $3 only if they are still $2,
-		// as readQueue read them, creating its row if it has none, and tells
-		// the workers on channel $4 with payload $5. It returns 1 if it
-		// wrote, 0 if the settings changed meanwhile.
-		swapQueue: q(`
-WITH swapped AS (
-    INSERT INTO {s}.queues AS q (name, max_running) VALUES ($1, $3)
-    ON CONFLICT (name) DO UPDATE SET max_running = $3, updated_at = now()
-    WHERE q.max_running IS NOT DISTINCT FROM $2
-    RETURNING 1
-)
-SELECT count(pg_notify($4, $5)) FROM swapped`),
-
-		pauseQueue: q(`
-INSERT INTO {s}.queues AS q (name, paused_at) VALUES ($1, CASE WHEN $2 THEN now() END)
-ON CONFLICT (name) DO UPDATE
-SET paused_at = CASE WHEN $2 THEN coalesce(q.paused_at, now()) END, updated_at = now()`),
-
-		listQueues: q(`
-WITH served AS (
-    SELECT q AS name, count(*)::int AS workers FROM {s}.workers, unnest(queues) AS q GROUP BY q
-), names AS (
-    SELECT name FROM {s}.queues
-    UNION SELECT queue FROM {s}.queue_stats
-    UNION SELECT name FROM served
-)
-SELECT n.name, coalesce(q.max_running, 0), q.paused_at IS NOT NULL, coalesce(s.workers, 0)
-FROM names n
-LEFT JOIN {s}.queues q ON q.name = n.name
-LEFT JOIN served s ON s.name = n.name
-ORDER BY n.name`),
-
-		// queueStats reads the statistics, with the lag of each count in
-		// microseconds by the database's clock now: 0 for a count without a
-		// due task. Halted groups and most failures read 0 where not
-		// stored: with the other states, and from a maintainer that does
-		// not count them.
-		queueStats: q(`
-SELECT queue, state::text, tasks, capped, refreshed_at,
-       greatest(0, (extract(epoch FROM now() - oldest_due_at) * 1000000)::bigint),
-       coalesce(halted_groups, 0), coalesce(most_failures, 0)
-FROM {s}.queue_stats`),
-
-		// readSettings reads the retention periods in microseconds, which
-		// swapSettings compares and writes.
-		readSettings: q(`
-SELECT (extract(epoch FROM history_retention) * 1000000)::bigint, (extract(epoch FROM dead_retention) * 1000000)::bigint
-FROM {s}.settings`),
-
-		// swapSettings writes the retention periods $3 and $4 only if they
-		// are still $1 and $2, as readSettings read them. It changes no row
-		// if they changed meanwhile.
-		swapSettings: q(`
-UPDATE {s}.settings
-SET history_retention = $3 * interval '1 microsecond', dead_retention = $4 * interval '1 microsecond',
-    updated_at = now()
-WHERE (extract(epoch FROM history_retention) * 1000000)::bigint = $1
-  AND (extract(epoch FROM dead_retention) * 1000000)::bigint = $2`),
-
-		// listWorkers lists the workers, each with whether it is stale: it
-		// made no check-in for its whole lease, by the database's clock. A
-		// worker of a release that stores no lease is stale after $1
-		// microseconds.
-		listWorkers: q(`
-SELECT w.id, w.hostname, w.version, w.queues, w.kinds, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL,
-       w.heartbeat_at < now() - coalesce(w.lease_duration, $1 * interval '1 microsecond')
-FROM {s}.workers w
-LEFT JOIN {s}.leader l ON l.name = 'maintainer' AND l.worker_id = w.id AND l.expires_at > now()
-ORDER BY w.id`),
-
-		// listTasks pages through live tasks and history, newest first. Each
-		// branch is limited on its own, so both can use their indexes. It runs
-		// with custom plans, so that the planner sees which filters are set,
-		// and its filters are written so that the planner also sees a single
-		// queue or group and the selected states: see inList and inStates.
-		// If $9, it returns a summary of each task: see listColumns.
-		listTasks: q(`
-SELECT ` + taskColumns(`state::text`) + ` FROM (
-    (SELECT ` + listColumns(`state::text`, `$9`) + ` FROM {s}.tasks
-     WHERE $6 AND ` + inList(`queue`, `$1::text[]`) + `
-       AND (cardinality($2::text[]) = 0 OR ` + inStates(`$2::text[]`) + `)
-       AND ` + inList(`kind`, `$3::text[]`) + `
-       AND ` + inList(`group_key`, `$8::text[]`) + ` AND id < $4
-     ORDER BY id DESC LIMIT $5)
-    UNION ALL
-    (SELECT ` + listColumns(`'completed'`, `$9`) + `
-     FROM {s}.task_history
-     WHERE $7 AND ` + inList(`queue`, `$1::text[]`) + `
-       AND ` + inList(`kind`, `$3::text[]`) + `
-       AND ` + inList(`group_key`, `$8::text[]`) + ` AND id < $4
-     ORDER BY id DESC LIMIT $5)
-) page(` + pageColumns + `)
-ORDER BY id DESC LIMIT $5`),
-
-		// listFinished pages through dead and canceled tasks by when they
-		// finished, latest first, and by ID among the tasks of one finish
-		// time. That is the order of the index of finished tasks within one
-		// queue and state, so the statement reads one range of it for each
-		// listed queue ($1) and state ($2), backward from the position ($5,
-		// $6) and up to a page ($7), and merges the ranges. No index holds
-		// these tasks in the order of their IDs, in which listTasks would
-		// read every newer task of any state, or all of them and sort.
-		//
-		// With no queue named, it finds the queues that hold such tasks with
-		// one index probe each, as deleteFinished does. A queue named twice
-		// is read once. The state is compared with a value that the planner
-		// does not know, so the test for both states is what tells it that
-		// the index's condition holds.
-		//
-		// The index has no ID, so a range is read in the order of the finish
-		// time alone: WITH TIES makes it end with the last finish time whole,
-		// and the merge then orders by ID. So a page reads its own tasks and
-		// those that share its last finish time, such as the rest of a batch
-		// that one bulk action canceled. The position bounds the range by its
-		// finish time, so a page also reads again what the pages before
-		// returned of that finish time, and the comparison of the pair leaves
-		// it out: up to two such batches for one page.
-		//
-		// A range of finish times, from $9 up to but not including $10,
-		// narrows each range of the index, and NULL is no bound. The
-		// statement runs with custom plans, so a bound that is set is a
-		// condition of the index, where the read then starts or stops, and
-		// one that is not set leaves the plan as it is without a range. The
-		// column and the bounds are timestamptz, so they compare as instants
-		// whatever the session's time zone.
-		//
-		// Each row ends with the task's finish time once more, as the column
-		// holds it: see timeRows. If $8, the rows are summaries.
-		listFinished: q(`
-WITH RECURSIVE ` + queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, listed AS (
-    SELECT queue FROM finished WHERE cardinality($1::text[]) = 0 AND queue IS NOT NULL
-    UNION ALL
-    SELECT DISTINCT q FROM unnest($1::text[]) AS q
-)
-SELECT ` + taskColumns(`state::text`) + `, finalized_at
-FROM listed AS l(name)
-CROSS JOIN unnest($2::text[]) AS selected
-CROSS JOIN LATERAL (
-    SELECT ` + listColumns(`t.state::text`, `$8`) + `
-    FROM {s}.tasks t
-    WHERE t.queue = l.name AND t.state = selected::{s}.task_state AND t.state IN ('dead', 'canceled')
-      AND (t.finalized_at, t.id) < ($5::timestamptz, $6::bigint)
-      AND ($9::timestamptz IS NULL OR t.finalized_at >= $9)
-      AND ($10::timestamptz IS NULL OR t.finalized_at < $10)
-      AND ` + inList(`t.kind`, `$3::text[]`) + `
-      AND ` + inList(`t.group_key`, `$4::text[]`) + `
-    ORDER BY t.finalized_at DESC FETCH FIRST $7 ROWS WITH TIES
-) page(` + pageColumns + `)
-ORDER BY page.finalized_at DESC, page.id DESC LIMIT $7`),
-
-		// listCreated pages through tasks by when they were created, latest
-		// first, and by ID among the tasks of one creation time. That is the
-		// order of the two indexes of creation time within one queue, so the
-		// statement reads one range for each listed queue ($1), from the
-		// position ($5, $6) back to the start of the range of creation times
-		// ($9), up to a page ($7), and merges the ranges. No index holds
-		// tasks by creation time in the order of their IDs, in which
-		// listTasks reads: IDs follow creation time only roughly.
-		//
-		// The tasks come from three places, and the statement reads each
-		// only if the list asks for its states ($2, and $10 for completed
-		// tasks): the index of the tasks that are not running, the running
-		// tasks, and the history. The index of tasks leaves the running ones
-		// out, so that a fetch writes nothing to it. A queue runs as many
-		// tasks as its workers take at a time, so the statement reads all of
-		// them, from their own index, and sorts those of the range.
-		//
-		// With no queue named, each place finds its own queues, with one
-		// index probe each. A queue named twice is read once.
-		//
-		// The position and the start of the range are never NULL: the first
-		// page starts below the end of the range, or below the infinite
-		// time, and a range without a start begins at the other infinite
-		// time. So both are conditions of the index under any plan. The end
-		// of the range is no parameter of its own: beside the position,
-		// PostgreSQL would start to read at the position, and compare every
-		// entry from there down to the end of the range with it.
-		//
-		// Each row ends with the task's creation time once more, as the
-		// column holds it: see timeRows. If $8, the rows are summaries.
-		listCreated: q(`
-WITH RECURSIVE ` + queuesWith(`waiting`, `<> 'running'`) + `, ` +
-			queuesWith(`running`, `= 'running'`) + `, ` +
-			queuesIn(`kept`, `{s}.task_history`, `true`) + `, named AS (
-    SELECT DISTINCT q AS queue FROM unnest($1::text[]) AS q
-)
-SELECT ` + taskColumns(`state`) + `, created_at
-FROM (
-    ` + createdPages(`waiting`, `{s}.tasks`, `t.state::text`, `t.state <> 'running' AND `+inStates(`$2::text[]`),
-			`cardinality(array_remove($2::text[], 'running')) > 0`) + `
-    UNION ALL
-    ` + createdPages(`running`, `{s}.tasks`, `t.state::text`, `t.state = 'running'`, `'running' = ANY($2::text[])`) + `
-    UNION ALL
-    ` + createdPages(`kept`, `{s}.task_history`, `'completed'`, `true`, `$10`) + `
-) page(` + pageColumns + `)
-ORDER BY created_at DESC, id DESC LIMIT $7`),
-
-		// listGroups reads a page of FIFO groups in the order of the primary
-		// key, after group ($4, $5) where the last page ended, so a page with
-		// no search reads only its own rows. Halted groups only ($3) read the
-		// index of halted groups, in the same order.
-		listGroups: q(`
-SELECT queue, group_key, tasks, coalesce(halted_task_id, 0) FROM {s}.groups
-WHERE tasks > 0
-  AND ($1 = '' OR strpos(lower(group_key), lower($1)) > 0)
-  AND (NOT $3 OR halted_task_id IS NOT NULL)
-  AND (queue, group_key) > ($4, $5)
-ORDER BY queue, group_key
-LIMIT $2`),
-
-		// listQueueGroups reads a page of listGroups in queues $6 only. Each
-		// queue from the cursor's on reads its own groups in key order, up to
-		// a page, from where the last page ended, so a page reads no group
-		// of an earlier one.
-		listQueueGroups: q(`
-SELECT g.queue, g.group_key, g.tasks, coalesce(g.halted_task_id, 0)
-FROM (SELECT DISTINCT unnest($6::text[])) AS u(q),
-LATERAL (
-    SELECT g.queue, g.group_key, g.tasks, g.halted_task_id FROM {s}.groups g
-    WHERE g.queue = u.q AND g.group_key > CASE WHEN u.q = $4 THEN $5 ELSE '' END
-      AND g.tasks > 0
-      AND ($1 = '' OR strpos(lower(g.group_key), lower($1)) > 0)
-      AND (NOT $3 OR g.halted_task_id IS NOT NULL)
-    ORDER BY g.group_key
-    LIMIT $2
-) g
-WHERE u.q >= $4
-ORDER BY g.queue, g.group_key
-LIMIT $2`),
-
-		// countStats counts each queue's tasks per state, except completed
-		// ones, with the run time of the oldest due task of each count. The
-		// states whose indexes lead with the queue are counted per queue, up
-		// to $1 tasks each: their queues are found with one index probe per
-		// queue, and the oldest available task with one more per priority.
-		// Scheduled and retryable tasks are counted across all queues, oldest
-		// first, up to $2 in all, so the due ones come first. Every branch
-		// reads only an index, except for the attempts of up to $3 retryable
-		// tasks and one per queue, found with one index probe each.
-		//
-		// The dead count comes with the queue's halted groups, up to the cap
-		// itself ($1 - 1), as they have no capped flag. The retryable count
-		// comes with the most failures of the queue's retryable tasks: the
-		// highest attempt among the $3 counted tasks that retry last, and the
-		// queue's own task that retries last, so that no queue goes unread.
-		// Backoff grows with the failures, so the tasks that failed most
-		// retry last. They are found by reading the same index again,
-		// backward from the last retryable task counted, so no task past the
-		// counted ones, and no scheduled task after them, is read.
-		//
-		// A run time that is infinite is no oldest task. Only a row that
-		// taskmill did not write has one, Go cannot read it as a time, and one
-		// such row must not fail the counts of every queue. The conditions
-		// that leave it out are ranges of the indexes that the probes read.
-		countStats: q(`
-WITH RECURSIVE ` + queuesWith(`available`, `= 'available'`) + `, ` +
-			queuesWith(`running`, `= 'running'`) + `, ` +
-			queuesWith(`pending`, `= 'pending'`) + `, ` +
-			queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, due AS (
-    SELECT state, queue, count(*) AS tasks,
-           min(run_at) FILTER (WHERE run_at <= now() AND run_at > '-infinity') AS oldest, max(run_at) AS last
-    FROM (
-        SELECT state, queue, run_at FROM {s}.tasks WHERE state IN ('scheduled', 'retryable') ORDER BY run_at LIMIT $2
-    ) d GROUP BY state, queue
-), failures AS (
-    SELECT r.queue, max(a.attempt) AS most FROM (
-        (SELECT queue, run_at FROM {s}.tasks
-         WHERE state = 'retryable' AND run_at <= (SELECT max(last) FROM due WHERE state = 'retryable')
-         ORDER BY run_at DESC LIMIT $3)
-        UNION ALL
-        SELECT queue, last FROM due WHERE state = 'retryable'
-    ) r, LATERAL (
-        SELECT t.attempt FROM {s}.tasks t
-        WHERE t.state = 'retryable' AND t.run_at = r.run_at AND t.queue = r.queue LIMIT 1
-    ) a GROUP BY r.queue
-)
-SELECT 'available', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue LIMIT $1) c),
-       (SELECT min(o.run_at) FROM unnest('{1,2,3,4}'::smallint[]) AS p, -- every priority
-        LATERAL (SELECT t.run_at FROM {s}.tasks t WHERE t.state = 'available' AND t.queue = x.queue AND t.priority = p
-                   AND t.run_at > '-infinity' AND t.run_at < 'infinity'
-                 ORDER BY t.run_at LIMIT 1) o),
-       NULL::bigint, NULL::integer
-FROM available x WHERE x.queue IS NOT NULL
-UNION ALL
-SELECT 'running', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'running' AND t.queue = x.queue LIMIT $1) c), NULL, NULL::bigint, NULL::integer
-FROM running x WHERE x.queue IS NOT NULL
-UNION ALL
-SELECT 'pending', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'pending' AND t.queue = x.queue LIMIT $1) c), NULL, NULL::bigint, NULL::integer
-FROM pending x WHERE x.queue IS NOT NULL
-UNION ALL
-SELECT 'dead', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'dead' AND t.queue = x.queue LIMIT $1) c), NULL,
-       (SELECT count(*) FROM (SELECT FROM {s}.groups g WHERE g.halted_task_id IS NOT NULL AND g.queue = x.queue LIMIT $1 - 1) c),
-       NULL
-FROM finished x WHERE x.queue IS NOT NULL
-UNION ALL
-SELECT 'canceled', x.queue,
-       (SELECT count(*) FROM (SELECT FROM {s}.tasks t WHERE t.state = 'canceled' AND t.queue = x.queue LIMIT $1) c), NULL, NULL::bigint, NULL::integer
-FROM finished x WHERE x.queue IS NOT NULL
-UNION ALL
-SELECT d.state::text, d.queue, d.tasks, d.oldest, NULL, f.most
-FROM due d LEFT JOIN failures f ON d.state = 'retryable' AND f.queue = d.queue`),
-
-		// lockStats lets one refresh at a time replace the statistics, while
-		// everyone reads them. Two maintainers whose terms overlap can
-		// refresh at the same time. Without the lock, the second one's delete
-		// waits for the first refresh, and then sees neither the rows that
-		// it deleted nor the ones that it stored, so its insert fails on
-		// those. With it, the second refresh waits here, and its delete sees
-		// what the first one stored: the table always holds the counts of
-		// exactly one refresh. An insert that updates on conflict would
-		// keep the rows that only the first refresh stored.
-		//
-		// A maintainer of a release without the lock takes its turn too: its
-		// delete waits for the lock, and the lock for its transaction. Only
-		// the maintainer writes the table, so the lock keeps nothing else
-		// waiting but a vacuum of this small table. And only a role that may
-		// change the table can take it, unlike an advisory lock, which any
-		// role may take and hold.
-		lockStats:  q(`LOCK TABLE {s}.queue_stats IN SHARE ROW EXCLUSIVE MODE`),
-		clearStats: q(`DELETE FROM {s}.queue_stats`),
-		// storeStats stores the counts, with their halted groups ($7) and
-		// most failures ($8), and a zero available count for every other
-		// known queue, so that each one shows when it was counted, even an
-		// empty installation. Once the shared cap was hit ($6), any queue
-		// may have scheduled and retryable tasks that were not counted, so
-		// each one missing those counts gets them as capped zeros.
-		storeStats: q(`
-WITH u AS (
-    SELECT q, s, n, c, o, h, f
-    FROM unnest($1::text[], $2::text[], $3::bigint[], $4::boolean[], $5::timestamptz[], $7::bigint[], $8::integer[])
-         AS u(q, s, n, c, o, h, f)
-), k AS (
-    SELECT name FROM {s}.queues UNION SELECT unnest(queues) FROM {s}.workers UNION SELECT q FROM u
-)
-INSERT INTO {s}.queue_stats (queue, state, tasks, capped, refreshed_at, oldest_due_at, halted_groups, most_failures)
-SELECT q, s::{s}.task_state, n, c, now(), o, h, f FROM u
-UNION ALL
-SELECT k.name, 'available', 0, false, now(), NULL, NULL::bigint, NULL::integer
-FROM k WHERE NOT EXISTS (SELECT FROM u WHERE u.q = k.name)
-UNION ALL
-SELECT k.name, d.s::{s}.task_state, 0, true, now(), NULL, NULL::bigint, NULL::integer
-FROM k, unnest('{scheduled,retryable}'::text[]) AS d(s)
-WHERE $6 AND NOT EXISTS (SELECT FROM u WHERE u.q = k.name AND u.s = d.s)`),
-
-		// storeActivity copies the counts just stored in queue_stats into the
-		// current minute's activity, with zeros for every other known queue,
-		// so that an empty queue reads as empty rather than as not counted.
-		// A later refresh in the same minute keeps the higher count of each
-		// state, so the minute holds the most tasks counted in it: a queue
-		// that fills and drains within a minute shows. A count is NULL in a
-		// row that only a worker's attempts made so far, and greatest skips
-		// it. Rows are locked in the byte order of their queue names, the
-		// order workers use too.
-		storeActivity: q(`
-INSERT INTO {s}.activity AS a (minute, queue, scheduled, pending, available, running, retryable, dead, canceled)
-SELECT date_trunc('minute', now()), n.queue,
-       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'scheduled'), 0),
-       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'pending'), 0),
-       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'available'), 0),
-       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'running'), 0),
-       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'retryable'), 0),
-       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'dead'), 0),
-       coalesce(sum(s.tasks) FILTER (WHERE s.state = 'canceled'), 0)
-FROM (SELECT name FROM {s}.queues
-      UNION SELECT queue FROM {s}.queue_stats
-      UNION SELECT unnest(queues) FROM {s}.workers) AS n(queue)
-LEFT JOIN {s}.queue_stats s ON s.queue = n.queue
-GROUP BY n.queue
-ORDER BY n.queue COLLATE "C"
-ON CONFLICT (minute, queue) DO UPDATE
-SET scheduled = greatest(a.scheduled, excluded.scheduled), pending = greatest(a.pending, excluded.pending),
-    available = greatest(a.available, excluded.available), running = greatest(a.running, excluded.running),
-    retryable = greatest(a.retryable, excluded.retryable), dead = greatest(a.dead, excluded.dead),
-    canceled = greatest(a.canceled, excluded.canceled)`),
-
-		// addActivity adds a worker's counts of ended attempts to their
-		// minutes. The caller sorts the rows by minute, then by the bytes of
-		// the queue name, so that concurrent flushes lock rows in one order.
-		addActivity: q(`
-INSERT INTO {s}.activity AS a (minute, queue, completed, failed)
-SELECT m, q, c, f FROM unnest($1::timestamptz[], $2::text[], $3::integer[], $4::integer[]) AS u(m, q, c, f)
-ON CONFLICT (minute, queue) DO UPDATE
-SET completed = a.completed + excluded.completed, failed = a.failed + excluded.failed`),
-
-		deleteActivity: q(`
-WITH old AS (
-    SELECT minute, queue FROM {s}.activity WHERE minute < now() - $1 * interval '1 second'
-    LIMIT {batch} FOR UPDATE SKIP LOCKED
-)
-DELETE FROM {s}.activity a USING old WHERE a.minute = old.minute AND a.queue = old.queue`),
-
-		// activity sums the selected queues' activity per minute, then
-		// combines the minutes of each step of $3 seconds: the most tasks
-		// counted in each state, and the sum of ended attempts. A minute in
-		// which no maintainer counted has NULL counts.
-		activity: q(`
-WITH minutes AS (
-    SELECT minute, sum(scheduled) AS scheduled, sum(pending) AS pending, sum(available) AS available,
-           sum(running) AS running, sum(retryable) AS retryable, sum(dead) AS dead, sum(canceled) AS canceled,
-           sum(completed) AS completed, sum(failed) AS failed
-    FROM {s}.activity
-    WHERE minute >= $1 AND minute < $2 AND (cardinality($4::text[]) = 0 OR queue = ANY($4::text[]))
-    GROUP BY minute
-)
-SELECT date_bin($3 * interval '1 second', minute, '2000-01-01 00:00:00+00') AS at,
-       max(scheduled), max(pending), max(available), max(running), max(retryable), max(dead), max(canceled),
-       sum(completed), sum(failed)
-FROM minutes
-GROUP BY at
-ORDER BY at`),
-
-		// runSchedule makes schedule $1 due now, unless it is paused or due
-		// already, and reports whether it exists and is paused. The time of
-		// the request takes the place of the next regular run's time: the
-		// maintainer tells the two apart, runs the request as it runs any due
-		// schedule, and computes the regular run again from the expression. A
-		// run that is due already stays, since its time cannot be computed
-		// again. The statement decides on the row it locked, not on the one it
-		// first read, which the maintainer may be moving on.
-		runSchedule: q(`
-WITH s AS (
-    SELECT name, paused_at IS NOT NULL AS paused, next_run_at <= now() AS due
-    FROM {s}.schedules WHERE name = $1 FOR UPDATE
-), requested AS (
-    UPDATE {s}.schedules t SET next_run_at = now(), updated_at = now()
-    FROM s WHERE t.name = s.name AND NOT s.paused AND NOT s.due
-)
-SELECT paused FROM s`),
-
-		pauseSchedule: q(`
-UPDATE {s}.schedules SET paused_at = CASE WHEN $2 THEN coalesce(paused_at, now()) END, updated_at = now()
-WHERE name = $1`),
+		schemaVersion: q(schemaVersionSQL),
+
+		enqueue:      q(enqueueSQL),
+		enqueuePlain: q(enqueuePlainSQL),
+		dedupeLookup: q(dedupeLookupSQL),
+
+		fetch:         q(fetchSQL),
+		fetchKind:     q(fetchKindSQL),
+		leaseTask:     q(leaseTaskSQL),
+		atLimit:       q(atLimitSQL),
+		lockQueue:     q(lockQueueSQL),
+		countRunning:  q(countRunningSQL),
+		renewLeases:   q(renewLeasesSQL),
+		cancelRequest: q(cancelRequestSQL),
+		complete:      q(completeSQL),
+		lockLeased:    q(lockLeasedSQL),
+		fail:          q(failSQL),
+		snooze:        q(snoozeSQL),
+		release:       q(releaseSQL),
+
+		haltGroup:         q(haltGroupSQL),
+		lockGroups:        q(lockGroupsSQL),
+		recountGroups:     q(recountGroupsSQL),
+		deleteEmptyGroups: q(deleteEmptyGroupsSQL),
+		promoteGroups:     q(promoteGroupsSQL),
+		lockPendingGroup:  q(lockPendingGroupSQL),
+		enterGroup:        q(enterGroupSQL),
+		resumeHaltedHead:  q(resumeHaltedHeadSQL),
+		releaseHalts:      q(releaseHaltsSQL),
+		createGroups:      q(createGroupsSQL),
+
+		lockTask:        q(lockTaskSQL),
+		takeKeys:        q(takeKeysSQL),
+		keyHolder:       q(keyHolderSQL),
+		releaseKeys:     q(releaseKeysSQL),
+		deleteTask:      q(deleteTaskSQL),
+		deleteHistory:   q(deleteHistorySQL),
+		taskExists:      q(taskExistsSQL),
+		lastTask:        q(lastTaskSQL),
+		windowEnd:       q(windowEndSQL),
+		pickRetry:       q(pickRetrySQL),
+		pickCancel:      q(pickCancelSQL),
+		pickDelete:      q(pickDeleteSQL),
+		retryTasks:      q(retryTasksSQL),
+		cancelTasks:     q(cancelTasksSQL),
+		deleteTasks:     q(deleteTasksSQL),
+		pickCompleted:   q(pickCompletedSQL),
+		deleteCompleted: q(deleteCompletedSQL),
+		readQueue:       q(readQueueSQL),
+		swapQueue:       q(swapQueueSQL),
+		pauseQueue:      q(pauseQueueSQL),
+		queueSettings:   q(queueSettingsSQL),
+		readSettings:    q(readSettingsSQL),
+		swapSettings:    q(swapSettingsSQL),
+		runSchedule:     q(runScheduleSQL),
+		pauseSchedule:   q(pauseScheduleSQL),
+
+		upsertWorker:     q(upsertWorkerSQL),
+		checkInWorker:    q(checkInWorkerSQL),
+		deleteWorker:     q(deleteWorkerSQL),
+		electMaintainer:  q(electMaintainerSQL),
+		resignMaintainer: q(resignMaintainerSQL),
+		promoteDue:       q(promoteDueSQL),
+		nextDue:          q(nextDueSQL),
+		wakeQueues:       q(wakeQueuesSQL),
+		rescue:           q(rescueSQL),
+		deleteFinished:   q(deleteFinishedSQL),
+		deleteDedupeKeys: q(deleteDedupeKeysSQL),
+		deleteWorkers:    q(deleteWorkersSQL),
+		deleteActivity:   q(deleteActivitySQL),
+		expiredHistory:   q(expiredHistorySQL),
+		pruneSchedules:   q(pruneSchedulesSQL),
+		loadSchedules:    q(loadSchedulesSQL),
+		upsertSchedule:   q(upsertScheduleSQL),
+		advanceSchedule:  q(advanceScheduleSQL),
+
+		getTask:         q(getTaskSQL),
+		listTasks:       q(listTasksSQL),
+		listFinished:    q(listFinishedSQL),
+		listCreated:     q(listCreatedSQL),
+		countTasks:      q(countTasksSQL),
+		listGroups:      q(listGroupsSQL),
+		listQueueGroups: q(listQueueGroupsSQL),
+		listQueues:      q(listQueuesSQL),
+		listWorkers:     q(listWorkersSQL),
+		listSchedules:   q(listSchedulesSQL),
+
+		countStats:    q(countStatsSQL),
+		lockStats:     q(lockStatsSQL),
+		clearStats:    q(clearStatsSQL),
+		storeStats:    q(storeStatsSQL),
+		queueStats:    q(queueStatsSQL),
+		storeActivity: q(storeActivitySQL),
+		addActivity:   q(addActivitySQL),
+		activity:      q(activitySQL),
 	}
 }
 
-// leaseSet is what taking a task writes: worker by runs the task, its attempt
-// and its lease token count up, and its lease lasts us microseconds from the
-// moment it is taken. us and by are parameters, such as "$3".
-//
-// Every statement that takes a task writes this text. The statements that
-// renew a lease, end an attempt, or rescue an expired lease read what it
-// wrote, and cannot know which statement took the task.
-func leaseSet(us, by string) string {
-	return `state = 'running',
-    attempt = {attempt},
-    lease_token = {token},
-    lease_expires_at = clock_timestamp() + ` + us + ` * interval '1 microsecond',
-    attempted_at = now(),
-    attempted_by = ` + by
-}
+// schemaVersionSQL reads the version of the schema, and the isolation level
+// that the pool's transactions start with.
+const schemaVersionSQL = `
+SELECT coalesce(max(version), 0), current_setting('default_transaction_isolation') FROM {s}.migrations`
+
+// keptErrors is how many of a task's most recent attempt errors are kept.
+const keptErrors = 20
+
+// errorsTrimmedSQL is a task's errors without the oldest entry once it holds
+// keptErrors, so that appending one keeps at most keptErrors. Errors that
+// are not an array count as none, and appending replaces them: their length
+// is an error, which in the statement that rescues expired leases would keep
+// every task of its batch from being rescued.
+const errorsTrimmedSQL = "(CASE WHEN jsonb_typeof(errors) <> 'array' THEN '[]' WHEN jsonb_array_length(errors) >= " +
+	"{keptErrors} THEN errors - 0 ELSE errors END)"
+
+// errorsUnnotedSQL is a task's errors without a no_handler note at their
+// end. The note says that the task waits for a worker with a handler for its
+// kind: the wait is over once such a worker has the task, or an operator
+// retries it.
+const errorsUnnotedSQL = "(CASE WHEN (errors -> -1) ->> 'code' = '" + string(CodeNoHandler) + "' THEN errors - (-1) ELSE errors END)"
+
+// nowRFC3339SQL is the database's time as an error entry stores it: text, in
+// UTC, in the format of RFC 3339. As a value, jsonb would write it with the
+// offset of the session's time zone: an entry would read differently for
+// each writer, and Go cannot read every offset that PostgreSQL accepts, such
+// as one of more than a day.
+const nowRFC3339SQL = `to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+
+// nowUTCSQL is the database's time in UTC, without a time zone. A retention
+// period is subtracted from it, not from now(): there, a period's days are
+// days of the session's time zone, which are 23 or 25 hours long when its
+// clocks change.
+const nowUTCSQL = "(now() AT TIME ZONE 'UTC')"
+
+// leasedSQL checks that a task is leased. The statements that find tasks by
+// their attempts look each one up by ID, and compare the state as text, so
+// that the planner cannot read tasks_running_idx instead: statistics taken
+// while few tasks ran make that index look small, but until vacuum it keeps
+// an entry for every task that ran. Those that take a batch of attempts join
+// from the attempts to the tasks, one lookup per attempt. The planner
+// expects very few running tasks, so when the tasks are matched against the
+// list of attempts instead, it compares every task with every attempt.
+const leasedSQL = "state::text = 'running'"
+
+// taskFilterSQL matches the tasks t of queues $1, kinds $2, and FIFO groups $3;
+// an empty filter matches every task.
+const taskFilterSQL = `(cardinality($1::text[]) = 0 OR t.queue = ANY($1::text[]))
+  AND (cardinality($2::text[]) = 0 OR t.kind = ANY($2::text[]))
+  AND (cardinality($3::text[]) = 0 OR t.group_key = ANY($3::text[]))`
 
 // queuesWith is a recursive CTE called name: the queues that have a task
 // whose state meets cond, in the order of their names. cond is the condition
@@ -1688,100 +315,4 @@ func queuesIn(name, table, where string) string {
     SELECT (SELECT t.queue FROM ` + table + ` t WHERE ` + where + ` AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
     FROM ` + name + ` x WHERE x.queue IS NOT NULL
 )`
-}
-
-// createdPages is one of the places that listCreated reads: for each listed
-// queue, the tasks t of table that meet cond, in the range of creation times
-// and below the position, the latest first and up to a page. With no queue
-// named, the queues are those of the CTE found. state is the expression for
-// a task's state. Nothing is read unless gate holds, which the planner
-// knows: it tells whether the list asks for the tasks of this place.
-func createdPages(found, table, state, cond, gate string) string {
-	return `(SELECT ` + pageColumns + `
-     FROM (SELECT queue FROM ` + found + ` WHERE cardinality($1::text[]) = 0 AND queue IS NOT NULL
-           UNION ALL
-           SELECT queue FROM named) AS l(name)
-     CROSS JOIN LATERAL (
-         SELECT ` + listColumns(state, `$8`) + `
-         FROM ` + table + ` t
-         WHERE t.queue = l.name AND ` + cond + `
-           AND t.created_at >= $9::timestamptz AND (t.created_at, t.id) < ($5::timestamptz, $6::bigint)
-           AND ` + inList(`t.kind`, `$3::text[]`) + `
-           AND ` + inList(`t.group_key`, `$4::text[]`) + `
-         ORDER BY t.created_at DESC, t.id DESC LIMIT $7
-     ) page(` + pageColumns + `)
-     WHERE ` + gate + `)`
-}
-
-// pageColumns name the columns of a page of tasks, which are listColumns.
-const pageColumns = `id, queue, kind, state, priority, attempt, max_attempts, group_key, metadata, payload, errors,
-       created_at, run_at, attempted_at, finalized_at`
-
-// taskColumns are the columns that scanTaskInfo reads, in its order. state is
-// the expression for the task's state: the history has no such column, so a
-// statement that reads it passes "'completed'". Tasks and history are read
-// through this one list, because scanTaskInfo reads both by position.
-func taskColumns(state string) string {
-	return `id, queue, kind, ` + state + `, priority, attempt, max_attempts, coalesce(group_key, ''),
-       metadata, payload, errors, created_at, run_at, attempted_at, finalized_at`
-}
-
-// listColumns are taskColumns as a list reads them from a table of tasks in
-// the given state. If the boolean parameter summary is set, they leave out
-// what a list of tasks rarely shows, and what makes a task large: they have
-// no metadata and no payload, and of the errors only the newest. The planner
-// sees the parameter, so a summary does not read the values it leaves out.
-func listColumns(state, summary string) string {
-	return `id, queue, kind, ` + state + `, priority, attempt, max_attempts, coalesce(group_key, ''),
-            CASE WHEN ` + summary + ` THEN NULL ELSE metadata END, CASE WHEN ` + summary + ` THEN NULL ELSE payload END,
-            CASE WHEN ` + summary + ` THEN jsonb_path_query_array(errors, '$[last]') ELSE errors END,
-            created_at, run_at, attempted_at, finalized_at`
-}
-
-// inList matches the rows whose column is among the values of the text array
-// param, or every row if param is empty. It compares a single value with =,
-// so that a custom plan can read an index that leads with the column in the
-// order of the index's next column. Through a list, even a list of one
-// value, the planner does not see that order.
-func inList(column, param string) string {
-	return `CASE cardinality(` + param + `) WHEN 0 THEN true WHEN 1 THEN ` + column + ` = (` + param + `)[1]
-            ELSE ` + column + ` = ANY(` + param + `) END`
-}
-
-// inStates matches the tasks whose state is among the names in the text
-// array param. It tests each state as a literal, and only if param names it,
-// so that a custom plan sees which states are left, and which partial indexes
-// hold them. A cast of param to the enum hides them: it is not evaluated when
-// the statement is planned.
-func inStates(param string) string {
-	var tests []string
-	for _, s := range allStates {
-		if s != StateCompleted {
-			tests = append(tests, `(state = '`+string(s)+`' AND '`+string(s)+`' = ANY(`+param+`))`)
-		}
-	}
-	return `(` + strings.Join(tests, ` OR `) + `)`
-}
-
-// countTasks returns the statement that counts tasks per state, up to one
-// more than {cap} each, with how many of them were not asked to stop: a
-// branch for each state, run only if $4 lists it, so that each reads the
-// index of its state, or the history.
-func countTasks() string {
-	var b strings.Builder
-	for _, s := range allStates {
-		from := `SELECT t.cancel_requested_at FROM {s}.tasks t WHERE t.state = '` + string(s) + `' AND `
-		if s == StateCompleted {
-			from = `SELECT NULL AS cancel_requested_at FROM {s}.task_history t WHERE `
-		}
-		if b.Len() > 0 {
-			b.WriteString("\nUNION ALL")
-		}
-		b.WriteString(`
-SELECT '` + string(s) + `', n, unflagged FROM (
-    SELECT count(*) AS n, count(*) FILTER (WHERE c.cancel_requested_at IS NULL) AS unflagged
-    FROM (` + from + taskFilter + ` LIMIT {cap} + 1) c) x
-WHERE '` + string(s) + `' = ANY($4::text[])`)
-	}
-	return b.String()
 }

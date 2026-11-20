@@ -452,7 +452,13 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 		kinds = []string{} // the column holds an array
 	}
 	_, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker,
-		w.id, names, w.host, w.version, kinds, w.cfg.LeaseDuration.Microseconds())
+		w.id,                               // $1
+		names,                              // $2
+		kinds,                              // $3
+		w.host,                             // $4
+		w.version,                          // $5
+		w.cfg.LeaseDuration.Microseconds(), // $6
+	)
 	return names, err
 }
 

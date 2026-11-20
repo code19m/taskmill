@@ -400,16 +400,28 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *tracked, o outcome)
 		if o.kind == outcomeDead {
 			want = StateDead
 		}
-		found, err = queryRow(ctx, q, sql.fail, []any{id, token, string(want), o.delay.Microseconds(), errorJSON(o)},
-			&queue, &group, &state)
+		args := []any{
+			id,                     // $1
+			token,                  // $2
+			string(want),           // $3
+			o.delay.Microseconds(), // $4
+			errorJSON(o),           // $5
+		}
+		found, err = queryRow(ctx, q, sql.fail, args, &queue, &group, &state)
 	case outcomeSnooze:
 		var note *string // an error to record, if the snooze has one
 		if o.msg != "" {
 			s := errorJSON(o)
 			note = &s
 		}
-		found, err = queryRow(ctx, q, sql.snooze, []any{id, token, o.delay.Microseconds(), note, t.reg != nil},
-			&queue, &group, &state)
+		args := []any{
+			id,                     // $1
+			token,                  // $2
+			o.delay.Microseconds(), // $3
+			note,                   // $4
+			t.reg != nil,           // $5
+		}
+		found, err = queryRow(ctx, q, sql.snooze, args, &queue, &group, &state)
 	case outcomeCancel, outcomeRelease:
 		// The worker stopped the attempt. Only the task's row says whether
 		// that was a cancel request: without one, the task goes back to its

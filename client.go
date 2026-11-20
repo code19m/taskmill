@@ -285,7 +285,13 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	} else {
 		notify = c.notifiable(ctx, []string{queue})
 	}
-	if _, err := q.exec(ctx, c.sql.retryTasks, []int64{id}, waiting, c.schema, notify); err != nil {
+	_, err = q.exec(ctx, c.sql.retryTasks,
+		[]int64{id}, // $1
+		waiting,     // $2
+		c.schema,    // $3
+		notify,      // $4
+	)
+	if err != nil {
 		return fail(err)
 	}
 	return nil

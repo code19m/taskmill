@@ -103,7 +103,7 @@ func PruneSchedules(ctx context.Context, w *Worker) {
 func Elect(ctx context.Context, c *Client, id string) (leads, wrote bool, err error) {
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		var leader string
-		err := tx.QueryRow(ctx, c.sql.electLeader, id, time.Minute.Microseconds()).Scan(&leader)
+		err := tx.QueryRow(ctx, c.sql.electMaintainer, id, time.Minute.Microseconds()).Scan(&leader)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}

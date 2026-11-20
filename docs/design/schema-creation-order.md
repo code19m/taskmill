@@ -4,7 +4,7 @@ This page explains the third order of `Client.List`: a list with a range of
 creation times comes by creation time, and reads two indexes of that time.
 It says why such a list is not in ID order, what a page reads, and what the
 indexes cost. [Lists and counts](schema-lists.md) has the other two orders,
-and [`sql.go`](../../sql.go) the exact statement.
+and [`sql_lists.go`](../../sql_lists.go) the exact statement.
 
 ## IDs follow creation time only roughly
 

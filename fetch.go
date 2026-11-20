@@ -329,7 +329,13 @@ func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limi
 
 // leaseArgs returns a fetch statement's arguments.
 func (w *Worker) leaseArgs(q *queueState, limit int, extra []any) []any {
-	return append([]any{q.name, limit, w.cfg.LeaseDuration.Microseconds(), w.id}, extra...)
+	args := []any{
+		q.name,                             // $1
+		limit,                              // $2
+		w.cfg.LeaseDuration.Microseconds(), // $3
+		w.id,                               // $4
+	}
+	return append(args, extra...)
 }
 
 // scanAllLeased reads the tasks that a fetch statement leased.

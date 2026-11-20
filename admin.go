@@ -307,7 +307,14 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 			next = &s.MaxRunning
 		}
 		var swapped int
-		if err := c.pool.QueryRow(ctx, c.sql.swapQueue, name, limit, next, c.schema, notifyQueue+"|"+name).Scan(&swapped); err != nil {
+		err := c.pool.QueryRow(ctx, c.sql.swapQueue,
+			name,                 // $1
+			limit,                // $2
+			next,                 // $3
+			c.schema,             // $4
+			notifyQueue+"|"+name, // $5
+		).Scan(&swapped)
+		if err != nil {
 			return false, fmt.Errorf("taskmill: %s: %w", op, err)
 		}
 		return swapped == 1, nil
@@ -449,7 +456,12 @@ func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) err
 		if s.HistoryRetention < minRetention || s.DeadRetention < minRetention {
 			return false, invalidArgument("retention periods must be at least %s", minRetention)
 		}
-		tag, err := c.pool.Exec(ctx, c.sql.swapSettings, history, dead, s.HistoryRetention.Microseconds(), s.DeadRetention.Microseconds())
+		tag, err := c.pool.Exec(ctx, c.sql.swapSettings,
+			history,                           // $1
+			dead,                              // $2
+			s.HistoryRetention.Microseconds(), // $3
+			s.DeadRetention.Microseconds(),    // $4
+		)
 		if err != nil {
 			return false, fmt.Errorf("taskmill: update settings: %w", err)
 		}
@@ -653,7 +665,10 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 				return nil, invalidArgument("invalid cursor")
 			}
 		}
-		page.args = []any{m.queues, m.states, m.kinds, before, page.limit + 1, len(m.states) > 0, m.history, m.groups, p.Summary}
+		page.args = append(listArgs(m, page.limit, p.Summary, before),
+			len(m.states) > 0, // $8
+			m.history,         // $9
+		)
 		return &page, nil
 	}
 	// The first page starts below the latest time there is.
@@ -666,13 +681,37 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 	page.settings = timeOrderSettings
 	if page.order == byFinish {
 		page.sql = c.sql.listFinished
-		page.args = []any{m.queues, m.states, m.kinds, m.groups, at, before, page.limit + 1, p.Summary, finished.since, finished.until}
+		page.args = append(listArgs(m, page.limit, p.Summary, before),
+			at,             // $8
+			finished.since, // $9
+			finished.until, // $10
+		)
 		return &page, nil
 	}
 	at, before = created.below(at, before)
 	page.settings, page.sql = createdSettings, c.sql.listCreated
-	page.args = []any{m.queues, m.states, m.kinds, m.groups, at, before, page.limit + 1, p.Summary, created.from(), m.history}
+	page.args = append(listArgs(m, page.limit, p.Summary, before),
+		at,             // $8
+		created.from(), // $9
+		m.history,      // $10
+	)
 	return &page, nil
+}
+
+// listArgs returns the parameters that the three list statements share, $1
+// to $7: the filter, the page's size and whether it is a summary, and the ID
+// that the page starts below. It reads one task more than the page holds, to
+// tell whether another page follows.
+func listArgs(m *matching, limit int, summary bool, before int64) []any {
+	return []any{
+		m.queues,  // $1
+		m.states,  // $2
+		m.kinds,   // $3
+		m.groups,  // $4
+		limit + 1, // $5
+		summary,   // $6
+		before,    // $7
+	}
 }
 
 // orderOf returns the order of a list of the tasks m, with a range of
@@ -942,7 +981,13 @@ func (c *Client) groupsQuery(p *GroupParams) (sql string, args []any, err error)
 			return "", nil, err
 		}
 	}
-	args = []any{p.Search, p.Limit + 1, p.Halted, afterQueue, afterKey}
+	args = []any{
+		p.Search,    // $1
+		p.Limit + 1, // $2
+		p.Halted,    // $3
+		afterQueue,  // $4
+		afterKey,    // $5
+	}
 	if len(queues) == 0 {
 		return c.sql.listGroups, args, nil
 	}

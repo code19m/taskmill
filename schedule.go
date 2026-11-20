@@ -322,7 +322,15 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 		}
 		resetNext := st == nil || st.cron != s.Cron || st.timezone != tz
 		_, err = m.c.pool.Exec(ctx, m.c.sql.upsertSchedule,
-			s.Name, s.opts.Queue, s.Args.Kind(), s.Cron, tz, string(payload), next, resetNext)
+			s.Name,          // $1
+			s.opts.Queue,    // $2
+			s.Args.Kind(),   // $3
+			s.Cron,          // $4
+			tz,              // $5
+			string(payload), // $6
+			next,            // $7
+			resetNext,       // $8
+		)
 		if err != nil || resetNext {
 			return err // with a new next run time, no run is due
 		}

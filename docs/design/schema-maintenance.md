@@ -41,6 +41,20 @@ maintainer counts the queues.
   partition with a comment before it detaches it. It drops a table that is
   no partition only with that mark, so one that an operator detached stays.
   A later pass finishes what failed: see [`history.go`](../../history.go).
+- **Expired history leaves in an order that cannot get stuck.** PostgreSQL
+  detaches one partition of a table at a time, so an interrupted detach
+  comes first, and is finished. Then come the attached partitions, the
+  oldest first, so an interrupted detach is always the oldest one's: when
+  the retention grows, it is the last to leave the list. In another order
+  it could leave while older partitions stay, and none of them could be
+  detached. The detached tables come last, in random order. Some cannot be
+  dropped, such as one that a view depends on, and no state says which: in
+  a fixed order, enough of them would fill every pass, and keep the others
+  for good.
+- **The cutoff of the history is a day of our era, and not after today.**
+  The settings refuse a period of more than 300 years, and one with a
+  negative field. `to_char` prints a year before our era without a sign, so
+  such a cutoff would expire every partition, as a cutoff after today does.
 - **A failed election try writes nothing.** The upsert proposes its row only
   if no other worker's lease lasts. A conflict would lock the leader's row,
   and make every try of every other worker a write.

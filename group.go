@@ -11,7 +11,7 @@ import (
 // https://github.com/code19m/taskmill/blob/main/docs/design/schema-groups.md.
 //
 // The callers keep the lock order, not this file: see takeTask in client.go,
-// completeLocked in complete.go, and the pick statements in sql.go.
+// completeLocked in complete.go, and the pick statements in sql_operations.go.
 
 // groupLeave is a counted task that left its FIFO group.
 type groupLeave struct {
@@ -84,7 +84,12 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	for i := range counts {
 		counts[i] = -leaves[groupKey{asked.queues[i], asked.groups[i]}].tasks
 	}
-	r, err := q.query(ctx, c.sql.recountGroups, asked.queues, asked.groups, counts, ids)
+	r, err := q.query(ctx, c.sql.recountGroups,
+		asked.queues, // $1
+		asked.groups, // $2
+		counts,       // $3
+		ids,          // $4
+	)
 	if err != nil {
 		return err
 	}
@@ -190,7 +195,12 @@ func (c *Client) releaseHalts(ctx context.Context, q querier, ts []bulkTask) (ma
 
 // promoteGroups makes the oldest pending task of every group in s its head.
 func (c *Client) promoteGroups(ctx context.Context, q querier, s groupSet) error {
-	_, err := q.exec(ctx, c.sql.promoteGroups, s.queues, s.groups, c.schema, c.notifiable(ctx, s.queues))
+	_, err := q.exec(ctx, c.sql.promoteGroups,
+		s.queues,                    // $1
+		s.groups,                    // $2
+		c.schema,                    // $3
+		c.notifiable(ctx, s.queues), // $4
+	)
 	return err
 }
 
@@ -234,7 +244,13 @@ func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (re
 	counted, missing, byGroup := groupTasks(ts, resumed)
 	if len(counted.queues) > 0 {
 		left := []int64{} // the tasks join their groups: none leaves
-		if _, err := q.exec(ctx, c.sql.recountGroups, counted.queues, counted.groups, counted.sizes(byGroup), left); err != nil {
+		_, err := q.exec(ctx, c.sql.recountGroups,
+			counted.queues,         // $1
+			counted.groups,         // $2
+			counted.sizes(byGroup), // $3
+			left,                   // $4
+		)
+		if err != nil {
 			return nil, nil, err
 		}
 		for _, t := range counted.tasks(byGroup) {

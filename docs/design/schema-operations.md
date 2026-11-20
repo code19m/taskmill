@@ -4,7 +4,8 @@ This page explains the statements that retry, cancel, and delete tasks: one
 task, or every task that matches a filter. The operations API and the
 dashboard run them. [Lists and counts](schema-lists.md) has the statements
 that read tasks, [Key statements](schema-statements.md) has those that
-workers run, and [`sql.go`](../../sql.go) has the exact text.
+workers run, and [`sql_operations.go`](../../sql_operations.go) has the
+exact text.
 
 ## One task
 

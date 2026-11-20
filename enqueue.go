@@ -465,8 +465,19 @@ func (c *Client) insertTasks(ctx context.Context, q querier, b *enqueueBatch, no
 		stmt = c.sql.enqueuePlain
 	}
 	r, err := q.query(ctx, stmt,
-		b.queues, b.kinds, b.priorities, b.runAts, b.maxAttempts, nullable(b.groups),
-		b.dedupeKeys, b.dedupeWindows, b.payloads, b.metadata, c.schema, notify)
+		b.queues,           // $1
+		b.kinds,            // $2
+		b.priorities,       // $3
+		b.runAts,           // $4
+		b.maxAttempts,      // $5
+		nullable(b.groups), // $6
+		b.dedupeKeys,       // $7
+		b.dedupeWindows,    // $8
+		b.payloads,         // $9
+		b.metadata,         // $10
+		c.schema,           // $11
+		notify,             // $12
+	)
 	if err != nil {
 		return nil, nil, err
 	}
