@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -35,35 +36,155 @@ func TestHasNUL(t *testing.T) {
 	}
 }
 
+// jsonPairs are pairs of JSON values, and whether jsonb holds them as the
+// same value.
+var jsonPairs = []struct {
+	a, b string
+	want bool
+}{
+	// What jsonb does to a value leaves it equal.
+	{`{"a": 1, "b": [true, null, "x"]}`, `{"b":[true,null,"x"],"a":1}`, true},
+	{`-0`, `0`, true},
+	{`1`, `1.0`, true},
+	{`[1e2, 1.50e1, 1E-2]`, `[100, 15.0, 0.01]`, true},
+	{`1e400`, `1` + strings.Repeat("0", 400), true},
+	{`"é"`, `"\u00e9"`, true},
+	// A change is a change, however small.
+	{`9007199254740993`, `9007199254740992`, false},
+	{`1e400`, `1e401`, false},
+	{`1`, `"1"`, false},
+	{`[1, 2]`, `[2, 1]`, false},
+	{`{"a": null}`, `{}`, false},
+	{`{"a": 1}`, `{"b": 1}`, false},
+	{`null`, `false`, false},
+	{`{"a": [1]}`, `{"a": {"0": 1}}`, false},
+	{`["a", "b"]`, `["ab"]`, false},
+}
+
 func TestJSONEqual(t *testing.T) {
 	t.Parallel()
-	for _, tt := range []struct {
+	for _, tt := range append(jsonPairs, struct {
 		a, b string
 		want bool
-	}{
-		// What jsonb does to a value leaves it equal.
-		{`{"a": 1, "b": [true, null, "x"]}`, `{"b":[true,null,"x"],"a":1}`, true},
-		{`-0`, `0`, true},
-		{`[1e2, 1.50e1, 1E-2]`, `[100, 15.0, 0.01]`, true},
-		{`1e400`, `1` + strings.Repeat("0", 400), true},
-		{`"é"`, `"é"`, true},
-		// A change is a change, however small.
-		{`9007199254740993`, `9007199254740992`, false},
-		{`1e400`, `1e401`, false},
-		{`1`, `"1"`, false},
-		{`[1, 2]`, `[2, 1]`, false},
-		{`{"a": null}`, `{}`, false},
-		{`{"a": 1}`, `{"b": 1}`, false},
-		{`null`, `false`, false},
-		{`{"a": [1]}`, `{"a": {"0": 1}}`, false},
-		{`{`, `{`, false},
-	} {
+	}{`{`, `{`, false}) {
 		if got := jsonEqual([]byte(tt.a), []byte(tt.b)); got != tt.want {
 			t.Errorf("jsonEqual(%.20s, %.20s) = %v, want %v", tt.a, tt.b, got, tt.want)
 		}
 		if got := jsonEqual([]byte(tt.b), []byte(tt.a)); got != tt.want {
 			t.Errorf("jsonEqual(%.20s, %.20s) = %v, want %v", tt.b, tt.a, got, tt.want)
 		}
+	}
+}
+
+// rawArgs are args that encode as their bytes.
+type rawArgs []byte
+
+func (rawArgs) Kind() string { return "test.raw" }
+
+func (a rawArgs) MarshalJSON() ([]byte, error) { return a, nil }
+
+// countingArgs are args whose encoding changes in every call, as args that
+// hold the time do.
+type countingArgs struct{ n *atomic.Int64 }
+
+func (countingArgs) Kind() string { return "test.counting" }
+
+func (a countingArgs) MarshalJSON() ([]byte, error) {
+	return []byte(`{"n": ` + strconv.FormatInt(a.n.Add(1), 10) + `}`), nil
+}
+
+// A worker stores a hash of each schedule's definition, which the maintainer
+// compares with its own. Two definitions hash the same exactly when their
+// runs happen at the same times and enqueue the same task: the same
+// expression, time zone, queue, kind, priority, most attempts, FIFO group,
+// and payload, as jsonb holds it. The metadata does not count: it may hold
+// values of each process. A zone named Local is each process's own, so its
+// offsets count too.
+func TestDefinitionHashCoversWhatARunEnqueues(t *testing.T) {
+	t.Parallel()
+	hash := func(s Schedule) string {
+		t.Helper()
+		if s.Name == "" {
+			s.Name, s.Cron = "nightly", "@daily"
+		}
+		c, err := compileSchedule(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.hash
+	}
+
+	for _, tt := range jsonPairs {
+		a := hash(Schedule{Args: rawArgs(`{"v": ` + tt.a + `}`)})
+		b := hash(Schedule{Args: rawArgs(`{"v": ` + tt.b + `}`)})
+		if a == b != tt.want {
+			t.Errorf("payloads %.20s and %.20s: equal hashes is %v, want %v", tt.a, tt.b, a == b, tt.want)
+		}
+	}
+
+	local := func(offset int) *time.Location { return time.FixedZone("Local", offset) }
+	base := Schedule{Name: "nightly", Cron: "@daily", Args: rawArgs(`{"v": 1}`)}
+	for _, tt := range []struct {
+		name   string
+		change func(*Schedule)
+		same   bool
+	}{
+		{"the expression", func(s *Schedule) { s.Cron = "@hourly" }, false},
+		{"the time zone", func(s *Schedule) { s.Location = time.FixedZone("Europe/Berlin", 3600) }, false},
+		{"the queue", func(s *Schedule) { s.Options = &EnqueueOptions{Queue: "reports"} }, false},
+		{"the queue, named as its default", func(s *Schedule) { s.Options = &EnqueueOptions{Queue: DefaultQueue} }, true},
+		{"the priority", func(s *Schedule) { s.Options = &EnqueueOptions{Priority: PriorityHigh} }, false},
+		{"the priority, named as its default", func(s *Schedule) { s.Options = &EnqueueOptions{Priority: PriorityNormal} }, true},
+		{"the most attempts", func(s *Schedule) { s.Options = &EnqueueOptions{MaxAttempts: 3} }, false},
+		{"the FIFO group", func(s *Schedule) { s.Options = &EnqueueOptions{GroupKey: "reports"} }, false},
+		{"the metadata", func(s *Schedule) { s.Options = &EnqueueOptions{Metadata: map[string]string{"team": "ops"}} }, true},
+	} {
+		changed := base
+		tt.change(&changed)
+		if same := hash(base) == hash(changed); same != tt.same {
+			t.Errorf("%s changed: equal hashes is %v, want %v", tt.name, same, tt.same)
+		}
+	}
+
+	// Two processes whose zones both call themselves Local read the same
+	// expression at other times, unless their offsets agree.
+	inZone := func(offset int) string {
+		return hash(Schedule{Name: "nightly", Cron: "@daily", Location: local(offset), Args: base.Args})
+	}
+	if east, west, eastAgain := inZone(3600), inZone(-5*3600), inZone(3600); east == west || east != eastAgain {
+		t.Error("zones named Local hash by their name alone, not by their offsets")
+	}
+
+	// A payload that changes in every encoding changes the row in every pass
+	// of any maintainer: it does not count.
+	counter := new(atomic.Int64)
+	if first, second := hash(Schedule{Args: countingArgs{counter}}), hash(Schedule{Args: countingArgs{counter}}); first != second {
+		t.Error("a payload that changes in every encoding makes two definitions differ")
+	}
+}
+
+// An error about the workers' schedules names at most 20 schedules of each
+// list, and says how many more there are.
+func TestScheduleDifferenceNamesTheFirstSchedulesOfEachList(t *testing.T) {
+	t.Parallel()
+	d := &scheduleDiff{
+		workers:     []string{"w"},
+		missingHere: map[string]bool{}, missingThere: map[string]bool{"carts": true}, definedDifferently: map[string]bool{},
+	}
+	for i := range 25 {
+		d.missingHere[fmt.Sprintf("report-%02d", i)] = true
+	}
+
+	lists := map[string]any{}
+	for _, a := range d.attrs(time.Minute) {
+		lists[a.Key] = a.Value.Any()
+	}
+	missing, _ := lists["missing_here"].([]string)
+	if len(missing) != 21 || missing[0] != "report-00" || missing[19] != "report-19" || missing[20] != "and 5 more" {
+		t.Errorf("missing_here is %q, want the first 20 and how many more", missing)
+	}
+	if got := fmt.Sprint(lists["missing_there"], lists["defined_differently"]); got != "[carts] []" {
+		t.Errorf("the other lists are %s, want them whole", got)
 	}
 }
 
@@ -307,6 +428,9 @@ func TestDefaultTiming(t *testing.T) {
 		{"quiet", d.quiet, 20 * time.Millisecond},
 		{"listen", d.listen, 10 * time.Second},
 		{"lockWait", d.lockWait, time.Second},
+		{"scheduleCheck", d.scheduleCheck, time.Minute},
+		{"scheduleGrace", d.scheduleGrace, 10 * time.Minute},
+		{"scheduleReport", d.scheduleReport, time.Hour},
 	}
 
 	for _, tt := range intervals {

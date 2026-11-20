@@ -15,6 +15,7 @@ maintainer counts the queues.
 | History | Every minute, keeps partitions for today and the next 6 days, and drops up to 10 partitions whose whole day is older than the retention period (see [Operational notes](schema.md#operational-notes)). |
 | Statistics | Every 10 seconds, in a loop of its own, so that a long retention pass never delays it, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. [Queue statistics and health](schema-statistics.md) says how. |
 | Election | An upsert on `leader` that succeeds only for the current leader, or when no other worker's lease lasts. |
+| Schedule comparison | Every minute, in a loop of its own, reads the live workers whose stored schedules differ from its own, up to 10, in one statement. |
 
 - **Retention stays on its index.** It finds the queues that have dead or
   canceled tasks with one probe each, and reads each queue's old tasks as a
@@ -27,6 +28,32 @@ maintainer counts the queues.
   its pause and its last run, and a schedule that is gone from the code is
   deleted 23 to 24 hours later. A pass skips a schedule's row that another
   transaction holds, so two maintainers never wait for each other.
+- **The maintainer compares the workers' schedules, because a difference
+  is silent.** It runs only its own schedules. A worker that lacks one
+  stops it while it leads, and one that defines it in another way changes
+  it. So each worker that takes part in the election stores, when it
+  registers, the names of its schedules in `schedules`, and a hash of each
+  one's definition in `schedule_hashes`. A worker's schedules never change,
+  so the check-in writes nothing more. A worker with `NoMaintainer`, and one
+  of a release without the columns, store `NULL`, and are not compared.
+- **Two definitions hash the same exactly when their runs happen at the
+  same times and enqueue the same task.** The hash covers the expression,
+  the time zone, the queue, the kind, the priority, the most attempts, the
+  FIFO group, and the payload as jsonb holds it, with its numbers in one
+  form and its keys in any order. A payload that changes in every encoding,
+  such as one that holds the time, changes the stored row in every pass
+  anyway, and is left out. The metadata is left out too: it may hold values
+  of each process. A zone named Local is each process's own: its offsets
+  count too.
+- **A difference is logged once it has lasted longer than a rolling deploy
+  takes,** again now and then while it lasts, and its end once:
+  [Fixed timings and limits](../reference/defaults-and-limits.md#the-maintainer)
+  has the times. A rolling deploy that changes a schedule makes one for a
+  few minutes, which needs no person. A new term counts again from its
+  first comparison. The dashboard compares the names alone, which
+  `WorkerInfo` lists: the hashes are no API. We rejected one hash for all
+  the schedules, which cannot say which one differs, and a mark on the
+  dashboard alone, which nobody watches.
 - **The database's clock decides the history's days:** which days need a
   partition, and which partitions have expired, in UTC.
 - **No statement reads the session's time zone.** Each one compares moments,
@@ -63,7 +90,9 @@ maintainer counts the queues.
   keep every worker from leading: see
   [Rows that taskmill did not write](schema-rows.md).
 - **A worker that stops deletes its lease,** also when it does not know that
-  it holds one, as after a renewal whose answer was lost.
+  it holds one, as after a renewal whose answer was lost. The same statement
+  clears the schedules that it stored: it checks in while it drains its
+  tasks, which can take long, but no longer takes part in the election.
 - **It waits for its election first.** A worker that is told to stop gives
   up the statements that it has sent, and the database may still run one of
   them later. An election that ran after the lease was deleted would give

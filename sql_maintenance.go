@@ -4,17 +4,23 @@ package taskmill
 // workers' own rows. The reasons are in
 // https://github.com/code19m/taskmill/blob/main/docs/design/schema-maintenance.md.
 
-// $1 worker ID, $2 queues, $3 kinds, $4 host name, $5 version, $6 lease in microseconds.
+// $1 worker ID, $2 queues, $3 kinds, $4 host name, $5 version, $6 lease in microseconds,
+// $7 schedules, $8 their hashes.
 //
 // upsertWorkerSQL registers worker $1, with its lease of $6 microseconds:
 // the worker checks in every third of it, so listWorkers and
-// deleteWorkers judge by it how long the worker may be silent.
+// deleteWorkers judge by it how long the worker may be silent. A worker
+// that takes part in the maintainer election stores its schedules $7,
+// sorted, and the hash of each one's definition $8, in the same order,
+// for otherSchedulesSQL. Its schedules never change, so the check-in
+// does not write them again.
 const upsertWorkerSQL = `
-INSERT INTO {s}.workers (id, queues, kinds, hostname, version, lease_duration)
-VALUES ($1, $2, $3, $4, $5, $6 * interval '1 microsecond')
+INSERT INTO {s}.workers (id, queues, kinds, hostname, version, lease_duration, schedules, schedule_hashes)
+VALUES ($1, $2, $3, $4, $5, $6 * interval '1 microsecond', $7, $8)
 ON CONFLICT (id) DO UPDATE
 SET queues = EXCLUDED.queues, kinds = EXCLUDED.kinds, hostname = EXCLUDED.hostname, version = EXCLUDED.version,
-    lease_duration = EXCLUDED.lease_duration, started_at = now(), heartbeat_at = now()`
+    lease_duration = EXCLUDED.lease_duration, schedules = EXCLUDED.schedules, schedule_hashes = EXCLUDED.schedule_hashes,
+    started_at = now(), heartbeat_at = now()`
 
 // $1 worker ID.
 //
@@ -54,10 +60,15 @@ RETURNING worker_id`
 // $1 worker ID, $2 channel.
 //
 // resignMaintainerSQL gives up $1's lease, and tells the workers on channel
-// $2, so that another takes over right away.
+// $2, so that another takes over right away. It also clears the schedules
+// that $1 stored: the worker leaves the election, so the maintainer does
+// not compare them while it drains. No transaction holds both a worker's
+// row and the lease's, so the order of the two writes cannot deadlock.
 const resignMaintainerSQL = `
 WITH resigned AS (
     DELETE FROM {s}.leader WHERE name = 'maintainer' AND worker_id = $1 RETURNING 1
+), withdrawn AS (
+    UPDATE {s}.workers SET schedules = NULL, schedule_hashes = NULL WHERE id = $1
 )
 SELECT pg_notify($2, '{resigned}') FROM resigned`
 
@@ -267,6 +278,20 @@ WITH old AS (
     UPDATE {s}.schedules s SET updated_at = now() FROM old WHERE s.name = old.name AND old.defined
 )
 DELETE FROM {s}.schedules s USING old WHERE s.name = old.name AND NOT old.defined`
+
+// $1 the caller's schedules, sorted, $2 the hash of each one's definition.
+//
+// otherSchedulesSQL lists, by ID, up to 10 live workers whose schedules
+// differ from $1 and $2, with their schedules and hashes. A worker that
+// takes no part in the maintainer election stores no schedules, and
+// neither does one of a release without the columns: such a worker is not
+// listed. A worker that stores schedules stores its lease too, so it is
+// live while it made a check-in within its lease, as listWorkersSQL says.
+// The workers are few, so a scan of the table costs little.
+const otherSchedulesSQL = `
+SELECT id, schedules, schedule_hashes FROM {s}.workers
+WHERE (schedules <> $1 OR schedule_hashes <> $2) AND heartbeat_at >= now() - lease_duration
+ORDER BY id LIMIT 10`
 
 // $1 schedules.
 //

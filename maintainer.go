@@ -23,8 +23,9 @@ const (
 // loop elects the leader, then rescues expired leases and enqueues schedules
 // once per interval. Queues whose tasks wait are woken in a loop of their
 // own, which also sends the heartbeat that workers count on, and due tasks
-// are promoted in another, as they come due. Statistics and retention have
-// a loop each too, so that slow work in one never delays the others.
+// are promoted in another, as they come due. Statistics, retention, and the
+// comparison of the workers' schedules have a loop each too, so that slow
+// work in one never delays the others.
 type maintainer struct {
 	w      *Worker
 	c      *Client
@@ -37,7 +38,11 @@ type maintainer struct {
 
 	// The failures of each kind of work, which it logs only now and then.
 	electionFailures, promotionFailures, wakeFailures, rescueFailures *incidentLog
-	scheduleFailures, pruneFailures, statsFailures, retentionFailures *incidentLog
+	scheduleFailures, pruneFailures, compareFailures                  *incidentLog
+	statsFailures, retentionFailures                                  *incidentLog
+
+	ownHashes map[string]string // the hash of each of this worker's schedules, by name
+	watch     scheduleWatch     // a difference between the workers' schedules and this maintainer's
 }
 
 func newMaintainer(w *Worker) *maintainer {
@@ -51,8 +56,10 @@ func newMaintainer(w *Worker) *maintainer {
 		rescueFailures:    newIncidentLog(w, "rescue expired leases"),
 		scheduleFailures:  newIncidentLog(w, "run schedules"),
 		pruneFailures:     newIncidentLog(w, "delete removed schedules"),
+		compareFailures:   newIncidentLog(w, "compare schedules"),
 		statsFailures:     newIncidentLog(w, "refresh statistics"),
 		retentionFailures: newIncidentLog(w, "apply retention"),
+		ownHashes:         byName(w.scheduleNames, w.scheduleHashes),
 	}
 }
 
@@ -61,6 +68,7 @@ func (m *maintainer) run(ctx context.Context) {
 	loops.Go(func() { m.wakeLoop(ctx) })
 	loops.Go(func() { m.promoteLoop(ctx) })
 	loops.Go(func() { m.every(ctx, m.w.timing.stats, m.refreshStats) })
+	loops.Go(func() { m.every(ctx, m.w.timing.scheduleCheck, m.compareSchedules) })
 	loops.Go(func() {
 		m.every(ctx, m.w.timing.retention, func(ctx context.Context) {
 			m.retain(ctx)
@@ -166,10 +174,11 @@ func (m *maintainer) promoteLoop(ctx context.Context) {
 }
 
 // every calls work once per interval while this worker leads, until ctx
-// ends. Statistics and retention each run in such a loop of their own:
-// retention can take long, when a detach waits for a transaction that reads
-// the history, or a backlog of old tasks takes many batches, and the
-// statistics, which lag is read from, must stay fresh meanwhile.
+// ends. Statistics, retention, and the comparison of schedules each run in
+// such a loop of their own: retention can take long, when a detach waits
+// for a transaction that reads the history, or a backlog of old tasks takes
+// many batches, and the statistics, which lag is read from, must stay fresh
+// meanwhile. The comparison waits for neither.
 func (m *maintainer) every(ctx context.Context, interval time.Duration, work func(context.Context)) {
 	tick := time.NewTicker(m.w.timing.maintainer)
 	defer tick.Stop()
@@ -247,10 +256,16 @@ func (m *maintainer) elect(ctx context.Context) bool {
 
 	if leader && !was {
 		// A term starts without the incidents of the last one, whose work
-		// may have failed after it ended.
-		for _, f := range []*incidentLog{m.promotionFailures, m.wakeFailures, m.rescueFailures, m.scheduleFailures, m.pruneFailures, m.statsFailures, m.retentionFailures} {
+		// may have failed after it ended, and without the difference
+		// between the schedules that it found: that one may have ended
+		// meanwhile, and a new one must last its own time.
+		for _, f := range []*incidentLog{
+			m.promotionFailures, m.wakeFailures, m.rescueFailures, m.scheduleFailures, m.pruneFailures, m.compareFailures,
+			m.statsFailures, m.retentionFailures,
+		} {
 			f.reset()
 		}
+		m.watch.reset()
 	}
 
 	m.leader.Store(leader)
@@ -271,8 +286,10 @@ func (m *maintainer) elect(ctx context.Context) bool {
 // another worker takes over right away, not once the lease expires. It asks
 // the database even if this worker does not know that it leads: an election
 // whose answer was lost, or a renewal that failed, leaves a lease that only
-// the database knows of. For a worker without a lease, the statement changes
-// nothing and notifies nobody.
+// the database knows of. For a worker without a lease, the statement gives
+// up nothing and notifies nobody. Either way it clears the schedules that
+// the worker stored: it leaves the election, and while it drains its tasks,
+// which can take long, its schedules must not count as a difference.
 func (m *maintainer) resign(ctx context.Context) {
 	led := m.leader.Swap(false)
 

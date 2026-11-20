@@ -681,6 +681,67 @@ func TestWorkersShowTheirQueuesAndKinds(t *testing.T) {
 	}
 }
 
+// Every worker that stores schedules lists them, beside its queues and
+// kinds: a worker without kinds, such as a maintainer that only does
+// maintenance, has a count of its schedules in their place, which opens the
+// list. A worker whose schedules differ from the maintainer's, by name, has a
+// mark beside its ID, which opens the list too. There, each schedule that only
+// one of the two defines says so, and comes first. A worker that stores no
+// schedules, which takes no part in the election or runs an older release,
+// and a stale worker, which the maintainer does not compare either, have no
+// mark.
+func TestWorkersListTheirSchedulesAndMarkThoseThatDiffer(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers
+	        (id, queues, kinds, hostname, version, lease_duration, schedules, schedule_hashes) VALUES
+	    ('lead', '{}', '{}', 'h', 'v', '30 seconds', '{carts,nightly}', '{a,b}'),
+	    ('same', '{mail}', '{email.send}', 'h', 'v', '30 seconds', '{carts,nightly}', '{a,b}'),
+	    ('other', '{}', '{}', 'h', 'v', '30 seconds', '{archive,nightly}', '{c,b}'),
+	    ('none', '{mail}', '{email.send}', 'h', 'v', '30 seconds', NULL, NULL),
+	    ('gone', '{}', '{}', 'h', 'v', '30 seconds', '{}', '{}');
+	    UPDATE `+schema+`.workers SET heartbeat_at = now() - interval '1 minute' WHERE id = 'gone';
+	    INSERT INTO `+schema+`.leader (name, worker_id, elected_at, expires_at)
+	    VALUES ('maintainer', 'lead', now(), now() + interval '1 minute')`); err != nil {
+		t.Fatal(err)
+	}
+
+	_, body, _ := get(t, handler(t, client, nil), "/workers")
+	rows := map[string]string{}
+	for _, row := range tableRow.FindAllStringSubmatch(body, -1) {
+		rows[row[1]] = row[2]
+	}
+
+	const mark = `<button type="button" class="chip" popovertarget="lists-other" title="Its schedules differ from the maintainer's">schedules differ</button>`
+	for _, c := range []struct {
+		worker    string
+		want, not []string
+	}{
+		{"other", []string{
+			mark, `popovertarget="lists-other">2 schedules<`, `id="lists-other" popover`,
+			`<h2 class="wide">Schedules <span class="subtle">3</span></h2><ul class="wide">` +
+				`<li class="item">carts <span class="subtle">missing</span></li>` +
+				`<li class="item">archive <span class="subtle">not on the maintainer</span></li>` +
+				`<li class="item">nightly</li></ul>`,
+		}, nil},
+		{"same", []string{`popovertarget="lists-same">1 kind<`, `<h2 class="wide">Schedules <span class="subtle">2</span></h2>`, `<li class="item">carts</li>`}, []string{"schedules differ", "missing"}},
+		{"lead", []string{`popovertarget="lists-lead">2 schedules<`, `id="lists-lead" popover`, `<li class="item">nightly</li>`}, []string{"schedules differ", "missing"}},
+		{"none", nil, []string{"schedules differ", "<h2 class=\"wide\">"}},
+		{"gone", []string{`<span class="tone-ghost">none</span>`}, []string{"schedules differ", "popover"}},
+	} {
+		for _, want := range c.want {
+			if !strings.Contains(rows[c.worker], want) {
+				t.Errorf("the row of %q lacks %s\n%s", c.worker, want, rows[c.worker])
+			}
+		}
+		for _, not := range c.not {
+			if strings.Contains(rows[c.worker], not) {
+				t.Errorf("the row of %q has %s\n%s", c.worker, not, rows[c.worker])
+			}
+		}
+	}
+}
+
 // A worker built from taskmill's own tree stores Go's "(devel)" in place of a
 // version. The page says what that means, as text, and its tooltip says it
 // in full. A released version shows as it is, as code.

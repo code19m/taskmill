@@ -139,7 +139,7 @@ theme, and the next pages follow the device.
 | **Tasks** | Tasks filtered by state, queue, kind, FIFO group, and time: when they were created, or for dead and canceled tasks when they finished | Retry, cancel, or delete every task that matches the filters |
 | **A task** | Its payload, metadata, error history, and details, with a timeline: when it was created, due, started, and finished, and how long it waited and ran, which counts each second while it waits or runs. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its timetable in words and its next and last run | Pause, resume, or run it now |
-| **Workers** | Each worker, with its host, version, queues, and kinds, and which one is the [maintainer](../concepts/glossary.md#maintainer) | Nothing: this page is for looking |
+| **Workers** | Each worker, with its host, version, queues, kinds, and schedules, and which one is the [maintainer](../concepts/glossary.md#maintainer). *schedules differ* marks a worker whose schedule names differ from the maintainer's: press it to see which | Nothing: this page is for looking |
 
 On the **Overview**, the **Activity** card shows the last 1, 6, or 24 hours,
 in steps of 1, 5, or 15 minutes. To read the values of one step, point at a

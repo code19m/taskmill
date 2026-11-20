@@ -1518,8 +1518,8 @@
   // A hint opens beside its button, toward the middle of the window, where
   // it has room, and scrolls with the page. Its place, in --inset, which a
   // phone's style overrides, is set before it shows and after an update. A
-  // worker's lists are a hint with two buttons: it opens beside the one that
-  // the browser says opened it.
+  // worker's lists are a hint with up to three buttons: it opens beside the
+  // one that the browser says opened it.
   let hint = null; // the hint that opened last
   let beside = null; // the button that opened it, if the browser said
 

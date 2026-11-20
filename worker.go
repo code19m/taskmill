@@ -62,6 +62,9 @@ type timing struct {
 	quiet           time.Duration // how long a queue leaves notifications waiting after the fetch for one found nothing
 	listen          time.Duration // bound on opening the notification connection, and on its answer when heartbeats stop
 	lockWait        time.Duration // how long a schedule's run waits for a row that another transaction holds, such as a FIFO group's
+	scheduleCheck   time.Duration // how often the maintainer compares the workers' schedules with its own
+	scheduleGrace   time.Duration // how long they may differ before it logs an error
+	scheduleReport  time.Duration // how often it logs again while they differ, at most
 }
 
 var defaultTiming = timing{
@@ -83,6 +86,9 @@ var defaultTiming = timing{
 	quiet:           20 * time.Millisecond,
 	listen:          10 * time.Second,
 	lockWait:        time.Second,
+	scheduleCheck:   time.Minute,
+	scheduleGrace:   10 * time.Minute, // longer than a rolling deploy that changes a schedule takes
+	scheduleReport:  time.Hour,
 }
 
 // errListenConfig reports a ListenConfig that pgx cannot connect with.
@@ -113,6 +119,10 @@ type Worker struct {
 	listen    *pgx.ConnConfig
 	version   string
 	schedules []compiledSchedule
+
+	// The names of the schedules, sorted, and the hash of each one's
+	// definition, in the same order.
+	scheduleNames, scheduleHashes []string
 
 	running   atomic.Bool
 	reached   atomic.Pointer[time.Time] // when Run last reached the database; nil while it does not run
@@ -218,11 +228,13 @@ type WorkerConfig struct {
 	Middleware []Middleware
 
 	// Schedules are recurring tasks that the maintainer enqueues. Each name
-	// may appear once. Default: none.
+	// may appear once. Every worker that takes part in the maintainer
+	// election must define the same schedules: see [Schedule]. Default: none.
 	Schedules []Schedule
 
 	// NoMaintainer keeps this worker out of the maintainer election. At least
-	// one worker of an installation must take part.
+	// one worker of an installation must take part. Set it on a worker that
+	// does not define the schedules of the others.
 	NoMaintainer bool
 
 	// ListenConfig is the connection that receives notifications. Set it to
@@ -331,6 +343,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 	if w.schedules, err = compileSchedules(c.Schedules); err != nil {
 		return nil, err
 	}
+	w.scheduleNames, w.scheduleHashes = scheduleSums(w.schedules)
 	return w, nil
 }
 
@@ -460,6 +473,13 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 		kinds = []string{} // the column holds an array
 	}
 
+	// A worker that never leads stores no schedules, so that none compares
+	// them: NULL.
+	schedules, hashes := w.scheduleNames, w.scheduleHashes
+	if w.cfg.NoMaintainer {
+		schedules, hashes = nil, nil
+	}
+
 	_, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker,
 		w.id,                               // $1
 		names,                              // $2
@@ -467,6 +487,8 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 		w.host,                             // $4
 		w.version,                          // $5
 		w.cfg.LeaseDuration.Microseconds(), // $6
+		schedules,                          // $7
+		hashes,                             // $8
 	)
 	return names, err
 }
@@ -759,6 +781,15 @@ type WorkerInfo struct {
 	Queues   []string
 	Kinds    []string // the kinds it has handlers for
 
+	// Schedules are the names of the worker's schedules, sorted: see
+	// [WorkerConfig.Schedules]. It is empty for a worker that defines none.
+	// It is nil for a worker that takes no part in the maintainer election,
+	// which stores none, for one that is stopping, which no longer takes
+	// part, and for a worker of a release that does not store them. The
+	// maintainer logs an error when the schedules of the workers that take
+	// part keep differing: see [Schedule].
+	Schedules []string
+
 	// StartedAt is when the worker last registered: when its Run started,
 	// or when it registered again after the maintainer removed it as stale.
 	StartedAt   time.Time
@@ -794,7 +825,7 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	var out []WorkerInfo
 	for r.Next() {
 		var w WorkerInfo
-		err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.StartedAt, &w.CheckedInAt, &w.Maintainer, &w.Stale)
+		err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.Schedules, &w.StartedAt, &w.CheckedInAt, &w.Maintainer, &w.Stale)
 		if err != nil {
 			return nil, fail(err)
 		}
