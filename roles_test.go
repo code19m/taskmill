@@ -32,11 +32,13 @@ func TestRoleThatOnlyEnqueues(t *testing.T) {
 	if err := taskmill.Migrate(t.Context(), admin, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		t.Fatal(err)
 	}
+
 	pool := enqueueOnlyRole(t, admin, schema)
 	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
+
 	if err := enqueueEveryWay(t.Context(), client, pool); err != nil {
 		t.Errorf("enqueue as the role: %v", err)
 	}
@@ -80,6 +82,7 @@ func enqueueOnlyRole(t *testing.T, admin *pgxpool.Pool, schema string) *pgxpool.
 	if len(grants) == 0 {
 		t.Fatal("the recipe lists no grants")
 	}
+
 	role := schema + "_orders"
 	names := strings.NewReplacer("billing", schema, "orders", role)
 	for i, grant := range grants {
@@ -102,9 +105,11 @@ func enqueueEveryWay(ctx context.Context, client *taskmill.Client, pool *pgxpool
 		_, err := client.Enqueue(ctx, sendEmail{}, opts)
 		errs = append(errs, err)
 	}
+
 	if res, err := client.Enqueue(ctx, sendEmail{}, deduped); err != nil || !res.Duplicate {
 		errs = append(errs, errors.New("a second task with the dedupe key is no duplicate"), err)
 	}
+
 	_, err := client.EnqueueMany(ctx, many)
 	errs = append(errs, err, pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		_, one := client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, tagged)

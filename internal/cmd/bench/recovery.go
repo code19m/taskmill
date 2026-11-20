@@ -26,6 +26,7 @@ func benchRecovery(ctx context.Context, pool *pgxpool.Pool, url string) {
 	fmt.Println()
 	fmt.Println("| ID | Measure | Result | |")
 	fmt.Println("|---|---|---|---|")
+
 	rerunBound, stopBound := lease+2500*time.Millisecond, drain+6*time.Second
 	fmt.Printf("| L5 | A killed worker's %d running tasks running again on another worker, %s lease | "+
 		"the last after %s, bound %s | %s |\n",
@@ -46,8 +47,10 @@ func rerunAfterKill(ctx context.Context, pool *pgxpool.Pool, url string, n int, 
     phase text NOT NULL, at timestamptz NOT NULL DEFAULT clock_timestamp())`)
 	stopMaintainer := maintain(ctx, c)
 	defer stopMaintainer()
+
 	spec := child{Role: "worker", Name: "killed", Concurrency: n, Lease: lease, NoMaintainer: true}
 	killed := spawn(ctx, url, spec)
+
 	batch := make([]taskmill.EnqueueParams, n)
 	for i := range batch {
 		batch[i] = taskmill.EnqueueParams{Args: hold{N: i, Wave: 1}}
@@ -55,17 +58,20 @@ func rerunAfterKill(ctx context.Context, pool *pgxpool.Pool, url string, n int, 
 	if _, err := c.EnqueueMany(ctx, batch); err != nil {
 		fail(err)
 	}
+
 	started := func(worker string) func() bool {
 		return func() bool {
 			return scalar(ctx, pool, "SELECT count(*) FROM {s}.holds WHERE worker = $1 AND phase = 'start'", worker) == int64(n)
 		}
 	}
+
 	waitFor(ctx, 30*time.Second, "the worker to start every task", started("killed"))
 	killed.kill()
 	var at time.Time
 	if err := pool.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&at); err != nil {
 		fail(err)
 	}
+
 	spec.Name = "next"
 	next := spawn(ctx, url, spec)
 	waitFor(ctx, time.Minute, "another worker to run every task", started("next"))
@@ -73,6 +79,7 @@ func rerunAfterKill(ctx context.Context, pool *pgxpool.Pool, url string, n int, 
 	if err := pool.QueryRow(ctx, q("SELECT max(at) FROM {s}.holds WHERE worker = 'next'")).Scan(&last); err != nil {
 		fail(err)
 	}
+
 	next.release(1)
 	waitFor(ctx, 30*time.Second, "the tasks to complete", func() bool { return history(ctx, pool) == n })
 	next.stop()
@@ -85,6 +92,7 @@ func rerunAfterKill(ctx context.Context, pool *pgxpool.Pool, url string, n int, 
 func stopTime(ctx context.Context, pool *pgxpool.Pool, drain time.Duration) time.Duration {
 	const n = 10
 	c := fresh(ctx, pool)
+
 	started := make(chan struct{}, n)
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[stall](func(context.Context, *taskmill.Task[stall]) error {
@@ -96,6 +104,7 @@ func stopTime(ctx context.Context, pool *pgxpool.Pool, drain time.Duration) time
 	if err != nil {
 		fail(err)
 	}
+
 	batch := make([]taskmill.EnqueueParams, n)
 	for i := range batch {
 		batch[i] = taskmill.EnqueueParams{Args: stall{}}
@@ -103,10 +112,12 @@ func stopTime(ctx context.Context, pool *pgxpool.Pool, drain time.Duration) time
 	if _, err := c.EnqueueMany(ctx, batch); err != nil {
 		fail(err)
 	}
+
 	stop := run(ctx, w)
 	for range n {
 		<-started
 	}
+
 	begin := time.Now()
 	stop()
 	return time.Since(begin)

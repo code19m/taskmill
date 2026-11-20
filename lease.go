@@ -26,6 +26,7 @@ func (w *Worker) everyThirdOfLease(ctx context.Context, fn func(context.Context)
 	interval := w.cfg.LeaseDuration / 3
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -99,11 +100,13 @@ func (w *Worker) renewLeases(ctx context.Context, ts []*liveAttempt) {
 	if len(ts) == 0 {
 		return
 	}
+
 	ids := make([]int64, len(ts))
 	tokens := make([]int32, len(ts))
 	for i, t := range ts {
 		ids[i], tokens[i] = t.att.id, t.att.token
 	}
+
 	sent := time.Now()
 	renewals, err := w.renew(ctx, ids, tokens)
 	w.leaseFailures.observe(ctx, err)
@@ -130,6 +133,7 @@ func (w *Worker) renewLeases(ctx context.Context, ts []*liveAttempt) {
 				continue
 			}
 		}
+
 		if r.cancelRequested {
 			t.requestCancel()
 		}
@@ -151,11 +155,13 @@ func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[in
 		return nil, err
 	}
 	defer conn.Release()
+
 	r, err := conn.Query(ctx, w.client.sql.renewLeases, ids, tokens, w.cfg.LeaseDuration.Microseconds())
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
+
 	renewals := make(map[int64]renewal, len(ids))
 	for r.Next() {
 		var id int64
@@ -180,9 +186,11 @@ func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[in
 func (w *Worker) acquireForRenewal(ctx context.Context) (*pgxpool.Conn, error) {
 	s := w.client.pool.Stat()
 	full := s.IdleConns() == 0 && s.TotalConns() >= s.MaxConns()
+
 	start := time.Now()
 	conn, err := w.client.pool.Acquire(ctx)
 	waited := time.Since(start)
+
 	if !full || waited < w.cfg.LeaseDuration/30 { // a renewal has a third of the lease
 		return conn, err
 	}
@@ -199,6 +207,7 @@ func (w *Worker) loseLease(ctx context.Context, t *liveAttempt) {
 	t.mu.Lock()
 	running := t.state == attemptRunning
 	t.mu.Unlock()
+
 	// An attempt that completed its task in its own transaction owns nothing
 	// more: its row stays locked until that transaction commits.
 	if !running || t.att.completedInTx.Load() || t.lost.Swap(true) {
@@ -223,6 +232,7 @@ func (t *liveAttempt) cancelAttempt(cause error) {
 	t.mu.Lock()
 	cancel := t.cancel
 	t.mu.Unlock()
+
 	if cancel != nil {
 		cancel(cause)
 	}
@@ -246,6 +256,7 @@ func (w *Worker) whileLeased(ctx context.Context, ts []*liveAttempt, fn func(con
 		if err == nil || ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
 			return err
 		}
+
 		select {
 		case <-ctx.Done():
 			return err
@@ -263,6 +274,7 @@ func (w *Worker) leaseEnd(ts []*liveAttempt) time.Time {
 		t.mu.Lock()
 		e := t.renewedAt.Add(w.cfg.LeaseDuration)
 		t.mu.Unlock()
+
 		if i == 0 || e.Before(end) {
 			end = e
 		}
@@ -292,6 +304,7 @@ func (w *Worker) track(ctx context.Context, t *liveAttempt) {
 		old.mu.Unlock()
 	}
 	w.mu.Unlock()
+
 	if replaced && !old.lost.Swap(true) {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "attempt lost its lease; canceling it",
 			slog.Int64(logKeyTaskID, old.att.id), slog.String(logKeyKind, old.info.Kind))

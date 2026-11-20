@@ -17,10 +17,12 @@ func encodeMetadata(meta map[string]string) ([]byte, error) {
 	if len(meta) == 0 {
 		return []byte("{}"), nil
 	}
+
 	text, err := encodeJSON(meta)
 	if err != nil {
 		return nil, invalidArgument("encode metadata: %v", err)
 	}
+
 	if len(text) > maxMetadataBytes {
 		return nil, invalidArgument("metadata is %d bytes, more than the limit of %d", len(text), maxMetadataBytes)
 	}
@@ -51,6 +53,7 @@ func encodePayload(kind string, args Args) ([]byte, error) {
 	if err != nil {
 		return nil, invalidArgument("encode payload of kind %q: %v", kind, err)
 	}
+
 	size, numbersFit := storedSize(payload)
 	switch {
 	case bytes.Equal(payload, []byte("null")):
@@ -84,6 +87,7 @@ const (
 func storedSize(text []byte) (size int, numbersFit bool) {
 	size, numbersFit = len(text), true
 	inString := false
+
 	for i := 0; i < len(text) && size <= maxPayloadBytes && numbersFit; i++ {
 		switch c := text[i]; {
 		case inString && c == '\\':
@@ -95,6 +99,7 @@ func storedSize(text []byte) (size int, numbersFit bool) {
 			for end < len(text) && strings.IndexByte("+-.0123456789Ee", text[end]) >= 0 {
 				end++
 			}
+
 			var n int
 			n, numbersFit = numberSize(text[i:end])
 			size += n - (end - i)
@@ -111,6 +116,7 @@ func storedSize(text []byte) (size int, numbersFit bool) {
 func numberSize(num []byte) (size int, fits bool) {
 	digits := bytes.TrimPrefix(num, []byte("-"))
 	sign := len(num) - len(digits)
+
 	exp := 0
 	if at := bytes.IndexAny(digits, "eE"); at >= 0 {
 		var err error
@@ -119,15 +125,18 @@ func numberSize(num []byte) (size int, fits bool) {
 		}
 		digits = digits[:at]
 	}
+
 	// Past this bound, a number is beyond numeric's range, or a zero; within
 	// it, the sums below cannot overflow.
 	bound := len(digits) + maxNumericWhole + 1
 	exp = max(-bound, min(exp, bound))
+
 	whole, frac, _ := bytes.Cut(digits, []byte("."))
 	zeros := len(whole) - len(bytes.TrimLeft(whole, "0"))
 	if zeros == len(whole) {
 		zeros += len(frac) - len(bytes.TrimLeft(frac, "0"))
 	}
+
 	before := 1 // digits before the point
 	if zeros < len(whole)+len(frac) {
 		before = max(1, len(whole)+exp-zeros)
@@ -149,6 +158,7 @@ func hasNUL(text []byte) bool {
 		if j < 0 {
 			return false
 		}
+
 		j += i
 		slashes := 0
 		for k := j - 1; k >= 0 && text[k] == '\\'; k-- {

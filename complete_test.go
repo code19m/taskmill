@@ -35,6 +35,7 @@ func TestDiscardCompletedSkipsHistory(t *testing.T) {
 		_, err := e.client.Get(t.Context(), id)
 		return errors.Is(err, taskmill.ErrNotFound)
 	})
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.task_history"); n != 0 {
 		t.Fatalf("history holds %d tasks", n)
 	}
@@ -53,6 +54,7 @@ func TestCompleteTxCommitsWithTheHandlersWrites(t *testing.T) {
 				if _, err := tx.Exec(ctx, insert, task.ID, task.Attempt); err != nil {
 					return err
 				}
+
 				if task.Args.To == "stale" && task.Attempt == 1 {
 					// Another attempt takes the task over before this one
 					// completes it.
@@ -73,6 +75,7 @@ func TestCompleteTxCommitsWithTheHandlersWrites(t *testing.T) {
 
 	id := e.enqueue(t, sendEmail{To: "ok"}, nil)
 	e.waitState(t, id, taskmill.StateCompleted)
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.ledger WHERE task_id = $1", id); n != 1 {
 		t.Fatalf("ledger rows: got %d, want 1", n)
 	}
@@ -83,6 +86,7 @@ func TestCompleteTxCommitsWithTheHandlersWrites(t *testing.T) {
 	if err := <-staleResult; !errors.Is(err, taskmill.ErrLeaseLost) {
 		t.Fatalf("stale CompleteTx: got %v, want ErrLeaseLost", err)
 	}
+
 	info := e.waitState(t, staleID, taskmill.StateCompleted)
 	if info.Attempt != 2 {
 		t.Fatalf("completed on attempt %d, want 2", info.Attempt)
@@ -108,6 +112,7 @@ func TestFIFOGroupRunsOneAtATimeInOrder(t *testing.T) {
 				overlap.Store(true)
 			}
 			defer active.Add(-1)
+
 			time.Sleep(5 * time.Millisecond)
 			if task.Attempt == 1 && task.Args.UserID%4 == 0 {
 				return errors.New("transient")
@@ -153,6 +158,7 @@ func TestFailureAfterRolledBackCompleteTxIsRecorded(t *testing.T) {
 			if err := task.CompleteTx(ctx, taskmill.Pgx(tx)); err != nil {
 				return err
 			}
+
 			_ = tx.Rollback(ctx)
 			return errors.New("publish failed")
 		}, nil),
@@ -177,6 +183,7 @@ func TestCompleteTxWithDatabaseSQL(t *testing.T) {
 				return err
 			}
 			defer func() { _ = tx.Rollback() }()
+
 			if err := task.CompleteTx(ctx, taskmill.SQL(tx)); err != nil {
 				return err
 			}
@@ -188,6 +195,7 @@ func TestCompleteTxWithDatabaseSQL(t *testing.T) {
 	group := &taskmill.EnqueueOptions{GroupKey: "g"}
 	first := e.enqueue(t, sendEmail{}, group)
 	second := e.enqueue(t, sendEmail{}, group)
+
 	e.waitState(t, first, taskmill.StateCompleted)
 	e.waitState(t, second, taskmill.StateCompleted)
 }
@@ -196,6 +204,7 @@ func TestCompleteTxThenMoreWorkKeepsTheAttempt(t *testing.T) {
 	t.Parallel()
 	sent := &statementLog{}
 	e := newTracedEnv(t, sent)
+
 	causes := make(chan error, 2)
 	completed, release := make(chan struct{}, 2), make(chan struct{})
 	defer close(release)
@@ -205,6 +214,7 @@ func TestCompleteTxThenMoreWorkKeepsTheAttempt(t *testing.T) {
 				if err := task.CompleteTx(ctx, taskmill.Pgx(tx)); err != nil {
 					return err
 				}
+
 				// More work in the same transaction, for longer than the lease.
 				completed <- struct{}{}
 				<-release
@@ -226,15 +236,18 @@ func TestCompleteTxThenMoreWorkKeepsTheAttempt(t *testing.T) {
 	// other sessions see the task as it was before.
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, completed, "the handler to complete the task in its transaction")
+
 	var ends time.Time
 	if err := e.pool.QueryRow(t.Context(), replaceSchema("SELECT lease_expires_at FROM {s}.tasks WHERE id = $1", e.schema), id).Scan(&ends); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the task's lease to end", func() bool { return e.count(t, "SELECT count(*) WHERE now() > $1", ends) == 1 })
+
 	sent.reset()
 	waitFor(t, "the worker and the maintainer to look for ended leases twice", func() bool {
 		return sent.count("renewed AS") >= 2 && sent.count("t.lease_expires_at < now()") >= 2
 	})
+
 	release <- struct{}{}
 	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 {
 		t.Fatalf("completed on attempt %d, want 1", info.Attempt)
@@ -257,12 +270,14 @@ func TestLockedGroupDoesNotHoldUpOtherCompletions(t *testing.T) {
 		}, nil),
 		Queues: defaultQueue(10),
 	})
+
 	held := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "held"})
 	free := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "free"})
 	var plain []int64
 	for range 3 {
 		plain = append(plain, e.enqueue(t, sendEmail{}, nil))
 	}
+
 	for range 5 {
 		recv(t, started, "a handler to start")
 	}
@@ -271,14 +286,17 @@ func TestLockedGroupDoesNotHoldUpOtherCompletions(t *testing.T) {
 	// into that group does, while all five tasks complete together.
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'held' FOR UPDATE")
+
 	close(release)
 	for _, id := range append(plain, free) {
 		e.waitState(t, id, taskmill.StateCompleted)
 	}
 	e.wantState(t, held, taskmill.StateRunning)
+
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+
 	if info := e.waitState(t, held, taskmill.StateCompleted); info.Attempt != 1 {
 		t.Fatalf("completed on attempt %d, want 1", info.Attempt)
 	}
@@ -288,12 +306,14 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	t.Parallel()
 	// A small pool, as pgxpool's default is on a small machine.
 	e := newEnvWith(t, testdb.PoolSize(t, 4), nil)
+
 	// A check-in has a third of the lease to renew it, and shares this pool
 	// of 4 with the maintainer, which the test timing makes busy. On a busy
 	// machine, the wait for a connection and the statement can each take
 	// hundreds of milliseconds, so shorter leases ran out even with no group
 	// held.
 	const lease = 2 * time.Second
+
 	started := make(chan struct{}, 8)
 	release := make(chan struct{})
 	runWorker(t, e, &taskmill.WorkerConfig{
@@ -305,10 +325,12 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 		Queues:        defaultQueue(8),
 		LeaseDuration: lease,
 	})
+
 	var grouped []int64
 	for i := range 6 {
 		grouped = append(grouped, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: strconv.Itoa(i)}))
 	}
+
 	for range grouped {
 		recv(t, started, "a handler to start")
 	}
@@ -323,9 +345,11 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	if _, err := tx.Exec(t.Context(), replaceSchema("SELECT FROM {s}.groups FOR UPDATE", e.schema)); err != nil {
 		t.Fatal(err)
 	}
+
 	close(release)
 	plain := e.enqueue(t, sendEmail{}, nil)
 	e.waitState(t, plain, taskmill.StateCompleted)
+
 	// The held tasks' leases must survive, which needs free connections:
 	// the worker renews all six while their completions wait.
 	var before time.Time
@@ -335,10 +359,12 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	waitFor(t, "the worker to renew the leases of the six held tasks", func() bool {
 		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE lease_expires_at > $1", before) == len(grouped)
 	})
+
 	if n := e.count(t, `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0`,
 		e.schema+".groups"); n != 0 {
 		t.Fatalf("%d statements wait for the held groups, each on a connection of the pool", n)
 	}
+
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -360,10 +386,12 @@ func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
 	                                 lease_expires_at, attempted_at, attempted_by)
 	           SELECT 'default', 'email.send', 'running', now(), '{}', 5, 1, 1, now() + interval '1 minute', now(), 'w'
 	           FROM generate_series(1, 20000)`)
+
 	// The lease of the older task was renewed, which moved its row behind
 	// those of the tasks after it: the table's order is not that of the IDs.
 	const older, newer = 3, 9
@@ -372,6 +400,7 @@ func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 	if e.count(t, "SELECT count(*) FROM {s}.tasks o, {s}.tasks n WHERE o.id = $1 AND n.id = $2 AND o.ctid > n.ctid", older, newer) != 1 {
 		t.Fatal("the row of the older task does not lie behind the newer one's")
 	}
+
 	// The attempts ended newest first.
 	attempts := func(n int) []int64 {
 		ids := make([]int64, n)
@@ -385,6 +414,7 @@ func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 		settings string
 		attempts int
 	}
+
 	// Each plan that the server may choose. With 200 attempts and the
 	// planner's own choice, it can join the attempts to the tasks by reading
 	// the whole table. Fewer attempts get a custom and a generic plan under
@@ -404,6 +434,7 @@ func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 				"set_config('enable_hashjoin', '%t', true), set_config('enable_mergejoin', '%t', true)", mode, on[0], on[1], on[2]), 7})
 		}
 	}
+
 	for _, p := range plans {
 		// A transaction cancels the older task, and so holds its row. The
 		// completion then waits for that row and holds no other yet, so
@@ -412,6 +443,7 @@ func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 		if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), older); err != nil {
 			t.Fatal(err)
 		}
+
 		n, err := completeWhileHeld(t, e, p.settings, attempts(p.attempts), func() error {
 			if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), newer); err != nil {
 				_ = tx.Rollback(ctx)
@@ -428,6 +460,7 @@ func TestCompletionLocksTasksInTheOrderOfTheirIDs(t *testing.T) {
 	// row: the completion leaves that task.
 	tx := e.begin(t)
 	e.txExec(t, tx, "UPDATE {s}.tasks SET lease_token = lease_token + 1 WHERE id = $1", older)
+
 	n, err := completeWhileHeld(t, e, plans[0].settings, attempts(7), func() error { return tx.Commit(ctx) })
 	if err != nil || n != 6 {
 		t.Errorf("the completion finished %d tasks, %v; want the 6 that the attempts still own", n, err)
@@ -449,10 +482,12 @@ func completeWhileHeld(t *testing.T, e *env, settings string, ids []int64, relea
 		n, err := taskmill.Complete(t.Context(), e.client, settings, ids)
 		done <- result{n, err}
 	}()
+
 	e.waitBlocked(t, "INSERT INTO {s}.task_history")
 	if err := release(); err != nil {
 		t.Errorf("%s, %d attempts: the transaction that held a task failed: %v", settings, len(ids), err)
 	}
+
 	got := <-done
 	return got.tasks, got.err
 }
@@ -462,6 +497,7 @@ func TestCompletionWithoutHistoryPartition(t *testing.T) {
 	e := newEnv(t)
 	logs := &logRecorder{}
 	w := newWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+
 	// The worker's role could not create today's partition.
 	today := "task_history_" + time.Now().UTC().Format("20060102")
 	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+today)
@@ -473,6 +509,7 @@ func TestCompletionWithoutHistoryPartition(t *testing.T) {
 			t.Fatalf("got %+v, %v; want completed on the first attempt", info, err)
 		}
 	}
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 0 {
 		t.Fatalf("%d tasks left", n)
 	}

@@ -17,17 +17,20 @@ func TestStoredNamesNeverChange(t *testing.T) {
 	t.Parallel()
 	client, ob, pool := setup(t)
 	ctx := t.Context()
+
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "orders", Value: []byte("placed")})
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	page, err := client.List(ctx, nil)
 	if err != nil || len(page.Tasks) != 1 {
 		t.Fatalf("got %d tasks, %v; want the stored message", len(page.Tasks), err)
 	}
 	stored := page.Tasks[0]
+
 	for _, tt := range []struct {
 		what, got, want string
 	}{

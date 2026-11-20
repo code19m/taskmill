@@ -116,18 +116,22 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 	if update == nil {
 		return invalidArgument("update is nil")
 	}
+
 	op := fmt.Sprintf("update queue %q", name)
 	fail := func(err error) error { return fmt.Errorf("taskmill: %s: %w", op, err) }
+
 	return retryConflicts(ctx, op, func() (bool, error) {
 		var limit *int
 		if err := c.pool.QueryRow(ctx, c.sql.readQueue, name).Scan(&limit); err != nil {
 			return false, fail(err)
 		}
+
 		var s QueueSettings
 		if limit != nil {
 			s.MaxRunning = *limit
 		}
 		update(&s)
+
 		var next *int
 		switch {
 		case s.MaxRunning < 0:
@@ -137,6 +141,7 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 		case s.MaxRunning > 0:
 			next = &s.MaxRunning
 		}
+
 		var swapped int
 		err := c.pool.QueryRow(ctx, c.sql.swapQueue,
 			name,                 // $1
@@ -171,10 +176,12 @@ func (c *Client) setQueuePaused(ctx context.Context, name string, paused bool) e
 	if err := checkName("queue", name, maxNameLength); err != nil {
 		return err
 	}
+
 	err := pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, c.sql.pauseQueue, name, paused); err != nil {
 			return err
 		}
+
 		_, err := tx.Exec(ctx, notifySQL, c.schema, notifyQueue+"|"+name)
 		return err
 	})
@@ -189,16 +196,19 @@ func (c *Client) setQueuePaused(ctx context.Context, name string, paused bool) e
 // statistics.
 func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 	fail := func(err error) error { return fmt.Errorf("taskmill: list queues: %w", err) }
+
 	// The queues and their statistics, in one round trip.
 	b := &pgx.Batch{}
 	b.Queue(c.sql.listQueues)
 	b.Queue(c.sql.queueStats)
 	br := c.pool.SendBatch(ctx, b)
 	defer func() { _ = br.Close() }()
+
 	r, err := br.Query()
 	if err != nil {
 		return nil, fail(err)
 	}
+
 	var out []QueueInfo
 	index := make(map[string]int)
 	for r.Next() {
@@ -221,6 +231,7 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 		return nil, fail(err)
 	}
 	defer r.Close()
+
 	for r.Next() {
 		var name, state string
 		var n int64
@@ -231,6 +242,7 @@ func (c *Client) Queues(ctx context.Context) ([]QueueInfo, error) {
 		if err := r.Scan(&name, &state, &n, &capped, &at, &lag, &halted, &failures); err != nil {
 			return nil, fail(err)
 		}
+
 		if i, ok := index[name]; ok {
 			q := &out[i]
 			q.Counts[State(state)] = TaskCount{N: n, Capped: capped}
@@ -262,6 +274,7 @@ func (w *Worker) settingsLoop(ctx context.Context) {
 		if w.settled.Load() {
 			wait = w.timing.settings
 		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -278,10 +291,12 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) {
 	if len(w.queues) == 0 {
 		return
 	}
+
 	names := make([]string, 0, len(w.queues))
 	for name := range w.queues {
 		names = append(names, name)
 	}
+
 	readCtx, cancel := context.WithTimeout(ctx, w.timing.settings)
 	settings, err := w.loadQueueSettings(readCtx, names)
 	cancel()
@@ -289,9 +304,11 @@ func (w *Worker) refreshQueueSettings(ctx context.Context) {
 	if err != nil {
 		return
 	}
+
 	// Settled comes first: no queue fetches before the worker says that it
 	// has read the settings.
 	w.settled.Store(true)
+
 	// A queue without a row has the default settings: running, no limit.
 	for name, q := range w.queues {
 		s := settings[name]

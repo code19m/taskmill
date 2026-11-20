@@ -98,12 +98,14 @@ func TestCode(t *testing.T) {
 			t.Error(err)
 			continue
 		}
+
 		blocks, _ := goBlocks(string(text))
 		examples, listed := codePages[page]
 		if !listed && len(blocks) > 0 {
 			t.Errorf("%s has go blocks, but codePages does not name its example", page)
 			continue
 		}
+
 		for _, name := range examples {
 			if _, read := files[name]; read {
 				continue
@@ -114,6 +116,7 @@ func TestCode(t *testing.T) {
 			}
 			files[name] = codeLines(string(src), true)
 		}
+
 		for _, b := range blocks {
 			if why := b.missing(examples, files); why != "" {
 				t.Errorf("%s:%d: the go block %s", page, b.line, why)
@@ -133,11 +136,13 @@ func TestTutorialShowsAllCode(t *testing.T) {
 	if err != nil || len(parts) != 7 {
 		t.Fatalf("docs/tutorial has %d parts, want 7: %v", len(parts), err)
 	}
+
 	for _, built := range builtPrograms {
 		shown, err := shownBy(repo, parts[built.from-1:built.to])
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		src, err := fs.ReadFile(repo, built.file)
 		if err != nil {
 			t.Fatal(err)
@@ -146,6 +151,7 @@ func TestTutorialShowsAllCode(t *testing.T) {
 		if at == nil {
 			t.Fatalf("%s has no package clause", built.file)
 		}
+
 		for _, line := range codeLines(string(src[at[0]:]), true) {
 			if !shown[line] {
 				t.Errorf("%s: parts %d to %d of the tutorial do not show the line %s", built.file, built.from, built.to, quote(line))
@@ -165,6 +171,7 @@ func TestTutorialParts(t *testing.T) {
 	if err != nil || len(parts) == 0 {
 		t.Fatalf("docs/tutorial has no parts: %v", err)
 	}
+
 	for i, part := range parts {
 		text, err := fs.ReadFile(repo, part)
 		if err != nil {
@@ -185,6 +192,7 @@ func partShape(name, text string, n int) string {
 	if !strings.HasPrefix(name, strconv.Itoa(n)+"-") || len(headings) == 0 || !strings.HasPrefix(headings[0], title) {
 		return fmt.Sprintf("the file of part %d is named %d-….md, and its title starts with %q", n, n, title)
 	}
+
 	steps := 0
 	for _, h := range headings[1:] {
 		m := stepHeading.FindStringSubmatch(h)
@@ -195,6 +203,7 @@ func partShape(name, text string, n int) string {
 			return fmt.Sprintf("step %s comes where step %d belongs", m[1], steps)
 		}
 	}
+
 	if rest := headings[steps+1:]; steps == 0 || !slices.Equal(rest, []string{"What you learned", "Go deeper"}) {
 		return fmt.Sprintf(`after the title come the steps, then "What you learned" and "Go deeper"; after %d steps come %q`, steps, rest)
 	}
@@ -251,6 +260,7 @@ func shownBy(repo fs.FS, pages []string) (map[string]bool, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		blocks, prose := goBlocks(string(text))
 		for _, b := range blocks {
 			for _, line := range b.lines {
@@ -337,6 +347,7 @@ func findRuns(lines []string, runs [][]string) string {
 			}
 			most = max(most, n)
 		}
+
 		switch {
 		case at >= 0:
 			from = at + len(run)

@@ -55,6 +55,7 @@ func setup(t *testing.T) (*taskmill.Client, *outbox.Outbox, *pgxpool.Pool) {
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		t.Fatal(err)
 	}
+
 	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema})
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +80,7 @@ func newBroker(failFirst bool) *broker {
 func (b *broker) Publish(_ context.Context, ds []outbox.Delivery) []error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	errs := make([]error, len(ds))
 	seen := map[string]bool{}
 	for i, d := range ds {
@@ -89,24 +91,29 @@ func (b *broker) Publish(_ context.Context, ds []outbox.Delivery) []error {
 		}
 		seen[stream] = true
 		v := string(d.Value)
+
 		if prev, ok := b.ids[v]; ok && prev != d.ID {
 			errs[i] = fmt.Errorf("delivery ID changed on retry: %s then %s", prev, d.ID)
 			continue
 		}
 		b.ids[v] = d.ID
+
 		if b.failFirst && !b.failed[v] && strings.HasSuffix(v, "3") {
 			b.failed[v] = true
 			errs[i] = errors.New("broker unavailable")
 			continue
 		}
+
 		b.published[stream] = append(b.published[stream], v)
 	}
+
 	return errs
 }
 
 func (b *broker) count() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	n := 0
 	for _, vs := range b.published {
 		n += len(vs)
@@ -118,10 +125,12 @@ func run(t *testing.T, client *taskmill.Client, ob *outbox.Outbox, pub outbox.Pu
 	t.Helper()
 	var hs taskmill.Handlers
 	ob.AddRelay(&hs, pub, opts)
+
 	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs, PollInterval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -149,6 +158,7 @@ func TestStoreCommitsWithTheTransaction(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the rollback error")
 	}
+
 	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{
 			Topic: "orders", Key: []byte("1"), Value: []byte("committed"), Headers: map[string][]byte{"type": []byte("order.paid")},
@@ -160,6 +170,7 @@ func TestStoreCommitsWithTheTransaction(t *testing.T) {
 
 	// Had the rolled-back message been stored, it would be published first.
 	waitFor(t, func() bool { return b.count() == 1 })
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if got := b.published["orders/1"]; !slices.Equal(got, []string{"committed"}) {
@@ -193,11 +204,13 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 	waitFor(t, func() bool { return b.count() == keys*perKey })
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
 	for k := range keys {
 		want := make([]string, perKey)
 		for i := range want {
 			want[i] = fmt.Sprintf("%d-%02d", k, i)
 		}
+
 		if got := b.published[fmt.Sprintf("accounts/%d", k)]; !slices.Equal(got, want) {
 			t.Fatalf("key %d: published %v, want %v", k, got, want)
 		}
@@ -207,6 +220,7 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 func TestStoreRejectsMessagesWithoutTopic(t *testing.T) {
 	t.Parallel()
 	_, ob, pool := setup(t)
+
 	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
 		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Value: []byte("x")})
 	})
@@ -233,9 +247,11 @@ func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 	var mu sync.Mutex
 	var published []string
 	reject := true
+
 	run(t, client, ob, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
 		mu.Lock()
 		defer mu.Unlock()
+
 		errs := make([]error, len(ds))
 		for i, d := range ds {
 			if string(d.Value) == "first" && reject {
@@ -246,6 +262,7 @@ func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 		}
 		return errs
 	}), nil)
+
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return ob.Store(ctx, taskmill.Pgx(tx),
 			outbox.Message{Topic: "orders", Key: []byte("7"), Value: []byte("first")},
@@ -264,6 +281,7 @@ func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 		dead = page.Tasks
 		return len(dead) == 1
 	})
+
 	time.Sleep(200 * time.Millisecond) // the second message would be published by now if the key did not halt
 	mu.Lock()
 	if len(published) != 0 {
@@ -275,16 +293,19 @@ func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 	if err := client.Retry(ctx, dead[0].ID); err != nil {
 		t.Fatal(err)
 	}
+
 	waitFor(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(published) == 2
 	})
+
 	mu.Lock()
 	if !slices.Equal(published, []string{"first", "second"}) {
 		t.Fatalf("published %v", published)
 	}
 	mu.Unlock()
+
 	// Published messages are not kept in history.
 	waitFor(t, func() bool {
 		page, err := client.List(ctx, &taskmill.ListParams{Filter: taskmill.TaskFilter{Queues: []string{outbox.Queue}}})
@@ -299,6 +320,7 @@ func TestAddRelayReportsInvalidArguments(t *testing.T) {
 	t.Parallel()
 	client, ob, _ := setup(t)
 	pub := outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error { return make([]error, len(ds)) })
+
 	for _, c := range []struct {
 		name  string
 		pub   outbox.Publisher
@@ -330,6 +352,7 @@ func TestRelayHonorsItsBatchSize(t *testing.T) {
 	for i := range msgs {
 		msgs[i] = outbox.Message{Topic: "events", Value: []byte(strconv.Itoa(i))}
 	}
+
 	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error { return ob.Store(t.Context(), taskmill.Pgx(tx), msgs...) })
 	if err != nil {
 		t.Fatal(err)
@@ -349,12 +372,14 @@ func TestRelayHonorsItsBatchSize(t *testing.T) {
 	waitFor(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
+
 		total := 0
 		for _, n := range batches {
 			total += n
 		}
 		return total == stored
 	})
+
 	mu.Lock()
 	defer mu.Unlock()
 	if slices.Max(batches) > size {
@@ -365,6 +390,7 @@ func TestRelayHonorsItsBatchSize(t *testing.T) {
 func TestRelayHonorsItsTimeout(t *testing.T) {
 	t.Parallel()
 	client, ob, pool := setup(t)
+
 	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
 		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Topic: "events", Value: []byte("v")})
 	})
@@ -384,6 +410,7 @@ func TestRelayHonorsItsTimeout(t *testing.T) {
 			if deadline, ok := ctx.Deadline(); ok {
 				left = time.Until(deadline)
 			}
+
 			<-ctx.Done()
 			hung <- left
 			return []error{ctx.Err()}
@@ -400,6 +427,7 @@ func TestRelayHonorsItsTimeout(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("the hung call was not canceled")
 	}
+
 	select {
 	case <-published:
 	case <-time.After(20 * time.Second):
@@ -415,12 +443,14 @@ func TestDeliveryWithoutAResultFails(t *testing.T) {
 	t.Parallel()
 	client, ob, pool := setup(t)
 	ctx := t.Context()
+
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "events", Value: []byte("v")})
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	page, err := client.List(ctx, nil)
 	if err != nil || len(page.Tasks) != 1 {
 		t.Fatalf("got %d tasks, %v; want the stored message", len(page.Tasks), err)
@@ -435,15 +465,18 @@ func TestDeliveryWithoutAResultFails(t *testing.T) {
 		sent = append(sent, ds[0].ID)
 		return results[len(sent)-1]
 	}), nil)
+
 	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for try, result := range results {
 		info, err := w.RunTask(ctx, page.Tasks[0].ID)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if len(result) == 1 {
 			if info.State != taskmill.StateCompleted {
 				t.Fatalf("try %d, with a result: the message is %s, want it published", try+1, info.State)
@@ -456,6 +489,7 @@ func TestDeliveryWithoutAResultFails(t *testing.T) {
 				try+1, info.State, info.Errors, want)
 		}
 	}
+
 	if len(sent) != 3 || sent[0] != sent[1] || sent[1] != sent[2] {
 		t.Fatalf("the publisher got the deliveries %q, want the same one at each of 3 tries", sent)
 	}
@@ -482,6 +516,7 @@ func TestBinaryKeysAndHeadersArriveIntact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	select {
 	case d := <-got:
 		if !bytes.Equal(d.Key, key) || !bytes.Equal(d.Headers["trace"], header) {

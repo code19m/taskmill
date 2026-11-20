@@ -21,6 +21,7 @@ func TestWorkerCompletesTask(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	got := make(chan sendEmail, 1)
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 			got <- task.Args
@@ -43,6 +44,7 @@ func TestWorkerDrainsRunningTasksOnShutdown(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	started := make(chan struct{}, 1)
+
 	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
@@ -54,6 +56,7 @@ func TestWorkerDrainsRunningTasksOnShutdown(t *testing.T) {
 
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "a handler to start")
+
 	stop()
 	e.wantState(t, id, taskmill.StateCompleted)
 	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
@@ -70,6 +73,7 @@ func TestStoppingWorkerSaysThatItWaitsOnlyWhenTasksRun(t *testing.T) {
 	logs := &logRecorder{}
 	e := newEnv(t).withLogger(t, slog.New(logs))
 	started, release := make(chan struct{}, 3), make(chan struct{})
+
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
@@ -98,23 +102,27 @@ func TestStoppingWorkerSaysThatItWaitsOnlyWhenTasksRun(t *testing.T) {
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "held"})
 	e.enqueue(t, sendEmail{}, nil)
 	e.enqueue(t, sendEmail{}, nil)
+
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.groups FOR UPDATE")
 	stop = startWorker(t, w)
 	for range 3 {
 		recv(t, started, "a handler to start")
 	}
+
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
 		stop()
 	}()
+
 	waitFor(t, "the worker to say that it waits", func() bool { return logs.count(waiting) == 1 })
 	close(release)
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	recv(t, stopped, "the worker to stop")
+
 	for _, r := range logs.all() {
 		if r.Message == waiting && attr(r, "tasks") != "2" {
 			t.Fatalf("the worker said that it waits for %s tasks, want the 2 whose handlers ran", attr(r, "tasks"))
@@ -126,6 +134,7 @@ func TestWorkerReleasesTasksThatOutliveTheDrain(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	started := make(chan struct{}, 1)
+
 	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
@@ -139,6 +148,7 @@ func TestWorkerReleasesTasksThatOutliveTheDrain(t *testing.T) {
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "a handler to start")
 	stop()
+
 	info := e.get(t, id)
 	if info.State != taskmill.StateAvailable || info.Attempt != 0 {
 		t.Fatalf("released task: got %s with attempt %d, want available with 0", info.State, info.Attempt)
@@ -160,6 +170,7 @@ func (g *fetchGate) holdNext() (held <-chan struct{}, release func()) {
 		close(arrived)
 		<-free
 	}
+
 	g.hold.Store(&hold)
 	return arrived, sync.OnceFunc(func() { close(free) })
 }
@@ -198,6 +209,7 @@ func TestDrainTimeoutCountsFromTheStop(t *testing.T) {
 	gate := &fetchGate{}
 	e := newTracedEnv(t, gate)
 	started, cause := make(chan struct{}, 1), make(chan error, 1)
+
 	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
@@ -209,6 +221,7 @@ func TestDrainTimeoutCountsFromTheStop(t *testing.T) {
 		DrainTimeout: 50 * time.Millisecond,
 		NoMaintainer: true,
 	})
+
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "the handler to start")
 
@@ -222,11 +235,14 @@ func TestDrainTimeoutCountsFromTheStop(t *testing.T) {
 		defer close(stopped)
 		stop()
 	}()
+
 	if err := recv(t, cause, "the handler's context to end"); !errors.Is(err, taskmill.ErrShutdown) {
 		t.Fatalf("the handler's context ended with %v, want ErrShutdown", err)
 	}
+
 	release()
 	recv(t, stopped, "the worker to stop")
+
 	if info := e.get(t, id); info.State != taskmill.StateAvailable || info.Attempt != 0 {
 		t.Fatalf("released task: got %s with attempt %d, want available with 0", info.State, info.Attempt)
 	}
@@ -240,6 +256,7 @@ func TestTasksFetchedWhileTheWorkerStopsGoBack(t *testing.T) {
 	t.Parallel()
 	gate := &fetchGate{}
 	e := newTracedEnv(t, gate)
+
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers:     handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil),
 		Queues:       defaultQueue(1),
@@ -255,9 +272,11 @@ func TestTasksFetchedWhileTheWorkerStopsGoBack(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
+
 	recv(t, held, "the worker's first fetch")
 	cancel()
 	release()
+
 	if err := recv(t, done, "the worker to stop"); err != nil {
 		t.Fatal(err)
 	}
@@ -266,6 +285,7 @@ func TestTasksFetchedWhileTheWorkerStopsGoBack(t *testing.T) {
 	if n := e.count(t, "SELECT lease_token FROM {s}.tasks WHERE id = $1", id); n != 1 {
 		t.Fatalf("the task was leased %d times, want once, by the fetch that was in flight", n)
 	}
+
 	if info := e.get(t, id); info.State != taskmill.StateAvailable || info.Attempt != 0 {
 		t.Fatalf("got %s with attempt %d, want available with 0", info.State, info.Attempt)
 	}
@@ -279,6 +299,7 @@ func TestRunWaitsForAResultThatIsBeingRecorded(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	started := make(chan struct{}, 1)
+
 	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
@@ -289,6 +310,7 @@ func TestRunWaitsForAResultThatIsBeingRecorded(t *testing.T) {
 		DrainTimeout: 10 * time.Millisecond,
 		NoMaintainer: true,
 	})
+
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "the handler to start")
 
@@ -303,6 +325,7 @@ END $$`)
 	e.exec(t, `
 CREATE TRIGGER slow_release BEFORE UPDATE ON {s}.tasks
 FOR EACH ROW WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.slow_release()`)
+
 	stop()
 	if info := e.get(t, id); info.State != taskmill.StateAvailable || info.Attempt != 0 {
 		t.Fatalf("Run returned before the task was given back: it is %s with attempt %d, want available with 0",
@@ -318,6 +341,7 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 	var dup taskmill.Handlers
 	taskmill.AddHandler(&dup, noop, nil)
 	taskmill.AddHandler(&dup, noop, nil)
+
 	var noKind taskmill.Handlers
 	taskmill.AddHandler(&noKind, taskmill.HandlerFunc[emptyKind](func(context.Context, *taskmill.Task[emptyKind]) error {
 		return nil
@@ -360,6 +384,7 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 			Options: &taskmill.EnqueueOptions{Metadata: map[string]string{"k": strings.Repeat("x", 64<<10)}},
 		}}}},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -380,6 +405,7 @@ func TestRunStoppedBeforeItStartsReturnsNil(t *testing.T) {
 	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()})
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel() // as a SIGTERM during startup does
+
 	if err := w.Run(ctx); err != nil {
 		t.Fatalf("got %v, want nil", err)
 	}
@@ -395,9 +421,11 @@ func TestRunTwiceFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
+
 	// Listening comes after registering: canceling as soon as the worker's
 	// row shows could stop Run while it still waits for that insert's reply.
 	e.waitListening(t)
@@ -407,6 +435,7 @@ func TestRunTwiceFails(t *testing.T) {
 	if err := w.Run(second); !errors.Is(err, taskmill.ErrInvalidState) || second.Err() != nil {
 		t.Fatalf("second Run: got %v, want an immediate ErrInvalidState", err)
 	}
+
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -419,6 +448,7 @@ func TestHandlerThatIgnoresShutdownIsReleased(t *testing.T) {
 	started := make(chan struct{}, 1)
 	unblock := make(chan struct{})
 	returned := make(chan struct{})
+
 	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			defer close(returned)
@@ -429,6 +459,7 @@ func TestHandlerThatIgnoresShutdownIsReleased(t *testing.T) {
 		Queues:       defaultQueue(1),
 		DrainTimeout: 50 * time.Millisecond,
 	})
+
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "a handler to start")
 	stop()
@@ -440,6 +471,7 @@ func TestHandlerThatIgnoresShutdownIsReleased(t *testing.T) {
 	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
 		t.Error("the stopped worker is still registered")
 	}
+
 	// The abandoned handler's late success changes nothing.
 	close(unblock)
 	recv(t, returned, "the handler to return")
@@ -466,8 +498,10 @@ func runTaskWorker(t *testing.T, e *env) (*taskmill.Worker, *atomic.Int32, <-cha
 		}
 		return nil
 	}), nil)
+
 	var batches atomic.Int32
 	taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { batches.Add(1) }), nil)
+
 	// A lease long enough that a loaded machine does not miss renewals for
 	// all of it: each has a third of it, which through a proxy that many
 	// tests share was too little of one second.
@@ -478,6 +512,7 @@ func TestRunTask(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	w, batches, blocked := runTaskWorker(t, e)
+
 	run := func(t *testing.T, ctx context.Context, id int64, want taskmill.State) *taskmill.TaskInfo {
 		t.Helper()
 		info, err := w.RunTask(ctx, id)
@@ -516,6 +551,7 @@ func TestRunTask(t *testing.T) {
 			case <-ctx.Done():
 			}
 		}()
+
 		if info := run(t, ctx, id, taskmill.StateAvailable); info.Attempt != 0 {
 			t.Fatalf("released with attempt %d, want 0", info.Attempt)
 		}
@@ -533,6 +569,7 @@ func TestRunTask(t *testing.T) {
 		e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 		           VALUES ('default', 'other.kind', 'available', now(), '{}', 5)`)
 		id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks WHERE kind = 'other.kind'"))
+
 		if info := run(t, t.Context(), id, taskmill.StateScheduled); info.Errors[0].Code != taskmill.CodeNoHandler {
 			t.Fatalf("got errors %+v", info.Errors)
 		}
@@ -546,6 +583,7 @@ func TestRunTaskOfAKindWithoutHistory(t *testing.T) {
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil },
 			&taskmill.HandlerOptions{DiscardCompleted: true}),
 	})
+
 	id := e.enqueue(t, sendEmail{}, nil)
 	info, err := w.RunTask(t.Context(), id)
 	if err != nil || info.State != taskmill.StateCompleted {
@@ -564,6 +602,7 @@ func TestRunTaskRefuses(t *testing.T) {
 	if _, err := w.RunTask(t.Context(), completed); err != nil {
 		t.Fatal(err)
 	}
+
 	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 	pending := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 	running := e.enqueue(t, sendEmail{}, nil)
@@ -583,6 +622,7 @@ func TestRunTaskRefuses(t *testing.T) {
 			t.Errorf("%s: got %v, want %v", name, err, tc.want)
 		}
 	}
+
 	// Leave the group consistent for the end-of-test check.
 	for _, id := range []int64{pending, head} {
 		if err := e.client.Delete(t.Context(), id); err != nil {
@@ -599,12 +639,14 @@ func TestRunTaskRunsNoTaskWhoseLeaseFailed(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	var runs atomic.Int32
+
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			runs.Add(1)
 			return nil
 		}, nil),
 	})
+
 	id := e.enqueue(t, sendEmail{}, nil)
 	e.exec(t, `
 CREATE FUNCTION {s}.refuse_lease() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -628,8 +670,10 @@ func TestWorkerWarnsAboutUnservedKinds(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	logs := &logRecorder{}
+
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+
 	runWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
 	waitFor(t, "a warning that the reports queue is not served", func() bool {
 		return logs.count("the worker does not read the default queue of these registered kinds") == 1

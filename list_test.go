@@ -23,6 +23,7 @@ func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	for _, s := range []string{"a\x00b", "\xff", strings.Repeat("q", 257)} {
 		for name, call := range map[string]func() error{
 			"List queue": func() error {
@@ -74,6 +75,7 @@ func TestListPagesNewestFirst(t *testing.T) {
 		ids = append(ids, e.enqueue(t, sendEmail{UserID: int64(i)}, nil))
 	}
 	ids = append(ids, e.enqueue(t, report{Name: "r"}, nil))
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: noopHandlers(),
 		Queues:   map[string]taskmill.QueueOptions{"reports-done": {}},
@@ -89,9 +91,11 @@ func TestListPagesNewestFirst(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		for _, task := range res.Tasks {
 			got = append(got, task.ID)
 		}
+
 		if res.Next == "" {
 			break
 		}
@@ -100,6 +104,7 @@ func TestListPagesNewestFirst(t *testing.T) {
 			t.Fatal("too many pages")
 		}
 	}
+
 	want := slices.Clone(ids)
 	slices.Reverse(want)
 	if !slices.Equal(got, want) {
@@ -113,6 +118,7 @@ func TestListPagesNewestFirst(t *testing.T) {
 	if len(completed.Tasks) != 1 || completed.Tasks[0].ID != ids[5] || completed.Tasks[0].State != taskmill.StateCompleted {
 		t.Fatalf("completed tasks: %+v", completed.Tasks)
 	}
+
 	available, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{
 		Queues: []string{taskmill.DefaultQueue}, States: []taskmill.State{taskmill.StateAvailable}, Kinds: []string{"email.send"},
 	}})
@@ -135,9 +141,11 @@ func TestListChecksItsParams(t *testing.T) {
 	e := newEnv(t)
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 	           SELECT 'default', 'email.send', 'scheduled', now() + interval '1 day', '{}', 1 FROM generate_series(1, 101)`)
+
 	if page, err := e.client.List(t.Context(), &taskmill.ListParams{Summary: true}); err != nil || len(page.Tasks) != 100 || page.Next == "" {
 		t.Fatalf("no limit: got a page of %d tasks, next %q, %v; want 100 tasks and a next page", len(page.Tasks), page.Next, err)
 	}
+
 	at := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
 	for _, p := range []taskmill.ListParams{
@@ -187,6 +195,7 @@ func TestListsOfFinishedTasksComeLatestFirst(t *testing.T) {
 	e := newEnv(t)
 	e.rawGroups = true // the dead task of a group is written by hand, without its group
 	ctx := t.Context()
+
 	// Three dead tasks of the queue "a" share a finish time, and the one with
 	// the highest ID was written first: the index holds the tasks of one
 	// finish time in the order in which they were written.
@@ -203,6 +212,7 @@ func TestListsOfFinishedTasksComeLatestFirst(t *testing.T) {
 	                        (7, 'a', 'email.send', 'dead', '-infinity', NULL),
 	                        (8, 'a', 'email.send', 'available', NULL, NULL)
 	                ) AS v(id, queue, kind, state, finished, grp)`)
+
 	dead, canceled := []taskmill.State{taskmill.StateDead}, []taskmill.State{taskmill.StateCanceled}
 	finished := []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}
 	for _, c := range []struct {
@@ -238,6 +248,7 @@ func TestListsOfFinishedTasksComeLatestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	byID.Cursor, byFinish.Cursor = latest.Next, first.Next
 	for _, p := range []taskmill.ListParams{byID, byFinish} {
 		if _, err := e.client.List(ctx, &p); !errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -260,6 +271,7 @@ func TestListsOfFinishedTasksComeLatestFirst(t *testing.T) {
 func TestListsOfFinishedTasksTakeARangeOfFinishTimes(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// The range of most lists starts at second 1 and ends at second 3, with
 	// America/St_Johns back on standard time from second 2.
 	start := time.Date(2026, time.November, 1, 4, 29, 58, 0, time.UTC)
@@ -344,6 +356,7 @@ func TestListsTakeARangeOfCreationTimes(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	e.rawGroups = true // the pending task is written by hand, without its group
+
 	// The range of most lists starts at second 1 and ends at second 3, with
 	// America/St_Johns back on standard time from second 2. The task with the
 	// highest ID is the oldest, and the completed tasks are 11, 12, and 13.
@@ -448,16 +461,19 @@ func clientIn(t *testing.T, e *env, zone string) (*taskmill.Client, *time.Locati
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t)) // the time zone is a parameter of the session
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.RuntimeParams["timezone"] = zone
+
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+
 	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema, Logger: testLogger(t)})
 	if err != nil {
 		t.Fatal(err)
@@ -475,19 +491,23 @@ func TestRangeOfCreationTimesHoldsTheTaskOfALongTransaction(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	long := e.begin(t)
 	var began time.Time
 	if err := long.QueryRow(ctx, "SELECT now()").Scan(&began); err != nil {
 		t.Fatal(err)
 	}
+
 	waitFor(t, "the database's clock to pass the start of the transaction", func() bool {
 		return e.count(t, "SELECT count(*) WHERE clock_timestamp() > $1", began) == 1
 	})
+
 	meanwhile := e.enqueue(t, sendEmail{To: "meanwhile"}, nil)
 	late, err := e.client.EnqueueTx(ctx, taskmill.Pgx(long), sendEmail{To: "late"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := long.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -499,6 +519,7 @@ func TestRangeOfCreationTimesHoldsTheTaskOfALongTransaction(t *testing.T) {
 		t.Fatalf("the task of the long transaction has ID %d and was created at %s, the other ID %d at %s: want the higher ID with the earlier time",
 			late.ID, began, meanwhile, first.CreatedAt)
 	}
+
 	for _, c := range []struct {
 		what   string
 		params taskmill.ListParams
@@ -524,10 +545,12 @@ func TestRangeOfCreationTimesHoldsTheTaskOfALongTransaction(t *testing.T) {
 func TestRangeOfCreationTimesFollowsATaskThroughItsLife(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	var before time.Time
 	if err := e.pool.QueryRow(t.Context(), "SELECT now()").Scan(&before); err != nil {
 		t.Fatal(err)
 	}
+
 	// The worker completes the tasks of user 1, and keeps those of user 2
 	// running. No worker reads the queue "idle".
 	release := make(chan struct{})
@@ -541,6 +564,7 @@ func TestRangeOfCreationTimesFollowsATaskThroughItsLife(t *testing.T) {
 		}, nil),
 		Queues: defaultQueue(2),
 	})
+
 	completed := e.enqueue(t, sendEmail{UserID: 1}, nil)
 	running := e.enqueue(t, sendEmail{UserID: 2}, nil)
 	waiting := e.enqueue(t, sendEmail{UserID: 3}, &taskmill.EnqueueOptions{Queue: "idle"})
@@ -551,6 +575,7 @@ func TestRangeOfCreationTimesFollowsATaskThroughItsLife(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	want := []taskmill.State{taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateCompleted}
 	var states []taskmill.State
 	for _, task := range page.Tasks {
@@ -560,6 +585,7 @@ func TestRangeOfCreationTimesFollowsATaskThroughItsLife(t *testing.T) {
 		t.Errorf("the tasks created since the test began: %v in the states %v, want the three, the latest first, in the states %v",
 			ids(page.Tasks), states, want)
 	}
+
 	for _, c := range []struct {
 		filter taskmill.TaskFilter
 		want   []int64
@@ -582,16 +608,19 @@ func TestCursorOfCreationOrderStaysInItsRange(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	// Tasks 1 to 6 were created one a second, and died in the other order.
 	start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
 	           SELECT 'a', 'email.send', 'dead', $1::timestamptz + i * interval '1 second', $1::timestamptz - i * interval '1 second', now(), '{}', 1
 	           FROM generate_series(1, 6) i`, start)
 	second := func(n int) time.Time { return start.Add(time.Duration(n) * time.Second) }
+
 	page, err := e.client.List(ctx, &taskmill.ListParams{CreatedSince: second(1), Limit: 2})
 	if err != nil || !slices.Equal(ids(page.Tasks), []int64{6, 5}) || page.Next == "" {
 		t.Fatalf("the first page by creation time: %+v, %v; want the tasks 6 and 5, and a next page", page, err)
 	}
+
 	for _, c := range []struct {
 		what   string
 		params taskmill.ListParams
@@ -615,6 +644,7 @@ func TestCursorOfCreationOrderStaysInItsRange(t *testing.T) {
 		"creation order": {Limit: 2, CreatedSince: second(1)},
 		"finish order":   {Limit: 2, Filter: dead},
 	}
+
 	cursors := make(map[string]string)
 	for name, p := range orders {
 		page, err := e.client.List(ctx, &p)
@@ -623,6 +653,7 @@ func TestCursorOfCreationOrderStaysInItsRange(t *testing.T) {
 		}
 		cursors[name] = page.Next
 	}
+
 	for name, p := range orders {
 		for from, cursor := range cursors {
 			p.Cursor = cursor
@@ -640,6 +671,7 @@ func TestListSummary(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	opts := &taskmill.EnqueueOptions{Metadata: map[string]string{"tenant": "7"}}
 	failed := e.enqueue(t, sendEmail{To: "failed"}, opts)
 	e.exec(t, `UPDATE {s}.tasks SET errors = '[{"attempt": 1, "at": "2026-01-01T00:00:00Z", "message": "first"},
@@ -657,6 +689,7 @@ func TestListSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(full.Tasks) != 3 || len(brief.Tasks) != 3 {
 		t.Fatalf("got %d tasks in full and %d in summary, want 3 of each", len(full.Tasks), len(brief.Tasks))
 	}
@@ -664,10 +697,12 @@ func TestListSummary(t *testing.T) {
 		if len(want.Payload) == 0 || len(want.Metadata) == 0 {
 			t.Fatalf("the full list left out the payload or the metadata of task %d: %+v", want.ID, want)
 		}
+
 		got := brief.Tasks[i]
 		if got.Payload != nil || got.Metadata != nil {
 			t.Errorf("the summary of task %d has payload %q and metadata %v, want none", got.ID, got.Payload, got.Metadata)
 		}
+
 		want.Payload, want.Metadata = nil, nil
 		if n := len(want.Errors); n > 1 {
 			want.Errors = want.Errors[n-1:]
@@ -676,6 +711,7 @@ func TestListSummary(t *testing.T) {
 			t.Errorf("the summary of task %d:\n got %+v\nwant %+v", got.ID, got, want)
 		}
 	}
+
 	if last := brief.Tasks[2]; last.ID != failed || len(last.Errors) != 1 || last.Errors[0].Message != "last" {
 		t.Errorf("the summary of the failed task: %+v, want only its newest error", last)
 	}
@@ -687,6 +723,7 @@ func TestListSomeQueues(t *testing.T) {
 	for _, q := range []string{"a", "b", "c"} {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: q})
 	}
+
 	for _, c := range []struct {
 		queues []string
 		want   int
@@ -699,6 +736,7 @@ func TestListSomeQueues(t *testing.T) {
 			t.Fatalf("queues %v: got %d tasks, want %d", c.queues, len(res.Tasks), c.want)
 		}
 	}
+
 	if _, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{Queues: []string{""}}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("empty queue name: got %v", err)
 	}
@@ -711,6 +749,7 @@ func TestListSomeGroups(t *testing.T) {
 	b := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"})
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "c"})
 	a2 := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
+
 	for _, c := range []struct {
 		groups []string
 		want   []int64
@@ -729,6 +768,7 @@ func TestListSomeStatesAndKinds(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	e.rawGroups = true // the pending task is written by hand, without its group
+
 	// One task in each state, of a kind named after the state.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, group_key, lease_expires_at, finalized_at)
 	           SELECT 'default', s, s::{s}.task_state, now(), '{}', 1, CASE WHEN s = 'pending' THEN 'g' END,
@@ -737,12 +777,14 @@ func TestListSomeStatesAndKinds(t *testing.T) {
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
 	           VALUES (100, now(), 'default', now(), 'completed', now(), 'w', now(), 2, 1, 1, '{}', '{}', '[]')`)
+
 	list := func(filter taskmill.TaskFilter) []taskmill.State {
 		t.Helper()
 		page, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: filter})
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		var states []taskmill.State
 		for _, task := range page.Tasks {
 			if string(task.State) != task.Kind {
@@ -753,6 +795,7 @@ func TestListSomeStatesAndKinds(t *testing.T) {
 		slices.Sort(states)
 		return states
 	}
+
 	all := []taskmill.State{
 		taskmill.StateAvailable, taskmill.StateCanceled, taskmill.StateCompleted, taskmill.StateDead,
 		taskmill.StatePending, taskmill.StateRetryable, taskmill.StateRunning, taskmill.StateScheduled,
@@ -760,6 +803,7 @@ func TestListSomeStatesAndKinds(t *testing.T) {
 	if got := list(taskmill.TaskFilter{}); !slices.Equal(got, all) {
 		t.Fatalf("no filter: got %v, want %v", got, all)
 	}
+
 	for _, s := range all {
 		if got := list(taskmill.TaskFilter{States: []taskmill.State{s}}); !slices.Equal(got, []taskmill.State{s}) {
 			t.Errorf("state %s: got %v", s, got)
@@ -768,6 +812,7 @@ func TestListSomeStatesAndKinds(t *testing.T) {
 			t.Errorf("kind %s: got %v", s, got)
 		}
 	}
+
 	two := []taskmill.State{taskmill.StateCompleted, taskmill.StateDead}
 	if got := list(taskmill.TaskFilter{States: two}); !slices.Equal(got, two) {
 		t.Errorf("states %v: got %v", two, got)
@@ -786,6 +831,7 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	e.rawGroups = true // pending tasks are written by hand, without their groups
+
 	// The oldest tasks are those of the queue "rare": pending ones of two
 	// groups, and completed ones. The others are newer, and many: here the
 	// planner's choice depends on the size, and with 5,000 tasks in each
@@ -813,6 +859,7 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		// A page reads one row past its limit, to know whether more follow.
 		if read > limit+1 {
 			t.Errorf("%+v: read %d rows of tasks, want at most %d", filter, read, limit+1)
@@ -842,6 +889,7 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 func TestPagesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// A backlog in two queues. Every fifth task of the queue "busy" is dead,
 	// 1,920 that died one after the other, and the 200 that died last are
 	// of a kind of their own: one task in 50.
@@ -852,6 +900,7 @@ func TestPagesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 	                  CASE WHEN i > 400 AND i % 5 = 0 THEN now() - (10000 - i) * interval '1 second' END
 	           FROM generate_series(1, 10000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
+
 	// What the statistics do not know: the queue "late" got its dead tasks
 	// since, and the queue "bulk" its canceled ones, 300 in each statement.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
@@ -870,6 +919,7 @@ func TestPagesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 		// each of the three queues, in each state, and for each queue found.
 		rounded = 5
 	)
+
 	dead, canceled := []taskmill.State{taskmill.StateDead}, []taskmill.State{taskmill.StateCanceled}
 	both := []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}
 	for _, c := range []struct {
@@ -899,6 +949,7 @@ func TestPagesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 			}
 			params.Cursor = before.Next
 		}
+
 		for _, generic := range []bool{false, true} {
 			read, err := taskmill.ListRowsRead(t.Context(), e.client, &params, generic)
 			if err != nil {
@@ -933,6 +984,7 @@ func TestPagesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 func TestRangesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// Two queues with 3,000 dead tasks each, one a second. The queue "busy"
 	// also has 600 canceled tasks, one every 5 seconds.
 	start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
@@ -952,6 +1004,7 @@ func TestRangesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 		// each of the two queues, in each state, and for each queue found.
 		rounded = 3
 	)
+
 	second := func(n int) time.Time { return start.Add(time.Duration(n) * time.Second) }
 	dead := []taskmill.State{taskmill.StateDead}
 	both := []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}
@@ -983,6 +1036,7 @@ func TestRangesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 			}
 			params.Limit, params.Cursor = limit, before.Next
 		}
+
 		read, err := taskmill.ListRowsRead(t.Context(), e.client, &params, false)
 		if err != nil {
 			t.Fatal(err)
@@ -1014,10 +1068,12 @@ func TestRangesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 func TestRangesOfCreationTimesReadOnlyTheirRows(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, lease_expires_at, payload, max_attempts, run_at)
 	           SELECT 'busy', 'email.send', 'running', now(), '{}', 1, now() FROM generate_series(1, 2000)`)
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "DELETE FROM {s}.tasks")
+
 	// Two queues with 3,000 available tasks and 3,000 completed ones each,
 	// one a second. The queue "busy" also has 600 scheduled tasks, one every
 	// 5 seconds, and runs 30 tasks.
@@ -1045,6 +1101,7 @@ func TestRangesOfCreationTimesReadOnlyTheirRows(t *testing.T) {
 		// queue found.
 		rounded = 6
 	)
+
 	second := func(n int) time.Time { return start.Add(time.Duration(n) * time.Second) }
 	completed := []taskmill.State{taskmill.StateCompleted}
 	busy := []string{"busy"}
@@ -1088,6 +1145,7 @@ func TestRangesOfCreationTimesReadOnlyTheirRows(t *testing.T) {
 		}
 		cases = append(cases, bounded{c.what, params, c.most})
 	}
+
 	for _, statistics := range []string{"of a table where every task runs", "of the table as it is"} {
 		for _, c := range cases {
 			checkRowsRead(t, e.client, c.what+", with the statistics "+statistics, &c.params, c.most)
@@ -1126,8 +1184,10 @@ func TestReadsTakeOneRoundTrip(t *testing.T) {
 	t.Parallel()
 	trips := &roundTrips{}
 	e := newTracedEnv(t, trips)
+
 	ctx := t.Context()
 	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+
 	for name, read := range map[string]func() error{
 		"Get":       func() error { _, err := e.client.Get(ctx, id); return err },
 		"List":      func() error { _, err := e.client.List(ctx, nil); return err },
@@ -1164,11 +1224,13 @@ func TestReadSettingsHoldForTheReadOnly(t *testing.T) {
 	}
 	cfg.ConnConfig.Tracer = trips
 	cfg.MaxConns = 1 // every statement of the test uses the one connection
+
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+
 	e := newEnvWith(t, pool, nil)
 	ctx := t.Context()
 	const brief = "SELECT set_config('statement_timeout', '50ms', true)"
@@ -1181,18 +1243,22 @@ func TestReadSettingsHoldForTheReadOnly(t *testing.T) {
 	if n := trips.n.Load() - before; n != 1 {
 		t.Errorf("the read made %d round trips, want 1", n)
 	}
+
 	unlimited := func(after string) {
 		t.Helper()
 		if n := e.count(t, "SELECT count(*) FROM pg_sleep(0.1)"); n != 1 {
 			t.Fatalf("a statement %s did not run", after)
 		}
 	}
+
 	unlimited("after the read")
 	opened := pool.Stat().NewConnsCount()
+
 	_, err = taskmill.ReadAlone(ctx, e.client, brief, "SELECT pg_sleep(30)::text")
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "57014" { // query_canceled
 		t.Fatalf("a statement past its time limit: got %v, want it canceled", err)
 	}
+
 	unlimited("after the read that was canceled")
 	if n := pool.Stat().NewConnsCount() - opened; n != 0 {
 		t.Errorf("the pool opened %d connections after the canceled read, want it to use the same one again", n)
@@ -1231,6 +1297,7 @@ func TestGroups(t *testing.T) {
 	for _, key := range []string{"Account-1", "account-2", "account-2", "order-9"} {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: key})
 	}
+
 	// A dead head halts its group, and the task behind it waits. A group
 	// halted by its only task is listed too.
 	runWorker(t, e, &taskmill.WorkerConfig{
@@ -1239,6 +1306,7 @@ func TestGroups(t *testing.T) {
 		}, nil),
 		Queues: map[string]taskmill.QueueOptions{"other": {}},
 	})
+
 	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "other", GroupKey: "order-9"})
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "other", GroupKey: "order-9"})
 	solo := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "other", GroupKey: "solo"})
@@ -1277,21 +1345,25 @@ func TestGroups(t *testing.T) {
 			}
 			params.Cursor = page.Next
 		}
+
 		if !slices.Equal(got, c.want) {
 			t.Fatalf("%+v: got %+v, want %+v", c.params, got, c.want)
 		}
 	}
+
 	// A page without groups is an empty list, not nil: a caller that encodes
 	// it as JSON has always got [] for it.
 	none, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Search: "no-such-group"})
 	if err != nil || none.Groups == nil || len(none.Groups) != 0 || none.Next != "" {
 		t.Fatalf("no groups: got %#v, %v; want an empty list that is not nil", none, err)
 	}
+
 	for _, params := range []taskmill.GroupParams{{Limit: -1}, {Cursor: "%%%"}, {Cursor: "b25seS1vbmU"}} { // "only-one"
 		if _, err := e.client.Groups(t.Context(), &params); !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Fatalf("%+v: got %v, want ErrInvalidArgument", params, err)
 		}
 	}
+
 	// Each named queue reads up to a page, so a call names at most 100.
 	queues := make([]string, 101)
 	for i := range queues {
@@ -1309,11 +1381,13 @@ func TestGroupPagesReadOnlyTheirRows(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	e.rawGroups = true // groups written by hand, without tasks
+
 	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
 	           SELECT q, format('key-%s', lpad(i::text, 4, '0')), 1,
 	                  CASE WHEN i % 10 = 0 THEN i END, CASE WHEN i % 10 = 0 THEN now() END
 	           FROM unnest('{a,b,c,d,e,f,g,h}'::text[]) AS q, generate_series(1, 1000) AS i`)
 	e.exec(t, "ANALYZE {s}.groups")
+
 	page, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Queues: []string{"b"}, Limit: 990})
 	if err != nil {
 		t.Fatal(err)

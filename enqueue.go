@@ -199,6 +199,7 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 	if err != nil {
 		return EnqueueResult{}, err
 	}
+
 	res, err := c.enqueue(ctx, q, []EnqueueParams{{Args: args, Options: opts}})
 	if err != nil {
 		return EnqueueResult{}, err
@@ -251,6 +252,7 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 	if len(params) > maxEnqueueTasks {
 		return nil, invalidArgument("%d tasks in one call, more than the limit of %d", len(params), maxEnqueueTasks)
 	}
+
 	tasks := make([]*resolvedTask, len(params))
 	payloads := 0
 	for i, p := range params {
@@ -258,6 +260,7 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 		if err != nil {
 			return nil, inBatch(err, i, len(params))
 		}
+
 		// Stop at the first task past the limit, before encoding the rest;
 		// store checks the limit again with the metadata.
 		if payloads += len(t.payload); payloads > maxEnqueueBytes {
@@ -265,6 +268,7 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 		}
 		tasks[i] = t
 	}
+
 	return c.storeThrough(ctx, q, tasks)
 }
 
@@ -281,15 +285,18 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 		// caller.
 		views[i] = &EnqueueTask{Queue: t.queue, Kind: t.kind, Metadata: t.metadataCopy()}
 	}
+
 	var results []EnqueueResult
 	err := through(ctx, c.enqueueMiddleware, views, func(ctx context.Context) error {
 		for i, v := range views {
 			tasks[i].meta = v.Metadata
 		}
+
 		res, err := c.store(ctx, q, tasks)
 		if err != nil {
 			return err
 		}
+
 		for i, v := range views {
 			v.Result = res[i]
 		}
@@ -333,6 +340,7 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 		if size += len(t.payload) + len(meta); size > maxEnqueueBytes {
 			return nil, tooLarge(len(tasks))
 		}
+
 		if t.dedupeKey != nil {
 			if row, ok := rowOf[string(t.dedupeKey)]; ok {
 				pos[i], repeat[i] = row, true
@@ -387,6 +395,7 @@ func (c *Client) insertWithRetry(ctx context.Context, q querier, b *enqueueBatch
 	// Only on the client's own pool is the enqueue statement known to be a
 	// transaction of its own: any other executor may be in the caller's.
 	ownTx := q == querier(pgxExecutor{q: c.pool})
+
 	var results []EnqueueResult
 	var missing [][]byte // duplicates whose existing task the statement could not see
 	var err error
@@ -405,6 +414,7 @@ func (c *Client) insertWithRetry(ctx context.Context, q querier, b *enqueueBatch
 	if err != nil {
 		return nil, enqueueError(err)
 	}
+
 	if len(missing) > 0 {
 		if err := c.resolveDuplicates(ctx, q, b, results, missing); err != nil {
 			if !ownTx {
@@ -429,6 +439,7 @@ func (c *Client) insertTasks(ctx context.Context, q querier, b *enqueueBatch, no
 	if b.plain {
 		stmt = c.sql.enqueuePlain
 	}
+
 	r, err := q.query(ctx, stmt,
 		b.queues,           // $1
 		b.kinds,            // $2
@@ -481,12 +492,14 @@ func enqueueError(err error) error {
 // if the read fails.
 func (c *Client) resolveDuplicates(ctx context.Context, q querier, b *enqueueBatch, results []EnqueueResult, keys [][]byte) error {
 	fail := func(err error) error { return fmt.Errorf("taskmill: enqueue: find duplicates: %w", err) }
+
 	r, err := q.query(ctx, c.sql.dedupeLookup, keys)
 	if err != nil {
 		return fail(err)
 	}
 	defer r.Close()
 	existing := make(map[string]int64, len(keys))
+
 	for r.Next() {
 		var key []byte
 		var id int64
@@ -498,6 +511,7 @@ func (c *Client) resolveDuplicates(ctx context.Context, q querier, b *enqueueBat
 	if err := r.Err(); err != nil {
 		return fail(err)
 	}
+
 	for i := range results {
 		if results[i].Duplicate && results[i].ID == 0 {
 			results[i].ID = existing[string(b.dedupeKeys[i])]
@@ -565,6 +579,7 @@ func resolve(p EnqueueParams) (*resolvedTask, error) {
 		runAt:        o.RunAt,
 		dedupeWindow: o.DedupeWindow,
 	}
+
 	if t.queue == "" {
 		t.queue = DefaultQueue
 	}
@@ -632,6 +647,7 @@ func (b *enqueueBatch) add(t *resolvedTask, metadata []byte, now time.Time) {
 	b.payloads = append(b.payloads, string(t.payload))
 	b.metadata = append(b.metadata, string(metadata))
 	b.plain = b.plain && t.dedupeKey == nil && t.group == ""
+
 	if !t.runAt.After(now) {
 		b.due[t.queue] = true
 	}

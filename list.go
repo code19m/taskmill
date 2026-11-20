@@ -144,11 +144,13 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	if err != nil {
 		return nil, err
 	}
+
 	var (
 		out  ListResult
 		at   pgtype.Timestamptz // the time of the task last read, in the order of a time
 		last pgtype.Timestamptz // that of the page's last task, where the next page starts
 	)
+
 	// In the order of a time, each row ends with that time once more, as the
 	// column holds it: the cursor needs it, and scanTaskInfo reads an
 	// infinite time as the zero time.
@@ -156,6 +158,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	if page.order != byID {
 		orderedBy = []any{&at}
 	}
+
 	err = c.readAlone(ctx, page.settings, page.sql, page.args, func(r pgx.Rows) error {
 		info, err := scanTaskInfo(r, orderedBy...)
 		if err != nil {
@@ -169,6 +172,7 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: list tasks: %w", err)
 	}
+
 	if len(out.Tasks) > page.limit {
 		out.Tasks = out.Tasks[:page.limit]
 		if id := out.Tasks[page.limit-1].ID; page.order == byID {
@@ -211,6 +215,7 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 	case p.Limit < 0 || p.Limit > maxListLimit:
 		return nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
 	}
+
 	f, err := match(&p.Filter, allStates)
 	if err != nil {
 		return nil, err
@@ -226,6 +231,7 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 	if page.order, err = orderOf(f, created.set, finished.set); err != nil {
 		return nil, err
 	}
+
 	if page.order == byID {
 		before := int64(math.MaxInt64)
 		if p.Cursor != "" {
@@ -233,12 +239,14 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 				return nil, invalidArgument("invalid cursor")
 			}
 		}
+
 		page.args = append(listArgs(f, page.limit, p.Summary, before),
 			len(f.states) > 0, // $8
 			f.history,         // $9
 		)
 		return &page, nil
 	}
+
 	// The first page starts below the latest time there is.
 	at, before := pgtype.Timestamptz{InfinityModifier: pgtype.Infinity, Valid: true}, int64(math.MaxInt64)
 	if p.Cursor != "" {
@@ -246,6 +254,7 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 			return nil, err
 		}
 	}
+
 	page.settings = timeOrderSettings
 	if page.order == byFinish {
 		page.sql = c.sql.listFinished
@@ -256,6 +265,7 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 		)
 		return &page, nil
 	}
+
 	at, before = created.below(at, before)
 	page.settings, page.sql = createdSettings, c.sql.listCreated
 	page.args = append(listArgs(f, page.limit, p.Summary, before),
@@ -341,6 +351,7 @@ func rangeOf(sinceName string, since time.Time, beforeName string, before time.T
 	if !since.IsZero() && !before.IsZero() && !since.Before(before) {
 		return r, invalidArgument("%s must be before %s", sinceName, beforeName)
 	}
+
 	if r.since, err = rangeBound(sinceName, since); err != nil {
 		return r, err
 	}
@@ -428,6 +439,7 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult
 	if err != nil {
 		return nil, err
 	}
+
 	out := GroupsResult{Groups: []GroupInfo{}} // never nil, as callers have always got it
 	err = c.readAlone(ctx, pageSettings, sql, args, func(r pgx.Rows) error {
 		var g GroupInfo
@@ -440,6 +452,7 @@ func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: list groups: %w", err)
 	}
+
 	if len(out.Groups) > p.Limit {
 		out.Groups = out.Groups[:p.Limit]
 		last := out.Groups[p.Limit-1]
@@ -457,6 +470,7 @@ func (c *Client) groupsQuery(p *GroupParams) (sql string, args []any, err error)
 	case p.Limit < 0 || p.Limit > maxListLimit:
 		return "", nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
 	}
+
 	if len(p.Queues) > maxGroupQueues {
 		return "", nil, invalidArgument("at most %d queue names", maxGroupQueues)
 	}
@@ -469,12 +483,14 @@ func (c *Client) groupsQuery(p *GroupParams) (sql string, args []any, err error)
 			return "", nil, err
 		}
 	}
+
 	var afterQueue, afterKey string
 	if p.Cursor != "" {
 		if afterQueue, afterKey, err = decodeGroupCursor(p.Cursor); err != nil {
 			return "", nil, err
 		}
 	}
+
 	args = []any{
 		p.Search,    // $1
 		p.Limit + 1, // $2
@@ -495,6 +511,7 @@ func decodeGroupCursor(cursor string) (queue, key string, err error) {
 	if err != nil {
 		return "", "", invalidArgument("invalid cursor")
 	}
+
 	queue, key, ok := strings.Cut(string(raw), "\x00")
 	if !ok || checkName("queue", queue, maxNameLength) != nil || checkName("group key", key, maxGroupKeyLength) != nil {
 		return "", "", invalidArgument("invalid cursor")
@@ -539,6 +556,7 @@ func encodeTimeCursor(order listOrder, at pgtype.Timestamptz, id int64) string {
 	case pgtype.Finite:
 		micros = (at.Time.Unix()-pgEpoch)*1e6 + int64(at.Time.Nanosecond())/1e3
 	}
+
 	return base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, "%c%d,%d", order, micros, id))
 }
 
@@ -551,6 +569,7 @@ func decodeTimeCursor(order listOrder, cursor string) (at pgtype.Timestamptz, id
 	when, which, _ := strings.Cut(position, ",")
 	micros, errTime := strconv.ParseInt(when, 10, 64)
 	id, errID := strconv.ParseInt(which, 10, 64)
+
 	at.Valid = true
 	switch {
 	case err != nil || !ordered || errTime != nil || errID != nil:

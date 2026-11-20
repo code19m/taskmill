@@ -44,6 +44,7 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 		if err != nil || len(days) == 0 {
 			return err
 		}
+
 		if _, err := tx.Exec(ctx, lockTimeoutSQL, partitionLockTimeout); err != nil {
 			return err
 		}
@@ -52,16 +53,19 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 		if _, err := tx.Exec(ctx, lock); err != nil {
 			return err
 		}
+
 		// Another process may have created them while this one waited.
 		if days, err = missingHistoryDays(ctx, tx, schema); err != nil {
 			return err
 		}
+
 		for _, from := range days {
 			name := historyPartition(from)
 			create := fmt.Sprintf("CREATE TABLE %[1]s.%[2]s (LIKE %[1]s.task_history INCLUDING DEFAULTS INCLUDING CONSTRAINTS)",
 				schema, name)
 			attach := fmt.Sprintf("ALTER TABLE %[1]s.task_history ATTACH PARTITION %[1]s.%[2]s FOR VALUES FROM ('%[3]s') TO ('%[4]s')",
 				schema, name, from.Format(time.RFC3339), from.AddDate(0, 0, 1).Format(time.RFC3339))
+
 			if _, err := tx.Exec(ctx, create); err != nil {
 				return fmt.Errorf("create %s: %w", name, err)
 			}
@@ -181,6 +185,7 @@ func (m *maintainer) dropHistory(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	var errs []error
 	busy := false // a detach timed out
 	for _, p := range expired {
@@ -194,6 +199,7 @@ func (m *maintainer) dropHistory(ctx context.Context) error {
 				continue
 			}
 		}
+
 		if err := m.dropDetached(ctx, p.name); err != nil {
 			errs = append(errs, err)
 			continue
@@ -217,10 +223,12 @@ func (m *maintainer) dropHistory(ctx context.Context) error {
 func (m *maintainer) detachPartition(ctx context.Context, p expiredPartition) error {
 	ctx, cancel := context.WithTimeout(ctx, detachTimeout)
 	defer cancel()
+
 	mark := fmt.Sprintf("COMMENT ON TABLE %s.%s IS '%s'", m.c.schema, p.name, historyDropMark)
 	if _, err := m.c.pool.Exec(ctx, mark); err != nil {
 		return fmt.Errorf("mark %s: %w", p.name, err)
 	}
+
 	mode := "CONCURRENTLY"
 	if p.pending {
 		mode = "FINALIZE"

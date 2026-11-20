@@ -61,6 +61,7 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	if len(left) == 0 {
 		return nil
 	}
+
 	// Each group goes to the recount once, with all its tasks that left: an
 	// UPDATE changes a row once.
 	type leave struct {
@@ -68,6 +69,7 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 		id    int64 // one of them: the task, if only one left
 		head  bool  // its head was among them: the next task becomes the head
 	}
+
 	var asked groupSet
 	ids := make([]int64, len(left))
 	leaves := make(map[groupID]leave, len(left)) // by group, until its row is read back
@@ -80,10 +82,12 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 		}
 		leaves[key] = leave{tasks: g.tasks + 1, id: l.id, head: g.head || l.head}
 	}
+
 	counts := make([]int, len(asked.queues))
 	for i := range counts {
 		counts[i] = -leaves[groupID{asked.queues[i], asked.groups[i]}].tasks
 	}
+
 	r, err := q.query(ctx, c.sql.recountGroups,
 		asked.queues, // $1
 		asked.groups, // $2
@@ -93,6 +97,7 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	if err != nil {
 		return err
 	}
+
 	var empty, next groupSet
 	for r.Next() {
 		var queue, group string
@@ -102,6 +107,7 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 			r.Close()
 			return err
 		}
+
 		key := groupID{queue, group}
 		head := leaves[key].head
 		delete(leaves, key)
@@ -116,14 +122,17 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	if err := r.Err(); err != nil {
 		return err
 	}
+
 	for key, g := range leaves { // not read back: the group has no row
 		groupMissing(ctx, logger, key.queue, key.group, g.tasks, g.id)
 	}
+
 	if len(empty.queues) > 0 {
 		if _, err := q.exec(ctx, c.sql.deleteEmptyGroups, empty.queues, empty.groups); err != nil {
 			return err
 		}
 	}
+
 	if len(next.queues) == 0 {
 		return nil
 	}
@@ -174,15 +183,18 @@ func (c *Client) releaseHalts(ctx context.Context, q querier, ts []bulkTask) (ma
 			dead = append(dead, t.id)
 		}
 	}
+
 	halting := make(map[int64]bool)
 	if len(dead) == 0 {
 		return halting, nil
 	}
+
 	r, err := q.query(ctx, c.sql.releaseHalts, dead)
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
+
 	for r.Next() {
 		var id int64
 		if err := r.Scan(&id); err != nil {
@@ -213,6 +225,7 @@ func (c *Client) rejoinGroup(ctx context.Context, q querier, queue, group string
 	if err != nil || resumed == 1 {
 		return false, err
 	}
+
 	var tasks int
 	if _, err := queryRow(ctx, q, c.sql.enterGroup, []any{queue, group}, &tasks); err != nil {
 		return false, err
@@ -235,12 +248,14 @@ func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (re
 	if err != nil {
 		return nil, nil, err
 	}
+
 	pending = []int64{} // the tasks that become pending, or none
 	for _, t := range ts {
 		if t.group == "" || resumed[t.id] {
 			retried = append(retried, t)
 		}
 	}
+
 	counted, missing, byGroup := groupTasks(ts, resumed)
 	if len(counted.queues) > 0 {
 		left := []int64{} // the tasks join their groups: none leaves
@@ -253,11 +268,13 @@ func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (re
 		if err != nil {
 			return nil, nil, err
 		}
+
 		for _, t := range counted.tasks(byGroup) {
 			retried = append(retried, t)
 			pending = append(pending, t.id)
 		}
 	}
+
 	if len(missing.queues) == 0 {
 		return retried, pending, nil
 	}
@@ -265,6 +282,7 @@ func (c *Client) rejoinGroups(ctx context.Context, q querier, ts []bulkTask) (re
 	if err != nil {
 		return nil, nil, err
 	}
+
 	for _, key := range created {
 		for i, t := range byGroup[key] {
 			retried = append(retried, t)
@@ -309,6 +327,7 @@ func (c *Client) createGroups(ctx context.Context, q querier, s groupSet, byGrou
 			return err
 		}
 		defer r.Close()
+
 		for r.Next() {
 			var key groupID
 			if err := r.Scan(&key.queue, &key.group); err != nil {

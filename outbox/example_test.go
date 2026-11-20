@@ -43,6 +43,7 @@ func Example() {
 		}
 		return errs
 	}), nil) // nil: the default RelayOptions
+
 	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers}) // serves outbox.Queue
 	if err != nil {
 		log.Fatal(err)

@@ -47,6 +47,7 @@ func newIdleWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) (*taskmill.
 	if cfg == nil {
 		cfg = &taskmill.WorkerConfig{}
 	}
+
 	started := make(chan struct{}, 10)
 	cfg.Handlers = handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 		started <- struct{}{}
@@ -91,6 +92,7 @@ const heartbeatsMissing = "maintainer heartbeats do not arrive; idle queues poll
 func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 	t.Parallel()
 	e, fetches := newCountedEnv(t)
+
 	// A listener on another database, as one through a transaction-pooling
 	// proxy, connects and listens, but receives no notification.
 	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
@@ -98,9 +100,11 @@ func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 		t.Fatal(err)
 	}
 	listen.Database = "postgres"
+
 	logs := &logRecorder{}
 	e = e.withLogger(t, slog.New(logs))
 	w, started := startIdleWorker(t, e, &taskmill.WorkerConfig{ListenConfig: listen})
+
 	waitFor(t, "the worker to find that heartbeats do not arrive", func() bool {
 		return logs.count(heartbeatsMissing) == 1
 	})
@@ -114,6 +118,7 @@ func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 	// the 20 ms poll interval.
 	before := fetches.n.Load()
 	waitFor(t, "the worker to keep polling", func() bool { return fetches.n.Load()-before >= 20 })
+
 	// A task whose notification does not arrive starts by the next poll.
 	e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "the task to start")
@@ -125,6 +130,7 @@ func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 func TestIdleWorkerPollsWhileTheMaintainerFailsOver(t *testing.T) {
 	t.Parallel()
 	e, _ := newCountedEnv(t)
+
 	// A maintainer that crashed holds the role until its lease runs out, so
 	// no heartbeat comes, and nothing wakes a queue whose notification was
 	// lost. The lease is a minute here, and the worker's own too: it takes a
@@ -150,11 +156,13 @@ func TestIdleWorkerPollsWhileItsListenerIsCut(t *testing.T) {
 	t.Parallel()
 	e, _ := newCountedEnv(t)
 	direct := newProxy(t, testdb.DirectURL(t))
+
 	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
+
 	w, started := startIdleWorker(t, e, &taskmill.WorkerConfig{ListenConfig: listen})
 	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
 
@@ -178,14 +186,17 @@ func TestWorkerReadsItsQueuesSettingsAgainOnceItListens(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	direct := newProxy(t, testdb.DirectURL(t))
+
 	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
+
 	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
 		t.Fatal(err)
 	}
+
 	ran := make(chan struct{}, 1)
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
@@ -196,6 +207,7 @@ func TestWorkerReadsItsQueuesSettingsAgainOnceItListens(t *testing.T) {
 		NoMaintainer: true,
 		ListenConfig: listen,
 	})
+
 	// No later read of the settings stands in for the one that the test
 	// waits for.
 	taskmill.SetTiming(w, taskmill.Timing{Settings: time.Hour})
@@ -219,11 +231,13 @@ func TestIdleWorkerReplacesAListenerThatFallsSilent(t *testing.T) {
 	t.Parallel()
 	e, _ := newCountedEnv(t)
 	direct := newProxy(t, testdb.DirectURL(t))
+
 	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
+
 	logs := &logRecorder{}
 	e = e.withLogger(t, slog.New(logs))
 	w, started := startIdleWorker(t, e, &taskmill.WorkerConfig{ListenConfig: listen})
@@ -255,6 +269,7 @@ func TestIdleWorkerKeepsAListenerThatAnswers(t *testing.T) {
 	stopMaintainer := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: noopHandlers(), Queues: map[string]taskmill.QueueOptions{"m": {}},
 	})
+
 	logs := &logRecorder{}
 	e = e.withLogger(t, slog.New(logs))
 	w, started := startIdleWorker(t, e, &taskmill.WorkerConfig{NoMaintainer: true})
@@ -266,6 +281,7 @@ func TestIdleWorkerKeepsAListenerThatAnswers(t *testing.T) {
 	missing := logs.count(heartbeatsMissing)
 	stopMaintainer()
 	pid := e.listenerPID(t)
+
 	// Without heartbeats, the worker asks the listener each 600 ms whether
 	// it still answers, with a statement of its own. A listener that it
 	// replaced after an answer would not get a second such statement.
@@ -274,6 +290,7 @@ func TestIdleWorkerKeepsAListenerThatAnswers(t *testing.T) {
 		if got := e.listenerPID(t); got != pid {
 			t.Fatalf("the worker replaced a listener that answers: pid %d, then %d", pid, got)
 		}
+
 		var at time.Time
 		if err := e.pool.QueryRow(t.Context(), "SELECT query_start FROM pg_stat_activity WHERE pid = $1", pid).Scan(&at); err != nil {
 			t.Fatal(err)
@@ -281,11 +298,13 @@ func TestIdleWorkerKeepsAListenerThatAnswers(t *testing.T) {
 		statements[at] = true
 		return len(statements)
 	}
+
 	seen() // its last statement from while heartbeats arrived
 	waitFor(t, "the worker to find that heartbeats do not arrive", func() bool {
 		return logs.count(heartbeatsMissing) == missing+1 && !taskmill.Notifying(w)
 	})
 	waitFor(t, "the listener to be asked twice", func() bool { return seen() > 2 })
+
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "a"})
 	recv(t, started, "the task to start")
 }
@@ -297,6 +316,7 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 	t.Parallel()
 	e, fetches := newCountedEnv(t)
 	logs := &logRecorder{}
+
 	eligible := func() (stop func()) {
 		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: map[string]taskmill.QueueOptions{"m": {}}})
 		taskmill.SetTiming(w, taskmill.Timing{Election: time.Hour})
@@ -305,6 +325,7 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 	stopLeader := eligible()
 	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
 	eligible()
+
 	// The other workers wait three heartbeat intervals, three seconds here,
 	// for the next heartbeat: far longer than a handover takes, even on a
 	// busy machine, and far shorter than the hour that the eligible worker
@@ -317,6 +338,7 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 		startWorker(t, w)
 		idle = append(idle, w)
 	}
+
 	notifying := func() bool {
 		for _, w := range idle {
 			if !taskmill.Notifying(w) {
@@ -326,6 +348,7 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 		return true
 	}
 	waitFor(t, "heartbeats to arrive", notifying)
+
 	// Every worker listens before the handover. On a busy machine, the
 	// eligible worker's listener can still be starting when the idle workers
 	// hear heartbeats, and would then look like a replacement.
@@ -342,6 +365,7 @@ func TestMaintainerHandsOverWithoutAGap(t *testing.T) {
 	stopLeader()
 	sent := fetches.heartbeats.Load()
 	waitFor(t, "the next maintainer to send two heartbeats", func() bool { return fetches.heartbeats.Load() >= sent+2 })
+
 	if !notifying() || logs.count(heartbeatsMissing) > 0 {
 		t.Fatal("workers stopped counting on notifications while the maintainer changed")
 	}
@@ -362,6 +386,7 @@ func TestWorkerDoesNotListenThroughTransactionPooling(t *testing.T) {
 	if os.Getenv(testdb.EnvListenURL) == "" {
 		t.Skip("the test database is not behind a transaction-pooling proxy")
 	}
+
 	e := newEnv(t)
 	logs := &logRecorder{}
 	e = e.withLogger(t, slog.New(logs))
@@ -369,9 +394,11 @@ func TestWorkerDoesNotListenThroughTransactionPooling(t *testing.T) {
 	waitFor(t, "the worker to give up listening", func() bool {
 		return logs.count("notifications disabled; polling only") == 1
 	})
+
 	if n := e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE query = 'LISTEN ' || $1", e.schema); n != 0 {
 		t.Fatalf("%d server connections listen", n)
 	}
+
 	e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "the task to start")
 }
@@ -419,6 +446,7 @@ func TestIdleWorkerFindsATaskCommittedAfterItsNotification(t *testing.T) {
 	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err != nil {
 		t.Fatal(err)
 	}
+
 	recv(t, started, "the first task to start")
 	time.Sleep(200 * time.Millisecond)
 	if err := tx.Commit(t.Context()); err != nil {
@@ -444,14 +472,17 @@ func TestEveryWayATaskBecomesAvailableNotifies(t *testing.T) {
 	for _, q := range []string{"enqueue", "retry", "bulk", "group", "snooze"} {
 		queues[q] = taskmill.QueueOptions{}
 	}
+
 	idle := func(hs *taskmill.Handlers, queues map[string]taskmill.QueueOptions) *taskmill.WorkerConfig {
 		return &taskmill.WorkerConfig{Handlers: hs, Queues: queues, NoMaintainer: true, PollInterval: time.Hour}
 	}
+
 	runWorker(t, e, idle(handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 		mu.Lock()
 		runs[task.ID]++
 		first := runs[task.ID] == 1
 		mu.Unlock()
+
 		ran <- task.ID
 		switch {
 		case !first:
@@ -476,6 +507,7 @@ func TestEveryWayATaskBecomesAvailableNotifies(t *testing.T) {
 			t.Fatalf("%s: task %d ran, want %d", how, got, id)
 		}
 	}
+
 	once := &taskmill.EnqueueOptions{MaxAttempts: 1}
 
 	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "enqueue"})
@@ -522,8 +554,10 @@ func TestEveryWayATaskBecomesAvailableNotifies(t *testing.T) {
 		NoMaintainer: true,
 		DrainTimeout: 50 * time.Millisecond,
 	})
+
 	id = e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "release"})
 	recv(t, started, "the task to start")
+
 	runWorker(t, e, idle(handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 		ran <- task.ID
 		return nil
@@ -531,6 +565,7 @@ func TestEveryWayATaskBecomesAvailableNotifies(t *testing.T) {
 	waitFor(t, "three workers to listen", func() bool {
 		return e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE query = 'LISTEN ' || $1", e.schema) == 3
 	})
+
 	stop()
 	runsSoon("release", id)
 }
@@ -570,6 +605,7 @@ func TestWorkerCancelsRunningTask(t *testing.T) {
 	e := newEnv(t)
 	started := make(chan struct{})
 	cause := make(chan error, 1)
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
 			close(started)
@@ -583,9 +619,11 @@ func TestWorkerCancelsRunningTask(t *testing.T) {
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "a handler to start")
 	e.waitListening(t) // a missed notification would wait for the next heartbeat
+
 	if err := e.client.Cancel(t.Context(), id); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := recv(t, cause, "the handler's context to end"); !errors.Is(err, taskmill.ErrTaskCanceled) {
 		t.Fatalf("got cause %v, want ErrTaskCanceled", err)
 	}
@@ -600,6 +638,7 @@ func TestCancelNotificationAloneDoesNotCancel(t *testing.T) {
 	started := make(chan struct{}, 2)
 	ended := make(chan int64, 2)
 	proceed := make(chan struct{})
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
@@ -613,6 +652,7 @@ func TestCancelNotificationAloneDoesNotCancel(t *testing.T) {
 		}, &taskmill.HandlerOptions{Timeout: time.Minute}),
 		Queues: defaultQueue(2),
 	})
+
 	unasked := e.enqueue(t, sendEmail{}, nil)
 	asked := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "the first handler to start")
@@ -627,9 +667,11 @@ func TestCancelNotificationAloneDoesNotCancel(t *testing.T) {
 	if err := e.client.Cancel(t.Context(), asked); err != nil {
 		t.Fatal(err)
 	}
+
 	if id := recv(t, ended, "the canceled task's context to end"); id != asked {
 		t.Fatalf("a notification alone ended the context of task %d", id)
 	}
+
 	close(proceed)
 	e.waitState(t, unasked, taskmill.StateCompleted)
 	e.waitState(t, asked, taskmill.StateCanceled)
@@ -641,6 +683,7 @@ func TestCancelNotificationAloneDoesNotCancel(t *testing.T) {
 func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 	t.Parallel()
 	const flood = 20000
+
 	for _, tc := range []struct {
 		name    string
 		payload func(running int64) string // of every notification of the flood
@@ -661,6 +704,7 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 			started := make(chan struct{}, 2)
 			ended := make(chan int64, 2)
 			proceed := make(chan struct{})
+
 			runWorker(t, e, &taskmill.WorkerConfig{
 				Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
 					started <- struct{}{}
@@ -674,13 +718,16 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 				}, &taskmill.HandlerOptions{Timeout: time.Minute}),
 				Queues: defaultQueue(2),
 			})
+
 			// A second worker only takes part in the election, so one of the
 			// two leads, and the other one does not.
 			runWorker(t, e, &taskmill.WorkerConfig{})
+
 			running := e.enqueue(t, sendEmail{}, nil)
 			asked := e.enqueue(t, sendEmail{}, nil)
 			recv(t, started, "the first handler to start")
 			recv(t, started, "the second handler to start")
+
 			waitFor(t, "both workers to listen", func() bool { return len(e.listenerPIDs(t)) == 2 })
 			waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
 			sent.reset()
@@ -690,6 +737,7 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 			flooded := time.Now()
 			e.exec(t, "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(flood)+" LOOP PERFORM pg_notify('"+e.schema+"', '"+
 				tc.payload(running)+"'); COMMIT; END LOOP; END $$")
+
 			start := time.Now()
 			if err := e.client.Cancel(t.Context(), asked); err != nil {
 				t.Fatal(err)
@@ -700,11 +748,13 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 			if waited := time.Since(start); waited > 2*time.Second {
 				t.Errorf("the cancellation waited %s behind %d notifications", waited.Round(time.Millisecond), flood)
 			}
+
 			// The workers read at their own pace, however long a slow database
 			// takes to commit the flood.
 			if n, most := sent.count(tc.reads), int(time.Since(flooded)/tc.every)+flood/1000; n > most {
 				t.Errorf("the workers read the database %d times for %d notifications, want at most %d", n, flood, most)
 			}
+
 			close(proceed)
 			e.waitState(t, running, taskmill.StateCompleted)
 		})
@@ -722,6 +772,7 @@ func TestFIFOGroupRunsWhileNotificationsWait(t *testing.T) {
 	t.Parallel()
 	const tasks = 20
 	e, fetches := newCountedEnv(t)
+
 	params := make([]taskmill.EnqueueParams, tasks)
 	for i := range params {
 		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}, Options: &taskmill.EnqueueOptions{GroupKey: "account-7"}}
@@ -729,6 +780,7 @@ func TestFIFOGroupRunsWhileNotificationsWait(t *testing.T) {
 	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
 		t.Fatal(err)
 	}
+
 	notify := replaceSchema("SELECT pg_notify('{s}', 'a|"+taskmill.DefaultQueue+"')", e.schema)
 	started, release := make(chan int64, tasks), make(chan struct{})
 	w := newWorker(t, e, &taskmill.WorkerConfig{
@@ -755,11 +807,13 @@ func TestFIFOGroupRunsWhileNotificationsWait(t *testing.T) {
 
 	before := fetches.n.Load()
 	close(release)
+
 	for i := 1; i < tasks; i++ {
 		if got := recv(t, started, "the group's next task to start"); got != int64(i) {
 			t.Fatalf("task %d of the group ran in place %d", got, i)
 		}
 	}
+
 	// One fetch when a task frees its slot, which comes too early to find
 	// the next task, and one when its completion is recorded.
 	if n := fetches.n.Load() - before; n > 2*tasks {
@@ -803,6 +857,7 @@ func TestListenerReconnects(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	started := make(chan struct{}, 1)
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
@@ -812,6 +867,7 @@ func TestListenerReconnects(t *testing.T) {
 		PollInterval: time.Minute, // only a notification can wake the worker in time
 	})
 	e.waitListening(t)
+
 	old := e.listenerPID(t)
 	e.exec(t, "SELECT pg_terminate_backend($1)", old)
 	waitFor(t, "the listener to reconnect", func() bool {

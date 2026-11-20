@@ -149,6 +149,7 @@ func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Messag
 	if len(msgs) == 0 {
 		return nil
 	}
+
 	params := make([]taskmill.EnqueueParams, len(msgs))
 	for i, m := range msgs {
 		if m.Topic == "" {
@@ -159,6 +160,7 @@ func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Messag
 			Options: &taskmill.EnqueueOptions{GroupKey: groupKey(m.Topic, m.Key)},
 		}
 	}
+
 	_, err := o.client.EnqueueManyTx(ctx, tx, params)
 	return err
 }
@@ -183,6 +185,7 @@ func (*Outbox) AddRelay(hs *taskmill.Handlers, pub Publisher, opts *RelayOptions
 	if opts != nil {
 		ho.BatchSize, ho.Timeout = opts.BatchSize, opts.Timeout
 	}
+
 	if pub == nil {
 		taskmill.AddBatchHandler[message](hs, nil, ho)
 		return
@@ -219,6 +222,7 @@ func (r relay) HandleBatch(ctx context.Context, tasks []*taskmill.Task[message])
 			Metadata: t.Metadata,
 		}
 	}
+
 	// Clipped, so that the errors added here stay out of the publisher's
 	// own slice.
 	errs := slices.Clip(r.pub.Publish(ctx, ds))

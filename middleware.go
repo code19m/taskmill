@@ -27,6 +27,7 @@ func through[T any, M ~func(context.Context, T, func(context.Context) error) err
 		}
 		return call(ctx)
 	}
+
 	for _, m := range slices.Backward(ms) {
 		inner := next
 		next = func(ctx context.Context) error {
@@ -41,6 +42,7 @@ func through[T any, M ~func(context.Context, T, func(context.Context) error) err
 			return err
 		}
 	}
+
 	if err := next(ctx); err != nil || called.Load() {
 		return err
 	}

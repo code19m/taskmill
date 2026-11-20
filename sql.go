@@ -141,6 +141,7 @@ func newStatements(schema string) *statements {
 		"{heartbeat}", notifyHeartbeat+"|",
 		"{resigned}", notifyResigned+"|",
 	).Replace
+
 	return &statements{
 		schemaVersion: q(schemaVersionSQL),
 

@@ -73,6 +73,7 @@ func Parse(expr string) (*Schedule, error) {
 		}
 		expr = m
 	}
+
 	fields := strings.Fields(expr)
 	if len(fields) != 5 {
 		return nil, fmt.Errorf("cron expression %q must have 5 fields, has %d", expr, len(fields))
@@ -96,6 +97,7 @@ func Parse(expr string) (*Schedule, error) {
 	if s.Dow, dowAny, err = dowField.parse(fields[4]); err != nil {
 		return nil, err
 	}
+
 	if s.Dow&(1<<7) != 0 { // 7 is Sunday too
 		s.Dow = s.Dow&^(1<<7) | 1
 	}
@@ -124,6 +126,7 @@ func (f field) parsePart(part string) (bits uint64, star bool, err error) {
 		if err != nil || step < 1 {
 			return 0, false, fmt.Errorf("invalid step %q in %s field", stepText, f.name)
 		}
+
 		// Every step beyond the field's range matches the same values: the
 		// first one only. Capping it keeps the loop below from overflowing.
 		step = min(step, f.max+1)
@@ -152,6 +155,7 @@ func (f field) parsePart(part string) (bits uint64, star bool, err error) {
 			hi = lo
 		}
 	}
+
 	for v := lo; v <= hi; v += step {
 		bits |= 1 << v
 	}
@@ -162,6 +166,7 @@ func (f field) value(text string) (int, error) {
 	if v, ok := f.names[strings.ToUpper(text)]; ok {
 		return v, nil
 	}
+
 	v, err := strconv.Atoi(text)
 	if err != nil || v < f.min || v > f.max {
 		return 0, fmt.Errorf("value %q is out of range for %s field (%d-%d)", text, f.name, f.min, f.max)
@@ -191,6 +196,7 @@ func (s *Schedule) Next(t time.Time) (time.Time, error) {
 	// wall is the wall clock in loc, held as a UTC time so that arithmetic
 	// on it never meets a daylight saving transition.
 	wall := civil(t).Add(time.Minute)
+
 	for {
 		match, err := s.nextCivil(wall)
 		if err != nil {
@@ -199,6 +205,7 @@ func (s *Schedule) Next(t time.Time) (time.Time, error) {
 			}
 			return moved, nil
 		}
+
 		// The search ends at moved. A time that is later on the wall clock
 		// runs later, whether the clock shows it or skips it too. Without
 		// this end, the search would continue for ever in a location that skips
@@ -206,6 +213,7 @@ func (s *Schedule) Next(t time.Time) (time.Time, error) {
 		if !moved.IsZero() && match.After(civil(moved)) {
 			return moved, nil
 		}
+
 		at, skipped := instant(match, loc)
 		switch {
 		case skipped && moved.IsZero():
@@ -231,12 +239,14 @@ func (s *Schedule) skippedBefore(t time.Time) time.Time {
 	if jump.IsZero() {
 		return time.Time{}
 	}
+
 	_, after := jump.Zone()
 	_, before := jump.Add(-time.Second).Zone()
 	gap := time.Duration(after-before) * time.Second
 	if !t.Before(jump.Add(gap)) {
 		return time.Time{}
 	}
+
 	// A skipped time runs the gap's length later than the wall clock says.
 	match, err := s.nextCivil(civil(t).Add(time.Minute - gap))
 	if err != nil || !match.Before(civil(jump)) {
@@ -259,6 +269,7 @@ func instant(c time.Time, loc *time.Location) (at time.Time, skipped bool) {
 	_, after := c.Add(48 * time.Hour).In(loc).Zone()
 	early := c.Add(-time.Duration(max(before, after)) * time.Second).In(loc)
 	late := c.Add(-time.Duration(min(before, after)) * time.Second).In(loc)
+
 	switch {
 	case civil(early).Equal(c):
 		return early, false // the only occurrence, or the first of two
@@ -279,28 +290,33 @@ func civil(t time.Time) time.Time {
 // skipping whole months, days, and hours that cannot.
 func (s *Schedule) nextCivil(c time.Time) (time.Time, error) {
 	limit := c.Year() + 5
+
 wrap:
 	if c.Year() > limit {
 		return time.Time{}, errNoTime
 	}
+
 	for s.Month&(1<<uint(c.Month())) == 0 {
 		c = time.Date(c.Year(), c.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 		if c.Month() == time.January {
 			goto wrap
 		}
 	}
+
 	for !s.dayMatches(c) {
 		c = time.Date(c.Year(), c.Month(), c.Day()+1, 0, 0, 0, 0, time.UTC)
 		if c.Day() == 1 {
 			goto wrap
 		}
 	}
+
 	for s.Hour&(1<<uint(c.Hour())) == 0 {
 		c = c.Truncate(time.Hour).Add(time.Hour)
 		if c.Hour() == 0 {
 			goto wrap
 		}
 	}
+
 	for s.Minute&(1<<uint(c.Minute())) == 0 {
 		c = c.Add(time.Minute)
 		if c.Minute() == 0 {

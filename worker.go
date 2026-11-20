@@ -270,6 +270,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 	if client == nil {
 		return nil, invalidArgument("client is nil")
 	}
+
 	if cfg == nil {
 		cfg = &WorkerConfig{}
 	}
@@ -298,6 +299,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		queueHints:  make(chan struct{}, 1),
 		completions: make(chan *liveAttempt, completionBatch),
 	}
+
 	if c.Handlers != nil {
 		for kind, reg := range c.Handlers.byKind {
 			r := *reg
@@ -309,6 +311,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 			w.handlers[kind] = &r
 		}
 	}
+
 	for name, o := range c.Queues {
 		w.queues[name] = &queueState{
 			name:  name,
@@ -317,11 +320,13 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 			freed: make(chan struct{}, 1),
 		}
 	}
+
 	if w.listen == nil {
 		w.listen = client.pool.Config().ConnConfig.Copy()
 	}
 	w.leaseFailures = newIncidentLog(w, "renew leases")
 	w.resultFailures = newIncidentLog(w, "record results")
+
 	var err error
 	if w.schedules, err = compileSchedules(c.Schedules); err != nil {
 		return nil, err
@@ -340,6 +345,7 @@ func resolveWorkerConfig(c *WorkerConfig) error {
 	if len(c.Queues) > 0 && len(kinds) == 0 {
 		return invalidArgument("a worker with queues needs handlers")
 	}
+
 	queues := make(map[string]QueueOptions)
 	if len(c.Queues) == 0 {
 		for _, reg := range kinds {
@@ -381,6 +387,7 @@ func (w *Worker) warnUnservedKinds(ctx context.Context) {
 			kinds = append(kinds, kind+" (queue "+reg.queue+")")
 		}
 	}
+
 	if len(kinds) == 0 {
 		return
 	}
@@ -452,6 +459,7 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 	if kinds == nil {
 		kinds = []string{} // the column holds an array
 	}
+
 	_, err := w.client.pool.Exec(ctx, w.client.sql.upsertWorker,
 		w.id,                               // $1
 		names,                              // $2
@@ -499,6 +507,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 		return fmt.Errorf("taskmill: register worker: %w", err)
 	}
+
 	// No queue fetches before the worker knows its settings, which the
 	// settings loop reads first: a paused queue stays paused, and a limit
 	// holds, also when that read fails or takes long. Health says so until
@@ -507,12 +516,14 @@ func (w *Worker) Run(ctx context.Context) error {
 	for _, q := range w.queues {
 		q.paused.Store(true)
 	}
+
 	now := time.Now()
 	w.reached.Store(&now)
 	w.checkInFailures = newIncidentLog(w, "record check-in")
 	w.settingsFailures = newIncidentLog(w, "load queue settings")
 	w.activityFailures = newIncidentLog(w, "record activity")
 	w.listenFailures = newIncidentLog(w, "listen for notifications")
+
 	w.prepareHistory(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
@@ -544,6 +555,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	<-ctx.Done()
 	w.drain(base, r, stopAttempts)
+
 	// Attempts that ended before drain gave up may still be recording their
 	// results, through the completer too.
 	w.recording.Wait()
@@ -573,6 +585,7 @@ func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.Ca
 		r.inflight.Wait()
 		close(done)
 	}()
+
 	if n := w.runningTasks(); n > 0 {
 		w.logger.LogAttrs(ctx, slog.LevelInfo, "worker stopping; waiting for running tasks",
 			slog.Int(logKeyTasks, n), slog.Duration(logKeyTimeout, w.cfg.DrainTimeout))
@@ -610,6 +623,7 @@ func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.Ca
 		t.mu.Unlock()
 	}
 	w.mu.Unlock()
+
 	for _, t := range abandoned {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler ignored shutdown; releasing its task",
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind))
@@ -681,6 +695,7 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	} else {
 		w.runOne(attemptCtx, t)
 	}
+
 	stopAfter()
 	stopAttempt(nil)
 	stopRenewing()
@@ -705,6 +720,7 @@ func (w *Worker) leaseTask(ctx context.Context, id int64) (*liveAttempt, error) 
 		return nil, fail(err)
 	}
 	defer r.Close()
+
 	if r.Next() {
 		t, err := w.scanLeased(r, time.Now())
 		// The task is leased only if the statement ends without an error,
@@ -727,6 +743,7 @@ func workerID(host string) string {
 	if host == "" {
 		host = "worker"
 	}
+
 	var b [3]byte
 	_, _ = rand.Read(b[:]) // never returns an error
 	return fmt.Sprintf("%s-%d-%s", host, os.Getpid(), hex.EncodeToString(b[:]))
@@ -773,6 +790,7 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 		return nil, fail(err)
 	}
 	defer r.Close()
+
 	var out []WorkerInfo
 	for r.Next() {
 		var w WorkerInfo

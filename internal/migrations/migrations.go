@@ -35,10 +35,12 @@ func All(schema string) ([]Migration, error) {
 		if !ok {
 			return nil, fmt.Errorf("invalid migration file name %q", e.Name())
 		}
+
 		body, err := fs.ReadFile(files, e.Name())
 		if err != nil {
 			return nil, fmt.Errorf("read migration %s: %w", e.Name(), err)
 		}
+
 		all = append(all, Migration{
 			Version: version,
 			Name:    name,
@@ -70,10 +72,12 @@ func parseName(file string) (version int, name string, ok bool) {
 	if !found {
 		return 0, "", false
 	}
+
 	num, name, found := strings.Cut(base, "_")
 	if !found || len(num) != 4 || name == "" {
 		return 0, "", false
 	}
+
 	version, err := strconv.Atoi(num)
 	if err != nil || version < 1 {
 		return 0, "", false

@@ -19,11 +19,13 @@ import (
 func TestStatementThatFailsAfterItsFirstRowIsReported(t *testing.T) {
 	t.Parallel()
 	pool, db := testdb.Pool(t), openSQL(t)
+
 	tx, err := pool.Begin(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) }) // t.Context is canceled before cleanups run
+
 	sqlTx, err := db.BeginTx(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)

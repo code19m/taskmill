@@ -40,6 +40,7 @@ const retries = 5
 // clean-up, and DropSchema returns it.
 func DropSchema(ctx context.Context, pool *pgxpool.Pool, schema string) error {
 	closed := waitClosed(ctx, pool)
+
 	for try := 0; ; try++ {
 		_, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+pgx.Identifier{schema}.Sanitize()+" CASCADE")
 		pgErr, ok := errors.AsType[*pgconn.PgError](err)
@@ -56,6 +57,7 @@ func DropSchema(ctx context.Context, pool *pgxpool.Pool, schema string) error {
 // the pool does, after closeLimit, and with ctx.
 func waitClosed(ctx context.Context, pool *pgxpool.Pool) bool {
 	acquires := pool.Stat().AcquireCount()
+
 	for start := time.Now(); ; time.Sleep(time.Millisecond) {
 		s := pool.Stat()
 		if s.AcquiredConns() == 0 {
@@ -76,6 +78,7 @@ func direct(ctx context.Context, pool *pgxpool.Pool) bool {
 		return false
 	}
 	defer conn.Release()
+
 	var pid uint32
 	err = conn.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid)
 	return err == nil && pid == conn.Conn().PgConn().PID()

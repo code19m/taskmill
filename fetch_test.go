@@ -20,6 +20,7 @@ func TestWorkerConcurrency(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	var active, peak atomic.Int32
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			n := active.Add(1)
@@ -45,6 +46,7 @@ func TestQueueConcurrencyLimitAcrossWorkers(t *testing.T) {
 	t.Parallel()
 	e := newEnvWith(t, testdb.PoolSize(t, 16), nil)
 	e.limitDefaultQueue(t, 1)
+
 	var active, peak atomic.Int32
 	hs := handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 		n := active.Add(1)
@@ -53,6 +55,7 @@ func TestQueueConcurrencyLimitAcrossWorkers(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 		return nil
 	}, nil)
+
 	runWorker(t, e, &taskmill.WorkerConfig{Handlers: hs, Queues: defaultQueue(5)})
 	runWorker(t, e, &taskmill.WorkerConfig{Handlers: hs, Queues: defaultQueue(5)})
 
@@ -72,6 +75,7 @@ func TestQueueConcurrencyLimitAcrossWorkers(t *testing.T) {
 func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 	t.Parallel()
 	const lease, wait = time.Second, 700 * time.Millisecond
+
 	// measuring returns a handler that sends how much of its lease an attempt
 	// has left when it starts.
 	measuring := func(e *env, left chan<- time.Duration) *taskmill.Handlers {
@@ -85,6 +89,7 @@ func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 			return nil
 		}, nil)
 	}
+
 	// holdThenFree keeps tx's row lock for wait once a statement of the
 	// worker waits for it, then frees it, and checks the lease that the
 	// handler finds.
@@ -95,6 +100,7 @@ func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 		if err := tx.Rollback(t.Context()); err != nil {
 			t.Fatal(err)
 		}
+
 		if d := recv(t, left, "the handler to start"); d < lease/2 {
 			t.Fatalf("the handler started with %s of its %s lease left: the wait for the row was taken off the lease", d, lease)
 		}
@@ -105,33 +111,40 @@ func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 		e := newEnv(t)
 		e.limitDefaultQueue(t, 5)
 		left := make(chan time.Duration, 1)
+
 		w := newWorker(t, e, &taskmill.WorkerConfig{
 			Handlers: measuring(e, left), Queues: defaultQueue(1), LeaseDuration: lease,
 			NoMaintainer: true, // nothing rescues: the test only measures the lease
 		})
+
 		// Another fetch of the queue holds its row, as a worker does that
 		// stalls in the middle of its fetch.
 		tx := e.begin(t)
 		e.txExec(t, tx, "SELECT FROM {s}.queues WHERE name = 'default' FOR UPDATE")
+
 		e.enqueue(t, sendEmail{}, nil)
 		startWorker(t, w)
 		holdThenFree(t, e, tx, "SELECT max_running FROM {s}.queues", left)
 	})
+
 	t.Run("RunTask", func(t *testing.T) {
 		t.Parallel()
 		e := newEnv(t)
 		left := make(chan time.Duration, 1)
 		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: measuring(e, left), LeaseDuration: lease})
 		id := e.enqueue(t, sendEmail{}, nil)
+
 		// Another transaction holds the task's row, as CancelTx does until
 		// its caller commits or rolls back.
 		tx := e.begin(t)
 		e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", id)
+
 		done := make(chan error, 1)
 		go func() {
 			_, err := w.RunTask(t.Context(), id)
 			done <- err
 		}()
+
 		holdThenFree(t, e, tx, "{s}.tasks", left)
 		if err := recv(t, done, "RunTask to return"); err != nil {
 			t.Fatal(err)
@@ -153,6 +166,7 @@ func TestLimitedFetchGivesUpOnAHeldQueueRow(t *testing.T) {
 	sent, logs := &statementLog{}, &logRecorder{}
 	e := newTracedEnv(t, sent).withLogger(t, slog.New(logs))
 	e.limitDefaultQueue(t, 5)
+
 	ran := make(chan struct{}, 1)
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
@@ -167,6 +181,7 @@ func TestLimitedFetchGivesUpOnAHeldQueueRow(t *testing.T) {
 	e.txExec(t, tx, "SELECT FROM {s}.queues WHERE name = 'default' FOR UPDATE")
 	e.enqueue(t, sendEmail{}, nil)
 	startWorker(t, w)
+
 	waitFor(t, "the fetch to give up on the held row, and to try again", func() bool {
 		return sent.count(queueLock) >= 2
 	})
@@ -193,6 +208,7 @@ func TestFetchDoesNotLockAQueueAtItsLimit(t *testing.T) {
 	sent := &statementLog{}
 	e := newTracedEnv(t, sent)
 	e.limitDefaultQueue(t, 1)
+
 	started, release := make(chan struct{}, 2), make(chan struct{})
 	var active, peak atomic.Int32
 	runWorker(t, e, &taskmill.WorkerConfig{
@@ -206,6 +222,7 @@ func TestFetchDoesNotLockAQueueAtItsLimit(t *testing.T) {
 		Queues:       defaultQueue(2),
 		NoMaintainer: true,
 	})
+
 	t.Cleanup(func() { close(release) })
 	e.enqueue(t, sendEmail{}, nil)
 	waiting := e.enqueue(t, sendEmail{}, nil)
@@ -227,6 +244,7 @@ func TestFetchDoesNotLockAQueueAtItsLimit(t *testing.T) {
 	if n := sent.count(queueLock); n == 0 {
 		t.Error("the second task started without a lock on the queue's row: nothing serialized its fetch")
 	}
+
 	if p := peak.Load(); p != 1 {
 		t.Errorf("peak concurrency %d, want the limit of 1", p)
 	}
@@ -244,9 +262,11 @@ func TestLimitedQueueStartsATaskWhenOneEnds(t *testing.T) {
 	sent := &statementLog{}
 	e := newTracedEnv(t, sent)
 	e.limitDefaultQueue(t, limit)
+
 	for range tasks {
 		e.enqueue(t, sendEmail{}, nil)
 	}
+
 	running := replaceSchema("SELECT count(*) FILTER (WHERE state = 'running') FROM {s}.tasks", e.schema)
 	started, release := make(chan int, tasks), make(chan struct{})
 	runWorker(t, e, &taskmill.WorkerConfig{
@@ -264,6 +284,7 @@ func TestLimitedQueueStartsATaskWhenOneEnds(t *testing.T) {
 		NoMaintainer: true, // nothing wakes the queue either
 	})
 	t.Cleanup(func() { close(release) })
+
 	// The listener's start wakes every queue once: that must not stand in
 	// for the fetch that the test waits for.
 	e.waitListening(t)
@@ -276,6 +297,7 @@ func TestLimitedQueueStartsATaskWhenOneEnds(t *testing.T) {
 			t.Fatalf("task %d started with %d tasks running, want the limit of %d", i+1, n, limit)
 		}
 	}
+
 	// A fetch that leases locks the queue's row once. More locks than
 	// tasks would mean fetches that found no room.
 	if n := sent.count(queueLock); n > tasks {
@@ -287,6 +309,7 @@ func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	started := make(chan time.Time, 1)
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			started <- time.Now()
@@ -297,6 +320,7 @@ func TestScheduledTaskRunsAfterItsRunTime(t *testing.T) {
 
 	runAt := time.Now().Add(500 * time.Millisecond)
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{RunAt: runAt})
+
 	select {
 	case at := <-started:
 		if at.Before(runAt) {
@@ -334,6 +358,7 @@ func TestBatchKindsDoNotWidenOtherQueuesFetches(t *testing.T) {
 	e := newEnv(t)
 	started := make(chan struct{}, 5)
 	release := make(chan struct{})
+
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error {
 		started <- struct{}{}
@@ -341,9 +366,11 @@ func TestBatchKindsDoNotWidenOtherQueuesFetches(t *testing.T) {
 		return nil
 	}), nil)
 	taskmill.AddBatchHandler[report](&hs, reportBatch{}, nil)
+
 	for range 5 {
 		e.enqueue(t, sendEmail{}, nil)
 	}
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: &hs,
 		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {Concurrency: 1}, "reports": {Concurrency: 1}},
@@ -364,6 +391,7 @@ func TestBatchFillsWithoutLeasingOtherKinds(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
 	var sizes []int
+
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error {
 		started <- struct{}{}
@@ -385,6 +413,7 @@ func TestBatchFillsWithoutLeasingOtherKinds(t *testing.T) {
 	for range 3 {
 		last = e.enqueue(t, sendEmail{}, nil)
 	}
+
 	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
 
 	// The first fetch takes one report and fills its batch with the other
@@ -395,6 +424,7 @@ func TestBatchFillsWithoutLeasingOtherKinds(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("%d emails leased for one slot", n)
 	}
+
 	e.waitState(t, last, taskmill.StateCompleted)
 	mu.Lock()
 	defer mu.Unlock()
@@ -411,6 +441,7 @@ func TestBatchFillReadsOnlyTheTasksItTakes(t *testing.T) {
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 	           SELECT 'default', 'report.build', 'available', now(), '{}', 1 FROM generate_series(1, 2000)`)
 	e.exec(t, "ANALYZE {s}.tasks")
+
 	const fill = 90
 	n, err := taskmill.FillRowsRead(t.Context(), e.client, taskmill.DefaultQueue, "report.build", fill)
 	if err != nil {
@@ -452,6 +483,7 @@ func TestBatchFillsInTheQueuesOrder(t *testing.T) {
 	// The one slot's fetch takes the first report of high priority, and
 	// fills its batch with the two others and the oldest of low priority.
 	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+
 	for _, id := range ids {
 		e.waitState(t, id, taskmill.StateCompleted)
 	}
@@ -473,6 +505,7 @@ func (f batchFunc) HandleBatch(_ context.Context, tasks []*taskmill.Task[report]
 func TestFetchStaysOnItsIndexWithStaleStatistics(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// The statistics see an empty queue; then a backlog arrives, as it does
 	// faster than autovacuum analyzes the table.
 	e.exec(t, "ANALYZE {s}.tasks")

@@ -19,6 +19,7 @@ import (
 func TestPauseAndResumeQueue(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
 		t.Fatal(err)
 	}
@@ -43,6 +44,7 @@ func TestUpdateQueue(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	want := func(maxRunning int, paused bool) {
 		t.Helper()
 		queues, err := e.client.Queues(ctx)
@@ -54,6 +56,7 @@ func TestUpdateQueue(t *testing.T) {
 			t.Fatalf("queues: %+v; want partner with max %d, paused %v", queues, maxRunning, paused)
 		}
 	}
+
 	// It creates the queue, and keeps what update does not change.
 	if err := e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { s.MaxRunning = 3 }); err != nil {
 		t.Fatal(err)
@@ -65,6 +68,7 @@ func TestUpdateQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	want(4, true)
+
 	for _, update := range []func(*taskmill.QueueSettings){
 		nil,
 		func(s *taskmill.QueueSettings) { s.MaxRunning = -1 },
@@ -114,6 +118,7 @@ func TestManyConcurrentUpdatesLand(t *testing.T) {
 	e := newEnv(t)
 	ctx := t.Context()
 	const updaters, calls = 16, 10
+
 	// A try loses only to an update of another updater that landed during
 	// the try. One updater's tries do not overlap, so each loses to a
 	// different update, and an update conflicts once 10 of its tries lost.
@@ -124,6 +129,7 @@ func TestManyConcurrentUpdatesLand(t *testing.T) {
 	const maxConflicts = (updaters - 1) * calls / 10
 	increment := func(s *taskmill.QueueSettings) { s.MaxRunning++ }
 	var wg sync.WaitGroup
+
 	for range updaters {
 		wg.Go(func() {
 			conflicts := 0
@@ -142,6 +148,7 @@ func TestManyConcurrentUpdatesLand(t *testing.T) {
 		})
 	}
 	wg.Wait()
+
 	queues, err := e.client.Queues(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -162,6 +169,7 @@ func interleave(t *testing.T, first func(wait func()) error, second func(ctx con
 	t.Helper()
 	waiting, release := make(chan struct{}), make(chan struct{})
 	errs := make(chan error, 1)
+
 	go func() {
 		errs <- first(sync.OnceFunc(func() {
 			close(waiting)
@@ -173,6 +181,7 @@ func interleave(t *testing.T, first func(wait func()) error, second func(ctx con
 	case err := <-errs:
 		t.Fatalf("the first update ended before its update ran: %v", err)
 	}
+
 	func() {
 		defer close(release) // also when second fails the test
 		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -181,6 +190,7 @@ func interleave(t *testing.T, first func(wait func()) error, second func(ctx con
 			t.Fatalf("the second update: %v", err)
 		}
 	}()
+
 	if err := recv(t, errs, "the first update"); err != nil {
 		t.Fatal(err)
 	}
@@ -190,9 +200,11 @@ func TestSlowUpdateDoesNotHoldUpFetches(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	limit := func(n int) func(*taskmill.QueueSettings) {
 		return func(s *taskmill.QueueSettings) { s.MaxRunning = n }
 	}
+
 	if err := e.client.UpdateQueue(ctx, taskmill.DefaultQueue, limit(2)); err != nil {
 		t.Fatal(err)
 	}
@@ -212,6 +224,7 @@ func TestSlowUpdateDoesNotHoldUpFetches(t *testing.T) {
 			if err != nil {
 				return err
 			}
+
 			for {
 				task, err := e.client.Get(ctx, res.ID)
 				if err != nil || task.State == taskmill.StateCompleted {
@@ -232,9 +245,11 @@ func TestQueuesAndWorkers(t *testing.T) {
 	for range 3 {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "backlog"})
 	}
+
 	if err := e.client.UpdateQueue(t.Context(), "limited", func(s *taskmill.QueueSettings) { s.MaxRunning = 2 }); err != nil {
 		t.Fatal(err)
 	}
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: noopHandlers(),
 		Queues:   map[string]taskmill.QueueOptions{"mail": {}},
@@ -251,6 +266,7 @@ func TestQueuesAndWorkers(t *testing.T) {
 		}
 		return byName["backlog"].Counts[taskmill.StateAvailable].N == 3
 	})
+
 	if byName["mail"].Workers != 1 || byName["limited"].Settings.MaxRunning != 2 {
 		t.Fatalf("got %+v", byName)
 	}
@@ -275,6 +291,7 @@ func TestQueuesAndWorkers(t *testing.T) {
 func TestQueuesMeasureLag(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// The oldest available task has the lowest priority: lag spans every
 	// priority.
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{
@@ -283,15 +300,18 @@ func TestQueuesMeasureLag(t *testing.T) {
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{
 		Queue: "behind", Priority: taskmill.PriorityCritical, RunAt: time.Now().Add(-time.Minute),
 	})
+
 	// A retry that is overdue counts, and so does its wait before it is
 	// promoted.
 	retry := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "retrying"})
 	e.exec(t, "UPDATE {s}.tasks SET state = 'retryable', run_at = now() - interval '30 minutes' WHERE id = $1", retry)
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "idle", RunAt: time.Now().Add(time.Hour)})
+
 	// A task due for longer than a duration can hold: the lag stops at the
 	// longest duration, and does not wrap around to none.
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "ancient", RunAt: time.Date(1700, 1, 1, 0, 0, 0, 0, time.UTC)})
 	longest := time.Duration(math.MaxInt64).Truncate(time.Microsecond)
+
 	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: noopHandlers(),
 		Queues:   map[string]taskmill.QueueOptions{"mail": {}},
@@ -336,15 +356,18 @@ func TestQueuesMeasureLag(t *testing.T) {
 func TestQueuesShowWorkThatIsStuckWithoutLag(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// As in an outbox while its broker is down: the first message of a key
 	// keeps failing, and the messages behind it wait as pending.
 	for range 3 {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "relay", GroupKey: "order-1"})
 	}
+
 	// A group whose first task dies is halted, and its other tasks wait.
 	for range 2 {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "orders", GroupKey: "order-2", MaxAttempts: 1})
 	}
+
 	fail := func(context.Context, *taskmill.Task[sendEmail]) error { return errors.New("broker unreachable") }
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(fail, &taskmill.HandlerOptions{Retry: retryUntil(3)}),
@@ -362,6 +385,7 @@ func TestQueuesShowWorkThatIsStuckWithoutLag(t *testing.T) {
 		}
 		return byName["relay"].MostFailures == 3 && byName["orders"].HaltedGroups == 1
 	})
+
 	for name, want := range map[string]struct {
 		halted, failures int
 		counts           map[taskmill.State]taskmill.TaskCount
@@ -396,6 +420,7 @@ func TestFailedSettingsRefreshKeepsQueuesPaused(t *testing.T) {
 	t.Parallel()
 	logs := &logRecorder{}
 	e := newEnv(t).withLogger(t, slog.New(logs))
+
 	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
 		t.Fatal(err)
 	}
@@ -403,9 +428,11 @@ func TestFailedSettingsRefreshKeepsQueuesPaused(t *testing.T) {
 		Handlers: noopHandlers(),
 		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}, "canary": {}},
 	})
+
 	// The worker reads the settings this often, and a read may take as long.
 	taskmill.SetTiming(w, taskmill.Timing{Settings: 100 * time.Millisecond})
 	startWorker(t, w)
+
 	// The canary's queue is not paused. A worker fetches nothing before it
 	// has read the settings, so the canary's task shows that it has.
 	canary := &taskmill.EnqueueOptions{Queue: "canary"}
@@ -414,6 +441,7 @@ func TestFailedSettingsRefreshKeepsQueuesPaused(t *testing.T) {
 	// From here on, every read of the settings waits for the queues' table.
 	tx := e.begin(t)
 	e.txExec(t, tx, "LOCK TABLE {s}.queues IN ACCESS EXCLUSIVE MODE")
+
 	waitFor(t, "the worker to give up a read of the settings", func() bool {
 		return len(operationLines(logs.all())["load queue settings"]) > 0
 	})
@@ -433,11 +461,13 @@ func TestWorkerDoesNotFetchBeforeItKnowsItsQueuesSettings(t *testing.T) {
 	t.Parallel()
 	logs := &logRecorder{}
 	e := newEnv(t).withLogger(t, slog.New(logs))
+
 	if err := e.client.PauseQueue(t.Context(), taskmill.DefaultQueue); err != nil {
 		t.Fatal(err)
 	}
 	paused := e.enqueue(t, sendEmail{}, nil)
 	ran := make(chan string, 2)
+
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 			ran <- task.Queue
@@ -446,6 +476,7 @@ func TestWorkerDoesNotFetchBeforeItKnowsItsQueuesSettings(t *testing.T) {
 		Queues:       map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}, "canary": {}},
 		NoMaintainer: true,
 	})
+
 	// A read may take as long as the interval between two reads.
 	taskmill.SetTiming(w, taskmill.Timing{Settings: 100 * time.Millisecond})
 
@@ -453,13 +484,16 @@ func TestWorkerDoesNotFetchBeforeItKnowsItsQueuesSettings(t *testing.T) {
 	tx := e.begin(t)
 	e.txExec(t, tx, "LOCK TABLE {s}.queues IN ACCESS EXCLUSIVE MODE")
 	stop := startWorker(t, w)
+
 	waitFor(t, "the worker to give up its read of the settings", func() bool {
 		return len(operationLines(logs.all())["load queue settings"]) > 0
 	})
+
 	// A worker that takes no task is not ready, and says why.
 	if err := w.Health(); err == nil || !strings.Contains(err.Error(), "settings") {
 		t.Errorf("a worker that has not read its queues' settings reports the health %v", err)
 	}
+
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -473,6 +507,7 @@ func TestWorkerDoesNotFetchBeforeItKnowsItsQueuesSettings(t *testing.T) {
 	if err := w.Health(); err != nil {
 		t.Errorf("the worker read its queues' settings, and reports the health %v", err)
 	}
+
 	// A worker that stops gives back a task that it fetched and did not
 	// start, so the task's state alone does not show a fetch.
 	stop()

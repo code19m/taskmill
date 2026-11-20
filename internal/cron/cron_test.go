@@ -18,6 +18,7 @@ func TestNext(t *testing.T) {
 	berlin, _ := time.LoadLocation("Europe/Berlin")
 	sydney, _ := time.LoadLocation("Australia/Sydney")
 	auckland, _ := time.LoadLocation("Pacific/Auckland")
+
 	tests := []struct {
 		expr string
 		from time.Time
@@ -59,11 +60,13 @@ func TestNext(t *testing.T) {
 		{"30 1 * * *", time.Date(2026, 11, 1, 0, 0, 0, 0, ny), time.Date(2026, 11, 1, 1, 30, 0, 0, ny)},
 		{"30 1 * * *", time.Date(2026, 11, 1, 1, 31, 0, 0, ny), time.Date(2026, 11, 2, 1, 30, 0, 0, ny)},
 	}
+
 	for _, tt := range tests {
 		s, err := Parse(tt.expr)
 		if err != nil {
 			t.Fatalf("Parse(%q): %v", tt.expr, err)
 		}
+
 		got, err := s.Next(tt.from)
 		if err != nil {
 			t.Fatalf("%q Next(%s): %v", tt.expr, tt.from, err)
@@ -83,6 +86,7 @@ func clockRuns(s *Schedule, start, end time.Time) []time.Time {
 		match, err := s.nextCivil(c)
 		return err == nil && match.Equal(c)
 	}
+
 	var runs []time.Time
 	shown := map[time.Time]bool{}
 	last := civil(start).Add(-time.Minute) // the latest time that the clock showed
@@ -96,11 +100,13 @@ func clockRuns(s *Schedule, start, end time.Time) []time.Time {
 		if !shown[c] && matches(c) {
 			runs = append(runs, at)
 		}
+
 		shown[c] = true
 		if c.After(last) {
 			last = c
 		}
 	}
+
 	slices.SortFunc(runs, time.Time.Compare)
 	return slices.CompactFunc(runs, time.Time.Equal)
 }
@@ -158,6 +164,7 @@ func TestNextFindsEveryRunAroundClockChanges(t *testing.T) {
 		"5 0-4 * * *", "*/7 1-3 * * *", "0 0 * * *", "59 23 * * *", "30 0-3 * * SUN", "0 12 30,31 12 *",
 		"0 12 30 12 *",
 	}
+
 	for zone, year := range map[string]int{
 		"America/New_York": 2026, "Europe/Berlin": 2026, "Australia/Lord_Howe": 2026, "Antarctica/Troll": 2026,
 		"America/St_Johns": 2026, "America/Santiago": 2026, "America/Havana": 2026, "Pacific/Apia": 2011,
@@ -166,10 +173,12 @@ func TestNextFindsEveryRunAroundClockChanges(t *testing.T) {
 		if err != nil {
 			t.Skip("time zone database unavailable")
 		}
+
 		changes := clockChanges(loc, year)
 		if len(changes) == 0 {
 			t.Errorf("%s has no clock change in %d", zone, year)
 		}
+
 		for _, change := range changes {
 			start, end := change.Add(-26*time.Hour).Truncate(time.Minute), change.Add(50*time.Hour).Truncate(time.Minute)
 			for _, expr := range exprs {
@@ -177,6 +186,7 @@ func TestNextFindsEveryRunAroundClockChanges(t *testing.T) {
 				if err != nil {
 					t.Fatalf("Parse(%q): %v", expr, err)
 				}
+
 				got, want := nextRuns(s, start, end), clockRuns(s, start, end)
 				if !slices.EqualFunc(got, want, time.Time.Equal) {
 					t.Errorf("%q around the clock change of %s in %s: Next found %d runs, want %d: %s",
@@ -198,6 +208,7 @@ func firstDifference(got, want []time.Time) string {
 		if i < len(want) {
 			w = want[i].Format(time.RFC3339)
 		}
+
 		if g != w {
 			return "run " + strconv.Itoa(i+1) + " is " + g + ", want " + w
 		}
@@ -219,11 +230,13 @@ func newYearJump(t *testing.T) *time.Location {
 		}
 		return h
 	}
+
 	data := header(0, 0)                  // the 32-bit part, which is empty
 	data = append(data, header(1, 4)...)  // the 64-bit part
 	data = append(data, 0, 0, 0, 0, 0, 0) // the zone: UTC, not summer time, named by the first name
 	data = append(data, "STD\x00"...)
 	data = append(data, "\nSTD0DST,J1/2,J200/2\n"...)
+
 	loc, err := time.LoadLocationFromTZData("made-up", data)
 	if err != nil {
 		t.Fatal(err)
@@ -240,10 +253,12 @@ func TestNextEndsWhenTheClockSkipsEveryMatch(t *testing.T) {
 	if at := time.Date(2027, 1, 1, 2, 30, 0, 0, time.UTC); civil(at.In(loc)).Equal(at) {
 		t.Fatalf("the made-up clock shows %s, which it should skip", at)
 	}
+
 	s, err := Parse("30 2 1 1 *")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	type result struct {
 		next time.Time
 		err  error
@@ -253,6 +268,7 @@ func TestNextEndsWhenTheClockSkipsEveryMatch(t *testing.T) {
 		next, err := s.Next(time.Date(2026, 6, 1, 12, 0, 0, 0, loc))
 		found <- result{next, err}
 	}()
+
 	select {
 	case got := <-found:
 		// 02:30 runs as far after the jump as it is into the skipped hour.
@@ -270,10 +286,12 @@ func TestNextRunsTheRepeatedHourOnce(t *testing.T) {
 	if err != nil {
 		t.Skip("time zone database unavailable")
 	}
+
 	s, err := Parse("30 * * * *")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	// From midnight to 04:00 on the day clocks go back, 01:xx happens twice
 	// but runs once: 00:30, 01:30, 02:30, 03:30.
 	at := time.Date(2026, 11, 1, 0, 0, 0, 0, ny)
@@ -301,6 +319,7 @@ func TestNextNeverMatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := s.Next(time.Now()); err == nil {
 		t.Fatal("February 31 matched a time")
 	}
@@ -327,11 +346,13 @@ func FuzzParse(f *testing.F) {
 	} {
 		f.Add(s)
 	}
+
 	f.Fuzz(func(t *testing.T, expr string) {
 		s, err := Parse(expr)
 		if err != nil {
 			return
 		}
+
 		from := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 		next, err := s.Next(from)
 		if err != nil {

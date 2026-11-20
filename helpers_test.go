@@ -80,6 +80,7 @@ func newEnvWith(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *
 	if err := taskmill.Migrate(tb.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		tb.Fatalf("migrate: %v", err)
 	}
+
 	if cfg == nil {
 		cfg = &taskmill.ClientConfig{}
 	}
@@ -87,11 +88,13 @@ func newEnvWith(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *
 		cfg.Logger = testLogger(tb)
 	}
 	cfg.Schema = schema
+
 	client, err := taskmill.NewClient(tb.Context(), pool, cfg)
 	if err != nil {
 		tb.Fatalf("new client: %v", err)
 	}
 	e := &env{pool: pool, schema: schema, client: client}
+
 	// Cleanups run last first, so this check runs after the test's workers
 	// stopped.
 	tb.Cleanup(func() {
@@ -111,6 +114,7 @@ func newTracedEnv(t *testing.T, tracer pgx.QueryTracer) *env {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.Tracer = tracer
+
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -253,6 +257,7 @@ func (e *env) waitState(t *testing.T, id int64, state taskmill.State) *taskmill.
 		if err == nil && info.State == state {
 			return info
 		}
+
 		if time.Now().After(deadline) {
 			got := "error: " + fmt.Sprint(err)
 			if info != nil {
@@ -451,6 +456,7 @@ func newWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) *taskmill.Worke
 	if cfg.ListenConfig == nil {
 		cfg.ListenConfig = testdb.ListenConfig(t)
 	}
+
 	w, err := taskmill.NewWorker(e.client, cfg)
 	if err != nil {
 		t.Fatalf("new worker: %v", err)
@@ -472,6 +478,7 @@ func startWorker(t *testing.T, w *taskmill.Worker) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
+
 	stop = sync.OnceFunc(func() {
 		cancel()
 		select {

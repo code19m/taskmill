@@ -66,11 +66,14 @@ func (f *incidentLog) observe(ctx context.Context, err error) {
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	now := time.Now()
 	every := f.w.timing.failureReport
 	quiet := now.Sub(f.logged) < every
+
 	if err == nil {
 		if f.failing {
 			f.failing, f.pending = false, true
@@ -90,11 +93,13 @@ func (f *incidentLog) observe(ctx context.Context, err error) {
 		}
 		f.count = 0
 	}
+
 	if f.count == 0 {
 		f.since = now
 	}
 	f.count++
 	f.last, f.failing = now, true
+
 	if quiet {
 		return
 	}

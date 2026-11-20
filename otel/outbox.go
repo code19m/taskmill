@@ -32,6 +32,7 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 	if pub == nil {
 		return nil
 	}
+
 	broker := messagingconv.SystemAttr(system)
 	return outbox.PublisherFunc(func(ctx context.Context, deliveries []outbox.Delivery) (errs []error) {
 		sent := make([]outbox.Delivery, len(deliveries))
@@ -48,6 +49,7 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 					semconv.MessagingDestinationName(d.Topic),
 					semconv.MessagingMessageID(d.ID),
 				))
+
 			headers := make(map[string][]byte, len(d.Headers)+2)
 			maps.Copy(headers, d.Headers)
 			deleteFields(headers, fields)
@@ -69,19 +71,23 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 				case i < len(errs):
 					err = errs[i]
 				}
+
 				if err != nil {
 					errType := semconv.ErrorType(err)
 					span.SetAttributes(errType)
 					span.SetStatus(codes.Error, err.Error())
 					attrs = append(attrs, errType)
 				}
+
 				span.End()
 				in.sent.Add(ctx, 1, "send", broker, attrs...)
 			}
+
 			if panicked != nil {
 				panic(panicked) // for the worker to record, as it does without this wrapper
 			}
 		}()
+
 		return pub.Publish(ctx, sent)
 	})
 }
@@ -107,6 +113,7 @@ func (e panicError) Error() (text string) {
 			text = fmt.Sprintf("panic: a %T that panics when it is formatted", e.value)
 		}
 	}()
+
 	return fmt.Sprintf("panic: %v", e.value)
 }
 

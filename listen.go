@@ -29,6 +29,7 @@ func (w *Worker) listenLoop(ctx context.Context) {
 			w.logger.LogAttrs(ctx, slog.LevelError, "notifications disabled; polling only", slog.Any(logKeyError, err))
 			return
 		}
+
 		w.listenFailures.observe(ctx, err) // workers poll meanwhile
 		select {
 		case <-ctx.Done():
@@ -66,6 +67,7 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 		defer cancel()
 		_ = conn.Close(closeCtx)
 	}()
+
 	if err := w.checkSession(startCtx, conn); err != nil {
 		return false, err
 	}
@@ -74,15 +76,18 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 		return false, err
 	}
 	w.listenFailures.observe(ctx, nil)
+
 	// Notifications may have been missed while disconnected: of changed
 	// settings, such as a pause, and of tasks.
 	signal(w.queueHints)
 	for _, q := range w.queues {
 		q.nudge()
 	}
+
 	defer w.stopNotifying()
 	timeout := heartbeatsMissed * w.timing.heartbeat
 	deadline := time.Now().Add(timeout) // for the next heartbeat
+
 	for {
 		waitCtx, cancel := context.WithDeadline(ctx, deadline)
 		n, err := conn.WaitForNotification(waitCtx)
@@ -105,6 +110,7 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 				w.logger.LogAttrs(ctx, slog.LevelWarn, "maintainer heartbeats do not arrive; idle queues poll every PollInterval")
 			}
 			w.stopNotifying()
+
 			// Listening again changes nothing, but the connection must answer.
 			checkCtx, cancel := context.WithTimeout(ctx, w.timing.listen)
 			_, err := conn.Exec(checkCtx, listen)
@@ -155,10 +161,12 @@ func (w *Worker) checkSession(ctx context.Context, conn *pgx.Conn) error {
 		err = q.QueryRow(ctx, "SELECT pg_backend_pid()", pgx.QueryExecModeSimpleProtocol).Scan(&n)
 		return n, err
 	}
+
 	own, err := pid(conn)
 	if err != nil {
 		return err
 	}
+
 	for range sessionChecks {
 		other, err := pid(w.client.pool)
 		if err != nil {
@@ -199,6 +207,7 @@ func (w *Worker) handleNotification(payload string) (heartbeat bool) {
 	if !ok {
 		return false
 	}
+
 	switch kind {
 	case notifyAvailable:
 		if q := w.queues[arg]; q != nil {
@@ -212,6 +221,7 @@ func (w *Worker) handleNotification(payload string) (heartbeat bool) {
 		if err != nil || strconv.FormatInt(id, 10) != arg {
 			return false
 		}
+
 		w.mu.Lock()
 		t := w.attempts[id]
 		w.mu.Unlock()
@@ -251,6 +261,7 @@ func followHints(ctx context.Context, hints <-chan struct{}, read func(context.C
 		case <-hints:
 		}
 		read(ctx)
+
 		select {
 		case <-ctx.Done():
 			return
@@ -268,6 +279,7 @@ func (w *Worker) cancelHinted(ctx context.Context) {
 	hinted := map[int64]*liveAttempt{}
 	var ids []int64
 	var tokens []int32
+
 	w.mu.Lock()
 	for id, t := range w.attempts {
 		// Cleared before the read: a notification that arrives during it
@@ -280,6 +292,7 @@ func (w *Worker) cancelHinted(ctx context.Context) {
 	if len(ids) == 0 {
 		return
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, w.cfg.LeaseDuration/3)
 	defer cancel()
 	r, err := w.client.pool.Query(ctx, w.client.sql.cancelRequest, ids, tokens)
@@ -290,6 +303,7 @@ func (w *Worker) cancelHinted(ctx context.Context) {
 	if err != nil {
 		return
 	}
+
 	for _, id := range requested {
 		hinted[id].requestCancel()
 	}

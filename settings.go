@@ -67,6 +67,7 @@ func retryConflicts(ctx context.Context, op string, try func() (saved bool, err 
 			}
 			pause = min(2*pause, maxUpdatePause)
 		}
+
 		if saved, err := try(); saved || err != nil {
 			return err
 		}
@@ -105,18 +106,22 @@ func (c *Client) UpdateSettings(ctx context.Context, update func(*Settings)) err
 	if update == nil {
 		return invalidArgument("update is nil")
 	}
+
 	return retryConflicts(ctx, "update settings", func() (bool, error) {
 		var history, dead int64
 		if err := c.pool.QueryRow(ctx, c.sql.readSettings).Scan(&history, &dead); err != nil {
 			return false, fail(err)
 		}
+
 		s := Settings{HistoryRetention: fromMicros(history), DeadRetention: fromMicros(dead)}
 		update(&s)
 		s.HistoryRetention = cmp.Or(s.HistoryRetention, defaultHistoryRetention)
 		s.DeadRetention = cmp.Or(s.DeadRetention, defaultDeadRetention)
+
 		if s.HistoryRetention < minRetention || s.DeadRetention < minRetention {
 			return false, invalidArgument("retention periods must be at least %s", minRetention)
 		}
+
 		tag, err := c.pool.Exec(ctx, c.sql.swapSettings,
 			history,                           // $1
 			dead,                              // $2

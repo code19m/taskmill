@@ -78,6 +78,7 @@ func (c *Client) readAlone(ctx context.Context, settings, sql string, args []any
 		}
 		return nil // Close returns an error of the rows.
 	})
+
 	return c.pool.SendBatch(ctx, b).Close()
 }
 

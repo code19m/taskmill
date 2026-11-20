@@ -26,6 +26,7 @@ func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 	b := newWorker(t, e, &taskmill.WorkerConfig{Schedules: schedules})
 	ctx := t.Context()
 	tasks := func() int { return e.count(t, "SELECT count(*) FROM {s}.tasks") }
+
 	// Each run is due at a different time, as cron runs are: runs are
 	// deduplicated by their due time.
 	makeDue := func(ago time.Duration) {
@@ -53,11 +54,13 @@ func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 	if err := e.pool.QueryRow(ctx, replaceSchema("SELECT next_run_at FROM {s}.schedules", e.schema)).Scan(&slot); err != nil {
 		t.Fatal(err)
 	}
+
 	var wg sync.WaitGroup
 	for _, w := range []*taskmill.Worker{a, b} {
 		wg.Go(func() { taskmill.RunSchedules(ctx, w) })
 	}
 	wg.Wait()
+
 	if n := tasks(); n != 1 {
 		t.Fatalf("one due run enqueued %d tasks", n)
 	}
@@ -78,6 +81,7 @@ func TestScheduleEnqueuesEachRunOnce(t *testing.T) {
 	if n := tasks(); n != 1 {
 		t.Fatal("a paused schedule ran")
 	}
+
 	if err := e.client.ResumeSchedule(ctx, "digest"); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +116,7 @@ func (a ticking) MarshalJSON() ([]byte, error) {
 func TestScheduleRunsWhateverItsStoredPayloadLooksLike(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// jsonb rewrites the numbers of the first two payloads: -0 becomes 0,
 	// 1e2 becomes 100, and 1e400, which no float64 holds, is written in
 	// full. The third payload really changes with every pass.
@@ -120,6 +125,7 @@ func TestScheduleRunsWhateverItsStoredPayloadLooksLike(t *testing.T) {
 		{Name: "exponents", Cron: "@hourly", Args: rawArgs{Body: json.RawMessage(`[1e2, 1.50e1, 1e400]`)}},
 		{Name: "ticking", Cron: "@hourly", Args: ticking{encoded: new(atomic.Int64)}},
 	}})
+
 	ctx := t.Context()
 	storedAt := func(name string) time.Time {
 		var at time.Time
@@ -144,6 +150,7 @@ func TestScheduleRunsWhateverItsStoredPayloadLooksLike(t *testing.T) {
 	// same pass.
 	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
 	taskmill.RunSchedules(ctx, w)
+
 	for _, kind := range []string{"test.adjust", "raw", "test.ticking"} {
 		if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE kind = $1", kind); n != 1 {
 			t.Errorf("the due schedule of kind %s enqueued %d tasks, want 1", kind, n)
@@ -162,6 +169,7 @@ func TestRunScheduleNow(t *testing.T) {
 			Options: &taskmill.EnqueueOptions{Priority: taskmill.PriorityHigh},
 		}},
 	})
+
 	ctx := t.Context()
 	taskmill.RunSchedules(ctx, w)
 	before, err := e.client.Schedules(ctx)
@@ -174,6 +182,7 @@ func TestRunScheduleNow(t *testing.T) {
 		t.Fatal(err)
 	}
 	taskmill.RunSchedules(ctx, w)
+
 	page, err := e.client.List(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -181,15 +190,18 @@ func TestRunScheduleNow(t *testing.T) {
 	if len(page.Tasks) != 1 {
 		t.Fatalf("got %d tasks, want 1", len(page.Tasks))
 	}
+
 	// The run has the schedule's options, and runs at the time of the request.
 	task := page.Tasks[0]
 	if task.Priority != taskmill.PriorityHigh || task.RunAt.Sub(asked).Abs() > 5*time.Second {
 		t.Fatalf("got priority %s and run time %s, want high and about %s", task.Priority, task.RunAt, asked)
 	}
+
 	// It is a run of the schedule, for the time of the request.
 	if got := task.Metadata[taskmill.MetadataSchedule]; got != "yearly-report" || !task.ScheduledFor().Equal(task.RunAt) {
 		t.Fatalf("the run is of schedule %q, for %s; want yearly-report, for %s", got, task.ScheduledFor(), task.RunAt)
 	}
+
 	// The timetable stays as it was.
 	after, err := e.client.Schedules(ctx)
 	if err != nil {
@@ -205,6 +217,7 @@ func TestRunScheduleNow(t *testing.T) {
 	if err := e.client.RunSchedule(ctx, "yearly-report"); !errors.Is(err, taskmill.ErrInvalidState) {
 		t.Fatalf("paused schedule: got %v, want ErrInvalidState", err)
 	}
+
 	if err := e.client.RunSchedule(ctx, "unknown"); !errors.Is(err, taskmill.ErrNotFound) {
 		t.Fatalf("unknown schedule: got %v, want ErrNotFound", err)
 	}
@@ -225,6 +238,7 @@ func (e *env) runTimes(t *testing.T) []time.Time {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var at []time.Time
 	for _, task := range slices.Backward(page.Tasks) {
 		at = append(at, task.RunAt)
@@ -248,6 +262,7 @@ func newDailySchedule(t *testing.T, e *env) (*taskmill.Worker, time.Time) {
 		t.Fatal(err)
 	}
 	slot = slot.UTC()
+
 	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 		{Name: "digest", Cron: fmt.Sprintf("%d %d * * *", slot.Minute(), slot.Hour()), Args: sendEmail{To: "digest"}},
 	}})
@@ -264,10 +279,12 @@ func TestRunScheduleJustAfterARegularRunAddsARun(t *testing.T) {
 	// The maintainer enqueues today's regular run.
 	e.scheduleDueAt(t, slot)
 	taskmill.RunSchedules(ctx, w)
+
 	// An operator asks for a run in the same second.
 	request := slot.Add(time.Microsecond)
 	e.scheduleDueAt(t, request)
 	taskmill.RunSchedules(ctx, w)
+
 	if got := e.runTimes(t); !sameTimes(got, slot, request) {
 		t.Fatalf("got runs at %s, want the regular run at %s and the requested run at %s", got, slot, request)
 	}
@@ -285,9 +302,11 @@ func TestRunScheduleJustBeforeARegularRunKeepsThatRun(t *testing.T) {
 	e.scheduleDueAt(t, request)
 	taskmill.RunSchedules(ctx, w)
 	taskmill.RunSchedules(ctx, w)
+
 	if got := e.runTimes(t); !sameTimes(got, request, slot) {
 		t.Fatalf("got runs at %s, want the requested run at %s and the regular run at %s", got, request, slot)
 	}
+
 	// The timetable goes on from there: the next regular run is tomorrow's.
 	ss, err := e.client.Schedules(ctx)
 	if err != nil {
@@ -314,9 +333,11 @@ func TestScheduleCollapsesTheRegularRunsItMissed(t *testing.T) {
 	}
 	e.scheduleDueAt(t, missed)
 	taskmill.RunSchedules(ctx, w)
+
 	if got := e.runTimes(t); !sameTimes(got, missed) {
 		t.Fatalf("got runs at %s, want one run at %s, the first that was missed", got, missed)
 	}
+
 	ss, err := e.client.Schedules(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -340,6 +361,7 @@ func TestRunScheduleWhileARegularRunIsDueKeepsThatRun(t *testing.T) {
 	}
 	taskmill.RunSchedules(ctx, w)
 	taskmill.RunSchedules(ctx, w)
+
 	if got := e.runTimes(t); !sameTimes(got, slot) {
 		t.Fatalf("got runs at %s, want the regular run at %s", got, slot)
 	}
@@ -352,6 +374,7 @@ func TestRemovedSchedulesArePruned(t *testing.T) {
 		Schedules: []taskmill.Schedule{{Name: "kept", Cron: "@yearly", Args: sendEmail{}}},
 	})
 	ctx := t.Context()
+
 	taskmill.RunSchedules(ctx, w)
 	for _, name := range []string{"removed-today", "removed-long-ago"} {
 		e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at) VALUES ($1, 'default', 'email.send', '@daily', now())`, name)
@@ -386,12 +409,14 @@ func TestRemovedSchedulesArePruned(t *testing.T) {
 func TestScheduleOutlivesAMaintainerThatDoesNotDefineIt(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	defining := func(name string) *taskmill.Worker {
 		return newWorker(t, e, &taskmill.WorkerConfig{
 			Schedules: []taskmill.Schedule{{Name: name, Cron: "@weekly", Args: sendEmail{}}},
 		})
 	}
 	with, without := defining("weekly"), defining("other")
+
 	ctx := t.Context()
 	taskmill.RunSchedules(ctx, with)
 	if err := e.client.PauseSchedule(ctx, "weekly"); err != nil {
@@ -413,6 +438,7 @@ func TestScheduleOutlivesAMaintainerThatDoesNotDefineIt(t *testing.T) {
 	// pass.
 	e.exec(t, "UPDATE {s}.schedules SET updated_at = now() - interval '30 minutes'")
 	taskmill.PruneSchedules(ctx, with)
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.schedules WHERE updated_at < now() - interval '29 minutes'"); n != 1 {
 		t.Fatal("a pass within the hour wrote the schedule again")
 	}
@@ -427,9 +453,11 @@ func TestPruningSchedulesWaitsForNoRow(t *testing.T) {
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Schedules: []taskmill.Schedule{{Name: "kept", Cron: "@yearly", Args: sendEmail{}}},
 	})
+
 	taskmill.RunSchedules(t.Context(), w)
 	e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at) VALUES ('removed', 'default', 'email.send', '@daily', now())`)
 	e.exec(t, "UPDATE {s}.schedules SET updated_at = now() - interval '2 days'")
+
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.schedules WHERE name = 'removed' FOR UPDATE")
 
@@ -440,6 +468,7 @@ func TestPruningSchedulesWaitsForNoRow(t *testing.T) {
 		taskmill.PruneSchedules(t.Context(), w)
 	}()
 	recv(t, passed, "the pass to end while a schedule's row is held")
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.schedules WHERE updated_at > now() - interval '1 day'"); n != 1 {
 		t.Fatal("the pass did not note the schedule that it defines")
 	}
@@ -449,6 +478,7 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	// The schedule runs every day at this minute, on the clock of a shop
 	// that is 5 hours 30 minutes ahead of UTC.
 	var slot time.Time
@@ -467,8 +497,10 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 	calls := make(chan seen, 4)
 	leaseLost := make(chan struct{})
 	var called atomic.Int32
+
 	h := func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
 		calls <- seen{task.Attempt, task.Metadata[taskmill.MetadataSchedule], task.ScheduledFor(), task.RunAt}
+
 		switch called.Add(1) {
 		case 1:
 			return errors.New("the database is down")
@@ -483,6 +515,7 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 		}
 		return nil
 	}
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(h, &taskmill.HandlerOptions{Retry: fastRetry}),
 		Queues:   defaultQueue(1),
@@ -493,6 +526,7 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 			Options: &taskmill.EnqueueOptions{Metadata: map[string]string{taskmill.MetadataSchedule: "mine", "team": "billing"}},
 		}},
 	})
+
 	waitFor(t, "the schedule to be stored", func() bool { return e.count(t, "SELECT count(*) FROM {s}.schedules") == 1 })
 	e.scheduleDueAt(t, slot)
 
@@ -501,6 +535,7 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 		got = append(got, recv(t, calls, "an attempt"))
 	}
 	id := int64(e.count(t, "SELECT id FROM {s}.tasks"))
+
 	// The worker of the third call is lost: the maintainer rescues the task,
 	// and records why. The rescue stays on record, while the state that it
 	// leaves lasts only until the next attempt. A lease that the worker
@@ -510,6 +545,7 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 		e.exec(t, "UPDATE {s}.tasks SET lease_expires_at = now() - interval '1 second' WHERE state = 'running' AND attempt = 2")
 		return slices.ContainsFunc(e.get(t, id).Errors, func(a taskmill.AttemptError) bool { return a.Code == taskmill.CodeLeaseLost })
 	})
+
 	// A rescued task waits the default backoff, 2 seconds here, which says
 	// nothing about its times: the test makes it due now.
 	e.exec(t, "UPDATE {s}.tasks SET run_at = now() WHERE id = $1 AND state = 'retryable'", id)
@@ -527,6 +563,7 @@ func TestScheduledRunKnowsItsTimeOnEveryAttempt(t *testing.T) {
 				i+1, call.schedule, call.scheduledFor.Format(time.RFC3339), slot.Format(time.RFC3339))
 		}
 	}
+
 	// RunAt is the time the run is for on the first attempt only.
 	if first, last := got[0].runAt, got[3].runAt; !first.Equal(slot) || !last.After(slot) {
 		t.Errorf("the run time was %s on the first attempt and %s on the last, want %s and a later time", first, last, slot)
@@ -560,6 +597,7 @@ func TestScheduledRunKeepsItsTimeWhateverEnqueueMiddlewareDoes(t *testing.T) {
 		tasks[0].Metadata = map[string]string{"trace": "abc"}
 		return next(ctx)
 	}
+
 	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{overwrite, replace}})
 	w, slot := newDailySchedule(t, e)
 	e.scheduleDueAt(t, slot)
@@ -569,10 +607,12 @@ func TestScheduledRunKeepsItsTimeWhateverEnqueueMiddlewareDoes(t *testing.T) {
 	if err != nil || len(page.Tasks) != 1 {
 		t.Fatalf("got %d tasks, %v; want the scheduled run", len(page.Tasks), err)
 	}
+
 	own := map[string]string{
 		taskmill.MetadataSchedule:     "digest",
 		taskmill.MetadataScheduledFor: slot.Format(time.RFC3339),
 	}
+
 	// The middleware sees taskmill's keys, but cannot change or drop them.
 	if !maps.Equal(seen, own) {
 		t.Errorf("the middleware got the metadata %v, want %v", seen, own)
@@ -587,6 +627,7 @@ func TestScheduledRunKeepsItsTimeWhateverEnqueueMiddlewareDoes(t *testing.T) {
 func TestEnqueuedTaskCanStandForAScheduledRun(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// A test of a handler sets taskmill's keys itself: Enqueue keeps them.
 	id := e.enqueue(t, sendEmail{To: "report"}, &taskmill.EnqueueOptions{Metadata: map[string]string{
 		taskmill.MetadataSchedule:     "nightly-report",
@@ -601,12 +642,14 @@ func TestEnqueuedTaskCanStandForAScheduledRun(t *testing.T) {
 func TestNewWorkerCountsTheMetadataThatItAddsToAScheduledRun(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// This metadata fits the limit of 64 KiB as it is, but not with the two
 	// keys of a scheduled run: every run would fail.
 	opts := &taskmill.EnqueueOptions{Metadata: map[string]string{"k": strings.Repeat("x", 64<<10-20)}}
 	if _, err := e.client.Enqueue(t.Context(), sendEmail{}, opts); err != nil {
 		t.Fatalf("the metadata alone: %v", err)
 	}
+
 	_, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{
 		Schedules: []taskmill.Schedule{{Name: "digest", Cron: "@daily", Args: sendEmail{}, Options: opts}},
 	})
@@ -621,26 +664,32 @@ func TestScheduleDoesNotWaitForAHeldGroup(t *testing.T) {
 	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 		{Name: "ledger", Cron: "@hourly", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
 	}})
+
 	// The run gives up on the held group after 50 ms, not after a second.
 	taskmill.SetTiming(w, taskmill.Timing{LockWait: 50 * time.Millisecond})
+
 	ctx := t.Context()
 	taskmill.RunSchedules(ctx, w)
 	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'g' FOR UPDATE")
 
 	start := time.Now()
 	taskmill.RunSchedules(ctx, w)
+
 	if d := time.Since(start); d > 5*time.Second {
 		t.Fatalf("the schedule waited %s for the group", d)
 	}
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
 		t.Fatalf("got %d tasks while the group was held, want 1", n)
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	taskmill.RunSchedules(ctx, w)
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 2 {
 		t.Fatalf("got %d tasks after the group was free, want 2", n)
@@ -659,8 +708,10 @@ func TestMaintainerRunsDueSchedules(t *testing.T) {
 		Queues:    defaultQueue(1),
 		Schedules: []taskmill.Schedule{{Name: "digest", Cron: "@hourly", Args: sendEmail{To: "digest"}}},
 	})
+
 	waitFor(t, "the schedule to be stored", func() bool { return e.count(t, "SELECT count(*) FROM {s}.schedules") == 1 })
 	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
+
 	select {
 	case <-ran:
 	case <-time.After(10 * time.Second):

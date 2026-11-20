@@ -74,6 +74,7 @@ type cancelBatch struct {
 func (b *cancelBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
 	b.started <- len(tasks)
 	<-b.release
+
 	errs := make([]error, len(tasks))
 	for i, t := range tasks {
 		if t.Args.UserID == 1 {
@@ -92,15 +93,18 @@ func TestCancelingATaskOfABatch(t *testing.T) {
 	b := &cancelBatch{started: make(chan int, 1), release: make(chan struct{})}
 	var hs taskmill.Handlers
 	taskmill.AddBatchHandler[sendEmail](&hs, b, &taskmill.HandlerOptions{Retry: fastRetry})
+
 	res, err := e.client.EnqueueMany(t.Context(), []taskmill.EnqueueParams{{Args: sendEmail{UserID: 0}}, {Args: sendEmail{UserID: 1}}})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	// With two free slots, the first fetch takes both tasks into one batch.
 	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(2)})
 	if n := recv(t, b.started, "the batch to start"); n != 2 {
 		t.Fatalf("the batch has %d tasks, want 2", n)
 	}
+
 	for _, r := range res {
 		if err := e.client.Cancel(t.Context(), r.ID); err != nil {
 			t.Fatal(err)
@@ -193,6 +197,7 @@ func TestRetryGroupedTaskWaitsBehindTheGroup(t *testing.T) {
 	if err := e.client.Cancel(t.Context(), first); err != nil {
 		t.Fatal(err)
 	}
+
 	second := e.enqueue(t, sendEmail{To: "2"}, group)
 	e.wantState(t, second, taskmill.StateAvailable)
 
@@ -278,6 +283,7 @@ func TestCancelRetryAndDeleteSayWhatFailed(t *testing.T) {
 	e := newEnv(t)
 	ended, cancel := context.WithCancel(t.Context())
 	cancel()
+
 	for op, do := range map[string]func(context.Context, int64) error{
 		"cancel": e.client.Cancel, "retry": e.client.Retry, "delete": e.client.Delete,
 	} {
@@ -285,6 +291,7 @@ func TestCancelRetryAndDeleteSayWhatFailed(t *testing.T) {
 		if want := "taskmill: " + op + " task 7: "; !errors.Is(err, context.Canceled) || !strings.HasPrefix(err.Error(), want) {
 			t.Errorf("%s after the context ended: got %v, want context.Canceled after %q", op, err, want)
 		}
+
 		err = do(t.Context(), 7)
 		if !errors.Is(err, taskmill.ErrNotFound) || strings.Count(err.Error(), "taskmill:") != 1 {
 			t.Errorf("%s of an unknown task: got %v, want ErrNotFound, said once", op, err)
@@ -310,6 +317,7 @@ func TestCancelAndDeleteFreeTheDedupeKey(t *testing.T) {
 	if dup := enqueue(); !dup.Duplicate || dup.ID != first.ID {
 		t.Fatalf("got %+v, want a duplicate of %d", dup, first.ID)
 	}
+
 	if err := e.client.Cancel(ctx, first.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -317,6 +325,7 @@ func TestCancelAndDeleteFreeTheDedupeKey(t *testing.T) {
 	if second.Duplicate {
 		t.Fatalf("the canceled task still holds its key: %+v", second)
 	}
+
 	if err := e.client.Delete(ctx, second.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -409,6 +418,7 @@ func cancelThenRetry(t *testing.T, e *env, name string, cancel, retry func(t *te
 	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42", Metadata: map[string]string{"tenant": "7"}}
 	first := e.keyed(t, opts)
 	cancel(t, e, first.ID)
+
 	other := e.keyed(t, opts)
 	if other.Duplicate {
 		t.Fatalf("%s: the canceled task still holds its key: %+v", name, other)
@@ -431,12 +441,14 @@ func cancelThenRetry(t *testing.T, e *env, name string, cancel, retry func(t *te
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE freed_key IS NOT NULL OR freed_key_expires_at IS NOT NULL"); n != 0 {
 		t.Fatalf("%s: the retried task still stores the key that its cancel freed", name)
 	}
+
 	e.die(t, first.ID)
 	retry(t, e, first.ID)
 	e.wantState(t, first.ID, taskmill.StateAvailable)
 	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != first.ID {
 		t.Fatalf("%s: after the retry of the dead task: got %+v, want a duplicate of task %d", name, dup, first.ID)
 	}
+
 	if err := e.client.Delete(t.Context(), first.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -461,6 +473,7 @@ func TestRetryIsRefusedWhileAnotherTaskHoldsTheDedupeKey(t *testing.T) {
 	ctx := t.Context()
 	opts := &taskmill.EnqueueOptions{DedupeKey: "remind-42", GroupKey: "customer-7"}
 	first := e.keyed(t, opts)
+
 	// One transaction replaces the task, as the deduplication guide shows.
 	tx := e.begin(t)
 	if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), first.ID); err != nil {
@@ -481,6 +494,7 @@ func TestRetryIsRefusedWhileAnotherTaskHoldsTheDedupeKey(t *testing.T) {
 	if n := e.count(t, "SELECT tasks FROM {s}.groups WHERE group_key = 'customer-7'"); n != 1 {
 		t.Fatalf("the group counts %d tasks after the refused retry, want 1", n)
 	}
+
 	// A dead task keeps its key until the window ends, so it still holds it.
 	e.die(t, second.ID)
 	e.wantRefused(t, "while the new task is dead", first.ID, second.ID)
@@ -509,10 +523,12 @@ func TestRetryAfterTheWindowTakesNoKey(t *testing.T) {
 	opts := &taskmill.EnqueueOptions{DedupeKey: "report-monday"}
 	first := e.keyed(t, opts)
 	e.cancel(t, first.ID)
+
 	second := e.keyed(t, opts)
 	if second.Duplicate {
 		t.Fatalf("the canceled task still holds its key: %+v", second)
 	}
+
 	// The first task's window ends.
 	e.exec(t, "UPDATE {s}.tasks SET freed_key_expires_at = now() - interval '1 second' WHERE id = $1", first.ID)
 
@@ -537,22 +553,26 @@ func TestRetryTakesItsKeyBeforeItsGroup(t *testing.T) {
 	e := newTracedEnv(t, sent)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+
 	id := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "k", GroupKey: "g"}).ID
 	e.cancel(t, id)
 	tx := e.begin(t)
 	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{DedupeKey: "k"}); err != nil {
 		t.Fatal(err)
 	}
+
 	sent.reset()
 	retried := make(chan error, 1)
 	go func() { retried <- e.client.Retry(ctx, id) }()
 	e.waitBlocked(t, "INSERT INTO {s}.dedupe_keys")
+
 	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
 		t.Fatalf("enqueue into the group while the retry waits for the key: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	// The transaction's task holds the key now.
 	if err := recv(t, retried, "the retry"); !errors.Is(err, taskmill.ErrConflict) {
 		t.Fatalf("retry: got %v, want ErrConflict", err)
@@ -573,6 +593,7 @@ func TestRetryIgnoresAStoredKeyThatIsNotOne(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	var single, many []int64
 	for _, stored := range []string{
 		`freed_key = '\x01', freed_key_expires_at = 'infinity'`,
@@ -588,11 +609,13 @@ func TestRetryIgnoresAStoredKeyThatIsNotOne(t *testing.T) {
 			*ids = append(*ids, id)
 		}
 	}
+
 	for _, id := range single {
 		if err := e.client.Retry(ctx, id); err != nil {
 			t.Fatalf("retry of task %d: %v", id, err)
 		}
 	}
+
 	finished := &taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled, taskmill.StateDead}}
 	res, err := e.client.RetryMatching(ctx, bulk(finished))
 	if err != nil || res.Changed != int64(len(many)) || res.Conflicts != 0 {
@@ -601,6 +624,7 @@ func TestRetryIgnoresAStoredKeyThatIsNotOne(t *testing.T) {
 	if n := e.count(t, "SELECT count(*) FROM {s}.dedupe_keys"); n != 0 {
 		t.Fatalf("%d dedupe keys were claimed from values that are no keys of canceled tasks", n)
 	}
+
 	// A key whose window never ends is a key: the task takes it back.
 	forever := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "forever"})
 	e.exec(t, "UPDATE {s}.dedupe_keys SET expires_at = 'infinity'")
@@ -611,6 +635,7 @@ func TestRetryIgnoresAStoredKeyThatIsNotOne(t *testing.T) {
 	if dup := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "forever"}); !dup.Duplicate || dup.ID != forever.ID {
 		t.Fatalf("after the retry: got %+v, want a duplicate of task %d", dup, forever.ID)
 	}
+
 	// And a retry that it refuses says so without the end of its window.
 	e.cancel(t, forever.ID)
 	second := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "forever"})
@@ -630,6 +655,7 @@ func TestRetryIsRefusedByTheKeyOfATaskThatIsGone(t *testing.T) {
 	first := e.keyed(t, opts)
 	e.cancel(t, first.ID)
 	holder := e.keyed(t, opts)
+
 	// The holder completes, and nothing of it is kept but its key.
 	e.exec(t, "DELETE FROM {s}.tasks WHERE id = $1", holder.ID)
 
@@ -683,6 +709,7 @@ func TestRetryAndDeleteSeeTheLatestGroupHalt(t *testing.T) {
 				}
 			}()
 			e.waitBlocked(t, "{s}.tasks")
+
 			if err := tx.Commit(t.Context()); err != nil {
 				t.Fatal(err)
 			}
@@ -765,6 +792,7 @@ func TestCancelAndDeleteOfATaskRetriedMeanwhileDoNotDeadlock(t *testing.T) {
 			if err := e.client.Cancel(ctx, id); err != nil {
 				t.Fatal(err)
 			}
+
 			// A dedupe key of the task, whose lock holds the action later.
 			e.exec(t, "INSERT INTO {s}.dedupe_keys (key, task_id, expires_at) VALUES (sha256('k'), $1, now() + interval '1 hour')", id)
 
@@ -774,6 +802,7 @@ func TestCancelAndDeleteOfATaskRetriedMeanwhileDoNotDeadlock(t *testing.T) {
 			retried := make(chan error, 1)
 			go func() { retried <- e.client.Retry(ctx, id) }()
 			e.waitBlocked(t, "INSERT INTO {s}.groups")
+
 			// The action reads the task as canceled, and waits for its row.
 			keyTx := e.begin(t)
 			e.txExec(t, keyTx, "SELECT FROM {s}.dedupe_keys FOR UPDATE")
@@ -789,6 +818,7 @@ func TestCancelAndDeleteOfATaskRetriedMeanwhileDoNotDeadlock(t *testing.T) {
 			if err := recv(t, retried, "the retry"); err != nil {
 				t.Fatalf("retry: %v", err)
 			}
+
 			e.endWithASecondCancel(t, id, keyTx, acted, tt.after)
 		})
 	}
@@ -808,6 +838,7 @@ func TestCancelAndDeleteOfATaskEnqueuedMeanwhileDoNotDeadlock(t *testing.T) {
 			ctx := t.Context()
 			opts := &taskmill.EnqueueOptions{GroupKey: "g", DedupeKey: "k"}
 			e.enqueue(t, sendEmail{To: "head"}, &taskmill.EnqueueOptions{GroupKey: "g"})
+
 			// The task is enqueued behind the head, in a transaction that
 			// stays open.
 			enqueueTx := e.begin(t)
@@ -815,6 +846,7 @@ func TestCancelAndDeleteOfATaskEnqueuedMeanwhileDoNotDeadlock(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			// A lock on the table waits for that transaction. Until it is
 			// granted and released, whoever comes to lock a row of the table
 			// waits behind it, but a plain read goes through.
@@ -825,6 +857,7 @@ func TestCancelAndDeleteOfATaskEnqueuedMeanwhileDoNotDeadlock(t *testing.T) {
 				tableLocked <- err
 			}()
 			e.waitBlocked(t, "LOCK TABLE {s}.tasks")
+
 			// The action reads no such task, and waits to lock its row.
 			acted := make(chan error, 1)
 			go func() { acted <- tt.act(e.client, ctx, res.ID) }()
@@ -844,6 +877,7 @@ func TestCancelAndDeleteOfATaskEnqueuedMeanwhileDoNotDeadlock(t *testing.T) {
 			if err := tableTx.Rollback(ctx); err != nil {
 				t.Fatal(err)
 			}
+
 			e.endWithASecondCancel(t, res.ID, keyTx, acted, tt.after)
 		})
 	}
@@ -868,6 +902,7 @@ func TestDeleteOfATaskCanceledMeanwhileDoesNotDeadlockWithItsRetry(t *testing.T)
 	canceled := make(chan error, 1)
 	go func() { canceled <- e.client.Cancel(ctx, id) }()
 	e.waitBlocked(t, "DELETE FROM {s}.dedupe_keys")
+
 	// The Delete waits for the group's row, and the Retry for the task's.
 	deleted := make(chan error, 1)
 	go func() { deleted <- e.client.Delete(ctx, id) }()
@@ -891,6 +926,7 @@ func TestDeleteOfATaskCanceledMeanwhileDoesNotDeadlockWithItsRetry(t *testing.T)
 			t.Fatalf("%s: %v", what, err)
 		}
 	}
+
 	if _, err := e.client.Get(ctx, id); !errors.Is(err, taskmill.ErrNotFound) {
 		t.Fatalf("the deleted task: got %v, want ErrNotFound", err)
 	}
@@ -899,6 +935,7 @@ func TestDeleteOfATaskCanceledMeanwhileDoesNotDeadlockWithItsRetry(t *testing.T)
 func TestOperationsOnCompletedTasks(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	stop := runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
 	id := e.enqueue(t, sendEmail{}, nil)
 	e.waitState(t, id, taskmill.StateCompleted)
@@ -910,6 +947,7 @@ func TestOperationsOnCompletedTasks(t *testing.T) {
 	if err := e.client.Retry(t.Context(), id); !errors.Is(err, taskmill.ErrInvalidState) {
 		t.Fatalf("retry: got %v, want ErrInvalidState", err)
 	}
+
 	if err := e.client.Delete(t.Context(), id); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -926,12 +964,14 @@ func TestTxMethodsWithDatabaseSQL(t *testing.T) {
 	group := &taskmill.EnqueueOptions{GroupKey: "g"}
 	head := e.enqueue(t, sendEmail{To: "1"}, group)
 	next := e.enqueue(t, sendEmail{To: "2"}, group)
+
 	inTx := func(fn func(tx *sql.Tx) error) {
 		t.Helper()
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if err := fn(tx); err != nil {
 			_ = tx.Rollback()
 			t.Fatal(err)
@@ -974,11 +1014,13 @@ func TestTxMethodsAcceptWrappedSQLTransactions(t *testing.T) {
 	e := newEnv(t)
 	db := openSQL(t)
 	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+
 	tx, err := db.BeginTx(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
 	if err := e.client.CancelTx(t.Context(), taskmill.SQL(wrappedTx{tx}), id); err != nil {
 		t.Fatal(err)
 	}
@@ -1022,10 +1064,12 @@ func TestCancelDeleteAndRetryRunAgainAfterADeadlock(t *testing.T) {
 			other := e.begin(t)
 			e.txExec(t, other, "SET LOCAL deadlock_timeout = '1min'")
 			e.txExec(t, other, "SELECT FROM {s}.groups FOR UPDATE")
+
 			// The action locks the task's row, and waits for the group's.
 			acted := make(chan error, 1)
 			go func() { acted <- tt.act(e.client, ctx, id) }()
 			e.waitBlockedCount(t, 1)
+
 			// The other transaction gets the task's row once the action's
 			// transaction has ended, after a second.
 			e.txExec(t, other, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", id)
@@ -1080,6 +1124,7 @@ func TestCancelTxSetsNoSavepoint(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	if len(statements) == 0 {
 		t.Fatal("CancelTx ran no statement on the caller's transaction")
 	}
@@ -1088,6 +1133,7 @@ func TestCancelTxSetsNoSavepoint(t *testing.T) {
 			t.Errorf("CancelTx ran %q in the caller's transaction", statement)
 		}
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1110,6 +1156,7 @@ func TestCancelWhileTheWorkerRecordsAResult(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- e.client.Cancel(t.Context(), id) }()
 	e.waitBlocked(t, "FROM {s}.tasks WHERE id = $1 AND")
+
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -1122,17 +1169,20 @@ func TestCancelWhileTheWorkerRecordsAResult(t *testing.T) {
 func TestNewClientRequiresReadCommitted(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.MaxConns = 1
 	cfg.ConnConfig.RuntimeParams["default_transaction_isolation"] = "serializable"
+
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pool.Close()
+
 	_, err = taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema})
 	if !errors.Is(err, taskmill.ErrInvalidArgument) || !strings.Contains(err.Error(), "read committed") {
 		t.Fatalf("got %v, want ErrInvalidArgument about the isolation level", err)

@@ -24,6 +24,7 @@ func benchOrder(ctx context.Context, pool *pgxpool.Pool, url string, groups int)
 	c := fresh(ctx, pool)
 	mustExec(ctx, pool, `CREATE TABLE {s}.steps (g integer NOT NULL, s integer NOT NULL, ok boolean NOT NULL,
     at timestamptz NOT NULL DEFAULT clock_timestamp())`)
+
 	// One transaction at a time, so each group's order is its enqueue order.
 	batch := make([]taskmill.EnqueueParams, 0, 1000)
 	for s := 1; s <= size; s++ {
@@ -44,6 +45,7 @@ func benchOrder(ctx context.Context, pool *pgxpool.Pool, url string, groups int)
 	for i := range workers {
 		workers[i] = spawn(ctx, url, spec)
 	}
+
 	kills := 0
 	begin := time.Now()
 	// Done when every task completed, or waits behind a dead head.
@@ -57,6 +59,7 @@ func benchOrder(ctx context.Context, pool *pgxpool.Pool, url string, groups int)
 			fail(errors.New("order run did not finish in 15 minutes"))
 		}
 	}
+
 	took := time.Since(begin)
 	for _, w := range workers {
 		w.stop()
@@ -67,6 +70,7 @@ CREATE TABLE {s}.done AS SELECT (payload->>'g')::int AS g, (payload->>'s')::int 
 CREATE TABLE {s}.dead AS SELECT (payload->>'g')::int AS g, (payload->>'s')::int AS s, id FROM {s}.tasks WHERE state = 'dead';
 CREATE INDEX ON {s}.done (g, s);
 CREATE INDEX ON {s}.steps (g, s)`)
+
 	// A call that started before the task ahead of it completed, or after
 	// its own task completed.
 	early := scalar(ctx, pool, `
@@ -74,6 +78,7 @@ SELECT count(*) FROM {s}.steps x LEFT JOIN {s}.done p ON p.g = x.g AND p.s = x.s
 WHERE x.s > 1 AND (p.at IS NULL OR x.at <= p.at)`)
 	again := scalar(ctx, pool, `SELECT count(*) FROM {s}.steps x JOIN {s}.done d USING (g, s) WHERE x.at >= d.at`)
 	pastDead := scalar(ctx, pool, `SELECT count(*) FROM {s}.steps x JOIN {s}.dead d ON d.g = x.g AND x.s > d.s`)
+
 	// Every task, each one checked, completed once, is a dead head that
 	// halts its group, or waits behind one.
 	done := scalar(ctx, pool, "SELECT count(*) FROM {s}.done")
@@ -82,6 +87,7 @@ WHERE x.s > 1 AND (p.at IS NULL OR x.at <= p.at)`)
 	waiting := scalar(ctx, pool, `
 SELECT count(*) FROM {s}.tasks t JOIN {s}.dead d ON d.g = (t.payload->>'g')::int AND d.s < (t.payload->>'s')::int
 WHERE t.state = 'pending'`)
+
 	// The distinct tasks that are accounted for, each by its group and
 	// place: completed, a dead head that halts its group, or waiting behind
 	// one. Any task missing from them is lost.
@@ -94,6 +100,7 @@ SELECT count(*) FROM (
     SELECT w.g, w.s FROM (SELECT (payload->>'g')::int AS g, (payload->>'s')::int AS s FROM {s}.tasks WHERE state = 'pending') w
     JOIN {s}.dead d ON d.g = w.g AND d.s < w.s
 ) a WHERE g BETWEEN 0 AND $1 - 1 AND s BETWEEN 1 AND $2`, groups, size)
+
 	broken := brokenGroups(ctx, pool)
 	failed := scalar(ctx, pool, "SELECT count(*) FROM {s}.steps WHERE NOT ok")
 
@@ -104,6 +111,7 @@ SELECT count(*) FROM (
 		"%s groups halted at a dead head. It took %s.\n\n",
 		commas(int64(groups*size)), commas(int64(groups)), size, procs, concurrency, stepFailures, commas(failed),
 		kills, commas(halted), took.Round(time.Second))
+
 	fmt.Println("| ID | Check | Result | |")
 	fmt.Println("|---|---|---|---|")
 	fmt.Printf("| F4 | No handler sees a task before the one ahead of it completes, or after its own | "+
@@ -122,6 +130,7 @@ func benchDedupe(ctx context.Context, pool *pgxpool.Pool, url string, keys int) 
 	const procs = 20
 	fresh(ctx, pool)
 	mustExec(ctx, pool, "CREATE TABLE {s}.results (key integer NOT NULL, task_id bigint NOT NULL, duplicate boolean NOT NULL)")
+
 	begin := time.Now()
 	producers := make([]*proc, procs)
 	for i := range producers {
@@ -137,6 +146,7 @@ func benchDedupe(ctx context.Context, pool *pgxpool.Pool, url string, keys int) 
 	enqueues := scalar(ctx, pool, "SELECT count(*) FROM {s}.results")
 	admitted := scalar(ctx, pool, "SELECT count(DISTINCT key) FROM {s}.results WHERE NOT duplicate")
 	created := scalar(ctx, pool, "SELECT count(*) FROM {s}.results WHERE NOT duplicate")
+
 	// Every result, duplicate or not, names the one task of its key.
 	wrong := scalar(ctx, pool, `
 SELECT count(*) FROM {s}.results r LEFT JOIN {s}.tasks t ON (t.payload->>'key')::int = r.key
@@ -147,6 +157,7 @@ WHERE t.id IS DISTINCT FROM r.task_id`)
 	fmt.Println()
 	fmt.Printf("%d producer processes enqueued %s tasks with %s dedupe keys at once, each key 10 times, "+
 		"in batches of 100, in %s.\n\n", procs, commas(enqueues), commas(int64(keys)), took.Round(time.Millisecond))
+
 	fmt.Println("| ID | Check | Result | |")
 	fmt.Println("|---|---|---|---|")
 	fmt.Printf("| F5 | Exactly one task per key | %s tasks, %s distinct keys | %s |\n",
@@ -188,10 +199,12 @@ func benchRestart(ctx context.Context, pool *pgxpool.Pool, url, container string
 		fmt.Println()
 		return
 	}
+
 	const procs, concurrency = 4, 16
 	c := fresh(ctx, pool)
 	mustExec(ctx, pool, "CREATE TABLE {s}.executions (n integer NOT NULL)")
 	enqueueTracked(ctx, c, n)
+
 	workers := make([]*proc, procs)
 	for i := range workers {
 		workers[i] = spawn(ctx, url, child{Role: "worker", Concurrency: concurrency})
@@ -202,6 +215,7 @@ func benchRestart(ctx context.Context, pool *pgxpool.Pool, url, container string
 			fail(fmt.Errorf("docker %v: %w: %s", args, err, out))
 		}
 	}
+
 	// The crashed database stays down for longer than the maintainer's lease.
 	restarts := []struct {
 		name    string
@@ -214,6 +228,7 @@ func benchRestart(ctx context.Context, pool *pgxpool.Pool, url, container string
 			docker("start", container)
 		}},
 	}
+
 	var rows []string
 	resumedInTime := true
 	for i, r := range restarts {
@@ -222,6 +237,7 @@ func benchRestart(ctx context.Context, pool *pgxpool.Pool, url, container string
 		r.restart()
 		waitFor(ctx, time.Minute, "the database", func() bool { return pool.Ping(ctx) == nil })
 		down := time.Since(begin)
+
 		// Workers resumed once a task that they fetched after the restart
 		// completed; completions of earlier attempts do not count.
 		var back time.Time
@@ -233,10 +249,12 @@ func benchRestart(ctx context.Context, pool *pgxpool.Pool, url, container string
 			err := pool.QueryRow(ctx, q("SELECT EXISTS (SELECT FROM {s}.task_history WHERE attempted_at > $1)"), back).Scan(&fetched)
 			return err == nil && fetched
 		})
+
 		resumedInTime = resumedInTime && resumed <= 10*time.Second
 		rows = append(rows, fmt.Sprintf("%s: back after %s, workers resumed %s later",
 			r.name, down.Round(100*time.Millisecond), resumed.Round(10*time.Millisecond)))
 	}
+
 	waitFor(ctx, 5*time.Minute, "every task", func() bool { return history(ctx, pool) >= n })
 	for _, w := range workers {
 		w.stop()
@@ -244,6 +262,7 @@ func benchRestart(ctx context.Context, pool *pgxpool.Pool, url, container string
 
 	fmt.Printf("%s tasks, %d worker processes with concurrency %d. PostgreSQL restarted twice: %s; %s.\n\n",
 		commas(int64(n)), procs, concurrency, rows[0], rows[1])
+
 	fmt.Println("| ID | Check | Result | |")
 	fmt.Println("|---|---|---|---|")
 	fmt.Printf("| F6 | Workers resume within 10 s of the database | %s; %s | %s |\n", rows[0], rows[1], verdict(resumedInTime))
@@ -263,6 +282,7 @@ func benchPartition(ctx context.Context, pool *pgxpool.Pool, dbURL string) {
 	mustExec(ctx, pool, `CREATE TABLE {s}.holds (n integer NOT NULL, worker text NOT NULL, attempt integer NOT NULL,
     phase text NOT NULL, at timestamptz NOT NULL DEFAULT clock_timestamp())`)
 	stopMaintainer := maintain(ctx, c) // rescues the cut worker's tasks at once
+
 	u, err := url.Parse(dbURL)
 	if err != nil {
 		fail(err)
@@ -276,6 +296,7 @@ func benchPartition(ctx context.Context, pool *pgxpool.Pool, dbURL string) {
 	cutSpec, otherSpec := spec, spec
 	cutSpec.Name, otherSpec.Name = "cut", "other"
 	cut := spawn(ctx, viaProxy.String(), cutSpec)
+
 	batch := make([]taskmill.EnqueueParams, holds)
 	for i := range batch {
 		batch[i] = taskmill.EnqueueParams{Args: hold{N: i, Wave: 1 + i%2}, Options: &taskmill.EnqueueOptions{MaxAttempts: 5}}
@@ -283,6 +304,7 @@ func benchPartition(ctx context.Context, pool *pgxpool.Pool, dbURL string) {
 	if _, err := c.EnqueueMany(ctx, batch); err != nil {
 		fail(err)
 	}
+
 	started := func(worker string) func() bool {
 		return func() bool {
 			return scalar(ctx, pool, "SELECT count(*) FROM {s}.holds WHERE worker = $1 AND phase = 'start'", worker) == holds
@@ -294,6 +316,7 @@ func benchPartition(ctx context.Context, pool *pgxpool.Pool, dbURL string) {
 	cut.release(1)
 	other := spawn(ctx, dbURL, otherSpec)
 	takeover := waitFor(ctx, time.Minute, "another worker to take over", started("other"))
+
 	p.heal()
 	time.Sleep(2 * lease) // the late results arrive, and the cut worker learns that it lost its leases
 	cut.release(2)
@@ -325,6 +348,7 @@ SELECT count(*) FROM {s}.task_history h WHERE h.kind = 'bench.hold' AND NOT EXIS
 		"all traffic. Another worker took the tasks over %s after the cut. The cut lasted until then; "+
 		"%s bytes that the cut worker sent during it, its results and check-ins, reached the database after it.\n\n",
 		holds, lease, takeover.Round(100*time.Millisecond), commas(p.late.Load()))
+
 	fmt.Println("| ID | Check | Result | |")
 	fmt.Println("|---|---|---|---|")
 	fmt.Printf("| F7 | The cut worker's late results are rejected | %d of %d tasks completed by a stale attempt | %s |\n",

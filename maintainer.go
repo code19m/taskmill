@@ -110,6 +110,7 @@ func (m *maintainer) cycle(ctx context.Context) {
 	if !m.elect(ctx) {
 		return
 	}
+
 	m.rescue(ctx)
 	m.runSchedules(ctx)
 }
@@ -122,6 +123,7 @@ func (m *maintainer) wakeLoop(ctx context.Context) {
 	defer tick.Stop()
 	every := max(1, int(m.w.timing.heartbeat/m.w.timing.maintainer))
 	ticks := every // since the last heartbeat went out
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -131,6 +133,7 @@ func (m *maintainer) wakeLoop(ctx context.Context) {
 		case <-tick.C:
 			ticks++
 		}
+
 		if !m.leader.Load() {
 			continue
 		}
@@ -145,12 +148,14 @@ func (m *maintainer) wakeLoop(ctx context.Context) {
 func (m *maintainer) promoteLoop(ctx context.Context) {
 	wait := time.NewTimer(0)
 	defer wait.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-wait.C:
 		}
+
 		next := m.w.timing.maintainer
 		if m.leader.Load() {
 			m.promote(ctx)
@@ -169,12 +174,14 @@ func (m *maintainer) every(ctx context.Context, interval time.Duration, work fun
 	tick := time.NewTicker(m.w.timing.maintainer)
 	defer tick.Stop()
 	var last time.Time
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
 		}
+
 		if m.leader.Load() && time.Since(last) >= interval {
 			work(ctx)
 			last = time.Now()
@@ -220,8 +227,10 @@ func (m *maintainer) elect(ctx context.Context) bool {
 	if ctx.Err() != nil {
 		return false
 	}
+
 	electCtx, cancel := outlive(ctx, m.w.timing.leaderLease, cleanupTimeout)
 	defer cancel()
+
 	var id string
 	err := m.c.pool.QueryRow(electCtx, m.c.sql.electMaintainer, m.w.id, m.w.timing.leaderLease.Microseconds()).Scan(&id)
 	if err != nil && ctx.Err() != nil {
@@ -235,6 +244,7 @@ func (m *maintainer) elect(ctx context.Context) bool {
 	}
 	m.electionFailures.observe(ctx, err)
 	was := m.leader.Load() // only the main loop changes it
+
 	if leader && !was {
 		// A term starts without the incidents of the last one, whose work
 		// may have failed after it ended.
@@ -242,6 +252,7 @@ func (m *maintainer) elect(ctx context.Context) bool {
 			f.reset()
 		}
 	}
+
 	m.leader.Store(leader)
 	switch {
 	case leader && !was:
@@ -264,6 +275,7 @@ func (m *maintainer) elect(ctx context.Context) bool {
 // nothing and notifies nobody.
 func (m *maintainer) resign(ctx context.Context) {
 	led := m.leader.Swap(false)
+
 	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()
 	if _, err := m.c.pool.Exec(ctx, m.c.sql.resignMaintainer, m.w.id, m.c.schema); err != nil && led {
@@ -334,6 +346,7 @@ func (m *maintainer) rescueBatch(ctx context.Context) (batch []rescuedTask, err 
 		if batch, err = collectRescued(r); err != nil {
 			return err
 		}
+
 		var left []groupLeave
 		for _, x := range batch {
 			switch s := State(x.state); {
@@ -357,6 +370,7 @@ func (m *maintainer) rescued(ctx context.Context, batch []rescuedTask) {
 		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "rescued tasks whose workers lost their leases",
 			slog.Int(logKeyTasks, len(batch)))
 	}
+
 	for _, x := range batch {
 		m.w.tally.add(x.queue, 0, 1)
 		if State(x.state) == StateDead {
@@ -481,6 +495,7 @@ func (m *maintainer) recountStats(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("count tasks: %w", err)
 		}
+
 		if err := stats.store(ctx, tx, m.c.sql); err != nil {
 			return fmt.Errorf("store counts: %w", err)
 		}
@@ -505,6 +520,7 @@ type statsSnapshot struct {
 func readStats(ctx context.Context, tx pgx.Tx, sql string) (*statsSnapshot, error) {
 	var stats statsSnapshot
 	var dueTotal int64 // scheduled and retryable tasks counted, in all queues
+
 	// Each cap is read one past, so that a count that ends exactly at its cap
 	// is not taken for one with more tasks left.
 	r, err := tx.Query(ctx, sql, statsQueueCap+1, statsDueCap+1, statsRetryCap)
@@ -512,6 +528,7 @@ func readStats(ctx context.Context, tx pgx.Tx, sql string) (*statsSnapshot, erro
 		return nil, err
 	}
 	defer r.Close()
+
 	for r.Next() {
 		var state, queue string
 		var n int64
@@ -521,6 +538,7 @@ func readStats(ctx context.Context, tx pgx.Tx, sql string) (*statsSnapshot, erro
 		if err := r.Scan(&state, &queue, &n, &due, &h, &f); err != nil {
 			return nil, err
 		}
+
 		if s := State(state); s == StateScheduled || s == StateRetryable {
 			dueTotal += n
 		}
@@ -531,6 +549,7 @@ func readStats(ctx context.Context, tx pgx.Tx, sql string) (*statsSnapshot, erro
 	if err := r.Err(); err != nil {
 		return nil, err
 	}
+
 	// The scheduled and retryable counts share one cap: once it is passed,
 	// any queue may have more of them than counted, even none counted.
 	stats.dueCapped = dueTotal > statsDueCap
@@ -552,6 +571,7 @@ func (s *statsSnapshot) store(ctx context.Context, tx pgx.Tx, sql *statements) e
 	if _, err := tx.Exec(ctx, sql.lockStats); err != nil {
 		return err
 	}
+
 	if _, err := tx.Exec(ctx, sql.clearStats); err != nil {
 		return err
 	}
@@ -568,6 +588,7 @@ func (s *statsSnapshot) store(ctx context.Context, tx pgx.Tx, sql *statements) e
 	if err != nil {
 		return err
 	}
+
 	_, err = tx.Exec(ctx, sql.storeActivity)
 	return err
 }

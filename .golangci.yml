@@ -50,6 +50,7 @@ linters:
     - unconvert
     - usestdlibvars
     - wastedassign
+    - whitespace # no blank line right after { or right before }
 
     # Documentation and comments.
     - dupword

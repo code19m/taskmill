@@ -23,6 +23,7 @@ import (
 
 func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	t.Parallel()
+
 	// The worker reaches the database through proxies, which the test cuts:
 	// one for its pool, and one for its notifications, which may need a
 	// direct connection of their own.
@@ -32,6 +33,7 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	listen.Host, listen.Port, listen.Fallbacks = direct.host, direct.port, nil
+
 	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
@@ -57,14 +59,17 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 		LeaseDuration: 600 * time.Millisecond,
 		ListenConfig:  listen,
 	})
+
 	timing := testTiming
 	timing.FailureReport = time.Second
 	taskmill.SetTiming(w, timing)
 	startWorker(t, w)
+
 	// If the test fails first, the third task still ends before the worker
 	// stops: cleanups run last first.
 	sawRenewal := sync.OnceFunc(func() { close(renewed) })
 	t.Cleanup(sawRenewal)
+
 	e.waitListening(t)
 	ids := []int64{
 		e.enqueue(t, sendEmail{UserID: 1}, nil), e.enqueue(t, sendEmail{UserID: 2}, nil), e.enqueue(t, sendEmail{UserID: 3}, nil),
@@ -92,6 +97,7 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 		return failed(ops, repeated...) && escalated(ops["fetch tasks"], 25) &&
 			logs.count(gaveUp[0]) > 0 && logs.count(gaveUp[1]) > 0
 	})
+
 	db.cut(false)
 	direct.cut(false)
 
@@ -100,15 +106,18 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	waitFor(t, "the lease renewals to recover", func() bool {
 		return recovered(operationLines(logs.all()), "renew leases")
 	})
+
 	sawRenewal()
 	for _, id := range ids {
 		e.waitState(t, id, taskmill.StateCompleted)
 	}
+
 	var ops map[string][]slog.Record
 	waitFor(t, "the worker's operations to recover", func() bool {
 		ops = operationLines(logs.all())
 		return recovered(ops, repeated...)
 	})
+
 	for _, msg := range gaveUp {
 		if n := logs.count(msg); n != 1 {
 			t.Errorf("%q was logged %d times, want once", msg, n)
@@ -121,6 +130,7 @@ func TestDatabaseOutageLogsAFewLines(t *testing.T) {
 	for op, lines := range ops {
 		checkIncident(t, op, lines, limit)
 	}
+
 	for _, r := range logs.all() {
 		if line := recordText(r); strings.Contains(line, testdb.URL(t)) || strings.Contains(line, "password") {
 			t.Errorf("a log line shows the connection string: %s", line)
@@ -138,6 +148,7 @@ func outageTasks(started chan<- struct{}, release, renewed <-chan struct{}) *tas
 		if task.Attempt == 1 {
 			started <- struct{}{}
 		}
+
 		switch {
 		case task.Args.UserID == 3:
 			<-renewed
@@ -158,6 +169,7 @@ func TestMaintainerWorkStartsCleanInANewTerm(t *testing.T) {
 	w := newWorker(t, e.withLogger(t, slog.New(logs)), &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
 		{Name: "ledger", Cron: "@hourly", Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
 	}})
+
 	// A run gives up on a held group after 50 ms, not after a second. The
 	// maintainer's lease is an hour, as the other worker's is below: a
 	// worker takes a lease that ends later than two of its own for none.
@@ -184,6 +196,7 @@ func TestMaintainerWorkStartsCleanInANewTerm(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "the schedule run to recover", func() bool { return failed() == 3 })
+
 	want := []string{"operation failed", "operation failed", "operation recovered"}
 	if got := operationLines(logs.all())["run schedules"]; !slices.EqualFunc(got, want, func(r slog.Record, m string) bool {
 		return r.Message == m
@@ -198,6 +211,7 @@ func TestLogsLeaveOutPayloadsAndMetadata(t *testing.T) {
 	const metaSecret = "s3cret-metadata"
 	var out syncBuffer
 	e := newEnv(t).withLogger(t, slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 			switch task.Args.UserID {
@@ -214,11 +228,13 @@ func TestLogsLeaveOutPayloadsAndMetadata(t *testing.T) {
 		}, &taskmill.HandlerOptions{Retry: fastRetry}),
 		Queues: defaultQueue(3),
 	})
+
 	opts := &taskmill.EnqueueOptions{Metadata: map[string]string{"token": metaSecret}, MaxAttempts: 2}
 	retried := e.enqueue(t, sendEmail{To: secret, UserID: 1}, opts)
 	dead := e.enqueue(t, sendEmail{To: secret, UserID: 2}, opts)
 	panicked := e.enqueue(t, sendEmail{To: secret, UserID: 3}, opts)
 	e.enqueue(t, report{Name: secret}, &taskmill.EnqueueOptions{Queue: taskmill.DefaultQueue, Metadata: opts.Metadata})
+
 	e.waitState(t, retried, taskmill.StateCompleted)
 	e.waitState(t, dead, taskmill.StateDead)
 	e.waitState(t, panicked, taskmill.StateDead)
@@ -259,6 +275,7 @@ func checkIncident(t *testing.T, op string, lines []slog.Record, limit int) {
 			failing++
 		}
 	}
+
 	if failing > limit {
 		t.Errorf("%s logged %d failure lines, want at most %d", op, failing, limit)
 	}
@@ -365,6 +382,7 @@ func newProxy(t *testing.T, url string) *proxy {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -377,12 +395,14 @@ func newProxy(t *testing.T, url string) *proxy {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	p := &proxy{
 		host:   host,
 		port:   uint16(portNum),
 		target: net.JoinHostPort(cfg.ConnConfig.Host, strconv.Itoa(int(cfg.ConnConfig.Port))),
 		conns:  map[net.Conn]bool{},
 	}
+
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -392,6 +412,7 @@ func newProxy(t *testing.T, url string) *proxy {
 			go p.forward(c)
 		}
 	}()
+
 	// Cleanups run last first: the database stays reachable until the
 	// pool closes.
 	t.Cleanup(func() {
@@ -406,6 +427,7 @@ func (p *proxy) cut(down bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.down = down
+
 	if down {
 		for c := range p.conns {
 			_ = c.Close()
@@ -437,6 +459,7 @@ func (p *proxy) forward(client net.Conn) {
 	p.pipe(client, server)
 	_ = client.Close()
 	<-done
+
 	p.mu.Lock()
 	delete(p.conns, client)
 	delete(p.conns, server)
@@ -452,6 +475,7 @@ func (p *proxy) pipe(dst, src net.Conn) {
 		if err != nil {
 			return
 		}
+
 		if p.frozen.Load() {
 			continue
 		}

@@ -17,6 +17,7 @@ func Version() string {
 	if !ok {
 		return "unknown"
 	}
+
 	for _, m := range append([]*debug.Module{&info.Main}, info.Deps...) {
 		if m.Path == module {
 			return m.Version

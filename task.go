@@ -276,6 +276,7 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	if err != nil {
 		return err
 	}
+
 	a := t.attempt
 	done, err := a.client.complete(ctx, a.logger, q, []completion{{id: a.id, token: a.token, discard: a.discard}})
 	if err != nil {
@@ -284,6 +285,7 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	if len(done) == 0 {
 		return fmt.Errorf("%w: task %d", ErrLeaseLost, a.id)
 	}
+
 	a.completedInTx.Store(true)
 	return nil
 }
@@ -302,6 +304,7 @@ func scanTaskInfo(r rows, extra ...any) (*TaskInfo, error) {
 		metadata, payload, errs                   []byte
 		createdAt, runAt, attemptedAt, finishedAt pgtype.Timestamptz
 	)
+
 	dest := []any{
 		&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
 		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt, &finishedAt,
@@ -309,6 +312,7 @@ func scanTaskInfo(r rows, extra ...any) (*TaskInfo, error) {
 	if err := r.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
 	}
+
 	info.State = State(state)
 	info.Priority = Priority(priority)
 	info.Attempt = int(attempt)
@@ -343,6 +347,7 @@ func decodeErrors(errs []byte) []AttemptError {
 	if len(errs) == 0 || string(errs) == "[]" {
 		return nil
 	}
+
 	var stored []storedError
 	if json.Unmarshal(errs, &stored) != nil {
 		stored = nil // it holds a zero entry for each one that did not decode
@@ -355,6 +360,7 @@ func decodeErrors(errs []byte) []AttemptError {
 			}
 		}
 	}
+
 	if len(stored) == 0 {
 		return nil
 	}

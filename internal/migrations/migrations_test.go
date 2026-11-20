@@ -11,6 +11,7 @@ func TestAllRendersEveryMigrationInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(all) != Latest() || len(all) == 0 {
 		t.Fatalf("got %d migrations, Latest says %d", len(all), Latest())
 	}
@@ -35,6 +36,7 @@ func TestMigrationsAfterTheFirstSetALockTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, m := range all[1:] {
 		first := ""
 		for line := range strings.Lines(m.SQL) {
@@ -43,6 +45,7 @@ func TestMigrationsAfterTheFirstSetALockTimeout(t *testing.T) {
 				break
 			}
 		}
+
 		if first != "SET LOCAL lock_timeout = '5s';" {
 			t.Errorf("migration %04d_%s starts with %q, want a lock timeout of 5 seconds before any other statement",
 				m.Version, m.Name, first)
@@ -64,6 +67,7 @@ func TestMigrationsLockATableBeforeTheyChangeItsRowsAndAlterIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, m := range all[1:] {
 		locked := make(map[string]bool)  // tables that the migration holds in ACCESS EXCLUSIVE mode
 		changed := make(map[string]bool) // tables whose rows it changed without that lock
@@ -92,6 +96,7 @@ func statements(sql string) [][]string {
 			code.WriteString(line)
 		}
 	}
+
 	var out [][]string
 	for stmt := range strings.SplitSeq(code.String(), ";") {
 		if words := strings.Fields(stmt); len(words) > 0 {
@@ -118,6 +123,7 @@ func TestParseName(t *testing.T) {
 		{"abcd_name.sql", 0, "", false},
 		{"0001_initial.txt", 0, "", false},
 	}
+
 	for _, tt := range tests {
 		version, name, ok := parseName(tt.file)
 		if version != tt.version || name != tt.name || ok != tt.ok {

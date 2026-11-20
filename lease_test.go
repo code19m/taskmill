@@ -26,6 +26,7 @@ import (
 func longLease(t *testing.T, e *env) string {
 	t.Helper()
 	runWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 10 * time.Minute, NoMaintainer: true})
+
 	var id string
 	waitFor(t, "the worker to register", func() bool {
 		workers, err := e.client.Workers(t.Context())
@@ -59,6 +60,7 @@ func TestWorkerIsStaleAfterItsOwnLease(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	long, old := longLease(t, e), e.oldWorker(t)
+
 	for _, tt := range []struct {
 		id, ago string
 		stale   bool
@@ -73,6 +75,7 @@ func TestWorkerIsStaleAfterItsOwnLease(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		for _, w := range workers {
 			if w.ID == tt.id && w.Stale != tt.stale {
 				t.Errorf("the worker %s, silent for %s: stale is %v, want %v", tt.id, tt.ago, w.Stale, tt.stale)
@@ -95,6 +98,7 @@ func TestMaintainerRemovesAWorkerByItsOwnLease(t *testing.T) {
 	e.silent(t, long, "7 minutes")
 	e.silent(t, old, "7 minutes")
 	taskmill.RunRetention(t.Context(), maintainer)
+
 	if !listed(long) {
 		t.Fatal("the maintainer removed a worker that was silent for less than its lease")
 	}
@@ -125,6 +129,7 @@ func TestWorkerWithTheLongestLeaseDoesNotFailTheOthers(t *testing.T) {
 	if err != nil || len(workers) != 2 {
 		t.Fatalf("list the workers: %d of 2, %v", len(workers), err)
 	}
+
 	for _, w := range workers {
 		if w.Stale != (w.ID == old) {
 			t.Errorf("the worker %s, silent for 7 minutes: stale is %v", w.ID, w.Stale)
@@ -141,6 +146,7 @@ func TestCheckInsKeepLongTasksLeased(t *testing.T) {
 	t.Parallel()
 	sent := &statementLog{}
 	e := newTracedEnv(t, sent)
+
 	var runs atomic.Int32
 	started, release := make(chan struct{}, 2), make(chan struct{})
 	runWorker(t, e, &taskmill.WorkerConfig{
@@ -161,15 +167,18 @@ func TestCheckInsKeepLongTasksLeased(t *testing.T) {
 	// maintainer has then looked twice for leases to rescue.
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "the task to start")
+
 	var ends time.Time
 	if err := e.pool.QueryRow(t.Context(), replaceSchema("SELECT lease_expires_at FROM {s}.tasks WHERE id = $1", e.schema), id).Scan(&ends); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "the task's first lease to end", func() bool { return e.count(t, "SELECT count(*) WHERE now() > $1", ends) == 1 })
+
 	sent.reset()
 	waitFor(t, "the maintainer to look for expired leases twice", func() bool {
 		return sent.count("t.lease_expires_at < now()") >= 2
 	})
+
 	close(release)
 	info := e.waitState(t, id, taskmill.StateCompleted)
 	if runs.Load() != 1 || info.Attempt != 1 {
@@ -196,6 +205,7 @@ func TestLeaseRenewalSkipsLockedTasks(t *testing.T) {
 		Queues:        defaultQueue(2),
 		LeaseDuration: lease,
 	})
+
 	locked := e.enqueue(t, sendEmail{To: "locked"}, nil)
 	other := e.enqueue(t, sendEmail{To: "other"}, nil)
 	recv(t, started, "a handler to start")
@@ -210,10 +220,12 @@ func TestLeaseRenewalSkipsLockedTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	waitFor(t, "the other task's lease to be renewed", func() bool {
 		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND lease_expires_at > $2",
 			other, lockedAt.Add(lease)) == 1
 	})
+
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -237,10 +249,12 @@ func connHolders(pool *pgxpool.Pool, started chan<- struct{}, release <-chan str
 			return err
 		}
 		defer conn.Release()
+
 		select {
 		case started <- struct{}{}:
 		default:
 		}
+
 		select {
 		case <-release:
 			return nil
@@ -255,6 +269,7 @@ func TestWorkerWarnsWhenHandlersHoldEveryPoolConnection(t *testing.T) {
 	pool := testdb.PoolSize(t, 2)
 	logs := &logRecorder{}
 	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
+
 	started, release := make(chan struct{}, 2), make(chan struct{})
 	defer close(release)
 	runWorker(t, e, &taskmill.WorkerConfig{
@@ -262,6 +277,7 @@ func TestWorkerWarnsWhenHandlersHoldEveryPoolConnection(t *testing.T) {
 		Queues:        defaultQueue(2),
 		LeaseDuration: 600 * time.Millisecond,
 	})
+
 	e.enqueue(t, sendEmail{UserID: 1}, nil)
 	e.enqueue(t, sendEmail{UserID: 2}, nil)
 	recv(t, started, "a handler to take a connection")
@@ -271,6 +287,7 @@ func TestWorkerWarnsWhenHandlersHoldEveryPoolConnection(t *testing.T) {
 	// however many renewals wait.
 	waitFor(t, "the pool warning", func() bool { return logs.count(poolWaitWarning) > 0 })
 	waitFor(t, "a lease to be lost", func() bool { return logs.count("attempt lost its lease; canceling it") > 0 })
+
 	if n := logs.count(poolWaitWarning); n != 1 {
 		t.Errorf("the pool warning was logged %d times, want once", n)
 	}
@@ -295,6 +312,7 @@ func TestWorkerDoesNotWarnWhenHandlersHaveTheirOwnPool(t *testing.T) {
 		Queues:        defaultQueue(20),
 		LeaseDuration: lease,
 	})
+
 	ids := make([]int64, 4)
 	for i := range ids {
 		ids[i] = e.enqueue(t, sendEmail{UserID: int64(i)}, nil)
@@ -311,10 +329,12 @@ func TestWorkerDoesNotWarnWhenHandlersHaveTheirOwnPool(t *testing.T) {
 		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = ANY($1) AND lease_expires_at > $2",
 			ids, now.Add(2*lease)) == len(ids)
 	})
+
 	close(release)
 	for _, id := range ids {
 		e.waitState(t, id, taskmill.StateCompleted)
 	}
+
 	for _, r := range logs.all() {
 		if r.Level >= slog.LevelWarn && strings.Contains(r.Message, "pool") {
 			t.Errorf("got %s, want no warning about the pool", recordText(r))
@@ -331,6 +351,7 @@ func TestAttemptThatLostItsLeaseIsCanceledAndDiscarded(t *testing.T) {
 			return func() {}
 		})
 	})
+
 	t.Run("row locked past the lease", func(t *testing.T) {
 		t.Parallel()
 		testLostLease(t, func(e *env, id int64) (release func()) {
@@ -361,6 +382,7 @@ func testLostLease(t *testing.T, lose func(e *env, id int64) (release func())) {
 		Queues:        defaultQueue(1),
 		LeaseDuration: 300 * time.Millisecond,
 	})
+
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "a handler to start")
 
@@ -407,6 +429,7 @@ func TestFetchingATaskAgainCancelsItsOlderAttempt(t *testing.T) {
 		LeaseDuration: time.Minute, // no check-in comes during the test
 		NoMaintainer:  true,
 	})
+
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, first, "the first attempt to start")
 
@@ -428,14 +451,17 @@ func TestHealthFollowsTheDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = db.host, db.port, nil
+
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(pool.Close)
+
 	e := newEnvWith(t, pool, nil)
 	const lease = 600 * time.Millisecond
 	w := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: lease})
+
 	if w.Health() == nil {
 		t.Fatal("a worker that does not run is healthy")
 	}
@@ -462,6 +488,7 @@ func TestHealthFollowsTheDatabase(t *testing.T) {
 func TestLeasedTasksAreFoundByID(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// The statistics see no running task, as they do after a quiet moment,
 	// while tasks_running_idx may hold the entries of many finished tasks
 	// that vacuum has not removed yet.
@@ -486,14 +513,17 @@ func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	const attempts = 2000
+
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 	           SELECT 'default', 'email.send', 'available', now(), '{}', 1 FROM generate_series(1, 50000)`)
+
 	// The running tasks were all asked to stop, as after a bulk cancel.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
 	                                 lease_expires_at, attempted_at, attempted_by, cancel_requested_at)
 	           SELECT 'default', 'email.send', 'running', now(), '{}', 1, 1, 1, now() + interval '1 minute', now(), 'w', now()
 	           FROM generate_series(1, $1)`, attempts)
 	e.exec(t, "ANALYZE {s}.tasks")
+
 	var ids []int64
 	var tokens []int32
 	running := replaceSchema("SELECT array_agg(id), array_agg(lease_token) FROM {s}.tasks WHERE state = 'running'", e.schema)
@@ -505,6 +535,7 @@ func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	// The lock reads each task twice, the renewal three times and returns
 	// it, the read of cancel requests once, and the completion reads it to
 	// lock it and to delete it, and returns it.
@@ -521,6 +552,7 @@ func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
 func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	task := func(state string, token int) int64 {
 		var lease any
 		if state == "running" {
@@ -531,12 +563,14 @@ func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 		                         VALUES ('default', 'email.send', $1, now(), '{}', 5, 1, $2, $3, now(), 'w')
 		                         RETURNING id`, state, token, lease))
 	}
+
 	owned, alsoOwned := task("running", 3), task("running", 7)
 	takenOver := task("running", 5)   // its attempt holds token 4
 	released := task("available", 2)  // its attempt holds its token, but the task no longer runs
 	swapped := task("running", 1)     // its attempt holds the token of the next task,
 	swappedBack := task("running", 2) // and that task's attempt holds this one's
 	gone := swappedBack + 1           // no such task
+
 	// Someone asked to cancel one task of each sort.
 	e.exec(t, "UPDATE {s}.tasks SET cancel_requested_at = now() WHERE id = ANY($1)",
 		[]int64{alsoOwned, takenOver, released, swapped})
@@ -547,6 +581,7 @@ func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	// The lock and the renewal return each task they find twice: as locked
 	// or renewed, and as owned. The others return it once. An attempt
 	// listed twice changes none of this. The failure, the snooze, and the
@@ -562,6 +597,7 @@ func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 			t.Errorf("%s found the tasks %v, want %v", statements[i], found[i], want)
 		}
 	}
+
 	for id, state := range map[int64]taskmill.State{
 		owned: taskmill.StateCompleted, alsoOwned: taskmill.StateCompleted,
 		takenOver: taskmill.StateRunning, released: taskmill.StateAvailable,
@@ -575,6 +611,7 @@ func TestWorkerRemovedAsStaleRegistersAgain(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	logs := &logRecorder{}
+
 	// The check-in that finds the row gone registers again within its third
 	// of the lease. If that runs out, the next check-in says so again: a
 	// third of 300 ms was too short on a busy machine.
@@ -582,13 +619,16 @@ func TestWorkerRemovedAsStaleRegistersAgain(t *testing.T) {
 		Handlers: noopHandlers(), NoMaintainer: true, LeaseDuration: time.Second,
 	})
 	e.waitListening(t)
+
 	// What the maintainer does to a worker that has not checked in for 5
 	// minutes, such as one on a machine that slept, while it kept working.
 	e.exec(t, "DELETE FROM {s}.workers")
+
 	const logged = "worker was removed as stale; registering again"
 	waitFor(t, "the worker to register again, and say so", func() bool {
 		return logs.count(logged) > 0 && e.count(t, "SELECT count(*) FROM {s}.workers") == 1
 	})
+
 	if n := logs.count(logged); n != 1 {
 		t.Fatalf("the new registration was logged %d times, want once", n)
 	}

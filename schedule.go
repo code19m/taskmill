@@ -172,6 +172,7 @@ func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 			return nil, invalidArgument("schedule %q defined twice", s.Name)
 		}
 		seen[s.Name] = true
+
 		c, err := compileSchedule(s)
 		if err != nil {
 			return nil, err
@@ -192,6 +193,7 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 			"schedule %q: Options set RunAt, DedupeKey, or DedupeWindow, which the schedule sets itself", s.Name,
 		)
 	}
+
 	if s.Location == nil {
 		s.Location = time.UTC
 	}
@@ -202,6 +204,7 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 	if err != nil {
 		return compiledSchedule{}, invalidArgument("schedule %q: %v", s.Name, err)
 	}
+
 	var opts EnqueueOptions
 	if d, ok := s.Args.(ArgsWithDefaults); ok {
 		opts = d.EnqueueDefaults()
@@ -211,6 +214,7 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 	}
 	opts.Queue = cmp.Or(opts.Queue, DefaultQueue)
 	c := compiledSchedule{Schedule: s, expr: expr, opts: opts}
+
 	// Check the task as a run enqueues it, so that a mistake fails NewWorker
 	// and not every run. A run sets its own run time and dedupe window over
 	// those of the kind's defaults, so the check sets valid ones too. And a
@@ -273,6 +277,7 @@ func (m *maintainer) enqueueDue(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load schedules: %w", err)
 	}
+
 	var errs []error
 	for i := range m.w.schedules {
 		s := &m.w.schedules[i]
@@ -299,6 +304,7 @@ func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleSta
 		return nil, err
 	}
 	defer r.Close()
+
 	states := make(map[string]*scheduleState, len(m.w.schedules))
 	for r.Next() {
 		var name string
@@ -318,6 +324,7 @@ func (m *maintainer) syncSchedule(ctx context.Context, s *compiledSchedule, st *
 	if err != nil {
 		return fmt.Errorf("encode args: %w", err)
 	}
+
 	tz := s.Location.String()
 	changed := st == nil || st.cron != s.Cron || st.timezone != tz || st.queue != s.opts.Queue ||
 		st.kind != s.Args.Kind() || !jsonEqual(st.payload, payload)
@@ -326,6 +333,7 @@ func (m *maintainer) syncSchedule(ctx context.Context, s *compiledSchedule, st *
 		if err != nil {
 			return err
 		}
+
 		resetNext := st == nil || st.cron != s.Cron || st.timezone != tz
 		_, err = m.c.pool.Exec(ctx, m.c.sql.upsertSchedule,
 			s.Name,          // $1
@@ -343,6 +351,7 @@ func (m *maintainer) syncSchedule(ctx context.Context, s *compiledSchedule, st *
 		// Continue to the due run: a definition that differs in every pass,
 		// such as args that encode the time, must not keep it from running.
 	}
+
 	if st.paused || st.nextRunAt.After(now) {
 		return nil
 	}
@@ -355,6 +364,7 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 	// A regular run is due at a whole minute of the timetable. Any other
 	// time is the time of a request, which Client.RunSchedule stored.
 	requested := due.In(s.Location).Second() != 0 || due.Nanosecond() != 0
+
 	// The regular runs missed since a regular run collapse into it, so the
 	// next one comes after now. A requested run stands for no regular run,
 	// so the next one comes after the request: if it is due already, the
@@ -367,12 +377,14 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 	if err != nil {
 		return err
 	}
+
 	// The key is the due time, in the unit that tells the two kinds of run
 	// apart: a request may come in the second of a regular run.
 	key := due.Unix()
 	if requested {
 		key = due.UnixMicro()
 	}
+
 	return pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
 		// An enqueue into a FIFO group waits for the group's row. The election
 		// runs in the same loop, so give up after a moment, and try again in
@@ -381,10 +393,12 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		if _, err := tx.Exec(ctx, lockTimeoutSQL, wait); err != nil {
 			return err
 		}
+
 		tag, err := tx.Exec(ctx, m.c.sql.advanceSchedule, s.Name, next, due)
 		if err != nil || tag.RowsAffected() == 0 {
 			return err // another maintainer ran it, or it was paused meanwhile
 		}
+
 		opts := s.opts
 		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(key, 10)
 		opts.DedupeWindow = max(24*time.Hour, 2*next.Sub(due))
@@ -393,12 +407,14 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		if err != nil {
 			return err
 		}
+
 		// The enqueue middleware sees taskmill's own metadata, and cannot
 		// change it: a handler must find the run's time whatever it does.
 		run.reservedMeta = s.reservedMetadata(s.scheduledFor(due))
 		if _, err = m.c.storeThrough(ctx, pgxExecutor{q: tx}, []*resolvedTask{run}); err != nil {
 			return err
 		}
+
 		// The timeout was for the group's row. At the commit, it would keep
 		// the schedule from running for as long as notifying transactions
 		// queue there for longer than that wait, while every other enqueue
@@ -466,11 +482,13 @@ func sameNumber(x, y json.Number) bool {
 // Schedules returns every schedule stored in the database, ordered by name.
 func (c *Client) Schedules(ctx context.Context) ([]ScheduleInfo, error) {
 	fail := func(err error) error { return fmt.Errorf("taskmill: list schedules: %w", err) }
+
 	r, err := c.pool.Query(ctx, c.sql.listSchedules)
 	if err != nil {
 		return nil, fail(err)
 	}
 	defer r.Close()
+
 	var out []ScheduleInfo
 	for r.Next() {
 		var s ScheduleInfo
@@ -511,6 +529,7 @@ func (c *Client) RunSchedule(ctx context.Context, name string) error {
 	if err := checkName("schedule name", name, maxNameLength); err != nil {
 		return err
 	}
+
 	var paused bool
 	if err := c.pool.QueryRow(ctx, c.sql.runSchedule, name).Scan(&paused); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -528,10 +547,12 @@ func (c *Client) setSchedulePaused(ctx context.Context, name string, paused bool
 	if err := checkName("schedule name", name, maxNameLength); err != nil {
 		return err
 	}
+
 	verb := "resume"
 	if paused {
 		verb = "pause"
 	}
+
 	tag, err := c.pool.Exec(ctx, c.sql.pauseSchedule, name, paused)
 	if err != nil {
 		return fmt.Errorf("taskmill: %s schedule %q: %w", verb, name, err)

@@ -30,8 +30,10 @@ func FuzzList(f *testing.F) {
 	f.Add("!", -1, "", "", "", "", int64(0), int64(0), int64(0), int64(0))
 	// Text that PostgreSQL rejects once failed the call.
 	f.Add("", 0, "", "\x00", "\xff", "\xc3", int64(0), int64(0), int64(0), int64(0))
+
 	const y2k = 946_684_800 // the year 2000 in Unix seconds
 	now := (time.Now().Unix() - y2k) * 1e6
+
 	// Cursors of a list in the order of a time, which hold a time as
 	// PostgreSQL stores it, and an ID: the first and the last time that a
 	// column can hold, the two infinite times, and times and text that no
@@ -46,6 +48,7 @@ func FuzzList(f *testing.F) {
 		f.Add(base64.RawURLEncoding.EncodeToString([]byte("c"+position)), 1, "", "", "", "", now-3_600e6, int64(0), int64(0), int64(0))
 		f.Add(base64.RawURLEncoding.EncodeToString([]byte("c"+position)), 1, "canceled", "", "", "", int64(0), int64(0), int64(0), int64(0))
 	}
+
 	// Ranges of each time: the hours around now, the first and the last
 	// time that a column can hold, times that none holds, and a range that
 	// ends before it starts.
@@ -66,7 +69,9 @@ func FuzzList(f *testing.F) {
 	}
 	f.Add("", 1, "available", "", "", "", int64(0), int64(0), now, int64(0)) // not a list in finish order
 	f.Add("", 1, "canceled", "", "", "", now, int64(0), int64(0), now)       // a range of each time
+
 	e := newEnv(f)
+
 	for i := range 3 {
 		res, err := e.client.Enqueue(f.Context(), sendEmail{UserID: int64(i)}, &taskmill.EnqueueOptions{GroupKey: "g"})
 		if err != nil {
@@ -78,6 +83,7 @@ func FuzzList(f *testing.F) {
 			}
 		}
 	}
+
 	// A task with the newest ID and the oldest creation time, as a long
 	// transaction leaves it, and a completed one: the creation order is not
 	// the order of the IDs, and reads the history too.
@@ -92,6 +98,7 @@ func FuzzList(f *testing.F) {
 		"{s}", e.schema)); err != nil {
 		f.Fatal(err)
 	}
+
 	bound := func(micros int64) time.Time {
 		if micros == 0 {
 			return time.Time{}
@@ -105,6 +112,7 @@ func FuzzList(f *testing.F) {
 			CreatedSince: bound(created), CreatedBefore: bound(createdEnd), FinishedSince: bound(finished), FinishedBefore: bound(finishedEnd),
 			Filter: taskmill.TaskFilter{States: only(taskmill.State(state)), Queues: only(queue), Kinds: only(kind), GroupKeys: only(group)},
 		}
+
 		if _, err := e.client.List(t.Context(), p); errors.Is(err, taskmill.ErrInvalidArgument) {
 			return
 		}
@@ -126,12 +134,14 @@ func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
 		}
 		return task.ID < last.ID
 	}
+
 	var last *taskmill.TaskInfo
 	for {
 		res, err := client.List(t.Context(), p)
 		if err != nil {
 			t.Fatalf("List(%+v): %v", p, err)
 		}
+
 		for i := range res.Tasks {
 			task := &res.Tasks[i]
 			if last != nil && !follows(task, last) {
@@ -143,6 +153,7 @@ func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
 			}
 			last = task
 		}
+
 		if res.Next == "" {
 			return
 		}
@@ -202,6 +213,7 @@ func FuzzPayload(f *testing.F) {
 	} {
 		f.Add([]byte(body))
 	}
+
 	e := newEnv(f)
 
 	f.Fuzz(func(t *testing.T, body []byte) {
@@ -212,10 +224,12 @@ func FuzzPayload(f *testing.F) {
 		if err != nil {
 			t.Fatalf("enqueue %q: %v", body, err)
 		}
+
 		info, err := e.client.Get(t.Context(), res.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		payload, _ := json.Marshal(rawArgs{Body: body}) // as Enqueue encoded it
 		var stored bytes.Buffer
 		if err := json.Compact(&stored, info.Payload); err != nil {
@@ -224,6 +238,7 @@ func FuzzPayload(f *testing.F) {
 		if counted := taskmill.StoredSize(payload); stored.Len() > counted || counted > 1<<20 {
 			t.Fatalf("enqueued %q, which counted as %d bytes, and PostgreSQL stored %d", body, counted, stored.Len())
 		}
+
 		var args rawArgs
 		if err := json.Unmarshal(info.Payload, &args); err != nil {
 			t.Fatalf("decode %q: %v", info.Payload, err)
@@ -242,12 +257,15 @@ func FuzzBulkCursor(f *testing.F) {
 	for _, cursor := range []string{"", "MA", "LTE", "%%%", "OTIyMzM3MjAzNjg1NDc3NTgwOA", "MTAw"} {
 		f.Add(cursor)
 	}
+
 	e := newEnv(f)
+
 	for i := range 3 {
 		if _, err := e.client.Enqueue(f.Context(), sendEmail{UserID: int64(i)}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
 			f.Fatal(err)
 		}
 	}
+
 	f.Fuzz(func(t *testing.T, cursor string) {
 		params := &taskmill.BulkParams{Filter: taskmill.TaskFilter{GroupKeys: []string{"g"}}, Cursor: cursor}
 		for _, do := range []func(context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error){
@@ -261,6 +279,7 @@ func FuzzBulkCursor(f *testing.F) {
 				t.Fatalf("cursor %q: a finished action gave %q", cursor, res.Next)
 			}
 		}
+
 		e.checkGroups(t)
 	})
 }
@@ -274,12 +293,15 @@ func FuzzGroups(f *testing.F) {
 	f.Add("", 2, false, "%%%")
 	f.Add("", 1, false, "ZGVmYXVsdABn") // "default\x00g"
 	f.Add("\x00", -1, false, "AA")
+
 	e := newEnv(f)
+
 	for _, key := range []string{"g", "G2", "g\x1fkey", "h"} {
 		if _, err := e.client.Enqueue(f.Context(), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: key}); err != nil {
 			f.Fatal(err)
 		}
 	}
+
 	f.Fuzz(func(t *testing.T, search string, limit int, halted bool, cursor string) {
 		p := &taskmill.GroupParams{Search: search, Limit: limit, Halted: halted, Cursor: cursor}
 		if _, err := e.client.Groups(t.Context(), p); errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -299,6 +321,7 @@ func groupPages(t *testing.T, client *taskmill.Client, p *taskmill.GroupParams) 
 		if err != nil {
 			t.Fatalf("Groups(%+v): %v", p, err)
 		}
+
 		for _, g := range page.Groups {
 			if key := [2]string{g.Queue, g.Key}; seen[key] {
 				t.Fatalf("Groups(%+v): group %q comes twice", p, key)
@@ -306,6 +329,7 @@ func groupPages(t *testing.T, client *taskmill.Client, p *taskmill.GroupParams) 
 				seen[key] = true
 			}
 		}
+
 		if page.Next == "" {
 			return
 		}

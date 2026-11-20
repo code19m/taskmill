@@ -29,6 +29,7 @@ func newProxy(ctx context.Context, target string) *proxy {
 	if err != nil {
 		fail(err)
 	}
+
 	p := &proxy{ln: ln, target: target, open: make(chan struct{})}
 	close(p.open)
 	go p.serve(ctx)
@@ -57,6 +58,7 @@ func (p *proxy) gate() (held bool) {
 	p.mu.Lock()
 	open := p.open
 	p.mu.Unlock()
+
 	select {
 	case <-open:
 		return false
@@ -76,6 +78,7 @@ func (p *proxy) serve(ctx context.Context) {
 		if err != nil {
 			continue
 		}
+
 		go func() {
 			server, err := d.DialContext(ctx, "tcp", p.target)
 			if err != nil {
@@ -94,6 +97,7 @@ func (p *proxy) pipe(dst, src net.Conn, late *atomic.Int64) {
 	defer func() { _ = dst.Close() }()
 	defer func() { _ = src.Close() }()
 	buf := make([]byte, 32<<10)
+
 	for {
 		n, err := src.Read(buf)
 		if n > 0 {

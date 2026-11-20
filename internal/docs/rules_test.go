@@ -286,6 +286,7 @@ func linkTo(t *testing.T, from, to string) string {
 func TestNextChain(t *testing.T) {
 	t.Parallel()
 	order := readingOrder(t)
+
 	for _, name := range files(t) {
 		if strings.HasPrefix(name, "docs/") && !slices.Contains(order, name) {
 			t.Errorf("%s: no Next line leads to it, because the README.md of a section does not link to it. "+
@@ -293,6 +294,7 @@ func TestNextChain(t *testing.T) {
 				name, strings.Join(sections, ","))
 		}
 	}
+
 	for i, name := range order {
 		want := "**Next:** " + linkTo(t, name, order[(i+1)%len(order)])
 		lines := strings.Split(strings.TrimRight(read(t, name), "\n"), "\n")
@@ -337,6 +339,7 @@ func TestAllPages(t *testing.T) {
 	t.Parallel()
 	order := readingOrder(t)
 	links, lines := listed(t, order, "All pages", false)
+
 	for i, name := range order[1:] {
 		want := linkTo(t, home, name)
 		if i == len(links) {
@@ -347,6 +350,7 @@ func TestAllPages(t *testing.T) {
 				home, lines[i], links[i], want)
 		}
 	}
+
 	if len(links) >= len(order) {
 		t.Errorf(`%s:%d: "All pages" lists %s again. Remove it`, home, lines[len(order)-1], links[len(order)-1])
 	}
@@ -362,6 +366,7 @@ func TestLearningPath(t *testing.T) {
 	if len(links) == 0 {
 		t.Fatalf(`%s: the table under "## Learning path" links to no page`, home)
 	}
+
 	at := 0 // the place in the reading order of the step before
 	for i, link := range links {
 		place := slices.IndexFunc(order, func(name string) bool { return linkTo(t, home, name) == link })
@@ -394,6 +399,7 @@ func TestOrphans(t *testing.T) {
 			}
 		}
 	}
+
 	for _, name := range files(t) {
 		if !reached[name] && !slices.Contains(entryPoints, name) {
 			t.Errorf("%s: no other Markdown file links to it. Link to it from the README.md of its folder, or from the page that a reader comes from", name)
@@ -418,6 +424,7 @@ func TestGlossaryLinks(t *testing.T) {
 	if len(terms) == 0 {
 		t.Fatalf(`%s has no "###" heading: where are its terms?`, glossary)
 	}
+
 	for _, p := range boundPages(t) {
 		lines := strings.Split(p.text, "\n")
 		for _, r := range refs(p.name, p.prose) {

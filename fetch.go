@@ -25,6 +25,7 @@ func (w *Worker) fetchLoop(ctx context.Context, r *runState, q *queueState) {
 	// quietUntil, the loop leaves notifications waiting.
 	notified, atLimit := false, false
 	var quietUntil time.Time
+
 	wait := func() (ok bool) {
 		ok, notified = waitForWork(ctx, q, w.pollWait(atLimit), quietUntil)
 		return ok
@@ -38,17 +39,20 @@ func (w *Worker) fetchLoop(ctx context.Context, r *runState, q *queueState) {
 			}
 			continue
 		}
+
 		var tasks []*liveAttempt
 		var more bool
 		var err error
 		tasks, more, atLimit, err = w.fetch(ctx, q, free)
 		fetches.observe(ctx, err)
 		w.dispatch(ctx, r, q, tasks)
+
 		// A notification wakes every worker of the queue, and most find
 		// nothing: those let a moment pass before they act on the next one.
 		if err == nil && notified && len(tasks) == 0 {
 			quietUntil = time.Now().Add(w.timing.quiet)
 		}
+
 		if (err != nil || !more) && !wait() {
 			return
 		}
@@ -84,6 +88,7 @@ func (w *Worker) pollWait(atLimit bool) time.Duration {
 func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUntil time.Time) (ok, nudged bool) {
 	timer := time.NewTimer(poll)
 	defer timer.Stop()
+
 	if quiet := time.Until(quietUntil); quiet > 0 {
 		select {
 		case <-ctx.Done():
@@ -95,6 +100,7 @@ func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUn
 		case <-time.After(quiet):
 		}
 	}
+
 	select {
 	case <-ctx.Done():
 		return false, false
@@ -157,11 +163,13 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	}
 	more = limit > 0 && len(out) == limit
 	atLimit = allowed < slots && len(out) == limit
+
 	extra, err := w.fillBatches(dbCtx, q, lease, out, allowed-len(out))
 	if err != nil && tx != nil {
 		return nil, false, false, err // rolled back: nothing was leased
 	}
 	out = append(out, extra...)
+
 	if tx != nil {
 		if err := tx.Commit(dbCtx); err != nil {
 			return nil, false, false, err
@@ -192,6 +200,7 @@ func (w *Worker) fillBatches(ctx context.Context, q *queueState, lease leaseFunc
 		if fill <= 0 {
 			continue
 		}
+
 		more, err := lease(ctx, q, w.client.sql.fetchKind, fill, kind, maxFetch)
 		if err != nil {
 			return extra, err
@@ -222,6 +231,7 @@ func (w *Worker) beginLimited(ctx context.Context, q *queueState) (pgx.Tx, int, 
 	if err != nil {
 		return nil, 0, err
 	}
+
 	allowed := 0
 	if _, err = tx.Exec(ctx, limitedSettings); err == nil {
 		allowed, err = w.capacity(ctx, tx, q.name)
@@ -265,6 +275,7 @@ func (w *Worker) capacity(ctx context.Context, tx pgx.Tx, queue string) (int, er
 	if maxRunning == nil {
 		return maxFetch, nil
 	}
+
 	var running int
 	if err := tx.QueryRow(ctx, w.client.sql.countRunning, queue).Scan(&running); err != nil {
 		return 0, err
@@ -286,18 +297,22 @@ func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limi
 	if limit <= 0 {
 		return nil, nil
 	}
+
 	b := &pgx.Batch{}
 	b.Queue("BEGIN")
 	b.Queue(planSettings)
 	b.Queue(sql, w.leaseArgs(q, limit, extra)...)
 	b.Queue("COMMIT")
+
 	br := w.client.pool.SendBatch(ctx, b)
 	defer func() { _ = br.Close() }()
+
 	for range 2 {
 		if _, err := br.Exec(); err != nil {
 			return nil, err
 		}
 	}
+
 	r, err := br.Query()
 	if err != nil {
 		return nil, err
@@ -306,6 +321,7 @@ func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limi
 	if err != nil {
 		return nil, err
 	}
+
 	// The tasks are leased once the transaction commits.
 	if _, err := br.Exec(); err != nil {
 		return nil, err
@@ -367,11 +383,13 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*liveAttempt, error) {
 		createdAt, runAt        pgtype.Timestamptz
 		attemptedAt             *time.Time
 	)
+
 	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &priority, &att, &maxAtt, &token, &info.GroupKey,
 		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt)
 	if err != nil {
 		return nil, err
 	}
+
 	info.State = StateRunning
 	info.Priority = Priority(priority)
 	info.Attempt = int(att)
@@ -382,6 +400,7 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*liveAttempt, error) {
 	var created, due bool
 	info.CreatedAt, created = finite(createdAt)
 	info.RunAt, due = finite(runAt)
+
 	var invalid error
 	info.Metadata, invalid = decodeMetadata(metadata)
 	if invalid == nil && (!created || !due) {
@@ -392,6 +411,7 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*liveAttempt, error) {
 		// have this token too, and could record this attempt's result.
 		invalid = errors.New("the lease token is at its largest value, so the task cannot run again")
 	}
+
 	reg := w.handlers[info.Kind]
 	if invalid != nil {
 		invalid, reg = fmt.Errorf("invalid row: %w", invalid), nil
@@ -429,6 +449,7 @@ func (w *Worker) dispatch(ctx context.Context, r *runState, q *queueState, tasks
 			w.release(context.WithoutCancel(ctx), unstarted)
 			return
 		}
+
 		r.inflight.Go(func() {
 			defer q.freeSlot()
 			if len(unit) == 1 && (unit[0].reg == nil || unit[0].reg.run != nil) {
@@ -475,6 +496,7 @@ func (w *Worker) units(tasks []*liveAttempt) [][]*liveAttempt {
 		}
 		units = append(units, []*liveAttempt{t})
 	}
+
 	for kind, ts := range batches {
 		for chunk := range slices.Chunk(ts, w.handlers[kind].opts.BatchSize) {
 			units = append(units, chunk)

@@ -85,9 +85,11 @@ func llms(t *testing.T) (text string, missing []string) {
 	var b strings.Builder
 	intro := strings.Join(strings.Fields(strings.SplitN(read(t, home), "\n\n", 3)[1]), " ")
 	b.WriteString("# taskmill\n\n> " + intro + "\n\n" + llmsNote + "\n## Packages\n\n")
+
 	for _, p := range apiPackages(t) {
 		b.WriteString("- `" + importPath(p.dir) + "`: " + p.synopsis + "\n")
 	}
+
 	order := readingOrder(t)
 	for _, section := range sections {
 		index := "docs/" + section + "/README.md"
@@ -119,16 +121,19 @@ func TestLLMs(t *testing.T) {
 			"Add a row there: a link to the page alone in one cell, and in another cell when to read it",
 			name, llmsFile)
 	}
+
 	if *update {
 		if err := os.WriteFile("../../"+llmsFile, []byte(want), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return
 	}
+
 	got, err := os.ReadFile("../../" + llmsFile)
 	if err != nil {
 		t.Fatalf("%v. The file is generated: run go test ./internal/docs/ -run TestLLMs -update, and commit it", err)
 	}
+
 	gotLines, wantLines := strings.Split(string(got), "\n"), strings.Split(want, "\n")
 	for i, line := range wantLines {
 		if i >= len(gotLines) || gotLines[i] != line {
@@ -158,6 +163,7 @@ func TestSummary(t *testing.T) {
 				name, guide)
 			continue
 		}
+
 		words := 0
 		for _, line := range lines[2:] {
 			if line == "" {

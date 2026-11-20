@@ -27,5 +27,6 @@ func Of[A interface{ Kind() string }]() (kind string, err error) {
 			err = fmt.Errorf("%v.Kind panicked on a zero value: %s", reflect.TypeFor[A](), recovered.Text(r))
 		}
 	}()
+
 	return Zero[A]().Kind(), nil
 }

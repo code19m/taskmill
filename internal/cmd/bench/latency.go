@@ -48,6 +48,7 @@ func pickup(ctx context.Context, pool *pgxpool.Pool, d time.Duration, rate int) 
 		mu.Unlock()
 		return nil
 	}), nil)
+
 	cfg := &taskmill.WorkerConfig{
 		Handlers: &hs,
 		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {Concurrency: 64}},
@@ -60,6 +61,7 @@ func pickup(ctx context.Context, pool *pgxpool.Pool, d time.Duration, rate int) 
 	if err != nil {
 		fail(err)
 	}
+
 	stop := run(ctx, w)
 	time.Sleep(time.Second) // let the worker connect
 
@@ -72,8 +74,10 @@ func pickup(ctx context.Context, pool *pgxpool.Pool, d time.Duration, rate int) 
 	} else {
 		paced(ctx, d, rate/10, func() { enqueueStamped(ctx, c, pool, 10) })
 	}
+
 	time.Sleep(time.Second)
 	stop()
+
 	mu.Lock()
 	defer mu.Unlock()
 	return lat
@@ -88,6 +92,7 @@ func enqueueStamped(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool,
 	for i := range batch {
 		batch[i] = taskmill.EnqueueParams{Args: noop{Sent: sent}}
 	}
+
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		_, err := c.EnqueueManyTx(ctx, taskmill.Pgx(tx), batch)
 		return err
@@ -104,6 +109,7 @@ func paced(ctx context.Context, d time.Duration, perSecond int, fn func()) {
 	const goroutines = 8
 	ctx, cancel := context.WithTimeout(ctx, d)
 	defer cancel()
+
 	var wg sync.WaitGroup
 	for range goroutines {
 		wg.Go(func() {

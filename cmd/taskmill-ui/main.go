@@ -112,15 +112,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 		addr:        getenv("TASKMILL_UI_ADDR"),
 		prefix:      getenv("TASKMILL_UI_PREFIX"),
 	}
+
 	if c.databaseURL == "" {
 		return c, errors.New("set TASKMILL_DATABASE_URL to the PostgreSQL connection string")
 	}
 	if c.addr == "" {
 		c.addr = "localhost:8080"
 	}
+
 	c.frameAncestors = strings.FieldsFunc(getenv("TASKMILL_UI_FRAME_ANCESTORS"), func(r rune) bool {
 		return r == ',' || unicode.IsSpace(r)
 	})
+
 	if v := getenv("TASKMILL_UI_READ_ONLY"); v != "" {
 		readOnly, err := strconv.ParseBool(v)
 		if err != nil {
@@ -128,6 +131,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		c.readOnly = readOnly
 	}
+
 	if password := getenv("TASKMILL_UI_PASSWORD"); password != "" {
 		user := getenv("TASKMILL_UI_USERNAME")
 		if user == "" {
@@ -151,6 +155,7 @@ func poolConfig(connString string) (*pgxpool.Config, error) {
 	if err != nil {
 		return nil, errDatabaseURL
 	}
+
 	// Like libpq, pgx reads a URL's user and password before the first "@",
 	// and reads none if a "/" comes first. So a password that holds one of
 	// the two, not percent-encoded, is cut there. What follows, with the "@"
@@ -179,6 +184,7 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
+
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return err
@@ -193,10 +199,12 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
+
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.addr)
 	if err != nil {
 		return err
 	}
+
 	server := &http.Server{
 		Handler:      h,
 		ReadTimeout:  readTimeout,
@@ -207,6 +215,7 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 		// could not accept: both need a person.
 		ErrorLog: slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
+
 	if cfg.auth == nil {
 		logger.LogAttrs(ctx, slog.LevelWarn,
 			"the dashboard has no password: set TASKMILL_UI_PASSWORD, unless something in front of it authenticates")
@@ -221,6 +230,7 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 		return err
 	case <-ctx.Done():
 	}
+
 	shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdown)
@@ -237,6 +247,7 @@ func handler(pool *pgxpool.Pool, client *taskmill.Client, cfg config, logger *sl
 	if err != nil {
 		return nil, fmt.Errorf("TASKMILL_UI_*: %w", err)
 	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok\n") })
 	mux.Handle("GET /readyz", &readiness{pool: pool, logger: logger})
@@ -270,9 +281,11 @@ func (rd *readiness) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (rd *readiness) check(ctx context.Context) error {
 	rd.mu.Lock()
 	defer rd.mu.Unlock()
+
 	if time.Since(rd.checked) < readyReuse {
 		return rd.err
 	}
+
 	// The check answers the requests that wait for it too, so it outlasts
 	// the request that started it.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), readyTimeout)
@@ -284,6 +297,7 @@ func (rd *readiness) check(ctx context.Context) error {
 	case err == nil && rd.err != nil:
 		rd.logger.LogAttrs(ctx, slog.LevelInfo, "taskmill-ui ready again")
 	}
+
 	rd.checked, rd.err = time.Now(), err
 	return err
 }

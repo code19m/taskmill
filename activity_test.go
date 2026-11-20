@@ -12,6 +12,7 @@ import (
 func TestActivityCountsAttempts(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 			if task.Args.UserID == 1 {
@@ -21,11 +22,13 @@ func TestActivityCountsAttempts(t *testing.T) {
 		}, nil),
 		Queues: defaultQueue(2),
 	})
+
 	ok1, ok2 := e.enqueue(t, sendEmail{}, nil), e.enqueue(t, sendEmail{}, nil)
 	bad := e.enqueue(t, sendEmail{UserID: 1}, nil)
 	e.waitState(t, ok1, taskmill.StateCompleted)
 	e.waitState(t, ok2, taskmill.StateCompleted)
 	e.waitState(t, bad, taskmill.StateDead)
+
 	// The maintainer counts the tasks each refresh; then a worker that stops
 	// writes the attempts it counted.
 	waitFor(t, "the maintainer to count the dead task", func() bool {
@@ -38,6 +41,7 @@ func TestActivityCountsAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var completed, failed int64
 	for _, p := range points {
 		completed, failed = completed+p.Completed, failed+p.Failed
@@ -50,6 +54,7 @@ func TestActivityCountsAttempts(t *testing.T) {
 func TestActivitySteps(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	base := time.Now().Truncate(5 * time.Minute).Add(-20 * time.Minute)
 	insert := `INSERT INTO {s}.activity (minute, queue, completed, failed, scheduled, pending, available,
 	                                     running, retryable, dead, canceled)
@@ -57,6 +62,7 @@ func TestActivitySteps(t *testing.T) {
 	e.exec(t, insert, base, "a", 3, 1, 4, 5)
 	e.exec(t, insert, base, "b", 2, 0, 0, 1)
 	e.exec(t, insert, base.Add(time.Minute), "a", 1, 0, 9, 2)
+
 	// A minute in which workers counted attempts, but no maintainer counted
 	// tasks.
 	e.exec(t, `INSERT INTO {s}.activity (minute, queue, completed) VALUES ($1, 'a', 4)`, base.Add(5*time.Minute))
@@ -97,12 +103,14 @@ func TestActivityKeepsTheMostTasksCountedInAMinute(t *testing.T) {
 	e := newEnv(t)
 	w := newWorker(t, e, &taskmill.WorkerConfig{})
 	ctx := t.Context()
+
 	refresh := func() {
 		t.Helper()
 		if err := taskmill.RefreshStats(ctx, w); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	for range 5 {
 		e.enqueue(t, sendEmail{}, nil)
 	}
@@ -116,6 +124,7 @@ func TestActivityKeepsTheMostTasksCountedInAMinute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	var most int64
 	for _, p := range points {
 		most = max(most, p.Counts[taskmill.StateAvailable])
@@ -155,9 +164,11 @@ func sameActivity(got, want []taskmill.Activity) bool {
 func TestActivityIsKeptForADay(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	insert := `INSERT INTO {s}.activity (minute, queue, completed) VALUES (date_trunc('minute', now()) - $1::interval, 'a', 1)`
 	e.exec(t, insert, "25 hours")
 	e.exec(t, insert, "23 hours")
+
 	taskmill.RunRetention(t.Context(), newWorker(t, e, &taskmill.WorkerConfig{}))
 	if n := e.count(t, "SELECT count(*) FROM {s}.activity"); n != 1 {
 		t.Fatalf("got %d minutes of activity, want the one from 23 hours ago", n)

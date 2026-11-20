@@ -21,15 +21,18 @@ import (
 func (w *Worker) runOne(parent context.Context, t *liveAttempt) {
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
+
 	t.mu.Lock()
 	t.cancel = cancel
 	t.mu.Unlock()
+
 	if t.cancelRequested.Load() {
 		cancel(ErrTaskCanceled)
 	}
 	if t.lost.Load() {
 		cancel(ErrLeaseLost)
 	}
+
 	if t.invalid != nil {
 		// No code of the application sees a task whose row the worker cannot
 		// trust: not its handler, and not the middleware, whose result would
@@ -69,6 +72,7 @@ func (w *Worker) runBatch(parent context.Context, tasks []*liveAttempt) {
 	errs := make([]error, len(tasks))
 	var chains sync.WaitGroup
 	start := time.Now()
+
 	for i, t := range tasks {
 		chains.Go(func() {
 			var reached atomic.Bool
@@ -92,6 +96,7 @@ func (w *Worker) runBatch(parent context.Context, tasks []*liveAttempt) {
 		case <-early:
 		}
 	}
+
 	if len(arrived) > 0 {
 		slices.SortFunc(arrived, func(a, b arrival) int { return cmp.Compare(a.index, b.index) })
 		infos := make([]*TaskInfo, len(arrived))
@@ -99,6 +104,7 @@ func (w *Worker) runBatch(parent context.Context, tasks []*liveAttempt) {
 		for j, a := range arrived {
 			infos[j], atts[j] = tasks[a.index].info, tasks[a.index].att
 		}
+
 		results := safeBatch(ctx, reg, infos, atts)
 		for j, a := range arrived {
 			a.result <- results[j]
@@ -124,6 +130,7 @@ func safeBatch(ctx context.Context, reg *registration, infos []*TaskInfo, atts [
 			}
 		}
 	}()
+
 	return reg.runBatch(ctx, infos, atts)
 }
 
@@ -136,12 +143,14 @@ func (w *Worker) invoke(ctx context.Context, t *liveAttempt, call func(context.C
 			err = panicFailure(r)
 		}
 	}()
+
 	return through(ctx, w.cfg.Middleware, t.info, func(ctx context.Context) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
 				err = panicFailure(r)
 			}
 		}()
+
 		return call(ctx)
 	}, errNextTwice, errSkippedHandler)
 }
@@ -195,6 +204,7 @@ func outcomeOf(t *liveAttempt, err, cause error) (o outcome) {
 			}
 		}
 	}()
+
 	o = classify(t, err, cause)
 	if o.err != nil {
 		o.msg = o.err.Error()
@@ -236,6 +246,7 @@ func classify(t *liveAttempt, err, cause error) outcome {
 	if errors.Is(cause, ErrAttemptTimeout) && o.code == "" {
 		o.code = CodeTimeout
 	}
+
 	if o.kind == outcomeRetry {
 		if t.info.Attempt >= t.info.MaxAttempts {
 			o.kind = outcomeDead
@@ -268,6 +279,7 @@ func (w *Worker) unknownKind(ctx context.Context, t *liveAttempt) outcome {
 		}
 		since = e.At
 	}
+
 	o := outcome{kind: outcomeSnooze, code: CodeNoHandler}
 	var waited time.Duration
 	if since.IsZero() {
@@ -275,10 +287,12 @@ func (w *Worker) unknownKind(ctx context.Context, t *liveAttempt) outcome {
 	} else {
 		waited = t.info.AttemptedAt.Sub(since) // both times come from the database's clock
 	}
+
 	if waited >= limit {
 		err := fmt.Errorf("no handler for kind %q appeared within %s", t.info.Kind, limit)
 		return outcome{kind: outcomeDead, code: CodeUnknownKind, err: err, msg: err.Error()}
 	}
+
 	// Warn once per task, not at every snooze: a deploy can leave many tasks
 	// waiting for an hour.
 	level := slog.LevelDebug
@@ -287,6 +301,7 @@ func (w *Worker) unknownKind(ctx context.Context, t *liveAttempt) outcome {
 	}
 	w.logger.LogAttrs(ctx, level, "no handler for task kind; snoozing",
 		slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind))
+
 	o.delay = min(w.timing.noHandlerSnooze, limit-waited)
 	return o
 }
@@ -316,6 +331,7 @@ func (w *Worker) finish(ctx context.Context, t *liveAttempt, o outcome, start ti
 		if !start.IsZero() { // a handler ran
 			attrs = append(attrs, slog.Duration(logKeyDuration, time.Since(start)))
 		}
+
 		if o.kind == outcomeDead {
 			w.logger.LogAttrs(ctx, slog.LevelError, "attempt failed; the task is dead", attrs...)
 		} else {
@@ -339,12 +355,14 @@ func (w *Worker) finish(ctx context.Context, t *liveAttempt, o outcome, start ti
 // counts the attempt once that commits.
 func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 	defer w.untrack(t)
+
 	if o.kind == outcomeDiscard && t.att.completedInTx.Load() {
 		w.tally.add(t.info.Queue, 1, 0) // the handler's transaction completed it
 	}
 	if o.kind == outcomeDiscard || o.kind == outcomeComplete {
 		return
 	}
+
 	if o.kind == outcomeRelease {
 		w.released.Add(1)
 	}
@@ -400,6 +418,7 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *liveAttempt, o outc
 		if o.kind == outcomeDead {
 			want = StateDead
 		}
+
 		args := []any{
 			id,                     // $1
 			token,                  // $2
@@ -414,6 +433,7 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *liveAttempt, o outc
 			s := errorJSON(o)
 			note = &s
 		}
+
 		args := []any{
 			id,                     // $1
 			token,                  // $2
@@ -447,6 +467,7 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *liveAttempt, o outc
 	if o.kind == outcomeRetry || o.kind == outcomeDead {
 		ended = endedFailed
 	}
+
 	switch s := State(state); {
 	case s == StateDead && group != "":
 		return ended, w.client.haltGroup(ctx, w.logger, q, queue, group, id)
@@ -464,6 +485,7 @@ func errorJSON(o outcome) string {
 	if len(msg) > errorMessageLimit {
 		msg = strings.ToValidUTF8(msg[:errorMessageLimit], "") + "…"
 	}
+
 	// The statement adds the attempt and the time.
 	b, _ := json.Marshal(struct { //nolint:errchkjson // two strings always encode
 		Message string    `json:"message"`

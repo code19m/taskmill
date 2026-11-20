@@ -60,6 +60,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 	if err != nil {
 		return fail(err)
 	}
+
 	if current >= len(all) {
 		// The maintainer keeps the partitions ready too, so a role that may not
 		// create them still starts.
@@ -68,6 +69,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 		}
 		return nil
 	}
+
 	if err := createMigrationsTable(ctx, pool, schema); err != nil {
 		return fail(err)
 	}
@@ -135,12 +137,14 @@ func createMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema strin
 				return err
 			}
 		}
+
 		_, err := tx.Exec(ctx, migrationsTableSQL(schema))
 		return err
 	})
 	if createErr == nil {
 		return nil
 	}
+
 	var created bool
 	if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", schema+".migrations").Scan(&created); err != nil || !created {
 		return createErr
@@ -169,11 +173,13 @@ func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrat
 	if err != nil {
 		return err
 	}
+
 	for _, m := range all[min(current, len(all)):] {
 		start := time.Now()
 		if _, err := tx.Exec(ctx, m.SQL); err != nil {
 			return fmt.Errorf("migration %04d_%s: %w", m.Version, m.Name, err)
 		}
+
 		insert := fmt.Sprintf("INSERT INTO %s.migrations (version, name) VALUES ($1, $2)", schema)
 		if _, err := tx.Exec(ctx, insert, m.Version, m.Name); err != nil {
 			return err
@@ -232,10 +238,12 @@ func Migrations(schema string) ([]Migration, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	all, err := migrations.All(schema)
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: %w", err)
 	}
+
 	bootstrap := Migration{Version: 0, Name: "bootstrap", SQL: bootstrapSQL(schema)}
 	out := make([]Migration, 0, len(all)+1)
 	out = append(out, bootstrap)

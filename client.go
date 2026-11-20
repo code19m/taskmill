@@ -107,6 +107,7 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 		notifier:          newNotifier(pool, schema, logger),
 		enqueueMiddleware: slices.Clone(cfg.EnqueueMiddleware),
 	}
+
 	if err := c.checkSchema(ctx); err != nil {
 		return nil, err
 	}
@@ -127,6 +128,7 @@ func (c *Client) checkSchema(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("taskmill: read schema version: %w", err)
 	}
+
 	if want := migrations.Latest(); version < want {
 		return fmt.Errorf("%w: schema %q is at version %d, need %d", ErrSchemaOutdated, c.schema, version, want)
 	}
@@ -146,6 +148,7 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 		return nil, fail(err)
 	}
 	defer r.Close()
+
 	if !r.Next() {
 		if err := r.Err(); err != nil {
 			return nil, fail(err)
@@ -191,6 +194,7 @@ func (c *Client) CancelTx(ctx context.Context, tx Executor, id int64) error {
 	if err != nil {
 		return err
 	}
+
 	verifyOrder := false // the transaction is the caller's: it cannot start again
 	return c.cancel(ctx, q, id, verifyOrder)
 }
@@ -208,10 +212,12 @@ func (c *Client) cancel(ctx context.Context, q querier, id int64, verifyOrder bo
 	if t.state.Finished() {
 		return fmt.Errorf("%w: cannot cancel task %d in state %s", ErrInvalidState, id, t.state)
 	}
+
 	// A waiting task is canceled, and a running one is asked to stop.
 	if _, err := q.exec(ctx, c.sql.cancelTasks, []int64{id}, c.schema); err != nil {
 		return fail(err)
 	}
+
 	if t.state == StateRunning || t.group == "" {
 		return nil
 	}
@@ -275,6 +281,7 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 			return fail(err)
 		}
 	}
+
 	// The statement of a bulk retry, with one task: it also notifies the
 	// queue of a task that is available again.
 	pendingIDs := []int64{} // the tasks that become pending: this one, or none
@@ -333,6 +340,7 @@ func (c *Client) takeKeys(ctx context.Context, q querier, ids []int64) (refused 
 		return nil, err
 	}
 	defer r.Close()
+
 	refused = make(map[int64]bool)
 	for r.Next() {
 		var id int64
@@ -370,12 +378,15 @@ func (c *Client) delete(ctx context.Context, q querier, id int64, verifyOrder bo
 			return c.stateError(ctx, q, id, "delete")
 		}
 	}
+
 	if _, err := q.exec(ctx, c.sql.releaseKeys, []int64{id}); err != nil {
 		return fail(err)
 	}
+
 	if !found || t.group == "" {
 		return nil
 	}
+
 	// Unfinished tasks are counted in their group, and so is a dead head that
 	// halts it: its halt ends here.
 	counted := !t.state.Finished()
@@ -386,6 +397,7 @@ func (c *Client) delete(ctx context.Context, q querier, id int64, verifyOrder bo
 		}
 		counted = resumed == 1
 	}
+
 	if !counted {
 		return nil
 	}
@@ -470,6 +482,7 @@ func (c *Client) takeTask(ctx context.Context, q querier, id int64, take string,
 	if err != nil {
 		return t, false, err
 	}
+
 	if t, found, err = readLocked(ctx, q, take, id, groupLocked && verifyOrder); err != nil {
 		return t, false, err
 	}

@@ -65,6 +65,7 @@ func (c *Client) Activity(ctx context.Context, params *ActivityParams) ([]Activi
 	if err != nil {
 		return nil, err
 	}
+
 	var out []Activity
 	args := []any{
 		p.Since,                     // $1
@@ -93,6 +94,7 @@ func activityParams(params *ActivityParams) (ActivityParams, []string, error) {
 	if params != nil {
 		p = *params
 	}
+
 	switch {
 	case p.Step == 0:
 		p.Step = time.Minute
@@ -102,6 +104,7 @@ func activityParams(params *ActivityParams) (ActivityParams, []string, error) {
 	if p.Since.IsZero() {
 		p.Since = time.Now().Add(-time.Hour)
 	}
+
 	queues, err := checkFilter("queue name", p.Queues, maxNameLength)
 	return p, queues, err
 }
@@ -114,9 +117,11 @@ func scanActivity(r rows) (Activity, error) {
 	for i := range counts {
 		dest = append(dest, &counts[i])
 	}
+
 	if err := r.Scan(append(dest, &a.Completed, &a.Failed)...); err != nil {
 		return a, err
 	}
+
 	for i, n := range counts {
 		if n == nil {
 			continue
@@ -157,12 +162,15 @@ func (t *tally) add(queue string, completed, failed int) {
 	if completed == 0 && failed == 0 {
 		return
 	}
+
 	key := tallyKey{time.Now().Truncate(time.Minute).Unix(), queue}
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	if t.counts == nil {
 		t.counts = map[tallyKey]tallyCount{}
 	}
+
 	c, ok := t.counts[key]
 	if !ok {
 		// A worker that only runs tasks with RunTask never flushes: drop what
@@ -170,6 +178,7 @@ func (t *tally) add(queue string, completed, failed int) {
 		oldest := key.minute - int64(tallyMaxAge/time.Second)
 		maps.DeleteFunc(t.counts, func(k tallyKey, _ tallyCount) bool { return k.minute < oldest })
 	}
+
 	c.completed += completed
 	c.failed += failed
 	t.counts[key] = c
@@ -190,9 +199,11 @@ func (t *tally) restore(counts map[tallyKey]tallyCount) {
 	oldest := time.Now().Add(-tallyMaxAge).Unix()
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	if t.counts == nil {
 		t.counts = map[tallyKey]tallyCount{}
 	}
+
 	for key, c := range counts {
 		if key.minute < oldest {
 			continue
@@ -216,6 +227,7 @@ func (w *Worker) countCompleted(done []completedTask) {
 func (w *Worker) activityLoop(ctx context.Context) {
 	tick := time.NewTicker(w.timing.activity)
 	defer tick.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -235,9 +247,11 @@ func (w *Worker) flushActivity(ctx context.Context) {
 	if len(counts) == 0 {
 		return
 	}
+
 	keys := slices.SortedFunc(maps.Keys(counts), func(a, b tallyKey) int {
 		return cmp.Or(cmp.Compare(a.minute, b.minute), cmp.Compare(a.queue, b.queue))
 	})
+
 	minutes := make([]time.Time, len(keys))
 	queues := make([]string, len(keys))
 	completed := make([]int32, len(keys))
@@ -247,6 +261,7 @@ func (w *Worker) flushActivity(ctx context.Context) {
 		minutes[i], queues[i] = time.Unix(k.minute, 0), k.queue
 		completed[i], failed[i] = int32(min(c.completed, 1<<31-1)), int32(min(c.failed, 1<<31-1)) //nolint:gosec // capped
 	}
+
 	_, err := w.client.pool.Exec(ctx, w.client.sql.addActivity,
 		minutes,   // $1
 		queues,    // $2

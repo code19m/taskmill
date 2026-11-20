@@ -22,6 +22,7 @@ func (w *Worker) completer(ctx context.Context) {
 	delay := blockedRetryDelay
 	retryBlocked := time.NewTimer(delay)
 	retryBlocked.Stop()
+
 	for {
 		batch := blocked
 		select {
@@ -38,6 +39,7 @@ func (w *Worker) completer(ctx context.Context) {
 			w.completeWaiting(record, w.completeBatch(record, batch))
 			return
 		}
+
 		// Retry blocked completions soon, then less often while they stay blocked.
 		wasBlocked := len(blocked) > 0
 		blocked = w.completeBatch(record, w.gather(batch))
@@ -66,6 +68,7 @@ ready:
 			break ready
 		}
 	}
+
 	linger := time.NewTimer(completionLinger)
 	defer linger.Stop()
 	for len(batch) < completionBatch {
@@ -88,6 +91,7 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*liveAttempt) []compl
 	if len(ts) == 0 {
 		return nil
 	}
+
 	var done []completedTask
 	err := w.whileLeased(ctx, ts, func(ctx context.Context) error {
 		return w.client.inTx(ctx, func(q querier) error {
@@ -99,6 +103,7 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*liveAttempt) []compl
 	if err != nil {
 		done = nil // the transaction did not commit
 	}
+
 	w.afterComplete(ctx, ts, done, err)
 	return done
 }
@@ -129,6 +134,7 @@ func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (block
 		})
 		w.afterComplete(ctx, plain, done, err)
 	}
+
 	if len(grouped) == 0 {
 		return nil
 	}
@@ -144,6 +150,7 @@ func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (block
 		w.afterComplete(ctx, grouped, nil, err)
 		return nil
 	}
+
 	w.afterComplete(ctx, slices.DeleteFunc(grouped, func(t *liveAttempt) bool { return slices.Contains(blocked, t) }), done, nil)
 	return blocked
 }
@@ -159,6 +166,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*liveAttemp
 	for i, t := range ts {
 		queues[i], groups[i] = t.info.Queue, t.info.GroupKey
 	}
+
 	groupLocked, groupExists, err := lockedRows(ctx, q, w.client.sql.lockGroups, func(r rows) (groupID, bool, error) {
 		var key groupID
 		var locked bool
@@ -168,6 +176,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*liveAttemp
 	if err != nil {
 		return nil, nil, err
 	}
+
 	var mine []*liveAttempt
 	for _, t := range ts {
 		key := groupID{t.info.Queue, t.info.GroupKey}
@@ -186,6 +195,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*liveAttemp
 	for i, t := range mine {
 		ids[i], tokens[i] = t.att.id, t.att.token
 	}
+
 	taskLocked, owned, err := lockedRows(ctx, q, w.client.sql.lockLeased, func(r rows) (int64, bool, error) {
 		var id int64
 		var locked bool
@@ -195,6 +205,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*liveAttemp
 	if err != nil {
 		return nil, nil, err
 	}
+
 	// Tasks no longer owned lost their leases, and are left out; the
 	// complete statement would skip them anyway.
 	var ready []*liveAttempt
@@ -206,6 +217,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*liveAttemp
 			blocked = append(blocked, t)
 		}
 	}
+
 	if len(ready) > 0 {
 		if done, err = w.client.complete(ctx, w.logger, q, completionsOf(ready)); err != nil {
 			return nil, nil, err
@@ -223,6 +235,7 @@ func lockedRows[K comparable](ctx context.Context, q querier, sql string, scan f
 	}
 	defer r.Close()
 	locked, seen = map[K]bool{}, map[K]bool{}
+
 	for r.Next() {
 		key, isLocked, err := scan(r)
 		if err != nil {
@@ -243,6 +256,7 @@ func (w *Worker) afterComplete(ctx context.Context, ts []*liveAttempt, done []co
 	for _, t := range ts {
 		w.untrack(t)
 	}
+
 	if err == nil {
 		w.countCompleted(done)
 		w.madeRoom(done)
@@ -339,6 +353,7 @@ func (c *Client) completeTasks(ctx context.Context, q querier, ids []int64, toke
 	}
 	defer r.Close()
 	var done []completedTask
+
 	for r.Next() {
 		var t completedTask
 		if err := r.Scan(&t.id, &t.queue, &t.group); err != nil {
@@ -362,6 +377,7 @@ func sortedByGroup(ts []completedTask) []completedTask {
 			grouped = append(grouped, t)
 		}
 	}
+
 	slices.SortFunc(grouped, func(a, b completedTask) int {
 		return cmp.Or(cmp.Compare(a.queue, b.queue), cmp.Compare(a.group, b.group))
 	})
