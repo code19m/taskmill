@@ -573,9 +573,9 @@ a.pop-opt:focus-visible { outline-offset: -2px; }
 /* A hint: a small button, and the short text that it shows. The text is a
    popover: the browser opens it above the whole page, so no card and no
    table cuts it off, and closes it on Escape or a click elsewhere, with or
-   without the script. The script places it beside its button, and the style
-   attribute that it sets says so. Without the script, the text shows where
-   the notices do. On a small screen it is as wide as the page. */
+   without the script. The script places it beside its button, in --inset,
+   and the style attribute that it sets says so. Without the script, the text
+   shows where the notices do. On a small screen it is as wide as the page. */
 .hint { display: inline-flex; flex-shrink: 0; }
 .hint > button {
   position: relative; display: grid; place-items: center; width: 24px; height: 24px; padding: 0;
@@ -584,11 +584,11 @@ a.pop-opt:focus-visible { outline-offset: -2px; }
 .hint > button:hover { background: var(--fill-hover); color: var(--ink); }
 .hint:has(:popover-open) > button { background: var(--fill-selected); color: var(--ink); }
 .hint-pop {
-  inset: auto 20px 20px auto; max-width: 280px; margin: 0; padding: 8px 12px;
+  --inset: auto 20px 20px auto; inset: var(--inset); max-width: 280px; margin: 0; padding: 8px 12px;
   color: var(--ink-soft); font: var(--weight-normal) var(--text-sm)/1.5 var(--font-sans); text-align: left; white-space: normal;
 }
 .hint-pop[style] { position: absolute; }
-@media (max-width: 600px) { .hint-pop { left: 16px !important; right: 16px !important; width: auto; max-width: none; } }
+@media (max-width: 600px) { .hint-pop { left: 16px; right: 16px; width: auto; max-width: none; } }
 /* A browser without popovers cannot open the text of a hint: there the
    text stands in its place, as quiet text that wraps, without the button. */
 @supports not selector(:popover-open) {
