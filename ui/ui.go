@@ -1560,19 +1560,25 @@ func ago(now, t time.Time) string {
 	return strconv.FormatInt(n, 10) + unit + " ago"
 }
 
-// span words a length of time: "0.2s" below a second, then "13s", "3m 12s",
-// "2h 5m", and from two days, as ago, "3d 4h". Each part is cut down, never
-// rounded up, as ago does. Below a tenth of a second it is "<0.1s", where
-// "0.0s" would read as no time; no time is "0s". A gap that counts is whole
-// seconds, and the script counts it in the same words: see span in app.js.
+// span words a length of time: tenths below ten seconds, as "0.2s" and
+// "1.3s", which is the scale of a handler's run, then "13s", "3m 12s", "2h 5m",
+// and from two days, as ago, "3d 4h". Each part is cut down, never rounded
+// up, as ago does, and a whole number of seconds has no tenths. Below a tenth
+// of a second it is "<0.1s", where "0.0s" would read as no time; no time is
+// "0s". A gap that counts is whole seconds, and the script counts it in the
+// same words: see span in app.js.
 func span(d time.Duration) string {
 	switch {
 	case d <= 0:
 		return "0s"
 	case d < 100*time.Millisecond:
 		return "<0.1s"
-	case d < time.Second:
-		return "0." + strconv.Itoa(int(d/(100*time.Millisecond))) + "s"
+	case d < 10*time.Second:
+		tenths := int(d / (100 * time.Millisecond))
+		if tenths%10 == 0 {
+			return strconv.Itoa(tenths/10) + "s"
+		}
+		return strconv.Itoa(tenths/10) + "." + strconv.Itoa(tenths%10) + "s"
 	}
 	s := int64(d / time.Second)
 	pair := func(n int64, unit string, rest int64, sub string) string {

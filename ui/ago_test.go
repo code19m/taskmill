@@ -66,7 +66,12 @@ func TestSpanWordsALengthOfTime(t *testing.T) {
 		{100 * time.Millisecond, "0.1s"},
 		{999 * time.Millisecond, "0.9s"},
 		{time.Second, "1s"},
-		{1900 * time.Millisecond, "1s"},
+		{1300 * time.Millisecond, "1.3s"},
+		{1999 * time.Millisecond, "1.9s"},
+		{2 * time.Second, "2s"}, // a gap that counts: as the script words it
+		{9999 * time.Millisecond, "9.9s"},
+		{10 * time.Second, "10s"},
+		{10900 * time.Millisecond, "10s"},
 		{59*time.Second + 999*time.Millisecond, "59s"},
 		{time.Minute, "1m"},
 		{time.Minute + time.Second, "1m 1s"},

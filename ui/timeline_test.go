@@ -62,7 +62,7 @@ func TestTaskTimeline(t *testing.T) {
 			"step: Created 7m ago",
 			"gap: waited 0.1s",
 			"step: Started 7m ago",
-			"gap err: failed after 2s",
+			"gap err: failed after 2.1s",
 			"step plan: Due again in 3m attempt 2",
 		}},
 		{"dead after five attempts", `'dead', 5, 5, NULL, now() - interval '2h10m', now() - interval '12m30s', now() - interval '12m29.6s',
@@ -130,7 +130,7 @@ func TestTaskTimeline(t *testing.T) {
 		"step: Created 9m ago due at once",
 		"gap: waited 0.2s",
 		"step: Started 9m ago",
-		"gap: ran 1s",
+		"gap: ran 1.3s",
 		"step ok: Completed 9m ago",
 	})
 	checkTimeline(t, client, 1002, "completed, started before it was due", []string{
