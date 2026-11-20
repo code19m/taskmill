@@ -56,6 +56,9 @@
           </div>
           <pre class="code code-error">{{.Message}}</pre>
         </li>
+        {{- if .Retried}}
+        <li class="retried">Retried: the attempts started again</li>
+        {{- end}}
       {{end}}</ol>
       {{else}}<div class="card-body">{{template "empty" (dict "Title" "No errors")}}</div>{{end}}
     </section>
@@ -66,7 +69,7 @@
     <dl class="props">
       <dt>Kind</dt><dd class="mono">{{$t.Kind}}</dd>
       <dt>Queue</dt><dd><a href="{{path "/tasks"}}{{query "queue" $t.Queue}}">{{$t.Queue}}</a></dd>
-      {{with $t.GroupKey}}<dt>FIFO group</dt><dd><a class="mono" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" .}}">{{template "group" .}}</a></dd>{{end}}
+      {{with $t.GroupKey}}<dt>FIFO group</dt><dd><a class="mono" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" .}}"{{with outbox .}} title="{{.}}"{{end}}>{{template "group" .}}</a></dd>{{end}}
       <dt>Priority</dt><dd>{{$t.Priority}}</dd>
       <dt>Attempts</dt>
       <dd>

@@ -837,6 +837,8 @@
   // ellipsis cuts short. A title that only repeats text that shows whole
   // says nothing. The tooltip holds the title meanwhile, so the browser
   // shows none, and a screen reader hears it as before, in aria-description.
+  // It holds the titles further out too: without its own, an element shows
+  // the title of the one around it.
 
   const tooltip = document.createElement("div");
   tooltip.className = "tooltip";
@@ -844,7 +846,7 @@
   tooltip.setAttribute("aria-hidden", "true");
   let tipFor = null; // what the tooltip was last asked about
   let described = null; // the element that it is about
-  let held = ""; // the title that it took from that element
+  let held = []; // the titles that it took, [element, title], the nearest first
 
   const nearest = (el, test) => {
     while (el && !test(el)) el = el.parentElement;
@@ -856,21 +858,24 @@
   // element, or under it where there is no room. It measures the tooltip
   // once. With no target, or nothing to say, it hides the tooltip.
   function describe(target) {
-    if (held) {
-      if (!described.hasAttribute("title")) described.title = held; // one that it got meanwhile is newer
-      described.removeAttribute("aria-description");
+    for (const [el, title] of held) {
+      if (!el.hasAttribute("title")) el.title = title; // one that it got meanwhile is newer
+      el.removeAttribute("aria-description");
     }
+    held = [];
     tipFor = target;
     const box = nearest(target, cuts);
     described = nearest(target, (el) => el.title) ?? box;
-    held = described?.title;
-    if (held) {
-      described.removeAttribute("title");
-      described.setAttribute("aria-description", held);
+    for (let el = described; el; el = el.parentElement) {
+      if (!el.title) continue;
+      held.push([el, el.title]);
+      el.setAttribute("aria-description", el.title);
+      el.removeAttribute("title");
     }
+    const title = described && held[0]?.[0] === described ? held[0][1] : "";
     // innerText is the text as it shows. Words that only a screen reader
     // reads are on lines of their own in it, and complete no title.
-    tooltip.textContent = held ? (box || !described.innerText?.includes(held) ? held : "") : described?.innerText ?? "";
+    tooltip.textContent = title ? (box || !described.innerText?.includes(title) ? title : "") : described?.innerText ?? "";
     if (!tooltip.textContent) {
       tooltip.remove();
       return;

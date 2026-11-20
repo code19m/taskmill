@@ -42,7 +42,7 @@
       <tr data-href="{{path "/tasks/"}}{{.ID}}" data-key="{{.ID}}"{{if and $i (eq $i $d.Seen)}} id="more"{{end}}>
         <td class="num"><a class="task-id" href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
         <td class="mono" title="{{.Kind}}">{{.Kind}}</td>
-        <td title="{{.Queue}}{{with .GroupKey}}, FIFO group {{with outbox .}}{{.Topic}} › {{.Key}}{{else}}{{visible .}}{{end}}{{end}}">{{.Queue}}{{if .GroupKey}}<span class="group">{{template "group" .GroupKey}}</span>{{end}}</td>
+        <td{{with .GroupKey}} title="{{with outbox .}}{{.}}{{else}}FIFO group {{visible .}}{{end}}"{{end}}>{{.Queue}}{{if .GroupKey}}<span class="group">{{template "group" .GroupKey}}</span>{{end}}</td>
         <td><div class="state-cell">{{template "state" .State}}{{if ne .Priority 2}}<span class="chip priority-{{.Priority}}" title="Priority: {{.Priority}}">{{.Priority}}</span>{{end}}</div></td>
         <td class="num">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
         <td class="tone-faint"{{template "at" .CreatedAt}}>{{ago $.Now .CreatedAt}}</td>

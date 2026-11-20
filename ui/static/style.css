@@ -891,6 +891,9 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
   border: 1.6px solid var(--err); border-radius: 50%;
 }
 .errors li.code-no_handler::before { border-color: var(--ink-ghost); border-style: dashed; }
+/* A retry between two attempts: the count of attempts starts again. */
+.errors li.retried { display: block; font-size: var(--text-xs); color: var(--ink-faint); }
+.errors li.retried::before { top: 7px; width: 9px; height: 1.5px; border: 0; border-radius: 1px; background: var(--ink-ghost); }
 .errors li:not(:last-child)::after {
   content: ""; position: absolute; left: 6.5px; top: 19px; bottom: -14px; width: 1px; background: var(--line);
 }

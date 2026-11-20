@@ -204,3 +204,53 @@ func TestTaskColumnsEndTogether(t *testing.T) {
 		t.Errorf("the task's page does not end its left column with the card of its errors, beside the details:\n%s", body)
 	}
 }
+
+// A task's errors mark where it was retried: a retry starts the count of
+// attempts again, so two errors of the first attempt have a retry between
+// them. A note, such as the wait for a handler, is no attempt, and the
+// number of the attempt that it notes marks no retry.
+func TestTaskErrorsMarkARetry(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	h := handler(t, client, nil)
+	errorLines := regexp.MustCompile(`(?s)<ol class="errors">(.*?)</ol>`)
+	line := regexp.MustCompile(`(?s)<li class="([^"]*)">(.*?)</li>`)
+	for _, c := range []struct {
+		name, errors string
+		want         []string
+	}{
+		{"retried after it died", `[{"attempt": 1, "at": "2026-11-19T11:35:27Z", "message": "boom"},
+		    {"attempt": 1, "at": "2026-11-19T18:33:17Z", "message": "boom"}]`,
+			[]string{"Attempt 1", "retried", "Attempt 1"}},
+		{"retried after its third attempt", `[{"attempt": 2, "at": "2026-11-19T10:00:00Z", "message": "a"},
+		    {"attempt": 3, "at": "2026-11-19T10:01:00Z", "message": "b"},
+		    {"attempt": 2, "at": "2026-11-19T12:00:00Z", "message": "c"}]`,
+			[]string{"Attempt 2", "retried", "Attempt 3", "Attempt 2"}},
+		{"a note between two attempts", `[{"attempt": 2, "at": "2026-11-19T10:00:00Z", "message": "a"},
+		    {"attempt": 2, "at": "2026-11-19T10:01:00Z", "code": "no_handler", "message": "no handler"},
+		    {"attempt": 3, "at": "2026-11-19T10:02:00Z", "message": "b"}]`,
+			[]string{"Attempt 3", "Attempt 2", "Attempt 2"}},
+	} {
+		var id int64
+		if err := pool.QueryRow(t.Context(), `INSERT INTO `+schema+`.tasks (queue, kind, payload, state, attempt, max_attempts, errors, run_at, finalized_at)
+		    VALUES ('mail', 'greet', '{}', 'dead', 1, 5, $1, now(), now()) RETURNING id`, c.errors).Scan(&id); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		_, body, _ := get(t, h, "/tasks/"+strconv.FormatInt(id, 10))
+		list := errorLines.FindStringSubmatch(body)
+		if list == nil {
+			t.Fatalf("%s: the page lists no errors:\n%s", c.name, body)
+		}
+		var got []string
+		for _, li := range line.FindAllStringSubmatch(list[1], -1) {
+			if li[1] == "retried" {
+				got = append(got, "retried")
+				continue
+			}
+			got = append(got, regexp.MustCompile(`<span class="strong">([^<]*)</span>`).FindStringSubmatch(li[2])[1])
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: the errors read %q, want %q", c.name, got, c.want)
+		}
+	}
+}

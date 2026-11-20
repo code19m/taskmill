@@ -2069,10 +2069,26 @@ func lastError(errs []taskmill.AttemptError) *taskmill.AttemptError {
 	return &errs[len(errs)-1]
 }
 
-// newestFirst returns errs, newest first.
-func newestFirst(errs []taskmill.AttemptError) []taskmill.AttemptError {
-	out := slices.Clone(errs)
-	slices.Reverse(out)
+// errorLine is an error of a task's history, as its page lists it.
+type errorLine struct {
+	taskmill.AttemptError
+	Retried bool // the task was retried between the attempt before this one and this one
+}
+
+// newestFirst returns errs, newest first, and marks where the task was
+// retried: a retry starts the count of attempts again, so an attempt's
+// number that is not above the one before it follows a retry. A note, such
+// as the wait for a handler, is no attempt, and counts for nothing here.
+func newestFirst(errs []taskmill.AttemptError) []errorLine {
+	out := make([]errorLine, len(errs))
+	before := 0 // the number of the attempt before, in time
+	for i, e := range errs {
+		attempt := e.Attempt > 0 && e.Code != taskmill.CodeNoHandler
+		out[len(errs)-1-i] = errorLine{AttemptError: e, Retried: attempt && before > 0 && e.Attempt <= before}
+		if attempt {
+			before = e.Attempt
+		}
+	}
 	return out
 }
 

@@ -51,6 +51,15 @@ All notable changes to taskmill are recorded here. The format follows
   the database came back.
 - The back and forward buttons no longer stop with a script error, which
   left the buttons of an action that was on its way disabled.
+- A task's errors say where the task was retried. A retry starts the count
+  of attempts again, so a task that died, was retried, and died again
+  listed "Attempt 1" twice, as if one attempt had failed twice. A line
+  between the two now says "Retried: the attempts started again".
+- Pointing at a FIFO group key that the outbox made showed two tooltips
+  with two texts: the dashboard's, and the browser's for the cell around
+  it. The dashboard now holds the titles around the element too, so only
+  its own shows, and the key has one text everywhere: "Outbox topic
+  orders, key order-13".
 
 ## [0.12.1] - 2026-11-20
 

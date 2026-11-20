@@ -660,16 +660,16 @@ func TestGroupKeysOfTheOutboxShowAsTopicAndKey(t *testing.T) {
 		}
 	}
 	h := handler(t, client, nil)
-	const parts = `<span title="Outbox topic orders, key order-13"><span class="topic">orders</span><span class="topic-sep" aria-hidden="true">›</span>order-13</span>`
+	const parts = `<span><span class="topic">orders</span><span class="topic-sep" aria-hidden="true">›</span>order-13</span>`
 	for path, wants := range map[string][]string{
 		// The filter's options, and each task's group beside its queue.
 		"/tasks?queue=mail": {
 			`<label class="pop-opt" data-key="` + key + `"><input type="checkbox" class="chk-input" name="group" value="` + key + `">`,
 			`<span class="pop-text mono">` + parts + `</span>`,
-			`<td title="mail, FIFO group orders › order-13">mail<span class="group">` + parts + `</span></td>`,
+			`<td title="Outbox topic orders, key order-13">mail<span class="group">` + parts + `</span></td>`,
 			`<span class="pop-text mono">a␟b␟c</span>`, `<span class="pop-text mono">tab␉here␟key</span>`,
 			`<span class="pop-text mono">␟no-topic</span>`, `<span class="pop-text mono">plain</span>`,
-			`<td title="mail, FIFO group a␟b␟c">mail<span class="group">a␟b␟c</span></td>`,
+			`<td title="FIFO group a␟b␟c">mail<span class="group">a␟b␟c</span></td>`,
 		},
 		// The filter's button, when the key is the one choice.
 		"/tasks?group=orders%1Forder-13": {
@@ -678,7 +678,7 @@ func TestGroupKeysOfTheOutboxShowAsTopicAndKey(t *testing.T) {
 		},
 		"/tasks?group=a%1Fb%1Fc": {`aria-label="FIFO group: a␟b␟c"><span class="sel-label">a␟b␟c</span>`},
 		// The task's page, and the page of an action on the group's tasks.
-		"/tasks/" + strconv.FormatInt(id, 10):        {`<a class="mono" href="/tasks?group=orders%1Forder-13&amp;queue=mail">` + parts + `</a>`},
+		"/tasks/" + strconv.FormatInt(id, 10):        {`<a class="mono" href="/tasks?group=orders%1Forder-13&amp;queue=mail" title="Outbox topic orders, key order-13">` + parts + `</a>`},
 		"/tasks/bulk/cancel?group=orders%1Forder-13": {`<dt>FIFO group</dt><dd class="mono">` + parts + `</dd>`},
 		"/tasks/bulk/cancel?group=a%1Fb%1Fc":         {`<dt>FIFO group</dt><dd class="mono">a␟b␟c</dd>`},
 	} {

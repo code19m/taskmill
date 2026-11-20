@@ -198,7 +198,7 @@
    key shows as it is, with its control characters as pictures. A value, a
    link, and a data-key carry the key itself. The script's "group" shows a
    key in the same way. */}}
-{{define "group"}}{{with outbox .}}<span title="{{.}}"><span class="topic">{{.Topic}}</span><span class="topic-sep" aria-hidden="true">›</span>{{.Key}}</span>{{else}}{{visible .}}{{end}}{{end}}
+{{define "group"}}{{with outbox .}}<span><span class="topic">{{.Topic}}</span><span class="topic-sep" aria-hidden="true">›</span>{{.Key}}</span>{{else}}{{visible .}}{{end}}{{end}}
 
 {{/* The tooltip of a time: the time in UTC, with its instant, by which the
    script words it in the reader's time zone. */}}
