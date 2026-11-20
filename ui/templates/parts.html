@@ -1,5 +1,5 @@
 {{/* A task state: a ring icon, so that color is never the only cue, and its name. */}}
-{{define "task-state"}}<span class="status status-{{.}}">{{template "state-icon" .}}<span>{{.}}</span></span>{{end}}
+{{define "task-state"}}<span class="task-state task-state-{{.}}">{{template "state-icon" .}}<span>{{.}}</span></span>{{end}}
 
 {{/* A hint: a small button that shows a short text about what is beside it.
    Its argument has the Text, and the Name of what the text is about, one

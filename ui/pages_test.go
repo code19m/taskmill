@@ -6,6 +6,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -133,6 +134,25 @@ func TestStylesDefineThePropertiesTheyUse(t *testing.T) {
 		if !used[name] {
 			t.Errorf("the stylesheet defines %s, which nothing uses", name)
 		}
+	}
+}
+
+// The light theme is written twice: for a reader who chose it, and for a
+// device that prefers it, without the script. Plain CSS cannot share one
+// block between an attribute and a media query, so the two must stay equal.
+func TestStylesWriteTheLightThemeTwiceAlike(t *testing.T) {
+	t.Parallel()
+	sheet, err := os.ReadFile("static/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chosen := regexp.MustCompile(`(?s):root\[data-theme="light"\] \{(.*?)\}`).FindSubmatch(sheet)
+	preferred := regexp.MustCompile(`(?s)\(prefers-color-scheme: light\) \{\s*:root:not\(\[data-theme\]\) \{(.*?)\}`).FindSubmatch(sheet)
+	if chosen == nil || preferred == nil {
+		t.Fatal("the stylesheet has no light theme in the form that this test reads")
+	}
+	if a, b := strings.Fields(string(chosen[1])), strings.Fields(string(preferred[1])); !slices.Equal(a, b) {
+		t.Errorf("the two light themes differ:\n%s\n%s", strings.Join(a, " "), strings.Join(b, " "))
 	}
 }
 
