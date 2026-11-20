@@ -50,8 +50,8 @@ steps before and after the tag are manual.
      `grep -rn 'taskmill-ui:[0-9]' README.md docs` finds them all.
    - Set the latest release in [Compatibility](../reference/compatibility.md#status).
 
-4. **Check the migration checksums.** `internal/migrations/released_test.go`
-   must pin the checksum of every migration in the release.
+4. **Pin the new migrations.** Add the checksum of each migration that the
+   release first includes to `internal/migrations/released_test.go`.
 
 5. **Tag the release.** Once the pull request is merged, tag the release
    commit on `main` with an annotated tag, and push it:
