@@ -848,11 +848,27 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .step.run::before { background: var(--run); }
 .step.ok::before { background: var(--ok); }
 .step.err::before { background: var(--err); }
-.gap { padding: 1px 0 1px 26px; font-size: var(--text-xs); color: var(--ink-faint); }
-.gap.run { color: var(--run); }
-.gap.err { color: var(--err); }
-.gap.warn { color: var(--warn); }
+/* Between two steps, the line says what the task did: dashed while it
+   waited, solid in the color of its outcome while an attempt ran. The words
+   stand under the step's name, and the length of time in the column of the
+   times, so every number of the timeline reads down one edge. */
+.gap {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; column-gap: 10px; align-items: center;
+  min-height: 26px; font-size: var(--text-xs); color: var(--ink-faint);
+}
+.gap > :first-child { grid-column: 2; }
+.gap .took { font-size: var(--text-sm); font-weight: var(--weight-medium); color: var(--ink-muted); }
 .gap a { color: inherit; font-weight: var(--weight-medium); }
+.timeline .gap.wait::after { left: 7.25px; width: 1.5px; background: repeating-linear-gradient(to bottom, var(--ink-ghost) 0 3px, transparent 3px 6px); }
+.timeline .gap.work::after { left: 7px; width: 2px; border-radius: 1px; background: var(--ink-muted); }
+.timeline .gap.ok::after { background: var(--ok); }
+.timeline .gap.err::after { background: var(--err); }
+.timeline .gap.run::after { background: var(--run); }
+.timeline .gap.wait.warn::after { background: repeating-linear-gradient(to bottom, var(--warn) 0 3px, transparent 3px 6px); }
+.gap.ok .took { color: var(--ok); }
+.gap.err .took { color: var(--err); }
+.gap.run .took { color: var(--run); }
+.gap.warn, .gap.warn .took { color: var(--warn); }
 
 .code {
   margin: 0; padding: 14px 16px; overflow: auto; max-height: 520px;

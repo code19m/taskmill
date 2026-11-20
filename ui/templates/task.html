@@ -81,7 +81,7 @@
     <h3 class="timeline-title" id="timeline-title">Timeline</h3>
     <ol class="timeline" aria-labelledby="timeline-title">{{range $e := timeline $.Now $t $g.Head}}
       {{if .Step}}<li class="step{{with .Tone}} {{.}}{{end}}{{if .Plan}} plan{{end}}"><span>{{.Step}}</span> {{if .At.IsZero}}<span>not yet</span>{{else}}<time{{template "at" .At}}>{{ago $.Now .At}}</time>{{end}}{{with .Note}} <span class="step-note">{{.}}</span>{{end}}</li>
-      {{- else}}<li class="gap{{with .Tone}} {{.}}{{end}}">{{if .Since.IsZero}}{{.Gap}}{{else}}<span data-since="{{instant .Since}}">{{.Gap}}</span>{{end}}{{with .Behind}}{{if $e.Gap}}, {{end}}behind <a href="{{path "/tasks/"}}{{.ID}}" aria-label="task {{.ID}}">#{{.ID}}</a>{{end}}</li>{{end}}
+      {{- else}}<li class="gap {{if .Work}}work{{else}}wait{{end}}{{with .Tone}} {{.}}{{end}}"><span>{{with .Behind}}{{if $e.Gap}}{{$e.Gap}}, behind{{else}}Behind{{end}} <a href="{{path "/tasks/"}}{{.ID}}" aria-label="task {{.ID}}">#{{.ID}}</a>{{else}}{{.Gap}}{{end}}</span>{{with .Took}} <span class="took"{{if not $e.Since.IsZero}} data-since="{{instant $e.Since}}"{{end}}>{{.}}</span>{{end}}</li>{{end}}
     {{- end}}
     </ol>
   </aside>

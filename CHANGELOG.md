@@ -35,6 +35,14 @@ All notable changes to taskmill are recorded here. The format follows
 - On a phone, the Live button says "Reconnecting", "Offline", or "Signed
   out" in words too.
 
+- In a task's timeline, the line between two steps says what the task did:
+  dashed while it waited, solid while an attempt ran, green when it
+  completed, red when it failed, blue while it runs. The words, such as
+  "Waited" or "Failed after", stand under the step's name, and the length
+  of time stands with the times, so every number reads down one edge. A
+  length below a second is in milliseconds, such as "35ms", where it said
+  "<0.1s".
+
 ### Fixed
 
 - A click on a link of a dashboard that fails costs one request, where it

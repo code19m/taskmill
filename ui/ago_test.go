@@ -61,10 +61,11 @@ func TestSpanWordsALengthOfTime(t *testing.T) {
 	}{
 		{-time.Second, "0s"}, // the timeline leaves such a gap out
 		{0, "0s"},
-		{time.Microsecond, "<0.1s"},
-		{99 * time.Millisecond, "<0.1s"},
-		{100 * time.Millisecond, "0.1s"},
-		{999 * time.Millisecond, "0.9s"},
+		{time.Microsecond, "<1ms"},
+		{999 * time.Microsecond, "<1ms"},
+		{time.Millisecond, "1ms"},
+		{35 * time.Millisecond, "35ms"},
+		{999 * time.Millisecond, "999ms"},
 		{time.Second, "1s"},
 		{1300 * time.Millisecond, "1.3s"},
 		{1999 * time.Millisecond, "1.9s"},

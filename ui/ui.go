@@ -1675,19 +1675,21 @@ func ago(now, t time.Time) string {
 	return strconv.FormatInt(n, 10) + unit + " ago"
 }
 
-// span words a length of time: tenths below ten seconds, as "0.2s" and
-// "1.3s", which is the scale of a handler's run, then "13s", "3m 12s", "2h 5m",
-// and from two days, as ago, "3d 4h". Each part is cut down, never rounded
-// up, as ago does, and a whole number of seconds has no tenths. Below a tenth
-// of a second it is "<0.1s", where "0.0s" would read as no time; no time is
-// "0s". A gap that counts is whole seconds, and the script counts it in the
-// same words: see span in app.js.
+// span words a length of time at the scale of a handler's run:
+// milliseconds below a second, as "35ms", tenths below ten seconds, as
+// "1.3s", then "13s", "3m 12s", "2h 5m", and from two days, as ago, "3d 4h".
+// Each part is cut down, never rounded up, as ago does, and a whole number
+// of seconds has no tenths. Below a millisecond it is "<1ms", where "0ms"
+// would read as no time; no time is "0s". A gap that counts is whole
+// seconds, and the script counts it in the same words: see span in app.js.
 func span(d time.Duration) string {
 	switch {
 	case d <= 0:
 		return "0s"
-	case d < 100*time.Millisecond:
-		return "<0.1s"
+	case d < time.Millisecond:
+		return "<1ms"
+	case d < time.Second:
+		return strconv.Itoa(int(d/time.Millisecond)) + "ms"
 	case d < 10*time.Second:
 		tenths := int(d / (100 * time.Millisecond))
 		if tenths%10 == 0 {
@@ -1718,8 +1720,8 @@ func span(d time.Duration) string {
 // the microsecond, as one statement sets both. A due time that the
 // application took from its own clock is a few milliseconds off, by that
 // clock and the trip to the database, and one before the creation was due
-// when the task was created. The page shows a wait in tenths of a second:
-// closer than half of one, the two times are one time to the reader.
+// when the task was created. Within that slack, the two times are one time
+// to the reader, and the wait is counted from the creation.
 const dueSlack = 50 * time.Millisecond
 
 // entry is a line of a task's timeline: a step, or the gap between two
@@ -1729,10 +1731,12 @@ type entry struct {
 	At     time.Time          // when the step was or is due; zero for one with no time yet
 	Note   string             // a step's second line, such as "attempt 2"
 	Plan   bool               // the step is yet to come
-	Gap    string             // a gap's words, such as "waited 0.2s"
-	Since  time.Time          // for a gap that lasts until now, when it began: the script counts the end of its words
+	Gap    string             // a gap's words, such as "Waited"
+	Took   string             // a gap's length of time, such as "0.2s"; empty if it has none
+	Work   bool               // the gap is an attempt that ran, not a wait: its line is solid, not dashed
+	Since  time.Time          // for a gap that lasts until now, when it began: the script counts its length
 	Behind *taskmill.TaskInfo // for a gap, the task that this one waits behind in its FIFO group
-	Tone   string             // the color of a step's dot or of a gap's words: "run", "ok", "err", or "warn"
+	Tone   string             // the color of a step's dot, or of a gap's line and length: "run", "ok", "err", or "warn"
 }
 
 // timeline returns the steps of task t at now, with the time between them:
@@ -1758,23 +1762,23 @@ func timeline(now time.Time, t, head *taskmill.TaskInfo) []entry {
 		s.waiting(head)
 	case taskmill.StateRunning:
 		due := s.created()
-		s.gap("waited", due, s.started, "")
+		s.gap("Waited", due, s.started, "")
 		if s.start("run") {
-			s.tl = append(s.tl, entry{Gap: "running for " + s.lasting(s.started), Since: s.started, Tone: "run"})
+			s.tl = append(s.tl, entry{Gap: "Running for", Took: s.lasting(s.started), Work: true, Since: s.started, Tone: "run"})
 		}
 	case taskmill.StateRetryable:
 		s.retrying()
 	case taskmill.StateCompleted:
 		due := s.created()
-		s.gap("waited", due, s.started, "")
+		s.gap("Waited", due, s.started, "")
 		s.start("")
-		s.gap("ran", s.started, t.FinalizedAt, "")
+		s.gap("Ran", s.started, t.FinalizedAt, "ok")
 		s.step("Completed", t.FinalizedAt, "", "ok")
 	case taskmill.StateDead:
 		due := s.created()
-		s.gap("waited", due, s.started, "")
+		s.gap("Waited", due, s.started, "")
 		s.start("")
-		s.gap("failed after", s.started, t.FinalizedAt, "err")
+		s.gap("Failed after", s.started, t.FinalizedAt, "err")
 		s.step("Died", t.FinalizedAt, "", "err")
 	case taskmill.StateCanceled:
 		s.canceled()
@@ -1801,10 +1805,11 @@ func (s *steps) plan(name string, at time.Time, note string) {
 }
 
 // gap adds the time from one step to the next, unless a time is missing or
-// the two are out of order.
+// the two are out of order. A gap that ends a start, Waited, is a wait; any
+// other is the attempt that ran.
 func (s *steps) gap(words string, from, to time.Time, tone string) {
 	if !from.IsZero() && !to.IsZero() && !to.Before(from) {
-		s.tl = append(s.tl, entry{Gap: words + " " + span(to.Sub(from)), Tone: tone})
+		s.tl = append(s.tl, entry{Gap: words, Took: span(to.Sub(from)), Work: words != "Waited", Tone: tone})
 	}
 }
 
@@ -1859,9 +1864,9 @@ func (s *steps) waiting(head *taskmill.TaskInfo) {
 		wait.Tone = "warn"
 	}
 	if due := s.created(); !due.After(s.now) {
-		wait.Gap, wait.Since = "waiting "+s.lasting(due), due
+		wait.Gap, wait.Took, wait.Since = "Waiting", s.lasting(due), due
 	}
-	if wait.Gap != "" || head != nil {
+	if wait.Took != "" || head != nil {
 		s.tl = append(s.tl, wait)
 	}
 	s.plan("Start", time.Time{}, "")
@@ -1873,10 +1878,10 @@ func (s *steps) waiting(head *taskmill.TaskInfo) {
 func (s *steps) retrying() {
 	s.step("Created", s.t.CreatedAt, "", "")
 	if len(s.t.Errors) == 1 {
-		s.gap("waited", s.t.CreatedAt, s.started, "")
+		s.gap("Waited", s.t.CreatedAt, s.started, "")
 	}
 	s.start("")
-	s.gap("failed after", s.started, s.failed(), "err")
+	s.gap("Failed after", s.started, s.failed(), "err")
 	s.plan("Due again", s.t.RunAt, "attempt "+strconv.Itoa(s.t.Attempt+1))
 }
 
@@ -1889,12 +1894,12 @@ func (s *steps) canceled() {
 	first := s.started.IsZero() || !s.t.RunAt.After(s.started)
 	if reached && first {
 		due := s.created()
-		s.gap("waited", due, s.started, "")
+		s.gap("Waited", due, s.started, "")
 	} else {
 		s.step("Created", s.t.CreatedAt, "", "")
 	}
 	if s.start("") {
-		s.gap("failed after", s.started, s.failed(), "err")
+		s.gap("Failed after", s.started, s.failed(), "err")
 		if reached && !first {
 			s.step("Due", s.t.RunAt, "", "")
 		}
