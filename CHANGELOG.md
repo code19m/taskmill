@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-21
+
 ### Added
 
 - Docs for each architecture: a new page, "Fit taskmill to your
@@ -1895,7 +1897,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/code19m/taskmill/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/code19m/taskmill/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/code19m/taskmill/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/code19m/taskmill/compare/v0.11.1...v0.12.0
