@@ -3,7 +3,7 @@
 <header class="topbar">
   <a class="crumb" href="{{path "/tasks"}}{{query "queue" $t.Queue}}">{{$t.Queue}}</a>
   <span class="crumb-sep" aria-hidden="true">/</span>
-  <h1 class="task-heading"><span>#{{$t.ID}}</span>{{template "state" $t.State}}</h1>
+  <h1 class="task-heading"><span>#{{$t.ID}}</span>{{template "task-state" $t.State}}</h1>
   {{if not .ReadOnly}}
   <div class="right">
     {{if $t.State.CanRetry}}
@@ -27,7 +27,7 @@
 </div>
 {{else if $g.Head}}
 <div class="callout" role="note">
-  <div>Waits behind <a class="strong" href="{{path "/tasks/"}}{{$g.Head.ID}}">#{{$g.Head.ID}}</a> {{template "state" $g.Head.State}} in its FIFO group.</div>
+  <div>Waits behind <a class="strong" href="{{path "/tasks/"}}{{$g.Head.ID}}">#{{$g.Head.ID}}</a> {{template "task-state" $g.Head.State}} in its FIFO group.</div>
   <a class="btn sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group{{template "icon" "next"}}</a>
 </div>
 {{end}}
@@ -52,7 +52,7 @@
           <div class="error-head">
             <span class="strong">{{if .Attempt}}Attempt {{.Attempt}}{{else}}Note{{end}}</span>
             {{with .Code}}<span class="chip mono">{{.}}</span>{{end}}
-            <time class="subtle"{{template "at" .At}}>{{ago $.Now .At}}</time>
+            <time class="subtle"{{template "time-attrs" .At}}>{{ago $.Now .At}}</time>
           </div>
           <pre class="code code-error">{{.Message}}</pre>
         </li>
@@ -78,13 +78,16 @@
         </div>
       </dd>
     </dl>
-    {{/* The task's steps, with the time between them; see timeline in ui.go.
+    {{/* The task's steps, with the time between them; see timeline in timeline.go.
        A step's dot is drawn by its style, and its name, time, and note are
        in the order to read them. */}}
     <h3 class="timeline-title" id="timeline-title">Timeline</h3>
     <ol class="timeline" aria-labelledby="timeline-title">{{range $e := timeline $.Now $t $g.Head}}
-      {{if .Step}}<li class="step{{with .Tone}} {{.}}{{end}}{{if .Plan}} plan{{end}}"><span>{{.Step}}</span> {{if .At.IsZero}}<span>not yet</span>{{else}}<time{{template "at" .At}}>{{ago $.Now .At}}</time>{{end}}{{with .Note}} <span class="step-note">{{.}}</span>{{end}}</li>
-      {{- else}}<li class="gap {{if .Work}}work{{else}}wait{{end}}{{with .Tone}} {{.}}{{end}}"><span>{{.Gap}}{{with .Behind}} <a href="{{path "/tasks/"}}{{.ID}}" aria-label="task {{.ID}}">#{{.ID}}</a>{{end}}</span>{{with .Took}} <span class="took"{{if not $e.Since.IsZero}} data-since="{{instant $e.Since}}"{{end}}>{{.}}</span>{{end}}</li>{{end}}
+      {{if .Step}}<li class="step{{with .Tone}} {{.}}{{end}}{{if .Plan}} plan{{end}}"><span>{{.Step}}</span> {{if .At.IsZero}}<span>not yet</span>{{else}}<time{{template "time-attrs" .At}}>{{ago $.Now .At}}</time>{{end}}
+        {{- with .Note}} <span class="step-note">{{.}}</span>{{end}}</li>
+      {{- else}}<li class="gap {{if .Work}}work{{else}}wait{{end}}{{with .Tone}} {{.}}{{end}}"><span>{{.Gap}}
+        {{- with .Behind}} <a href="{{path "/tasks/"}}{{.ID}}" aria-label="task {{.ID}}">#{{.ID}}</a>{{end}}</span>
+        {{- with .Took}} <span class="took"{{if not $e.Since.IsZero}} data-since="{{instant $e.Since}}"{{end}}>{{.}}</span>{{end}}</li>{{end}}
     {{- end}}
     </ol>
   </aside>

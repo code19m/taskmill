@@ -23,7 +23,9 @@
        keeps it open. */}}
     <tbody>{{range .Data}}{{$own := afterHost .ID .Hostname}}{{$queues := fit .Queues}}
       <tr data-key="{{.ID}}">
-        <td title="{{.ID}}"><div class="worker"><span class="health{{if .Stale}} stale{{end}}" title="{{if .Stale}}No check-in for longer than its lease{{else}}Healthy{{end}}"></span><span class="mono">{{if $own}}<span class="visually-hidden">{{.Hostname}}-</span>{{$own}}{{else}}{{.ID}}{{end}}</span>{{if .Stale}}<span class="chip warn">stale</span>{{end}}{{if .Maintainer}}<span class="chip">maintainer</span>{{end}}</div></td>
+        <td title="{{.ID}}"><div class="worker"><span class="health{{if .Stale}} stale{{end}}" title="{{if .Stale}}No check-in for longer than its lease{{else}}Healthy{{end}}"></span><span class="mono">
+          {{- if $own}}<span class="visually-hidden">{{.Hostname}}-</span>{{$own}}{{else}}{{.ID}}{{end}}</span>
+          {{- if .Stale}}<span class="chip warn">stale</span>{{end}}{{if .Maintainer}}<span class="chip">maintainer</span>{{end}}</div></td>
         <td title="{{.Hostname}}">{{.Hostname}}</td>
         {{/* A word in place of a version is not code. Go's word for a build from taskmill's own tree, "(devel)", is said plainly. */ -}}
         {{if eq .Version "(devel)"}}<td class="tone-ghost" title="Built from taskmill's source, not from a release">local build</td>
@@ -34,8 +36,8 @@
             {{- with .Queues}}<h2>Queues <span class="subtle">{{len .}}</span></h2><ul>{{range .}}<li><a href="{{path "/tasks"}}{{query "queue" .}}">{{.}}</a></li>{{end}}</ul>{{end}}
             {{- with .Kinds}}<h2>Kinds <span class="subtle">{{len .}}</span></h2><ul class="mono">{{range .}}<li><a href="{{path "/tasks"}}{{query "kind" .}}">{{.}}</a></li>{{end}}</ul>{{end -}}
           </div>{{end}}</td>
-        <td class="tone-faint"{{template "at" .StartedAt}}>{{ago $.Now .StartedAt}}</td>
-        <td class="{{if .Stale}}tone-warn{{else}}tone-faint{{end}}"{{template "at" .CheckedInAt}}>{{ago $.Now .CheckedInAt}}</td>
+        <td class="tone-faint"{{template "time-attrs" .StartedAt}}>{{ago $.Now .StartedAt}}</td>
+        <td class="{{if .Stale}}tone-warn{{else}}tone-faint{{end}}"{{template "time-attrs" .CheckedInAt}}>{{ago $.Now .CheckedInAt}}</td>
       </tr>
     {{end}}</tbody>
   </table>
