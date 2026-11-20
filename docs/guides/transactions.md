@@ -57,6 +57,8 @@ Keep the database library your app already uses, and wrap its transaction:
 | `database/sql` with pgx's driver, `github.com/jackc/pgx/v5/stdlib` | `taskmill.SQL(tx)` | Any `*sql.Tx` on that driver works |
 | sqlx | `taskmill.SQL(tx)` | A `*sqlx.Tx` works as it is |
 | bun | `taskmill.SQL(tx.Tx)` | Pass the `*sql.Tx` inside: bun rewrites query placeholders itself |
+| GORM, with `gorm.io/driver/postgres` | `taskmill.SQL(tx.Statement.ConnPool)` | Inside `db.Transaction`, `ConnPool` runs on GORM's transaction ([example](../../examples/orms/gorm.go)) |
+| ent, generated with `--feature sql/execquery` | `taskmill.SQL(tx)` | The feature gives `*ent.Tx` the two methods that `SQL` needs ([example](../../examples/orms/ent.go)) |
 | lib/pq | Not supported | Switch to pgx's `database/sql` driver |
 
 The quick example again, with `database/sql`:
@@ -84,7 +86,8 @@ return tx.Commit()
 - taskmill itself still needs a pgx pool
   ([Set up the database and client](setup.md#size-the-pool)).
   `stdlib.OpenDBFromPool` opens your `*sql.DB` on that same pool, so both
-  use the same connections.
+  use the same connections. Open GORM and ent on that `*sql.DB` too, as the
+  examples do.
 - The enqueue calls also accept a connection or a pool. `CancelTx` and
   `Task.CompleteTx` need a transaction, because they run several statements
   that must commit together. If you pass them a connection or a pool, they

@@ -10,10 +10,10 @@ GORELEASER_VERSION    := v2.19.0
 SYFT_VERSION          := v1.57.1
 GORELEASE_VERSION     := v0.0.0-20261014143641-f0251eb4aa3e
 
-# The repository's modules: the core, and the integrations that need modules
-# of their own (docs/design/dependencies.md).
-# Targets that check code run in each.
-MODULES := . otel
+# The repository's modules: the core, the integrations that need modules of
+# their own, and the examples that use other libraries
+# (docs/design/dependencies.md). Targets that check code run in each.
+MODULES := . otel examples/orms
 
 # The core version that otel/go.mod requires. Its replace line builds the
 # module against the core next to it; `make otel-release-check` builds it

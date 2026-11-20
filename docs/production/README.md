@@ -9,8 +9,8 @@ when you need them.
 | [Production checklist](checklist.md) | you prepare to go live |
 | [Database](database.md) | you set up PostgreSQL: roles, isolation level, connections, vacuum, and what happens when it fails |
 | [Connection poolers](connection-poolers.md) | you use PgBouncer, RDS Proxy, Supabase, or Neon |
-| [Backups, failover, and replicas](backups-and-failover.md) | you plan backups, restore one, or fail over to another server |
-| [Deploys](deploys.md) | you ship a new version of your app, or change a task |
+| [Backups, failover, and replicas](backups-and-failover.md) | you plan backups, restore one, fail over to another server, or run in several regions |
+| [Deploys](deploys.md) | you ship a new version of your app, change a task, or run on a serverless platform |
 | [Kubernetes](kubernetes.md) | you want manifests to copy |
 | [Autoscaling](autoscaling.md) | you want KEDA to add and remove workers |
 | [Capacity planning](capacity.md) | you estimate workers, connections, and disk |

@@ -24,6 +24,14 @@ var codePages = map[string][]string{
 	"docs/tutorial/5-outbox.md":                  {"examples/tutorial/main.go"},
 	"docs/tutorial/6-test-it.md":                 {"examples/tutorial/main.go", "examples/tutorial/main_test.go"},
 	"docs/tutorial/7-ready-to-ship.md":           {"examples/tutorial/main.go"},
+
+	"docs/recipes/organize-tasks-by-module.md": {
+		"examples/modules/main.go", "examples/modules/internal/billing/billing.go",
+		"examples/modules/internal/billing/billingtasks/billingtasks.go",
+		"examples/modules/internal/orders/orders.go", "examples/modules/internal/orders/orders_test.go",
+	},
+	"docs/recipes/split-across-services.md":     {"examples/services/orders/main.go", "examples/services/orders/main_test.go"},
+	"docs/recipes/work-with-other-languages.md": {"examples/enqueue-over-http/main.go"},
 }
 
 // builtPrograms are the files that the tutorial's reader has written, each

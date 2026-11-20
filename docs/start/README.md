@@ -6,6 +6,7 @@ fits, then take you to your first finished task.
 | Page | Read this when… |
 |---|---|
 | [Why taskmill](why-taskmill.md) | you want to know if taskmill fits your project, and what it does not do |
+| [Fit taskmill to your architecture](architectures.md) | you want to know where taskmill's parts go in a monolith, modules, services, serverless functions, several regions, or an app with tenants |
 | [Quickstart](quickstart.md) | you want to run your first task and see it in the dashboard, in about 15 minutes |
 
 Ready to write code? The [tutorial](../tutorial/README.md) builds the

@@ -91,6 +91,7 @@ You need Go 1.26 or newer, and PostgreSQL 15 or newer.
 ## Learn more
 
 - **[Quickstart](docs/start/quickstart.md):** run your first task, and watch it in the dashboard.
+- **[Fit taskmill to your architecture](docs/start/architectures.md):** a monolith, modules, services, serverless functions, several regions, or many tenants.
 - **[Tutorial](docs/tutorial/README.md):** build a small shop step by step, from one task to a program that is ready to ship.
 - **[Documentation](docs/README.md):** concepts, guides, and running in production.
 - **[How do I…?](docs/recipes/README.md):** the best way to do common things.

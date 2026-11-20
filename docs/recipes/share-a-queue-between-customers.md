@@ -1,4 +1,4 @@
-# Share a queue fairly between customers
+# Share a queue fairly between customers or tenants
 
 **Situation.** "One customer imports 200,000 rows, and we enqueue a task for
 every 1,000 rows. Now every other customer's import waits behind those 200
@@ -17,6 +17,7 @@ build it from queues and groups:
 | In one queue, one customer must not take every slot | A `GroupKey` per customer | Only one task per customer runs at a time |
 | Customers must take turns, however many are busy | [A task that enqueues the customer's next task](#let-customers-take-turns) | Each new task goes to the end of the line |
 | Some customers must go first | A higher `Priority` for their tasks | They start before the others, who can then wait for a long time |
+| Your app serves many tenants | One schema for all tenants, and a group per tenant: see [Run tasks for many tenants](#run-tasks-for-many-tenants) | A schema per tenant needs workers of its own |
 
 ## The recommended way
 
@@ -112,6 +113,32 @@ customer has only one task at a time.
 In the same test with 2 slots and 5 customers, every customer started
 within the first 5 tasks, and all five finished at about the same time.
 
+## Run tasks for many tenants
+
+In a SaaS app, a tenant is a customer, and the ways above work the same.
+These choices come on top:
+
+- **Use one schema for all tenants.** A schema per tenant needs its own
+  workers and its own [maintainer](../concepts/glossary.md#maintainer). And
+  each notification wakes the workers of every schema in the database
+  ([Capacity planning](../production/capacity.md#know-what-an-idle-system-costs)).
+- **Carry the tenant in each task's metadata,** with two middleware: one on
+  the client stores the request's tenant, and one on the worker gives it to
+  the handler ([Add middleware](../guides/middleware.md)).
+- **Limit each tenant with groups.** One group per tenant runs one task of
+  that tenant at a time. A few groups per tenant, as above, allow a few.
+  taskmill has no `MaxRunning` per tenant.
+- **To erase a tenant's tasks,** call `CancelMatching`, then
+  `DeleteMatching`, with all of the tenant's group keys.
+  `DeleteMatching` skips running tasks, so call it again once they have
+  ended. It deletes finished tasks in history too. If you don't group by
+  tenant, store each task's ID with the tenant's data, and `Delete` each one.
+- **If your own data has a schema per tenant,** the handler starts its own
+  transaction, and runs `SET LOCAL search_path` to the tenant's schema
+  first. Quote the name with `pgx.Identifier{name}.Sanitize()`. taskmill's
+  statements name their own schema, so the search path does not change
+  them.
+
 ## Other options
 
 | Option | When it fits | The cost |
@@ -141,6 +168,6 @@ within the first 5 tasks, and all five finished at about the same time.
 - [Task order and FIFO groups](../guides/ordering.md): the order in which tasks start
 - [Workers and queues](../guides/workers-and-queues.md): queues, `Concurrency`, and `MaxRunning`
 - [Keep order per key](keep-order-per-key.md): FIFO groups, and how to fix a halted one
-- [`EnqueueOptions`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions) on pkg.go.dev
+- [`EnqueueOptions`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions) and [`Client.DeleteMatching`](https://pkg.go.dev/github.com/code19m/taskmill#Client.DeleteMatching) on pkg.go.dev
 
 **Next:** [Keep at most one waiting task per key](one-waiting-task-per-key.md)

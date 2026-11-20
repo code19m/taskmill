@@ -10,7 +10,8 @@ the services share one taskmill schema?"
 |---|---|---|
 | Share one PostgreSQL database | **One [schema](../concepts/glossary.md#schema) per service.** Enqueue for another service with a `Client` for its schema | The order and the invoice task commit in one transaction |
 | Each have their own database | One schema per service. The [outbox](../guides/outbox.md) on the sending side, the [inbox](consume-from-a-broker.md) on the receiving side | No transaction spans two databases |
-| Are parts of one app, such as a web process and a worker built from the same code | One schema for the app | It is one app, with one set of tasks |
+| Are parts of one app, such as a web process and a worker built from the same code | One schema for the app | It is one app, with one set of tasks. Modules of the app follow [Organize tasks by module](organize-tasks-by-module.md) |
+| Are not all written in Go | An HTTP endpoint or a broker in front of the Go service's tasks | Handlers are Go only: see [Work with other languages](work-with-other-languages.md) |
 
 ## The recommended way
 
@@ -33,27 +34,50 @@ flowchart LR
 if err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Schema: "orders"}); err != nil {
     return err
 }
-orders, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: "orders"})
+orders, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: "orders", Logger: logger})
 // ...
-billing, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: "billing"})
-// ...
-
-err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-    if err := saveOrder(ctx, tx, order); err != nil {
-        return err
-    }
-    if _, err := orders.EnqueueTx(ctx, taskmill.Pgx(tx), SendReceipt{OrderID: order.ID}, nil); err != nil {
-        return err
-    }
-    _, err := billing.EnqueueTx(ctx, taskmill.Pgx(tx), billingtasks.CreateInvoice{OrderID: order.ID}, nil)
-    return err // billing's task commits with the order
-})
+billing, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: "billing"}) // only to enqueue
 ```
 
-`billingtasks` is a small Go package of billing's task types, with their
-kinds and defaults. It is a contract between the two services. Change it as
-[Change a task safely](change-a-task-safely.md) says: billing's workers
-first.
+Then enqueue billing's task in the transaction that saves the order:
+
+```go
+func placeOrder(ctx context.Context, pool *pgxpool.Pool, orders, billing *taskmill.Client, email string) (int64, error) {
+    var orderID int64
+    err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+        err := tx.QueryRow(ctx, "INSERT INTO orders (email) VALUES ($1) RETURNING id", email).Scan(&orderID)
+        if err != nil {
+            return err
+        }
+        if _, err := orders.EnqueueTx(ctx, taskmill.Pgx(tx), SendReceipt{OrderID: orderID}, nil); err != nil {
+            return err
+        }
+        _, err = billing.EnqueueTx(ctx, taskmill.Pgx(tx), billingtasks.CreateInvoice{OrderID: orderID}, nil)
+        return err // billing's task commits with the order
+    })
+    return orderID, err
+}
+```
+
+[The example program](../../examples/services) runs both services.
+
+## Agree on the contract
+
+Billing's tasks are a contract between the two services: each task's kind,
+its queue, its JSON fields, and its other defaults. Billing publishes them
+in a package of task types only, `billingtasks`, as a module does in
+[Organize tasks by module](organize-tasks-by-module.md). Orders imports that
+package, and nothing else of billing.
+
+If orders can't import billing's Go code, it declares its own copy of each
+type: the same `Kind`, the same JSON fields, and the same `EnqueueDefaults`.
+Change the contract as [Change a task safely](change-a-task-safely.md) says:
+billing's workers first.
+
+> [!WARNING]
+> A copy without billing's queue in `EnqueueDefaults` enqueues into the
+> `default` queue. By default, billing's workers read only the queues of
+> their kinds, so the task may never run, and no error says so.
 
 ## Why one schema per service
 
@@ -70,10 +94,15 @@ first.
 
 ## Check versions and privileges
 
-- **Upgrade taskmill in billing first.** If the orders service's taskmill is
-  newer than billing's schema, its `NewClient` for billing fails with
-  `ErrSchemaOutdated`. Older code on a newer schema works for one release
-  ([Compatibility](../reference/compatibility.md)).
+- **Keep every service within one taskmill release of the others.**
+  Older code works on a newer schema for one release only
+  ([Compatibility](../reference/compatibility.md#old-code-on-a-newer-schema)).
+- **Migrate a schema before a newer taskmill enqueues into it.** If the
+  orders service's taskmill is newer than billing's schema, its `NewClient`
+  for billing fails with `ErrSchemaOutdated`. So upgrade billing first.
+  When each service also enqueues into the other's schema, migrate both
+  schemas first, for example with a migration Job of each. Then roll out the
+  services in any order.
 - **If the services use different database roles,** give the orders role
   only what an enqueue needs in billing's schema:
 
@@ -113,6 +142,34 @@ first.
   column of `tasks`. The error `permission denied for table …` then names
   the table.
 
+## Follow a task across services
+
+Give the client for billing's schema the same `EnqueueMiddleware` as your
+own client: `tel.EnqueueMiddleware` from the
+[otel module](../guides/observability.md#add-traces-and-metrics-with-opentelemetry).
+It stores the trace context in each task's metadata. Billing's workers, with
+`tel.Middleware` and the same propagator, then continue the trace of the
+request that placed the order. The metrics carry no schema: tell the
+services apart by the label of each service, such as Prometheus's `job`.
+
+## Test it
+
+Give each schema its own `taskmilltest.NewClient`, and check billing's task
+with billing's type:
+
+```go
+orders := taskmilltest.NewClient(t, pool, nil)  // a schema for the orders service
+billing := taskmilltest.NewClient(t, pool, nil) // and one for billing's
+orderID, err := placeOrder(t.Context(), pool, orders, billing, "ada@example.com")
+// ...
+// Enqueued decodes the payload into billing's type, as billing's worker does.
+invoices := taskmilltest.Enqueued[billingtasks.CreateInvoice](t, billing)
+```
+
+So the test fails on a payload that billing's worker can't decode. A JSON
+field that billing's type lacks is dropped, and a field that the payload
+lacks reads as zero, so check the values too.
+
 ## Other options
 
 | Option | When it fits | The cost |
@@ -138,4 +195,4 @@ first.
 - [Publish events with the outbox](../guides/outbox.md): for a database per service
 - [`ClientConfig`](https://pkg.go.dev/github.com/code19m/taskmill#ClientConfig) on pkg.go.dev
 
-**Next:** [One dashboard for many services](one-dashboard-for-many-services.md)
+**Next:** [Work with other languages](work-with-other-languages.md)
