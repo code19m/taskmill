@@ -42,7 +42,7 @@
       <tr data-href="{{path "/tasks/"}}{{.ID}}" data-key="{{.ID}}"{{if and $i (eq $i $d.Seen)}} id="more"{{end}}>
         <td class="num"><a class="task-id" href="{{path "/tasks/"}}{{.ID}}">{{.ID}}</a></td>
         <td class="mono" title="{{.Kind}}">{{.Kind}}</td>
-        <td title="{{.Queue}}{{with .GroupKey}}, FIFO group {{with outbox .}}{{.Topic}} › {{.Key}}{{else}}{{visible .}}{{end}}{{end}}">{{.Queue}}{{if .GroupKey}}<span class="group">{{template "group" .GroupKey}}</span>{{end}}</td>
+        <td{{with .GroupKey}} title="{{with outbox .}}{{.}}{{else}}FIFO group {{visible .}}{{end}}"{{end}}>{{.Queue}}{{if .GroupKey}}<span class="group">{{template "group" .GroupKey}}</span>{{end}}</td>
         <td><div class="state-cell">{{template "state" .State}}{{if ne .Priority 2}}<span class="chip priority-{{.Priority}}" title="Priority: {{.Priority}}">{{.Priority}}</span>{{end}}</div></td>
         <td class="num">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
         <td class="tone-faint"{{template "at" .CreatedAt}}>{{ago $.Now .CreatedAt}}</td>
@@ -59,7 +59,12 @@
     {{else if $d.Next}}<a class="pager-link" href="{{$d.Next}}">{{$d.Order.Next}}{{template "icon" "next"}}</a>{{end}}
     <span class="subtle" data-shown>{{len $d.Tasks}} shown</span>
   </div>
-  {{else}}<div class="card-body">{{template "empty" (print (or (and $d.Paged "No more tasks") (and $d.Filtered "No tasks match these filters") "No tasks yet"))}}</div>{{end}}
+  {{else}}<div class="card-body">
+  {{- if $d.Paged}}{{template "empty" (dict "Glyph" "inbox" "Title" "No more tasks" "Text" "The list ends before this page." "Href" $d.First "Label" $d.Order.First "Icon" "first")}}
+  {{- else if and (eq $.Nav "dead") (not $d.Range.Set) $d.Queues.Empty $d.Kinds.Empty $d.Groups.Empty}}{{template "empty" (dict "Glyph" "done" "Title" "No dead tasks" "Text" "A task that fails all its attempts shows here, until you retry or delete it.")}}
+  {{- else if $d.Filtered}}{{template "empty" (dict "Glyph" "filter" "Title" "No tasks match these filters" "Text" "Fewer filters, or a longer range of time, may find some." "Href" (path "/tasks") "Label" "Clear the filters" "Icon" "clear")}}
+  {{- else}}{{template "empty" (dict "Glyph" "inbox" "Title" "No tasks yet" "Text" "Tasks show here once your app enqueues them.")}}{{end}}
+  </div>{{end}}
 </section>
 </div>
 {{template "foot" .}}{{end}}

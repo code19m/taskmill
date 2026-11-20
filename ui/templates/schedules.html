@@ -34,7 +34,7 @@
     {{end}}</tbody>
   </table>
   </div>
-  {{else}}<div class="card-body">{{template "empty" "No schedules"}}</div>{{end}}
+  {{else}}<div class="card-body">{{template "empty" (dict "Glyph" "clock" "Title" "No schedules" "Text" "A schedule enqueues a task on a timetable. It shows here once a worker that runs it starts.")}}</div>{{end}}
 </section>
 </div>
 {{template "foot" .}}{{end}}

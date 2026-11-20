@@ -173,7 +173,7 @@ backticks.
 | Message | Level | What it means | What to do |
 |---|---|---|---|
 | `dashboard action` | Info | Someone did `action` on `target` in the dashboard. A bulk action also has `tasks`: how many tasks it changed, and `skipped`: how many it left, because another transaction held them. [Actions in the log](taskmill-ui.md#actions-in-the-log) lists every `action`. | Nothing. To log who did it, see [One dashboard for many services](../recipes/one-dashboard-for-many-services.md). |
-| `dashboard request failed` | Warn | A page or an action at `path` failed, often because the database is out of reach. | Check the database, if it repeats. |
+| `dashboard request failed` | Warn | A page or an action at `path` failed. The page says "Can’t reach the database" when the dashboard cannot connect to it, and "Something went wrong" otherwise. | Check the database, if it repeats. |
 | `dashboard request timed out` | Warn | The database did not answer within 10 seconds, or before an earlier deadline that your app set in the request's context. Or it ended a read of tasks at the read's limit of 5 seconds. The page says "Taking too long". | Check the database's load. For a task list at `path`, see [which lists are fast](../guides/operations-api.md#find-tasks). |
 | `read activity failed` | Warn | The overview's charts could not read their history, and show none. | Check the database, if it repeats. |
 | `read filter choices failed` | Warn | The task list could not read the choices of a filter, named by `target`. | Check the database, if it repeats. |

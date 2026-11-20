@@ -40,38 +40,38 @@ func TestTaskTimeline(t *testing.T) {
 		}},
 		{"pending, due before it was created, behind the dead task of its group", `'pending', 0, 25, 'g', now() - interval '3h', now() - interval '3h5m', NULL, '[]', NULL`, []string{
 			"step: Created 3h ago due at once",
-			"gap warn: waiting 3h, behind #127 (counts)",
+			"gap wait warn: Waiting, behind #127 3h (counts)",
 			"step plan: Start not yet",
 		}},
 		{"available, due after it was created", `'available', 0, 25, NULL, now() - interval '5h', now() - interval '4h', NULL, '[]', NULL`, []string{
 			"step: Created 5h ago",
 			"step: Due 4h ago",
-			"gap: waiting 4h (counts)",
+			"gap wait: Waiting 4h (counts)",
 			"step plan: Start not yet",
 		}},
 		{"running its second attempt", `'running', 2, 25, NULL, now() - interval '6h', now() - interval '2h0.3s', now() - interval '2h',
 			jsonb_build_array(jsonb_build_object('attempt', 1, 'at', now() - interval '5h', 'message', 'boom')), NULL`, []string{
 			"step: Created 6h ago",
 			"step: Due 2h ago",
-			"gap: waited 0.3s",
+			"gap wait: Waited 300ms",
 			"step run: Started 2h ago attempt 2",
-			"gap run: running for 2h (counts)",
+			"gap work run: Running for 2h (counts)",
 		}},
 		{"retryable after its first attempt", `'retryable', 1, 25, NULL, now() - interval '7m10s', now() + interval '3m30s', now() - interval '7m9.9s',
 			jsonb_build_array(jsonb_build_object('attempt', 1, 'at', now() - interval '7m7.8s', 'message', 'boom')), NULL`, []string{
 			"step: Created 7m ago",
-			"gap: waited 0.1s",
+			"gap wait: Waited 100ms",
 			"step: Started 7m ago",
-			"gap err: failed after 2.1s",
+			"gap work err: Failed after 2.1s",
 			"step plan: Due again in 3m attempt 2",
 		}},
 		{"dead after five attempts", `'dead', 5, 5, NULL, now() - interval '2h10m', now() - interval '12m30s', now() - interval '12m29.6s',
 			jsonb_build_array(jsonb_build_object('attempt', 5, 'at', now() - interval '12m28.8s', 'message', 'boom')), now() - interval '12m28.8s'`, []string{
 			"step: Created 2h ago",
 			"step: Due 12m ago",
-			"gap: waited 0.4s",
+			"gap wait: Waited 400ms",
 			"step: Started 12m ago attempt 5",
-			"gap err: failed after 0.8s",
+			"gap work err: Failed after 800ms",
 			"step err: Died 12m ago",
 		}},
 		{"canceled before it was due", `'canceled', 0, 25, NULL, now() - interval '1h10m', now() + interval '1h19m50s', NULL, '[]', now() - interval '40m10s'`, []string{
@@ -81,16 +81,16 @@ func TestTaskTimeline(t *testing.T) {
 		{"canceled when its attempt failed", `'canceled', 1, 25, NULL, now() - interval '30m10s', now() - interval '30m10s', now() - interval '30m9.7s',
 			jsonb_build_array(jsonb_build_object('attempt', 1, 'at', now() - interval '28m10s', 'message', 'context canceled')), now() - interval '28m10s'`, []string{
 			"step: Created 30m ago due at once",
-			"gap: waited 0.3s",
+			"gap wait: Waited 300ms",
 			"step: Started 30m ago",
-			"gap err: failed after 1m 59s",
+			"gap work err: Failed after 1m 59s",
 			"step: Canceled 28m ago",
 		}},
 		{"canceled once its retry was due", `'canceled', 1, 25, NULL, now() - interval '50m10s', now() - interval '45m10s', now() - interval '49m10s',
 			jsonb_build_array(jsonb_build_object('attempt', 1, 'at', now() - interval '49m9s', 'message', 'boom')), now() - interval '40m10s'`, []string{
 			"step: Created 50m ago",
 			"step: Started 49m ago",
-			"gap err: failed after 1s",
+			"gap work err: Failed after 1s",
 			"step: Due 45m ago",
 			"step: Canceled 40m ago",
 		}},
@@ -128,16 +128,16 @@ func TestTaskTimeline(t *testing.T) {
 	}
 	checkTimeline(t, client, 1001, "completed", []string{
 		"step: Created 9m ago due at once",
-		"gap: waited 0.2s",
+		"gap wait: Waited 200ms",
 		"step: Started 9m ago",
-		"gap: ran 1.3s",
+		"gap work ok: Ran 1.3s",
 		"step ok: Completed 9m ago",
 	})
 	checkTimeline(t, client, 1002, "completed, started before it was due", []string{
 		"step: Created 20m ago",
 		"step: Due 19m ago",
 		"step: Started 19m ago",
-		"gap: ran 3s",
+		"gap work ok: Ran 3s",
 		"step ok: Completed 19m ago",
 	})
 }
@@ -199,8 +199,64 @@ func TestTaskColumnsEndTogether(t *testing.T) {
 	_, body, _ := get(t, handler(t, client, nil), "/tasks/"+strconv.FormatInt(res.ID, 10))
 	columns := regexp.MustCompile(`(?s)<div class="task-layout">\s*<div class="stack">.*<h2>Metadata</h2>.*` +
 		`<section class="card flush">\s*<div class="card-head"><h2>Errors <span class="subtle">0</span></h2></div>\s*` +
-		`<div class="card-body"><p class="empty-note">No errors</p></div>\s*</section>\s*</div>\s*<aside class="card flush details">`)
+		`<div class="card-body"><div class="empty-note"><p class="empty-title">No errors</p></div></div>\s*</section>\s*</div>\s*<aside class="card flush details">`)
 	if !columns.MatchString(body) {
 		t.Errorf("the task's page does not end its left column with the card of its errors, beside the details:\n%s", body)
+	}
+}
+
+// A task's errors mark where it was retried: a retry starts the count of
+// attempts again, so two errors of the first attempt have a retry between
+// them. A note, such as the wait for a handler, is no attempt, and the
+// number of the attempt that it notes marks no retry.
+func TestTaskErrorsMarkARetry(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	h := handler(t, client, nil)
+	errorLines := regexp.MustCompile(`(?s)<ol class="errors">(.*?)</ol>`)
+	line := regexp.MustCompile(`(?s)<li class="([^"]*)">(.*?)</li>`)
+	for _, c := range []struct {
+		name, errors string
+		want         []string
+	}{
+		{
+			"retried after it died", `[{"attempt": 1, "at": "2026-11-19T11:35:27Z", "message": "boom"},
+		    {"attempt": 1, "at": "2026-11-19T18:33:17Z", "message": "boom"}]`,
+			[]string{"Attempt 1", "retried", "Attempt 1"},
+		},
+		{
+			"retried after its third attempt", `[{"attempt": 2, "at": "2026-11-19T10:00:00Z", "message": "a"},
+		    {"attempt": 3, "at": "2026-11-19T10:01:00Z", "message": "b"},
+		    {"attempt": 2, "at": "2026-11-19T12:00:00Z", "message": "c"}]`,
+			[]string{"Attempt 2", "retried", "Attempt 3", "Attempt 2"},
+		},
+		{
+			"a note between two attempts", `[{"attempt": 2, "at": "2026-11-19T10:00:00Z", "message": "a"},
+		    {"attempt": 2, "at": "2026-11-19T10:01:00Z", "code": "no_handler", "message": "no handler"},
+		    {"attempt": 3, "at": "2026-11-19T10:02:00Z", "message": "b"}]`,
+			[]string{"Attempt 3", "Attempt 2", "Attempt 2"},
+		},
+	} {
+		var id int64
+		if err := pool.QueryRow(t.Context(), `INSERT INTO `+schema+`.tasks (queue, kind, payload, state, attempt, max_attempts, errors, run_at, finalized_at)
+		    VALUES ('mail', 'greet', '{}', 'dead', 1, 5, $1, now(), now()) RETURNING id`, c.errors).Scan(&id); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		_, body, _ := get(t, h, "/tasks/"+strconv.FormatInt(id, 10))
+		list := errorLines.FindStringSubmatch(body)
+		if list == nil {
+			t.Fatalf("%s: the page lists no errors:\n%s", c.name, body)
+		}
+		var got []string
+		for _, li := range line.FindAllStringSubmatch(list[1], -1) {
+			if li[1] == "retried" {
+				got = append(got, "retried")
+				continue
+			}
+			got = append(got, regexp.MustCompile(`<span class="strong">([^<]*)</span>`).FindStringSubmatch(li[2])[1])
+		}
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: the errors read %q, want %q", c.name, got, c.want)
+		}
 	}
 }
