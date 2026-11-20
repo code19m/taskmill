@@ -21,6 +21,10 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Changed
 
+- **Breaking:** `TaskInfo.FinalizedAt` is now `TaskInfo.FinishedAt`, and
+  so `Task.FinalizedAt`, which `Task` embeds, is now `Task.FinishedAt`: the
+  name that `State.Finished` and `ListParams.FinishedSince` use. Rename the
+  field where you read or set it; its value is the same.
 - The dashboard's tooltips take the colors of the theme: a raised surface
   with the edge and the shadow of a menu, where they were inverted.
 

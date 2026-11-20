@@ -139,7 +139,7 @@ type TaskInfo struct {
 	RunAt time.Time
 
 	AttemptedAt time.Time // zero if never attempted
-	FinalizedAt time.Time // zero until completed, dead, or canceled
+	FinishedAt  time.Time // zero until completed, dead, or canceled
 }
 
 // AttemptError is one entry of a task's error history: why an attempt
@@ -296,15 +296,15 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 // worker that takes the task makes it dead (see scanLeased).
 func scanTaskInfo(r rows, extra ...any) (*TaskInfo, error) {
 	var (
-		info                                       TaskInfo
-		state                                      string
-		priority, attempt, maxAttempts             int16
-		metadata, payload, errs                    []byte
-		createdAt, runAt, attemptedAt, finalizedAt pgtype.Timestamptz
+		info                                      TaskInfo
+		state                                     string
+		priority, attempt, maxAttempts            int16
+		metadata, payload, errs                   []byte
+		createdAt, runAt, attemptedAt, finishedAt pgtype.Timestamptz
 	)
 	dest := []any{
 		&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
-		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt, &finalizedAt,
+		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt, &finishedAt,
 	}
 	if err := r.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
@@ -319,7 +319,7 @@ func scanTaskInfo(r rows, extra ...any) (*TaskInfo, error) {
 	info.CreatedAt, _ = finite(createdAt)
 	info.RunAt, _ = finite(runAt)
 	info.AttemptedAt, _ = finite(attemptedAt)
-	info.FinalizedAt, _ = finite(finalizedAt)
+	info.FinishedAt, _ = finite(finishedAt)
 	return &info, nil
 }
 

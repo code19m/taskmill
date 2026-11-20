@@ -35,8 +35,8 @@ func TestCancelWaitingTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := e.get(t, id)
-	if info.State != taskmill.StateCanceled || info.FinalizedAt.IsZero() {
-		t.Fatalf("got %s, finalized at %v", info.State, info.FinalizedAt)
+	if info.State != taskmill.StateCanceled || info.FinishedAt.IsZero() {
+		t.Fatalf("got %s, finalized at %v", info.State, info.FinishedAt)
 	}
 
 	if err := e.client.Cancel(t.Context(), id); !errors.Is(err, taskmill.ErrInvalidState) {
@@ -173,8 +173,8 @@ func TestRetryDeadTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	info := e.get(t, id)
-	if info.State != taskmill.StateAvailable || info.Attempt != 0 || !info.FinalizedAt.IsZero() {
-		t.Fatalf("got %s, attempt %d, finalized %v", info.State, info.Attempt, info.FinalizedAt)
+	if info.State != taskmill.StateAvailable || info.Attempt != 0 || !info.FinishedAt.IsZero() {
+		t.Fatalf("got %s, attempt %d, finalized %v", info.State, info.Attempt, info.FinishedAt)
 	}
 	if len(info.Errors) != 1 || info.Errors[0].Message != "boom" {
 		t.Fatalf("error history lost: %+v", info.Errors)

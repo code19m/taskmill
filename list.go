@@ -50,7 +50,7 @@ type ListParams struct {
 	CreatedBefore time.Time
 
 	// FinishedSince limits the list to the tasks that finished at this time
-	// or later: those whose [TaskInfo.FinalizedAt] is not before it. Zero
+	// or later: those whose [TaskInfo.FinishedAt] is not before it. Zero
 	// means no lower bound. Only a list in finish order takes it, which is a
 	// list of only dead tasks, only canceled tasks, or both, without a range
 	// of creation times: see [Client.List]. On any other list it is an error
@@ -108,7 +108,7 @@ type ListResult struct {
 //     first, among tasks created at the same time.
 //   - Without such a range, a list of only dead tasks, only canceled tasks,
 //     or both is ordered by when the tasks finished, the latest first: by
-//     [TaskInfo.FinalizedAt], and then by ID in the same way.
+//     [TaskInfo.FinishedAt], and then by ID in the same way.
 //   - Every other list is ordered by ID, the newest task first.
 //
 // A time that is infinite, as only an UPDATE by hand writes it, reads as the

@@ -691,7 +691,7 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 		// The kind discards completed tasks: the task was deleted as it
 		// completed.
 		done := *t.info
-		done.State, done.FinalizedAt = StateCompleted, time.Now()
+		done.State, done.FinishedAt = StateCompleted, time.Now()
 		return &done, nil
 	}
 	return info, err

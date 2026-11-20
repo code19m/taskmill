@@ -34,8 +34,8 @@ func TestWorkerCompletesTask(t *testing.T) {
 		t.Fatalf("handler got %+v", args)
 	}
 	info := e.waitState(t, id, taskmill.StateCompleted)
-	if info.Attempt != 1 || info.FinalizedAt.IsZero() {
-		t.Fatalf("completed task: attempt %d, finalized %v", info.Attempt, info.FinalizedAt)
+	if info.Attempt != 1 || info.FinishedAt.IsZero() {
+		t.Fatalf("completed task: attempt %d, finalized %v", info.Attempt, info.FinishedAt)
 	}
 }
 

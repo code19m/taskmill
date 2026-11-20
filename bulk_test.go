@@ -103,8 +103,8 @@ func TestRetryMatching(t *testing.T) {
 		oldest: taskmill.StateAvailable, newest: taskmill.StatePending,
 		head: taskmill.StateAvailable, waits: taskmill.StatePending,
 	})
-	if info := e.get(t, dead); info.Attempt != 0 || !info.FinalizedAt.IsZero() {
-		t.Fatalf("retried task has attempt %d, finalized at %v", info.Attempt, info.FinalizedAt)
+	if info := e.get(t, dead); info.Attempt != 0 || !info.FinishedAt.IsZero() {
+		t.Fatalf("retried task has attempt %d, finalized at %v", info.Attempt, info.FinishedAt)
 	}
 	if res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}})); err != nil || res.Changed != 0 {
 		t.Fatalf("second retry: %d tasks, %v; want none", res.Changed, err)

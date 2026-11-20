@@ -136,10 +136,10 @@ func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
 			task := &res.Tasks[i]
 			if last != nil && !follows(task, last) {
 				t.Fatalf("List(%+v): task %d, created at %s and finished at %s, follows task %d, created at %s and finished at %s",
-					p, task.ID, task.CreatedAt, task.FinalizedAt, last.ID, last.CreatedAt, last.FinalizedAt)
+					p, task.ID, task.CreatedAt, task.FinishedAt, last.ID, last.CreatedAt, last.FinishedAt)
 			}
-			if outsideRange(task.CreatedAt, p.CreatedSince, p.CreatedBefore) || outsideRange(task.FinalizedAt, p.FinishedSince, p.FinishedBefore) {
-				t.Fatalf("List(%+v): task %d, created at %s and finished at %s, is outside the range", p, task.ID, task.CreatedAt, task.FinalizedAt)
+			if outsideRange(task.CreatedAt, p.CreatedSince, p.CreatedBefore) || outsideRange(task.FinishedAt, p.FinishedSince, p.FinishedBefore) {
+				t.Fatalf("List(%+v): task %d, created at %s and finished at %s, is outside the range", p, task.ID, task.CreatedAt, task.FinishedAt)
 			}
 			last = task
 		}
@@ -159,7 +159,7 @@ func orderTime(p *taskmill.ListParams) func(*taskmill.TaskInfo) time.Time {
 	case !p.CreatedSince.IsZero() || !p.CreatedBefore.IsZero():
 		return func(task *taskmill.TaskInfo) time.Time { return task.CreatedAt }
 	case slices.Equal(states, only(taskmill.StateDead)) || slices.Equal(states, only(taskmill.StateCanceled)):
-		return func(task *taskmill.TaskInfo) time.Time { return task.FinalizedAt }
+		return func(task *taskmill.TaskInfo) time.Time { return task.FinishedAt }
 	}
 	return func(*taskmill.TaskInfo) time.Time { return time.Time{} }
 }
