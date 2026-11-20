@@ -12,7 +12,8 @@ rejected, and when we look at a point again.
 | The JSON form of the result types | No result type has JSON tags |
 | `ui.New` | It returns `http.Handler` |
 | A nil or short result of a batch | A task without a result fails |
-| `Middleware`, `AttemptError`, the two `Counts`, `GroupParams`, `FinalizedAt` | The names stay as they are |
+| `Middleware`, `AttemptError`, the two `Counts`, `GroupParams` | The names stay as they are |
+| `TaskInfo.FinishedAt` | A task's finish has one name |
 
 ## The querier interfaces hold what taskmill calls, and no more
 
@@ -81,10 +82,26 @@ break the build of its callers for no change in behavior.
 | `AttemptError`, which is no `error`, and also holds notes | It is an entry of `TaskInfo.Errors`, and callers rarely write its name. It cannot pass for an error: the compiler refuses to return it as one, and `go vet` reports `errors.As` with it |
 | `QueueInfo.Counts` and `Activity.Counts`, with different values | The facts differ. A queue's count may have stopped at its cap, so it is a `TaskCount`. A point of the activity holds the largest of several counts, where "capped" has no clear meaning, so it is a number |
 | `GroupParams`, next to `GroupsResult` | `ListParams` and `ListResult` follow their method's name, and `GroupParams` does not. `GroupsParams` would be regular, but the gain is cosmetic |
-| `TaskInfo.FinalizedAt`, next to `State.Finished` and the `FinishedSince` and `FinishedBefore` of `ListParams` | The field has its column's name, and every caller that shows a task reads it. Everything else says "finished": the method, the comments, and the pages. So the range of `ListParams` says it too. Its `Since` starts a period, as in `ActivityParams`, and its `Before` leaves the end out, as `time.Time.Before` does. `CreatedSince` and `CreatedBefore` follow them, and `TaskInfo.CreatedAt` |
 
 `GroupParams` stays the one name of its kind that does not follow its
 method. New pairs follow `ListParams` and `ListResult`.
+
+## A task's finish has one name
+
+`TaskInfo.FinishedAt`, `State.Finished`, and the `FinishedSince` and
+`FinishedBefore` of `ListParams` all say "finished", as the comments and
+the pages do. A range's `Since` starts a period, as in `ActivityParams`, and
+its `Before` leaves the end out, as `time.Time.Before` does. `CreatedSince`
+and `CreatedBefore` follow them, and `TaskInfo.CreatedAt`.
+
+Unlike [the names that stay](#the-names-stay), which are only less regular,
+two names for one concept make a reader look for two things. So this one
+name follows the others while the version is below v1.0.0, where a change
+that breaks the API is still allowed.
+
+The column keeps its name, `finalized_at`: renaming it needs a migration,
+and the workers of the release before would fail on it during a rolling
+deploy.
 
 ## Options we rejected
 
@@ -93,6 +110,7 @@ method. New pairs follow `ListParams` and `ListResult`.
 | `QueryRow` and `QueryRowContext` in the querier interfaces | They cost nothing today. But an interface that never grows never shrinks either: the unused methods would stay until v2 |
 | Tag every result type in snake_case | The tags are cheap to write. Their cost is the promise: a wire format for about 15 types, kept for all of v1, that taskmill itself never puts on a wire. A duration would still be a number of nanoseconds in it, unless we also wrote an encoder for durations |
 | Tags on `AttemptError` only | One type would encode with other keys than the rest, and the reference would explain that accident for good |
+| Keep the field named after its column, `finalized_at` | One field would say "finalized" in an API that says "finished" everywhere else. Before v1.0.0, a rename costs each caller one line. From v1.0.0 on, the odd name would stay until v2 |
 | No tags, and still decode the stored entries into `AttemptError` | It works, because `encoding/json` matches keys without regard to case. But the storage format would rest on a rule that nobody sees in the code |
 | `ui.New` returns a concrete type | It pays now, with code that stops building, for a need that is a guess. And `ui.Handler`, the natural name of that type, was the name of an earlier constructor |
 | "Nil means that all succeeded" | Its mistake is silent: see the table above |

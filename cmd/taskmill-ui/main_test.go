@@ -28,7 +28,6 @@ func env(vars map[string]string) func(string) string {
 
 func TestLoadConfig(t *testing.T) {
 	t.Parallel()
-
 	if _, err := loadConfig(env(nil)); err == nil {
 		t.Fatal("no database URL was accepted")
 	}
@@ -67,6 +66,7 @@ func TestHandlerServesItsSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	cfg, err := loadConfig(env(map[string]string{
 		"TASKMILL_DATABASE_URL":       "postgres://db",
 		"TASKMILL_UI_PREFIX":          "/admin/jobs",
@@ -123,6 +123,7 @@ func start(t *testing.T, vars map[string]string) (addr string, logs *jsonLog, st
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		t.Fatal(err)
 	}
+
 	settings := map[string]string{
 		"TASKMILL_DATABASE_URL":  testdb.URL(t),
 		"TASKMILL_SCHEMA":        schema,
@@ -131,10 +132,12 @@ func start(t *testing.T, vars map[string]string) (addr string, logs *jsonLog, st
 		"TASKMILL_UI_LOG_FORMAT": "json",
 	}
 	maps.Copy(settings, vars)
+
 	logs = &jsonLog{}
 	ctx, cancel := context.WithCancel(context.Background()) // t.Context ends before the cleanup
 	stopped := make(chan error, 1)
 	go func() { stopped <- run(ctx, env(settings), logs) }()
+
 	stop = sync.OnceFunc(func() {
 		cancel()
 		select {
@@ -147,6 +150,7 @@ func start(t *testing.T, vars map[string]string) (addr string, logs *jsonLog, st
 		}
 	})
 	t.Cleanup(stop)
+
 	addr, _ = logs.wait(t, "taskmill-ui listening")["addr"].(string)
 	return addr, logs, stop
 }
@@ -190,11 +194,13 @@ func TestRunAnswersProbesAndLogsJSON(t *testing.T) {
 func TestRunGivesUpOnARequestBodyThatNeverComes(t *testing.T) {
 	shorten(t, &readTimeout, 10*time.Second, 200*time.Millisecond)
 	addr, _, _ := start(t, nil)
+
 	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close() }()
+
 	if _, err := io.WriteString(conn, "POST /tasks/1/delete HTTP/1.1\r\nHost: taskmill\r\nContent-Length: 1000\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -251,6 +257,7 @@ func TestRunKeepsTheDatabasePasswordOutOfTheLog(t *testing.T) {
 			if err == nil {
 				t.Fatal("the command accepted the connection string")
 			}
+
 			logged := out.String()
 			if strings.Contains(logged, "Sup3r") || strings.Contains(logged, "Secret") {
 				t.Errorf("the log holds a part of the password: %s", logged)
@@ -272,6 +279,7 @@ func shorten(t *testing.T, fixed *time.Duration, documented, d time.Duration) {
 	if *fixed != documented {
 		t.Errorf("the time is %s, want %s, as docs/reference/taskmill-ui.md says", *fixed, documented)
 	}
+
 	t.Cleanup(func() { *fixed = documented })
 	*fixed = d
 }
@@ -295,10 +303,12 @@ func waitStatus(t *testing.T, url string, want int) string {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if got = resp.StatusCode; got == want {
 			return string(body)
 		}
 	}
+
 	t.Fatalf("%s: got %d, want %d", url, got, want)
 	return ""
 }
@@ -331,6 +341,7 @@ func (l *jsonLog) wait(t *testing.T, msg string) map[string]any {
 			return line
 		}
 	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	t.Fatalf("no line %q was logged; the lines: %v", msg, l.lines)
@@ -372,12 +383,14 @@ func newProxy(t *testing.T) *proxy {
 		t.Fatalf("%s is not a URL with a host: %v", testdb.EnvURL, err)
 	}
 	target := u.Host
+
 	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	u.Host = ln.Addr().String()
 	p := &proxy{addr: u.Host, url: u.String()}
+
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -387,6 +400,7 @@ func newProxy(t *testing.T) *proxy {
 			go p.forward(c, target)
 		}
 	}()
+
 	t.Cleanup(func() {
 		_ = ln.Close()
 		p.cut(true)
@@ -420,6 +434,7 @@ func (p *proxy) forward(client net.Conn, target string) {
 	}
 	p.conns = append(p.conns, client, server)
 	p.mu.Unlock()
+
 	go func() {
 		_, _ = io.Copy(server, client)
 		_ = server.Close()

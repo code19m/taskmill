@@ -33,6 +33,7 @@ func TestEnqueuedSeesOnlyCommittedTasks(t *testing.T) {
 		}
 		return errors.New("roll back")
 	})
+
 	for _, name := range []string{"ada", "grace"} {
 		if _, err := client.Enqueue(ctx, greet{Name: name}, nil); err != nil {
 			t.Fatal(err)
@@ -62,6 +63,7 @@ func TestRunRecordsTheOutcome(t *testing.T) {
 	if !errors.Is(err, boom) || info.State != taskmill.StateRetryable || info.Errors[0].Message != "boom" {
 		t.Fatalf("got %s with %+v, %v", info.State, info.Errors, err)
 	}
+
 	bad := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { return taskmill.Permanent(boom) })
 	if info, _ = taskmilltest.Run(t, client, bad, greet{}); info.State != taskmill.StateDead {
 		t.Fatalf("got %s, want dead", info.State)
@@ -81,6 +83,7 @@ func TestRunSupportsCompleteTx(t *testing.T) {
 			return task.CompleteTx(ctx, taskmill.Pgx(tx))
 		})
 	})
+
 	info, err := taskmilltest.Run(t, client, h, greet{Name: "ada"})
 	if err != nil || info.State != taskmill.StateCompleted || info.Attempt != 1 {
 		t.Fatalf("got %s on attempt %d, %v", info.State, info.Attempt, err)
@@ -110,6 +113,7 @@ func TestWorkProcessesEverything(t *testing.T) {
 		Handlers: &hs,
 		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {}},
 	})
+
 	got := taskmilltest.Enqueued[greet](t, client)
 	if len(got) != 5 {
 		t.Fatalf("got %d tasks, want 5", len(got))
@@ -130,6 +134,7 @@ func (e *stubbornError) Error() string { panic(e) }
 func TestRunReportsPanics(t *testing.T) {
 	t.Parallel()
 	client := taskmilltest.NewClient(t, testdb.Pool(t), nil)
+
 	for name, value := range map[string]any{
 		"a string": "boom",
 		"a value that panics when it is formatted": &stubbornError{},
@@ -166,6 +171,7 @@ func TestRunReportsAHandlerThatDidNotRun(t *testing.T) {
 		ran = true
 		return nil
 	})
+
 	info, err := taskmilltest.Run(t, client, h, measure{Shape: square{Side: 2}})
 	if ran || info.State != taskmill.StateDead || info.Errors[0].Code != taskmill.CodeInvalidPayload {
 		t.Fatalf("the handler ran (%v), or the task is not dead of its payload: %s with %+v", ran, info.State, info.Errors)
@@ -200,6 +206,7 @@ func TestNewClientDropsItsSchemaAfterTheStatementsThatItsTestGaveUp(t *testing.T
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			pool := testdb.Pool(t)
+
 			if tt.shared {
 				stop, stopped := make(chan struct{}), make(chan struct{})
 				go func() {
@@ -219,9 +226,11 @@ func TestNewClientDropsItsSchemaAfterTheStatementsThatItsTestGaveUp(t *testing.T
 					<-stopped
 				})
 			}
+
 			client := taskmilltest.NewClient(t, pool, nil)
 			schema := schemaOf(t, pool, client)
 			testdb.GiveUp(t, pool, schema+".activity", schema+".tasks")
+
 			// The test ends here, and NewClient drops the schema.
 		})
 	}

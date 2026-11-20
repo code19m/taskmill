@@ -2,13 +2,11 @@ package taskmill
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill/internal/migrations"
@@ -47,6 +45,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 	if err != nil {
 		return err
 	}
+	fail := func(err error) error { return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err) }
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -59,8 +58,9 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 
 	current, err := schemaVersion(ctx, pool, schema)
 	if err != nil {
-		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+		return fail(err)
 	}
+
 	if current >= len(all) {
 		// The maintainer keeps the partitions ready too, so a role that may not
 		// create them still starts.
@@ -69,28 +69,39 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 		}
 		return nil
 	}
+
 	if err := createMigrationsTable(ctx, pool, schema); err != nil {
-		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+		return fail(err)
 	}
 	if err := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
 		return applyMigrations(ctx, tx, schema, all, logger)
 	}); err != nil {
-		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+		return fail(err)
 	}
 	if err := ensureHistoryPartitions(ctx, pool, schema); err != nil {
-		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+		return fail(err)
 	}
 	return nil
 }
 
 // schemaVersion returns the schema's migration version, or 0 if it has none.
 func schemaVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int, error) {
-	var version int
-	sql := fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)
-	err := pool.QueryRow(ctx, sql, unprepared).Scan(&version)
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42P01" { // undefined_table
+	version, err := readVersion(ctx, pool, schema)
+	if pgCode(err) == codeUndefinedTable {
 		return 0, nil
 	}
+	return version, err
+}
+
+// readVersion reads the version of the latest migration that the schema's
+// migrations table records, on q, a pool or a transaction. NewClient reads
+// it with the pool's isolation level instead: see schemaVersionSQL.
+func readVersion(ctx context.Context, q interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}, schema string,
+) (int, error) {
+	var version int
+	err := q.QueryRow(ctx, "SELECT coalesce(max(version), 0) FROM "+schema+".migrations", unprepared).Scan(&version)
 	return version, err
 }
 
@@ -126,12 +137,14 @@ func createMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema strin
 				return err
 			}
 		}
+
 		_, err := tx.Exec(ctx, migrationsTableSQL(schema))
 		return err
 	})
 	if createErr == nil {
 		return nil
 	}
+
 	var created bool
 	if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", schema+".migrations").Scan(&created); err != nil || !created {
 		return createErr
@@ -156,15 +169,17 @@ func applyMigrations(ctx context.Context, tx pgx.Tx, schema string, all []migrat
 		return err
 	}
 
-	var current int
-	if err := tx.QueryRow(ctx, fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)).Scan(&current); err != nil {
+	current, err := readVersion(ctx, tx, schema)
+	if err != nil {
 		return err
 	}
+
 	for _, m := range all[min(current, len(all)):] {
 		start := time.Now()
 		if _, err := tx.Exec(ctx, m.SQL); err != nil {
 			return fmt.Errorf("migration %04d_%s: %w", m.Version, m.Name, err)
 		}
+
 		insert := fmt.Sprintf("INSERT INTO %s.migrations (version, name) VALUES ($1, $2)", schema)
 		if _, err := tx.Exec(ctx, insert, m.Version, m.Name); err != nil {
 			return err
@@ -223,10 +238,12 @@ func Migrations(schema string) ([]Migration, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	all, err := migrations.All(schema)
 	if err != nil {
 		return nil, fmt.Errorf("taskmill: %w", err)
 	}
+
 	bootstrap := Migration{Version: 0, Name: "bootstrap", SQL: bootstrapSQL(schema)}
 	out := make([]Migration, 0, len(all)+1)
 	out = append(out, bootstrap)

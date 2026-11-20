@@ -27,6 +27,7 @@ import (
 func TestLinks(t *testing.T) {
 	t.Parallel()
 	c := &checker{repo: os.DirFS("../.."), anchors: make(map[string]map[string]int)}
+
 	files, err := markdownFiles(c.repo)
 	if err != nil {
 		t.Fatal(err)
@@ -34,11 +35,13 @@ func TestLinks(t *testing.T) {
 	if !slices.Contains(files, "README.md") {
 		t.Fatal("the repository's README.md is missing: is the test run from internal/docs?")
 	}
+
 	for _, file := range files {
 		text, err := fs.ReadFile(c.repo, file)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		prose, _ := parse(string(text))
 		for _, l := range linksOf(prose) {
 			if err := c.check(file, l.target); err != nil {
@@ -96,6 +99,7 @@ var (
 func parse(text string) (prose string, headings []string) {
 	lines := strings.SplitAfter(text, "\n")
 	open := "" // the fence of the code block that the line is in, if any
+
 	for i, line := range lines {
 		bare := strings.TrimRight(line, "\r\n")
 		if m := fence.FindStringSubmatch(bare); m != nil {
@@ -116,6 +120,7 @@ func parse(text string) (prose string, headings []string) {
 			headings = append(headings, m[1])
 		}
 	}
+
 	return blankCodeSpans(strings.Join(lines, "")), headings
 }
 
@@ -139,6 +144,7 @@ func blankCodeSpans(s string) string {
 			i++
 			continue
 		}
+
 		n := backticks(s, i)
 		end := spanEnd(s, i+n, n)
 		if end < 0 {
@@ -204,6 +210,7 @@ func linksOf(prose string) []link {
 			links = append(links, link{line: 1 + strings.Count(prose[:m[2]], "\n"), target: prose[m[2]:m[3]]})
 		}
 	}
+
 	slices.SortStableFunc(links, func(a, b link) int { return a.line - b.line })
 	return links
 }
@@ -216,6 +223,7 @@ func resolve(file, target string) (dest, fragment string, err error) {
 	if ref, err = url.PathUnescape(ref); err != nil {
 		return "", "", err
 	}
+
 	switch {
 	case strings.HasPrefix(ref, "/"): // GitHub reads it from the repository's root
 		return path.Clean(ref[1:]), fragment, nil
@@ -236,6 +244,7 @@ func (c *checker) check(file, target string) error {
 	if external.MatchString(target) {
 		return nil
 	}
+
 	dest, fragment, err := resolve(file, target)
 	if err != nil {
 		return err
@@ -246,12 +255,14 @@ func (c *checker) check(file, target string) error {
 	if _, err := fs.Stat(c.repo, dest); err != nil {
 		return fmt.Errorf("%s does not exist", dest)
 	}
+
 	if fragment == "" || path.Ext(dest) != ".md" {
 		return nil
 	}
 	if fragment, err = url.PathUnescape(fragment); err != nil {
 		return err
 	}
+
 	anchors, err := c.anchorsOf(dest)
 	if err != nil {
 		return err
@@ -267,10 +278,12 @@ func (c *checker) anchorsOf(file string) (map[string]int, error) {
 	if anchors, ok := c.anchors[file]; ok {
 		return anchors, nil
 	}
+
 	text, err := fs.ReadFile(c.repo, file)
 	if err != nil {
 		return nil, err
 	}
+
 	_, headings := parse(string(text))
 	anchors := make(map[string]int) // as GitHub counts them: each anchor, and how often its slug repeats
 	for _, h := range headings {
@@ -282,6 +295,7 @@ func (c *checker) anchorsOf(file string) (map[string]int, error) {
 		}
 		anchors[anchor] = 0
 	}
+
 	c.anchors[file] = anchors
 	return anchors, nil
 }
@@ -291,6 +305,7 @@ func (c *checker) anchorsOf(file string) (map[string]int, error) {
 // each space.
 func slug(heading string) string {
 	heading = linkText.ReplaceAllString(heading, "$1")
+
 	var b strings.Builder
 	for _, r := range strings.ToLower(strings.TrimSpace(heading)) {
 		switch {

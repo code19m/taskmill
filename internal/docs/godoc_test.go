@@ -111,6 +111,7 @@ func parsePackage(repo fs.FS, dir string) (*apiPackage, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	p := &apiPackage{dir: dir, names: make(map[string]bool), structs: make(map[string][]field)}
 	fset := token.NewFileSet()
 	files := make([]*ast.File, 0, len(names))
@@ -119,18 +120,22 @@ func parsePackage(repo fs.FS, dir string) (*apiPackage, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		f, err := parser.ParseFile(fset, name, src, parser.ParseComments)
 		if err != nil {
 			return nil, err
 		}
+
 		files = append(files, f)
 		p.readComments(fset, name, f)
 	}
+
 	// NewFromFiles takes the comments out of the files: they are read above.
 	d, err := doc.NewFromFiles(fset, files, importPath(dir))
 	if err != nil {
 		return nil, err
 	}
+
 	p.doc, p.synopsis = d.Doc, d.Synopsis(d.Doc)
 	p.readNames(fset, d)
 	return p, nil
@@ -142,6 +147,7 @@ func (p *apiPackage) readComments(fset *token.FileSet, name string, f *ast.File)
 	if f.Doc != nil && !strings.HasSuffix(name, "_test.go") {
 		p.docFile = name
 	}
+
 	for _, group := range f.Comments {
 		for _, c := range group.List {
 			p.comments = append(p.comments, comment{file: name, line: fset.Position(c.Pos()).Line, text: c.Text})
@@ -154,6 +160,7 @@ func (p *apiPackage) readNames(fset *token.FileSet, d *doc.Package) {
 	p.addExamples("", d.Examples)
 	p.addValues(d.Consts, d.Vars)
 	p.addFuncs("", d.Funcs)
+
 	for _, t := range d.Types {
 		p.names[t.Name] = true
 		p.addExamples(t.Name, t.Examples)
@@ -215,6 +222,7 @@ func (p *apiPackage) addMembers(fset *token.FileSet, typeName string, expr ast.E
 	default:
 		return
 	}
+
 	for _, m := range members.List {
 		for _, name := range m.Names {
 			if !name.IsExported() {
@@ -224,6 +232,7 @@ func (p *apiPackage) addMembers(fset *token.FileSet, typeName string, expr ast.E
 			if !inStruct {
 				continue
 			}
+
 			at := fset.Position(name.Pos())
 			kind, _ := m.Type.(*ast.Ident)
 			p.structs[typeName] = append(p.structs[typeName], field{
@@ -257,6 +266,7 @@ func (p *apiPackage) configs() []string {
 			names = append(names, name)
 		}
 	}
+
 	slices.Sort(names)
 	return names
 }
@@ -307,6 +317,7 @@ func TestGodocLinks(t *testing.T) {
 				"end it with a link such as https://github.com/code19m/taskmill/blob/main/docs/guides/setup.md",
 				cmp.Or(p.docFile, p.dir), importPath(p.dir))
 		}
+
 		for _, c := range p.comments {
 			for _, m := range repoLink.FindAllStringSubmatch(c.text, -1) {
 				target, anchor := strings.TrimRight(m[1], ".,;:"), strings.TrimRight(m[2], ".,;:")
@@ -339,6 +350,7 @@ func TestPkgGoDevLinks(t *testing.T) {
 	for _, p := range apiPackages(t) {
 		byDir[p.dir] = p
 	}
+
 	for _, page := range boundPages(t) {
 		for _, m := range pkgLink.FindAllStringSubmatchIndex(page.prose, -1) {
 			link, line := page.prose[m[0]:m[1]], 1+strings.Count(page.prose[:m[0]], "\n")
@@ -349,6 +361,7 @@ func TestPkgGoDevLinks(t *testing.T) {
 					page.name, line, link, dir, strings.Join(apiDirs[1:], ", "))
 				continue
 			}
+
 			if m[4] < 0 {
 				continue // a link to the package
 			}
@@ -383,6 +396,7 @@ func tablesOf(p page) []table {
 			continue
 		}
 		t := table{line: i + 1, header: cells(text[i])}
+
 		for i++; i < len(text) && strings.HasPrefix(prose[i], "|"); i++ {
 			if row := cells(text[i]); !separator.MatchString(row[0]) {
 				t.rows = append(t.rows, row)
@@ -425,6 +439,7 @@ func fieldsOwner(packages []*apiPackage, rows [][]string) (*apiPackage, string) 
 	if len(names) < 2 {
 		return nil, ""
 	}
+
 	for _, p := range packages {
 		for _, name := range slices.Sorted(maps.Keys(p.structs)) {
 			owns := func(fieldName string) bool {
@@ -446,12 +461,14 @@ func fieldsOwner(packages []*apiPackage, rows [][]string) (*apiPackage, string) 
 func TestNoFieldTables(t *testing.T) {
 	t.Parallel()
 	packages := apiPackages(t)
+
 	for _, page := range boundPages(t) {
 		for _, tb := range tablesOf(page) {
 			column := slices.IndexFunc(tb.header, factColumn.MatchString)
 			if column < 0 {
 				continue
 			}
+
 			p, name := fieldsOwner(packages, tb.rows)
 			if p == nil {
 				continue
@@ -482,6 +499,7 @@ func TestConfigurationIndex(t *testing.T) {
 			}
 		}
 	}
+
 	for _, p := range apiPackages(t) {
 		for _, name := range p.configs() {
 			key := p.dir + "#" + name
@@ -513,6 +531,7 @@ func TestErrorsIndex(t *testing.T) {
 	t.Parallel()
 	text := read(t, errorsIndex)
 	core := apiPackages(t)[0]
+
 	for _, name := range slices.Sorted(maps.Keys(core.names)) {
 		link := "https://pkg.go.dev/" + module + "#" + name
 		if indexedError.MatchString(name) && !strings.Contains(text, "("+link+")") {
@@ -548,6 +567,7 @@ func TestCommandVariables(t *testing.T) {
 	for _, m := range readVariable.FindAllStringSubmatch(read(t, commandSource), -1) {
 		reads = append(reads, m[1])
 	}
+
 	text := read(t, commandPage)
 	prose, _ := parse(text)
 	for _, tb := range tablesOf(page{name: commandPage, text: text, prose: prose}) {
@@ -557,10 +577,12 @@ func TestCommandVariables(t *testing.T) {
 			}
 		}
 	}
+
 	if len(reads) == 0 || len(lists) == 0 {
 		t.Fatalf("found %d variables in %s and %d in the tables of %s: has the way to read or to list them changed?",
 			len(reads), commandSource, len(lists), commandPage)
 	}
+
 	for _, name := range reads {
 		if !slices.Contains(lists, name) {
 			t.Errorf("%s: no row for %s, which %s reads. Add a row to the table of environment variables: the variable, its default, its valid values, and what it does",

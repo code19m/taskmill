@@ -22,6 +22,6 @@ jobs:
         run: |
           pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9/-]+\))?!?: [a-z].{0,70}[^.]$'
           if [[ ! "$TITLE" =~ $pattern ]]; then
-            echo "::error::The title must look like 'feat(worker): add graceful drain'. See CONTRIBUTING.md#commit-messages."
+            echo "::error::The title must look like 'feat(worker): add graceful drain': a type, an optional scope, and a summary that starts with a lowercase letter, has no period at the end, and has 72 characters or fewer. See CONTRIBUTING.md#commit-messages."
             exit 1
           fi

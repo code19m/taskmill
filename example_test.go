@@ -37,9 +37,11 @@ func Example() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	if err := taskmill.Migrate(ctx, pool, nil); err != nil {
 		log.Fatal(err)
 	}
+
 	// Without a logger, taskmill logs nothing, not even errors.
 	client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: slog.Default()})
 	if err != nil {
@@ -68,6 +70,7 @@ func Example() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := worker.Run(ctx); err != nil {
@@ -86,6 +89,7 @@ func ExampleSQL() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	if err := enqueueWithSQL(ctx, db, client); err != nil {
 		log.Fatal(err)
 	}
@@ -118,6 +122,7 @@ func ExampleClient_EnqueueTx() {
 		if err != nil {
 			return err
 		}
+
 		// If the enqueue fails, the order rolls back too.
 		_, err = client.EnqueueTx(ctx, taskmill.Pgx(tx), SendReceipt{OrderID: orderID, Email: "a@example.com"}, nil)
 		return err
@@ -132,6 +137,7 @@ func ExampleClient_EnqueueTx() {
 func ExampleClient_Enqueue() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
+
 	res, err := client.Enqueue(ctx, SendReceipt{OrderID: 7, Email: "a@example.com"}, &taskmill.EnqueueOptions{
 		RunAt:    time.Now().Add(10 * time.Minute),
 		Priority: taskmill.PriorityHigh,
@@ -147,6 +153,7 @@ func ExampleClient_Enqueue() {
 func ExampleClient_Enqueue_deduplicated() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
+
 	res, err := client.Enqueue(ctx, SendReceipt{OrderID: 7}, &taskmill.EnqueueOptions{
 		DedupeKey:    "receipt-7",
 		DedupeWindow: 24 * time.Hour,
@@ -163,6 +170,7 @@ func ExampleClient_Enqueue_deduplicated() {
 func ExampleEnqueueOptions_fifoGroup() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
+
 	for _, entry := range []int64{1, 2, 3} {
 		_, err := client.Enqueue(ctx, SendReceipt{OrderID: entry}, &taskmill.EnqueueOptions{GroupKey: "customer-7"})
 		if err != nil {
@@ -194,6 +202,7 @@ func ExampleTask_CompleteTx() {
 			return t.CompleteTx(ctx, taskmill.Pgx(tx))
 		})
 	}
+
 	var handlers taskmill.Handlers
 	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[ApplyPayment](handler), nil)
 }
@@ -209,6 +218,7 @@ func ExampleHandlerFunc() {
 		}
 		return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID) // retried with backoff on error
 	})
+
 	var handlers taskmill.Handlers
 	taskmill.AddHandler(&handlers, handler, &taskmill.HandlerOptions{Timeout: 30 * time.Second})
 }
@@ -219,6 +229,7 @@ func rateLimited() bool { return false }
 func ExampleSchedule() {
 	var client *taskmill.Client // from taskmill.NewClient
 	var handlers taskmill.Handlers
+
 	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[SendReceipt](
 		func(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
 			// The night the run is for, in Berlin time. It is the same on
@@ -228,6 +239,7 @@ func ExampleSchedule() {
 			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
 		},
 	), nil)
+
 	berlin, err := time.LoadLocation("Europe/Berlin")
 	if err != nil {
 		log.Fatal(err)
@@ -254,6 +266,7 @@ func ExampleMiddleware() {
 	})
 	var client *taskmill.Client // from taskmill.NewClient
 	var handlers taskmill.Handlers
+
 	_, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 		Handlers:   &handlers,
 		Middleware: []taskmill.Middleware{logAttempts},
@@ -274,6 +287,7 @@ func ExampleEnqueueMiddleware() {
 				task.Metadata["request_id"] = id
 			}
 		}
+
 		if err := next(ctx); err != nil {
 			return err
 		}
@@ -282,8 +296,10 @@ func ExampleEnqueueMiddleware() {
 		}
 		return nil
 	})
+
 	ctx := context.Background()
 	var pool *pgxpool.Pool // from pgxpool.New
+
 	_, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{
 		EnqueueMiddleware: []taskmill.EnqueueMiddleware{tagRequests},
 	})
@@ -317,6 +333,7 @@ func ExampleMigrations() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	for _, m := range ms {
 		fmt.Printf("%04d_%s\n", m.Version, m.Name)
 	}
@@ -336,6 +353,7 @@ func ExampleMigrations() {
 func ExampleClient_RetryMatching() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
+
 	res, err := client.RetryMatching(ctx, &taskmill.BulkParams{Filter: taskmill.TaskFilter{
 		Queues: []string{"emails"},
 		States: []taskmill.State{taskmill.StateDead},
@@ -343,6 +361,7 @@ func ExampleClient_RetryMatching() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	// Other transactions held the skipped tasks, their FIFO groups, or their
 	// dedupe keys: run it again for them.
 	log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
@@ -357,10 +376,12 @@ func ExampleClient_EnqueueMany() {
 	for orderID := int64(1); orderID <= 100; orderID++ {
 		params = append(params, taskmill.EnqueueParams{Args: SendReceipt{OrderID: orderID}})
 	}
+
 	results, err := client.EnqueueMany(ctx, params)
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	// The results are in the order of params.
 	log.Printf("enqueued %d tasks; the first is task %d", len(results), results[0].ID)
 }
@@ -389,6 +410,7 @@ func ExampleArgsWithDefaults() {
 	if _, err := client.Enqueue(ctx, ResizeImage{ImageID: 7}, nil); err != nil {
 		log.Fatal(err)
 	}
+
 	// Still goes to "images" with 5 attempts, but with a high priority.
 	_, err := client.Enqueue(ctx, ResizeImage{ImageID: 8}, &taskmill.EnqueueOptions{Priority: taskmill.PriorityHigh})
 	if err != nil {
@@ -401,6 +423,7 @@ func ExampleArgsWithDefaults() {
 func ExampleClient_UpdateQueue() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
+
 	err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) { s.MaxRunning = 4 })
 	if err != nil {
 		log.Fatal(err)
@@ -426,6 +449,7 @@ func ExampleClient_PauseQueue() {
 func ExampleClient_Queues() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
+
 	queues, err := client.Queues(ctx)
 	if err != nil {
 		log.Fatal(err)
@@ -448,16 +472,19 @@ func ExampleClient_List() {
 		Queues: []string{"emails"},
 		States: []taskmill.State{taskmill.StateDead},
 	}}
+
 	for {
 		page, err := client.List(ctx, params)
 		if err != nil {
 			log.Fatal(err)
 		}
+
 		for _, task := range page.Tasks {
 			if n := len(task.Errors); n > 0 {
 				log.Printf("task %d (%s): %s", task.ID, task.Kind, task.Errors[n-1].Message)
 			}
 		}
+
 		if page.Next == "" {
 			break
 		}
@@ -471,6 +498,7 @@ func ExampleClient_Cancel() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
 	var id int64                // from EnqueueResult.ID
+
 	err := client.Cancel(ctx, id)
 	switch {
 	case errors.Is(err, taskmill.ErrNotFound):
@@ -501,11 +529,13 @@ func ExampleWorker_RunTask() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
 	var handlers taskmill.Handlers
+
 	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[SendReceipt](
 		func(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
 			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
 		},
 	), nil)
+
 	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers, NoMaintainer: true})
 	if err != nil {
 		log.Fatal(err)
@@ -515,6 +545,7 @@ func ExampleWorker_RunTask() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	// RunTask ignores the run time, so the task runs now.
 	info, err := worker.RunTask(ctx, res.ID)
 	if err != nil {
@@ -561,9 +592,11 @@ func (h receiptHandler) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 func ExampleAddHandler() {
 	var mail mailer // the application's mail service
 	var handlers taskmill.Handlers
+
 	taskmill.AddHandler[SendReceipt](&handlers, receiptHandler{mail: mail}, &taskmill.HandlerOptions{
 		Timeout: 30 * time.Second,
 	})
+
 	// NewWorker reports a mistake in the registrations, such as a kind
 	// registered twice.
 	_ = taskmill.WorkerConfig{Handlers: &handlers}
@@ -574,6 +607,7 @@ func ExampleAddHandler() {
 func ExampleWorkerConfig() {
 	var client *taskmill.Client    // from taskmill.NewClient
 	var handlers taskmill.Handlers // with a handler for each kind of both queues
+
 	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 		Handlers: &handlers,
 		Queues: map[string]taskmill.QueueOptions{
@@ -587,6 +621,7 @@ func ExampleWorkerConfig() {
 	if err != nil {
 		log.Fatal(err) // ErrInvalidArgument: the configuration is not valid
 	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := worker.Run(ctx); err != nil {
@@ -599,6 +634,7 @@ func ExampleClient_Get() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
 	var id int64                // from EnqueueResult.ID
+
 	task, err := client.Get(ctx, id)
 	if errors.Is(err, taskmill.ErrNotFound) {
 		log.Print("the task is gone: deleted, or past its retention")
@@ -608,6 +644,7 @@ func ExampleClient_Get() {
 		log.Fatal(err)
 	}
 	log.Printf("task %d (%s) is %s after %d of %d attempts", task.ID, task.Kind, task.State, task.Attempt, task.MaxAttempts)
+
 	// The history holds the latest errors, oldest first. Code is empty for
 	// an error that the handler returned in time.
 	for _, e := range task.Errors {
@@ -652,6 +689,7 @@ func ExampleState_CanRetry() {
 		taskmill.StateScheduled, taskmill.StatePending, taskmill.StateAvailable, taskmill.StateRunning,
 		taskmill.StateRetryable, taskmill.StateCompleted, taskmill.StateDead, taskmill.StateCanceled,
 	}
+
 	fmt.Println("state      finished  retry  cancel  delete")
 	for _, s := range states {
 		fmt.Printf("%-10s %-9t %-6t %-7t %t\n", s, s.Finished(), s.CanRetry(), s.CanCancel(), s.CanDelete())

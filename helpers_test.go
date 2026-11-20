@@ -80,6 +80,7 @@ func newEnvWith(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *
 	if err := taskmill.Migrate(tb.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
 		tb.Fatalf("migrate: %v", err)
 	}
+
 	if cfg == nil {
 		cfg = &taskmill.ClientConfig{}
 	}
@@ -87,11 +88,13 @@ func newEnvWith(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *
 		cfg.Logger = testLogger(tb)
 	}
 	cfg.Schema = schema
+
 	client, err := taskmill.NewClient(tb.Context(), pool, cfg)
 	if err != nil {
 		tb.Fatalf("new client: %v", err)
 	}
 	e := &env{pool: pool, schema: schema, client: client}
+
 	// Cleanups run last first, so this check runs after the test's workers
 	// stopped.
 	tb.Cleanup(func() {
@@ -111,6 +114,7 @@ func newTracedEnv(t *testing.T, tracer pgx.QueryTracer) *env {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.Tracer = tracer
+
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -253,6 +257,7 @@ func (e *env) waitState(t *testing.T, id int64, state taskmill.State) *taskmill.
 		if err == nil && info.State == state {
 			return info
 		}
+
 		if time.Now().After(deadline) {
 			got := "error: " + fmt.Sprint(err)
 			if info != nil {
@@ -418,4 +423,84 @@ func (e *env) limitDefaultQueue(t *testing.T, maxRunning int) {
 	if err := e.client.UpdateQueue(t.Context(), taskmill.DefaultQueue, func(s *taskmill.QueueSettings) { s.MaxRunning = maxRunning }); err != nil {
 		t.Fatalf("update the default queue: %v", err)
 	}
+}
+
+func noopHandlers() *taskmill.Handlers {
+	return handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil)
+}
+
+// fastRetry keeps retry tests quick.
+var fastRetry = taskmill.ExponentialBackoff{Base: 10 * time.Millisecond, Max: 10 * time.Millisecond}
+
+// testTiming shortens the worker's intervals, so that tests wait less for
+// maintenance and elections.
+var testTiming = taskmill.Timing{
+	Maintainer:    100 * time.Millisecond,
+	Heartbeat:     200 * time.Millisecond,
+	Election:      100 * time.Millisecond,
+	LeaderLease:   2 * time.Second,
+	Stats:         200 * time.Millisecond,
+	ShutdownGrace: 200 * time.Millisecond,
+	Reconnect:     100 * time.Millisecond,
+	IdlePoll:      time.Hour,
+	Listen:        2 * time.Second,
+}
+
+// newWorker returns a worker with test timing that polls every 50 ms unless
+// cfg says otherwise, and listens as testdb.ListenConfig says.
+func newWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) *taskmill.Worker {
+	t.Helper()
+	if cfg.PollInterval == 0 {
+		cfg.PollInterval = 50 * time.Millisecond
+	}
+	if cfg.ListenConfig == nil {
+		cfg.ListenConfig = testdb.ListenConfig(t)
+	}
+
+	w, err := taskmill.NewWorker(e.client, cfg)
+	if err != nil {
+		t.Fatalf("new worker: %v", err)
+	}
+	taskmill.SetTiming(w, testTiming)
+	return w
+}
+
+// runWorker starts a worker and returns a function that stops it and waits
+// for Run to return. The worker also stops when the test ends.
+func runWorker(t *testing.T, e *env, cfg *taskmill.WorkerConfig) (stop func()) {
+	t.Helper()
+	return startWorker(t, newWorker(t, e, cfg))
+}
+
+// startWorker runs w as runWorker does.
+func startWorker(t *testing.T, w *taskmill.Worker) (stop func()) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	stop = sync.OnceFunc(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("worker run: %v", err)
+			}
+		case <-time.After(60 * time.Second):
+			t.Error("worker did not stop")
+		}
+	})
+	t.Cleanup(stop)
+	return stop
+}
+
+// handlers returns a handler set with one handler for sendEmail.
+func handlers(fn func(ctx context.Context, task *taskmill.Task[sendEmail]) error, opts *taskmill.HandlerOptions) *taskmill.Handlers {
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](fn), opts)
+	return &hs
+}
+
+func defaultQueue(concurrency int) map[string]taskmill.QueueOptions {
+	return map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {Concurrency: concurrency}}
 }

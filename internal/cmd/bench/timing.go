@@ -40,6 +40,7 @@ func benchTiming(ctx context.Context, pool *pgxpool.Pool, wantSkew time.Duration
 	c := fresh(ctx, pool)
 	mustExec(ctx, pool, `CREATE TABLE {s}.starts (n integer NOT NULL, attempt integer NOT NULL,
     early boolean NOT NULL, late_us bigint NOT NULL)`)
+
 	var dbNow time.Time
 	sent := time.Now()
 	if err := pool.QueryRow(ctx, "SELECT now()").Scan(&dbNow); err != nil {
@@ -71,6 +72,7 @@ func benchTiming(ctx context.Context, pool *pgxpool.Pool, wantSkew time.Duration
 	if _, err := c.EnqueueMany(ctx, batch); err != nil {
 		fail(err)
 	}
+
 	time.Sleep(timingRun)
 	var stopping time.Time
 	if err := pool.QueryRow(ctx, "SELECT now()").Scan(&stopping); err != nil {
@@ -96,6 +98,7 @@ func benchTiming(ctx context.Context, pool *pgxpool.Pool, wantSkew time.Duration
 	lost := scalar(ctx, pool, `
 SELECT (SELECT count(*) FROM {s}.task_history WHERE errors @> '[{"code": "lease_lost"}]')
      + (SELECT count(*) FROM {s}.tasks WHERE errors @> '[{"code": "lease_lost"}]')`)
+
 	late := percentiles(lates)
 	clock := skew.String() + " ahead of"
 	if skew < 0 {
@@ -108,6 +111,7 @@ SELECT (SELECT count(*) FROM {s}.task_history WHERE errors @> '[{"code": "lease_
 		"machine's clock, 500 failing twice with a 2 s backoff, 500 snoozing once for 2 s, and 100 running for 8 s "+
 		"with 3 s leases; and a schedule that runs every minute. 2 workers with concurrency 128 ran for %s.\n\n",
 		clock, timingRun)
+
 	fmt.Println("| ID | Check | Result | |")
 	fmt.Println("|---|---|---|---|")
 	fmt.Printf("| L4 | Start after the run time, %s starts | %s | %s |\n",
@@ -116,6 +120,7 @@ SELECT (SELECT count(*) FROM {s}.task_history WHERE errors @> '[{"code": "lease_
 		"%s of 2,100 completed, %s waiting, %d left; %d schedule runs at %d times, and %d due while the workers stopped | %s |\n",
 		commas(completed), commas(waiting), unfinished, runs, scheduled, dueAtStop,
 		verdict(completed+waiting == 2100 && unfinished == 0 && runs > 0 && runs == scheduled))
+
 	switch {
 	case wantSkew != 0 && (skew-wantSkew).Abs() > 30*time.Second:
 		fmt.Printf("| F9 | Clocks out of sync | The database's clock is %s off, not the expected %s | %s |\n",
@@ -139,6 +144,7 @@ func recordStart(pool *pgxpool.Pool) func(context.Context, *taskmill.Task[timedT
 		if t.CreatedAt.After(due) {
 			due = t.CreatedAt
 		}
+
 		_, err := pool.Exec(ctx, q("INSERT INTO {s}.starts VALUES ($1, $2, $3, $4)"),
 			t.Args.N, t.Attempt, t.AttemptedAt.Before(t.RunAt), t.AttemptedAt.Sub(due).Microseconds())
 		switch {
@@ -149,6 +155,7 @@ func recordStart(pool *pgxpool.Pool) func(context.Context, *taskmill.Task[timedT
 		case t.Args.Snooze && t.AttemptedAt.Sub(t.CreatedAt) < time.Second:
 			return taskmill.Snooze(2 * time.Second)
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

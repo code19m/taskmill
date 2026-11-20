@@ -12,22 +12,22 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // fetchLoop fetches tasks for one queue whenever it has free capacity, until
 // ctx is canceled.
-func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
-	fetches := newFailures(w, "fetch tasks", slog.String(logKeyQueue, q.name))
+func (w *Worker) fetchLoop(ctx context.Context, r *runState, q *queueState) {
+	fetches := newIncidentLog(w, "fetch tasks", slog.String(logKeyQueue, q.name))
 
-	// notified reports that a notification caused the last fetch, and held
-	// that the queue's MaxRunning limit blocked tasks. Until quietUntil, the
-	// loop leaves notifications waiting.
-	notified, held := false, false
+	// notified reports that a notification caused the last fetch, and
+	// atLimit that the queue's MaxRunning limit held tasks back. Until
+	// quietUntil, the loop leaves notifications waiting.
+	notified, atLimit := false, false
 	var quietUntil time.Time
+
 	wait := func() (ok bool) {
-		ok, notified = waitForWork(ctx, q, w.pollWait(held), quietUntil)
+		ok, notified = waitForWork(ctx, q, w.pollWait(atLimit), quietUntil)
 		return ok
 	}
 
@@ -39,15 +39,20 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 			}
 			continue
 		}
-		tasks, more, limited, err := w.fetch(ctx, q, free)
-		held = limited
+
+		var tasks []*liveAttempt
+		var more bool
+		var err error
+		tasks, more, atLimit, err = w.fetch(ctx, q, free)
 		fetches.observe(ctx, err)
 		w.dispatch(ctx, r, q, tasks)
+
 		// A notification wakes every worker of the queue, and most find
 		// nothing: those let a moment pass before they act on the next one.
 		if err == nil && notified && len(tasks) == 0 {
 			quietUntil = time.Now().Add(w.timing.quiet)
 		}
+
 		if (err != nil || !more) && !wait() {
 			return
 		}
@@ -64,8 +69,8 @@ func (w *Worker) fetchLoop(ctx context.Context, r *run, q *queueState) {
 // limit held tasks back: no notification says when another worker's task of
 // that queue ends. The end of this worker's own task wakes the queue (see
 // madeRoom).
-func (w *Worker) pollWait(held bool) time.Duration {
-	if held || !w.notifying.Load() {
+func (w *Worker) pollWait(atLimit bool) time.Duration {
+	if atLimit || !w.notifying.Load() {
 		return w.cfg.PollInterval
 	}
 	d := max(w.timing.idlePoll, w.cfg.PollInterval)
@@ -83,6 +88,7 @@ func (w *Worker) pollWait(held bool) time.Duration {
 func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUntil time.Time) (ok, nudged bool) {
 	timer := time.NewTimer(poll)
 	defer timer.Stop()
+
 	if quiet := time.Until(quietUntil); quiet > 0 {
 		select {
 		case <-ctx.Done():
@@ -94,6 +100,7 @@ func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUn
 		case <-time.After(quiet):
 		}
 	}
+
 	select {
 	case <-ctx.Done():
 		return false, false
@@ -111,17 +118,18 @@ func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUn
 // every fetched task starts right away. A queue with an installation-wide
 // MaxRunning limit fetches only up to its remaining capacity. more reports
 // that the first lease took all it asked for, so more tasks may be waiting,
-// and held that the limit kept it from asking for as many as slots, or that
-// it gave up waiting for the row of a queue with a limit (see errQueueHeld).
+// and atLimit that the limit kept it from asking for as many as slots, or
+// that it gave up waiting for the row of a queue with a limit (see
+// errQueueHeld).
 // If filling the batches fails outside a transaction, it returns the tasks
 // leased before the error with the error: they must run.
-func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*tracked, more, held bool, err error) {
+func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*liveAttempt, more, atLimit bool, err error) {
 	// A queue with a MaxRunning limit and a backlog is at its limit most of
 	// the time: one statement, without a lock, then saves the transaction.
 	limited := q.maxRunning.Load() > 0
 	if limited {
-		if held, err = w.atLimit(ctx, q.name); err != nil || held {
-			return nil, false, held, err
+		if atLimit, err = w.atLimit(ctx, q.name); err != nil || atLimit {
+			return nil, false, atLimit, err
 		}
 	}
 
@@ -154,42 +162,45 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 		return nil, false, false, err
 	}
 	more = limit > 0 && len(out) == limit
-	held = allowed < slots && len(out) == limit
+	atLimit = allowed < slots && len(out) == limit
+
 	extra, err := w.fillBatches(dbCtx, q, lease, out, allowed-len(out))
 	if err != nil && tx != nil {
 		return nil, false, false, err // rolled back: nothing was leased
 	}
 	out = append(out, extra...)
+
 	if tx != nil {
 		if err := tx.Commit(dbCtx); err != nil {
 			return nil, false, false, err
 		}
 	}
 
-	slices.SortFunc(out, func(a, b *tracked) int {
+	slices.SortFunc(out, func(a, b *liveAttempt) int {
 		return cmp.Or(
 			cmp.Compare(b.info.Priority, a.info.Priority),
 			a.info.RunAt.Compare(b.info.RunAt),
 			cmp.Compare(a.info.ID, b.info.ID),
 		)
 	})
-	return out, more, held, err
+	return out, more, atLimit, err
 }
 
 // leaseFunc runs a fetch statement for up to limit tasks of q, with extra
 // arguments after the standard four, and returns the leased tasks.
-type leaseFunc func(ctx context.Context, q *queueState, sql string, limit int, extra ...any) ([]*tracked, error)
+type leaseFunc func(ctx context.Context, q *queueState, sql string, limit int, extra ...any) ([]*liveAttempt, error)
 
 // fillBatches leases more tasks of the batch kinds among fetched, up to room
 // in all, to fill their batches. It returns what it leased before an error.
-func (w *Worker) fillBatches(ctx context.Context, q *queueState, lease leaseFunc, fetched []*tracked, room int) ([]*tracked, error) {
-	var extra []*tracked
+func (w *Worker) fillBatches(ctx context.Context, q *queueState, lease leaseFunc, fetched []*liveAttempt, room int) ([]*liveAttempt, error) {
+	var extra []*liveAttempt
 	for kind, n := range batchCounts(fetched) {
 		size := w.handlers[kind].opts.BatchSize
 		fill := min((size-n%size)%size, room-len(extra))
 		if fill <= 0 {
 			continue
 		}
+
 		more, err := lease(ctx, q, w.client.sql.fetchKind, fill, kind, maxFetch)
 		if err != nil {
 			return extra, err
@@ -220,6 +231,7 @@ func (w *Worker) beginLimited(ctx context.Context, q *queueState) (pgx.Tx, int, 
 	if err != nil {
 		return nil, 0, err
 	}
+
 	allowed := 0
 	if _, err = tx.Exec(ctx, limitedSettings); err == nil {
 		allowed, err = w.capacity(ctx, tx, q.name)
@@ -233,7 +245,7 @@ func (w *Worker) beginLimited(ctx context.Context, q *queueState) (pgx.Tx, int, 
 
 // leaseIn returns a leaseFunc that runs fetch statements in tx.
 func (w *Worker) leaseIn(tx pgx.Tx) leaseFunc {
-	return func(ctx context.Context, q *queueState, sql string, limit int, extra ...any) ([]*tracked, error) {
+	return func(ctx context.Context, q *queueState, sql string, limit int, extra ...any) ([]*liveAttempt, error) {
 		if limit <= 0 {
 			return nil, nil
 		}
@@ -255,7 +267,7 @@ func (w *Worker) capacity(ctx context.Context, tx pgx.Tx, queue string) (int, er
 		if errors.Is(err, pgx.ErrNoRows) {
 			return maxFetch, nil
 		}
-		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "55P03" { // lock_not_available
+		if pgCode(err) == codeLockNotAvailable {
 			return 0, errQueueHeld
 		}
 		return 0, err
@@ -263,28 +275,13 @@ func (w *Worker) capacity(ctx context.Context, tx pgx.Tx, queue string) (int, er
 	if maxRunning == nil {
 		return maxFetch, nil
 	}
+
 	var running int
 	if err := tx.QueryRow(ctx, w.client.sql.countRunning, queue).Scan(&running); err != nil {
 		return 0, err
 	}
 	return max(*maxRunning-running, 0), nil
 }
-
-// planSettings keep a fetch on its ordered index. A queue's table changes so
-// fast that the planner's statistics are often far off: with too low an
-// estimate of the available tasks, it may read all of them and sort them, on
-// every fetch. Turning sorts and bitmap scans off for the fetch's transaction
-// rules that out.
-const planSettings = `SELECT set_config('enable_sort', 'off', true), set_config('enable_bitmapscan', 'off', true)`
-
-// limitedSettings are planSettings for the fetch transaction of a queue with
-// a MaxRunning limit. They also bound its wait for the queue's row to one
-// second: a transaction that holds the row for long, such as a stalled
-// worker's, must not tie up a connection of every waiting worker, or keep
-// them from stopping, for as long as it holds the row. The timeout can hold
-// until the transaction ends: a fetch sends no notification, so its commit
-// waits for no lock (see liftLockTimeout).
-const limitedSettings = planSettings + `, set_config('lock_timeout', '1s', true)`
 
 // errQueueHeld reports that the fetch of a queue with a MaxRunning limit
 // gave up waiting for the queue's row. That is no failure of the fetch: the
@@ -296,22 +293,26 @@ var errQueueHeld = errors.New("taskmill: the queue's row is locked")
 // leaseAlone runs a fetch statement for up to limit tasks of q, with extra
 // arguments after the standard four, in a transaction of its own with
 // planSettings, all in one round trip. It returns the leased tasks.
-func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limit int, extra ...any) ([]*tracked, error) {
+func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limit int, extra ...any) ([]*liveAttempt, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
+
 	b := &pgx.Batch{}
 	b.Queue("BEGIN")
 	b.Queue(planSettings)
 	b.Queue(sql, w.leaseArgs(q, limit, extra)...)
 	b.Queue("COMMIT")
+
 	br := w.client.pool.SendBatch(ctx, b)
 	defer func() { _ = br.Close() }()
+
 	for range 2 {
 		if _, err := br.Exec(); err != nil {
 			return nil, err
 		}
 	}
+
 	r, err := br.Query()
 	if err != nil {
 		return nil, err
@@ -320,6 +321,7 @@ func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limi
 	if err != nil {
 		return nil, err
 	}
+
 	// The tasks are leased once the transaction commits.
 	if _, err := br.Exec(); err != nil {
 		return nil, err
@@ -329,14 +331,20 @@ func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limi
 
 // leaseArgs returns a fetch statement's arguments.
 func (w *Worker) leaseArgs(q *queueState, limit int, extra []any) []any {
-	return append([]any{q.name, limit, w.cfg.LeaseDuration.Microseconds(), w.id}, extra...)
+	args := []any{
+		q.name,                             // $1
+		limit,                              // $2
+		w.cfg.LeaseDuration.Microseconds(), // $3
+		w.id,                               // $4
+	}
+	return append(args, extra...)
 }
 
 // scanAllLeased reads the tasks that a fetch statement leased.
-func (w *Worker) scanAllLeased(r pgx.Rows) ([]*tracked, error) {
+func (w *Worker) scanAllLeased(r pgx.Rows) ([]*liveAttempt, error) {
 	defer r.Close()
 	now := time.Now()
-	var out []*tracked
+	var out []*liveAttempt
 	for r.Next() {
 		t, err := w.scanLeased(r, now)
 		if err != nil {
@@ -348,7 +356,7 @@ func (w *Worker) scanAllLeased(r pgx.Rows) ([]*tracked, error) {
 }
 
 // batchCounts counts the fetched tasks of each batch kind.
-func batchCounts(ts []*tracked) map[string]int {
+func batchCounts(ts []*liveAttempt) map[string]int {
 	var counts map[string]int
 	for _, t := range ts {
 		if t.reg != nil && t.reg.runBatch != nil {
@@ -366,7 +374,7 @@ func batchCounts(ts []*tracked) map[string]int {
 // is no error: an error would lose every task that the statement leased
 // with it. Such a task is tracked as invalid, without a handler, and runOne
 // makes it dead, alone.
-func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
+func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*liveAttempt, error) {
 	var (
 		info                    TaskInfo
 		priority, att, maxAtt   int16
@@ -375,11 +383,13 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 		createdAt, runAt        pgtype.Timestamptz
 		attemptedAt             *time.Time
 	)
+
 	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &priority, &att, &maxAtt, &token, &info.GroupKey,
 		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt)
 	if err != nil {
 		return nil, err
 	}
+
 	info.State = StateRunning
 	info.Priority = Priority(priority)
 	info.Attempt = int(att)
@@ -390,6 +400,7 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 	var created, due bool
 	info.CreatedAt, created = finite(createdAt)
 	info.RunAt, due = finite(runAt)
+
 	var invalid error
 	info.Metadata, invalid = decodeMetadata(metadata)
 	if invalid == nil && (!created || !due) {
@@ -400,11 +411,12 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 		// have this token too, and could record this attempt's result.
 		invalid = errors.New("the lease token is at its largest value, so the task cannot run again")
 	}
+
 	reg := w.handlers[info.Kind]
 	if invalid != nil {
 		invalid, reg = fmt.Errorf("invalid row: %w", invalid), nil
 	}
-	return &tracked{
+	return &liveAttempt{
 		att: &attempt{
 			client: w.client, logger: w.logger, id: info.ID, token: token, discard: reg != nil && reg.opts.DiscardCompleted,
 		},
@@ -418,7 +430,7 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*tracked, error) {
 // dispatch starts the fetched tasks: each one alone, or in batches for batch
 // handlers. Each start takes a slot of the queue's concurrency. Tasks that
 // cannot start before the worker stops go back to the queue.
-func (w *Worker) dispatch(ctx context.Context, r *run, q *queueState, tasks []*tracked) {
+func (w *Worker) dispatch(ctx context.Context, r *runState, q *queueState, tasks []*liveAttempt) {
 	for _, t := range tasks {
 		w.track(ctx, t)
 	}
@@ -437,6 +449,7 @@ func (w *Worker) dispatch(ctx context.Context, r *run, q *queueState, tasks []*t
 			w.release(context.WithoutCancel(ctx), unstarted)
 			return
 		}
+
 		r.inflight.Go(func() {
 			defer q.freeSlot()
 			if len(unit) == 1 && (unit[0].reg == nil || unit[0].reg.run != nil) {
@@ -473,16 +486,17 @@ func (q *queueState) freeSlot() {
 
 // units splits fetched tasks into what runs together: each task alone, or
 // tasks of a batch kind in batches of its batch size.
-func (w *Worker) units(tasks []*tracked) [][]*tracked {
-	var units [][]*tracked
-	batches := map[string][]*tracked{}
+func (w *Worker) units(tasks []*liveAttempt) [][]*liveAttempt {
+	var units [][]*liveAttempt
+	batches := map[string][]*liveAttempt{}
 	for _, t := range tasks {
 		if t.reg != nil && t.reg.runBatch != nil {
 			batches[t.info.Kind] = append(batches[t.info.Kind], t)
 			continue
 		}
-		units = append(units, []*tracked{t})
+		units = append(units, []*liveAttempt{t})
 	}
+
 	for kind, ts := range batches {
 		for chunk := range slices.Chunk(ts, w.handlers[kind].opts.BatchSize) {
 			units = append(units, chunk)

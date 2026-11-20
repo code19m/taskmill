@@ -12,86 +12,6 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// settingsRetry is the first wait before the worker reads the settings of
-// its queues again while it knows none.
-const settingsRetry = 100 * time.Millisecond
-
-// settingsLoop loads the installation-wide settings of the worker's queues
-// when the worker starts, and again every settings interval. Until a load
-// succeeds, the queues fetch nothing (see Run), so it tries again sooner:
-// after settingsRetry, then waiting twice as long each time, up to the
-// interval.
-func (w *Worker) settingsLoop(ctx context.Context) {
-	wait := settingsRetry
-	for {
-		w.refreshQueueSettings(ctx)
-		if w.settled.Load() {
-			wait = w.timing.settings
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(wait):
-		}
-		wait = min(2*wait, w.timing.settings)
-	}
-}
-
-// refreshQueueSettings reads the settings of the worker's queues and applies
-// them. If it cannot, the queues keep what they had. The read may take as
-// long as the settings interval, after which the next one is due.
-func (w *Worker) refreshQueueSettings(ctx context.Context) {
-	if len(w.queues) == 0 {
-		return
-	}
-	names := make([]string, 0, len(w.queues))
-	for name := range w.queues {
-		names = append(names, name)
-	}
-	readCtx, cancel := context.WithTimeout(ctx, w.timing.settings)
-	settings, err := w.loadQueueSettings(readCtx, names)
-	cancel()
-	w.settingsFailures.observe(ctx, err)
-	if err != nil {
-		return
-	}
-	// Settled comes first: no queue fetches before the worker says that it
-	// has read the settings.
-	w.settled.Store(true)
-	// A queue without a row has the default settings: running, no limit.
-	for name, q := range w.queues {
-		s := settings[name]
-		q.maxRunning.Store(s.maxRunning)
-		if q.paused.Swap(s.paused) && !s.paused {
-			q.nudge()
-		}
-	}
-}
-
-// queueSetting is the part of a queue's settings that its worker applies.
-type queueSetting struct {
-	paused     bool
-	maxRunning int32
-}
-
-func (w *Worker) loadQueueSettings(ctx context.Context, names []string) (map[string]queueSetting, error) {
-	r, err := w.client.pool.Query(ctx, w.client.sql.queueSettings, names)
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-	settings := make(map[string]queueSetting, len(names))
-	for r.Next() {
-		var name string
-		var s queueSetting
-		if err := r.Scan(&name, &s.paused, &s.maxRunning); err != nil {
-			return nil, err
-		}
-		settings[name] = s
-	}
-	return settings, r.Err()
-}
-
 // listenLoop receives notifications on a dedicated connection, reconnecting
 // with backoff when it breaks. The backoff starts over after a connection
 // that worked.
@@ -109,6 +29,7 @@ func (w *Worker) listenLoop(ctx context.Context) {
 			w.logger.LogAttrs(ctx, slog.LevelError, "notifications disabled; polling only", slog.Any(logKeyError, err))
 			return
 		}
+
 		w.listenFailures.observe(ctx, err) // workers poll meanwhile
 		select {
 		case <-ctx.Done():
@@ -146,6 +67,7 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 		defer cancel()
 		_ = conn.Close(closeCtx)
 	}()
+
 	if err := w.checkSession(startCtx, conn); err != nil {
 		return false, err
 	}
@@ -154,15 +76,18 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 		return false, err
 	}
 	w.listenFailures.observe(ctx, nil)
+
 	// Notifications may have been missed while disconnected: of changed
 	// settings, such as a pause, and of tasks.
 	signal(w.queueHints)
 	for _, q := range w.queues {
 		q.nudge()
 	}
+
 	defer w.stopNotifying()
 	timeout := heartbeatsMissed * w.timing.heartbeat
 	deadline := time.Now().Add(timeout) // for the next heartbeat
+
 	for {
 		waitCtx, cancel := context.WithDeadline(ctx, deadline)
 		n, err := conn.WaitForNotification(waitCtx)
@@ -185,6 +110,7 @@ func (w *Worker) listenOnce(ctx context.Context) (listened bool, err error) {
 				w.logger.LogAttrs(ctx, slog.LevelWarn, "maintainer heartbeats do not arrive; idle queues poll every PollInterval")
 			}
 			w.stopNotifying()
+
 			// Listening again changes nothing, but the connection must answer.
 			checkCtx, cancel := context.WithTimeout(ctx, w.timing.listen)
 			_, err := conn.Exec(checkCtx, listen)
@@ -235,10 +161,12 @@ func (w *Worker) checkSession(ctx context.Context, conn *pgx.Conn) error {
 		err = q.QueryRow(ctx, "SELECT pg_backend_pid()", pgx.QueryExecModeSimpleProtocol).Scan(&n)
 		return n, err
 	}
+
 	own, err := pid(conn)
 	if err != nil {
 		return err
 	}
+
 	for range sessionChecks {
 		other, err := pid(w.client.pool)
 		if err != nil {
@@ -279,6 +207,7 @@ func (w *Worker) handleNotification(payload string) (heartbeat bool) {
 	if !ok {
 		return false
 	}
+
 	switch kind {
 	case notifyAvailable:
 		if q := w.queues[arg]; q != nil {
@@ -292,6 +221,7 @@ func (w *Worker) handleNotification(payload string) (heartbeat bool) {
 		if err != nil || strconv.FormatInt(id, 10) != arg {
 			return false
 		}
+
 		w.mu.Lock()
 		t := w.attempts[id]
 		w.mu.Unlock()
@@ -331,6 +261,7 @@ func followHints(ctx context.Context, hints <-chan struct{}, read func(context.C
 		case <-hints:
 		}
 		read(ctx)
+
 		select {
 		case <-ctx.Done():
 			return
@@ -345,9 +276,10 @@ func followHints(ctx context.Context, hints <-chan struct{}, read func(context.C
 // late, for an earlier run of a task, finds nothing. If the read fails, or
 // takes as long as a check-in may, the next check-in reads the requests.
 func (w *Worker) cancelHinted(ctx context.Context) {
-	hinted := map[int64]*tracked{}
+	hinted := map[int64]*liveAttempt{}
 	var ids []int64
 	var tokens []int32
+
 	w.mu.Lock()
 	for id, t := range w.attempts {
 		// Cleared before the read: a notification that arrives during it
@@ -360,6 +292,7 @@ func (w *Worker) cancelHinted(ctx context.Context) {
 	if len(ids) == 0 {
 		return
 	}
+
 	ctx, cancel := context.WithTimeout(ctx, w.cfg.LeaseDuration/3)
 	defer cancel()
 	r, err := w.client.pool.Query(ctx, w.client.sql.cancelRequest, ids, tokens)
@@ -370,6 +303,7 @@ func (w *Worker) cancelHinted(ctx context.Context) {
 	if err != nil {
 		return
 	}
+
 	for _, id := range requested {
 		hinted[id].requestCancel()
 	}

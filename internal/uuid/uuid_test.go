@@ -11,6 +11,7 @@ var v7 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f
 func TestNewV7(t *testing.T) {
 	t.Parallel()
 	seen := make(map[string]bool)
+
 	for range 10_000 {
 		id := NewV7()
 		if !v7.MatchString(id) {
@@ -30,6 +31,7 @@ func TestNewV7IsOrderedByTime(t *testing.T) {
 	if earlier[:13] >= later[:13] {
 		t.Fatalf("%s does not sort before %s", earlier, later)
 	}
+
 	if got := newV7(time.UnixMilli(0x0123456789ab))[:13]; got != "01234567-89ab" {
 		t.Fatalf("timestamp encoded as %s", got)
 	}

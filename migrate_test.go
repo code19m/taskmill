@@ -48,6 +48,7 @@ func TestMigrateIsIdempotentAndConcurrencySafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if n, want := e.count(t, "SELECT count(*) FROM {s}.migrations"), len(all)-1; n != want { // all but the bootstrap
 		t.Fatalf("migrations recorded: got %d, want %d", n, want)
 	}
@@ -66,6 +67,7 @@ func TestMigrateWithARoleThatOnlyOwnsItsSchema(t *testing.T) {
 	schema := testdb.Schema(t, admin)
 	role := schema + "_owner"
 	ctx := t.Context()
+
 	// The role may connect, but not create schemas: an administrator
 	// created its schema for it.
 	pool := newRole(t, admin, role, "CREATE SCHEMA "+schema+" AUTHORIZATION "+role)
@@ -84,6 +86,7 @@ func TestConcurrentMigratesOnWarmConnections(t *testing.T) {
 	t.Parallel()
 	const processes = 8
 	pool := testdb.PoolSize(t, processes)
+
 	// Open every connection first, as a running application has, so that
 	// the migrations start together rather than as each connection opens.
 	conns := make([]*pgxpool.Conn, processes)
@@ -117,6 +120,7 @@ func TestConcurrentMigratesOnWarmConnections(t *testing.T) {
 func TestRoleWithoutRightsCannotHoldUpMigrateOrWorkers(t *testing.T) {
 	t.Parallel()
 	admin := testdb.Pool(t)
+
 	// hold takes the locks that Migrate and the history partitions once
 	// waited for, in a session of a new role, until the test ends.
 	hold := func(t *testing.T, schema string) {
@@ -126,6 +130,7 @@ func TestRoleWithoutRightsCannotHoldUpMigrateOrWorkers(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(conn.Release)
+
 		for _, key := range []string{"taskmill.migrate." + schema, "taskmill.partitions." + schema} {
 			if _, err := conn.Exec(t.Context(), "SELECT pg_advisory_lock(hashtextextended($1, 0))", key); err != nil {
 				t.Fatal(err)
@@ -137,6 +142,7 @@ func TestRoleWithoutRightsCannotHoldUpMigrateOrWorkers(t *testing.T) {
 		t.Parallel()
 		schema := testdb.Schema(t, admin)
 		hold(t, schema)
+
 		ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 		defer cancel()
 		if err := taskmill.Migrate(ctx, admin, &taskmill.MigrateConfig{Schema: schema}); err != nil {
@@ -149,6 +155,7 @@ func TestRoleWithoutRightsCannotHoldUpMigrateOrWorkers(t *testing.T) {
 		schema := testdb.Schema(t, admin)
 		applyWithoutMigrate(t, admin, schema, 0) // without partitions: the worker creates them
 		hold(t, schema)
+
 		e := (&env{pool: admin, schema: schema}).withLogger(t, testLogger(t))
 		id := e.enqueue(t, sendEmail{}, nil)
 		runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
@@ -179,6 +186,7 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 	if err := busy.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&holder); err != nil {
 		t.Fatal(err)
 	}
+
 	r, err := pool.Query(t.Context(), "SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename <> 'migrations'", schema)
 	if err != nil {
 		t.Fatal(err)
@@ -196,6 +204,7 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 	waitFor(t, "the migration to wait for a busy table", func() bool {
 		return e.count(t, "SELECT count(pg_cancel_backend(pid)) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", holder) > 0
 	})
+
 	err = recv(t, gaveUp, "Migrate to give up")
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "57014" { // query_canceled
 		t.Fatalf("migrate with busy tables: got %v, want the error of its canceled statement", err)
@@ -235,18 +244,21 @@ func TestMigrateDoesNotDeadlockWithTheFleet(t *testing.T) {
 			t.Parallel()
 			migrateBesideTheFleet(t, version, "SELECT count(*) FROM {s}.tasks", "SELECT count(*) FROM {s}.workers")
 		})
+
 		t.Run(fmt.Sprintf("from version %d, a run of a schedule", version), func(t *testing.T) {
 			t.Parallel()
 			migrateBesideTheFleet(t, version, "UPDATE {s}.schedules SET last_run_at = now()",
 				"INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts) VALUES ('q', 'k', 'available', now(), '{}', 1)")
 		})
 	}
+
 	t.Run("from version 6, a batch of a bulk delete", func(t *testing.T) {
 		t.Parallel()
 		migrateBesideTheFleet(t, 6, `WITH picked AS (SELECT id FROM {s}.tasks FOR UPDATE SKIP LOCKED)
 		                             DELETE FROM {s}.task_history WHERE id IN (SELECT id FROM picked)`,
 			"DELETE FROM {s}.tasks WHERE id = 0")
 	})
+
 	t.Run("from version 6, a completion", func(t *testing.T) {
 		t.Parallel()
 		migrateBesideTheFleet(t, 6, "DELETE FROM {s}.tasks WHERE id = 0",
@@ -268,6 +280,7 @@ func migrateBesideTheFleet(t *testing.T, version int, first, then string) {
 
 	fleet := e.begin(t)
 	e.txExec(t, fleet, first)
+
 	migrated := make(chan error, 1)
 	go func() {
 		migrated <- taskmill.Migrate(context.Background(), pool, &taskmill.MigrateConfig{Schema: e.schema})
@@ -285,6 +298,7 @@ func migrateBesideTheFleet(t *testing.T, version int, first, then string) {
 	}
 	e.txExec(t, fleet, then)
 	e.txExec(t, worker, "UPDATE {s}.workers SET heartbeat_at = now() WHERE id = 'worker'")
+
 	for _, tx := range []pgx.Tx{worker, fleet} {
 		if err := tx.Commit(t.Context()); err != nil {
 			t.Fatal(err)
@@ -307,6 +321,7 @@ func TestMigrateUpgradesEveryEarlierVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	latest := len(all) - 1 // without the bootstrap
 	for from := 1; from < latest; from++ {
 		t.Run(fmt.Sprintf("from version %d", from), func(t *testing.T) {
@@ -367,6 +382,7 @@ func upgradeWithRows(t *testing.T, from int, retention brokenRetention) {
 	pool := testdb.Pool(t)
 	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
 	applyUpTo(t, pool, e.schema, from)
+
 	e.exec(t, `CREATE TABLE {s}.task_history_20200101 PARTITION OF {s}.task_history
 	           FOR VALUES FROM ('2020-01-01 00:00:00+00') TO ('2020-01-02 00:00:00+00')`)
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
@@ -383,6 +399,7 @@ func upgradeWithRows(t *testing.T, from int, retention brokenRetention) {
 	           VALUES ('default', 'email.send', 'dead', now(), '{}', 1, 'customer', now())`)
 	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
 	           SELECT queue, group_key, 1, id, now() FROM {s}.tasks`)
+
 	refused := from < refusingVersion
 	if refused {
 		e.writeRefusedRows(t, retention.set)
@@ -391,6 +408,7 @@ func upgradeWithRows(t *testing.T, from int, retention brokenRetention) {
 	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema}); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+
 	e = e.withLogger(t, testLogger(t))
 	ctx := t.Context()
 	workers, errWorkers := e.client.Workers(ctx)
@@ -401,6 +419,7 @@ func upgradeWithRows(t *testing.T, from int, retention brokenRetention) {
 	if err := errors.Join(errWorkers, errSchedules, errQueues, errGroups, errSettings); err != nil {
 		t.Fatalf("read what the old release left: %v", err)
 	}
+
 	// The schedules come in the order of their names: the fleet's, between
 	// the two that were repaired and a third.
 	fleets := slices.IndexFunc(schedules, func(s taskmill.ScheduleInfo) bool { return s.Name == "nightly" })
@@ -414,6 +433,7 @@ func upgradeWithRows(t *testing.T, from int, retention brokenRetention) {
 			t.Errorf("the %s from before the upgrade: %+v, %+v, %+v, %+v", what, workers, schedules, queues, groups)
 		}
 	}
+
 	// The tasks from before the upgrade are in the indexes of creation time:
 	// the dead one, and the completed one, whose partition got the index of
 	// the history, as the seven that Migrate prepared did.
@@ -427,6 +447,7 @@ func upgradeWithRows(t *testing.T, from int, retention brokenRetention) {
 	if got := e.count(t, indexed); got != 1+8 {
 		t.Errorf("%d valid indexes of creation time, want that of tasks, and one for each of the 8 partitions of the history", got)
 	}
+
 	// The workers that the tables refuse are gone: the list above holds the
 	// fleet's worker alone. The other rows are repaired.
 	repairs := map[string]string{
@@ -468,6 +489,7 @@ func (e *env) writeRefusedRows(t *testing.T, retention string) {
 	           ('null-kind', '{default}', '{NULL}', 'host', 'v', now(), now()),
 	           ('queues-in-two-dimensions', '{{a,b},{c,d}}', '{}', 'host', 'v', now(), now()),
 	           ('kinds-in-two-dimensions', '{}', '{{a,b},{c,NULL}}', 'host', 'v', now(), now())`)
+
 	// The lease's column came with migration 5.
 	if e.count(t, "SELECT max(version) FROM {s}.migrations") >= 5 {
 		e.exec(t, `INSERT INTO {s}.workers (id, queues, hostname, version, lease_duration) VALUES
@@ -477,10 +499,12 @@ func (e *env) writeRefusedRows(t *testing.T, retention string) {
 		           ('lease-with-negative-days', '{}', 'host', 'v', '2 mons -20 days'),
 		           ('lease-with-negative-time', '{}', 'host', 'v', '7 days -1 hour')`)
 	}
+
 	e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at, last_run_at, paused_at) VALUES
 	           ('never', 'default', 'email.send', '0 3 * * *', 'infinity', NULL, NULL),
 	           ('never-paused', 'default', 'email.send', '0 3 * * *', '-infinity', NULL, '2026-01-01'),
 	           ('ran-forever', 'default', 'email.send', '0 3 * * *', now() + interval '1 day', 'infinity', NULL)`)
+
 	// Where the database stores a period without end, the period that is
 	// too long has none.
 	if e.infinitePeriods(t) {
@@ -516,9 +540,11 @@ func TestSchedulesAreIndexedByNameOnly(t *testing.T) {
 			e := &env{pool: pool, schema: testdb.Schema(t, pool)}
 			applyUpTo(t, pool, e.schema, 4) // migration 5 drops the index
 			e.exec(t, tt.before)
+
 			if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema}); err != nil {
 				t.Fatalf("migrate: %v", err)
 			}
+
 			r, err := pool.Query(t.Context(),
 				"SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = 'schedules'", e.schema)
 			if err != nil {
@@ -543,6 +569,7 @@ func TestConcurrentMigratesAtRepeatableRead(t *testing.T) {
 	}
 	cfg.MaxConns = 8
 	cfg.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
+
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -562,6 +589,7 @@ func migrateAtOnce(t *testing.T, pool *pgxpool.Pool, schema string, processes in
 			errs[i] = taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema})
 		})
 	}
+
 	wg.Wait()
 	for i, err := range errs {
 		if err != nil {
@@ -576,6 +604,7 @@ func TestMigrationsForExternalTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if len(ms) < 2 || ms[0].Version != 0 || ms[1].Version != 1 {
 		t.Fatalf("got versions %v, want the bootstrap then version 1", versions(ms))
 	}
@@ -607,6 +636,7 @@ func TestMigrationsApplyWithoutMigrate(t *testing.T) {
 	id := e.enqueue(t, sendEmail{}, nil)
 	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
 	e.waitState(t, id, taskmill.StateCompleted)
+
 	for _, r := range logs.all() {
 		if r.Level >= slog.LevelError {
 			t.Errorf("logged %s %q", r.Level, r.Message)
@@ -619,6 +649,7 @@ func TestWorkerStartsWhenItsRoleMayNotCreatePartitions(t *testing.T) {
 	admin := testdb.Pool(t)
 	schema := testdb.Schema(t, admin)
 	applyWithoutMigrate(t, admin, schema, 0)
+
 	// The role may use the tables, but does not own them.
 	role := schema + "_worker"
 	pool := newRole(t, admin, role,
@@ -633,6 +664,7 @@ func TestWorkerStartsWhenItsRoleMayNotCreatePartitions(t *testing.T) {
 	waitFor(t, "the task to complete without history", func() bool {
 		return e.count(t, "SELECT count(*) FROM {s}.tasks") == 0
 	})
+
 	var warnings []string
 	for _, r := range logs.all() {
 		if r.Message == "prepare history partitions failed" {
@@ -658,6 +690,7 @@ func applyWithoutMigrate(t *testing.T, pool *pgxpool.Pool, schema string, pendin
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, m := range ms[:len(ms)-pending] {
 		sql := m.SQL
 		if m.Version > 0 {
@@ -690,16 +723,19 @@ func newRole(t *testing.T, admin *pgxpool.Pool, role string, setup ...string) *p
 	t.Cleanup(func() {
 		_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+role+"; DROP ROLE "+role)
 	})
+
 	for _, sql := range setup {
 		if _, err := admin.Exec(t.Context(), sql); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.User, cfg.ConnConfig.Password = role, "role"
+
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)

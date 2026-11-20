@@ -72,6 +72,7 @@ func main() {
 	if *url == "" {
 		fail(errors.New("set -db or TASKMILL_TEST_DATABASE_URL"))
 	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -79,6 +80,7 @@ func main() {
 		runChild(ctx, *url, *spec)
 		return
 	}
+
 	pool := connect(ctx, *url, 64)
 	defer pool.Close()
 
@@ -86,6 +88,7 @@ func main() {
 	if *short {
 		size = 10
 	}
+
 	for s := range strings.SplitSeq(*scenarios, ",") {
 		switch s {
 		case "enqueue":
@@ -124,6 +127,7 @@ func main() {
 			fail(fmt.Errorf("unknown scenario %q", s))
 		}
 	}
+
 	if violations > 0 {
 		fail(fmt.Errorf("%d checks failed", violations))
 	}
@@ -141,6 +145,7 @@ func connectTraced(ctx context.Context, url string, conns int32, tracer pgx.Quer
 	}
 	cfg.MaxConns = conns
 	cfg.ConnConfig.Tracer = tracer
+
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		fail(err)
@@ -162,6 +167,7 @@ func client(ctx context.Context, pool *pgxpool.Pool, migrate bool) *taskmill.Cli
 			fail(err)
 		}
 	}
+
 	c, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: schema})
 	if err != nil {
 		fail(err)
@@ -172,6 +178,7 @@ func client(ctx context.Context, pool *pgxpool.Pool, migrate bool) *taskmill.Cli
 // T1 and T2: enqueue throughput, one task per transaction and in batches.
 func benchEnqueue(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 	c := fresh(ctx, pool)
+
 	fmt.Println("## Enqueue")
 	fmt.Println()
 	fmt.Println("| ID | Workload | Result |")
@@ -228,6 +235,7 @@ func benchThroughput(ctx context.Context, pool *pgxpool.Pool, n int) {
 		completed.Add(1)
 		return nil
 	}), nil)
+
 	w, err := taskmill.NewWorker(c, &taskmill.WorkerConfig{
 		Handlers: &hs,
 		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {Concurrency: 64}},
@@ -246,10 +254,12 @@ func benchThroughput(ctx context.Context, pool *pgxpool.Pool, n int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	elapsed := time.Since(start)
+
 	cancel()
 	if err := <-done; err != nil {
 		fail(err)
 	}
+
 	// Wait for the last completions to be recorded.
 	for history(ctx, pool) < n && ctx.Err() == nil {
 		time.Sleep(10 * time.Millisecond)
@@ -274,6 +284,7 @@ func enqueueNoop(ctx context.Context, c *taskmill.Client, n int) {
 	for i := range batch {
 		batch[i] = taskmill.EnqueueParams{Args: noop{N: i}}
 	}
+
 	for done := 0; done < n; done += len(batch) {
 		if _, err := c.EnqueueMany(ctx, batch[:min(len(batch), n-done)]); err != nil {
 			fail(err)
@@ -296,6 +307,7 @@ func benchFIFO(ctx context.Context, pool *pgxpool.Pool, n int) {
 			fail(err)
 		}
 	}
+
 	var completed atomic.Int64
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[noop](func(context.Context, *taskmill.Task[noop]) error {
@@ -316,6 +328,7 @@ func benchFIFO(ctx context.Context, pool *pgxpool.Pool, n int) {
 			fail(err)
 		}
 	}
+
 	var published atomic.Int64
 	hs = taskmill.Handlers{}
 	ob.AddRelay(&hs, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
@@ -345,6 +358,7 @@ func runUntil(ctx context.Context, c *taskmill.Client, hs *taskmill.Handlers, qu
 	if err != nil {
 		fail(err)
 	}
+
 	stop := run(ctx, w)
 	start := time.Now()
 	for !done() && ctx.Err() == nil {
@@ -361,6 +375,7 @@ func run(ctx context.Context, w *taskmill.Worker) (stop func()) {
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
+
 	return func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -403,6 +418,7 @@ func benchChaos(ctx context.Context, pool *pgxpool.Pool, url string, n int) {
 	for i := range workers {
 		workers[i] = spawn(ctx, url, spec)
 	}
+
 	kills := 0
 	begin := time.Now()
 	for history(ctx, pool) < n && ctx.Err() == nil {
@@ -415,6 +431,7 @@ func benchChaos(ctx context.Context, pool *pgxpool.Pool, url string, n int) {
 			fail(errors.New("chaos run did not finish in 10 minutes"))
 		}
 	}
+
 	for _, w := range workers {
 		w.stop()
 	}
@@ -450,11 +467,13 @@ func reportOnce(ctx context.Context, pool *pgxpool.Pool, id string, n, bound int
 	if id != "" {
 		ids = [3]string{id, id, id}
 	}
+
 	completed := scalar(ctx, pool, "SELECT count(*) FROM {s}.task_history")
 	distinct := scalar(ctx, pool, "SELECT count(DISTINCT payload->>'n') FROM {s}.task_history")
 	executions := scalar(ctx, pool, "SELECT count(*) FROM {s}.executions")
 	leftover := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks")
 	extra := executions - int64(n)
+
 	fmt.Printf("| %s | Every task completed, none left behind | %d completed, %d left | %s |\n",
 		ids[0], completed, leftover, verdict(completed == int64(n) && leftover == 0))
 	fmt.Printf("| %s | Every task completed exactly once | %d distinct of %d | %s |\n",

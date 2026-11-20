@@ -49,6 +49,7 @@ func spawn(ctx context.Context, url string, cfg child) *proc {
 	if err != nil {
 		fail(err)
 	}
+
 	b, _ := json.Marshal(cfg)                                              //nolint:errchkjson // plain fields always encode
 	cmd := exec.CommandContext(ctx, self, "-db", url, "-child", string(b)) //nolint:gosec // re-runs this binary
 	cmd.Stderr = os.Stderr
@@ -56,6 +57,7 @@ func spawn(ctx context.Context, url string, cfg child) *proc {
 	if err != nil {
 		fail(err)
 	}
+
 	if err := cmd.Start(); err != nil {
 		fail(err)
 	}
@@ -102,6 +104,7 @@ func runChild(ctx context.Context, url, spec string) {
 	if err := json.Unmarshal([]byte(spec), &cfg); err != nil {
 		fail(err)
 	}
+
 	// The parent writes to stdin, which ends when the parent does, however
 	// it ends: the child stops then too, rather than go on taking tasks.
 	ctx, cancel := context.WithCancel(ctx)
@@ -126,6 +129,7 @@ func runChild(ctx context.Context, url, spec string) {
 		}
 		fail(err)
 	}
+
 	switch cfg.Role {
 	case "worker":
 		runWorker(ctx, c, pool, cfg, waves)
@@ -189,10 +193,12 @@ func runWorker(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, cfg 
 			return insert(ctx, "INSERT INTO {s}.holds (n, worker, attempt, phase) VALUES ($1, $2, $3, $4)",
 				t.Args.N, cfg.Name, t.Attempt, phase)
 		}
+
 		if err := record(ctx, "start"); err != nil {
 			return err
 		}
 		<-waves[t.Args.Wave]
+
 		// A worker cut off from the database returns all the same.
 		ctx, cancel := context.WithTimeout(ctx, time.Second)
 		defer cancel()
@@ -208,6 +214,7 @@ func runWorker(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, cfg 
 	for i := range cfg.Queues {
 		queues[queueName(i)] = taskmill.QueueOptions{Concurrency: cfg.Concurrency}
 	}
+
 	w, err := taskmill.NewWorker(c, &taskmill.WorkerConfig{
 		Handlers:      &hs,
 		Queues:        queues,
@@ -218,6 +225,7 @@ func runWorker(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, cfg 
 	if err != nil {
 		fail(err)
 	}
+
 	if err := w.Run(ctx); err != nil {
 		fail(err)
 	}
@@ -238,6 +246,7 @@ func runProducer(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, cf
 	var results [][]any
 	batch := make([]taskmill.EnqueueParams, 0, 100)
 	keys := make([]int, 0, cap(batch))
+
 	flush := func() {
 		res, err := c.EnqueueMany(ctx, batch)
 		if err != nil {
@@ -248,6 +257,7 @@ func runProducer(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, cf
 		}
 		batch, keys = batch[:0], keys[:0]
 	}
+
 	for k := cfg.Parity; k < cfg.Keys; k += 2 {
 		opts := &taskmill.EnqueueOptions{DedupeKey: strconv.Itoa(k)}
 		if k%5 == 0 {
@@ -262,6 +272,7 @@ func runProducer(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, cf
 	if len(batch) > 0 {
 		flush()
 	}
+
 	_, err := pool.CopyFrom(ctx, pgx.Identifier{schema, "results"}, []string{"key", "task_id", "duplicate"},
 		pgx.CopyFromRows(results))
 	if err != nil {

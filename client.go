@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill/internal/migrations"
@@ -108,6 +107,7 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 		notifier:          newNotifier(pool, schema, logger),
 		enqueueMiddleware: slices.Clone(cfg.EnqueueMiddleware),
 	}
+
 	if err := c.checkSchema(ctx); err != nil {
 		return nil, err
 	}
@@ -122,12 +122,13 @@ func (c *Client) checkSchema(ctx context.Context) error {
 	var version int
 	var isolation string
 	err := c.pool.QueryRow(ctx, c.sql.schemaVersion, unprepared).Scan(&version, &isolation)
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42P01" { // undefined_table
+	if pgCode(err) == codeUndefinedTable {
 		return fmt.Errorf("%w: schema %q is not migrated", ErrSchemaOutdated, c.schema)
 	}
 	if err != nil {
 		return fmt.Errorf("taskmill: read schema version: %w", err)
 	}
+
 	if want := migrations.Latest(); version < want {
 		return fmt.Errorf("%w: schema %q is at version %d, need %d", ErrSchemaOutdated, c.schema, version, want)
 	}
@@ -141,20 +142,22 @@ func (c *Client) checkSchema(ctx context.Context) error {
 // Get returns a task by ID, whether it is unfinished, finished, or in
 // history. It returns [ErrNotFound] if no such task exists.
 func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
+	fail := func(err error) error { return fmt.Errorf("taskmill: get task %d: %w", id, err) }
 	r, err := c.pool.Query(ctx, c.sql.getTask, id)
 	if err != nil {
-		return nil, fmt.Errorf("taskmill: get task %d: %w", id, err)
+		return nil, fail(err)
 	}
 	defer r.Close()
+
 	if !r.Next() {
 		if err := r.Err(); err != nil {
-			return nil, fmt.Errorf("taskmill: get task %d: %w", id, err)
+			return nil, fail(err)
 		}
 		return nil, fmt.Errorf("%w: task %d", ErrNotFound, id)
 	}
 	info, err := scanTaskInfo(r)
 	if err != nil {
-		return nil, fmt.Errorf("taskmill: get task %d: %w", id, err)
+		return nil, fail(err)
 	}
 	return info, nil
 }
@@ -173,7 +176,7 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 // transaction to end a deadlock (SQLSTATE 40P01). So it returns that error
 // only if the fifth try meets it too.
 func (c *Client) Cancel(ctx context.Context, id int64) error {
-	return c.inLockOrder(ctx, "cancel", id, func(q querier, check bool) error { return c.cancel(ctx, q, id, check) })
+	return c.inLockOrder(ctx, "cancel", id, func(q querier, verifyOrder bool) error { return c.cancel(ctx, q, id, verifyOrder) })
 }
 
 // CancelTx is [Client.Cancel] in the caller's transaction.
@@ -191,32 +194,34 @@ func (c *Client) CancelTx(ctx context.Context, tx Executor, id int64) error {
 	if err != nil {
 		return err
 	}
-	return c.cancel(ctx, q, id, false)
+
+	verifyOrder := false // the transaction is the caller's: it cannot start again
+	return c.cancel(ctx, q, id, verifyOrder)
 }
 
-// cancel cancels task id on q. check is for takeTask.
-func (c *Client) cancel(ctx context.Context, q querier, id int64, check bool) error {
+// cancel cancels task id on q. verifyOrder is for takeTask.
+func (c *Client) cancel(ctx context.Context, q querier, id int64, verifyOrder bool) error {
 	fail := func(err error) error { return fmt.Errorf("taskmill: cancel task %d: %w", id, err) }
-	var state, queue, group string
-	found, err := c.takeTask(ctx, q, id, c.sql.lockTask, check, &state, &queue, &group)
+	t, found, err := c.takeTask(ctx, q, id, c.sql.lockTask, verifyOrder)
 	if err != nil {
 		return fail(err)
 	}
 	if !found {
 		return c.stateError(ctx, q, id, "cancel")
 	}
-	s := State(state)
-	if s.Finished() {
-		return fmt.Errorf("%w: cannot cancel task %d in state %s", ErrInvalidState, id, s)
+	if t.state.Finished() {
+		return fmt.Errorf("%w: cannot cancel task %d in state %s", ErrInvalidState, id, t.state)
 	}
+
 	// A waiting task is canceled, and a running one is asked to stop.
 	if _, err := q.exec(ctx, c.sql.cancelTasks, []int64{id}, c.schema); err != nil {
 		return fail(err)
 	}
-	if s == StateRunning || group == "" {
+
+	if t.state == StateRunning || t.group == "" {
 		return nil
 	}
-	left := []groupLeave{{id: id, queue: queue, group: group, head: s != StatePending}}
+	left := []groupLeave{{id: id, queue: t.queue, group: t.group, head: t.state != StatePending}}
 	if err := c.leaveGroups(ctx, c.logger, q, left); err != nil {
 		return fail(err)
 	}
@@ -245,16 +250,16 @@ func (c *Client) Retry(ctx context.Context, id int64) error {
 
 func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	fail := func(err error) error { return fmt.Errorf("taskmill: retry task %d: %w", id, err) }
-	var state, queue, group string
-	found, err := queryRow(ctx, q, c.sql.lockTask, []any{id, false}, &state, &queue, &group)
+	pendingOnly := false // a retry takes a dead or canceled task
+	t, found, err := readLocked(ctx, q, c.sql.lockTask, id, pendingOnly)
 	if err != nil {
 		return fail(err)
 	}
 	if !found {
 		return c.stateError(ctx, q, id, "retry")
 	}
-	if s := State(state); !s.CanRetry() {
-		return fmt.Errorf("%w: cannot retry task %d in state %s", ErrInvalidState, id, s)
+	if !t.state.CanRetry() {
+		return fmt.Errorf("%w: cannot retry task %d in state %s", ErrInvalidState, id, t.state)
 	}
 
 	// The key comes before the group, as in an enqueue.
@@ -271,21 +276,28 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 	}
 
 	pending := false
-	if group != "" {
-		if pending, err = c.rejoinGroup(ctx, q, queue, group, id); err != nil {
+	if t.group != "" {
+		if pending, err = c.rejoinGroup(ctx, q, t.queue, t.group, id); err != nil {
 			return fail(err)
 		}
 	}
+
 	// The statement of a bulk retry, with one task: it also notifies the
 	// queue of a task that is available again.
-	waiting := []int64{} // the tasks that become pending: this one, or none
+	pendingIDs := []int64{} // the tasks that become pending: this one, or none
 	var notify []string
 	if pending {
-		waiting = append(waiting, id)
+		pendingIDs = append(pendingIDs, id)
 	} else {
-		notify = c.notifiable(ctx, []string{queue})
+		notify = c.notifiable(ctx, []string{t.queue})
 	}
-	if _, err := q.exec(ctx, c.sql.retryTasks, []int64{id}, waiting, c.schema, notify); err != nil {
+	_, err = q.exec(ctx, c.sql.retryTasks,
+		[]int64{id}, // $1
+		pendingIDs,  // $2
+		c.schema,    // $3
+		notify,      // $4
+	)
+	if err != nil {
 		return fail(err)
 	}
 	return nil
@@ -328,6 +340,7 @@ func (c *Client) takeKeys(ctx context.Context, q querier, ids []int64) (refused 
 		return nil, err
 	}
 	defer r.Close()
+
 	refused = make(map[int64]bool)
 	for r.Next() {
 		var id int64
@@ -346,14 +359,13 @@ func (c *Client) takeKeys(ctx context.Context, q querier, ids []int64) (refused 
 // [Client.Cancel], it runs again by itself, up to 5 times in all, when it
 // loses to another transaction.
 func (c *Client) Delete(ctx context.Context, id int64) error {
-	return c.inLockOrder(ctx, "delete", id, func(q querier, check bool) error { return c.delete(ctx, q, id, check) })
+	return c.inLockOrder(ctx, "delete", id, func(q querier, verifyOrder bool) error { return c.delete(ctx, q, id, verifyOrder) })
 }
 
-// delete deletes task id on q. check is for takeTask.
-func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) error {
+// delete deletes task id on q. verifyOrder is for takeTask.
+func (c *Client) delete(ctx context.Context, q querier, id int64, verifyOrder bool) error {
 	fail := func(err error) error { return fmt.Errorf("taskmill: delete task %d: %w", id, err) }
-	var state, queue, group string
-	found, err := c.takeTask(ctx, q, id, c.sql.deleteTask, check, &state, &queue, &group)
+	t, found, err := c.takeTask(ctx, q, id, c.sql.deleteTask, verifyOrder)
 	if err != nil {
 		return fail(err)
 	}
@@ -366,27 +378,30 @@ func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) er
 			return c.stateError(ctx, q, id, "delete")
 		}
 	}
+
 	if _, err := q.exec(ctx, c.sql.releaseKeys, []int64{id}); err != nil {
 		return fail(err)
 	}
-	if !found || group == "" {
+
+	if !found || t.group == "" {
 		return nil
 	}
+
 	// Unfinished tasks are counted in their group, and so is a dead head that
 	// halts it: its halt ends here.
-	s := State(state)
-	counted := !s.Finished()
+	counted := !t.state.Finished()
 	if !counted {
-		resumed, err := q.exec(ctx, c.sql.resumeHaltedHead, queue, group, id)
+		resumed, err := q.exec(ctx, c.sql.resumeHaltedHead, t.queue, t.group, id)
 		if err != nil {
 			return fail(err)
 		}
 		counted = resumed == 1
 	}
+
 	if !counted {
 		return nil
 	}
-	left := []groupLeave{{id: id, queue: queue, group: group, head: s != StatePending}}
+	left := []groupLeave{{id: id, queue: t.queue, group: t.group, head: t.state != StatePending}}
 	if err := c.leaveGroups(ctx, c.logger, q, left); err != nil {
 		return fail(err)
 	}
@@ -397,11 +412,11 @@ func (c *Client) delete(ctx context.Context, q querier, id int64, check bool) er
 // the task changed between pending and another state while it took them.
 var errLockOrder = errors.New("taskmill: the task changed while its rows were locked")
 
-// lockOrderTries is how many times inLockOrder runs its transaction, and an
+// deadlockTries is how many times inLockOrder runs its transaction, and an
 // enqueue on the client's pool its statement. Each new try takes another
 // transaction that changes the same task or its group while the try before
 // runs.
-const lockOrderTries = 5
+const deadlockTries = 5
 
 // inLockOrder runs fn in a transaction on the client's pool, as Cancel,
 // Delete, and Retry need it. It runs fn again, in a new transaction, when
@@ -413,15 +428,15 @@ const lockOrderTries = 5
 //     the transactions that wait for each other, also one that kept the
 //     order, when another, such as a CancelTx, could not.
 //
-// The last try runs without takeTask's check, as CancelTx does, and returns
-// what it gets.
+// The last try runs without verifyOrder, as CancelTx does, and returns what
+// it gets.
 //
 // fn's errors say what it was doing. The begin and the commit of the
 // transaction fail outside fn, so inLockOrder wraps their errors in the same
 // words: op, such as "cancel", and the task's id.
-func (c *Client) inLockOrder(ctx context.Context, op string, id int64, fn func(q querier, check bool) error) error {
+func (c *Client) inLockOrder(ctx context.Context, op string, id int64, fn func(q querier, verifyOrder bool) error) error {
 	for try := 1; ; try++ {
-		last := try == lockOrderTries
+		last := try == deadlockTries
 		var inFn error
 		err := c.inTx(ctx, func(q querier) error {
 			inFn = fn(q, !last)
@@ -439,42 +454,59 @@ func (c *Client) inLockOrder(ctx context.Context, op string, id int64, fn func(q
 // isDeadlock reports whether err is PostgreSQL's error for the transaction
 // that it ended to end a deadlock.
 func isDeadlock(err error) bool {
-	pgErr, ok := errors.AsType[*pgconn.PgError](err)
-	return ok && pgErr.Code == "40P01" // deadlock_detected
+	return pgCode(err) == codeDeadlockDetected
 }
 
 // takeTask runs take, which is lockTask or deleteTask, on task id for Cancel
-// and Delete, and scans the task's state, queue, and FIFO group. It reports
-// whether take found the task.
+// and Delete, and returns what it read of the task. It reports whether take
+// found the task.
 //
 // The lock order of FIFO groups is: a pending task's row is locked only
 // after its group's row, and with a group's row in hand, no row of a task
 // that is not pending is waited for. takeTask reads whether the task is
 // pending before it holds a lock, and a Retry, a promotion, or the commit of
-// the task's enqueue may change that before it holds one. With check, it
-// finds out once it holds a lock:
+// the task's enqueue may change that before it holds one. With verifyOrder,
+// it finds out once it holds a lock:
 //
 //   - With the group's row, which every change into and out of pending
 //     takes, it takes the task only if the task is still pending.
 //   - With the task's row alone, it reads the state that the lock protects.
 //
-// If the task changed sides meanwhile, it returns errLockOrder: the caller
-// must roll back, which releases the locks, and start again. Only a caller
-// that owns its transaction can do that. Without check, as for CancelTx in
-// the caller's transaction, takeTask continues with the locks as they are.
-func (c *Client) takeTask(ctx context.Context, q querier, id int64, take string, check bool, state, queue, group *string) (bool, error) {
-	groupHeld, err := queryRow(ctx, q, c.sql.lockPendingGroup, []any{id}, new(bool))
+// verifyOrder: return errLockOrder if the task changed between pending and
+// another state while it was being locked; the caller must then roll back,
+// which releases the locks, and start again. Only a caller that owns its
+// transaction can do that, so verifyOrder is false on the last try and in
+// CancelTx, where takeTask continues with the locks as they are.
+func (c *Client) takeTask(ctx context.Context, q querier, id int64, take string, verifyOrder bool) (t lockedTask, found bool, err error) {
+	groupLocked, err := queryRow(ctx, q, c.sql.lockPendingGroup, []any{id}, new(bool))
 	if err != nil {
-		return false, err
+		return t, false, err
 	}
-	found, err := queryRow(ctx, q, take, []any{id, groupHeld && check}, state, queue, group)
-	if err != nil {
-		return false, err
+
+	if t, found, err = readLocked(ctx, q, take, id, groupLocked && verifyOrder); err != nil {
+		return t, false, err
 	}
-	if pending := found && State(*state) == StatePending; check && pending != groupHeld {
-		return false, errLockOrder
+	if pending := found && t.state == StatePending; verifyOrder && pending != groupLocked {
+		return t, false, errLockOrder
 	}
-	return found, nil
+	return t, found, nil
+}
+
+// lockedTask is what a statement that locks a task, or deletes it, read of
+// the task.
+type lockedTask struct {
+	state        State
+	queue, group string // group is empty for a task without a FIFO group
+}
+
+// readLocked runs take, lockTask or deleteTask, on task id, and returns what
+// it read of the task. pendingOnly is their $2. It reports whether take found
+// the task.
+func readLocked(ctx context.Context, q querier, take string, id int64, pendingOnly bool) (t lockedTask, found bool, err error) {
+	var state string
+	found, err = queryRow(ctx, q, take, []any{id, pendingOnly}, &state, &t.queue, &t.group)
+	t.state = State(state)
+	return t, found, err
 }
 
 // stateError explains why an operation found no task to act on.
@@ -490,54 +522,9 @@ func (c *Client) stateError(ctx context.Context, q querier, id int64, op string)
 	return fmt.Errorf("%w: cannot %s task %d in state %s", ErrInvalidState, op, id, state)
 }
 
-// notifiable returns, once each, the queues that the throttle allows to
-// notify now of available tasks.
-func (c *Client) notifiable(ctx context.Context, queues []string) []string {
-	var notify []string
-	for _, queue := range queues {
-		if !slices.Contains(notify, queue) && c.notifier.allow(ctx, queue) {
-			notify = append(notify, queue)
-		}
-	}
-	return notify
-}
-
-// notifyAvailable announces new available tasks in queue, inside q's
-// transaction, when the throttle allows it. In a transaction, a failed
-// notification aborts the transaction, so it is returned; outside one, it
-// is only logged, to logger.
-func (c *Client) notifyAvailable(ctx context.Context, logger *slog.Logger, q querier, queue string) error {
-	if !c.notifier.allow(ctx, queue) {
-		return nil
-	}
-	_, err := q.exec(ctx, notifySQL, c.schema, notifyAvailable+"|"+queue)
-	if err != nil && !q.inTx() {
-		logger.LogAttrs(ctx, slog.LevelWarn, "notification failed",
-			slog.String(logKeyQueue, queue), slog.Any(logKeyError, err))
-		return nil
-	}
-	return err
-}
-
 // inTx runs fn in a transaction on the client's pool.
 func (c *Client) inTx(ctx context.Context, fn func(q querier) error) error {
 	return pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		return fn(pgxQuerier{q: tx})
+		return fn(pgxExecutor{q: tx})
 	})
-}
-
-// txQuerier returns the querier of an Executor that must be a transaction,
-// because the operation runs several statements that must commit together.
-func txQuerier(tx Executor) (querier, error) {
-	if tx == nil {
-		return nil, invalidArgument("executor is nil")
-	}
-	q := tx.querier()
-	if q == nil {
-		return nil, invalidArgument("executor has no querier; create it with Pgx or SQL")
-	}
-	if !q.inTx() {
-		return nil, invalidArgument("executor must wrap a transaction (pgx.Tx or *sql.Tx)")
-	}
-	return q, nil
 }

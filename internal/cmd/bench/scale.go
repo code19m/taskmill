@@ -21,6 +21,7 @@ import (
 // T3 end to end, and E1 in steady state.
 func benchEndToEnd(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 	tasks, perTask := endToEnd(ctx, fresh(ctx, pool), d)
+
 	fmt.Println("## End to end")
 	fmt.Println()
 	fmt.Println("| ID | Workload | Result |")
@@ -40,11 +41,13 @@ const e2eWorkers, e2eConcurrency, e2eProducers = 2, 64, 8
 func endToEnd(ctx context.Context, c *taskmill.Client, d time.Duration) (tasks, perTask float64) {
 	const backlog = 20_000
 	var completed, enqueued atomic.Int64
+
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[noop](func(context.Context, *taskmill.Task[noop]) error {
 		completed.Add(1)
 		return nil
 	}), nil)
+
 	var stops []func()
 	for range e2eWorkers {
 		w, err := taskmill.NewWorker(c, &taskmill.WorkerConfig{
@@ -56,10 +59,12 @@ func endToEnd(ctx context.Context, c *taskmill.Client, d time.Duration) (tasks, 
 		}
 		stops = append(stops, run(ctx, w))
 	}
+
 	batch := make([]taskmill.EnqueueParams, 100)
 	for i := range batch {
 		batch[i] = taskmill.EnqueueParams{Args: noop{N: i}}
 	}
+
 	pctx, stopProducers := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	for range e2eProducers {
@@ -76,10 +81,12 @@ func endToEnd(ctx context.Context, c *taskmill.Client, d time.Duration) (tasks, 
 			}
 		})
 	}
+
 	time.Sleep(30 * time.Second)
 	done, stmts, start := completed.Load(), statements.n.Load(), time.Now()
 	time.Sleep(d)
 	done, stmts, elapsed := completed.Load()-done, statements.n.Load()-stmts, time.Since(start)
+
 	stopProducers()
 	wg.Wait()
 	for _, stop := range stops {
@@ -92,6 +99,7 @@ func endToEnd(ctx context.Context, c *taskmill.Client, d time.Duration) (tasks, 
 // tasks, and FIFO groups, in another queue.
 func benchScale(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 	const scheduled, available, groups, groupSize = 10_000_000, 1_000_000, 100_000, 10
+
 	base, _ := endToEnd(ctx, fresh(ctx, pool), d)
 	if base == 0 {
 		fail(errors.New("T3 completed no task"))
@@ -150,6 +158,7 @@ func bulk(ctx context.Context, c *taskmill.Client, n int, task func(i int) taskm
 				for i := from; i < min(from+1000, end); i++ {
 					batch = append(batch, task(i))
 				}
+
 				if _, err := c.EnqueueMany(ctx, batch); err != nil {
 					fail(err)
 				}
@@ -167,6 +176,7 @@ func bulk(ctx context.Context, c *taskmill.Client, n int, task func(i int) taskm
 func benchQueues(ctx context.Context, pool *pgxpool.Pool, url string, d time.Duration) {
 	const queues, procs, perSecond = 100, 50, 1000
 	d = max(d, time.Minute)
+
 	c := fresh(ctx, pool)
 	steps := &stepTracer{}
 	mpool := connectTraced(ctx, url, 8, steps)
@@ -178,6 +188,7 @@ func benchQueues(ctx context.Context, pool *pgxpool.Pool, url string, d time.Dur
 	for i := range workers {
 		workers[i] = spawn(ctx, url, spec)
 	}
+
 	time.Sleep(idleStart)
 	idle := max(d, 3*time.Minute)
 	idleAvg, idlePeak := transactionRate(ctx, pool, idle)
@@ -192,11 +203,13 @@ func benchQueues(ctx context.Context, pool *pgxpool.Pool, url string, d time.Dur
 				}
 				batch[i] = taskmill.EnqueueParams{Args: noop{}, Options: opts}
 			}
+
 			if _, err := c.EnqueueMany(ctx, batch); err != nil {
 				fail(err)
 			}
 		})
 	})
+
 	kills := 0
 	for end := time.Now().Add(d); time.Now().Before(end); kills++ {
 		time.Sleep(10 * time.Second)
@@ -204,6 +217,7 @@ func benchQueues(ctx context.Context, pool *pgxpool.Pool, url string, d time.Dur
 		workers[i].kill()
 		workers[i] = spawn(ctx, url, spec)
 	}
+
 	<-produced
 	stopMaintainer()
 	for _, w := range workers {
@@ -242,6 +256,7 @@ func transactionRate(ctx context.Context, pool *pgxpool.Pool, d time.Duration) (
 		}
 		return n
 	}
+
 	start := time.Now()
 	first := xacts()
 	last := first
@@ -317,11 +332,14 @@ func stepOf(sql string) string {
 func (t *stepTracer) add(sql string, d time.Duration) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	if t.steps == nil {
 		t.steps, t.loops, t.partly = map[string]*stepTime{}, map[string]*stepTime{}, map[string]time.Duration{}
 	}
+
 	step := stepOf(sql)
 	record(t.steps, step, d)
+
 	for _, l := range maintainerLoops {
 		if !slices.Contains(l.steps, step) {
 			continue
@@ -340,6 +358,7 @@ func record(times map[string]*stepTime, name string, d time.Duration) {
 		s = &stepTime{}
 		times[name] = s
 	}
+
 	s.n++
 	s.longest = max(s.longest, d)
 }
@@ -347,6 +366,7 @@ func record(times map[string]*stepTime, name string, d time.Duration) {
 func (t *stepTracer) count(step string) int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	if s := t.steps[step]; s != nil {
 		return s.n
 	}
@@ -357,6 +377,7 @@ func (t *stepTracer) count(step string) int {
 func (t *stepTracer) slowest() time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	var d time.Duration
 	for _, s := range t.loops {
 		d = max(d, s.longest)
@@ -369,15 +390,18 @@ func (t *stepTracer) slowest() time.Duration {
 func (t *stepTracer) summary(loops bool) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
 	times, unit := t.steps, "statements"
 	if loops {
 		times, unit = t.loops, "iterations"
 	}
+
 	names := make([]string, 0, len(times))
 	for name := range times {
 		names = append(names, name)
 	}
 	slices.Sort(names)
+
 	parts := make([]string, len(names))
 	for i, name := range names {
 		s := times[name]

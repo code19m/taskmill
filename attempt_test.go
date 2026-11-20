@@ -1,0 +1,858 @@
+package taskmill_test
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/code19m/taskmill"
+)
+
+func TestWorkerRetriesUntilSuccess(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var calls atomic.Int32
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			if calls.Add(1) < 3 {
+				return errors.New("smtp timeout")
+			}
+			return nil
+		}, &taskmill.HandlerOptions{Retry: fastRetry}),
+		Queues: defaultQueue(1),
+	})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	info := e.waitState(t, id, taskmill.StateCompleted)
+	if info.Attempt != 3 || len(info.Errors) != 2 || info.Errors[1].Message != "smtp timeout" || info.Errors[1].Attempt != 2 {
+		t.Fatalf("got attempt %d, errors %+v", info.Attempt, info.Errors)
+	}
+}
+
+func TestWorkerMakesTaskDeadAfterLastAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			return errors.New("always fails")
+		}, &taskmill.HandlerOptions{Retry: fastRetry}),
+		Queues: defaultQueue(1),
+	})
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 2})
+	info := e.waitState(t, id, taskmill.StateDead)
+	if info.Attempt != 2 || len(info.Errors) != 2 {
+		t.Fatalf("got attempt %d, %d errors", info.Attempt, len(info.Errors))
+	}
+}
+
+func TestWorkerFailureKinds(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			switch task.Args.To {
+			case "permanent":
+				return taskmill.Permanent(errors.New("bad address"))
+			case "panic":
+				panic("boom")
+			case "panic with a value that panics":
+				panic(&stubbornError{})
+			case "timeout":
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			return nil
+		}, &taskmill.HandlerOptions{Timeout: 100 * time.Millisecond, Retry: fastRetry}),
+		Queues: defaultQueue(4),
+	})
+
+	tests := []struct {
+		to       string
+		attempts int
+		code     taskmill.ErrorCode
+		message  string // part of the first error's message
+	}{
+		{"permanent", 1, "", "bad address"},
+		{"panic", 2, taskmill.CodePanic, "panic: boom"},
+		{"panic with a value that panics", 2, taskmill.CodePanic, "stubbornError"},
+		{"timeout", 2, taskmill.CodeTimeout, "context deadline exceeded"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.to, func(t *testing.T) {
+			t.Parallel()
+			id := e.enqueue(t, sendEmail{To: tt.to}, &taskmill.EnqueueOptions{MaxAttempts: 2})
+			info := e.waitState(t, id, taskmill.StateDead)
+			if info.Attempt != tt.attempts || len(info.Errors) != tt.attempts || info.Errors[0].Code != tt.code ||
+				!strings.Contains(info.Errors[0].Message, tt.message) {
+				t.Errorf("got attempt %d, errors %+v", info.Attempt, info.Errors)
+			}
+		})
+	}
+}
+
+// stubbornError is an error whose Error method panics with the error itself,
+// so that the panic's value panics again when it is formatted.
+type stubbornError struct{}
+
+func (e *stubbornError) Error() string { panic(e) }
+
+// apiError is an error type as applications write them. A function that
+// returns a nil *apiError as an error returns an error that is not nil, and
+// whose Error method panics: a well-known Go mistake.
+type apiError struct{ status int }
+
+func (e *apiError) Error() string { return "status " + strconv.Itoa(e.status) }
+
+// callAPI makes that mistake, except for the address "up".
+func callAPI(to string) error {
+	var failed *apiError
+	if to == "up" {
+		return nil
+	}
+	return failed
+}
+
+// apiBatch is a batch handler that calls the API for each task.
+type apiBatch struct{}
+
+func (apiBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+	errs := make([]error, len(tasks))
+	for i, task := range tasks {
+		errs[i] = callAPI(task.Args.To)
+	}
+	return errs
+}
+
+// tableBackoff is a retry policy with a table of delays. It panics for an
+// attempt beyond its table.
+type tableBackoff []time.Duration
+
+func (b tableBackoff) Backoff(attempt int) time.Duration { return b[attempt-1] }
+
+// taskmill runs code of the application after a handler returned: the
+// methods of the handler's error, and the retry policy. A panic there fails
+// the attempt as a handler's panic does, and the worker goes on.
+func TestPanicAfterTheHandlerReturnedFailsTheAttempt(t *testing.T) {
+	t.Parallel()
+	var batch taskmill.Handlers
+	taskmill.AddBatchHandler[sendEmail](&batch, apiBatch{}, &taskmill.HandlerOptions{Retry: fastRetry})
+
+	tests := map[string]struct {
+		handlers *taskmill.Handlers
+		where    string // the function that panics, as the recorded stack names it
+	}{
+		"the error's method": {
+			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+				return callAPI(task.Args.To)
+			}, &taskmill.HandlerOptions{Retry: fastRetry}),
+			"(*apiError).Error",
+		},
+		"the error's method, from a batch": {&batch, "(*apiError).Error"},
+		"the error's method, with a value that panics again": {
+			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+				if task.Args.To == "up" {
+					return nil
+				}
+				return &stubbornError{}
+			}, &taskmill.HandlerOptions{Retry: fastRetry}),
+			"(*stubbornError).Error",
+		},
+		"the retry policy": {
+			handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+				if task.Args.To == "up" {
+					return nil
+				}
+				return errors.New("the partner is down")
+			}, &taskmill.HandlerOptions{Retry: tableBackoff{}}),
+			"tableBackoff.Backoff",
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			runWorker(t, e, &taskmill.WorkerConfig{Handlers: tt.handlers, Queues: defaultQueue(1)})
+
+			// The first attempt is recorded as a panic, and the task is retried
+			// after the default backoff of about a second.
+			id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 2})
+			info := e.waitState(t, id, taskmill.StateDead)
+			first := info.Errors[0]
+			if info.Attempt != 2 || first.Attempt != 1 || first.Code != taskmill.CodePanic || !strings.Contains(first.Message, tt.where) {
+				t.Fatalf("got attempt %d with errors %+v, want a first error with the code panic that names %s",
+					info.Attempt, info.Errors, tt.where)
+			}
+
+			e.waitState(t, e.enqueue(t, sendEmail{To: "up"}, nil), taskmill.StateCompleted)
+		})
+	}
+}
+
+func TestWorkerRejectsUndecodablePayload(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil),
+		Queues:   defaultQueue(1),
+	})
+
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           VALUES ('default', 'email.send', 'available', now(), '{"user_id": "not a number"}', 5)`)
+	id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
+
+	info := e.waitState(t, id, taskmill.StateDead)
+	if info.Attempt != 1 || info.Errors[0].Code != taskmill.CodeInvalidPayload {
+		t.Fatalf("got attempt %d, errors %+v", info.Attempt, info.Errors)
+	}
+}
+
+func TestWorkerSnoozeKeepsTheAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var calls atomic.Int32
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			if calls.Add(1) == 1 {
+				return taskmill.Snooze(0)
+			}
+			return nil
+		}, nil),
+		Queues: defaultQueue(1),
+	})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 {
+		t.Fatalf("snoozed task used %d attempts, want 1", info.Attempt)
+	}
+}
+
+func TestWorkerSnoozesForADay(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+
+	// A day is more microseconds than a 32-bit integer holds.
+	const delay = 24 * time.Hour
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return taskmill.Snooze(delay) }, nil),
+		Queues:   defaultQueue(1),
+	})
+
+	asked := time.Now()
+	id := e.enqueue(t, sendEmail{}, nil)
+	info := e.waitState(t, id, taskmill.StateScheduled)
+	if wait := info.RunAt.Sub(asked); info.Attempt != 0 || (wait-delay).Abs() > 10*time.Minute {
+		t.Fatalf("the task waits %s after %d attempts, want about %s after none", wait, info.Attempt, delay)
+	}
+}
+
+func TestWorkerSnoozesUnknownKinds(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+	const timeout = 500 * time.Millisecond
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+	taskmill.SetTiming(w, taskmill.Timing{NoHandlerWait: timeout})
+	startWorker(t, w)
+
+	// A task created long ago, for example in a long FIFO group, still waits
+	// the whole timeout from the first time a worker meets it.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, created_at)
+	           VALUES ('default', 'old.kind', 'available', now(), '{}', 5, now() - interval '2 hours')`)
+	id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
+
+	info := e.waitState(t, id, taskmill.StateDead)
+	if len(info.Errors) != 2 || info.Errors[0].Code != taskmill.CodeNoHandler || info.Errors[1].Code != taskmill.CodeUnknownKind {
+		t.Fatalf("got errors %+v, want a note when snoozed and an error when dead", info.Errors)
+	}
+	if info.Errors[0].Attempt != 0 || info.Attempt != 1 {
+		t.Fatalf("the note counts attempt %d and the task %d; snoozes use no attempt", info.Errors[0].Attempt, info.Attempt)
+	}
+	if waited := info.Errors[1].At.Sub(info.Errors[0].At); waited < timeout {
+		t.Fatalf("gave up after %s, want at least %s", waited, timeout)
+	}
+}
+
+// The wait for a handler ends when a worker that has one takes the task,
+// however its attempt ends, and when an operator retries the task. A worker
+// without a handler that meets the task later, after a rollback for example,
+// starts a new wait: the note of the old wait must not make the task dead at
+// once.
+func TestWaitForAHandlerStartsAgain(t *testing.T) {
+	t.Parallel()
+	// Each case is what happens to the task after it began to wait.
+	tests := map[string]func(t *testing.T, e *env, id int64){
+		"a handler's attempt failed":      handledBy(errors.New("the partner is down"), taskmill.StateRetryable),
+		"a handler snoozed the task":      handledBy(taskmill.Snooze(time.Hour), taskmill.StateScheduled),
+		"a handler's worker gave it back": handledBy(nil, taskmill.StateAvailable),
+		"an operator canceled and retried it": func(t *testing.T, e *env, id int64) {
+			t.Helper()
+			if err := errors.Join(e.client.Cancel(t.Context(), id), e.client.Retry(t.Context(), id)); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"an operator canceled it and retried its kind": func(t *testing.T, e *env, id int64) {
+			t.Helper()
+			if err := e.client.Cancel(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+			res, err := e.client.RetryMatching(t.Context(), bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}}))
+			if err != nil || res.Changed != 1 {
+				t.Fatalf("retried %d tasks: %v", res.Changed, err)
+			}
+		},
+	}
+
+	for name, since := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+
+			var other taskmill.Handlers
+			taskmill.AddHandler(&other, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+			without := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &other})
+			id := e.enqueue(t, sendEmail{}, nil)
+
+			// A rolling deploy: a worker of the old release meets the task, which
+			// begins to wait for a handler. That was two hours ago.
+			info, err := without.RunTask(t.Context(), id)
+			if err != nil || info.State != taskmill.StateScheduled || info.Errors[0].Code != taskmill.CodeNoHandler {
+				t.Fatalf("got %+v, %v, want a snooze with a note", info, err)
+			}
+			e.exec(t, `UPDATE {s}.tasks SET errors = jsonb_set(errors, '{0,at}', to_jsonb(now() - interval '2 hours'))
+			           WHERE id = $1`, id)
+
+			since(t, e, id)
+
+			// A rollback: a worker without the handler meets the task again.
+			if info, err = without.RunTask(t.Context(), id); err != nil {
+				t.Fatal(err)
+			}
+			last := info.Errors[len(info.Errors)-1]
+			if info.State != taskmill.StateScheduled || last.Code != taskmill.CodeNoHandler || time.Since(last.At) > time.Hour {
+				t.Fatalf("the task is %s with errors %+v, want it to wait for a handler again, with a new note", info.State, info.Errors)
+			}
+		})
+	}
+}
+
+// handledBy returns a step of TestWaitForAHandlerStartsAgain: a worker with a
+// handler runs the task, which leaves it in the state want. The handler
+// returns result, or, if result is nil, runs until RunTask's context ends.
+func handledBy(result error, want taskmill.State) func(t *testing.T, e *env, id int64) {
+	return func(t *testing.T, e *env, id int64) {
+		t.Helper()
+		runCtx, stopRun := context.WithCancel(t.Context())
+		defer stopRun()
+
+		with := newWorker(t, e, &taskmill.WorkerConfig{
+			Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+				if result != nil {
+					return result
+				}
+				stopRun()
+				<-ctx.Done()
+				return ctx.Err()
+			}, nil),
+		})
+
+		if info, err := with.RunTask(runCtx, id); err != nil || info.State != want {
+			t.Fatalf("the worker with the handler left the task as %+v, %v, want %s", info, err, want)
+		}
+	}
+}
+
+// The task's row decides whether an attempt ends in a cancellation, whatever
+// the worker believed while the handler ran.
+func TestAttemptEndsCanceledOnlyIfTheTaskSaysSo(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+
+	var calls atomic.Int32
+	started := make(chan struct{}, 1)
+	ended := make(chan struct{})
+	proceed := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			if calls.Add(1) > 1 {
+				return nil
+			}
+			started <- struct{}{}
+			<-ctx.Done()
+			close(ended)
+			<-proceed
+			return context.Cause(ctx)
+		}, &taskmill.HandlerOptions{Timeout: time.Minute}),
+		Queues: defaultQueue(1),
+	})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the handler to start")
+	e.waitListening(t)
+
+	if err := e.client.Cancel(t.Context(), id); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, ended, "the handler's context to end")
+
+	// The request leaves the row before the attempt ends, here by hand.
+	e.exec(t, "UPDATE {s}.tasks SET cancel_requested_at = NULL WHERE id = $1", id)
+	close(proceed)
+	e.waitState(t, id, taskmill.StateCompleted)
+}
+
+func TestHandlerContextSaysWhyItEnded(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+
+	started := make(chan struct{}, 2)
+	cause := make(chan error, 1)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			cause <- context.Cause(ctx)
+			return ctx.Err()
+		}, &taskmill.HandlerOptions{Timeout: 200 * time.Millisecond}),
+		NoMaintainer: true,
+	})
+
+	// The attempt runs out of time.
+	if _, err := w.RunTask(t.Context(), e.enqueue(t, sendEmail{}, nil)); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, started, "the handler to start")
+	if err := recv(t, cause, "the timeout"); !errors.Is(err, taskmill.ErrAttemptTimeout) {
+		t.Fatalf("got cause %v, want ErrAttemptTimeout", err)
+	}
+
+	// RunTask's context ends while the handler runs, as a worker's does when
+	// it shuts down.
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	id := e.enqueue(t, sendEmail{}, nil)
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.RunTask(ctx, id)
+		done <- err
+	}()
+
+	recv(t, started, "the handler to start")
+	cancel()
+	if err := recv(t, cause, "the shutdown"); !errors.Is(err, taskmill.ErrShutdown) {
+		t.Fatalf("got cause %v, want ErrShutdown", err)
+	}
+	if err := recv(t, done, "RunTask to return"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFIFOGroupHaltsOnDeadHead(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var fixed atomic.Bool
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			if task.Args.To == "first" && !fixed.Load() {
+				return taskmill.Permanent(errors.New("bad"))
+			}
+			return nil
+		}, nil),
+		Queues: defaultQueue(4),
+	})
+
+	group := &taskmill.EnqueueOptions{GroupKey: "ledger-1"}
+	first := e.enqueue(t, sendEmail{To: "first"}, group)
+	second := e.enqueue(t, sendEmail{To: "second"}, group)
+
+	e.waitState(t, first, taskmill.StateDead)
+	// The halt commits with the dead state, so the next task stays pending.
+	if n := e.count(t, "SELECT count(*) FROM {s}.groups WHERE halted_task_id = $1", first); n != 1 {
+		t.Fatal("the dead head did not halt its group")
+	}
+	e.wantState(t, second, taskmill.StatePending)
+
+	fixed.Store(true)
+	if err := e.client.Retry(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	e.waitState(t, first, taskmill.StateCompleted)
+	e.waitState(t, second, taskmill.StateCompleted)
+}
+
+// A head that is canceled while it runs leaves its group when its worker
+// records the end of the attempt, and the next task takes over.
+func TestRecordedCancelOfAHeadPromotesTheNextTask(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	group := &taskmill.EnqueueOptions{GroupKey: "g"}
+	head := e.enqueue(t, sendEmail{}, group)
+	next := e.enqueue(t, sendEmail{}, group)
+
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			if err := e.client.Cancel(ctx, task.ID); err != nil {
+				return err
+			}
+			return errors.New("stopped")
+		}, nil),
+	})
+
+	if info, err := w.RunTask(t.Context(), head); err != nil || info.State != taskmill.StateCanceled {
+		t.Fatalf("the head: %v, %+v, want it canceled", err, info)
+	}
+	e.wantState(t, next, taskmill.StateAvailable)
+}
+
+func TestMiddlewareWrapsAttemptsInOrder(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var mu sync.Mutex
+	var log []string
+
+	mw := func(name string) taskmill.Middleware {
+		return func(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
+			mu.Lock()
+			log = append(log, name+" before "+task.Kind)
+			mu.Unlock()
+
+			err := next(ctx)
+			mu.Lock()
+			log = append(log, name+" after")
+			mu.Unlock()
+			return err
+		}
+	}
+
+	done := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			mu.Lock()
+			log = append(log, "handler")
+			mu.Unlock()
+			close(done)
+			return nil
+		}, nil),
+		Queues:     defaultQueue(1),
+		Middleware: []taskmill.Middleware{mw("outer"), mw("inner")},
+	})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, done, "the worker to stop")
+	e.waitState(t, id, taskmill.StateCompleted)
+
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"outer before email.send", "inner before email.send", "handler", "inner after", "outer after"}
+	if !slices.Equal(log, want) {
+		t.Fatalf("got %q, want %q", log, want)
+	}
+}
+
+type batchPublisher struct {
+	mu      sync.Mutex
+	batches [][]int64
+}
+
+func (b *batchPublisher) HandleBatch(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ids := make([]int64, len(tasks))
+	errs := make([]error, len(tasks))
+	for i, task := range tasks {
+		ids[i] = task.Args.UserID
+		if task.Args.UserID == 3 && task.Attempt == 1 {
+			errs[i] = errors.New("broker rejected message 3")
+		}
+	}
+
+	b.batches = append(b.batches, ids)
+	return errs
+}
+
+func TestBatchHandler(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	pub := &batchPublisher{}
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler[sendEmail](&hs, pub, &taskmill.HandlerOptions{BatchSize: 4, Retry: fastRetry})
+	var wrapped atomic.Int32
+
+	params := make([]taskmill.EnqueueParams, 10)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}}
+	}
+	res, err := e.client.EnqueueMany(t.Context(), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: &hs,
+		Queues:   defaultQueue(1),
+		Middleware: []taskmill.Middleware{func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+			wrapped.Add(1)
+			return next(ctx)
+		}},
+	})
+
+	for _, r := range res {
+		e.waitState(t, r.ID, taskmill.StateCompleted)
+	}
+
+	pub.mu.Lock()
+	defer pub.mu.Unlock()
+	largest := 0
+	for _, b := range pub.batches {
+		largest = max(largest, len(b))
+	}
+	if largest < 2 || largest > 4 {
+		t.Fatalf("largest batch has %d tasks, want 2 to 4", largest)
+	}
+	if w := wrapped.Load(); w != 11 {
+		t.Fatalf("middleware wrapped %d attempts, want 11 (10 plus one retry)", w)
+	}
+}
+
+func TestCancelRequestWinsOverOtherOutcomes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		result func(ctx context.Context) error
+	}{
+		{"fail", func(context.Context) error { return errors.New("boom") }},
+		{"snooze", func(context.Context) error { return taskmill.Snooze(time.Minute) }},
+		{"release", func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			started := make(chan struct{}, 1)
+			proceed := make(chan struct{})
+			stop := runWorker(t, e, &taskmill.WorkerConfig{
+				Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+					started <- struct{}{}
+					<-proceed
+					return tc.result(ctx)
+				}, &taskmill.HandlerOptions{Retry: fastRetry}),
+				Queues:       defaultQueue(1),
+				DrainTimeout: 50 * time.Millisecond,
+			})
+
+			id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+			recv(t, started, "a handler to start")
+
+			// The cancellation is requested, but its notification is missed.
+			e.exec(t, "UPDATE {s}.tasks SET cancel_requested_at = now() WHERE id = $1", id)
+			close(proceed)
+			if tc.name == "release" {
+				stop()
+			}
+
+			e.waitState(t, id, taskmill.StateCanceled)
+			if n := e.count(t, "SELECT count(*) FROM {s}.groups"); n != 0 {
+				t.Fatal("the canceled task did not leave its group")
+			}
+		})
+	}
+}
+
+func TestWorkerRecordsErrorsWithNULBytes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			return errors.New("bad\x00byte")
+		}, nil),
+		Queues: defaultQueue(1),
+	})
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 1})
+	info := e.waitState(t, id, taskmill.StateDead)
+	if len(info.Errors) != 1 || info.Errors[0].Message != "badbyte" {
+		t.Fatalf("got errors %+v", info.Errors)
+	}
+}
+
+// failingBatch fails or panics on its first batch.
+type failingBatch struct {
+	panics bool
+	calls  atomic.Int32
+}
+
+func (f *failingBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+	if f.calls.Add(1) > 1 {
+		return make([]error, len(tasks))
+	}
+	if f.panics {
+		panic("broker client crashed")
+	}
+	return nil // no result for any task
+}
+
+func TestBatchHandlerFailures(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, message string
+		code          taskmill.ErrorCode
+		panics        bool
+	}{
+		{"panic", "panic: broker client crashed", taskmill.CodePanic, true},
+		{"missing results", "the batch handler returned no result for this task", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			var hs taskmill.Handlers
+			taskmill.AddBatchHandler[sendEmail](&hs, &failingBatch{panics: tc.panics}, &taskmill.HandlerOptions{Retry: fastRetry})
+
+			res, err := e.client.EnqueueMany(t.Context(), []taskmill.EnqueueParams{{Args: sendEmail{}}, {Args: sendEmail{}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// With two free slots, the first fetch takes both tasks into one
+			// batch.
+			runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(2)})
+
+			for _, r := range res {
+				info := e.waitState(t, r.ID, taskmill.StateCompleted)
+				if len(info.Errors) != 1 || info.Errors[0].Code != tc.code || !strings.HasPrefix(info.Errors[0].Message, tc.message) {
+					t.Fatalf("got errors %+v", info.Errors)
+				}
+			}
+		})
+	}
+}
+
+func TestMiddlewareCannotRunAHandlerTwice(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var runs atomic.Int32
+
+	twice := taskmill.Middleware(func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+		_ = next(ctx)
+		return next(ctx)
+	})
+
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			runs.Add(1)
+			return nil
+		}, nil),
+		Middleware: []taskmill.Middleware{twice},
+	})
+
+	info, err := w.RunTask(t.Context(), e.enqueue(t, sendEmail{}, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs.Load() != 1 || info.State != taskmill.StateRetryable ||
+		!strings.Contains(info.Errors[0].Message, "next twice") {
+		t.Fatalf("the handler ran %d times; task %s with errors %+v", runs.Load(), info.State, info.Errors)
+	}
+}
+
+func TestMiddlewareThatSkipsTheHandlerFailsTheAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var runs atomic.Int32
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error {
+		runs.Add(1)
+		return nil
+	}), nil)
+	taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { runs.Add(1) }), nil)
+
+	var failures atomic.Int32 // the failures that the outer middleware saw
+	outer := taskmill.Middleware(func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+		err := next(ctx)
+		if err != nil {
+			failures.Add(1)
+		}
+		return err
+	})
+	swallow := taskmill.Middleware(func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+		_ = next(ctx)
+		return nil
+	})
+	skip := taskmill.Middleware(func(context.Context, *taskmill.TaskInfo, func(context.Context) error) error { return nil })
+
+	for _, c := range []struct {
+		name  string
+		chain []taskmill.Middleware
+	}{
+		{"seen by the middleware outside", []taskmill.Middleware{outer, skip}},
+		{"hidden by the middleware outside", []taskmill.Middleware{swallow, skip}},
+	} {
+		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Middleware: c.chain})
+		for _, args := range []taskmill.Args{sendEmail{}, report{}} { // a single task, and a batch
+			info, err := w.RunTask(t.Context(), e.enqueue(t, args, nil))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.State != taskmill.StateRetryable || len(info.Errors) != 1 ||
+				!strings.Contains(info.Errors[0].Message, "without running the handler") {
+				t.Fatalf("%s, %s: got task %s with errors %+v, want a retry", c.name, args.Kind(), info.State, info.Errors)
+			}
+		}
+	}
+
+	if failures.Load() != 2 {
+		t.Fatalf("the outer middleware saw %d failures, want 2", failures.Load())
+	}
+	if runs.Load() != 0 {
+		t.Fatalf("the handlers ran %d times", runs.Load())
+	}
+}
+
+func TestMiddlewareThatSkipsSomeTasksOfABatch(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	got := make(chan []string, 1)
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler[report](&hs, batchFunc(func(tasks []*taskmill.Task[report]) {
+		names := make([]string, len(tasks))
+		for i, task := range tasks {
+			names[i] = task.Args.Name
+		}
+		got <- names
+	}), &taskmill.HandlerOptions{Retry: taskmill.ExponentialBackoff{Base: time.Hour}})
+
+	skip := taskmill.Middleware(func(ctx context.Context, task *taskmill.TaskInfo, next func(context.Context) error) error {
+		if strings.Contains(string(task.Payload), "skip") {
+			return nil
+		}
+		return next(ctx)
+	})
+
+	var ids []int64
+	for _, name := range []string{"a", "skip-b", "c", "skip-d"} {
+		ids = append(ids, e.enqueue(t, report{Name: name}, nil))
+	}
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Middleware: []taskmill.Middleware{skip}})
+
+	if names := recv(t, got, "the batch"); !slices.Equal(names, []string{"a", "c"}) {
+		t.Fatalf("the batch handler got %q, want only the tasks not skipped", names)
+	}
+
+	for i, id := range ids {
+		want := taskmill.StateCompleted
+		if i%2 == 1 {
+			want = taskmill.StateRetryable
+		}
+		e.waitState(t, id, want)
+	}
+}

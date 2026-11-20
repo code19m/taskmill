@@ -78,6 +78,7 @@ func newRelease(t *testing.T) *release {
 	default:
 		t.Skip("TASKMILL_TEST_DATABASE_URL is not set; run `make db` and `make compat`")
 	}
+
 	pool, err := pgxpool.New(t.Context(), url)
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +93,7 @@ func newRelease(t *testing.T) *release {
 	if v := schemaVersion(t, pool, schema); v != version {
 		t.Fatalf("the release's Migrate changed the schema from version %d to %d", version, v)
 	}
+
 	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema})
 	if err != nil {
 		t.Fatalf("the release's NewClient: %v", err)
@@ -107,12 +109,14 @@ func newRelease(t *testing.T) *release {
 func (r *release) enqueue(t *testing.T) {
 	t.Helper()
 	ctx := t.Context()
+
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		_, err := r.client.EnqueueTx(ctx, taskmill.Pgx(tx), job{What: "rolled back"}, nil)
 		return errors.Join(err, errors.New("roll back"))
 	}); err == nil {
 		t.Fatal("the transaction committed")
 	}
+
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		for _, j := range []job{{What: "enqueue in a transaction"}, {What: "retry"}, {What: "complete in a transaction"}} {
 			if _, err := r.client.EnqueueTx(ctx, taskmill.Pgx(tx), j, nil); err != nil {
@@ -137,11 +141,13 @@ func (r *release) enqueue(t *testing.T) {
 func (r *release) retryCanceled(t *testing.T) {
 	t.Helper()
 	ctx := t.Context()
+
 	var id int64
 	stored := "SELECT id FROM " + r.schema + ".tasks WHERE state = 'canceled' AND freed_key IS NOT NULL AND freed_key_expires_at > now()"
 	if err := r.pool.QueryRow(ctx, stored).Scan(&id); err != nil {
 		t.Fatalf("the task that the current code canceled, with its key stored: %v", err)
 	}
+
 	if err := r.client.Retry(ctx, id); err != nil {
 		t.Fatalf("the release's Retry of a task that stores a key: %v", err)
 	}
@@ -172,6 +178,7 @@ func (r *release) work(t *testing.T) {
 		}
 		return make([]error, len(ds))
 	}), nil)
+
 	worker, err := taskmill.NewWorker(r.client, &taskmill.WorkerConfig{
 		Handlers:     &handlers,
 		PollInterval: 50 * time.Millisecond,
@@ -180,6 +187,7 @@ func (r *release) work(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	ctx, stop := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- worker.Run(ctx) }()
@@ -204,6 +212,7 @@ func (r *release) handle(ctx context.Context, task *taskmill.Task[job]) error {
 			return err
 		}
 	}
+
 	r.ran <- task.Args
 	return nil
 }
@@ -233,6 +242,7 @@ func (r *release) checkRuns(t *testing.T) {
 		"current: fifo", "current: fifo", "current: fifo",
 		"enqueue in a transaction", "fifo", "fifo", "fifo", "retry", "schedule",
 	}
+
 	var got []string
 	groups := make(map[string][]int) // the order each FIFO group ran in
 	timeout := time.After(wait)
@@ -247,6 +257,7 @@ func (r *release) checkRuns(t *testing.T) {
 			t.Fatalf("the release's worker ran %q, want each of %q", got, want)
 		}
 	}
+
 	if slices.Sort(got); !slices.Equal(got, want) {
 		t.Fatalf("the release's worker ran %q, want %q", got, want)
 	}
@@ -255,6 +266,7 @@ func (r *release) checkRuns(t *testing.T) {
 			t.Fatalf("the FIFO group of %q ran in the order %v", what, order)
 		}
 	}
+
 	select {
 	case v := <-r.published:
 		if v != "message" {
@@ -278,15 +290,18 @@ func (r *release) checkDashboard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := r.client.Activity(t.Context(), nil); err != nil {
 		t.Errorf("the release's Activity: %v", err)
 	}
+
 	// A page that cannot read part of its data, such as the overview's
 	// charts, still shows, and logs a warning instead.
 	h, err := ui.New(r.client, &ui.Config{Logger: slog.New(failOnWarn{t})})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, page := range []string{
 		"/", "/tasks", "/tasks?state=completed", fmt.Sprintf("/tasks/%d", retried.ID),
 		"/choices/groups?search=current", "/schedules", "/workers",
@@ -295,6 +310,7 @@ func (r *release) checkDashboard(t *testing.T) {
 			t.Errorf("the release's dashboard: GET %s: status %d", page, code)
 		}
 	}
+
 	for _, action := range []string{
 		fmt.Sprintf("/tasks/%d/cancel", retried.ID), fmt.Sprintf("/tasks/%d/retry", retried.ID),
 		fmt.Sprintf("/tasks/%d/delete", deleted.ID), "/queues/pause?name=default", "/queues/resume?name=default",
@@ -304,6 +320,7 @@ func (r *release) checkDashboard(t *testing.T) {
 			t.Errorf("the release's dashboard: POST %s: status %d", action, code)
 		}
 	}
+
 	timeout := time.After(wait)
 	for j := (job{}); j.What != "retried from the dashboard"; {
 		select {
@@ -326,6 +343,7 @@ func (h failOnWarn) Handle(_ context.Context, r slog.Record) error {
 		attrs = append(attrs, a.String())
 		return true
 	})
+
 	h.t.Errorf("the release's dashboard logged %s %q %v", r.Level, r.Message, attrs)
 	return nil
 }
@@ -348,19 +366,23 @@ func runCurrent(t *testing.T, pool *pgxpool.Pool) string {
 	var b [6]byte
 	_, _ = rand.Read(b[:]) // never returns an error
 	schema := "compat_" + hex.EncodeToString(b[:])
+
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+
 		// The statements that the stopped worker gave up may still run on the
 		// server, where the drop can deadlock with them. The pool counts
 		// their connections as acquired until it has closed them.
 		for pool.Stat().AcquiredConns() > 0 && ctx.Err() == nil {
 			time.Sleep(time.Millisecond)
 		}
+
 		if _, err := pool.Exec(ctx, "DROP SCHEMA IF EXISTS "+schema+" CASCADE"); err != nil {
 			t.Errorf("drop schema %s: %v", schema, err)
 		}
 	})
+
 	cmd := exec.CommandContext(t.Context(), "go", "run", "./internal/cmd/compat", schema) //nolint:gosec // the schema name is made above
 	cmd.Dir = "../.."                                                                     // the current code's module
 	if out, err := cmd.CombinedOutput(); err != nil {

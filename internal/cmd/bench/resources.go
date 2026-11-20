@@ -26,10 +26,12 @@ func benchResources(ctx context.Context, pool *pgxpool.Pool, url, container stri
 	perTask := (busyRSS - idleRSS) * 1024 / running
 	steps := idleLoad(ctx, pool, url, d, queues)
 	fetches, checkIns := steps.count("fetch"), steps.count("worker check-in")
+
 	// Each queue fetches when Run starts, when its notification connection
 	// starts, and every second until the maintainer's first heartbeat
 	// arrives, within 5 seconds; then once a minute.
 	polls := 7 + int(d/time.Minute)
+
 	others := 0
 	for _, step := range []string{"lease renewal", "settings", "activity", "other"} {
 		others += steps.count(step)
@@ -75,6 +77,7 @@ func heartbeatCost(ctx context.Context, pool *pgxpool.Pool, url, container strin
 	const window = 30 * time.Second
 	defer listenIdle(ctx, url, fanOutListeners)()
 	cpus := make([]float64, len(rates))
+
 	for i, rate := range rates {
 		before, began := containerCPU(ctx, container), time.Now()
 		if rate == 0 {
@@ -96,6 +99,7 @@ func heartbeatCost(ctx context.Context, pool *pgxpool.Pool, url, container strin
 func listenIdle(ctx context.Context, url string, n int) (stop func()) {
 	lctx, cancel := context.WithCancel(ctx)
 	var listeners sync.WaitGroup
+
 	for i := range n {
 		conn, err := pgx.Connect(ctx, url)
 		if err != nil {
@@ -104,6 +108,7 @@ func listenIdle(ctx context.Context, url string, n int) (stop func()) {
 		if _, err := conn.Exec(ctx, "LISTEN installation_"+strconv.Itoa(i)); err != nil {
 			fail(err)
 		}
+
 		listeners.Go(func() {
 			defer func() { _ = conn.Close(context.WithoutCancel(ctx)) }()
 			for lctx.Err() == nil {
@@ -111,6 +116,7 @@ func listenIdle(ctx context.Context, url string, n int) (stop func()) {
 			}
 		})
 	}
+
 	return func() {
 		cancel()
 		listeners.Wait()
@@ -124,6 +130,7 @@ func containerCPU(ctx context.Context, container string) time.Duration {
 	if err != nil {
 		fail(fmt.Errorf("read the database's CPU use: %w", err))
 	}
+
 	for line := range strings.Lines(string(out)) {
 		if v, ok := strings.CutPrefix(line, "usage_usec "); ok {
 			us, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
@@ -143,21 +150,25 @@ func containerCPU(ctx context.Context, container string) time.Duration {
 func connections(ctx context.Context, pool *pgxpool.Pool, url string, d time.Duration, conns int32) (client, worker, listening int64) {
 	fresh(ctx, pool)
 	const app = "taskmill-bench-e4"
+
 	sep := "?"
 	if strings.Contains(url, "?") {
 		sep = "&"
 	}
 	own := connect(ctx, url+sep+"application_name="+app, conns)
 	defer own.Close()
+
 	c, err := taskmill.NewClient(ctx, own, &taskmill.ClientConfig{Schema: schema})
 	if err != nil {
 		fail(err)
 	}
+
 	sample := func(sql string) func() int64 {
 		var most int64
 		var mu sync.Mutex
 		sctx, stop := context.WithCancel(ctx)
 		var wg sync.WaitGroup
+
 		wg.Go(func() {
 			for sctx.Err() == nil {
 				n := scalar(ctx, pool, sql, app)
@@ -167,12 +178,14 @@ func connections(ctx context.Context, pool *pgxpool.Pool, url string, d time.Dur
 				time.Sleep(10 * time.Millisecond)
 			}
 		})
+
 		return func() int64 {
 			stop()
 			wg.Wait()
 			return most
 		}
 	}
+
 	enqueue := func(ctx context.Context) int {
 		if _, err := c.Enqueue(ctx, noop{}, nil); err != nil {
 			fail(err)
@@ -194,8 +207,10 @@ func connections(ctx context.Context, pool *pgxpool.Pool, url string, d time.Dur
 	if err != nil {
 		fail(err)
 	}
+
 	stop := run(ctx, w)
 	time.Sleep(time.Second) // let the worker connect
+
 	done = sample(all)
 	listeners := sample(all + " AND query LIKE 'LISTEN %'")
 	timed(ctx, 16, d, enqueue)
@@ -210,8 +225,10 @@ func memory(ctx context.Context, pool *pgxpool.Pool, url string, n int) (idle, b
 	c := fresh(ctx, pool)
 	mustExec(ctx, pool, `CREATE TABLE {s}.holds (n integer NOT NULL, worker text NOT NULL, attempt integer NOT NULL,
     phase text NOT NULL, at timestamptz NOT NULL DEFAULT clock_timestamp())`)
+
 	w := spawn(ctx, url, child{Role: "worker", Concurrency: n, Conns: 16})
 	defer w.kill()
+
 	rss := func() int64 {
 		var most int64
 		for range 5 {
@@ -228,8 +245,10 @@ func memory(ctx context.Context, pool *pgxpool.Pool, url string, n int) (idle, b
 		}
 		return most
 	}
+
 	time.Sleep(5 * time.Second) // let the worker start and settle
 	idle = rss()
+
 	batch := make([]taskmill.EnqueueParams, 0, 1000)
 	for i := range n {
 		batch = append(batch, taskmill.EnqueueParams{Args: hold{N: i, Wave: 1}})
@@ -240,9 +259,11 @@ func memory(ctx context.Context, pool *pgxpool.Pool, url string, n int) (idle, b
 			batch = batch[:0]
 		}
 	}
+
 	waitFor(ctx, time.Minute, "every task to start", func() bool {
 		return scalar(ctx, pool, "SELECT count(*) FROM {s}.holds") == int64(n)
 	})
+
 	time.Sleep(10 * time.Second) // check-ins renew the leases
 	return idle, rss()
 }
@@ -255,6 +276,7 @@ func idleLoad(ctx context.Context, pool *pgxpool.Pool, url string, d time.Durati
 	steps := &stepTracer{}
 	own := connectTraced(ctx, url, 8, steps)
 	defer own.Close()
+
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[noop](func(context.Context, *taskmill.Task[noop]) error { return nil }), nil)
 	qs := map[string]taskmill.QueueOptions{}
@@ -265,8 +287,10 @@ func idleLoad(ctx context.Context, pool *pgxpool.Pool, url string, d time.Durati
 	if err != nil {
 		fail(err)
 	}
+
 	// The maintainer runs apart, on an untraced pool.
 	stopMaintainer := maintain(ctx, client(ctx, pool, false))
+
 	stop := run(ctx, w)
 	time.Sleep(d)
 	stop()
@@ -285,6 +309,7 @@ func benchSoak(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 		completed.Add(1)
 		return nil
 	}), &taskmill.HandlerOptions{DiscardCompleted: true})
+
 	w, err := taskmill.NewWorker(c, &taskmill.WorkerConfig{
 		Handlers: &hs,
 		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {Concurrency: 64}},
@@ -293,6 +318,7 @@ func benchSoak(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 		fail(err)
 	}
 	stop := run(ctx, w)
+
 	batch := make([]taskmill.EnqueueParams, 100)
 	for i := range batch {
 		batch[i] = taskmill.EnqueueParams{Args: noop{N: i}}
@@ -312,6 +338,7 @@ func benchSoak(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 		commas(loadRate), d)
 	fmt.Println("| Time | Enqueued | Completed | Waiting | `tasks` heap | `tasks` indexes |")
 	fmt.Println("|---|---|---|---|---|---|")
+
 	const samples = 12
 	var reference, most int64
 	for i := 1; i <= samples; i++ {
@@ -320,11 +347,13 @@ func benchSoak(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 			fail(ctx.Err())
 		case <-time.After(d / samples):
 		}
+
 		var heap, index int64
 		err := pool.QueryRow(ctx, "SELECT pg_table_size($1), pg_indexes_size($1)", schema+".tasks").Scan(&heap, &index)
 		if err != nil {
 			fail(err)
 		}
+
 		if i == samples/4 {
 			reference = heap + index
 		}
@@ -334,8 +363,10 @@ func benchSoak(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 		fmt.Printf("| %s | %s | %s | %s | %s | %s |\n", (d * time.Duration(i) / samples).Round(time.Second),
 			commas(enqueued.Load()), commas(completed.Load()), commas(enqueued.Load()-completed.Load()), mib(heap), mib(index))
 	}
+
 	<-produced
 	stop()
+
 	fmt.Println()
 	fmt.Println("| ID | Measure | Result | |")
 	fmt.Println("|---|---|---|---|")

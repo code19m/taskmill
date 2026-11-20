@@ -145,6 +145,7 @@ func Schema(tb testing.TB, pool *pgxpool.Pool) string {
 	var b [6]byte
 	_, _ = rand.Read(b[:]) // never returns an error
 	schema := "test_" + hex.EncodeToString(b[:])
+
 	tb.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -174,6 +175,7 @@ BEGIN
     END;
     LOCK TABLE %s IN ACCESS SHARE MODE;
 END $$`, held, wanted)
+
 	ctx, giveUp := context.WithCancel(context.Background())
 	defer giveUp()
 	done := make(chan error, 1)
@@ -181,6 +183,7 @@ END $$`, held, wanted)
 		_, err := pool.Exec(ctx, statement)
 		done <- err
 	}()
+
 	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		var sleeps bool
 		err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_stat_activity WHERE wait_event = 'PgSleep' AND strpos(query, $1) > 0)`,
@@ -195,6 +198,7 @@ END $$`, held, wanted)
 			tb.Fatal("testdb: give up a statement: it did not start")
 		}
 	}
+
 	giveUp()
 	if err := <-done; !errors.Is(err, context.Canceled) {
 		tb.Fatalf("testdb: give up a statement: it returned %v, want context.Canceled", err)
@@ -234,6 +238,7 @@ WHERE t.group_key IS NOT NULL AND t.state IN ('scheduled', 'pending', 'available
 		tb.Fatalf("testdb: check groups: %v", err)
 	}
 	defer r.Close()
+
 	var broken []string
 	for r.Next() {
 		var s string
@@ -245,6 +250,7 @@ WHERE t.group_key IS NOT NULL AND t.state IN ('scheduled', 'pending', 'available
 	if err := r.Err(); err != nil {
 		tb.Fatalf("testdb: check groups: %v", err)
 	}
+
 	for _, s := range broken {
 		tb.Errorf("FIFO invariant broken: %s", s)
 	}

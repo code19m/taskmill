@@ -5,7 +5,8 @@ and why each is written the way it is.
 [Lists and counts](schema-lists.md) and
 [Operator actions](schema-operations.md) have the statements of the
 operations API. [Storage schema](schema.md) has the tables and indexes that
-they use, and [`sql.go`](../../sql.go) has their exact text.
+they use, and [`sql_enqueue.go`](../../sql_enqueue.go) and
+[`sql_attempts.go`](../../sql_attempts.go) have their exact text.
 
 The statements send batches as arrays and use `unnest`, so a batch, up to the
 10,000 tasks that one enqueue call takes, is one round trip with fixed SQL

@@ -38,6 +38,7 @@ func run(args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: go run ./internal/cmd/compat <schema>")
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	pool, err := pgxpool.New(ctx, os.Getenv(testdb.EnvURL))
@@ -45,6 +46,7 @@ func run(args []string) error {
 		return err
 	}
 	defer pool.Close()
+
 	if err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Schema: args[0]}); err != nil {
 		return err
 	}
@@ -52,6 +54,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+
 	for seq := 1; seq <= 3; seq++ {
 		if _, err := client.Enqueue(ctx, job{What: "current: fifo", Seq: seq}, &taskmill.EnqueueOptions{GroupKey: "current"}); err != nil {
 			return err
@@ -60,6 +63,7 @@ func run(args []string) error {
 	if _, err := client.Enqueue(ctx, job{What: "current: delayed"}, &taskmill.EnqueueOptions{RunAt: time.Now().Add(time.Second)}); err != nil {
 		return err
 	}
+
 	dedupe := &taskmill.EnqueueOptions{DedupeKey: "compat"}
 	if _, err := client.Enqueue(ctx, job{What: "current: deduplicated"}, dedupe); err != nil {
 		return err
@@ -71,6 +75,7 @@ func run(args []string) error {
 	if !res.Duplicate {
 		return errors.New("the second deduplicated task is not a duplicate")
 	}
+
 	// A canceled task stores the dedupe key that its cancel freed, in
 	// columns that the release does not know. The release retries it.
 	canceled, err := client.Enqueue(ctx, job{What: "current: canceled"}, &taskmill.EnqueueOptions{DedupeKey: "compat-canceled"})

@@ -37,6 +37,7 @@ func TestStateValuesNeverChange(t *testing.T) {
 	const breaks = promised + "the State values never change, and that v1 adds none: the tasks table stores them, " +
 		"so the tasks of a running installation would be in states that the code no longer knows, " +
 		"and an application's comparisons with TaskInfo.State and its TaskFilter.States would stop matching"
+
 	var want []string
 	for _, tt := range []struct {
 		state taskmill.State
@@ -133,6 +134,7 @@ func TestStoredErrorNamesNeverChange(t *testing.T) {
 	e.exec(t, `UPDATE {s}.tasks SET state = 'running', attempt = 1, lease_token = 1, attempted_at = now(), attempted_by = 'gone',
 	           lease_expires_at = now() - interval '1 second' WHERE id = $1`, rescued)
 	taskmill.Rescue(t.Context(), w)
+
 	for what, id := range map[string]int64{"a failed attempt": failed, "the note of a snooze": snoozed, "a rescued attempt": rescued} {
 		var names []string
 		var at string
@@ -142,6 +144,7 @@ func TestStoredErrorNamesNeverChange(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if want := []string{"at", "attempt", "code", "message"}; !slices.Equal(names, want) {
 			t.Errorf("%s is stored under the names %q, want %q. %s", what, names, want, breaks)
 		}
@@ -165,6 +168,7 @@ func customEncodings(typ reflect.Type, pkgs []string, seen map[reflect.Type]bool
 			return nil // a type of another package, or one that is checked
 		}
 		seen[typ] = true
+
 		for _, marshaler := range []reflect.Type{reflect.TypeFor[json.Marshaler](), reflect.TypeFor[encoding.TextMarshaler]()} {
 			// A pointer has the methods of both kinds of receiver.
 			if reflect.PointerTo(typ).Implements(marshaler) {
@@ -172,6 +176,7 @@ func customEncodings(typ reflect.Type, pkgs []string, seen map[reflect.Type]bool
 			}
 		}
 	}
+
 	switch typ.Kind() {
 	case reflect.Map:
 		found = append(found, customEncodings(typ.Key(), pkgs, seen)...)
@@ -199,12 +204,14 @@ func customEncodings(typ reflect.Type, pkgs []string, seen map[reflect.Type]bool
 func TestHandedTypesKeepTheirDefaultJSON(t *testing.T) {
 	t.Parallel()
 	client := reflect.TypeFor[*taskmill.Client]()
+
 	// What a handler gets, what a publisher gets, and what each method of
 	// Client returns.
 	handed := []reflect.Type{reflect.TypeFor[taskmill.Task[sendEmail]](), reflect.TypeFor[outbox.Delivery]()}
 	for method := range client.Methods() {
 		handed = slices.AppendSeq(handed, method.Type.Outs())
 	}
+
 	pkgs := []string{client.Elem().PkgPath(), reflect.TypeFor[outbox.Delivery]().PkgPath()}
 	seen := make(map[reflect.Type]bool)
 	for _, typ := range handed {
@@ -213,6 +220,7 @@ func TestHandedTypesKeepTheirDefaultJSON(t *testing.T) {
 				"and get none: either one changes what every application that encodes the type sends", found, promised)
 		}
 	}
+
 	for _, reached := range []reflect.Type{reflect.TypeFor[taskmill.AttemptError](), reflect.TypeFor[taskmill.TaskCount](), reflect.TypeFor[outbox.Message]()} {
 		if !seen[reached] {
 			t.Errorf("the walk did not reach %s: it checks less than it says", reached)
@@ -231,12 +239,14 @@ func TestErrorClassesNeverChange(t *testing.T) {
 		if errors.As(err, &classified) {
 			got = classified.ErrorType()
 		}
+
 		if got != want {
 			t.Errorf("%s has the error class %q, want %q. %sthe classes that ErrorType() returns never change: "+
 				"they are the error.type of spans and metrics, so the dashboards and alerts that match them would go blind",
 				what, got, want, promised)
 		}
 	}
+
 	for _, tt := range []struct {
 		name string
 		err  error
@@ -274,6 +284,7 @@ func TestErrorClassesNeverChange(t *testing.T) {
 		Handlers:   handlers(func(context.Context, *taskmill.Task[sendEmail]) error { panic("boom") }, nil),
 		Middleware: []taskmill.Middleware{observe, skip},
 	})
+
 	for _, tt := range []struct {
 		what string
 		args taskmill.Args
@@ -300,6 +311,7 @@ func TestErrorClassesNeverChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	_, err = skipping.Enqueue(t.Context(), sendEmail{}, nil)
 	check("enqueue middleware that skips the enqueue", err, "middleware")
 }
@@ -310,6 +322,7 @@ func TestScheduledRunMetadataNeverChanges(t *testing.T) {
 		"RFC 3339 with the schedule's offset from UTC, to the microsecond. Each run stores them, " +
 		"so a handler that reads them would not find the time of its run, and TaskInfo.ScheduledFor " +
 		"would not find the time of the runs that earlier releases enqueued"
+
 	if taskmill.MetadataSchedule != "taskmill.schedule" || taskmill.MetadataScheduledFor != "taskmill.scheduled_for" {
 		t.Errorf("MetadataSchedule is now %q, and MetadataScheduledFor %q. %s",
 			taskmill.MetadataSchedule, taskmill.MetadataScheduledFor, breaks)
@@ -329,6 +342,7 @@ func TestScheduledRunMetadataNeverChanges(t *testing.T) {
 		{"ahead", time.FixedZone("ahead", (5*60+30)*60), regular, "2024-03-01T04:00:00+05:30"},
 		{"behind", time.FixedZone("behind", -8*60*60), requested, "2024-02-29T14:30:00.123456-08:00"},
 	}
+
 	e := newEnv(t)
 	var schedules []taskmill.Schedule
 	for _, tt := range cases {
@@ -336,6 +350,7 @@ func TestScheduledRunMetadataNeverChanges(t *testing.T) {
 			Name: tt.name, Cron: "@yearly", Location: tt.loc, Args: sendEmail{}, Options: &taskmill.EnqueueOptions{Queue: tt.name},
 		})
 	}
+
 	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: schedules})
 	taskmill.RunSchedules(t.Context(), w) // stores the schedules
 	for _, tt := range cases {
@@ -351,6 +366,7 @@ func TestScheduledRunMetadataNeverChanges(t *testing.T) {
 	for _, task := range page.Tasks {
 		got[task.Queue] = task.Metadata
 	}
+
 	for _, tt := range cases {
 		want := map[string]string{"taskmill.schedule": tt.name, "taskmill.scheduled_for": tt.want}
 		if !maps.Equal(got[tt.name], want) {
@@ -388,12 +404,14 @@ func TestQuerierInterfacesNeverGrow(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	pgxTx := e.begin(t)
 	sqlTx, err := openSQL(t).BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = sqlTx.Rollback() }()
+
 	for _, tt := range []struct {
 		name   string
 		tx     taskmill.Executor
@@ -425,6 +443,7 @@ func TestMigrationsTableKeepsItsColumns(t *testing.T) {
 		{"name", "text", "", false},
 		{"applied_at", "timestamp with time zone", "now()", false},
 	}
+
 	pool := testdb.Pool(t)
 	for _, tt := range []struct {
 		how    string
@@ -447,6 +466,7 @@ func TestMigrationsTableKeepsItsColumns(t *testing.T) {
 		if err := tt.create(schema); err != nil {
 			t.Fatalf("%s: %v", tt.how, err)
 		}
+
 		// A table of another name has no columns here.
 		r, err := pool.Query(t.Context(), `
 SELECT a.attname, format_type(a.atttypid, a.atttypmod), coalesce(pg_get_expr(d.adbin, d.adrelid), ''),
@@ -464,6 +484,7 @@ ORDER BY a.attnum`, schema+".migrations")
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if !slices.Equal(got, want) {
 			t.Errorf("%s creates %s.migrations with the columns %+v, want %+v. %sthis table keeps its name and its columns: "+
 				"teams that apply migrations with their own tool record each one there, so their "+

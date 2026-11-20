@@ -3,6 +3,7 @@ package taskmill
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -31,16 +32,6 @@ const (
 
 	notifySQL = "SELECT pg_notify($1, $2)"
 )
-
-// liftLockTimeout is the last statement of a transaction that set a lock
-// timeout for its statements and may have sent a notification. Such a
-// transaction takes one more lock when it commits: the lock that every
-// notifying transaction of the whole server takes, and holds until its
-// commit is done, which with synchronous replication includes the wait for
-// the standby. Under the timeout, a commit that waits longer for that lock
-// fails, and undoes work that was done. The wait cannot be part of a
-// deadlock: whoever holds the lock is committing, and asks for nothing more.
-const liftLockTimeout = `SELECT set_config('lock_timeout', '0', true)`
 
 // notifier throttles "tasks available" notifications per queue. The first
 // enqueue in a window notifies inside its own transaction; later ones in the
@@ -118,4 +109,33 @@ func (n *notifier) sendTrailing(ctx context.Context, queue string) {
 		n.logger.LogAttrs(ctx, slog.LevelWarn, "notification failed",
 			slog.String(logKeyQueue, queue), slog.Any(logKeyError, err))
 	}
+}
+
+// notifiable returns, once each, the queues that the throttle allows to
+// notify now of available tasks.
+func (c *Client) notifiable(ctx context.Context, queues []string) []string {
+	var notify []string
+	for _, queue := range queues {
+		if !slices.Contains(notify, queue) && c.notifier.allow(ctx, queue) {
+			notify = append(notify, queue)
+		}
+	}
+	return notify
+}
+
+// notifyAvailable announces new available tasks in queue, inside q's
+// transaction, when the throttle allows it. In a transaction, a failed
+// notification aborts the transaction, so it is returned; outside one, it
+// is only logged, to logger.
+func (c *Client) notifyAvailable(ctx context.Context, logger *slog.Logger, q querier, queue string) error {
+	if !c.notifier.allow(ctx, queue) {
+		return nil
+	}
+	_, err := q.exec(ctx, notifySQL, c.schema, notifyAvailable+"|"+queue)
+	if err != nil && !q.inTx() {
+		logger.LogAttrs(ctx, slog.LevelWarn, "notification failed",
+			slog.String(logKeyQueue, queue), slog.Any(logKeyError, err))
+		return nil
+	}
+	return err
 }

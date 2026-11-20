@@ -139,7 +139,7 @@ type TaskInfo struct {
 	RunAt time.Time
 
 	AttemptedAt time.Time // zero if never attempted
-	FinalizedAt time.Time // zero until completed, dead, or canceled
+	FinishedAt  time.Time // zero until completed, dead, or canceled
 }
 
 // AttemptError is one entry of a task's error history: why an attempt
@@ -276,6 +276,7 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	if err != nil {
 		return err
 	}
+
 	a := t.attempt
 	done, err := a.client.complete(ctx, a.logger, q, []completion{{id: a.id, token: a.token, discard: a.discard}})
 	if err != nil {
@@ -284,29 +285,34 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	if len(done) == 0 {
 		return fmt.Errorf("%w: task %d", ErrLeaseLost, a.id)
 	}
+
 	a.completedInTx.Store(true)
 	return nil
 }
 
-// scanTaskInfo reads one row of taskColumns. It reads what does not decode
-// as empty: metadata that is not an object of strings, an entry of the
-// errors that is not one, and a time that is infinite. Such a row comes from
-// another database role or an UPDATE by hand, and a list must still show it,
-// with the tasks around it. A worker that takes the task makes it dead (see
-// scanLeased).
-func scanTaskInfo(r rows) (*TaskInfo, error) {
+// scanTaskInfo reads one row of taskColumns, and into extra the columns that
+// follow them, if any. It reads what does not decode as empty: metadata that
+// is not an object of strings, an entry of the errors that is not one, and a
+// time that is infinite. Such a row comes from another database role or an
+// UPDATE by hand, and a list must still show it, with the tasks around it. A
+// worker that takes the task makes it dead (see scanLeased).
+func scanTaskInfo(r rows, extra ...any) (*TaskInfo, error) {
 	var (
-		info                                       TaskInfo
-		state                                      string
-		priority, attempt, maxAttempts             int16
-		metadata, payload, errs                    []byte
-		createdAt, runAt, attemptedAt, finalizedAt pgtype.Timestamptz
+		info                                      TaskInfo
+		state                                     string
+		priority, attempt, maxAttempts            int16
+		metadata, payload, errs                   []byte
+		createdAt, runAt, attemptedAt, finishedAt pgtype.Timestamptz
 	)
-	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
-		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt, &finalizedAt)
-	if err != nil {
+
+	dest := []any{
+		&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
+		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt, &finishedAt,
+	}
+	if err := r.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
 	}
+
 	info.State = State(state)
 	info.Priority = Priority(priority)
 	info.Attempt = int(attempt)
@@ -317,7 +323,7 @@ func scanTaskInfo(r rows) (*TaskInfo, error) {
 	info.CreatedAt, _ = finite(createdAt)
 	info.RunAt, _ = finite(runAt)
 	info.AttemptedAt, _ = finite(attemptedAt)
-	info.FinalizedAt, _ = finite(finalizedAt)
+	info.FinishedAt, _ = finite(finishedAt)
 	return &info, nil
 }
 
@@ -341,6 +347,7 @@ func decodeErrors(errs []byte) []AttemptError {
 	if len(errs) == 0 || string(errs) == "[]" {
 		return nil
 	}
+
 	var stored []storedError
 	if json.Unmarshal(errs, &stored) != nil {
 		stored = nil // it holds a zero entry for each one that did not decode
@@ -353,6 +360,7 @@ func decodeErrors(errs []byte) []AttemptError {
 			}
 		}
 	}
+
 	if len(stored) == 0 {
 		return nil
 	}

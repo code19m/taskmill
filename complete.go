@@ -18,16 +18,17 @@ import (
 func (w *Worker) completer(ctx context.Context) {
 	defer close(w.completerDone)
 	record := context.WithoutCancel(ctx)
-	var held []*tracked // completions whose rows other transactions held
-	delay := heldRetryDelay
-	retryHeld := time.NewTimer(delay)
-	retryHeld.Stop()
+	var blocked []*liveAttempt // completions whose rows other transactions held
+	delay := blockedRetryDelay
+	retryBlocked := time.NewTimer(delay)
+	retryBlocked.Stop()
+
 	for {
-		batch := held
+		batch := blocked
 		select {
 		case t := <-w.completions:
 			batch = append(batch, t)
-		case <-retryHeld.C:
+		case <-retryBlocked.C:
 		case <-ctx.Done():
 			// Record what finished before shutdown, then stop: every attempt
 			// has returned, so nothing more arrives. Completions whose groups
@@ -35,20 +36,21 @@ func (w *Worker) completer(ctx context.Context) {
 			for len(w.completions) > 0 {
 				batch = append(batch, <-w.completions)
 			}
-			w.completeWaiting(record, w.flush(record, batch))
+			w.completeWaiting(record, w.completeBatch(record, batch))
 			return
 		}
-		// Retry held completions soon, then less often while they stay held.
-		wasHeld := len(held) > 0
-		held = w.flush(record, w.gather(batch))
+
+		// Retry blocked completions soon, then less often while they stay blocked.
+		wasBlocked := len(blocked) > 0
+		blocked = w.completeBatch(record, w.gather(batch))
 		switch {
-		case len(held) == 0:
-			delay = heldRetryDelay
-		case wasHeld:
-			delay = min(2*delay, heldRetryMax)
+		case len(blocked) == 0:
+			delay = blockedRetryDelay
+		case wasBlocked:
+			delay = min(2*delay, blockedRetryMax)
 		}
-		if len(held) > 0 {
-			retryHeld.Reset(delay)
+		if len(blocked) > 0 {
+			retryBlocked.Reset(delay)
 		}
 	}
 }
@@ -56,7 +58,7 @@ func (w *Worker) completer(ctx context.Context) {
 // gather adds to batch the completions that are ready, then those that
 // arrive within completionLinger, so that a worker whose attempts finish one
 // at a time still records them in batches.
-func (w *Worker) gather(batch []*tracked) []*tracked {
+func (w *Worker) gather(batch []*liveAttempt) []*liveAttempt {
 ready:
 	for len(batch) < completionBatch {
 		select {
@@ -66,6 +68,7 @@ ready:
 			break ready
 		}
 	}
+
 	linger := time.NewTimer(completionLinger)
 	defer linger.Stop()
 	for len(batch) < completionBatch {
@@ -84,10 +87,11 @@ ready:
 // ends with it, for the tasks whose groups were held until then, and RunTask
 // completes its task with it. It returns the tasks that it completed, once
 // that is committed.
-func (w *Worker) completeWaiting(ctx context.Context, ts []*tracked) []completedTask {
+func (w *Worker) completeWaiting(ctx context.Context, ts []*liveAttempt) []completedTask {
 	if len(ts) == 0 {
 		return nil
 	}
+
 	var done []completedTask
 	err := w.whileLeased(ctx, ts, func(ctx context.Context) error {
 		return w.client.inTx(ctx, func(q querier) error {
@@ -99,18 +103,20 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*tracked) []completed
 	if err != nil {
 		done = nil // the transaction did not commit
 	}
-	w.completed(ctx, ts, done, err)
+
+	w.afterComplete(ctx, ts, done, err)
 	return done
 }
 
-// flush completes a batch of successful attempts. Ungrouped tasks complete
-// in one statement. Grouped tasks complete in one transaction, which first
-// locks their groups' rows, skipping rows that other transactions hold. It
-// returns the tasks whose groups were held, for example by a transaction that
-// enqueues into them, so that the completer tries them again later instead of
-// waiting for those locks; they stay tracked, so their leases are renewed.
-func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) {
-	var plain, grouped []*tracked
+// completeBatch completes a batch of successful attempts. Ungrouped tasks
+// complete in one statement. Grouped tasks complete in one transaction,
+// which first locks their groups' rows, skipping rows that other
+// transactions hold. It returns the tasks whose groups were held, for
+// example by a transaction that enqueues into them, so that the completer
+// tries them again later instead of waiting for those locks; they stay
+// tracked, so their leases are renewed.
+func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (blocked []*liveAttempt) {
+	var plain, grouped []*liveAttempt
 	for _, t := range batch {
 		if t.info.GroupKey == "" {
 			plain = append(plain, t)
@@ -123,11 +129,12 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 		var done []completedTask
 		err := w.whileLeased(ctx, plain, func(ctx context.Context) error {
 			var err error
-			done, err = w.client.complete(ctx, w.logger, pgxQuerier{q: w.client.pool}, completionsOf(plain))
+			done, err = w.client.complete(ctx, w.logger, pgxExecutor{q: w.client.pool}, completionsOf(plain))
 			return err
 		})
-		w.completed(ctx, plain, done, err)
+		w.afterComplete(ctx, plain, done, err)
 	}
+
 	if len(grouped) == 0 {
 		return nil
 	}
@@ -135,16 +142,17 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 	err := w.whileLeased(ctx, grouped, func(ctx context.Context) error {
 		return w.client.inTx(ctx, func(q querier) error {
 			var err error
-			held, done, err = w.completeLocked(ctx, q, grouped)
+			blocked, done, err = w.completeLocked(ctx, q, grouped)
 			return err
 		})
 	})
 	if err != nil {
-		w.completed(ctx, grouped, nil, err)
+		w.afterComplete(ctx, grouped, nil, err)
 		return nil
 	}
-	w.completed(ctx, slices.DeleteFunc(grouped, func(t *tracked) bool { return slices.Contains(held, t) }), done, nil)
-	return held
+
+	w.afterComplete(ctx, slices.DeleteFunc(grouped, func(t *liveAttempt) bool { return slices.Contains(blocked, t) }), done, nil)
+	return blocked
 }
 
 // completeLocked completes, in q's transaction, the grouped tasks whose
@@ -152,14 +160,15 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 // others, which other transactions hold, and the tasks it completed. A task
 // whose group has no row, which should not happen, completes all the same,
 // and leaveGroups reports it.
-func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (held []*tracked, done []completedTask, err error) {
+func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*liveAttempt) (blocked []*liveAttempt, done []completedTask, err error) {
 	queues := make([]string, len(ts))
 	groups := make([]string, len(ts))
 	for i, t := range ts {
 		queues[i], groups[i] = t.info.Queue, t.info.GroupKey
 	}
-	groupLocked, groupExists, err := lockedRows(ctx, q, w.client.sql.lockGroups, func(r rows) (groupKey, bool, error) {
-		var key groupKey
+
+	groupLocked, groupExists, err := lockedRows(ctx, q, w.client.sql.lockGroups, func(r rows) (groupID, bool, error) {
+		var key groupID
 		var locked bool
 		err := r.Scan(&key.queue, &key.group, &locked)
 		return key, locked, err
@@ -167,17 +176,18 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 	if err != nil {
 		return nil, nil, err
 	}
-	var mine []*tracked
+
+	var mine []*liveAttempt
 	for _, t := range ts {
-		key := groupKey{t.info.Queue, t.info.GroupKey}
+		key := groupID{t.info.Queue, t.info.GroupKey}
 		if groupExists[key] && !groupLocked[key] {
-			held = append(held, t)
+			blocked = append(blocked, t)
 		} else {
 			mine = append(mine, t)
 		}
 	}
 	if len(mine) == 0 {
-		return held, nil, nil
+		return blocked, nil, nil
 	}
 
 	ids := make([]int64, len(mine))
@@ -185,6 +195,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 	for i, t := range mine {
 		ids[i], tokens[i] = t.att.id, t.att.token
 	}
+
 	taskLocked, owned, err := lockedRows(ctx, q, w.client.sql.lockLeased, func(r rows) (int64, bool, error) {
 		var id int64
 		var locked bool
@@ -194,23 +205,25 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*tracked) (
 	if err != nil {
 		return nil, nil, err
 	}
+
 	// Tasks no longer owned lost their leases, and are left out; the
 	// complete statement would skip them anyway.
-	var ready []*tracked
+	var ready []*liveAttempt
 	for _, t := range mine {
 		switch {
 		case taskLocked[t.att.id]:
 			ready = append(ready, t)
 		case owned[t.att.id]:
-			held = append(held, t)
+			blocked = append(blocked, t)
 		}
 	}
+
 	if len(ready) > 0 {
 		if done, err = w.client.complete(ctx, w.logger, q, completionsOf(ready)); err != nil {
 			return nil, nil, err
 		}
 	}
-	return held, done, nil
+	return blocked, done, nil
 }
 
 // lockedRows runs a statement that returns rows of a key and whether that
@@ -222,6 +235,7 @@ func lockedRows[K comparable](ctx context.Context, q querier, sql string, scan f
 	}
 	defer r.Close()
 	locked, seen = map[K]bool{}, map[K]bool{}
+
 	for r.Next() {
 		key, isLocked, err := scan(r)
 		if err != nil {
@@ -235,13 +249,14 @@ func lockedRows[K comparable](ctx context.Context, q querier, sql string, scan f
 	return locked, seen, r.Err()
 }
 
-// completed stops tracking completed attempts, counts the tasks that their
+// afterComplete stops tracking completed attempts, counts the tasks that their
 // committed completion finished, wakes the fetches that those tasks kept
 // waiting, and logs a failure to record them.
-func (w *Worker) completed(ctx context.Context, ts []*tracked, done []completedTask, err error) {
+func (w *Worker) afterComplete(ctx context.Context, ts []*liveAttempt, done []completedTask, err error) {
 	for _, t := range ts {
 		w.untrack(t)
 	}
+
 	if err == nil {
 		w.countCompleted(done)
 		w.madeRoom(done)
@@ -274,92 +289,13 @@ func (w *Worker) madeRoom(done []completedTask) {
 	}
 }
 
-// whileLeased runs fn until it succeeds, waiting longer after each failed
-// try, for as long as the leases of ts may still be held when it starts: by
-// then the tasks are rescued, and a result recorded later would be refused.
-// A database outage or failover shorter than a lease thus loses no results,
-// while an error that persists ends the tries. Each try gets its own timeout.
-func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context.Context) error) error {
-	// The deadline is fixed now: the leases are still renewed while the
-	// tries continue, which would otherwise never let them end.
-	deadline := w.leaseEnd(ts)
-	delay := recordRetryFirst
-	for {
-		tryCtx, cancel := context.WithTimeout(ctx, recordTimeout)
-		err := fn(tryCtx)
-		cancel()
-		w.resultFailures.observe(ctx, err)
-		if err == nil || ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return err
-		case <-time.After(delay):
-		}
-		delay = min(2*delay, recordRetryMax)
-	}
-}
-
-// leaseEnd returns when the first of the leases of ts may expire, as far as
-// the worker knows.
-func (w *Worker) leaseEnd(ts []*tracked) time.Time {
-	var end time.Time
-	for i, t := range ts {
-		t.mu.Lock()
-		e := t.renewedAt.Add(w.cfg.LeaseDuration)
-		t.mu.Unlock()
-		if i == 0 || e.Before(end) {
-			end = e
-		}
-	}
-	return end
-}
-
 // completionsOf returns the completions of ts.
-func completionsOf(ts []*tracked) []completion {
+func completionsOf(ts []*liveAttempt) []completion {
 	cs := make([]completion, len(ts))
 	for i, t := range ts {
 		cs[i] = completion{id: t.att.id, token: t.att.token, discard: t.att.discard}
 	}
 	return cs
-}
-
-// track starts tracking t, so that check-ins renew its lease.
-//
-// The worker may still run an older attempt of t's task: it was out of touch
-// for longer than the lease, and the task was rescued and leased again
-// before a check-in found out. t takes that attempt's place, so no check-in
-// sees it again. The new lease proves that the older attempt lost its own,
-// so track cancels its context with ErrLeaseLost, and its result is ignored.
-func (w *Worker) track(ctx context.Context, t *tracked) {
-	w.mu.Lock()
-	old := w.attempts[t.att.id]
-	w.attempts[t.att.id] = t
-	replaced := false
-	if old != nil {
-		// Under w.mu, so that a shutdown either still finds the older
-		// attempt and abandons it, or finds it abandoned here.
-		old.mu.Lock()
-		if old.state == attemptRunning {
-			old.state, replaced = attemptAbandoned, true
-		}
-		old.mu.Unlock()
-	}
-	w.mu.Unlock()
-	if replaced && !old.lost.Swap(true) {
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "attempt lost its lease; canceling it",
-			slog.Int64(logKeyTaskID, old.att.id), slog.String(logKeyKind, old.info.Kind))
-		old.cancelAttempt(ErrLeaseLost)
-	}
-}
-
-func (w *Worker) untrack(t *tracked) {
-	w.mu.Lock()
-	if w.attempts[t.att.id] == t {
-		delete(w.attempts, t.att.id)
-	}
-	w.mu.Unlock()
 }
 
 // completion identifies an attempt whose task succeeded.
@@ -382,6 +318,7 @@ type completedTask struct {
 // out. q must be a transaction if any task belongs to a FIFO group. It logs
 // to the logger of the worker that completes.
 func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, cs []completion) ([]completedTask, error) {
+	fail := func(err error) error { return fmt.Errorf("taskmill: complete: %w", err) }
 	ids := make([]int64, len(cs))
 	tokens := make([]int32, len(cs))
 	discard := make([]int64, 0) // not nil: the statement compares with every element
@@ -396,7 +333,7 @@ func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, c
 	done, err := c.completeTasks(ctx, q, ids, tokens, discard)
 	if err != nil {
 		c.noteMissingHistory(ctx, logger, err)
-		return nil, fmt.Errorf("taskmill: complete: %w", err)
+		return nil, fail(err)
 	}
 
 	var heads []groupLeave
@@ -404,7 +341,7 @@ func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, c
 		heads = append(heads, groupLeave{id: t.id, queue: t.queue, group: t.group, head: true})
 	}
 	if err := c.leaveGroups(ctx, logger, q, heads); err != nil {
-		return nil, fmt.Errorf("taskmill: complete: %w", err)
+		return nil, fail(err)
 	}
 	return done, nil
 }
@@ -416,6 +353,7 @@ func (c *Client) completeTasks(ctx context.Context, q querier, ids []int64, toke
 	}
 	defer r.Close()
 	var done []completedTask
+
 	for r.Next() {
 		var t completedTask
 		if err := r.Scan(&t.id, &t.queue, &t.group); err != nil {
@@ -439,6 +377,7 @@ func sortedByGroup(ts []completedTask) []completedTask {
 			grouped = append(grouped, t)
 		}
 	}
+
 	slices.SortFunc(grouped, func(a, b completedTask) int {
 		return cmp.Or(cmp.Compare(a.queue, b.queue), cmp.Compare(a.group, b.group))
 	})

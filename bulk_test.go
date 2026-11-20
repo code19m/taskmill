@@ -54,6 +54,7 @@ func (e *env) completeIn(t *testing.T, queue string) int64 {
 		Handlers: noopHandlers(), Queues: map[string]taskmill.QueueOptions{queue: {Concurrency: 1}},
 	})
 	defer stop()
+
 	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: queue})
 	e.waitState(t, id, taskmill.StateCompleted)
 	return id
@@ -82,11 +83,13 @@ func TestRetryMatching(t *testing.T) {
 	halting := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "halted"})
 	behind := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "halted"})
 	e.die(t, halting)
+
 	// Of a group with no unfinished tasks, the oldest becomes the head.
 	oldest := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "drained"})
 	newest := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "drained"})
 	e.cancel(t, newest)
 	e.cancel(t, oldest)
+
 	// In a group with a head, a retried task waits behind it.
 	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "busy"})
 	waits := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "busy"})
@@ -103,9 +106,10 @@ func TestRetryMatching(t *testing.T) {
 		oldest: taskmill.StateAvailable, newest: taskmill.StatePending,
 		head: taskmill.StateAvailable, waits: taskmill.StatePending,
 	})
-	if info := e.get(t, dead); info.Attempt != 0 || !info.FinalizedAt.IsZero() {
-		t.Fatalf("retried task has attempt %d, finalized at %v", info.Attempt, info.FinalizedAt)
+	if info := e.get(t, dead); info.Attempt != 0 || !info.FinishedAt.IsZero() {
+		t.Fatalf("retried task has attempt %d, finalized at %v", info.Attempt, info.FinishedAt)
 	}
+
 	if res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{Kinds: []string{"email.send"}})); err != nil || res.Changed != 0 {
 		t.Fatalf("second retry: %d tasks, %v; want none", res.Changed, err)
 	}
@@ -115,6 +119,7 @@ func TestCancelMatching(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	mail := func(group string) *taskmill.EnqueueOptions {
 		return &taskmill.EnqueueOptions{Queue: "mail", GroupKey: group}
 	}
@@ -146,6 +151,7 @@ func TestCancelMatching(t *testing.T) {
 		running: taskmill.StateRunning, second: taskmill.StateCanceled, third: taskmill.StateCanceled,
 		halting: taskmill.StateDead, halted: taskmill.StateCanceled, elsewhere: taskmill.StateAvailable,
 	})
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND cancel_requested_at IS NOT NULL", running); n != 1 {
 		t.Fatal("running task was not flagged for cancellation")
 	}
@@ -155,6 +161,7 @@ func TestCancelMatching(t *testing.T) {
 	if res, err := e.client.Enqueue(ctx, sendEmail{}, &taskmill.EnqueueOptions{Queue: "mail", DedupeKey: "k"}); err != nil || res.Duplicate {
 		t.Fatalf("the dedupe key was not released: %+v, %v", res, err)
 	}
+
 	// A running task asked to stop is not counted again.
 	if res, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateRunning}})); err != nil || res.Changed != 0 {
 		t.Fatalf("second cancel: %d tasks, %v; want none", res.Changed, err)
@@ -210,6 +217,7 @@ func TestDeleteMatching(t *testing.T) {
 			t.Fatalf("task %d: got %v, want ErrNotFound", id, err)
 		}
 	}
+
 	e.wantState(t, running, taskmill.StateRunning)
 	if n := e.count(t, "SELECT count(*) FROM {s}.groups"); n != 0 {
 		t.Fatal("the emptied group was not removed")
@@ -225,6 +233,7 @@ func TestBulkActionsWorkInBatches(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	params := make([]taskmill.EnqueueParams, 2500)
 	for i := range params {
 		params[i].Args = sendEmail{}
@@ -235,6 +244,7 @@ func TestBulkActionsWorkInBatches(t *testing.T) {
 	if _, err := e.client.EnqueueMany(ctx, params); err != nil {
 		t.Fatal(err)
 	}
+
 	all := &taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
 	for _, step := range []struct {
 		name string
@@ -270,6 +280,7 @@ func TestALockTimeoutEndsBeforeTheCommit(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	e.exec(t, `
 CREATE FUNCTION {s}.commit_without_lock_timeout() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -281,6 +292,7 @@ END $$`)
 	e.exec(t, `
 CREATE CONSTRAINT TRIGGER commit_without_lock_timeout AFTER INSERT OR UPDATE OR DELETE ON {s}.tasks
 DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {s}.commit_without_lock_timeout()`)
+
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 
@@ -303,6 +315,7 @@ DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {s}.commit_without_l
 	taskmill.RunSchedules(ctx, w)
 	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
 	taskmill.RunSchedules(ctx, w)
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
 		t.Errorf("the schedule's run enqueued %d tasks, want 1", n)
 	}
@@ -317,6 +330,7 @@ func (e *env) states(t *testing.T) map[string]int {
 		t.Fatal(err)
 	}
 	defer r.Close()
+
 	for r.Next() {
 		var state string
 		var n int
@@ -345,6 +359,7 @@ func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	filler := make([]taskmill.EnqueueParams, 1500)
 	for i := range filler {
 		filler[i].Args = report{}
@@ -352,6 +367,7 @@ func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 	if _, err := e.client.EnqueueMany(ctx, filler); err != nil {
 		t.Fatal(err)
 	}
+
 	group := make([]taskmill.EnqueueParams, 1500)
 	for i := range group {
 		group[i] = taskmill.EnqueueParams{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}}
@@ -360,6 +376,7 @@ func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	// Free the first pages, and cancel the newest tasks first, so that their
 	// rows move there, before the older ones.
 	if _, err := e.client.DeleteMatching(ctx, bulk(&taskmill.TaskFilter{Kinds: []string{"report"}})); err != nil {
@@ -376,13 +393,16 @@ func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", res[0].ID)
+
 	got, err := e.client.RetryMatching(ctx, bulk(g))
 	if err != nil || got.Changed != 0 || got.Skipped != 1500 {
 		t.Fatalf("with the oldest task held: %+v, %v; want the whole group left", got, err)
 	}
+
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	got, err = e.client.RetryMatching(ctx, bulk(g))
 	if err != nil || got.Changed != 1500 || got.Skipped != 0 {
 		t.Fatalf("once released: %+v, %v; want all 1,500", got, err)
@@ -397,6 +417,7 @@ func TestRetryLeavesAGroupItCannotJoin(t *testing.T) {
 	e := newEnv(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
+
 	group := make([]taskmill.EnqueueParams, 1500)
 	for i := range group {
 		group[i] = taskmill.EnqueueParams{Args: sendEmail{}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}}
@@ -405,22 +426,27 @@ func TestRetryLeavesAGroupItCannotJoin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{GroupKeys: []string{"g"}})); err != nil {
 		t.Fatal(err)
 	}
+
 	g := &taskmill.TaskFilter{GroupKeys: []string{"g"}, States: []taskmill.State{taskmill.StateCanceled}}
 	tx := e.begin(t)
 	head, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	got, err := e.client.RetryMatching(ctx, bulk(g))
 	if err != nil || got.Changed != 0 || got.Skipped != 1500 {
 		t.Fatalf("while the group's row is created: %+v, %v; want the whole group left", got, err)
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	if got, err = e.client.RetryMatching(ctx, bulk(g)); err != nil || got.Changed != 1500 {
 		t.Fatalf("once created: %+v, %v; want all 1,500", got, err)
 	}
@@ -438,16 +464,20 @@ func TestBulkActionsSkipHeldRows(t *testing.T) {
 	e := newEnv(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a wait would end it
 	defer cancel()
+
 	free := e.enqueue(t, sendEmail{}, nil)
 	held := e.enqueue(t, sendEmail{}, nil)
 	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 	grouped := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 	keyed := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{DedupeKey: "k"})
+
 	for _, id := range []int64{free, held, grouped} {
 		e.cancel(t, id)
 	}
+
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", held)
+
 	// An open enqueue into the group holds the group's row. The transaction
 	// also holds the row of the dedupe key, as an enqueue does that claims a
 	// key whose window has ended.
@@ -466,6 +496,7 @@ func TestBulkActionsSkipHeldRows(t *testing.T) {
 		free: taskmill.StateCanceled, held: taskmill.StateCanceled, head: taskmill.StateAvailable,
 		grouped: taskmill.StateCanceled, keyed: taskmill.StateAvailable,
 	})
+
 	// The open transaction goes on: nothing of it waits for the bulk actions.
 	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
 		t.Fatal(err)
@@ -474,6 +505,7 @@ func TestBulkActionsSkipHeldRows(t *testing.T) {
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	if res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})); err != nil || res.Changed != 3 {
 		t.Fatalf("retried %d tasks once released, %v; want 3", res.Changed, err)
 	}
@@ -489,6 +521,7 @@ func TestRetryMatchingLeavesTasksWhoseDedupeKeyIsTaken(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	key := func(k, group string) *taskmill.EnqueueOptions {
 		return &taskmill.EnqueueOptions{DedupeKey: k, GroupKey: group}
 	}
@@ -499,11 +532,13 @@ func TestRetryMatchingLeavesTasksWhoseDedupeKeyIsTaken(t *testing.T) {
 	taken := e.keyed(t, key("taken", "")).ID
 	e.cancel(t, taken)
 	holder := e.keyed(t, key("taken", "")).ID
+
 	// Two canceled tasks gave the same key away: the older one gets it back.
 	older := e.keyed(t, key("twice", "")).ID
 	e.cancel(t, older)
 	newer := e.keyed(t, key("twice", "")).ID
 	e.cancel(t, newer)
+
 	// A task that is left for its key does not keep its group's later tasks
 	// from their retry: it is not waiting for another run.
 	head := e.keyed(t, key("in-group", "g")).ID
@@ -522,6 +557,7 @@ func TestRetryMatchingLeavesTasksWhoseDedupeKeyIsTaken(t *testing.T) {
 		later: taskmill.StateAvailable, taken: taskmill.StateCanceled, newer: taskmill.StateCanceled,
 		head: taskmill.StateCanceled, holder: taskmill.StateAvailable, inGroup: taskmill.StateAvailable,
 	})
+
 	for k, id := range map[string]int64{"free": free, "taken": holder, "twice": older, "in-group": inGroup} {
 		if dup := e.keyed(t, key(k, "")); !dup.Duplicate || dup.ID != id {
 			t.Errorf("key %q: got %+v, want a duplicate of task %d", k, dup, id)
@@ -533,11 +569,13 @@ func TestRetryMatchingLeavesTasksWhoseDedupeKeyIsTaken(t *testing.T) {
 	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res != want {
 		t.Fatalf("second run: %+v, %v; want %+v", res, err, want)
 	}
+
 	for _, id := range []int64{holder, older, inGroup} {
 		if err := e.client.Delete(ctx, id); err != nil {
 			t.Fatal(err)
 		}
 	}
+
 	want = taskmill.BulkResult{Changed: 3}
 	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res != want {
 		t.Fatalf("once the keys are free: %+v, %v; want %+v", res, err, want)
@@ -553,11 +591,13 @@ func TestRetryWaitsBrieflyForADedupeKey(t *testing.T) {
 	e := newEnv(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a long wait would end it
 	defer cancel()
+
 	opts := &taskmill.EnqueueOptions{DedupeKey: "k"}
 	keyed := e.keyed(t, opts).ID
 	e.cancel(t, keyed)
 	plain := e.enqueue(t, sendEmail{}, nil)
 	e.cancel(t, plain)
+
 	tx := e.begin(t)
 	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, opts); err != nil {
 		t.Fatal(err)
@@ -569,9 +609,11 @@ func TestRetryWaitsBrieflyForADedupeKey(t *testing.T) {
 		t.Fatalf("retried %+v, %v; want the task without a key, and the other left", res, err)
 	}
 	wantStates(t, e, map[int64]taskmill.State{plain: taskmill.StateAvailable, keyed: taskmill.StateCanceled})
+
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res.Changed != 1 {
 		t.Fatalf("retried %+v once released, %v; want 1 task", res, err)
 	}
@@ -588,13 +630,16 @@ func TestRetryTakesTheKeyOfATaskAheadOfOneItLeaves(t *testing.T) {
 	e := newEnv(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+
 	opts := &taskmill.EnqueueOptions{DedupeKey: "k", GroupKey: "g"}
 	ahead := e.keyed(t, opts).ID
 	held := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
 	behind := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+
 	for _, id := range []int64{behind, held, ahead} {
 		e.cancel(t, id)
 	}
+
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", held)
 
@@ -608,6 +653,7 @@ func TestRetryTakesTheKeyOfATaskAheadOfOneItLeaves(t *testing.T) {
 	if dup := e.keyed(t, opts); !dup.Duplicate || dup.ID != ahead {
 		t.Fatalf("after the retry: got %+v, want a duplicate of task %d", dup, ahead)
 	}
+
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -621,14 +667,17 @@ func TestRetryLeavesNoKeyWithATaskItLeaves(t *testing.T) {
 	e := newEnv(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
+
 	opts := &taskmill.EnqueueOptions{DedupeKey: "k"}
 	left := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "k", GroupKey: "g"}).ID
 	e.cancel(t, left)
+
 	// An open enqueue into the group creates the group's row.
 	tx := e.begin(t)
 	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
 		t.Fatal(err)
 	}
+
 	canceled := bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})
 	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res.Changed != 0 || res.Skipped != 1 {
 		t.Fatalf("retried %+v, %v; want the task left", res, err)
@@ -638,9 +687,11 @@ func TestRetryLeavesNoKeyWithATaskItLeaves(t *testing.T) {
 	if other.Duplicate {
 		t.Fatalf("the task that the retry left holds its key: %+v", other)
 	}
+
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	// The task still knows its key: its retry is refused while the new task
 	// holds it.
 	want := taskmill.BulkResult{Conflicts: 1}
@@ -658,6 +709,7 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 	e := newEnv(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a long wait would end it
 	defer cancel()
+
 	// Group "a" has a head, and a canceled task to retry; group "b" has no
 	// unfinished task, so no row.
 	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
@@ -665,6 +717,7 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 	inB := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"})
 	e.cancel(t, inA)
 	e.cancel(t, inB)
+
 	tx := e.begin(t)
 	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"}); err != nil {
 		t.Fatal(err)
@@ -675,13 +728,16 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 		t.Fatalf("retried %+v, %v; want the one of group a, and group b left", res, err)
 	}
 	wantStates(t, e, map[int64]taskmill.State{head: taskmill.StateAvailable, inA: taskmill.StatePending, inB: taskmill.StateCanceled})
+
 	// The transaction goes on into the group that the retry held.
 	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"}); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
+
 	if res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})); err != nil || res.Changed != 1 {
 		t.Fatalf("retried %d tasks once released, %v; want 1", res.Changed, err)
 	}
@@ -693,6 +749,7 @@ func TestRetryWaitsBrieflyForANewGroup(t *testing.T) {
 func TestBulkBatchEndsWholeWhenTheContextEnds(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// As above: the retry of group b's task waits, for up to its lock
 	// timeout, for the transaction that creates the group's row.
 	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "a"})
@@ -700,16 +757,19 @@ func TestBulkBatchEndsWholeWhenTheContextEnds(t *testing.T) {
 	inB := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"})
 	e.cancel(t, inA)
 	e.cancel(t, inB)
+
 	tx := e.begin(t)
 	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "b"}); err != nil {
 		t.Fatal(err)
 	}
+
 	waiting := func(ctx context.Context) bool {
 		var waiting bool
 		_ = e.pool.QueryRow(ctx, `SELECT EXISTS (SELECT FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0)`,
 			e.schema+".groups").Scan(&waiting)
 		return waiting
 	}
+
 	// The context ends once the batch waits. A run whose wait ended before
 	// that was seen goes again: it waits again for group b.
 	var changed int64
@@ -724,6 +784,7 @@ func TestBulkBatchEndsWholeWhenTheContextEnds(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 		}()
+
 		res, err := e.client.RetryMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}))
 		ended := ctx.Err() != nil
 		cancel()
@@ -731,6 +792,7 @@ func TestBulkBatchEndsWholeWhenTheContextEnds(t *testing.T) {
 		if !ended {
 			continue
 		}
+
 		if err != nil || res.Skipped != 1 || changed != 1 || waiting(t.Context()) {
 			t.Fatalf("retried %+v, %v, and %d tasks in all; want the batch to end whole after the context ended: group a retried, group b left", res, err, changed)
 		}
@@ -747,11 +809,13 @@ func TestBulkActionsGoOnFromAnyStop(t *testing.T) {
 	e.enqueue(t, sendEmail{}, nil)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
+
 	all := taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}
 	res, err := e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: all})
 	if !errors.Is(err, context.Canceled) || res.Next == "" {
 		t.Fatalf("canceled run: %+v, %v; want a cursor to go on", res, err)
 	}
+
 	if res, err = e.client.CancelMatching(t.Context(), &taskmill.BulkParams{Filter: all, Cursor: res.Next}); err != nil || res.Changed != 1 {
 		t.Fatalf("going on: %+v, %v; want the task canceled", res, err)
 	}
@@ -763,11 +827,13 @@ func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	t.Parallel()
 	sent := &bulkStatements{}
 	e := newTracedEnv(t, sent)
+
 	canceled := func(n int, group string) {
 		e.exec(t, `INSERT INTO {s}.tasks (queue, run_at, kind, finalized_at, state, cancel_requested_at, payload, max_attempts, group_key)
 		           SELECT 'default', now(), 'email.send', now(), 'canceled', now(), '{}', 3, nullif($1, '')
 		           FROM generate_series(1, $2)`, group, n)
 	}
+
 	// The oldest task of the group, two batches of other tasks, and the rest
 	// of the group, which is more than a batch.
 	canceled(1, "g")
@@ -788,9 +854,11 @@ func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || first.Changed != 1999 || first.Next == "" {
 		t.Fatalf("first run: %+v, %v; want it to stop after two batches, with a cursor", first, err)
 	}
+
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+
 	// The first run's last batch ended before it returned, so the rest
 	// skips none of its rows.
 	rest, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: all, Cursor: first.Next})
@@ -807,21 +875,26 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx := t.Context()
+
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, finalized_at)
 	           SELECT 'q' || (i % 2), 'k' || (i % 7), CASE WHEN i % 3 = 0 THEN 'available' ELSE 'canceled' END::{s}.task_state,
 	                  now(), '{}', 3, 0, CASE WHEN i % 3 = 0 THEN NULL ELSE now() END
 	           FROM generate_series(1, 30000) i`)
+
 	// The first 28,000 went through earlier batches: none of the actions
 	// matches them any more.
 	e.exec(t, `UPDATE {s}.tasks SET state = 'running', attempt = 1, lease_expires_at = now() + interval '1 hour',
 	           finalized_at = NULL, cancel_requested_at = now() WHERE id <= 28000`)
+
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
 	           SELECT 1000000 + i, now(), CASE WHEN i > 90000 THEN 'q' || (i % 2) ELSE 'q0' END, now(), 'k', now(), 'w', now(),
 	                  2, 1, 3, '{}', '{}', '[]'
 	           FROM generate_series(1, 100000) i`)
+
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "ANALYZE {s}.task_history")
+
 	// A batch reads the rows after its position at most, and those it picks
 	// once more to lock them: 2,000 tasks follow the position and 28,000
 	// precede it, and 10,000 completed tasks follow and 90,000 precede. The
@@ -847,6 +920,7 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 			t.Errorf("%s %+v after %d: a batch read %d rows, want at most %d", c.action, *c.filter, c.after, n, c.most)
 		}
 	}
+
 	e.rawGroups = true
 }
 
@@ -879,6 +953,7 @@ func (s *bulkStatements) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx
 	case d.SQL != "begin":
 		return ctx
 	}
+
 	if f := on.Swap(nil); f != nil {
 		(*f)()
 	}
@@ -918,6 +993,7 @@ func (s *bulkStatements) atBatch(n int, f func()) {
 		}
 		f()
 	}
+
 	s.again.Store(false)
 	s.onBatch.Store(&next)
 }
@@ -937,12 +1013,15 @@ func TestBulkBatchTimeStartsWhenItsTransactionBegan(t *testing.T) {
 	t.Parallel()
 	sent := &bulkStatements{}
 	e := newTracedEnv(t, sent)
+
 	for range 10 {
 		e.die(t, e.enqueue(t, sendEmail{}, nil))
 	}
+
 	// The batch's transaction begins only after more than a batch's time.
 	wait := func() { time.Sleep(taskmill.BatchTimeout + 200*time.Millisecond) }
 	sent.onBegin.Store(&wait)
+
 	res, err := e.client.RetryMatching(t.Context(), bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}))
 	if err != nil || res != (taskmill.BulkResult{Changed: 10}) {
 		t.Fatalf("retried %+v, %v; want 10 tasks retried", res, err)
@@ -957,6 +1036,7 @@ func TestBulkActionsWithAnIndexReadOnlyTheirTasks(t *testing.T) {
 	sent := &bulkStatements{}
 	e := newTracedEnv(t, sent)
 	ctx := t.Context()
+
 	// 30,000 tasks and as many completed ones. Every 500th of each is of
 	// the queue q, 60 of each, and those not completed are dead.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
@@ -969,6 +1049,7 @@ func TestBulkActionsWithAnIndexReadOnlyTheirTasks(t *testing.T) {
 	           SELECT 1000000 + i, now(), CASE WHEN i % 500 = 0 THEN 'q' ELSE 'other' END, now(), 'email.send', now(), 'w', now(),
 	                  2, 1, 3, '{}', '{}', '[]'
 	           FROM generate_series(1, 30000) i`)
+
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "ANALYZE {s}.task_history")
 
@@ -990,6 +1071,7 @@ func TestBulkActionsWithAnIndexReadOnlyTheirTasks(t *testing.T) {
 		if read > 200 {
 			t.Errorf("%s %+v: the batch read %d rows for 60 tasks", c.pick, c.filter, read)
 		}
+
 		sent.reset()
 		res, err := c.do(ctx, &taskmill.BulkParams{Filter: c.filter})
 		if err != nil || res != (taskmill.BulkResult{Changed: 60}) {
@@ -1013,6 +1095,7 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 	sent := &bulkStatements{}
 	e := newTracedEnv(t, sent)
 	ctx := t.Context()
+
 	// Tasks 1 to 250,000. The dead tasks of the queue q are every 1,000th
 	// of the first 100,000, and every fifth from 120,005 to 240,000: 24,100
 	// in all. So the first two windows each end with one of them, tasks
@@ -1023,14 +1106,17 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 	                  CASE WHEN dead THEN now() END
 	           FROM (SELECT i, i <= 100000 AND i % 1000 = 0 OR i > 120000 AND i <= 240000 AND i % 5 = 0 AS dead
 	                 FROM generate_series(1, 250000) i) x`)
+
 	// 120,000 completed tasks after them, 120 of them of the rare kind.
 	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
 	                                         priority, attempt, max_attempts, payload, metadata, errors)
 	           SELECT 1000000 + i, now(), 'other', now(), CASE WHEN i % 1000 = 0 THEN 'rare' ELSE 'email.send' END, now(), 'w', now(),
 	                  2, 1, 3, '{}', '{}', '[]'
 	           FROM generate_series(1, 120000) i`)
+
 	e.exec(t, "ANALYZE {s}.tasks")
 	e.exec(t, "ANALYZE {s}.task_history")
+
 	q := taskmill.TaskFilter{Queues: []string{"q"}}
 	rare := taskmill.TaskFilter{Kinds: []string{"rare"}}
 
@@ -1053,6 +1139,7 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 			t.Errorf("%s %+v: a batch in a window read %d rows, want at most a window of 100,000 and a batch", c.action, c.filter, n)
 		}
 	}
+
 	for _, generic := range []bool{false, true} {
 		n, err := taskmill.WindowRowsRead(ctx, e.client, 0, generic)
 		if err != nil {
@@ -1104,10 +1191,12 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 	if statements := sent.reset(); strings.Count(statements, "w") != 1 {
 		t.Errorf("the delete sent %q, want 1 window", statements)
 	}
+
 	rest, err := e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: rare, Cursor: got.Next})
 	if err != nil || rest != (taskmill.BulkResult{Changed: 420}) {
 		t.Fatalf("the rest of the delete: %+v, %v; want the other 300 tasks and the 120 completed ones deleted", rest, err)
 	}
+
 	left := e.count(t, `SELECT (SELECT count(*) FROM {s}.tasks WHERE kind = 'rare')
 	                         + (SELECT count(*) FROM {s}.task_history WHERE kind = 'rare')`)
 	all := e.count(t, "SELECT (SELECT count(*) FROM {s}.tasks) + (SELECT count(*) FROM {s}.task_history)")
@@ -1122,6 +1211,7 @@ func TestBulkActionsStopMidway(t *testing.T) {
 	t.Parallel()
 	sent := &bulkStatements{}
 	e := newTracedEnv(t, sent)
+
 	// Three batches of tasks, in ten groups that each lie across all three.
 	params := make([]taskmill.EnqueueParams, 3000)
 	for i := range params {
@@ -1130,6 +1220,7 @@ func TestBulkActionsStopMidway(t *testing.T) {
 	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
 		t.Fatal(err)
 	}
+
 	// The action's context ends when its second batch picks its tasks, as a
 	// request's does when it runs out of time: the action stops after that
 	// batch.
@@ -1145,6 +1236,7 @@ func TestBulkActionsStopMidway(t *testing.T) {
 		t.Fatalf("said it canceled %d tasks, but %d are", res.Changed, canceled)
 	}
 	e.checkGroups(t)
+
 	// It goes on where it stopped.
 	rest, err := e.client.CancelMatching(t.Context(), &taskmill.BulkParams{Filter: *all, Cursor: res.Next})
 	if err != nil || res.Changed+rest.Changed != 3000 || rest.Next != "" {
@@ -1155,10 +1247,12 @@ func TestBulkActionsStopMidway(t *testing.T) {
 func TestBulkActionsCheckTheFilter(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	actions := map[string]func(context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error){
 		"retry": e.client.RetryMatching, "cancel": e.client.CancelMatching, "delete": e.client.DeleteMatching,
 	}
 	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
+
 	for _, params := range []*taskmill.BulkParams{
 		nil,
 		{},
@@ -1174,6 +1268,7 @@ func TestBulkActionsCheckTheFilter(t *testing.T) {
 			}
 		}
 	}
+
 	if _, err := e.client.Count(t.Context(), &taskmill.TaskFilter{States: []taskmill.State{"lost"}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Errorf("count with an unknown state: got %v, want ErrInvalidArgument", err)
 	}
@@ -1207,6 +1302,7 @@ func TestCount(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("all tasks: %+v, %v; want %+v", got, err, want)
 	}
+
 	got, err = e.client.Count(ctx, &taskmill.TaskFilter{
 		Kinds: []string{"email.send"}, States: []taskmill.State{taskmill.StateAvailable, taskmill.StateCompleted},
 	})
@@ -1247,6 +1343,7 @@ func TestCount(t *testing.T) {
 func TestCountReadsEachStatesIndex(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// Available tasks, and after them dead ones, each more than the cap. The
 	// count turns scans of the table off for itself, so the table need not
 	// be large for the planner to read the indexes: only so large that a scan
@@ -1256,6 +1353,7 @@ func TestCountReadsEachStatesIndex(t *testing.T) {
 	                  now(), '{}', 3, CASE WHEN i > 20000 THEN now() END
 	           FROM generate_series(1, 35000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
+
 	for _, filter := range []*taskmill.TaskFilter{nil, {Queues: []string{taskmill.DefaultQueue}}} {
 		n, err := taskmill.CountRowsRead(t.Context(), e.client, filter)
 		if err != nil {

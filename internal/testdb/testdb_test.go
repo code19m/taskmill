@@ -42,6 +42,7 @@ func TestURLSkipsWithoutADatabaseButFailsInCI(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(testdb.EnvURL, tt.url)
 			t.Setenv("CI", tt.ci)
+
 			// URL ends the goroutine of a test that it skips or fails.
 			got, url, done := ended{TB: t}, "", make(chan struct{})
 			go func() {
@@ -49,6 +50,7 @@ func TestURLSkipsWithoutADatabaseButFailsInCI(t *testing.T) {
 				url = testdb.URL(&got)
 			}()
 			<-done
+
 			if url != tt.url {
 				t.Errorf("got the URL %q, want %q", url, tt.url)
 			}
@@ -73,10 +75,12 @@ func TestSchemaIsDroppedAfterTheStatementsThatItsTestGaveUp(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Pool(t)
 	schema := testdb.Schema(t, pool)
+
 	setup := strings.ReplaceAll("CREATE SCHEMA {s}; CREATE TABLE {s}.first (); CREATE TABLE {s}.second ()", "{s}", schema)
 	if _, err := pool.Exec(t.Context(), setup); err != nil {
 		t.Fatal(err)
 	}
+
 	testdb.GiveUp(t, pool, schema+".second", schema+".first")
 	// The test ends here, and Schema drops the schema.
 }

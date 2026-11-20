@@ -1,20 +1,14 @@
 package taskmill
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
-	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
-
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // DefaultQueue is the queue that tasks go to when neither the enqueue call
@@ -33,25 +27,6 @@ const (
 	maxEnqueueTasks     = 10_000   // most tasks of one enqueue call
 	maxEnqueueBytes     = 64 << 20 // most payload and metadata of one enqueue call
 )
-
-// PostgreSQL stores the times from minTime up to, but not including,
-// endTime. The driver does not check: it sends a later time as a number
-// that wraps around, which PostgreSQL reads as a time in the past, or
-// rejects.
-var (
-	minTime = time.Date(-4713, time.November, 24, 0, 0, 0, 0, time.UTC) // 4714 BC
-	endTime = time.Date(294277, time.January, 1, 0, 0, 0, 0, time.UTC)
-)
-
-// checkTime checks that PostgreSQL can store t. what names the time in the
-// error.
-func checkTime(what string, t time.Time) error {
-	if t.Before(minTime) || !t.Before(endTime) {
-		return invalidArgument("%s %s is outside the range that PostgreSQL stores, 4713 BC to 294276 AD",
-			what, t.UTC().Format(time.RFC3339))
-	}
-	return nil
-}
 
 // EnqueueOptions control how a task is enqueued. Zero values mean "not set":
 // a field set in the call wins over the kind's defaults (see
@@ -203,7 +178,7 @@ type EnqueueTask struct {
 // the try before was saved. [Client.EnqueueTx] cannot do that in the
 // caller's transaction, and returns the error.
 func (c *Client) Enqueue(ctx context.Context, args Args, opts *EnqueueOptions) (EnqueueResult, error) {
-	res, err := c.enqueue(ctx, pgxQuerier{q: c.pool}, []EnqueueParams{{Args: args, Options: opts}})
+	res, err := c.enqueue(ctx, pgxExecutor{q: c.pool}, []EnqueueParams{{Args: args, Options: opts}})
 	if err != nil {
 		return EnqueueResult{}, err
 	}
@@ -224,6 +199,7 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 	if err != nil {
 		return EnqueueResult{}, err
 	}
+
 	res, err := c.enqueue(ctx, q, []EnqueueParams{{Args: args, Options: opts}})
 	if err != nil {
 		return EnqueueResult{}, err
@@ -242,7 +218,7 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 //
 // Like [Client.Enqueue], it runs again by itself after a deadlock.
 func (c *Client) EnqueueMany(ctx context.Context, params []EnqueueParams) ([]EnqueueResult, error) {
-	return c.enqueue(ctx, pgxQuerier{q: c.pool}, params)
+	return c.enqueue(ctx, pgxExecutor{q: c.pool}, params)
 }
 
 // EnqueueManyTx is [Client.EnqueueMany] in the caller's transaction. tx may
@@ -253,19 +229,6 @@ func (c *Client) EnqueueManyTx(ctx context.Context, tx Executor, params []Enqueu
 		return nil, err
 	}
 	return c.enqueue(ctx, q, params)
-}
-
-// executorQuerier returns the querier of an Executor for a single statement,
-// which may run on a pool or connection as well as in a transaction.
-func executorQuerier(tx Executor) (querier, error) {
-	if tx == nil {
-		return nil, invalidArgument("executor is nil")
-	}
-	q := tx.querier()
-	if q == nil {
-		return nil, invalidArgument("executor has no querier; create it with Pgx or SQL")
-	}
-	return q, nil
 }
 
 // enqueueBatch holds a batch as the parallel arrays that the enqueue
@@ -289,6 +252,7 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 	if len(params) > maxEnqueueTasks {
 		return nil, invalidArgument("%d tasks in one call, more than the limit of %d", len(params), maxEnqueueTasks)
 	}
+
 	tasks := make([]*resolvedTask, len(params))
 	payloads := 0
 	for i, p := range params {
@@ -296,6 +260,7 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 		if err != nil {
 			return nil, inBatch(err, i, len(params))
 		}
+
 		// Stop at the first task past the limit, before encoding the rest;
 		// store checks the limit again with the metadata.
 		if payloads += len(t.payload); payloads > maxEnqueueBytes {
@@ -303,6 +268,7 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 		}
 		tasks[i] = t
 	}
+
 	return c.storeThrough(ctx, q, tasks)
 }
 
@@ -315,20 +281,22 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 	}
 	views := make([]*EnqueueTask, len(tasks))
 	for i, t := range tasks {
-		meta := make(map[string]string, len(t.meta)+len(t.own)) // t.meta may belong to the caller
-		maps.Copy(meta, t.meta)
-		maps.Copy(meta, t.own)
-		views[i] = &EnqueueTask{Queue: t.queue, Kind: t.kind, Metadata: meta}
+		// A copy: the middleware may change it, and t.meta may belong to the
+		// caller.
+		views[i] = &EnqueueTask{Queue: t.queue, Kind: t.kind, Metadata: t.metadataCopy()}
 	}
+
 	var results []EnqueueResult
 	err := through(ctx, c.enqueueMiddleware, views, func(ctx context.Context) error {
 		for i, v := range views {
 			tasks[i].meta = v.Metadata
 		}
+
 		res, err := c.store(ctx, q, tasks)
 		if err != nil {
 			return err
 		}
+
 		for i, v := range views {
 			v.Result = res[i]
 		}
@@ -372,6 +340,7 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 		if size += len(t.payload) + len(meta); size > maxEnqueueBytes {
 			return nil, tooLarge(len(tasks))
 		}
+
 		if t.dedupeKey != nil {
 			if row, ok := rowOf[string(t.dedupeKey)]; ok {
 				pos[i], repeat[i] = row, true
@@ -383,7 +352,7 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 		b.add(t, meta, now)
 	}
 
-	results, err := c.runEnqueue(ctx, q, &b)
+	results, err := c.insertWithRetry(ctx, q, &b)
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +380,11 @@ func inBatch(err error, i, n int) error {
 	return fmt.Errorf("%w (task %d of %d)", err, i+1, n)
 }
 
-func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]EnqueueResult, error) {
+// insertWithRetry runs the enqueue statement on a batch, and runs it again
+// after a deadlock when it is a transaction of its own, on the client's
+// pool. It then finds the tasks of the duplicates that the statement could
+// not see.
+func (c *Client) insertWithRetry(ctx context.Context, q querier, b *enqueueBatch) ([]EnqueueResult, error) {
 	notify := make([]string, 0, len(b.due))
 	for queue := range b.due {
 		if c.notifier.allow(ctx, queue) {
@@ -421,7 +394,8 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 
 	// Only on the client's own pool is the enqueue statement known to be a
 	// transaction of its own: any other executor may be in the caller's.
-	own := q == querier(pgxQuerier{q: c.pool})
+	ownTx := q == querier(pgxExecutor{q: c.pool})
+
 	var results []EnqueueResult
 	var missing [][]byte // duplicates whose existing task the statement could not see
 	var err error
@@ -433,16 +407,17 @@ func (c *Client) runEnqueue(ctx context.Context, q querier, b *enqueueBatch) ([]
 		// statement is a transaction of its own, so nothing of it stays,
 		// and it runs again, as Cancel does: see inLockOrder. In the
 		// caller's transaction it cannot: that transaction is over.
-		if try == lockOrderTries || !isDeadlock(err) || !own {
+		if try == deadlockTries || !isDeadlock(err) || !ownTx {
 			break
 		}
 	}
 	if err != nil {
 		return nil, enqueueError(err)
 	}
+
 	if len(missing) > 0 {
 		if err := c.resolveDuplicates(ctx, q, b, results, missing); err != nil {
-			if !own {
+			if !ownTx {
 				return nil, err // the caller rolls back
 			}
 			// The tasks are committed, and the read only fills in IDs. An
@@ -464,9 +439,21 @@ func (c *Client) insertTasks(ctx context.Context, q querier, b *enqueueBatch, no
 	if b.plain {
 		stmt = c.sql.enqueuePlain
 	}
+
 	r, err := q.query(ctx, stmt,
-		b.queues, b.kinds, b.priorities, b.runAts, b.maxAttempts, nullable(b.groups),
-		b.dedupeKeys, b.dedupeWindows, b.payloads, b.metadata, c.schema, notify)
+		b.queues,           // $1
+		b.kinds,            // $2
+		b.priorities,       // $3
+		b.runAts,           // $4
+		b.maxAttempts,      // $5
+		nullable(b.groups), // $6
+		b.dedupeKeys,       // $7
+		b.dedupeWindows,    // $8
+		b.payloads,         // $9
+		b.metadata,         // $10
+		c.schema,           // $11
+		notify,             // $12
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -492,7 +479,7 @@ func (c *Client) insertTasks(ctx context.Context, q querier, b *enqueueBatch, no
 // through, such as an unpaired surrogate escape in the payload: retrying
 // cannot help.
 func enqueueError(err error) error {
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && strings.HasPrefix(pgErr.Code, "22") { // data_exception
+	if strings.HasPrefix(pgCode(err), codeDataException) {
 		return fmt.Errorf("%w: the database rejected a value: %w", ErrInvalidArgument, err)
 	}
 	return fmt.Errorf("taskmill: enqueue: %w", err)
@@ -504,23 +491,27 @@ func enqueueError(err error) error {
 // deleted meanwhile, leaves its duplicates with the ID 0. So does every key
 // if the read fails.
 func (c *Client) resolveDuplicates(ctx context.Context, q querier, b *enqueueBatch, results []EnqueueResult, keys [][]byte) error {
+	fail := func(err error) error { return fmt.Errorf("taskmill: enqueue: find duplicates: %w", err) }
+
 	r, err := q.query(ctx, c.sql.dedupeLookup, keys)
 	if err != nil {
-		return fmt.Errorf("taskmill: enqueue: find duplicates: %w", err)
+		return fail(err)
 	}
 	defer r.Close()
 	existing := make(map[string]int64, len(keys))
+
 	for r.Next() {
 		var key []byte
 		var id int64
 		if err := r.Scan(&key, &id); err != nil {
-			return fmt.Errorf("taskmill: enqueue: find duplicates: %w", err)
+			return fail(err)
 		}
 		existing[string(key)] = id
 	}
 	if err := r.Err(); err != nil {
-		return fmt.Errorf("taskmill: enqueue: find duplicates: %w", err)
+		return fail(err)
 	}
+
 	for i := range results {
 		if results[i].Duplicate && results[i].ID == 0 {
 			results[i].ID = existing[string(b.dedupeKeys[i])]
@@ -539,18 +530,24 @@ type resolvedTask struct {
 	dedupeWindow       time.Duration
 	payload            []byte
 	meta               map[string]string // may belong to the caller or the kind: never modified
-	own                map[string]string // taskmill's own metadata, of a schedule's run: stored over meta
+	reservedMeta       map[string]string // taskmill's own metadata, of a schedule's run: stored over meta
 }
 
 // metadata returns the task's metadata as it is stored: meta, and over it
-// taskmill's own.
+// reservedMeta. Without reserved keys, it is meta itself, which the caller
+// must not change.
 func (t *resolvedTask) metadata() map[string]string {
-	if len(t.own) == 0 {
+	if len(t.reservedMeta) == 0 {
 		return t.meta
 	}
-	all := make(map[string]string, len(t.meta)+len(t.own))
+	return t.metadataCopy()
+}
+
+// metadataCopy returns the task's metadata as it is stored, in a new map.
+func (t *resolvedTask) metadataCopy() map[string]string {
+	all := make(map[string]string, len(t.meta)+len(t.reservedMeta))
 	maps.Copy(all, t.meta)
-	maps.Copy(all, t.own)
+	maps.Copy(all, t.reservedMeta)
 	return all
 }
 
@@ -582,6 +579,7 @@ func resolve(p EnqueueParams) (*resolvedTask, error) {
 		runAt:        o.RunAt,
 		dedupeWindow: o.DedupeWindow,
 	}
+
 	if t.queue == "" {
 		t.queue = DefaultQueue
 	}
@@ -612,155 +610,6 @@ func resolve(p EnqueueParams) (*resolvedTask, error) {
 
 	t.meta = o.Metadata
 	return t, nil
-}
-
-// encodeMetadata encodes a task's metadata as JSON, which jsonb can store.
-func encodeMetadata(meta map[string]string) ([]byte, error) {
-	if len(meta) == 0 {
-		return []byte("{}"), nil
-	}
-	text, err := encodeJSON(meta)
-	if err != nil {
-		return nil, invalidArgument("encode metadata: %v", err)
-	}
-	if len(text) > maxMetadataBytes {
-		return nil, invalidArgument("metadata is %d bytes, more than the limit of %d", len(text), maxMetadataBytes)
-	}
-	if hasNUL(text) {
-		return nil, invalidArgument("metadata contains a NUL character")
-	}
-	return text, nil
-}
-
-// encodeJSON encodes v as JSON without escaping &, <, and >, which jsonb
-// stores as they are, so that the size limits count what is stored.
-// encoding/json still escapes U+2028 and U+2029.
-func encodeJSON(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
-}
-
-// encodePayload encodes args as JSON, and checks that jsonb can store it
-// within the payload limit. The checks run before the query, so a payload
-// that fails them leaves the caller's transaction usable.
-func encodePayload(kind string, args Args) ([]byte, error) {
-	payload, err := encodeJSON(args)
-	if err != nil {
-		return nil, invalidArgument("encode payload of kind %q: %v", kind, err)
-	}
-	size, numbersFit := storedSize(payload)
-	switch {
-	case bytes.Equal(payload, []byte("null")):
-		return nil, invalidArgument("payload of kind %q encodes to null", kind)
-	case size > maxPayloadBytes:
-		return nil, invalidArgument("payload of kind %q is more than %d bytes as stored", kind, maxPayloadBytes)
-	case !numbersFit:
-		return nil, invalidArgument("payload of kind %q holds a number beyond the range of PostgreSQL's numeric type", kind)
-	case !utf8.Valid(payload):
-		return nil, invalidArgument("payload of kind %q is not valid UTF-8", kind)
-	case hasNUL(payload):
-		return nil, invalidArgument("payload of kind %q contains a NUL character", kind)
-	}
-	return payload, nil
-}
-
-// Limits of PostgreSQL's numeric type, in which jsonb stores numbers.
-const (
-	maxNumericWhole = 131_072 // digits before the point
-	maxNumericScale = 16_383  // digits after the point
-)
-
-// storedSize returns at most the size of JSON text as PostgreSQL writes it
-// out of jsonb, where each number is written in full: 1e6 becomes 1000000,
-// so a short payload could grow past any limit, up to values that PostgreSQL
-// cannot read back. Strings are written as they came. jsonb also adds a
-// space after each comma and colon; that at most doubles the size, and the
-// limit leaves it out, as it always has. Counting stops past the limit.
-// numbersFit reports whether every number counted fits PostgreSQL's numeric
-// type.
-func storedSize(text []byte) (size int, numbersFit bool) {
-	size, numbersFit = len(text), true
-	inString := false
-	for i := 0; i < len(text) && size <= maxPayloadBytes && numbersFit; i++ {
-		switch c := text[i]; {
-		case inString && c == '\\':
-			i++ // the escaped byte cannot end the string
-		case c == '"':
-			inString = !inString
-		case !inString && (c == '-' || '0' <= c && c <= '9'):
-			end := i + 1
-			for end < len(text) && strings.IndexByte("+-.0123456789Ee", text[end]) >= 0 {
-				end++
-			}
-			var n int
-			n, numbersFit = numberSize(text[i:end])
-			size += n - (end - i)
-			i = end - 1
-		}
-	}
-	return size, numbersFit
-}
-
-// numberSize returns at most the length of a JSON number as PostgreSQL
-// writes it: without an exponent, and with as many digits after the point as
-// the number has. fits reports whether the number fits PostgreSQL's numeric
-// type.
-func numberSize(num []byte) (size int, fits bool) {
-	digits := bytes.TrimPrefix(num, []byte("-"))
-	sign := len(num) - len(digits)
-	exp := 0
-	if at := bytes.IndexAny(digits, "eE"); at >= 0 {
-		var err error
-		if exp, err = strconv.Atoi(string(digits[at+1:])); err != nil {
-			return 0, false // beyond the range of int
-		}
-		digits = digits[:at]
-	}
-	// Past this bound, a number is beyond numeric's range, or a zero; within
-	// it, the sums below cannot overflow.
-	bound := len(digits) + maxNumericWhole + 1
-	exp = max(-bound, min(exp, bound))
-	whole, frac, _ := bytes.Cut(digits, []byte("."))
-	zeros := len(whole) - len(bytes.TrimLeft(whole, "0"))
-	if zeros == len(whole) {
-		zeros += len(frac) - len(bytes.TrimLeft(frac, "0"))
-	}
-	before := 1 // digits before the point
-	if zeros < len(whole)+len(frac) {
-		before = max(1, len(whole)+exp-zeros)
-	}
-	after := max(0, len(frac)-exp)
-	size = sign + before
-	if after > 0 {
-		size += 1 + after
-	}
-	return size, before <= maxNumericWhole && after <= maxNumericScale
-}
-
-// hasNUL reports whether JSON text encodes a NUL character, which jsonb
-// cannot store. An escape is one only if an odd number of backslashes leads
-// to it: in \\u0000 the backslash itself is escaped.
-func hasNUL(text []byte) bool {
-	for i := 0; ; {
-		j := bytes.Index(text[i:], []byte("u0000"))
-		if j < 0 {
-			return false
-		}
-		j += i
-		slashes := 0
-		for k := j - 1; k >= 0 && text[k] == '\\'; k-- {
-			slashes++
-		}
-		if slashes%2 == 1 {
-			return true
-		}
-		i = j + 1
-	}
 }
 
 func (t *resolvedTask) validate() error {
@@ -798,6 +647,7 @@ func (b *enqueueBatch) add(t *resolvedTask, metadata []byte, now time.Time) {
 	b.payloads = append(b.payloads, string(t.payload))
 	b.metadata = append(b.metadata, string(metadata))
 	b.plain = b.plain && t.dedupeKey == nil && t.group == ""
+
 	if !t.runAt.After(now) {
 		b.due[t.queue] = true
 	}
@@ -835,21 +685,6 @@ func mergeOptions(base, override EnqueueOptions) EnqueueOptions {
 		base.Metadata = merged
 	}
 	return base
-}
-
-// checkName validates a queue name, kind, or group key.
-func checkName(what, s string, maxLen int) error {
-	switch {
-	case s == "":
-		return invalidArgument("%s is empty", what)
-	case !utf8.ValidString(s):
-		return invalidArgument("%s is not valid UTF-8", what)
-	case strings.ContainsRune(s, 0):
-		return invalidArgument("%s contains a NUL character", what)
-	case utf8.RuneCountInString(s) > maxLen:
-		return invalidArgument("%s %q is longer than %d characters", what, s, maxLen)
-	}
-	return nil
 }
 
 // timePtr returns nil for the zero time, which the database stores as NULL.

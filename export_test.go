@@ -44,6 +44,7 @@ func SetTiming(w *Worker, t Timing) {
 			*dst = d
 		}
 	}
+
 	set(&w.timing.maintainer, t.Maintainer)
 	set(&w.timing.heartbeat, t.Heartbeat)
 	set(&w.timing.election, t.Election)
@@ -87,7 +88,7 @@ func Rescue(ctx context.Context, w *Worker) {
 // RefreshStats counts the tasks and stores the statistics once, as w's
 // maintainer does every 10 seconds.
 func RefreshStats(ctx context.Context, w *Worker) error {
-	return newMaintainer(w).countStats(ctx)
+	return newMaintainer(w).recountStats(ctx)
 }
 
 // PruneSchedules deletes the stored schedules that w does not define, as its
@@ -103,7 +104,7 @@ func PruneSchedules(ctx context.Context, w *Worker) {
 func Elect(ctx context.Context, c *Client, id string) (leads, wrote bool, err error) {
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		var leader string
-		err := tx.QueryRow(ctx, c.sql.electLeader, id, time.Minute.Microseconds()).Scan(&leader)
+		err := tx.QueryRow(ctx, c.sql.electMaintainer, id, time.Minute.Microseconds()).Scan(&leader)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
@@ -182,6 +183,7 @@ func ended(c *Client, id int64, token int32) []statement {
 func LeasedRowsRead(ctx context.Context, c *Client, ids []int64, tokens []int32) (int64, error) {
 	tasks := scanned(func(rel string) bool { return rel == "tasks" })
 	var n int64
+
 	for _, s := range leased(c, ids, tokens) {
 		plan, err := analyze(ctx, c, true, "", s.sql, s.args...)
 		if err != nil {
@@ -209,6 +211,7 @@ func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (f
 			return err
 		}
 		copy(found[4:], one[:])
+
 		for i, s := range leased(c, ids, tokens) {
 			r, err := tx.Query(ctx, s.sql, s.args...)
 			if err != nil {
@@ -226,6 +229,7 @@ func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (f
 				return err
 			}
 		}
+
 		for i := range found {
 			slices.Sort(found[i])
 		}
@@ -245,7 +249,7 @@ func endedFound(ctx context.Context, c *Client, tx pgx.Tx, ids []int64, tokens [
 			if err != nil {
 				return found, err
 			}
-			ok, err := queryRow(ctx, pgxQuerier{q: undo}, s.sql, s.args, new(string), new(string), new(string))
+			ok, err := queryRow(ctx, pgxExecutor{q: undo}, s.sql, s.args, new(string), new(string), new(string))
 			if err != nil {
 				return found, err
 			}
@@ -271,6 +275,7 @@ func Complete(ctx context.Context, c *Client, settings string, ids []int64) (int
 	for i, id := range ids {
 		cs[i] = completion{id: id, token: 1}
 	}
+
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -281,7 +286,8 @@ func Complete(ctx context.Context, c *Client, settings string, ids []int64) (int
 			return 0, err
 		}
 	}
-	done, err := c.complete(ctx, c.logger, pgxQuerier{q: tx}, cs)
+
+	done, err := c.complete(ctx, c.logger, pgxExecutor{q: tx}, cs)
 	return len(done), err
 }
 
@@ -305,11 +311,13 @@ func explain(ctx context.Context, c *Client, settings, sql string, args ...any) 
 			return "", err
 		}
 	}
+
 	r, err := tx.Query(ctx, "EXPLAIN "+sql, args...)
 	if err != nil {
 		return "", err
 	}
 	defer r.Close()
+
 	var plan []string
 	for r.Next() {
 		var line string
@@ -338,10 +346,12 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 	if states == nil {
 		states = deleteStates
 	}
+
 	m, err := checkBulk(&BulkParams{Filter: *filter}, states)
 	if err != nil {
 		return 0, err
 	}
+
 	m.after = after
 	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&m.last); err != nil {
 		return 0, err
@@ -352,6 +362,7 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 			return 0, err
 		}
 	}
+
 	args := []any{m.queues, m.kinds, m.groups, m.states, m.after, m.until, m.left.queues, m.left.groups}
 	if action == "history" {
 		args = []any{m.queues, m.kinds, m.groups, m.after, m.until}
@@ -367,6 +378,7 @@ func CountRowsRead(ctx context.Context, c *Client, filter *TaskFilter) (int64, e
 	if err != nil {
 		return 0, err
 	}
+
 	states := m.states
 	if m.history {
 		states = append(states, string(StateCompleted))
@@ -383,6 +395,7 @@ func WindowRowsRead(ctx context.Context, c *Client, after int64, generic bool) (
 	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&last); err != nil {
 		return 0, err
 	}
+
 	plan, err := analyze(ctx, c, generic, windowSettings, c.sql.windowEnd, after, last, true, true)
 	return planSum(plan, scanned(taskTables)), err
 }
@@ -402,6 +415,7 @@ func ListRowsRead(ctx context.Context, c *Client, params *ListParams, generic bo
 	if err != nil {
 		return 0, err
 	}
+
 	plan, err := analyze(ctx, c, generic, page.settings, page.sql, page.args...)
 	return planSum(plan, scanned(taskTables)), err
 }
@@ -414,6 +428,7 @@ func ListCompiled(ctx context.Context, c *Client, params *ListParams) (bool, err
 	if err != nil {
 		return false, err
 	}
+
 	tx, err := c.pool.Begin(ctx)
 	if err != nil {
 		return false, err
@@ -424,6 +439,7 @@ func ListCompiled(ctx context.Context, c *Client, params *ListParams) (bool, err
 			return false, err
 		}
 	}
+
 	var out []map[string]any
 	if err := tx.QueryRow(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+page.sql, page.args...).Scan(&out); err != nil {
 		return false, err
@@ -483,6 +499,7 @@ func analyze(ctx context.Context, c *Client, generic bool, settings, sql string,
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
 	// Only a prepared statement has a generic plan, and EXECUTE takes its
 	// arguments as text, so pgx writes them into the statement. A prepared
 	// statement outlives its transaction, on a connection that others use
@@ -497,6 +514,7 @@ func analyze(ctx context.Context, c *Client, generic bool, settings, sql string,
 		query = "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE " + name + "(" + strings.Join(params, ", ") + ")"
 		args = append([]any{pgx.QueryExecModeSimpleProtocol}, args...)
 	}
+
 	for _, s := range setup {
 		if s == "" {
 			continue
@@ -505,10 +523,12 @@ func analyze(ctx context.Context, c *Client, generic bool, settings, sql string,
 			return nil, err
 		}
 	}
+
 	var plan []map[string]any
 	if err := tx.QueryRow(ctx, query, args...).Scan(&plan); err != nil {
 		return nil, err
 	}
+
 	if generic {
 		if _, err := tx.Exec(ctx, "DEALLOCATE "+name); err != nil {
 			return nil, err
@@ -537,6 +557,7 @@ func scanned(match func(rel string) bool) func(node map[string]any) float64 {
 func planSum(plan map[string]any, count func(node map[string]any) float64) int64 {
 	loops, _ := plan["Actual Loops"].(float64)
 	n := int64(count(plan) * loops)
+
 	children, _ := plan["Plans"].([]any)
 	for _, child := range children {
 		if c, ok := child.(map[string]any); ok {

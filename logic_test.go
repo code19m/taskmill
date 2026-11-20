@@ -83,7 +83,7 @@ func TestScheduledFor(t *testing.T) {
 		{time.FixedZone("seconds", 60*60+17), "22:30"},
 	} {
 		s := compiledSchedule{Schedule: Schedule{Name: "nightly", Location: tt.loc}}
-		info := TaskInfo{Metadata: s.ownMetadata(s.scheduledFor(at))}
+		info := TaskInfo{Metadata: s.reservedMetadata(s.scheduledFor(at))}
 		if got := info.ScheduledFor(); !got.Equal(at) || got.Format("15:04") != tt.want {
 			t.Errorf("in %s: got %s, want %s at %s", tt.loc, got.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), tt.want)
 		}
@@ -141,6 +141,7 @@ func TestExponentialBackoff(t *testing.T) {
 			}
 		}
 	}
+
 	custom := ExponentialBackoff{Base: 10 * time.Millisecond, Max: 50 * time.Millisecond}
 	if got := custom.Backoff(4); got < 45*time.Millisecond || got > 55*time.Millisecond {
 		t.Fatalf("custom Backoff(4) = %s, want about 50ms", got)
@@ -151,6 +152,7 @@ func TestErrorJSON(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("é", errorMessageLimit) // two bytes each: the cut falls inside a rune
 	raw := errorJSON(outcome{msg: "a\x00" + long, code: CodeTimeout})
+
 	var got struct {
 		Message string    `json:"message"`
 		Code    ErrorCode `json:"code"`
@@ -162,6 +164,7 @@ func TestErrorJSON(t *testing.T) {
 		!strings.HasSuffix(got.Message, "…") || len(got.Message) > errorMessageLimit+len("…") {
 		t.Fatalf("got code %q and a message of %d bytes ending %q", got.Code, len(got.Message), got.Message[len(got.Message)-8:])
 	}
+
 	if raw := errorJSON(outcome{}); raw != `{"message":"unknown error"}` {
 		t.Fatalf("no error: got %s", raw)
 	}
@@ -171,6 +174,7 @@ func TestMergeOptions(t *testing.T) {
 	t.Parallel()
 	base := EnqueueOptions{Queue: "q", Priority: PriorityLow, MaxAttempts: 3, Metadata: map[string]string{"a": "1"}}
 	got := mergeOptions(base, EnqueueOptions{Priority: PriorityHigh, Metadata: map[string]string{"b": "2"}})
+
 	if got.Queue != "q" || got.Priority != PriorityHigh || got.MaxAttempts != 3 || len(got.Metadata) != 2 {
 		t.Fatalf("got %+v", got)
 	}
@@ -200,6 +204,7 @@ func TestMiddlewareChain(t *testing.T) {
 	t.Parallel()
 	errTwice, errSkipped, errCall := errors.New("twice"), errors.New("skipped"), errors.New("failed")
 	type middleware func(ctx context.Context, trace *[]string, next func(context.Context) error) error
+
 	// see keeps the rules. It records its start, and what its next returned.
 	see := func(name string) middleware {
 		return func(ctx context.Context, trace *[]string, next func(context.Context) error) error {
@@ -261,6 +266,7 @@ func TestWorkerServesTheDefaultQueuesOfItsKinds(t *testing.T) {
 	AddHandler(&hs, HandlerFunc[plainArgs](func(context.Context, *Task[plainArgs]) error { return nil }), nil)
 	AddHandler(&hs, HandlerFunc[*routedArgs](func(context.Context, *Task[*routedArgs]) error { return nil }), nil)
 	cfg := WorkerConfig{Handlers: &hs}
+
 	if err := resolveWorkerConfig(&cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -302,12 +308,14 @@ func TestDefaultTiming(t *testing.T) {
 		{"listen", d.listen, 10 * time.Second},
 		{"lockWait", d.lockWait, time.Second},
 	}
+
 	for _, tt := range intervals {
 		if tt.got != tt.want {
 			t.Errorf("the worker's %s interval is %s, want %s: the docs name it, and the tests that shorten it cannot see a change",
 				tt.name, tt.got, tt.want)
 		}
 	}
+
 	if fields := reflect.TypeFor[timing]().NumField(); fields != len(intervals) {
 		t.Errorf("timing has %d intervals, and this test holds %d: add the new one", fields, len(intervals))
 	}
@@ -362,10 +370,12 @@ func TestElectionOutlivesItsWorkersStopForABoundedTime(t *testing.T) {
 				defer stop()
 				election, cancel := outlive(worker, time.Minute, 5*time.Second)
 				defer cancel()
+
 				start := time.Now()
 				if tt.stopsAfter > 0 {
 					time.AfterFunc(tt.stopsAfter, stop)
 				}
+
 				<-election.Done()
 				if got := time.Since(start); got != tt.wantEnd {
 					t.Errorf("the election ended after %s, want %s", got, tt.wantEnd)
@@ -384,8 +394,8 @@ func TestWhileLeased(t *testing.T) {
 	// next try, so the test measures its waits exactly.
 	synctest.Test(t, func(t *testing.T) {
 		w := &Worker{cfg: WorkerConfig{LeaseDuration: 400 * time.Millisecond}, logger: slog.New(slog.DiscardHandler)}
-		w.resultFailures = newFailures(w, "record results")
-		ts := []*tracked{{renewedAt: time.Now()}}
+		w.resultFailures = newIncidentLog(w, "record results")
+		ts := []*liveAttempt{{renewedAt: time.Now()}}
 
 		calls := 0
 		err := w.whileLeased(t.Context(), ts, func(context.Context) error {
@@ -402,7 +412,7 @@ func TestWhileLeased(t *testing.T) {
 		// that persists still ends them. Tries that followed the renewals
 		// would never end: the tenth succeeds, which fails the test.
 		start, calls := time.Now(), 0
-		ts = []*tracked{{renewedAt: start}}
+		ts = []*liveAttempt{{renewedAt: start}}
 		err = w.whileLeased(t.Context(), ts, func(context.Context) error {
 			if calls++; calls == 10 {
 				return nil
@@ -428,10 +438,12 @@ func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
 
 		f.observe(ctx, boom)
 		f.observe(ctx, nil)
+
 		// A failure soon after the recovery belongs to the same incident, and
 		// waits for the next line.
 		f.observe(ctx, boom)
 		f.observe(ctx, nil)
+
 		// Much later, a failure reports that incident's recovery, then starts
 		// another.
 		time.Sleep(2 * every)
@@ -466,6 +478,7 @@ func TestFailuresOfWorkThatRunsNowAndThen(t *testing.T) {
 			f.observe(t.Context(), errors.New("timeout"))
 			time.Sleep(c.pause)
 			f.observe(t.Context(), errors.New("timeout"))
+
 			if !slices.Equal(l.lines, c.want) {
 				t.Errorf("failures %s apart: got lines %q, want %q", c.pause, l.lines, c.want)
 			}
@@ -494,6 +507,7 @@ func TestFailuresOfAFlappingOperationEscalateAndStayRare(t *testing.T) {
 		if limit := 2 * (1 + int(elapsed/every)); len(l.lines) > limit {
 			t.Errorf("%d tries logged %d lines, want at most %d: %q", tries, len(l.lines), limit, l.lines)
 		}
+
 		// It is one incident: a warning, errors as it lasts, and a last line
 		// that counts every failure.
 		escalated := false
@@ -525,6 +539,7 @@ func TestNotifierForgetsQueuesAfterTheirWindow(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		n := newNotifier(nil, "taskmill", slog.New(slog.DiscardHandler))
 		const queues = 1000
+
 		for _, window := range []string{"first", "second", "third"} {
 			for i := range queues {
 				if queue := window + "-" + strconv.Itoa(i); !n.allow(t.Context(), queue) {
@@ -533,6 +548,7 @@ func TestNotifierForgetsQueuesAfterTheirWindow(t *testing.T) {
 			}
 			time.Sleep(notifyWindow)
 		}
+
 		n.mu.Lock()
 		defer n.mu.Unlock()
 		if kept := len(n.last); kept > 2*queues {
@@ -544,10 +560,10 @@ func TestNotifierForgetsQueuesAfterTheirWindow(t *testing.T) {
 // newFailureLines returns the failures of an operation with a report
 // interval of every, and the lines it logs. Its tests run in a synctest
 // bubble, where the clock moves only when they sleep.
-func newFailureLines(every time.Duration) (*failures, *lineLog) {
+func newFailureLines(every time.Duration) (*incidentLog, *lineLog) {
 	l := &lineLog{}
 	w := &Worker{logger: slog.New(l), timing: timing{failureReport: every}}
-	return newFailures(w, "fetch tasks"), l
+	return newIncidentLog(w, "fetch tasks"), l
 }
 
 // lineLog is a slog handler that keeps each line's level, message, and
@@ -566,6 +582,7 @@ func (l *lineLog) Handle(_ context.Context, r slog.Record) error {
 		}
 		return true
 	})
+
 	l.lines = append(l.lines, line)
 	return nil
 }

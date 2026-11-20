@@ -64,6 +64,7 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 	if client == nil {
 		return nil, fmt.Errorf("%w: otel: client is nil", taskmill.ErrInvalidArgument)
 	}
+
 	tasks, err := in.meter.Int64ObservableGauge("taskmill.queue.tasks", metric.WithUnit("{task}"),
 		metric.WithDescription("Tasks per queue and state, counted up to 10,000 per queue and state "+
 			"and 100,000 scheduled and retryable tasks in all."))
@@ -95,6 +96,7 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 	if err != nil {
 		return nil, fmt.Errorf("taskmill/otel: %w", err)
 	}
+
 	return in.meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		ctx, cancel := context.WithTimeout(ctx, observeTimeout)
 		defer cancel()
@@ -102,11 +104,13 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 		if err != nil {
 			return fmt.Errorf("taskmill/otel: observe queues: %w", err)
 		}
+
 		var counted time.Time
 		for _, q := range queues {
 			if q.RefreshedAt.After(counted) {
 				counted = q.RefreshedAt
 			}
+
 			queue := metric.WithAttributes(semconv.MessagingDestinationName(q.Name))
 			for _, s := range observedStates {
 				state := metric.WithAttributes(semconv.MessagingDestinationName(q.Name), stateKey.String(string(s)))
@@ -117,6 +121,7 @@ func (in *Instrumentation) ObserveQueues(client *taskmill.Client) (metric.Regist
 			o.ObserveInt64(halted, int64(q.HaltedGroups), queue)
 			o.ObserveInt64(failures, int64(q.MostFailures), queue)
 		}
+
 		if !counted.IsZero() {
 			o.ObserveFloat64(age, time.Since(counted).Seconds())
 		}

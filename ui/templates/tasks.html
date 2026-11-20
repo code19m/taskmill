@@ -46,7 +46,7 @@
         <td><div class="state-cell">{{template "task-state" .State}}{{if ne .Priority 2}}<span class="chip priority-{{.Priority}}" title="Priority: {{.Priority}}">{{.Priority}}</span>{{end}}</div></td>
         <td class="num">{{.Attempt}}<span class="tone-ghost">/{{.MaxAttempts}}</span></td>
         <td class="tone-faint"{{template "time-attrs" .CreatedAt}}>{{ago $.Now .CreatedAt}}</td>
-        {{if $d.Order.ByFinish}}<td class="tone-faint"{{template "time-attrs" .FinalizedAt}}>{{ago $.Now .FinalizedAt}}</td>
+        {{if $d.Order.ByFinish}}<td class="tone-faint"{{template "time-attrs" .FinishedAt}}>{{ago $.Now .FinishedAt}}</td>
         {{else}}<td class="tone-faint"{{template "time-attrs" .RunAt}}>{{ago $.Now .RunAt}}</td>{{end}}
         <td class="error-cell">{{with lastError .Errors}}<span title="{{printf "%.300s" .Message}}">{{printf "%.140s" .Message}}</span>{{end}}</td>
       </tr>

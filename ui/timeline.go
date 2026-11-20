@@ -65,14 +65,14 @@ func timeline(now time.Time, t, head *taskmill.TaskInfo) []entry {
 		due := s.created()
 		s.gap("Waited", due, s.started, "")
 		s.start("")
-		s.gap("Ran", s.started, t.FinalizedAt, "ok")
-		s.step("Completed", t.FinalizedAt, "", "ok")
+		s.gap("Ran", s.started, t.FinishedAt, "ok")
+		s.step("Completed", t.FinishedAt, "", "ok")
 	case taskmill.StateDead:
 		due := s.created()
 		s.gap("Waited", due, s.started, "")
 		s.start("")
-		s.gap("Failed after", s.started, t.FinalizedAt, "err")
-		s.step("Died", t.FinalizedAt, "", "err")
+		s.gap("Failed after", s.started, t.FinishedAt, "err")
+		s.step("Died", t.FinishedAt, "", "err")
 	case taskmill.StateCanceled:
 		s.canceled()
 	default:
@@ -190,7 +190,7 @@ func (s *steps) retrying() {
 // that came before the cancel, as the due time of its attempt if it came
 // before the start, or else of the next attempt, after the start.
 func (s *steps) canceled() {
-	end := s.t.FinalizedAt
+	end := s.t.FinishedAt
 	reached := !s.t.RunAt.After(end)
 	first := s.started.IsZero() || !s.t.RunAt.After(s.started)
 	if reached && first {

@@ -29,9 +29,11 @@ func signUp(ctx context.Context, client *taskmill.Client, userID int64) error {
 func testSignUp(t *testing.T, pool *pgxpool.Pool, sendEmail func(userID int64) error) {
 	t.Helper()
 	client := taskmilltest.NewClient(t, pool, nil)
+
 	if err := signUp(t.Context(), client, 42); err != nil {
 		t.Fatal(err)
 	}
+
 	tasks := taskmilltest.Enqueued[SendWelcome](t, client)
 	if len(tasks) != 1 || tasks[0].Args.UserID != 42 {
 		t.Fatalf("enqueued %+v", tasks)
@@ -58,6 +60,7 @@ func Example() {
 func testSignUpEndToEnd(t *testing.T, pool *pgxpool.Pool, handlers *taskmill.Handlers) {
 	t.Helper()
 	client := taskmilltest.NewClient(t, pool, nil)
+
 	if err := signUp(t.Context(), client, 42); err != nil {
 		t.Fatal(err)
 	}

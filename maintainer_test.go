@@ -81,6 +81,7 @@ func TestMaintenanceDoesNotWaitForHeldGroups(t *testing.T) {
 	e.exec(t, "INSERT INTO {s}.groups (queue, group_key, tasks) VALUES ('unserved', 'g', 1)")
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'g' FOR UPDATE")
+
 	expired := `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
 	                                  lease_expires_at, attempted_at, attempted_by, group_key)
 	            VALUES ('unserved', 'email.send', 'running', now(), '{}', 5, 1, 1,
@@ -111,6 +112,7 @@ func TestMaintenanceDoesNotWaitForHeldGroups(t *testing.T) {
 func TestRescueHaltsOrLeavesTheGroupsOfItsTasks(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// Two groups whose heads ran on a worker that is gone: one head on its
 	// last attempt, one asked to stop. Each has one more task behind it.
 	insert := func(group, set string) (head, next int64) {
@@ -121,6 +123,7 @@ func TestRescueHaltsOrLeavesTheGroupsOfItsTasks(t *testing.T) {
 	}
 	deadHead, behindDead := insert("dies", "max_attempts = 1")
 	canceledHead, behindCanceled := insert("cancels", "cancel_requested_at = now()")
+
 	// Two tasks of one group in one batch, and a halt that names one of them,
 	// which only rows written by hand give. Each task is counted out, and
 	// the halt ends with its task, so the task behind them takes over. The
@@ -130,6 +133,7 @@ func TestRescueHaltsOrLeavesTheGroupsOfItsTasks(t *testing.T) {
 	behindBoth := e.insertTask(t, `state = 'pending', group_key = 'both'`)
 	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
 	           VALUES ('default', 'both', 3, $1, now())`, named)
+
 	taskmill.Rescue(t.Context(), newWorker(t, e, &taskmill.WorkerConfig{}))
 
 	wantStates(t, e, map[int64]taskmill.State{
@@ -151,11 +155,13 @@ func TestOneMaintainerLeadsAndAnotherTakesOver(t *testing.T) {
 		logs[i] = &logRecorder{}
 		stops[i] = runWorker(t, e.withLogger(t, slog.New(logs[i])), &taskmill.WorkerConfig{})
 	}
+
 	leader := func() (id string, expires time.Time) {
 		_ = e.pool.QueryRow(t.Context(), replaceSchema("SELECT worker_id, expires_at FROM {s}.leader", e.schema)).
 			Scan(&id, &expires)
 		return id, expires
 	}
+
 	waitFor(t, "a maintainer to be elected", func() bool { id, _ := leader(); return id != "" })
 	first, elected := leader()
 
@@ -165,6 +171,7 @@ func TestOneMaintainerLeadsAndAnotherTakesOver(t *testing.T) {
 		_, expires := leader()
 		return expires.Sub(elected) >= 2*testTiming.Maintainer
 	})
+
 	total, leading := 0, 0
 	for i, l := range logs {
 		if n := l.count("elected maintainer"); n > 0 {
@@ -196,9 +203,11 @@ func TestElectionTryWritesOnlyWhenItWins(t *testing.T) {
 			t.Fatalf("worker %s: leads %t, wrote %t; want both %t", worker, leads, wrote, wantLead)
 		}
 	}
+
 	try("a", true) // nobody leads
 	try("a", true) // it renews its lease
 	try("b", false)
+
 	// The leader crashed, and its lease ran out.
 	e.exec(t, "UPDATE {s}.leader SET expires_at = now() - interval '1 second'")
 	try("b", true)
@@ -226,6 +235,7 @@ func TestElectionIgnoresALeaseThatNoWorkerWrites(t *testing.T) {
 		e.exec(t, "DELETE FROM {s}.leader")
 		e.exec(t, `INSERT INTO {s}.leader (name, worker_id, elected_at, expires_at)
 		           VALUES ('maintainer', 'nobody', now(), `+tt.expires+`)`)
+
 		leads, wrote, err := taskmill.Elect(t.Context(), e.client, "worker")
 		if err != nil {
 			t.Fatal(err)
@@ -243,6 +253,7 @@ func TestMaintainerStoppedWhileRenewingResigns(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	w := newWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+
 	// A worker that stops waits for its renewal for the rest of the
 	// renewal's time, one lease, which is short here, and for 5 seconds at
 	// most.
@@ -274,6 +285,7 @@ func TestMaintainerStoppedWhileRenewingResigns(t *testing.T) {
 				replaceSchema("DELETE FROM {s}.leader", e.schema)) > 0
 		}
 	})
+
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -329,6 +341,7 @@ END $$`)
 		Queues:       defaultQueue(1),
 		DrainTimeout: 200 * time.Millisecond,
 	})
+
 	// While the worker runs, its election has one lease's time: far longer
 	// than the test takes. Once it is told to stop, 5 seconds more.
 	taskmill.SetTiming(w, taskmill.Timing{LeaderLease: time.Minute})
@@ -391,6 +404,7 @@ func TestStoppingWorkerHandsMaintenanceOverBeforeItDrains(t *testing.T) {
 	})
 	finish := sync.OnceFunc(func() { close(unblock) })
 	t.Cleanup(finish) // before the worker's own cleanup, which waits for the task
+
 	e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "the old worker's task to start")
 	waitFor(t, "the old worker to lead", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
@@ -414,6 +428,7 @@ func TestStoppingWorkerHandsMaintenanceOverBeforeItDrains(t *testing.T) {
 		defer close(stopped)
 		stopOld()
 	}()
+
 	// Only the maintainer stores its schedules, and enqueues their runs.
 	waitFor(t, "the new worker to lead, and store its schedule", func() bool {
 		schedules, err := e.client.Schedules(ctx)
@@ -422,6 +437,7 @@ func TestStoppingWorkerHandsMaintenanceOverBeforeItDrains(t *testing.T) {
 		}
 		return len(schedules) == 1
 	})
+
 	if err := e.client.RunSchedule(ctx, "yearly-report"); err != nil {
 		t.Fatal(err)
 	}
@@ -431,6 +447,7 @@ func TestStoppingWorkerHandsMaintenanceOverBeforeItDrains(t *testing.T) {
 		t.Fatal("the old worker stopped before its task ended, so the test did not see it drain")
 	default:
 	}
+
 	finish()
 	<-stopped
 }
@@ -457,6 +474,7 @@ func TestRescueCapsTheBackoffOfManyAttempts(t *testing.T) {
 func TestPromotionStaysOnItsIndexBesideABacklog(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// Run times in the past belong to available tasks, and those of
 	// scheduled tasks are a year ahead. The statistics see the two columns
 	// apart, so they suggest that a quarter of the tasks are due.
@@ -481,6 +499,7 @@ func TestPromotionStaysOnItsIndexBesideABacklog(t *testing.T) {
 func TestRetentionReadsOnlyTheTasksItDeletes(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// Tasks that wait, and after them as many dead tasks of two hours ago:
 	// with so many, a plan that does not know the age expects to meet an
 	// old task soon wherever it reads. The table is large enough that the
@@ -501,6 +520,7 @@ func TestRetentionReadsOnlyTheTasksItDeletes(t *testing.T) {
 		{"every dead task is old enough", "1 hour", 2100},
 	} {
 		e.exec(t, "UPDATE {s}.settings SET dead_retention = $1::interval", c.retention)
+
 		n, err := taskmill.RetentionRowsRead(t.Context(), e.client)
 		if err != nil {
 			t.Fatal(err)
@@ -532,6 +552,7 @@ func TestMaintainerWakesQueuesWhoseTasksWait(t *testing.T) {
 	if _, err := conn.Exec(ctx, "LISTEN "+e.schema); err != nil {
 		t.Fatal(err)
 	}
+
 	// Tasks that waited longer than a maintenance interval wake their queue.
 	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()})
 	timing := testTiming
@@ -545,6 +566,7 @@ func TestMaintainerWakesQueuesWhoseTasksWait(t *testing.T) {
 			t.Fatalf("got notification %v, %v; want %s", n, err, want)
 		}
 	}
+
 	quiet, stop := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer stop()
 	if n, err := conn.WaitForNotification(quiet); err == nil {
@@ -563,11 +585,13 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	// The timeout is a session setting, which needs a connection of its own.
 	reader := e.begin(t)
 	e.txExec(t, reader, "SELECT count(*) FROM {s}.task_history")
+
 	conn, err := pgx.Connect(t.Context(), testdb.DirectURL(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = conn.Close(t.Context()) }()
+
 	detach := replaceSchema(fmt.Sprintf("ALTER TABLE {s}.task_history DETACH PARTITION {s}.%s CONCURRENTLY", part), e.schema)
 	if _, err := conn.Exec(t.Context(), "SET statement_timeout = '200ms'"); err != nil {
 		t.Fatal(err)
@@ -575,6 +599,7 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 	if _, err := conn.Exec(t.Context(), detach); err == nil {
 		t.Fatal("detach was not interrupted")
 	}
+
 	if err := reader.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -597,12 +622,14 @@ func TestRetentionFinishesAnInterruptedDetach(t *testing.T) {
 		defer close(done)
 		taskmill.RunRetention(ctx, w)
 	}()
+
 	waitFor(t, "retention to finish the detach", func() bool {
 		if sent.count("DETACH PARTITION", part, "CONCURRENTLY") > 0 {
 			t.Fatal("retention started another detach of a partition that is pending detach")
 		}
 		return sent.count("DETACH PARTITION", part, "FINALIZE") > 0
 	})
+
 	cancel()
 	<-done
 }
@@ -625,20 +652,24 @@ func TestRetentionFinishesTheDropsItBegan(t *testing.T) {
 	e := newEnv(t)
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	var stuck, free []string // the newest first
+
 	for i := range taskmill.HistoryDrops + 1 {
 		part := e.attachHistory(t, today.AddDate(0, 0, -60-i))
 		e.exec(t, "CREATE VIEW {s}.report_"+strconv.Itoa(i)+" AS SELECT id FROM {s}."+part)
 		stuck = append(stuck, part)
 	}
+
 	for i := range 3 {
 		free = append(free, e.attachHistory(t, today.AddDate(0, 0, -30-i)))
 	}
+
 	// An operator detached one expired partition to keep it, and copied the
 	// history under the name of another expired day.
 	kept := e.attachHistory(t, today.AddDate(0, 0, -40))
 	e.exec(t, "ALTER TABLE {s}.task_history DETACH PARTITION {s}."+kept)
 	copied := "task_history_" + today.AddDate(0, 0, -41).Format("20060102")
 	e.exec(t, "CREATE TABLE {s}."+copied+" AS TABLE {s}.task_history")
+
 	// Retention detached a third table, as its comment says. The retention
 	// grew since, so its day is not expired any more.
 	recent := e.attachHistory(t, today.AddDate(0, 0, -2))
@@ -696,8 +727,10 @@ func TestRetentionFinishesTheDropsItBegan(t *testing.T) {
 	for i := range left {
 		e.exec(t, "DROP VIEW {s}.report_"+strconv.Itoa(i+1))
 	}
+
 	reader := e.begin(t)
 	e.txExec(t, reader, "LOCK TABLE {s}."+strings.Join(left, ", {s}.")+" IN ACCESS SHARE MODE")
+
 	var racing [2]*logRecorder
 	var passes sync.WaitGroup
 	for i := range racing {
@@ -709,6 +742,7 @@ func TestRetentionFinishesTheDropsItBegan(t *testing.T) {
 		return e.count(t, `SELECT count(*) FROM pg_stat_activity
 		                   WHERE wait_event_type = 'Lock' AND query LIKE 'DROP TABLE%' || $1 || '.%'`, e.schema) == 2
 	})
+
 	if err := reader.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -721,6 +755,7 @@ func TestRetentionFinishesTheDropsItBegan(t *testing.T) {
 			t.Errorf("worker %d reported a failure for tables that the other one dropped first: %s", i+1, recordText(lines[0]))
 		}
 	}
+
 	// A last pass has only the three other tables to find, and leaves them.
 	taskmill.RunRetention(t.Context(), w)
 	if n := e.historyTables(t, kept, copied, recent); n != 3 {
@@ -767,6 +802,7 @@ func newClockEnv(t *testing.T, at time.Time, zone string) (e *env, set func(time
 	t.Helper()
 	admin := testdb.Pool(t)
 	clock := testdb.Schema(t, admin)
+
 	for _, sql := range []string{
 		"CREATE SCHEMA " + clock,
 		"CREATE TABLE " + clock + ".clock (at timestamptz NOT NULL)",
@@ -777,12 +813,14 @@ func newClockEnv(t *testing.T, at time.Time, zone string) (e *env, set func(time
 			t.Fatal(err)
 		}
 	}
+
 	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t)) // a proxy refuses the parameters
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.RuntimeParams["search_path"] = clock + ", pg_catalog"
 	cfg.ConnConfig.RuntimeParams["timezone"] = zone
+
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -811,6 +849,7 @@ func TestHistoryPartitionsFollowTheDatabaseClock(t *testing.T) {
 	if _, err := e.client.Get(t.Context(), id); err != nil {
 		t.Fatalf("the history has no partition for the database's day: %v", err)
 	}
+
 	taskmill.RunRetention(t.Context(), w)
 	if _, err := e.client.Get(t.Context(), id); err != nil {
 		t.Fatalf("retention dropped the history of the database's day: %v", err)
@@ -830,6 +869,7 @@ func TestRetentionCountsDaysOf24Hours(t *testing.T) {
 	part := e.attachHistory(t, time.Date(2026, time.March, 25, 0, 0, 0, 0, time.UTC))
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
 	           VALUES ('default', 'email.send', 'dead', now(), '{}', 1, '2026-03-03 00:00:00+00')`)
+
 	kept := func() (history, dead int) {
 		return e.count(t, "SELECT count(*) FROM pg_tables WHERE schemaname = $1 AND tablename = $2", e.schema, part),
 			e.count(t, "SELECT count(*) FROM {s}.tasks")
@@ -839,6 +879,7 @@ func TestRetentionCountsDaysOf24Hours(t *testing.T) {
 	if history, dead := kept(); history != 1 || dead != 1 {
 		t.Fatalf("half an hour early, retention kept %d of 1 day of history and %d of 1 dead task", history, dead)
 	}
+
 	setNow(at.Add(time.Hour))
 	taskmill.RunRetention(t.Context(), w)
 	if history, dead := kept(); history != 0 || dead != 0 {
@@ -856,6 +897,7 @@ func TestRemovedScheduleIsKeptFor24Hours(t *testing.T) {
 	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Schedules: []taskmill.Schedule{{Name: "kept", Cron: "@yearly", Args: sendEmail{}}},
 	})
+
 	// In half an hour, no maintainer will have defined it for 24 hours.
 	e.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at, updated_at)
 	           VALUES ('removed', 'default', 'email.send', '@daily', now(), '2026-03-28 12:30:00+00')`)
@@ -865,6 +907,7 @@ func TestRemovedScheduleIsKeptFor24Hours(t *testing.T) {
 	if stored() != 1 {
 		t.Fatal("half an hour early, the removed schedule was deleted")
 	}
+
 	setNow(at.Add(time.Hour))
 	taskmill.PruneSchedules(t.Context(), w)
 	if stored() != 0 {
@@ -916,16 +959,18 @@ func TestLongestHistoryRetentionKeepsHistory(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t)
 			w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), NoMaintainer: true})
+
 			id := e.enqueue(t, sendEmail{}, nil)
 			if _, err := w.RunTask(t.Context(), id); err != nil {
 				t.Fatal(err)
 			}
-			tc.set(t, e)
 
+			tc.set(t, e)
 			taskmill.RunRetention(t.Context(), w)
 			if _, err := e.client.Get(t.Context(), id); err != nil {
 				t.Fatalf("retention dropped history that is kept for good: %v", err)
 			}
+
 			// The database stores whole microseconds, and Go reads at most
 			// its longest duration.
 			s, err := e.client.Settings(t.Context())
@@ -940,6 +985,7 @@ func TestRetentionDeletesOldFinishedTasks(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	e.rawGroups = true // the halting head below is written by hand
+
 	insert := `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at, group_key)
 	           VALUES ('default', 'email.send', $1, now(), '{}', 1, now() - $2 * interval '1 day', $3) RETURNING id`
 	var oldDead, oldCanceled, recentDead, haltingHead int64
@@ -958,6 +1004,7 @@ func TestRetentionDeletesOldFinishedTasks(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	// More than two batches of old tasks in a second queue.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
 	           SELECT 'reports', 'report.build', 'canceled', now(), '{}', 1, now() - interval '40 days'
@@ -998,6 +1045,7 @@ func TestRetentionSkipsRowsBeingChanged(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	e.exec(t, `INSERT INTO {s}.dedupe_keys (key, task_id, expires_at)
 	           VALUES (sha256('reclaimed'), $1, now() - interval '1 second'), (sha256('expired'), $1, now() - interval '1 second')`, old)
 
@@ -1006,15 +1054,16 @@ func TestRetentionSkipsRowsBeingChanged(t *testing.T) {
 	tx := e.begin(t)
 	e.txExec(t, tx, "UPDATE {s}.tasks SET state = 'available', finalized_at = NULL, attempt = 0 WHERE id = $1", retried)
 	e.txExec(t, tx, "UPDATE {s}.dedupe_keys SET expires_at = now() + interval '1 hour' WHERE key = sha256('reclaimed')")
+
 	runWorker(t, e, &taskmill.WorkerConfig{}) // retention runs in the first cycle
 	waitFor(t, "retention to delete the rows nobody changes", func() bool {
 		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1", old) == 0 &&
 			e.count(t, "SELECT count(*) FROM {s}.dedupe_keys WHERE key = sha256('expired')") == 0
 	})
+
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-
 	e.wantState(t, retried, taskmill.StateAvailable)
 	if n := e.count(t, "SELECT count(*) FROM {s}.dedupe_keys WHERE key = sha256('reclaimed')"); n != 1 {
 		t.Fatal("retention deleted a dedupe key that was claimed again")
@@ -1029,6 +1078,7 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 		           SELECT $1, 'email.send', $2::{s}.task_state, now() + $3::interval, '{}', 1 FROM generate_series(1, $4)`,
 			queue, state, runAt, n)
 	}
+
 	// Each count stops at 10,000 per queue and state, and is capped only if
 	// more tasks are left, also for scheduled tasks, which are counted
 	// across all queues.
@@ -1036,10 +1086,12 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 	insert("exact", "available", "0 s", 10_000)
 	insert("later", "scheduled", "1 hour", 15_000)
 	insert("later-exact", "scheduled", "1 hour", 10_000)
+
 	for range 5 {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small"})
 	}
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small", RunAt: time.Now().Add(time.Hour)})
+
 	// Halted groups stop at 10,000 per queue too.
 	e.exec(t, `WITH dead AS (
 	               INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, group_key, finalized_at)
@@ -1048,6 +1100,7 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 	           )
 	           INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
 	           SELECT 'halted', group_key, 1, id, now() FROM dead`)
+
 	// As in an outage, more tasks wait to retry than the 10,000 whose
 	// failures are read. New failures retry first, and the task that failed
 	// most retries after them, though not last: tasks that failed a little
@@ -1059,6 +1112,7 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 	                        ('retrying', 9, interval '5 minutes', 5), ('early', 5, interval '30 seconds', 1))
 	                AS v(queue, attempt, wait, n),
 	                generate_series(1, v.n) AS i`)
+
 	runWorker(t, e, &taskmill.WorkerConfig{}) // the maintainer refreshes statistics
 
 	counted := countedQueues(t, e, "big", "exact", "later", "later-exact", "small", "halted", "retrying", "early")
@@ -1078,14 +1132,17 @@ func TestStatisticsCountEveryQueue(t *testing.T) {
 			t.Errorf("%s: got %+v %s; want %+v", c.queue, got, c.state, c.want)
 		}
 	}
+
 	if got := counted["halted"].HaltedGroups; got != 10_000 {
 		t.Errorf("halted: got %d halted groups, want 10,000", got)
 	}
+
 	for queue, want := range map[string]int{"retrying": 12, "early": 5} {
 		if got := counted[queue].MostFailures; got != want {
 			t.Errorf("%s: got %d most failures, want %d", queue, got, want)
 		}
 	}
+
 	want := map[taskmill.State]taskmill.TaskCount{
 		taskmill.StateAvailable: {N: 5},
 		taskmill.StateScheduled: {N: 1},
@@ -1100,12 +1157,14 @@ func TestStatisticsCapTheDueCountsOfEveryQueue(t *testing.T) {
 	e := newEnv(t)
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 	           SELECT 'flood', 'email.send', 'scheduled', now() + interval '1 hour', '{}', 1 FROM generate_series(1, 100001)`)
+
 	for range 3 {
 		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "small"})
 	}
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, finalized_at)
 	           SELECT 'small', 'email.send', 'dead', now(), '{}', 1, now() FROM generate_series(1, 2)`)
 	e.exec(t, `INSERT INTO {s}.queues (name) VALUES ('idle')`)
+
 	runWorker(t, e, &taskmill.WorkerConfig{}) // the maintainer refreshes statistics
 
 	// The shared cap was passed by flood alone, so small may have scheduled and
@@ -1121,6 +1180,7 @@ func TestStatisticsCapTheDueCountsOfEveryQueue(t *testing.T) {
 	if got := counted["small"].Counts; !maps.Equal(got, want) {
 		t.Errorf("small: got %+v; want %+v", got, want)
 	}
+
 	want = map[taskmill.State]taskmill.TaskCount{
 		taskmill.StateScheduled: {N: 10_000, Capped: true},
 		taskmill.StateRetryable: {N: 0, Capped: true},
@@ -1128,6 +1188,7 @@ func TestStatisticsCapTheDueCountsOfEveryQueue(t *testing.T) {
 	if got := counted["flood"].Counts; !maps.Equal(got, want) {
 		t.Errorf("flood: got %+v; want %+v", got, want)
 	}
+
 	want = map[taskmill.State]taskmill.TaskCount{
 		taskmill.StateAvailable: {N: 0},
 		taskmill.StateScheduled: {N: 0, Capped: true},
@@ -1151,13 +1212,16 @@ func TestStatisticsRefreshesAtTheSameTimeBothStore(t *testing.T) {
 	if err := taskmill.RefreshStats(ctx, w); err != nil {
 		t.Fatal(err)
 	}
+
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.queue_stats FOR UPDATE")
+
 	refreshed := make(chan error, 2)
 	for range 2 {
 		go func() { refreshed <- taskmill.RefreshStats(ctx, w) }()
 	}
 	e.waitBlockedCount(t, 2)
+
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -1166,6 +1230,7 @@ func TestStatisticsRefreshesAtTheSameTimeBothStore(t *testing.T) {
 			t.Errorf("a refresh beside another one failed: %v", err)
 		}
 	}
+
 	if got := e.countedQueue(t, taskmill.DefaultQueue).Counts[taskmill.StateAvailable]; got != (taskmill.TaskCount{N: 1}) {
 		t.Errorf("the two refreshes stored %+v available tasks, want 1", got)
 	}
@@ -1186,6 +1251,7 @@ func countedQueues(t *testing.T, e *env, names ...string) map[string]taskmill.Qu
 				out[q.Name] = q
 			}
 		}
+
 		for _, name := range names {
 			if _, ok := out[name]; !ok {
 				return false
@@ -1222,6 +1288,7 @@ func TestSlowRetentionDelaysNeitherPromotionNorStatistics(t *testing.T) {
 		}, nil),
 		Queues: defaultQueue(1),
 	})
+
 	e.waitBlocked(t, "DETACH PARTITION")
 	runAt := time.Now().Add(200 * time.Millisecond)
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{RunAt: runAt})
@@ -1233,6 +1300,7 @@ func TestSlowRetentionDelaysNeitherPromotionNorStatistics(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the scheduled task was not promoted while retention waited")
 	}
+
 	// A task that arrives now, in a queue that no worker reads, is counted.
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "unread"})
 	waitFor(t, "the statistics to count a task that arrived while retention waited", func() bool {
@@ -1244,6 +1312,7 @@ func TestSlowRetentionDelaysNeitherPromotionNorStatistics(t *testing.T) {
 			return q.Name == "unread" && q.Counts[taskmill.StateAvailable].N == 1
 		})
 	})
+
 	if err := reader.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}

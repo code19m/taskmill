@@ -26,6 +26,7 @@ func Example() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	outbox.New(client).AddRelay(&handlers, tel.Publisher("kafka", kafka), nil)
 	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 		Handlers:   &handlers,
@@ -34,6 +35,7 @@ func Example() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	if _, err := tel.ObserveQueues(client); err != nil {
 		log.Fatal(err)
 	}

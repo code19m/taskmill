@@ -109,6 +109,7 @@ func New(cfg *Config) *Instrumentation {
 	if c.Propagator == nil {
 		c.Propagator = otel.GetTextMapPropagator()
 	}
+
 	version := moduleVersion()
 	in := &Instrumentation{
 		tracer: c.TracerProvider.Tracer(scope,
@@ -117,6 +118,7 @@ func New(cfg *Config) *Instrumentation {
 			metric.WithInstrumentationVersion(version), metric.WithSchemaURL(semconv.SchemaURL)),
 		propagator: c.Propagator,
 	}
+
 	buckets := metric.WithExplicitBucketBoundaries(durationBuckets...)
 	var errs [3]error
 	in.sent, errs[0] = messagingconv.NewClientSentMessages(in.meter)
@@ -145,6 +147,7 @@ func (in *Instrumentation) EnqueueMiddleware(ctx context.Context, tasks []*taskm
 			kind = ""
 		}
 	}
+
 	attrs := []attribute.KeyValue{
 		semconv.MessagingSystemKey.String(string(system)),
 		semconv.MessagingOperationName("send"),
@@ -166,6 +169,7 @@ func (in *Instrumentation) EnqueueMiddleware(ctx context.Context, tasks []*taskm
 	ctx, span := in.tracer.Start(ctx, spanName("send", queue),
 		trace.WithSpanKind(trace.SpanKindProducer), trace.WithAttributes(attrs...))
 	defer span.End()
+
 	fields := in.propagator.Fields()
 	for _, t := range tasks {
 		deleteFields(t.Metadata, fields)
@@ -200,6 +204,7 @@ func (in *Instrumentation) addSent(ctx context.Context, tasks []*taskmill.Enqueu
 	for _, t := range tasks {
 		counts[stream{t.Queue, t.Kind}]++
 	}
+
 	for s, n := range counts {
 		attrs := []attribute.KeyValue{semconv.MessagingDestinationName(s.queue), kindKey.String(s.kind)}
 		if err != nil {
@@ -231,6 +236,7 @@ func (in *Instrumentation) Middleware(ctx context.Context, task *taskmill.TaskIn
 			attemptKey.Int(task.Attempt),
 		),
 	}
+
 	ambient := trace.SpanContextFromContext(ctx)
 	ctx = in.propagator.Extract(ctx, propagation.MapCarrier(task.Metadata))
 	if created := trace.SpanContextFromContext(ctx); created.IsValid() && !created.Equal(ambient) {
@@ -243,6 +249,7 @@ func (in *Instrumentation) Middleware(ctx context.Context, task *taskmill.TaskIn
 	start := time.Now()
 	ctx, span := in.tracer.Start(ctx, spanName("process", task.Queue), opts...)
 	defer span.End()
+
 	err := next(ctx)
 	elapsed := time.Since(start).Seconds()
 	if _, snoozed := errors.AsType[*taskmill.SnoozeError](err); err != nil && !snoozed {
@@ -255,6 +262,7 @@ func (in *Instrumentation) Middleware(ctx context.Context, task *taskmill.TaskIn
 		span.SetStatus(codes.Error, err.Error())
 		shared = append(shared, errType)
 	}
+
 	in.processDuration.Record(ctx, elapsed, "process", system, shared...)
 	return err
 }
@@ -284,6 +292,7 @@ func moduleVersion() string {
 	if !ok {
 		return "unknown"
 	}
+
 	if info.Main.Path == scope {
 		return info.Main.Version
 	}

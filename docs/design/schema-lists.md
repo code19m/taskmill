@@ -4,7 +4,7 @@ This page explains the statements behind `Client.List`, `Client.Count`, and
 the dashboard's lists: the orders of a list, why dead and canceled tasks
 come by finish time, and what each read costs.
 [Operator actions](schema-operations.md) has the statements that change
-tasks, and [`sql.go`](../../sql.go) has the exact text of both.
+tasks, and [`sql_lists.go`](../../sql_lists.go) has the exact text of these.
 
 ## A list has one of three orders
 

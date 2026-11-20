@@ -131,6 +131,7 @@ func AddHandler[A Args](hs *Handlers, h Handler[A], opts *HandlerOptions) {
 	if reg == nil {
 		return
 	}
+
 	reg.run = func(ctx context.Context, info *TaskInfo, a *attempt) error {
 		t, err := newTask[A](info, a)
 		if err != nil {
@@ -148,6 +149,7 @@ func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptio
 	if reg == nil {
 		return
 	}
+
 	reg.runBatch = func(ctx context.Context, infos []*TaskInfo, as []*attempt) []error {
 		errs := make([]error, len(infos))
 		tasks := make([]*Task[A], 0, len(infos))
@@ -161,6 +163,7 @@ func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptio
 			tasks = append(tasks, t)
 			index = append(index, i)
 		}
+
 		if len(tasks) == 0 {
 			return errs
 		}
@@ -192,6 +195,7 @@ func newRegistration[A Args](hs *Handlers, nilHandler bool, opts *HandlerOptions
 		hs.fail(fmt.Errorf("handler for kind %q is nil", kind))
 		return nil
 	}
+
 	reg := &registration{kind: kind, queue: defaultQueueOf[A]()}
 	if opts != nil {
 		reg.opts = *opts
@@ -207,6 +211,7 @@ func defaultQueueOf[A Args]() (queue string) {
 			queue = DefaultQueue
 		}
 	}()
+
 	if d, ok := any(argkind.Zero[A]()).(ArgsWithDefaults); ok && d.EnqueueDefaults().Queue != "" {
 		return d.EnqueueDefaults().Queue
 	}
@@ -232,6 +237,7 @@ func (hs *Handlers) add(reg *registration) {
 		hs.fail(fmt.Errorf("handler for kind %q: batch size %d is not between 0 and %d", reg.kind, reg.opts.BatchSize, maxBatchSize))
 		return
 	}
+
 	if hs.byKind == nil {
 		hs.byKind = make(map[string]*registration)
 	}
@@ -296,12 +302,14 @@ func (b ExponentialBackoff) Backoff(attempt int) time.Duration {
 	if maxDelay <= 0 {
 		maxDelay = defaultBackoffMax
 	}
+
 	d := maxDelay
 	if shift := attempt - 1; shift >= 0 && shift < 62 {
 		if next := base << shift; next > 0 && next < maxDelay {
 			d = next
 		}
 	}
+
 	jitter := 0.9 + rand.Float64()*0.2 //nolint:gosec // jitter needs no cryptographic randomness
 	return time.Duration(float64(d) * jitter)
 }

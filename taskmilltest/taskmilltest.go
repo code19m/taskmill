@@ -54,6 +54,7 @@ func NewClient(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *t
 	if c.Schema != "" {
 		tb.Fatal("taskmilltest: NewClient picks the schema; leave ClientConfig.Schema empty")
 	}
+
 	var b [6]byte
 	_, _ = rand.Read(b[:]) // never returns an error
 	c.Schema = "taskmilltest_" + hex.EncodeToString(b[:])
@@ -67,9 +68,11 @@ func NewClient(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *t
 			tb.Errorf("taskmilltest: drop schema %s: %v", c.Schema, err)
 		}
 	})
+
 	if err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Schema: c.Schema}); err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
 	}
+
 	client, err := taskmill.NewClient(ctx, pool, &c)
 	if err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
@@ -90,6 +93,7 @@ func Enqueued[A taskmill.Args](tb testing.TB, client *taskmill.Client) []*taskmi
 	if err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
 	}
+
 	var out []*taskmill.Task[A]
 	params := &taskmill.ListParams{Filter: taskmill.TaskFilter{Kinds: []string{kind}}, Limit: 1000}
 	for {
@@ -97,6 +101,7 @@ func Enqueued[A taskmill.Args](tb testing.TB, client *taskmill.Client) []*taskmi
 		if err != nil {
 			tb.Fatalf("taskmilltest: %v", err)
 		}
+
 		for _, info := range page.Tasks {
 			var args A
 			if err := json.Unmarshal(info.Payload, &args); err != nil {
@@ -104,11 +109,13 @@ func Enqueued[A taskmill.Args](tb testing.TB, client *taskmill.Client) []*taskmi
 			}
 			out = append(out, &taskmill.Task[A]{TaskInfo: info, Args: args})
 		}
+
 		if page.Next == "" {
 			break
 		}
 		params.Cursor = page.Next
 	}
+
 	slices.Reverse(out) // List returns the newest first
 	return out
 }
@@ -146,6 +153,7 @@ func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Han
 	} else {
 		taskmill.AddHandler[A](&hs, nil, nil) // reported by NewWorker
 	}
+
 	w, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &hs, NoMaintainer: true})
 	if err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
@@ -154,6 +162,7 @@ func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Han
 	if err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
 	}
+
 	if !ran {
 		// The worker ended the attempt before the handler, and recorded why
 		// as the task's last error.
@@ -182,6 +191,7 @@ func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig) {
 	if c.PollInterval == 0 {
 		c.PollInterval = 10 * time.Millisecond
 	}
+
 	w, err := taskmill.NewWorker(client, &c)
 	if err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
@@ -192,6 +202,7 @@ func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig) {
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	limit := time.After(workLimit)
+
 	for {
 		queue, err := busyQueue(ctx, client)
 		if err != nil {
@@ -200,6 +211,7 @@ func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig) {
 		if queue == "" {
 			break
 		}
+
 		select {
 		case err := <-done:
 			tb.Fatalf("taskmilltest: worker stopped: %v", err)
@@ -208,6 +220,7 @@ func Work(tb testing.TB, client *taskmill.Client, cfg *taskmill.WorkerConfig) {
 		case <-time.After(c.PollInterval):
 		}
 	}
+
 	cancel()
 	if err := <-done; err != nil {
 		tb.Fatalf("taskmilltest: worker: %v", err)

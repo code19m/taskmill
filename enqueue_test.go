@@ -106,6 +106,7 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 		{"run time just before the first timestamp", sendEmail{}, &taskmill.EnqueueOptions{RunAt: firstTimestamp.Add(-time.Microsecond)}},
 		{"a kind's default run time after the last timestamp", parked{}, nil},
 	}
+
 	// Runs after the parallel subtests, once the test's context is canceled.
 	t.Cleanup(func() {
 		var n int
@@ -114,6 +115,7 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 			t.Errorf("invalid enqueues stored %d tasks (%v)", n, err)
 		}
 	})
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -125,6 +127,7 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 			if n := strings.Count(err.Error(), "taskmill:"); n != 1 {
 				t.Errorf("%q names the package %d times", err, n)
 			}
+
 			// The checks run before the query: the caller's transaction goes on.
 			e.txExec(t, tx, "SELECT 1")
 		})
@@ -149,6 +152,7 @@ func (parked) EnqueueDefaults() taskmill.EnqueueOptions {
 func TestEnqueueStoresRunTimesAtTheEdgesOfTimestamps(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	for _, c := range []struct {
 		runAt time.Time
 		state taskmill.State
@@ -168,6 +172,7 @@ func TestEnqueueStoresRunTimesAtTheEdgesOfTimestamps(t *testing.T) {
 func TestEnqueueStoresNumbersAtTheEdgesOfNumeric(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// The most digits before and after the point that PostgreSQL's numeric
 	// type holds, and a zero with a large exponent.
 	for _, body := range []string{"1e131071", "1e-16383", "0e99999", "0." + strings.Repeat("0", 99) + "1e100"} {
@@ -180,6 +185,7 @@ func TestEnqueueStoresNumbersAtTheEdgesOfNumeric(t *testing.T) {
 func TestEnqueueKeepsEscapedBackslashes(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	// A backslash followed by "u0000" is text, not a NUL character.
 	id := e.enqueue(t, sendEmail{To: `\u0000`}, nil)
 	var got sendEmail
@@ -200,6 +206,7 @@ func TestEnqueueManyKeepsOrderInOneTransaction(t *testing.T) {
 	for i := range params {
 		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}}
 	}
+
 	res, err := e.client.EnqueueMany(t.Context(), params)
 	if err != nil {
 		t.Fatal(err)
@@ -278,6 +285,7 @@ func TestEnqueueTxWithDatabaseSQL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
@@ -295,6 +303,7 @@ func TestEnqueueDeduplicates(t *testing.T) {
 	if err != nil || first.Duplicate {
 		t.Fatalf("first enqueue: %+v, %v", first, err)
 	}
+
 	second, err := e.client.Enqueue(t.Context(), sendEmail{To: "b"}, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -337,8 +346,10 @@ func TestEnqueueDeduplicates(t *testing.T) {
 func TestDuplicateEnqueueWritesNothing(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a wait for a lock would end it
 	defer cancel()
+
 	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42", GroupKey: "customer-7"}
 	first := e.keyed(t, opts)
 	last := e.count(t, "SELECT last_value FROM {s}.tasks_id_seq")
@@ -362,6 +373,7 @@ func TestDuplicateEnqueueWritesNothing(t *testing.T) {
 			t.Fatalf("got %+v, %v; want a duplicate of task %d", dup, err, first.ID)
 		}
 	}
+
 	var wrote bool
 	if err := tx.QueryRow(ctx, "SELECT pg_current_xact_id_if_assigned() IS NOT NULL").Scan(&wrote); err != nil {
 		t.Fatal(err)
@@ -372,6 +384,7 @@ func TestDuplicateEnqueueWritesNothing(t *testing.T) {
 	if n := e.count(t, "SELECT last_value FROM {s}.tasks_id_seq"); n != last {
 		t.Errorf("the duplicate enqueues took %d task IDs from the sequence, want none", n-last)
 	}
+
 	// The open transaction holds nothing that a cancel of the task needs.
 	if err := e.client.Cancel(ctx, first.ID); err != nil {
 		t.Fatalf("cancel while the transaction of the duplicate enqueues is open: %v", err)
@@ -387,17 +400,21 @@ func TestDuplicateEnqueueWritesNothing(t *testing.T) {
 func TestEnqueueDoesNotWaitForACancelOfTheKeysTask(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second) // a wait for the cancel would end it
 	defer cancel()
+
 	opts := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
 	first := e.keyed(t, opts)
 	tx := e.begin(t)
 	if err := e.client.CancelTx(ctx, taskmill.Pgx(tx), first.ID); err != nil {
 		t.Fatal(err)
 	}
+
 	if dup, err := e.client.Enqueue(ctx, sendEmail{}, opts); err != nil || !dup.Duplicate || dup.ID != first.ID {
 		t.Fatalf("while the cancel is open: got %+v, %v; want a duplicate of task %d", dup, err, first.ID)
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -417,13 +434,16 @@ func TestEnqueueInASnapshotTransactionSeesAFreedKey(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t)
 			ctx := t.Context()
+
 			opts := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
 			first := e.keyed(t, opts)
+
 			tx, err := e.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: level})
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer func() { _ = tx.Rollback(context.Background()) }()
+
 			// The transaction's snapshot: the first task holds the key.
 			if _, err := tx.Exec(ctx, replaceSchema("SELECT count(*) FROM {s}.dedupe_keys", e.schema)); err != nil {
 				t.Fatal(err)
@@ -434,6 +454,7 @@ func TestEnqueueInASnapshotTransactionSeesAFreedKey(t *testing.T) {
 			if err != nil || res.Duplicate {
 				t.Fatalf("got %+v, %v; want a new task: the key is free", res, err)
 			}
+
 			if err := tx.Commit(ctx); err != nil {
 				t.Fatal(err)
 			}
@@ -458,6 +479,7 @@ func TestEnqueueDeduplicatesConcurrently(t *testing.T) {
 					Options: &taskmill.EnqueueOptions{DedupeKey: strconv.Itoa(k)},
 				}
 			}
+
 			res, err := e.client.EnqueueMany(t.Context(), params)
 			if err != nil {
 				errs <- err
@@ -471,11 +493,13 @@ func TestEnqueueDeduplicatesConcurrently(t *testing.T) {
 			}
 		})
 	}
+
 	wg.Wait()
 	close(errs)
 	for err := range errs {
 		t.Fatal(err)
 	}
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != keys {
 		t.Fatalf("got %d tasks, want exactly %d", n, keys)
 	}
@@ -527,28 +551,34 @@ func (e *env) operate(ctx context.Context, n int, id int64) error {
 func TestDedupeKeysHoldUnderConcurrentOperations(t *testing.T) {
 	t.Parallel()
 	e := newEnvWith(t, testdb.PoolSize(t, 12), nil)
+
 	const workers, rounds, keys = 8, 15, 3
 	var last atomic.Int64 // the newest task that an enqueue named
+
 	round := func(w, i int) error {
 		key := strconv.Itoa((w + i) % keys)
 		res, err := e.client.Enqueue(t.Context(), sendEmail{To: key}, &taskmill.EnqueueOptions{DedupeKey: key, GroupKey: "g" + key})
 		if err != nil && !lostToOthers(err) {
 			return fmt.Errorf("enqueue: %w", err)
 		}
+
 		// The task that the enqueue named, or another recent one.
 		id := res.ID
 		if err != nil || i%3 == 0 {
 			id = max(1, last.Load()-int64(i%7))
 		}
 		last.Store(max(last.Load(), res.ID))
+
 		if err := e.operate(t.Context(), w+i, id); err != nil && !lostToOthers(err) {
 			return fmt.Errorf("on task %d: %w", id, err)
 		}
+
 		if n := e.brokenKeys(t); n != 0 {
 			return fmt.Errorf("%d keys or tasks break the rule of one unfinished task per key", n)
 		}
 		return nil
 	}
+
 	var wg sync.WaitGroup
 	errs := make(chan error, workers)
 	for w := range workers {
@@ -561,6 +591,7 @@ func TestDedupeKeysHoldUnderConcurrentOperations(t *testing.T) {
 			}
 		})
 	}
+
 	wg.Wait()
 	close(errs)
 	for err := range errs {
@@ -603,6 +634,7 @@ func TestEnqueueLimitsLeaveTheTransactionUsable(t *testing.T) {
 		return next(ctx)
 	}
 	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{grow}})
+
 	many := make([]taskmill.EnqueueParams, 10_001)
 	for i := range many {
 		many[i] = taskmill.EnqueueParams{Args: sendEmail{}}
@@ -628,6 +660,7 @@ func TestEnqueueLimitsLeaveTheTransactionUsable(t *testing.T) {
 		if _, err := e.client.EnqueueManyTx(t.Context(), taskmill.Pgx(tx), c.params); !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Fatalf("%s: got %v, want ErrInvalidArgument", c.name, err)
 		}
+
 		// No statement ran, so the caller's transaction goes on.
 		if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err != nil {
 			t.Fatalf("%s: the transaction is no longer usable: %v", c.name, err)
@@ -636,6 +669,7 @@ func TestEnqueueLimitsLeaveTheTransactionUsable(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 4 {
 		t.Fatalf("got %d tasks, want the 4 enqueued after the failures", n)
 	}
@@ -666,10 +700,12 @@ func TestEnqueueStopsAtTheFirstTaskPastTheLimit(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	var encoded atomic.Int32
+
 	params := make([]taskmill.EnqueueParams, 100)
 	for i := range params {
 		params[i] = taskmill.EnqueueParams{Args: countedArgs{encoded: &encoded}}
 	}
+
 	if _, err := e.client.EnqueueMany(t.Context(), params); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("got %v, want ErrInvalidArgument", err)
 	}
@@ -682,6 +718,7 @@ func TestEnqueueStopsAtTheFirstTaskPastTheLimit(t *testing.T) {
 func TestEnqueueMiddlewareWrapsEnqueues(t *testing.T) {
 	t.Parallel()
 	var calls []string
+
 	outer := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
 		calls = append(calls, "outer")
 		err := next(ctx)
@@ -697,6 +734,7 @@ func TestEnqueueMiddlewareWrapsEnqueues(t *testing.T) {
 		}
 		return next(ctx)
 	}
+
 	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
 		EnqueueMiddleware: []taskmill.EnqueueMiddleware{outer, inner},
 	})
@@ -711,6 +749,7 @@ func TestEnqueueMiddlewareWrapsEnqueues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	want := []string{
 		"outer", "inner",
 		fmt.Sprintf("default/email.send %d false", res[0].ID),
@@ -720,6 +759,7 @@ func TestEnqueueMiddlewareWrapsEnqueues(t *testing.T) {
 	if !slices.Equal(calls, want) {
 		t.Fatalf("got calls %q, want %q", calls, want)
 	}
+
 	meta := e.get(t, res[0].ID).Metadata
 	if meta["traceparent"] != "00-email.send" || meta["source"] != "caller" {
 		t.Fatalf("got metadata %v", meta)
@@ -783,12 +823,14 @@ func TestEnqueueMiddlewareThatMisusesNext(t *testing.T) {
 func TestEnqueueMiddlewareThatFailsAfterNext(t *testing.T) {
 	t.Parallel()
 	logs := &logRecorder{}
+
 	failAfter := func(ctx context.Context, _ []*taskmill.EnqueueTask, next func(context.Context) error) error {
 		if err := next(ctx); err != nil {
 			return err
 		}
 		return errors.New("exporter unavailable")
 	}
+
 	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
 		Logger:            slog.New(logs),
 		EnqueueMiddleware: []taskmill.EnqueueMiddleware{failAfter},
@@ -813,6 +855,7 @@ func TestEnqueueMiddlewareThatFailsAfterNext(t *testing.T) {
 	if err := tx.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
 		t.Fatalf("got %d tasks, want only the first", n)
 	}
@@ -871,6 +914,7 @@ func TestEnqueueRunsAgainAfterADeadlock(t *testing.T) {
 		},
 	}})
 	ctx := t.Context()
+
 	// The first insert of a task fails. A sequence counts the inserts: it
 	// keeps its count when the statement that failed rolls back.
 	e.exec(t, "CREATE SEQUENCE {s}.inserts")
@@ -883,6 +927,7 @@ BEGIN
     RETURN NEW;
 END $$`)
 	e.exec(t, "CREATE TRIGGER deadlock_first BEFORE INSERT ON {s}.tasks FOR EACH ROW EXECUTE FUNCTION {s}.deadlock_first()")
+
 	opts := func(key string) *taskmill.EnqueueOptions {
 		return &taskmill.EnqueueOptions{GroupKey: "g", DedupeKey: key}
 	}
@@ -898,6 +943,7 @@ END $$`)
 	} {
 		e.exec(t, "ALTER SEQUENCE {s}.inserts RESTART")
 		calls.Store(0)
+
 		if res, err := enqueue(); err != nil || res.Duplicate {
 			t.Fatalf("%s: got %+v, %v; want a new task", name, res, err)
 		}
@@ -905,6 +951,7 @@ END $$`)
 			t.Errorf("%s: the enqueue middleware ran %d times, want 1", name, n)
 		}
 	}
+
 	// The statements that failed left no task, and no count in the group.
 	if n := e.count(t, "SELECT tasks FROM {s}.groups"); n != 2 || e.count(t, "SELECT count(*) FROM {s}.tasks") != 2 {
 		t.Errorf("the group counts %d tasks, want it and the tasks table to hold 2", n)
@@ -927,12 +974,14 @@ func TestEnqueueFindsADuplicateCommittedWhileItWaited(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t)
 			opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
+
 			if held != "a new key" {
 				// An earlier task held the key, and the maintainer has not
 				// deleted the key yet.
 				e.enqueue(t, sendEmail{To: "earlier"}, opts)
 				e.exec(t, "UPDATE {s}.dedupe_keys SET expires_at = now() - interval '1 second'")
 			}
+
 			holder, first := e.holdKey(t, opts)
 			got, err := behind(t, e, holder, func() (taskmill.EnqueueResult, error) {
 				return e.client.Enqueue(t.Context(), sendEmail{To: "second"}, opts)
@@ -972,10 +1021,12 @@ func behind[T any](t *testing.T, e *env, holder pgx.Tx, enqueue func() (T, error
 		res, err := enqueue()
 		done <- result{res, err}
 	}()
+
 	e.waitBlocked(t, "{s}.dedupe_keys")
 	if err := holder.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+
 	got := recv(t, done, "the enqueue that waited for the key")
 	return got.res, got.err
 }
@@ -1027,6 +1078,7 @@ func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
 			e := newTracedEnv(t, read).withLogger(t, slog.New(logs))
 			opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
 			holder, first := e.holdKey(t, opts)
+
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			before := func() { cancel() } // the read fails: its context has ended
@@ -1038,6 +1090,7 @@ func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
 				}
 			}
 			read.call.Store(&before)
+
 			res, err := behind(t, e, holder, func() ([]taskmill.EnqueueResult, error) {
 				return e.client.EnqueueMany(ctx, plainAndKeyed(opts))
 			})
@@ -1062,10 +1115,12 @@ func TestEnqueueTxReturnsTheFailedReadOfADuplicate(t *testing.T) {
 	e := newTracedEnv(t, read)
 	opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
 	holder, _ := e.holdKey(t, opts)
+
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	before := func() { cancel() }
 	read.call.Store(&before)
+
 	tx := e.begin(t)
 	res, err := behind(t, e, holder, func() ([]taskmill.EnqueueResult, error) {
 		return e.client.EnqueueManyTx(ctx, taskmill.Pgx(tx), plainAndKeyed(opts))

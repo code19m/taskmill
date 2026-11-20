@@ -172,6 +172,7 @@ func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 			return nil, invalidArgument("schedule %q defined twice", s.Name)
 		}
 		seen[s.Name] = true
+
 		c, err := compileSchedule(s)
 		if err != nil {
 			return nil, err
@@ -192,6 +193,7 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 			"schedule %q: Options set RunAt, DedupeKey, or DedupeWindow, which the schedule sets itself", s.Name,
 		)
 	}
+
 	if s.Location == nil {
 		s.Location = time.UTC
 	}
@@ -202,6 +204,7 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 	if err != nil {
 		return compiledSchedule{}, invalidArgument("schedule %q: %v", s.Name, err)
 	}
+
 	var opts EnqueueOptions
 	if d, ok := s.Args.(ArgsWithDefaults); ok {
 		opts = d.EnqueueDefaults()
@@ -211,6 +214,7 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 	}
 	opts.Queue = cmp.Or(opts.Queue, DefaultQueue)
 	c := compiledSchedule{Schedule: s, expr: expr, opts: opts}
+
 	// Check the task as a run enqueues it, so that a mistake fails NewWorker
 	// and not every run. A run sets its own run time and dedupe window over
 	// those of the kind's defaults, so the check sets valid ones too. And a
@@ -218,7 +222,7 @@ func compileSchedule(s Schedule) (compiledSchedule, error) {
 	opts.RunAt, opts.DedupeWindow = time.Now(), defaultDedupeWindow
 	run, err := resolve(EnqueueParams{Args: s.Args, Options: &opts})
 	if err == nil {
-		run.own = c.ownMetadata(longestScheduledFor)
+		run.reservedMeta = c.reservedMetadata(longestScheduledFor)
 		_, err = encodeMetadata(run.metadata())
 	}
 	if err != nil {
@@ -241,9 +245,9 @@ func (s *compiledSchedule) scheduledFor(at time.Time) string {
 	return at.Format(time.RFC3339Nano)
 }
 
-// ownMetadata returns taskmill's own metadata of a run of s, which is stored
-// over the metadata of the schedule's task.
-func (s *compiledSchedule) ownMetadata(scheduledFor string) map[string]string {
+// reservedMetadata returns taskmill's reserved metadata of a run of s, which
+// is stored over the metadata of the schedule's task.
+func (s *compiledSchedule) reservedMetadata(scheduledFor string) map[string]string {
 	return map[string]string{MetadataSchedule: s.Name, MetadataScheduledFor: scheduledFor}
 }
 
@@ -258,7 +262,7 @@ type scheduleState struct {
 // runSchedules enqueues the due runs of the worker's schedules.
 func (m *maintainer) runSchedules(ctx context.Context) {
 	if len(m.w.schedules) > 0 {
-		m.schedules.observe(ctx, m.enqueueDue(ctx))
+		m.scheduleFailures.observe(ctx, m.enqueueDue(ctx))
 	}
 }
 
@@ -273,27 +277,35 @@ func (m *maintainer) enqueueDue(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load schedules: %w", err)
 	}
+
 	var errs []error
 	for i := range m.w.schedules {
 		s := &m.w.schedules[i]
-		if err := m.runSchedule(ctx, s, states[s.Name], now); err != nil {
+		if err := m.syncSchedule(ctx, s, states[s.Name], now); err != nil {
 			errs = append(errs, fmt.Errorf("schedule %s: %w", s.Name, err))
 		}
 	}
 	return errors.Join(errs...)
 }
 
-func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleState, error) {
+// scheduleNames returns the names of the worker's schedules.
+func (m *maintainer) scheduleNames() []string {
 	names := make([]string, len(m.w.schedules))
 	for i, s := range m.w.schedules {
 		names[i] = s.Name
 	}
-	r, err := m.c.pool.Query(ctx, m.c.sql.loadSchedules, names)
+	return names
+}
+
+// loadSchedules reads the stored state of the worker's schedules, by name.
+func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleState, error) {
+	r, err := m.c.pool.Query(ctx, m.c.sql.loadSchedules, m.scheduleNames())
 	if err != nil {
 		return nil, err
 	}
 	defer r.Close()
-	states := make(map[string]*scheduleState, len(names))
+
+	states := make(map[string]*scheduleState, len(m.w.schedules))
 	for r.Next() {
 		var name string
 		st := &scheduleState{}
@@ -305,13 +317,14 @@ func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleSta
 	return states, r.Err()
 }
 
-// runSchedule brings a schedule's row up to date with its definition, and
+// syncSchedule brings a schedule's row up to date with its definition, and
 // enqueues its run if one is due.
-func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *scheduleState, now time.Time) error {
+func (m *maintainer) syncSchedule(ctx context.Context, s *compiledSchedule, st *scheduleState, now time.Time) error {
 	payload, err := json.Marshal(s.Args)
 	if err != nil {
 		return fmt.Errorf("encode args: %w", err)
 	}
+
 	tz := s.Location.String()
 	changed := st == nil || st.cron != s.Cron || st.timezone != tz || st.queue != s.opts.Queue ||
 		st.kind != s.Args.Kind() || !jsonEqual(st.payload, payload)
@@ -320,15 +333,25 @@ func (m *maintainer) runSchedule(ctx context.Context, s *compiledSchedule, st *s
 		if err != nil {
 			return err
 		}
+
 		resetNext := st == nil || st.cron != s.Cron || st.timezone != tz
 		_, err = m.c.pool.Exec(ctx, m.c.sql.upsertSchedule,
-			s.Name, s.opts.Queue, s.Args.Kind(), s.Cron, tz, string(payload), next, resetNext)
+			s.Name,          // $1
+			s.opts.Queue,    // $2
+			s.Args.Kind(),   // $3
+			s.Cron,          // $4
+			tz,              // $5
+			string(payload), // $6
+			next,            // $7
+			resetNext,       // $8
+		)
 		if err != nil || resetNext {
 			return err // with a new next run time, no run is due
 		}
 		// Continue to the due run: a definition that differs in every pass,
 		// such as args that encode the time, must not keep it from running.
 	}
+
 	if st.paused || st.nextRunAt.After(now) {
 		return nil
 	}
@@ -341,6 +364,7 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 	// A regular run is due at a whole minute of the timetable. Any other
 	// time is the time of a request, which Client.RunSchedule stored.
 	requested := due.In(s.Location).Second() != 0 || due.Nanosecond() != 0
+
 	// The regular runs missed since a regular run collapse into it, so the
 	// next one comes after now. A requested run stands for no regular run,
 	// so the next one comes after the request: if it is due already, the
@@ -353,24 +377,28 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 	if err != nil {
 		return err
 	}
+
 	// The key is the due time, in the unit that tells the two kinds of run
 	// apart: a request may come in the second of a regular run.
 	key := due.Unix()
 	if requested {
 		key = due.UnixMicro()
 	}
+
 	return pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
 		// An enqueue into a FIFO group waits for the group's row. The election
 		// runs in the same loop, so give up after a moment, and try again in
 		// the next cycle.
 		wait := strconv.FormatInt(m.w.timing.lockWait.Milliseconds(), 10) + "ms"
-		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+wait+"'"); err != nil {
+		if _, err := tx.Exec(ctx, lockTimeoutSQL, wait); err != nil {
 			return err
 		}
+
 		tag, err := tx.Exec(ctx, m.c.sql.advanceSchedule, s.Name, next, due)
 		if err != nil || tag.RowsAffected() == 0 {
 			return err // another maintainer ran it, or it was paused meanwhile
 		}
+
 		opts := s.opts
 		opts.DedupeKey = "schedule:" + s.Name + ":" + strconv.FormatInt(key, 10)
 		opts.DedupeWindow = max(24*time.Hour, 2*next.Sub(due))
@@ -379,12 +407,14 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		if err != nil {
 			return err
 		}
+
 		// The enqueue middleware sees taskmill's own metadata, and cannot
 		// change it: a handler must find the run's time whatever it does.
-		run.own = s.ownMetadata(s.scheduledFor(due))
-		if _, err = m.c.storeThrough(ctx, pgxQuerier{q: tx}, []*resolvedTask{run}); err != nil {
+		run.reservedMeta = s.reservedMetadata(s.scheduledFor(due))
+		if _, err = m.c.storeThrough(ctx, pgxExecutor{q: tx}, []*resolvedTask{run}); err != nil {
 			return err
 		}
+
 		// The timeout was for the group's row. At the commit, it would keep
 		// the schedule from running for as long as notifying transactions
 		// queue there for longer than that wait, while every other enqueue
@@ -402,12 +432,8 @@ func (m *maintainer) pruneSchedules(ctx context.Context) {
 	if len(m.w.schedules) == 0 {
 		return
 	}
-	names := make([]string, len(m.w.schedules))
-	for i, s := range m.w.schedules {
-		names[i] = s.Name
-	}
-	_, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, names)
-	m.pruning.observe(ctx, err)
+	_, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, m.scheduleNames())
+	m.pruneFailures.observe(ctx, err)
 }
 
 // jsonEqual reports whether a and b hold the same JSON value, as PostgreSQL's
@@ -455,23 +481,26 @@ func sameNumber(x, y json.Number) bool {
 
 // Schedules returns every schedule stored in the database, ordered by name.
 func (c *Client) Schedules(ctx context.Context) ([]ScheduleInfo, error) {
+	fail := func(err error) error { return fmt.Errorf("taskmill: list schedules: %w", err) }
+
 	r, err := c.pool.Query(ctx, c.sql.listSchedules)
 	if err != nil {
-		return nil, fmt.Errorf("taskmill: list schedules: %w", err)
+		return nil, fail(err)
 	}
 	defer r.Close()
+
 	var out []ScheduleInfo
 	for r.Next() {
 		var s ScheduleInfo
 		var last *time.Time
 		if err := r.Scan(&s.Name, &s.Queue, &s.Kind, &s.Cron, &s.Location, &s.NextRunAt, &last, &s.Paused); err != nil {
-			return nil, fmt.Errorf("taskmill: list schedules: %w", err)
+			return nil, fail(err)
 		}
 		s.LastRunAt = deref(last)
 		out = append(out, s)
 	}
 	if err := r.Err(); err != nil {
-		return nil, fmt.Errorf("taskmill: list schedules: %w", err)
+		return nil, fail(err)
 	}
 	return out, nil
 }
@@ -500,6 +529,7 @@ func (c *Client) RunSchedule(ctx context.Context, name string) error {
 	if err := checkName("schedule name", name, maxNameLength); err != nil {
 		return err
 	}
+
 	var paused bool
 	if err := c.pool.QueryRow(ctx, c.sql.runSchedule, name).Scan(&paused); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -517,10 +547,12 @@ func (c *Client) setSchedulePaused(ctx context.Context, name string, paused bool
 	if err := checkName("schedule name", name, maxNameLength); err != nil {
 		return err
 	}
+
 	verb := "resume"
 	if paused {
 		verb = "pause"
 	}
+
 	tag, err := c.pool.Exec(ctx, c.sql.pauseSchedule, name, paused)
 	if err != nil {
 		return fmt.Errorf("taskmill: %s schedule %q: %w", verb, name, err)

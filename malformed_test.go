@@ -32,6 +32,7 @@ VALUES ('default', 'email.send', 'available', 4, now(), '{}', 25) RETURNING id`,
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	e.exec(t, "UPDATE {s}.tasks SET "+set+" WHERE id = $1", id)
 	return id
 }
@@ -81,16 +82,19 @@ func failsAlone(t *testing.T, set string, limited bool) {
 	if limited {
 		e.limitDefaultQueue(t, 8)
 	}
+
 	var ids []int64
 	for range 5 {
 		ids = append(ids, e.enqueue(t, sendEmail{}, nil))
 	}
+
 	var sawBad atomic.Bool
 	see := func(id int64) {
 		if id == bad {
 			sawBad.Store(true)
 		}
 	}
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 			see(task.ID)
@@ -112,6 +116,7 @@ func failsAlone(t *testing.T, set string, limited bool) {
 			t.Errorf("a task fetched with the malformed one took %d attempts, with errors %+v", info.Attempt, info.Errors)
 		}
 	}
+
 	info := e.waitState(t, bad, taskmill.StateDead)
 	if n := len(info.Errors); info.Attempt != 1 || n != 1 || info.Errors[0].Code != taskmill.CodeInvalidRow {
 		t.Errorf("the malformed task: attempt %d, errors %+v; want one attempt that failed with invalid_row", info.Attempt, info.Errors)
@@ -130,6 +135,7 @@ func TestTaskWithoutAttemptsLeftRunsOnce(t *testing.T) {
 	e := newEnv(t)
 	used := e.insertTask(t, "attempt = 3, max_attempts = 3")
 	id := e.enqueue(t, sendEmail{}, nil)
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
 			if task.ID == used {
@@ -139,6 +145,7 @@ func TestTaskWithoutAttemptsLeftRunsOnce(t *testing.T) {
 		}, nil),
 		Queues: defaultQueue(10),
 	})
+
 	e.waitState(t, id, taskmill.StateCompleted)
 	if info := e.waitState(t, used, taskmill.StateDead); info.Attempt != 3 || len(info.Errors) != 1 {
 		t.Fatalf("the task without attempts left: attempt %d, errors %+v; want one more failed attempt", info.Attempt, info.Errors)
@@ -155,6 +162,7 @@ func TestErrorsThatAreNotAnArrayCountAsNone(t *testing.T) {
 	failing := e.insertTask(t, `errors = '{}', max_attempts = 1`)
 	lost := e.insertTask(t, expiredLease+`, queue = 'billing', errors = '"gone"'`)
 	other := e.insertTask(t, expiredLease+`, queue = 'reports'`)
+
 	runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return errors.New("no") }, nil),
 		Queues:   defaultQueue(10),
@@ -176,6 +184,7 @@ func TestErrorsThatAreNotAnArrayCountAsNone(t *testing.T) {
 func TestListShowsMalformedTasks(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+
 	var ids []int64
 	for _, set := range []string{
 		`metadata = '{"tenant": "shop"}'`,
@@ -185,10 +194,12 @@ func TestListShowsMalformedTasks(t *testing.T) {
 	} {
 		ids = append(ids, e.insertTask(t, set))
 	}
+
 	res, err := e.client.List(t.Context(), nil)
 	if err != nil || len(res.Tasks) != len(ids) {
 		t.Fatalf("list: %v; want %d tasks", err, len(ids))
 	}
+
 	if got := e.get(t, ids[0]).Metadata; got["tenant"] != "shop" {
 		t.Errorf("metadata of an ordinary task: %v", got)
 	}
@@ -244,6 +255,7 @@ func TestGroupCountThatIsTooLowFailsNoOtherGroup(t *testing.T) {
 		t.Parallel()
 		e := newEnv(t)
 		e.rawGroups = true // one group's count is wrong on purpose
+
 		var ids []int64
 		for _, group := range []string{"spoiled", "a", "b", "c", "d", "e"} {
 			ids = append(ids, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: group}))
@@ -265,6 +277,7 @@ func TestGroupCountThatIsTooLowFailsNoOtherGroup(t *testing.T) {
 			Queues:        defaultQueue(10),
 			LeaseDuration: 2 * time.Second,
 		})
+
 		for _, id := range ids {
 			e.waitState(t, id, taskmill.StateCompleted)
 		}
@@ -277,6 +290,7 @@ func TestGroupCountThatIsTooLowFailsNoOtherGroup(t *testing.T) {
 		t.Parallel()
 		e := newEnv(t)
 		e.rawGroups = true
+
 		// A canceled task of the group, whose worker is gone: the rescue
 		// ends it, which takes it out of its group.
 		canceled := e.insertTask(t, expiredLease+`, group_key = 'spoiled', cancel_requested_at = now()`)
@@ -325,6 +339,7 @@ func TestHaltEndsWhenTheTaskItNamesLeaves(t *testing.T) {
 		taskmill.Rescue(ctx, w)
 		return nil
 	}
+
 	run := func(ctx context.Context, id int64) error {
 		_, err := w.RunTask(ctx, id)
 		return err
@@ -391,6 +406,7 @@ func TestHaltEndsWhenTheTaskItNamesLeaves(t *testing.T) {
 		e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
 		           VALUES ('default', $1, 3, nullif($2::bigint, 0), CASE WHEN $2::bigint <> 0 THEN now() END)`,
 			tt.name, ids[tt.named])
+
 		if err := tt.do(tt.name, ids); err != nil {
 			t.Fatalf("%s: %v", tt.name, err)
 		}
@@ -425,6 +441,7 @@ func TestCompletionCountsEveryTaskOfAGroup(t *testing.T) {
 	// transaction, which waits for the row.
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'both' FOR UPDATE")
+
 	ran := make(chan struct{}, 2)
 	stop := runWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
@@ -435,11 +452,13 @@ func TestCompletionCountsEveryTaskOfAGroup(t *testing.T) {
 	})
 	recv(t, ran, "the first task to run")
 	recv(t, ran, "the second task to run")
+
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
 		stop()
 	}()
+
 	e.waitBlocked(t, "UPDATE {s}.groups")
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
@@ -458,6 +477,7 @@ func TestMissingGroupRowIsReported(t *testing.T) {
 	logs := &logRecorder{}
 	e := newEnv(t).withLogger(t, slog.New(logs))
 	ctx := t.Context()
+
 	// One task in each group, named after the way in which it leaves, and
 	// two in the group that a bulk action empties.
 	ids := make(map[string]int64)
@@ -483,6 +503,7 @@ func TestMissingGroupRowIsReported(t *testing.T) {
 			return nil
 		}, nil),
 	})
+
 	for group, want := range map[string]taskmill.State{
 		"completed": taskmill.StateCompleted, "dead": taskmill.StateDead, "stopped": taskmill.StateCanceled,
 	} {
@@ -490,6 +511,7 @@ func TestMissingGroupRowIsReported(t *testing.T) {
 			t.Fatalf("the task of the group %q: %v, %+v, want it %s", group, err, info, want)
 		}
 	}
+
 	if err := e.client.Cancel(ctx, ids["canceled"]); err != nil {
 		t.Fatal(err)
 	}
@@ -504,12 +526,14 @@ func TestMissingGroupRowIsReported(t *testing.T) {
 	for group, id := range ids {
 		want = append(want, "default/"+group+" task_id="+strconv.FormatInt(id, 10))
 	}
+
 	var reported []string
 	for _, r := range logs.all() {
 		if r.Message == "fifo group missing" {
 			reported = append(reported, attr(r, "queue")+"/"+attr(r, "group")+" task_id="+attr(r, "task_id"))
 		}
 	}
+
 	slices.Sort(want)
 	slices.Sort(reported)
 	if !slices.Equal(reported, want) {
@@ -532,6 +556,7 @@ func (e *env) countedQueue(t *testing.T, name string) taskmill.QueueInfo {
 		if err != nil {
 			t.Fatalf("queues: %v", err)
 		}
+
 		i := slices.IndexFunc(queues, func(q taskmill.QueueInfo) bool { return q.Name == name && !q.RefreshedAt.IsZero() })
 		if i >= 0 {
 			counted = queues[i]
@@ -593,6 +618,7 @@ func TestSmallTablesRefuseWhatNoReleaseWrites(t *testing.T) {
 			"lease_duration = '-4000000 mons 120000000 days'", "workers_lease_check",
 		},
 	}
+
 	// So no field of a period may be negative: not its months, not its days,
 	// and not the rest. Each of these is inside its range in all.
 	for _, period := range []struct{ table, column, constraint string }{
@@ -606,11 +632,13 @@ func TestSmallTablesRefuseWhatNoReleaseWrites(t *testing.T) {
 			})
 		}
 	}
+
 	if e.infinitePeriods(t) {
 		refused = append(refused,
 			write{"a lease without end", "workers", "lease_duration = 'infinity'", "workers_lease_check"},
 			write{"a retention without end", "settings", "dead_retention = 'infinity'", "settings_retention_check"})
 	}
+
 	for _, tt := range refused {
 		_, err := e.pool.Exec(ctx, replaceSchema("UPDATE {s}."+tt.table+" SET "+tt.set, e.schema))
 		pgErr, ok := errors.AsType[*pgconn.PgError](err)
@@ -626,6 +654,7 @@ func TestSmallTablesRefuseWhatNoReleaseWrites(t *testing.T) {
 	longest := time.Duration(math.MaxInt64)
 	e.exec(t, "UPDATE {s}.workers SET lease_duration = $1 * interval '1 microsecond'", longest.Microseconds())
 	e.exec(t, "UPDATE {s}.settings SET history_retention = DEFAULT, dead_retention = DEFAULT")
+
 	for _, d := range []time.Duration{time.Hour, longest} {
 		err := e.client.UpdateSettings(ctx, func(s *taskmill.Settings) { s.HistoryRetention, s.DeadRetention = d, d })
 		if err != nil {
