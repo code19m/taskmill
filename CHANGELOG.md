@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-11-20
+
 ### Changed
 
 - The dashboard's status pages stand in the middle of the page: a picture,
@@ -1860,7 +1862,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.12.2...HEAD
+[0.12.2]: https://github.com/code19m/taskmill/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/code19m/taskmill/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/code19m/taskmill/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/code19m/taskmill/compare/v0.11.0...v0.11.1
