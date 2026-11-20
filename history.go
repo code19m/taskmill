@@ -44,7 +44,7 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 		if err != nil || len(days) == 0 {
 			return err
 		}
-		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+partitionLockTimeout+"'"); err != nil {
+		if _, err := tx.Exec(ctx, lockTimeoutSQL, partitionLockTimeout); err != nil {
 			return err
 		}
 		// ONLY: the partitions stay free for autovacuum.
@@ -71,7 +71,7 @@ func ensureHistoryPartitions(ctx context.Context, pool *pgxpool.Pool, schema str
 		}
 		return nil
 	})
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42501" { // insufficient_privilege
+	if pgCode(err) == codeInsufficientPrivilege {
 		return fmt.Errorf("prepare history partitions: %w; the role that runs workers must own the taskmill tables", err)
 	}
 	if err != nil {
@@ -129,7 +129,7 @@ const historyGap = time.Minute
 // translated.
 func (c *Client) noteMissingHistory(ctx context.Context, logger *slog.Logger, err error) {
 	pgErr, ok := errors.AsType[*pgconn.PgError](err)
-	if !ok || pgErr.Code != "23514" || pgErr.TableName != "task_history" || pgErr.SchemaName != c.schema { // check_violation
+	if !ok || pgErr.Code != codeCheckViolation || pgErr.TableName != "task_history" || pgErr.SchemaName != c.schema {
 		return
 	}
 	c.historyGapUntil.Store(time.Now().Add(historyGap).UnixNano())

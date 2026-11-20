@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -255,7 +254,7 @@ func (w *Worker) capacity(ctx context.Context, tx pgx.Tx, queue string) (int, er
 		if errors.Is(err, pgx.ErrNoRows) {
 			return maxFetch, nil
 		}
-		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "55P03" { // lock_not_available
+		if pgCode(err) == codeLockNotAvailable {
 			return 0, errQueueHeld
 		}
 		return 0, err
@@ -269,22 +268,6 @@ func (w *Worker) capacity(ctx context.Context, tx pgx.Tx, queue string) (int, er
 	}
 	return max(*maxRunning-running, 0), nil
 }
-
-// planSettings keep a fetch on its ordered index. A queue's table changes so
-// fast that the planner's statistics are often far off: with too low an
-// estimate of the available tasks, it may read all of them and sort them, on
-// every fetch. Turning sorts and bitmap scans off for the fetch's transaction
-// rules that out.
-const planSettings = `SELECT set_config('enable_sort', 'off', true), set_config('enable_bitmapscan', 'off', true)`
-
-// limitedSettings are planSettings for the fetch transaction of a queue with
-// a MaxRunning limit. They also bound its wait for the queue's row to one
-// second: a transaction that holds the row for long, such as a stalled
-// worker's, must not tie up a connection of every waiting worker, or keep
-// them from stopping, for as long as it holds the row. The timeout can hold
-// until the transaction ends: a fetch sends no notification, so its commit
-// waits for no lock (see liftLockTimeout).
-const limitedSettings = planSettings + `, set_config('lock_timeout', '1s', true)`
 
 // errQueueHeld reports that the fetch of a queue with a MaxRunning limit
 // gave up waiting for the queue's row. That is no failure of the fetch: the

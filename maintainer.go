@@ -452,6 +452,13 @@ func sleepUntilDue(secs float64, limit time.Duration) time.Duration {
 	return time.Duration(secs * float64(time.Second))
 }
 
+// Limits of a statistics refresh.
+const (
+	statsQueueCap = 10_000  // most tasks counted per queue and state, and halted groups per queue
+	statsDueCap   = 100_000 // most scheduled and retryable tasks counted in all
+	statsRetryCap = 10_000  // most retryable tasks whose attempts are read in all, besides each queue's last
+)
+
 // refreshStats counts each queue's tasks per state, up to the caps, finds
 // each count's oldest due task, its queue's halted groups, and the most
 // failures of its queue's retryable tasks, and stores them for
@@ -459,12 +466,6 @@ func sleepUntilDue(secs float64, limit time.Duration) time.Duration {
 func (m *maintainer) refreshStats(ctx context.Context) {
 	m.stats.observe(ctx, m.countStats(ctx))
 }
-
-// statsSettings start the transaction of a statistics refresh. The count's
-// many subqueries make the planner think it costly, so PostgreSQL would
-// compile it with JIT at every refresh: about 200 ms on a large table, many
-// times the count itself.
-const statsSettings = `SELECT set_config('jit', 'off', true)`
 
 // countStats does the work of refreshStats, in one transaction with JIT off.
 // The count only reads, so the transaction takes its locks at the end, when

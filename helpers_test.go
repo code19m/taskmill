@@ -419,3 +419,7 @@ func (e *env) limitDefaultQueue(t *testing.T, maxRunning int) {
 		t.Fatalf("update the default queue: %v", err)
 	}
 }
+
+func noopHandlers() *taskmill.Handlers {
+	return handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil)
+}

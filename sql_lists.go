@@ -64,7 +64,7 @@ ORDER BY id DESC LIMIT $5`
 // costs.
 //
 // Each row ends with the task's finish time once more, as the column holds
-// it: see timeRows.
+// it: see List.
 var listFinishedSQL = `
 WITH RECURSIVE ` + queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, listed AS (
     SELECT queue FROM finished WHERE cardinality($1::text[]) = 0 AND queue IS NOT NULL
@@ -118,7 +118,7 @@ ORDER BY page.finalized_at DESC, page.id DESC LIMIT $5`
 // and compare every entry from there down to the end of the range with it.
 //
 // Each row ends with the task's creation time once more, as the column holds
-// it: see timeRows.
+// it: see List.
 var listCreatedSQL = `
 WITH RECURSIVE ` + queuesWith(`waiting`, `<> 'running'`) + `, ` +
 	queuesWith(`running`, `= 'running'`) + `, ` +

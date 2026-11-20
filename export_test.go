@@ -245,7 +245,7 @@ func endedFound(ctx context.Context, c *Client, tx pgx.Tx, ids []int64, tokens [
 			if err != nil {
 				return found, err
 			}
-			ok, err := queryRow(ctx, pgxQuerier{q: undo}, s.sql, s.args, new(string), new(string), new(string))
+			ok, err := queryRow(ctx, pgxExecutor{q: undo}, s.sql, s.args, new(string), new(string), new(string))
 			if err != nil {
 				return found, err
 			}
@@ -281,7 +281,7 @@ func Complete(ctx context.Context, c *Client, settings string, ids []int64) (int
 			return 0, err
 		}
 	}
-	done, err := c.complete(ctx, c.logger, pgxQuerier{q: tx}, cs)
+	done, err := c.complete(ctx, c.logger, pgxExecutor{q: tx}, cs)
 	return len(done), err
 }
 

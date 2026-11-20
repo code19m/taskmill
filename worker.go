@@ -698,9 +698,10 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 
 // leaseTask leases one task for RunTask, or explains why it cannot.
 func (w *Worker) leaseTask(ctx context.Context, id int64) (*tracked, error) {
+	fail := func(err error) error { return fmt.Errorf("taskmill: run task %d: %w", id, err) }
 	r, err := w.client.pool.Query(ctx, w.client.sql.leaseTask, id, w.cfg.LeaseDuration.Microseconds(), w.id)
 	if err != nil {
-		return nil, fmt.Errorf("taskmill: run task %d: %w", id, err)
+		return nil, fail(err)
 	}
 	defer r.Close()
 	if r.Next() {
@@ -709,14 +710,14 @@ func (w *Worker) leaseTask(ctx context.Context, id int64) (*tracked, error) {
 		// which the rows report once they are closed.
 		r.Close()
 		if err = cmp.Or(err, r.Err()); err != nil {
-			return nil, fmt.Errorf("taskmill: run task %d: %w", id, err)
+			return nil, fail(err)
 		}
 		return t, nil
 	}
 	if err := r.Err(); err != nil {
-		return nil, fmt.Errorf("taskmill: run task %d: %w", id, err)
+		return nil, fail(err)
 	}
-	return nil, w.client.stateError(ctx, pgxQuerier{q: w.client.pool}, id, "run")
+	return nil, w.client.stateError(ctx, pgxExecutor{q: w.client.pool}, id, "run")
 }
 
 // workerID names a worker after its host and process, with a random suffix
@@ -745,4 +746,60 @@ func moduleVersion() string {
 		}
 	}
 	return "unknown"
+}
+
+// WorkerInfo describes a worker process.
+type WorkerInfo struct {
+	// ID names the worker: its host name, its process ID, and a random
+	// suffix, joined by dashes.
+	ID       string
+	Hostname string
+	Version  string // taskmill's version in the worker's binary
+	Queues   []string
+	Kinds    []string // the kinds it has handlers for
+
+	// StartedAt is when the worker last registered: when its Run started,
+	// or when it registered again after the maintainer removed it as stale.
+	StartedAt   time.Time
+	CheckedInAt time.Time // its last check-in, which it makes every third of its LeaseDuration
+	Maintainer  bool      // the worker is the elected maintainer
+
+	// Stale reports that the worker made no check-in for its whole
+	// [WorkerConfig.LeaseDuration], by the database's clock. It stopped
+	// without unregistering, or it cannot reach the database: the leases of
+	// its tasks have run out, and its [Worker.Health] fails. A worker of a
+	// release that does not store its LeaseDuration is stale after 30
+	// seconds without a check-in.
+	Stale bool
+}
+
+// staleWithoutLease is how long a worker that stored no lease may make no
+// check-in before it is stale: the workers of releases without the column.
+const staleWithoutLease = 30 * time.Second
+
+// Workers returns the registered worker processes, ordered by ID. A worker
+// that stopped without unregistering is stale once it made no check-in for
+// its LeaseDuration: see [WorkerInfo.Stale]. It disappears once it made
+// none for 5 minutes, or for twice its LeaseDuration if that is longer: the
+// maintainer removes it.
+func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
+	fail := func(err error) error { return fmt.Errorf("taskmill: list workers: %w", err) }
+	r, err := c.pool.Query(ctx, c.sql.listWorkers, staleWithoutLease.Microseconds())
+	if err != nil {
+		return nil, fail(err)
+	}
+	defer r.Close()
+	var out []WorkerInfo
+	for r.Next() {
+		var w WorkerInfo
+		err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.StartedAt, &w.CheckedInAt, &w.Maintainer, &w.Stale)
+		if err != nil {
+			return nil, fail(err)
+		}
+		out = append(out, w)
+	}
+	if err := r.Err(); err != nil {
+		return nil, fail(err)
+	}
+	return out, nil
 }

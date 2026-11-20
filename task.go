@@ -288,13 +288,13 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	return nil
 }
 
-// scanTaskInfo reads one row of taskColumns. It reads what does not decode
-// as empty: metadata that is not an object of strings, an entry of the
-// errors that is not one, and a time that is infinite. Such a row comes from
-// another database role or an UPDATE by hand, and a list must still show it,
-// with the tasks around it. A worker that takes the task makes it dead (see
-// scanLeased).
-func scanTaskInfo(r rows) (*TaskInfo, error) {
+// scanTaskInfo reads one row of taskColumns, and into extra the columns that
+// follow them, if any. It reads what does not decode as empty: metadata that
+// is not an object of strings, an entry of the errors that is not one, and a
+// time that is infinite. Such a row comes from another database role or an
+// UPDATE by hand, and a list must still show it, with the tasks around it. A
+// worker that takes the task makes it dead (see scanLeased).
+func scanTaskInfo(r rows, extra ...any) (*TaskInfo, error) {
 	var (
 		info                                       TaskInfo
 		state                                      string
@@ -302,9 +302,11 @@ func scanTaskInfo(r rows) (*TaskInfo, error) {
 		metadata, payload, errs                    []byte
 		createdAt, runAt, attemptedAt, finalizedAt pgtype.Timestamptz
 	)
-	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
-		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt, &finalizedAt)
-	if err != nil {
+	dest := []any{
+		&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
+		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt, &finalizedAt,
+	}
+	if err := r.Scan(append(dest, extra...)...); err != nil {
 		return nil, err
 	}
 	info.State = State(state)

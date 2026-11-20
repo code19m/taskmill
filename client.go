@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill/internal/migrations"
@@ -122,7 +121,7 @@ func (c *Client) checkSchema(ctx context.Context) error {
 	var version int
 	var isolation string
 	err := c.pool.QueryRow(ctx, c.sql.schemaVersion, unprepared).Scan(&version, &isolation)
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42P01" { // undefined_table
+	if pgCode(err) == codeUndefinedTable {
 		return fmt.Errorf("%w: schema %q is not migrated", ErrSchemaOutdated, c.schema)
 	}
 	if err != nil {
@@ -141,20 +140,21 @@ func (c *Client) checkSchema(ctx context.Context) error {
 // Get returns a task by ID, whether it is unfinished, finished, or in
 // history. It returns [ErrNotFound] if no such task exists.
 func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
+	fail := func(err error) error { return fmt.Errorf("taskmill: get task %d: %w", id, err) }
 	r, err := c.pool.Query(ctx, c.sql.getTask, id)
 	if err != nil {
-		return nil, fmt.Errorf("taskmill: get task %d: %w", id, err)
+		return nil, fail(err)
 	}
 	defer r.Close()
 	if !r.Next() {
 		if err := r.Err(); err != nil {
-			return nil, fmt.Errorf("taskmill: get task %d: %w", id, err)
+			return nil, fail(err)
 		}
 		return nil, fmt.Errorf("%w: task %d", ErrNotFound, id)
 	}
 	info, err := scanTaskInfo(r)
 	if err != nil {
-		return nil, fmt.Errorf("taskmill: get task %d: %w", id, err)
+		return nil, fail(err)
 	}
 	return info, nil
 }
@@ -445,8 +445,7 @@ func (c *Client) inLockOrder(ctx context.Context, op string, id int64, fn func(q
 // isDeadlock reports whether err is PostgreSQL's error for the transaction
 // that it ended to end a deadlock.
 func isDeadlock(err error) bool {
-	pgErr, ok := errors.AsType[*pgconn.PgError](err)
-	return ok && pgErr.Code == "40P01" // deadlock_detected
+	return pgCode(err) == codeDeadlockDetected
 }
 
 // takeTask runs take, which is lockTask or deleteTask, on task id for Cancel
@@ -496,54 +495,9 @@ func (c *Client) stateError(ctx context.Context, q querier, id int64, op string)
 	return fmt.Errorf("%w: cannot %s task %d in state %s", ErrInvalidState, op, id, state)
 }
 
-// notifiable returns, once each, the queues that the throttle allows to
-// notify now of available tasks.
-func (c *Client) notifiable(ctx context.Context, queues []string) []string {
-	var notify []string
-	for _, queue := range queues {
-		if !slices.Contains(notify, queue) && c.notifier.allow(ctx, queue) {
-			notify = append(notify, queue)
-		}
-	}
-	return notify
-}
-
-// notifyAvailable announces new available tasks in queue, inside q's
-// transaction, when the throttle allows it. In a transaction, a failed
-// notification aborts the transaction, so it is returned; outside one, it
-// is only logged, to logger.
-func (c *Client) notifyAvailable(ctx context.Context, logger *slog.Logger, q querier, queue string) error {
-	if !c.notifier.allow(ctx, queue) {
-		return nil
-	}
-	_, err := q.exec(ctx, notifySQL, c.schema, notifyAvailable+"|"+queue)
-	if err != nil && !q.inTx() {
-		logger.LogAttrs(ctx, slog.LevelWarn, "notification failed",
-			slog.String(logKeyQueue, queue), slog.Any(logKeyError, err))
-		return nil
-	}
-	return err
-}
-
 // inTx runs fn in a transaction on the client's pool.
 func (c *Client) inTx(ctx context.Context, fn func(q querier) error) error {
 	return pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		return fn(pgxQuerier{q: tx})
+		return fn(pgxExecutor{q: tx})
 	})
-}
-
-// txQuerier returns the querier of an Executor that must be a transaction,
-// because the operation runs several statements that must commit together.
-func txQuerier(tx Executor) (querier, error) {
-	if tx == nil {
-		return nil, invalidArgument("executor is nil")
-	}
-	q := tx.querier()
-	if q == nil {
-		return nil, invalidArgument("executor has no querier; create it with Pgx or SQL")
-	}
-	if !q.inTx() {
-		return nil, invalidArgument("executor must wrap a transaction (pgx.Tx or *sql.Tx)")
-	}
-	return q, nil
 }

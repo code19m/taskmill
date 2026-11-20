@@ -372,7 +372,7 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		// runs in the same loop, so give up after a moment, and try again in
 		// the next cycle.
 		wait := strconv.FormatInt(m.w.timing.lockWait.Milliseconds(), 10) + "ms"
-		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = '"+wait+"'"); err != nil {
+		if _, err := tx.Exec(ctx, lockTimeoutSQL, wait); err != nil {
 			return err
 		}
 		tag, err := tx.Exec(ctx, m.c.sql.advanceSchedule, s.Name, next, due)
@@ -390,7 +390,7 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		// The enqueue middleware sees taskmill's own metadata, and cannot
 		// change it: a handler must find the run's time whatever it does.
 		run.own = s.ownMetadata(s.scheduledFor(due))
-		if _, err = m.c.storeThrough(ctx, pgxQuerier{q: tx}, []*resolvedTask{run}); err != nil {
+		if _, err = m.c.storeThrough(ctx, pgxExecutor{q: tx}, []*resolvedTask{run}); err != nil {
 			return err
 		}
 		// The timeout was for the group's row. At the commit, it would keep
@@ -463,9 +463,10 @@ func sameNumber(x, y json.Number) bool {
 
 // Schedules returns every schedule stored in the database, ordered by name.
 func (c *Client) Schedules(ctx context.Context) ([]ScheduleInfo, error) {
+	fail := func(err error) error { return fmt.Errorf("taskmill: list schedules: %w", err) }
 	r, err := c.pool.Query(ctx, c.sql.listSchedules)
 	if err != nil {
-		return nil, fmt.Errorf("taskmill: list schedules: %w", err)
+		return nil, fail(err)
 	}
 	defer r.Close()
 	var out []ScheduleInfo
@@ -473,13 +474,13 @@ func (c *Client) Schedules(ctx context.Context) ([]ScheduleInfo, error) {
 		var s ScheduleInfo
 		var last *time.Time
 		if err := r.Scan(&s.Name, &s.Queue, &s.Kind, &s.Cron, &s.Location, &s.NextRunAt, &last, &s.Paused); err != nil {
-			return nil, fmt.Errorf("taskmill: list schedules: %w", err)
+			return nil, fail(err)
 		}
 		s.LastRunAt = deref(last)
 		out = append(out, s)
 	}
 	if err := r.Err(); err != nil {
-		return nil, fmt.Errorf("taskmill: list schedules: %w", err)
+		return nil, fail(err)
 	}
 	return out, nil
 }

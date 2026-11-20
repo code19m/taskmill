@@ -355,7 +355,7 @@ func (w *Worker) record(ctx context.Context, t *tracked, o outcome) {
 	err := w.whileLeased(ctx, []*tracked{t}, func(ctx context.Context) error {
 		var err error
 		if t.info.GroupKey == "" {
-			ended, err = w.recordTx(ctx, pgxQuerier{q: w.client.pool}, t, o)
+			ended, err = w.recordTx(ctx, pgxExecutor{q: w.client.pool}, t, o)
 			return err
 		}
 		return w.client.inTx(ctx, func(q querier) error {

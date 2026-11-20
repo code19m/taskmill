@@ -86,9 +86,6 @@ func (c *Client) Activity(ctx context.Context, params *ActivityParams) ([]Activi
 	return out, nil
 }
 
-// activitySettings start the read of the activity, and bound it.
-const activitySettings = `SELECT set_config('statement_timeout', '` + listTimeout + `', true)`
-
 // activityParams applies the defaults to params and checks them. It returns
 // the queues as a slice that is never nil: NULL would match nothing.
 func activityParams(params *ActivityParams) (ActivityParams, []string, error) {

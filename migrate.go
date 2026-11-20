@@ -2,13 +2,11 @@ package taskmill
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill/internal/migrations"
@@ -47,6 +45,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 	if err != nil {
 		return err
 	}
+	fail := func(err error) error { return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err) }
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -59,7 +58,7 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 
 	current, err := schemaVersion(ctx, pool, schema)
 	if err != nil {
-		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+		return fail(err)
 	}
 	if current >= len(all) {
 		// The maintainer keeps the partitions ready too, so a role that may not
@@ -70,15 +69,15 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig) error 
 		return nil
 	}
 	if err := createMigrationsTable(ctx, pool, schema); err != nil {
-		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+		return fail(err)
 	}
 	if err := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
 		return applyMigrations(ctx, tx, schema, all, logger)
 	}); err != nil {
-		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+		return fail(err)
 	}
 	if err := ensureHistoryPartitions(ctx, pool, schema); err != nil {
-		return fmt.Errorf("taskmill: migrate schema %q: %w", schema, err)
+		return fail(err)
 	}
 	return nil
 }
@@ -88,7 +87,7 @@ func schemaVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int,
 	var version int
 	sql := fmt.Sprintf("SELECT coalesce(max(version), 0) FROM %s.migrations", schema)
 	err := pool.QueryRow(ctx, sql, unprepared).Scan(&version)
-	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "42P01" { // undefined_table
+	if pgCode(err) == codeUndefinedTable {
 		return 0, nil
 	}
 	return version, err

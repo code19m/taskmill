@@ -123,7 +123,7 @@ func (w *Worker) flush(ctx context.Context, batch []*tracked) (held []*tracked) 
 		var done []completedTask
 		err := w.whileLeased(ctx, plain, func(ctx context.Context) error {
 			var err error
-			done, err = w.client.complete(ctx, w.logger, pgxQuerier{q: w.client.pool}, completionsOf(plain))
+			done, err = w.client.complete(ctx, w.logger, pgxExecutor{q: w.client.pool}, completionsOf(plain))
 			return err
 		})
 		w.completed(ctx, plain, done, err)
@@ -274,48 +274,6 @@ func (w *Worker) madeRoom(done []completedTask) {
 	}
 }
 
-// whileLeased runs fn until it succeeds, waiting longer after each failed
-// try, for as long as the leases of ts may still be held when it starts: by
-// then the tasks are rescued, and a result recorded later would be refused.
-// A database outage or failover shorter than a lease thus loses no results,
-// while an error that persists ends the tries. Each try gets its own timeout.
-func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context.Context) error) error {
-	// The deadline is fixed now: the leases are still renewed while the
-	// tries continue, which would otherwise never let them end.
-	deadline := w.leaseEnd(ts)
-	delay := recordRetryFirst
-	for {
-		tryCtx, cancel := context.WithTimeout(ctx, recordTimeout)
-		err := fn(tryCtx)
-		cancel()
-		w.resultFailures.observe(ctx, err)
-		if err == nil || ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return err
-		case <-time.After(delay):
-		}
-		delay = min(2*delay, recordRetryMax)
-	}
-}
-
-// leaseEnd returns when the first of the leases of ts may expire, as far as
-// the worker knows.
-func (w *Worker) leaseEnd(ts []*tracked) time.Time {
-	var end time.Time
-	for i, t := range ts {
-		t.mu.Lock()
-		e := t.renewedAt.Add(w.cfg.LeaseDuration)
-		t.mu.Unlock()
-		if i == 0 || e.Before(end) {
-			end = e
-		}
-	}
-	return end
-}
-
 // completionsOf returns the completions of ts.
 func completionsOf(ts []*tracked) []completion {
 	cs := make([]completion, len(ts))
@@ -323,43 +281,6 @@ func completionsOf(ts []*tracked) []completion {
 		cs[i] = completion{id: t.att.id, token: t.att.token, discard: t.att.discard}
 	}
 	return cs
-}
-
-// track starts tracking t, so that check-ins renew its lease.
-//
-// The worker may still run an older attempt of t's task: it was out of touch
-// for longer than the lease, and the task was rescued and leased again
-// before a check-in found out. t takes that attempt's place, so no check-in
-// sees it again. The new lease proves that the older attempt lost its own,
-// so track cancels its context with ErrLeaseLost, and its result is ignored.
-func (w *Worker) track(ctx context.Context, t *tracked) {
-	w.mu.Lock()
-	old := w.attempts[t.att.id]
-	w.attempts[t.att.id] = t
-	replaced := false
-	if old != nil {
-		// Under w.mu, so that a shutdown either still finds the older
-		// attempt and abandons it, or finds it abandoned here.
-		old.mu.Lock()
-		if old.state == attemptRunning {
-			old.state, replaced = attemptAbandoned, true
-		}
-		old.mu.Unlock()
-	}
-	w.mu.Unlock()
-	if replaced && !old.lost.Swap(true) {
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "attempt lost its lease; canceling it",
-			slog.Int64(logKeyTaskID, old.att.id), slog.String(logKeyKind, old.info.Kind))
-		old.cancelAttempt(ErrLeaseLost)
-	}
-}
-
-func (w *Worker) untrack(t *tracked) {
-	w.mu.Lock()
-	if w.attempts[t.att.id] == t {
-		delete(w.attempts, t.att.id)
-	}
-	w.mu.Unlock()
 }
 
 // completion identifies an attempt whose task succeeded.
@@ -382,6 +303,7 @@ type completedTask struct {
 // out. q must be a transaction if any task belongs to a FIFO group. It logs
 // to the logger of the worker that completes.
 func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, cs []completion) ([]completedTask, error) {
+	fail := func(err error) error { return fmt.Errorf("taskmill: complete: %w", err) }
 	ids := make([]int64, len(cs))
 	tokens := make([]int32, len(cs))
 	discard := make([]int64, 0) // not nil: the statement compares with every element
@@ -396,7 +318,7 @@ func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, c
 	done, err := c.completeTasks(ctx, q, ids, tokens, discard)
 	if err != nil {
 		c.noteMissingHistory(ctx, logger, err)
-		return nil, fmt.Errorf("taskmill: complete: %w", err)
+		return nil, fail(err)
 	}
 
 	var heads []groupLeave
@@ -404,7 +326,7 @@ func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, c
 		heads = append(heads, groupLeave{id: t.id, queue: t.queue, group: t.group, head: true})
 	}
 	if err := c.leaveGroups(ctx, logger, q, heads); err != nil {
-		return nil, fmt.Errorf("taskmill: complete: %w", err)
+		return nil, fail(err)
 	}
 	return done, nil
 }

@@ -10,6 +10,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// This file holds what keeps the leases of a worker's attempts: the
+// check-in that renews them every third of the lease, the attempts it
+// tracks, and the tries to record a result while its lease may still be
+// held.
+
 // checkInLoop checks the worker in every third of the lease, until ctx ends.
 func (w *Worker) checkInLoop(ctx context.Context) {
 	w.everyThirdOfLease(ctx, w.checkIn)
@@ -221,4 +226,83 @@ func (t *tracked) cancelAttempt(cause error) {
 	if cancel != nil {
 		cancel(cause)
 	}
+}
+
+// whileLeased runs fn until it succeeds, waiting longer after each failed
+// try, for as long as the leases of ts may still be held when it starts: by
+// then the tasks are rescued, and a result recorded later would be refused.
+// A database outage or failover shorter than a lease thus loses no results,
+// while an error that persists ends the tries. Each try gets its own timeout.
+func (w *Worker) whileLeased(ctx context.Context, ts []*tracked, fn func(context.Context) error) error {
+	// The deadline is fixed now: the leases are still renewed while the
+	// tries continue, which would otherwise never let them end.
+	deadline := w.leaseEnd(ts)
+	delay := recordRetryFirst
+	for {
+		tryCtx, cancel := context.WithTimeout(ctx, recordTimeout)
+		err := fn(tryCtx)
+		cancel()
+		w.resultFailures.observe(ctx, err)
+		if err == nil || ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+		delay = min(2*delay, recordRetryMax)
+	}
+}
+
+// leaseEnd returns when the first of the leases of ts may expire, as far as
+// the worker knows.
+func (w *Worker) leaseEnd(ts []*tracked) time.Time {
+	var end time.Time
+	for i, t := range ts {
+		t.mu.Lock()
+		e := t.renewedAt.Add(w.cfg.LeaseDuration)
+		t.mu.Unlock()
+		if i == 0 || e.Before(end) {
+			end = e
+		}
+	}
+	return end
+}
+
+// track starts tracking t, so that check-ins renew its lease.
+//
+// The worker may still run an older attempt of t's task: it was out of touch
+// for longer than the lease, and the task was rescued and leased again
+// before a check-in found out. t takes that attempt's place, so no check-in
+// sees it again. The new lease proves that the older attempt lost its own,
+// so track cancels its context with ErrLeaseLost, and its result is ignored.
+func (w *Worker) track(ctx context.Context, t *tracked) {
+	w.mu.Lock()
+	old := w.attempts[t.att.id]
+	w.attempts[t.att.id] = t
+	replaced := false
+	if old != nil {
+		// Under w.mu, so that a shutdown either still finds the older
+		// attempt and abandons it, or finds it abandoned here.
+		old.mu.Lock()
+		if old.state == attemptRunning {
+			old.state, replaced = attemptAbandoned, true
+		}
+		old.mu.Unlock()
+	}
+	w.mu.Unlock()
+	if replaced && !old.lost.Swap(true) {
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "attempt lost its lease; canceling it",
+			slog.Int64(logKeyTaskID, old.att.id), slog.String(logKeyKind, old.info.Kind))
+		old.cancelAttempt(ErrLeaseLost)
+	}
+}
+
+func (w *Worker) untrack(t *tracked) {
+	w.mu.Lock()
+	if w.attempts[t.att.id] == t {
+		delete(w.attempts, t.att.id)
+	}
+	w.mu.Unlock()
 }

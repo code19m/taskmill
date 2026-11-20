@@ -1,8 +1,11 @@
 package taskmill
 
 import (
+	"errors"
 	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Errors returned by taskmill. Test for them with [errors.Is], never with ==
@@ -169,4 +172,26 @@ func Snooze(d time.Duration) error {
 // Error implements the error interface.
 func (e *SnoozeError) Error() string {
 	return "snooze for " + e.Delay.String()
+}
+
+// PostgreSQL's error codes (SQLSTATE) that taskmill handles. The code, not
+// the message, tells an error apart: the message is in the server's
+// language.
+const (
+	codeDataException         = "22" // a class: every code that starts with it
+	codeCheckViolation        = "23514"
+	codeDeadlockDetected      = "40P01"
+	codeInsufficientPrivilege = "42501"
+	codeUndefinedTable        = "42P01"
+	codeLockNotAvailable      = "55P03"
+	codeQueryCanceled         = "57014"
+)
+
+// pgCode returns the code of the PostgreSQL error in err's chain, or "" if
+// there is none.
+func pgCode(err error) string {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok {
+		return pgErr.Code
+	}
+	return ""
 }
