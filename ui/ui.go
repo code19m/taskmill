@@ -65,6 +65,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -198,6 +199,7 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	mux.HandleFunc("POST /tasks/bulk/{action}", s.bulkAction)
 	mux.HandleFunc("POST /queues/{action}", s.queueAction)
 	mux.HandleFunc("POST /schedules/{action}", s.scheduleAction)
+	mux.HandleFunc("GET /", s.notFound)
 
 	var h http.Handler = mux
 	if s.prefix != "" {
@@ -285,6 +287,7 @@ type page struct {
 	Title    string
 	Nav      string // the active section
 	Static   bool   // the page does not update itself
+	Retry    bool   // a status page of a cause that may pass: the script tries its address again
 	ReadOnly bool
 	Notice   string
 	Dead     taskmill.TaskCount // dead tasks, for the navigation; zero if unknown
@@ -410,14 +413,13 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, err := shown(q.Get("limit"))
 	if err != nil {
-		back := problem{err.Error(), listPath(first), "Back to the first page"}
-		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", reason(err), link{listPath(first), "Back to the first page", "first"})
 		return
 	}
 	since, before, err := listRange(q)
 	if err != nil {
-		back := problem{err.Error(), listPath(withRange(first, time.Time{}, time.Time{})), "Clear the range"}
-		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", reason(err),
+			link{listPath(withRange(first, time.Time{}, time.Time{})), "Clear the range", "clear"})
 		return
 	}
 	ranged := !since.IsZero() || !before.IsZero()
@@ -437,11 +439,11 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		// cursor. With a cursor in the address, the filter may be fine, so
 		// the way back is the first page of the same list. If the filter is
 		// what is wrong, that page says so again, and offers to clear it.
-		back := problem{err.Error(), "/tasks", "Clear the filters"}
+		text, back := reason(err), link{"/tasks", "Clear the filters", "clear"}
 		if params.Cursor != "" {
-			back = problem{err.Error() + cursorHint, listPath(first), "Back to the first page"}
+			text, back = text+cursorHint, link{listPath(first), "Back to the first page", "first"}
 		}
-		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Invalid request", Data: back})
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", text, back)
 		return
 	}
 	filtered := ranged || len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
@@ -450,7 +452,7 @@ func (s *server) tasks(w http.ResponseWriter, r *http.Request) {
 		if filtered {
 			hint = filtersHint
 		}
-		s.failWith(w, r, err, hint)
+		s.failWith(w, r, err, hint, "")
 		return
 	}
 	known, err := s.client.Queues(r.Context())
@@ -692,7 +694,7 @@ type filterRow struct {
 // dialog shows it over the task list. It counts the tasks once, and does
 // not update itself.
 func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
-	if s.refuseIfReadOnly(w) {
+	if s.refuseIfReadOnly(w, r) {
 		return
 	}
 	a, ok := bulkActions[r.PathValue("action")]
@@ -702,15 +704,13 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	}
 	f := taskFilter(r.URL.Query())
 	if len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) == 0 {
-		s.render(w, r, http.StatusBadRequest, "error.html", page{Title: "Choose filters first", Data: problem{
-			"A bulk action acts on the tasks that the task list's filters select.", "/tasks", "Back to the tasks",
-		}})
+		s.refuse(w, r, http.StatusBadRequest, "Choose filters first",
+			"A bulk action acts on the tasks that the task list's filters select.", link{"/tasks", "Back to the tasks", "back"})
 		return
 	}
 	counts, err := s.client.Count(r.Context(), &f)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
-		s.render(w, r, http.StatusBadRequest, "error.html",
-			page{Title: "Invalid filter", Data: problem{err.Error(), "/tasks", "Clear the filters"}})
+		s.refuse(w, r, http.StatusBadRequest, "Invalid filter", reason(err), link{"/tasks", "Clear the filters", "clear"})
 		return
 	}
 	if err != nil {
@@ -926,7 +926,7 @@ func (s *server) task(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	info, err := s.client.Get(ctx, id)
 	if errors.Is(err, taskmill.ErrNotFound) {
-		s.notFound(w, r)
+		s.taskNotFound(w, r, id)
 		return
 	}
 	if err != nil {
@@ -1049,7 +1049,7 @@ func notice(q url.Values) string {
 }
 
 func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
-	if s.refuseIfReadOnly(w) {
+	if s.refuseIfReadOnly(w, r) {
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -1081,7 +1081,7 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 // the action leads back to the overview of that period: the charts stay as
 // the reader set them.
 func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
-	if s.refuseIfReadOnly(w) {
+	if s.refuseIfReadOnly(w, r) {
 		return
 	}
 	var err error
@@ -1106,7 +1106,7 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 // scheduleAction pauses, resumes, or runs the schedule that the query names,
 // as queueAction names its queue.
 func (s *server) scheduleAction(w http.ResponseWriter, r *http.Request) {
-	if s.refuseIfReadOnly(w) {
+	if s.refuseIfReadOnly(w, r) {
 		return
 	}
 	var err error
@@ -1149,18 +1149,21 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 // request, as the same value is on a page. An action that does not fit the
 // task or the schedule as it is now is not possible.
 func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error, back string) {
-	refuse := func(status int, title string) {
-		s.render(w, r, status, "error.html", page{Title: title, Data: problem{err.Error(), back, "Go back"}})
-	}
 	switch {
 	case errors.Is(err, taskmill.ErrNotFound):
-		s.notFound(w, r)
+		if strings.HasPrefix(back, "/tasks/") {
+			back = "/tasks" // the task's own page is gone too
+		}
+		s.status(w, r, http.StatusNotFound, "Not found", status{
+			Glyph: "search",
+			Text:  "What the action was for no longer exists. It may have been deleted meanwhile.", Actions: []link{backTo(back)},
+		})
 	case errors.Is(err, taskmill.ErrInvalidArgument):
-		refuse(http.StatusBadRequest, "Invalid request")
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", reason(err), backTo(back))
 	case errors.Is(err, taskmill.ErrInvalidState), errors.Is(err, taskmill.ErrConflict):
-		refuse(http.StatusConflict, "Not possible")
+		s.refuse(w, r, http.StatusConflict, "Not possible", reason(err), backTo(back))
 	default:
-		s.fail(w, r, err)
+		s.failWith(w, r, err, "", back)
 	}
 }
 
@@ -1174,7 +1177,7 @@ func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error,
 // not help those. Only its page carries where a run continues: the task
 // list always shows every task that the filters select.
 func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
-	if s.refuseIfReadOnly(w) {
+	if s.refuseIfReadOnly(w, r) {
 		return
 	}
 	name := r.PathValue("action")
@@ -1219,29 +1222,108 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, s.path(target+query.Encode()), http.StatusSeeOther)
 }
 
-func (s *server) refuseIfReadOnly(w http.ResponseWriter) bool {
+// refuseIfReadOnly refuses an action of a read-only dashboard, and says so.
+func (s *server) refuseIfReadOnly(w http.ResponseWriter, r *http.Request) bool {
 	if !s.readOnly {
 		return false
 	}
-	http.Error(w, "this dashboard is read-only", http.StatusForbidden)
+	s.status(w, r, http.StatusForbidden, "Read-only dashboard", status{
+		Glyph:   "lock",
+		Text:    "This dashboard shows the tasks, and does not change them.",
+		Actions: []link{{"/", "Back to the overview", "back"}},
+	})
 	return true
 }
 
-// problem is what the error page shows: what went wrong, and where to go.
-type problem struct {
-	Message, Back, BackLabel string
+// status is what a status page shows under its title, in place of a page
+// that the dashboard cannot show: a picture of what happened, what it means
+// and what to do, in plain words, and where to go. The details of an error
+// stay in the server log.
+type status struct {
+	Glyph   string // the picture: a name of the "glyph" template
+	Text    string
+	Actions []link // the most useful first
+	Retry   bool   // the cause may pass: with the script, the page tries its address again
+}
+
+// link is an action of a status page or of an empty list: where it leads,
+// what it says, and the icon of the sprite before it.
+type link struct {
+	Href, Label, Icon string
+}
+
+// status answers with a status page.
+func (s *server) status(w http.ResponseWriter, r *http.Request, code int, title string, st status) {
+	s.render(w, r, code, "status.html", page{Title: title, Retry: st.Retry, Data: st})
+}
+
+// refuse answers a request that the dashboard refuses, and says why: a value
+// that is not valid, or an action that does not fit.
+func (s *server) refuse(w http.ResponseWriter, r *http.Request, code int, title, why string, back link) {
+	s.status(w, r, code, title, status{Glyph: "refused", Text: why, Actions: []link{back}})
 }
 
 func (s *server) notFound(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, http.StatusNotFound, "error.html", page{Title: "Not found", Data: problem{
-		"Nothing exists at this address. The task may have been deleted.", "/tasks", "Back to the tasks",
-	}})
+	s.status(w, r, http.StatusNotFound, "Page not found", status{
+		Glyph:   "search",
+		Text:    "Nothing exists at this address.",
+		Actions: []link{{"/", "Back to the overview", "back"}},
+	})
+}
+
+func (s *server) taskNotFound(w http.ResponseWriter, r *http.Request, id int64) {
+	s.status(w, r, http.StatusNotFound, "Task not found", status{
+		Glyph:   "search",
+		Text:    fmt.Sprintf("Task %d does not exist. It may have been deleted, or removed after its retention period.", id),
+		Actions: []link{{"/tasks", "Back to the tasks", "back"}},
+	})
+}
+
+// unreachablePage is the status page that the script shows in place of a
+// page that got no answer from the dashboard: the network is down, the
+// dashboard is, or a proxy in front of it answered in its place. Its action
+// leads to the address that the page has then.
+var unreachablePage = page{Title: "Can’t reach the dashboard", Data: status{
+	Glyph:   "offline",
+	Text:    "No answer came from the dashboard. The network may be down, or the dashboard may be restarting.",
+	Actions: []link{{"", "Try again", "retry"}}, Retry: true,
+}}
+
+// backTo is the way back to where an action leads.
+func backTo(target string) link {
+	label := "Back to the overview"
+	switch p, _, _ := strings.Cut(target, "?"); {
+	case strings.HasPrefix(p, "/tasks/"):
+		label = "Back to the task"
+	case p == "/tasks":
+		label = "Back to the tasks"
+	case p == "/schedules":
+		label = "Back to the schedules"
+	}
+	return link{target, label, "back"}
+}
+
+// reason words an error that the reader can act on as a sentence, without
+// the name of its class: the title says that in plain words.
+func reason(err error) string {
+	text := err.Error()
+	for _, class := range []error{taskmill.ErrInvalidArgument, taskmill.ErrInvalidState, taskmill.ErrConflict} {
+		if _, after, ok := strings.Cut(text, class.Error()+": "); ok {
+			text = after
+		}
+	}
+	first, size := utf8.DecodeRuneInString(text)
+	text = string(unicode.ToUpper(first)) + text[size:]
+	if !strings.HasSuffix(text, ".") {
+		text += "."
+	}
+	return text
 }
 
 // cursorHint tells the reader of a task list that the client refused, at an
 // address with a cursor, where such a cursor comes from: each release makes
 // its own, and so does each of a list's two orders.
-const cursorHint = ". A link or a bookmark from before an upgrade can hold a cursor that this list no longer takes."
+const cursorHint = " A link or a bookmark from before an upgrade can hold a cursor that this list no longer takes."
 
 // filtersHint tells the reader of a task list that ran out of time what may
 // help. A list by state, kind, or FIFO group can read many tasks that it does
@@ -1250,6 +1332,10 @@ const cursorHint = ". A link or a bookmark from before an upgrade can hold a cur
 const filtersHint = " A list with these filters can read many tasks that it does not show. " +
 	"A queue and a state in the filters, or fewer filters, may help."
 
+// unfinished tells the reader of an action that failed that it may have
+// changed something before it did.
+const unfinished = " The action did not finish: check the page before you try again."
+
 // timeLimit reports whether the database ended a read at its time limit: the
 // client's reads of tasks, groups, and activity set one of 5 seconds.
 func timeLimit(err error) bool {
@@ -1257,30 +1343,55 @@ func timeLimit(err error) bool {
 	return ok && pgErr.Code == "57014" // query_canceled
 }
 
+// unreachable reports whether err is a failure to connect to the database:
+// it is down, out of reach, or refuses the dashboard's login. Then no
+// statement ran.
+func unreachable(err error) bool {
+	_, ok := errors.AsType[*pgconn.ConnectError](err)
+	return ok
+}
+
 // fail answers a request whose reads or action failed. A request whose
 // client went away gets no answer, and is not an error of the dashboard.
 func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
-	s.failWith(w, r, err, "")
+	s.failWith(w, r, err, "", "")
 }
 
 // failWith is fail with a hint for the reader, shown if the request, or a
-// read of it, ran out of time. A request runs out of time at the deadline
-// that the dashboard sets, or at an earlier one that the application set in
-// the request's context: the answer is the same. Only a request that was
-// canceled is one whose client went away.
-func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hint string) {
+// read of it, ran out of time, and for an action, the page it leads back to.
+// A request runs out of time at the deadline that the dashboard sets, or at
+// an earlier one that the application set in the request's context: the
+// answer is the same. Only a request that was canceled is one whose client
+// went away.
+//
+// Each cause may pass, so the page tries again by itself, with the script:
+// a page that the server cannot read now, it may read in a moment. The
+// script waits longer after each failure, so that a page that fails for good
+// costs a request a minute. An action is never sent again: its page tries
+// the page that the action was sent from.
+func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hint, back string) {
 	ctx := r.Context()
+	actions := []link{{r.URL.RequestURI(), "Try again", "retry"}}
+	if r.URL.Path != "/" {
+		actions = append(actions, backTo("/"))
+	}
+	failed := "The dashboard could not read what this page shows. "
+	if r.Method != http.MethodGet {
+		if back == "" {
+			back = "/"
+		}
+		actions, failed, hint = []link{backTo(back)}, "", unfinished
+	}
+	answer := func(code int, title, glyph, text string) {
+		if code == http.StatusServiceUnavailable {
+			w.Header().Set("Retry-After", "5")
+		}
+		s.status(w, r, code, title, status{Glyph: glyph, Text: text + hint, Actions: actions, Retry: true})
+	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) || timeLimit(err) {
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request timed out",
 			slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
-		again, label := r.URL.RequestURI(), "Try again"
-		if r.Method != http.MethodGet {
-			again, label = "/", "Back to the overview"
-		}
-		w.Header().Set("Retry-After", "5")
-		s.render(w, r, http.StatusServiceUnavailable, "error.html", page{Title: "Taking too long", Data: problem{
-			"The database did not answer in time. Try again in a moment." + hint, again, label,
-		}})
+		answer(http.StatusServiceUnavailable, "Taking too long", "slow", "The database did not answer in time.")
 		return
 	}
 	if ctx.Err() != nil {
@@ -1288,9 +1399,12 @@ func (s *server) failWith(w http.ResponseWriter, r *http.Request, err error, hin
 	}
 	s.logger.LogAttrs(ctx, slog.LevelWarn, "dashboard request failed",
 		slog.String(logKeyPath, r.URL.Path), slog.Any(logKeyError, err))
-	s.render(w, r, http.StatusInternalServerError, "error.html", page{Title: "Something went wrong", Data: problem{
-		"The request failed; the server log has the details.", "/", "Back to the overview",
-	}})
+	if unreachable(err) {
+		answer(http.StatusServiceUnavailable, "Can’t reach the database", "database",
+			"The dashboard is running, but it cannot connect to its database.")
+		return
+	}
+	answer(http.StatusInternalServerError, "Something went wrong", "alert", failed+"The server log has the details.")
 }
 
 // buffers and gzipWriters are reused across requests: live updates render
@@ -1397,30 +1511,31 @@ func (s *server) asset(name string) string {
 
 func (s *server) funcs() template.FuncMap {
 	return template.FuncMap{
-		"path":      s.path,
-		"asset":     s.asset,
-		"ago":       ago,
-		"timestamp": timestamp,
-		"instant":   instant,
-		"fieldTime": fieldTime,
-		"json":      prettyJSON,
-		"states":    func() []taskmill.State { return listedStates },
-		"lastError": lastError,
-		"newest":    newestFirst,
-		"timeline":  timeline,
-		"visible":   visible,
-		"outbox":    outbox,
-		"num":       number,
-		"count":     count,
-		"atLeast":   atLeast,
-		"percent":   percent,
-		"period":    period,
-		"cronWords": cronWords,
-		"afterHost": afterHost,
-		"fit":       fit,
-		"join":      strings.Join,
-		"dict":      dict,
-		"lower":     strings.ToLower,
+		"path":        s.path,
+		"asset":       s.asset,
+		"ago":         ago,
+		"timestamp":   timestamp,
+		"instant":     instant,
+		"fieldTime":   fieldTime,
+		"json":        prettyJSON,
+		"states":      func() []taskmill.State { return listedStates },
+		"lastError":   lastError,
+		"newest":      newestFirst,
+		"timeline":    timeline,
+		"visible":     visible,
+		"outbox":      outbox,
+		"num":         number,
+		"count":       count,
+		"atLeast":     atLeast,
+		"percent":     percent,
+		"period":      period,
+		"cronWords":   cronWords,
+		"afterHost":   afterHost,
+		"fit":         fit,
+		"join":        strings.Join,
+		"dict":        dict,
+		"unreachable": func() page { return unreachablePage },
+		"lower":       strings.ToLower,
 		"query": func(pairs ...string) string {
 			v := url.Values{}
 			for i := 0; i+1 < len(pairs); i += 2 {

@@ -4,17 +4,19 @@
 // confirms actions, and adds a few conveniences.
 //
 // It is careful with the network and the machine: one page request at a
-// time, each abandoned after a while, with a growing wait while the server
-// is out of reach. An update changes only the parts of the page that
-// changed, so nothing flickers, and scroll, open menus, and the focus stay
-// as they are, unless what had the focus is gone. Whatever it cannot show in
-// place, the browser loads as a page.
+// time, each abandoned after a while, and one request for each page that
+// the reader asks for. While the server fails or is out of reach, the page
+// says so and tries again by itself, waiting longer after each failure, and
+// shows the page once the server answers. An update changes only the parts
+// of the page that changed, so nothing flickers, and scroll, open menus,
+// and the focus stay as they are, unless what had the focus is gone. A page
+// that is not the dashboard's, such as a login page, the browser loads.
 (() => {
   "use strict";
 
   const REFRESH_MS = 5000; // between live updates
-  const TIMEOUT_MS = 10000; // a request that takes longer is abandoned
-  const MAX_WAIT_MS = 60000; // the longest wait between failed updates
+  const TIMEOUT_MS = 15000; // a request that takes longer is abandoned: longer than the server's 10 seconds, so that its page that says so arrives
+  const MAX_WAIT_MS = 60000; // the longest wait between failed updates: 5, 10, 20, 40, then 60 seconds
   const SLOW_MS = 300; // a navigation that takes longer shows progress
   const SEARCH_WAIT_MS = 250; // typing this close asks the server once
   const NOTICE_MS = 4000; // a notice stays this long
@@ -64,7 +66,31 @@
   let confirming = null; // the form that the dialog asks about
   let submitting = false;
 
-  const failure = () => document.querySelector("[data-failure]").content.firstElementChild.cloneNode(true);
+  // The notice of an action that the dashboard did not answer: what may
+  // have happened. A device that was offline sent nothing, and a session
+  // that ended let nothing through. Otherwise the action may have reached
+  // the dashboard, and applied, before the answer was lost.
+  const UNSENT = "This device is offline, so the action was not sent.";
+  const REFUSED = "The session ended, so the action did not apply. Reload the page to sign in again.";
+  const UNCONFIRMED = "No answer came for this action. It may have applied: check the page before you try again.";
+
+  function failure(text) {
+    const toast = document.querySelector("[data-failure]").content.firstElementChild.cloneNode(true);
+    toast.querySelector(".toast-message").textContent = text;
+    return toast;
+  }
+
+  // unanswered says why an action got no page in answer, and has the page
+  // show what is true now, as soon as the dashboard answers.
+  function unanswered(result, offline) {
+    if (result.kind === "signed-out") {
+      status = "signed-out";
+      show();
+      return REFUSED;
+    }
+    schedule(0);
+    return offline ? UNSENT : UNCONFIRMED;
+  }
 
   // ask shows the dialog: its title, its text, what its status line says,
   // and its main button, which reads as label and sends form. Without a
@@ -114,7 +140,7 @@
     const n = address(url, elsewhere ? "push" : "replace");
     if (n == null) return;
     render(result, { moved: elsewhere || !result.url, n, notice: result.doc.querySelector("[data-toast]") });
-    succeeded();
+    landed(result);
   }
 
   // send runs the action of a form on the page, and shows the page that the
@@ -126,19 +152,15 @@
     submitting = true;
     for (const button of buttons) button.disabled = true;
     const slow = setTimeout(() => progress(true), SLOW_MS);
+    const offline = navigator.onLine === false;
     const result = await request(form.action, { body: new URLSearchParams(new FormData(form)) });
     clearTimeout(slow);
     submitting = false;
     progress(false);
     delete form.dataset.jsPending;
     for (const button of buttons) button.disabled = false;
-    if (result.kind === "signed-out") {
-      status = "signed-out";
-      show();
-    }
     if (result.kind !== "page") {
-      // Nothing says whether the action reached the server.
-      notify(failure(), 2 * NOTICE_MS);
+      notify(failure(unanswered(result, offline)), 2 * NOTICE_MS);
       return;
     }
     if (turn !== turns) return; // the reader went on to another page meanwhile
@@ -157,16 +179,14 @@
     submitting = true;
     dialog.ariaBusy = "true";
     said.textContent = said.dataset.busy;
+    const offline = navigator.onLine === false;
     const result = await request(confirming.action, { body: new URLSearchParams(new FormData(confirming)) });
     submitting = false;
     dialog.ariaBusy = null;
-    if (result.kind === "signed-out") {
-      status = "signed-out";
-      show();
-    }
     if (result.kind !== "page") {
-      if (dialog.open) said.textContent = failure().textContent;
-      else notify(failure(), 2 * NOTICE_MS);
+      const text = unanswered(result, offline);
+      if (dialog.open) said.textContent = text;
+      else notify(failure(text), 2 * NOTICE_MS);
       return;
     }
     if (turn !== turns || (assetsOf(result.doc) === assets && tell(result))) return;
@@ -174,9 +194,9 @@
     arrive(result);
   }
 
-  // settle ends the pending state of every form. A page that was kept while
+  // release ends the pending state of every form. A page that was kept while
   // an action was on its way comes back with it.
-  function settle() {
+  function release() {
     for (const form of document.querySelectorAll("form[data-js-pending]")) {
       delete form.dataset.jsPending;
       for (const button of form.querySelectorAll("button")) button.disabled = false;
@@ -227,7 +247,7 @@
     if (!event.persisted) return;
     submitting = false;
     progress(false);
-    settle();
+    release();
     schedule(0);
   });
 
@@ -597,36 +617,48 @@
   }
 
   // navigate shows another page, or another state of this one, in place,
-  // with its place in the history as address gives it. Whatever cannot be
-  // shown in place, the browser loads, and shows what went wrong. In the
-  // mode "ask", the dialog shows the page, which asks before an action on
-  // many tasks: the page on screen stays, and so does the history. If the
-  // server is out of reach then, a notice says so.
+  // with its place in the history as address gives it: one request for
+  // each. A page that says the server failed shows in place too, and so
+  // does the page that says that no answer came: each tries again by
+  // itself. A page that is not the dashboard's, such as a login page, or
+  // one of a newer version of it, the browser loads. In the mode "ask",
+  // the dialog shows the page, which asks before an action on many tasks:
+  // the page on screen stays, and so does the history.
   let turns = 0; // counts navigations and actions: a newer one takes over
 
   async function navigate(url, mode) {
     const turn = ++turns;
     const slow = setTimeout(() => progress(true), SLOW_MS);
-    const result = await load(url.href, null, true);
+    let result = await load(url.href, null);
     clearTimeout(slow);
     if (turn !== turns || result.kind === "aborted") return; // a newer change takes over
-    if (mode === "ask" && result.kind === "down") {
-      progress(false);
-      notify(failure(), 2 * NOTICE_MS);
-      return;
-    }
+    progress(false);
+    if (result.kind === "down") result = unreachable();
     if (result.kind !== "page" || assetsOf(result.doc) !== assets) {
       location.assign(url.href);
       progress(true);
       return;
     }
-    progress(false);
     if (mode === "ask" && tell(result)) return;
-    // The server may lead to another address of the same page.
-    const n = address(result.url ? new URL(result.url) : url, mode);
+    const n = address(url, mode);
     if (n == null) return;
-    render(result, { moved: mode === "push", n });
-    succeeded();
+    render(result, { moved: mode !== "replace", n });
+    landed(result);
+  }
+
+  // unreachable returns the page that says that no answer came, from the
+  // template of the page on screen. It tries its address again.
+  function unreachable() {
+    const doc = document.implementation.createHTMLDocument();
+    doc.head.append(...[...document.head.querySelectorAll("script[src], link[rel=stylesheet]")].map((node) => node.cloneNode()));
+    const main = doc.body.appendChild(document.getElementById("main").cloneNode());
+    main.dataset.live = "retry";
+    // No section is the current one, as on the server's status pages.
+    const nav = doc.body.appendChild(document.querySelector("[data-live-part=nav]").cloneNode(true));
+    for (const item of nav.querySelectorAll("[aria-current]")) item.removeAttribute("aria-current");
+    main.append(document.querySelector("[data-unreachable]").content.cloneNode(true));
+    doc.title = `${main.querySelector("h1").textContent} ${document.title.slice(document.title.lastIndexOf("·"))}`;
+    return { kind: "page", doc, main, failed: true };
   }
 
   // render puts the page of history entry n on screen. A newer state of the
@@ -652,7 +684,7 @@
       // how many tasks it shows now, or that it shows none. An action says
       // what it did itself.
       if (focused?.isConnected === false) main.focus({ preventScroll: true });
-      if (!notice && announcer) announcer.textContent = main.querySelector("[data-shown], .empty-note")?.textContent ?? "";
+      if (!notice && announcer) announcer.textContent = main.querySelector("[data-shown], .empty-title")?.textContent ?? "";
       return;
     }
     scrollTo(0, y);
@@ -685,7 +717,7 @@
     leave();
     result.doc.title = was.title;
     render(result, { moved: true, n, y: was.y });
-    settle();
+    release();
     schedule(0);
   });
 
@@ -1099,6 +1131,7 @@
     const now = clock();
     if (document.hidden || Number.isNaN(now)) return;
     if (window.getSelection()?.isCollapsed !== false) count(document.getElementById("main"));
+    note();
     beat = setTimeout(tick, 1000 - (now % 1000));
   }
 
@@ -1408,37 +1441,38 @@
 
   // request fetches a page, or with a body, sends an action and reads the
   // page that the server answers with. The result's kind says what happened:
-  // "page", "same" (not modified), "down" (out of reach, or a server error),
-  // "signed-out", or "aborted". The page of an action may be one that says
-  // why the action did not apply. Its url is where the server led to, if it
-  // led somewhere. A request that does not follow takes a redirect for the
-  // way to a login page.
-  async function request(url, { etag = null, body = null, follow = body !== null, control = new AbortController() } = {}) {
+  // "page", "same" (not modified), "down" (no answer from the dashboard: the
+  // network, a timeout, or a proxy's error page in its place), "elsewhere"
+  // (a page that is not the dashboard's), "signed-out", or "aborted". A
+  // page is "failed" when it says that the server failed: it tries again.
+  // The page of an action may say why the action did not apply. Its url is
+  // where the server led to, if it led somewhere.
+  async function request(url, { etag = null, body = null, control = new AbortController() } = {}) {
     let timedOut = false;
-    // An action may work for as long as the server lets a request take.
-    const timer = setTimeout(() => { timedOut = true; control.abort(); }, body ? 3 * TIMEOUT_MS : TIMEOUT_MS);
+    const timer = setTimeout(() => { timedOut = true; control.abort(); }, TIMEOUT_MS);
     try {
       const headers = { "X-Taskmill-Live": "1" };
       if (etag) headers["If-None-Match"] = etag;
       const response = await fetch(url, {
         method: body ? "POST" : "GET", body, headers, cache: "no-store", credentials: "same-origin",
-        // An action is led to the page that shows its result, and a link
-        // or a filter may be led to another address of the interface. An
-        // update is not: its page is at its address, so a redirect leads to
-        // a login page, outside of the interface.
-        redirect: follow ? "follow" : "manual", signal: control.signal,
+        // An action is led to the page that shows its result. A page is at
+        // its address: a redirect leads to a login page, or elsewhere, and
+        // the browser follows it.
+        redirect: body ? "follow" : "manual", signal: control.signal,
       });
       const began = performance.now();
       if (response.status === 304) return { kind: "same" };
       if (response.type === "opaqueredirect" || response.status === 401 || (response.status === 403 && !body)) {
         return { kind: "signed-out" };
       }
-      if (!body && (response.status >= 500 || response.status === 429)) return { kind: "down" };
-      if (!(response.headers.get("Content-Type") || "").startsWith("text/html")) return { kind: "down" };
-      const result = page(await response.text());
-      if (!result) return { kind: body && response.redirected ? "signed-out" : "down" };
+      const html = (response.headers.get("Content-Type") || "").startsWith("text/html");
+      const result = html ? page(await response.text()) : null;
+      if (!result) {
+        if (response.status >= 500 || response.status === 429) return { kind: "down" };
+        return { kind: body && (response.redirected || response.status === 403) ? "signed-out" : "elsewhere" };
+      }
       arrived(result.main, began);
-      return { ...result, etag: response.headers.get("ETag"), url: response.redirected ? response.url : null };
+      return { ...result, failed: response.status >= 500, etag: response.headers.get("ETag"), url: response.redirected ? response.url : null };
     } catch {
       return { kind: control.signal.aborted && !timedOut ? "aborted" : "down" };
     } finally {
@@ -1450,12 +1484,12 @@
   // abandons it.
   let inflight = null;
 
-  async function load(url, etag, follow = false) {
+  async function load(url, etag) {
     inflight?.abort();
     const control = new AbortController();
     inflight = control;
     try {
-      return await request(url, { etag, follow, control });
+      return await request(url, { etag, control });
     } finally {
       if (inflight === control) inflight = null;
     }
@@ -1499,18 +1533,24 @@
   // place, unless the reader is busy with it. The button in the header shows
   // whether the page is live, paused, out of date, or signed out. Its dot
   // pulses while updates run: not on a page that does not update itself,
-  // nor while they wait for the reader.
+  // nor while they wait for the reader. While the server fails, the page on
+  // screen stays, and the updates wait longer after each failure. A page
+  // that says the server failed is live too: it says when it tries again,
+  // and gives way to the page once the server answers.
 
   const toggle = document.querySelector("[data-live-toggle]");
   const LABELS = { live: "Live", paused: "Paused", stale: "Reconnecting", offline: "Offline", "signed-out": "Signed out" };
   let live = local.get(LIVE_KEY) !== "off";
   let status = "live";
-  let failures = 0;
+  let failures = 0; // in a row
+  let cause = ""; // what the last failure said
   let lastUpdate = Date.now();
   let timer = 0;
+  let due = 0; // when the next update runs
   let waiting = false; // the last update waited for the reader
 
   const livePage = () => document.getElementById("main")?.hasAttribute("data-live") ?? false;
+  const retrying = () => document.getElementById("main")?.dataset.live === "retry";
 
   function show() {
     if (!toggle) return;
@@ -1524,11 +1564,21 @@
     toggle.title = {
       live: "Live updates are on. Click to pause them.",
       paused: "Live updates are paused. Click to resume them.",
-      stale: `The server did not answer. Trying again; last update at ${since}.`,
+      stale: `${cause || "The dashboard did not answer"}. Trying again; last update at ${since}.`,
       offline: `This device is offline. Last update at ${since}.`,
       "signed-out": "The session ended. Click to reload the page.",
     }[state];
     if (described === toggle) describe(tipFor); // its tooltip says the new title
+    note();
+  }
+
+  // note says, on a page that says the server failed, when it tries again.
+  function note() {
+    const said = document.querySelector("[data-retry]");
+    if (!said) return;
+    const s = Math.ceil((due - Date.now()) / 1000);
+    said.textContent = !live ? "Live updates are paused" : status === "signed-out" ? ""
+      : s > 0 ? `Trying again in ${s}s` : "Trying again…";
   }
 
   // The reader is busy during a press, an action, or a scroll, while a
@@ -1543,6 +1593,7 @@
 
   function schedule(ms) {
     clearTimeout(timer);
+    due = Date.now() + ms;
     timer = setTimeout(update, ms);
   }
 
@@ -1550,9 +1601,31 @@
     failures = 0;
     lastUpdate = Date.now();
     status = "live";
-    show();
     // A slow server gets more time between updates.
     schedule(Math.max(REFRESH_MS, 2 * took));
+    show();
+  }
+
+  // failed counts a failure, says what it was, in the title of the page that
+  // said it, and waits longer before the next update: 5 seconds after the
+  // first, and twice as long after each more, up to a minute.
+  const heading = (main) => main.querySelector("h1")?.textContent ?? "";
+
+  function failed(why = "") {
+    failures++;
+    cause = why;
+    status = "stale";
+    schedule(Math.min(MAX_WAIT_MS, REFRESH_MS * 2 ** (failures - 1)));
+    show();
+  }
+
+  // landed starts the updates of a page that the reader asked for. Their
+  // request is a fresh start: a page that says the server failed tries
+  // again 5 seconds later.
+  function landed(result) {
+    failures = 0;
+    if (result.failed) failed(heading(document.getElementById("main")));
+    else succeeded();
   }
 
   async function update() {
@@ -1569,10 +1642,20 @@
       return;
     }
     const started = Date.now();
+    note();
     const result = await load(location.href, shownETag);
     if (!live) return; // the reader paused
     if (result.kind === "aborted") { // another page took over: it plans the next update, or this does
       if (!timer) schedule(REFRESH_MS);
+      return;
+    }
+    if (result.kind === "signed-out") {
+      status = "signed-out";
+      show();
+      return;
+    }
+    if (result.kind !== "page" && result.kind !== "same") {
+      failed();
       return;
     }
     if (result.kind === "page") {
@@ -1584,18 +1667,18 @@
         schedule(1000);
         return;
       }
-      apply(result);
+      // A page that says the server failed keeps the page on screen, unless
+      // that says so too. The page gives way to the first that works.
+      if (result.failed) {
+        const why = heading(result.main);
+        if (retrying()) apply(result);
+        failed(why);
+        return;
+      }
+      if (retrying()) render(result, { moved: true, n: entry });
+      else apply(result);
     }
-    if (result.kind === "page" || result.kind === "same") {
-      succeeded(Date.now() - started);
-      return;
-    }
-    status = result.kind === "signed-out" ? "signed-out" : "stale";
-    show();
-    if (status === "stale") {
-      failures++;
-      schedule(Math.min(MAX_WAIT_MS, REFRESH_MS * 2 ** failures));
-    }
+    succeeded(Date.now() - started);
   }
 
   toggle?.addEventListener("click", () => {
@@ -1614,9 +1697,11 @@
     }
   });
 
+  // A tab that comes back in view updates when its update is due: at once
+  // if it fell due while the tab was hidden, which runs none.
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
-    schedule(Math.max(0, REFRESH_MS - (Date.now() - lastUpdate)));
+    schedule(Math.max(0, (failures ? due : lastUpdate + REFRESH_MS) - Date.now()));
     tick();
   });
   window.addEventListener("online", () => {
@@ -1629,7 +1714,8 @@
   localise(document);
   for (const slider of document.querySelectorAll(".chart-step")) say(slider);
   arrived(document.getElementById("main"), performance.getEntriesByType("navigation")[0]?.responseStart || performance.now());
+  if (retrying()) failed(heading(document.getElementById("main")));
+  else if (live) schedule(REFRESH_MS);
   tick();
   show();
-  if (live) schedule(REFRESH_MS);
 })();

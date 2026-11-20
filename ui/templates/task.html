@@ -57,7 +57,7 @@
           <pre class="code code-error">{{.Message}}</pre>
         </li>
       {{end}}</ol>
-      {{else}}<div class="card-body">{{template "empty" "No errors"}}</div>{{end}}
+      {{else}}<div class="card-body">{{template "empty" (dict "Title" "No errors")}}</div>{{end}}
     </section>
   </div>
 

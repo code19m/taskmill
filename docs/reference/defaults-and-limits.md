@@ -72,8 +72,8 @@ by election, that does the shared work.
 | What | Value |
 |---|---|
 | Time limit of one request | 10 seconds, or less if your app sets an earlier deadline in the request's context. Then the page says "Taking too long". It says the same when a list of tasks reads for more than its 5 seconds |
-| Live updates | About every 5 seconds while the browser tab is visible. Up to 1 minute apart while the server is out of reach |
-| A page or an action that the page's script asks for | Given up after 10 seconds for a page, and 30 seconds for an action. The browser then loads the page itself, or a notice says that the action got no answer |
+| Live updates | About every 5 seconds while the browser tab is visible. While the server fails or is out of reach, 5, 10, 20, and 40 seconds apart, then 1 minute |
+| A page or an action that the page's script asks for | Given up after 15 seconds, more than the server's 10. Then the page says that no answer came, and tries again by itself, or a notice says that the action may have applied |
 | Pages kept for the back and forward buttons | The last 10 of a browser tab, in memory, so that they show right away. The browser loads an older one again |
 | Tasks that the task list shows | 50 at first. "Load more" adds 50, up to 250, and every live update reads all that are shown. After 250, the list continues from its last task on a page of its own |
 | One bulk action request | Works for about 5 seconds, then offers to continue |

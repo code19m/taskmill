@@ -116,21 +116,22 @@ func TestPagesHoldWhatTheScriptReads(t *testing.T) {
 	h := handler(t, setup(t), nil)
 	for path, title := range map[string]string{
 		"/": "", "/tasks": "", "/schedules": "", "/workers": "",
-		"/tasks/0":                     `data-dialog-title="Not found"`,
+		"/tasks/0":                     `data-dialog-title="Task not found"`,
 		"/tasks/bulk/retry?state=dead": `data-dialog-title="Retry tasks"`,
 		"/tasks/bulk/retry":            `data-dialog-title="Choose filters first"`,
 	} {
 		_, body, _ := get(t, h, path)
 		for _, part := range []string{
 			`<main id="main"`, ` data-now="`, `<div class="main">`, `data-live-part="nav"`, "data-announce",
-			"<template data-failure>", `id="confirm-dialog"`, "data-confirm-status", "data-confirm-text", "data-confirm-button",
+			"<template data-failure>", "<template data-unreachable>", `id="confirm-dialog"`, "data-confirm-status", "data-confirm-text", "data-confirm-button",
 			title,
 		} {
 			if !strings.Contains(body, part) {
 				t.Errorf("%s: the page has no %s", path, part)
 			}
 		}
-		if title == "" && strings.Contains(body, "data-dialog-title") {
+		// The page that the script shows when no answer comes is a template, not part of the page.
+		if title == "" && strings.Contains(regexp.MustCompile(`(?s)<template data-unreachable>.*?</template>`).ReplaceAllString(body, ""), "data-dialog-title") {
 			t.Errorf("%s: the page names a title for the dialog, which would show it in place of the page", path)
 		}
 	}
@@ -910,7 +911,7 @@ func TestQueueActionsKeepThePeriodOfTheCharts(t *testing.T) {
 		}
 	}
 	rec := post(t, h, "/admin/queues/pause?range=24h", "same-origin") // no queue
-	if body := rec.Body.String(); rec.Code != http.StatusBadRequest || !strings.Contains(body, `<a class="btn" href="/admin/?range=24h">`) {
+	if body := rec.Body.String(); rec.Code != http.StatusBadRequest || !strings.Contains(body, `<a class="btn primary" href="/admin/?range=24h">`) {
 		t.Errorf("Pause without a queue on the 24h overview: status %d, want 400 and the way back to that overview\n%s", rec.Code, body)
 	}
 }
@@ -1134,17 +1135,17 @@ func TestTaskListSaysWhatItRefuses(t *testing.T) {
 		target, wrong, back, label string
 		cursor                     bool
 	}{
-		{"/tasks?state=dead&cursor=MTIz", "invalid cursor", "/tasks?state=dead", "Back to the first page", true}, // "123", of the ID order
-		{"/tasks?cursor=%25", "invalid cursor", "/tasks", "Back to the first page", true},
-		{"/tasks?state=bogus&cursor=MTIz", "unknown state", "/tasks?state=bogus", "Back to the first page", true},
-		{"/tasks?state=bogus", "unknown state", "/tasks", "Clear the filters", false},
-		{"/tasks?state=dead&limit=0", "the limit must be a number from 1 to 250", "/tasks?state=dead", "Back to the first page", false},
-		{"/tasks?limit=251&cursor=MTIz", "the limit must be", "/tasks", "Back to the first page", false},
-		{"/tasks?limit=many", "the limit must be", "/tasks", "Back to the first page", false},
+		{"/tasks?state=dead&cursor=MTIz", "Invalid cursor.", "/tasks?state=dead", "Back to the first page", true}, // "123", of the ID order
+		{"/tasks?cursor=%25", "Invalid cursor.", "/tasks", "Back to the first page", true},
+		{"/tasks?state=bogus&cursor=MTIz", "Unknown state", "/tasks?state=bogus", "Back to the first page", true},
+		{"/tasks?state=bogus", "Unknown state", "/tasks", "Clear the filters", false},
+		{"/tasks?state=dead&limit=0", "The limit must be a number from 1 to 250.", "/tasks?state=dead", "Back to the first page", false},
+		{"/tasks?limit=251&cursor=MTIz", "The limit must be", "/tasks", "Back to the first page", false},
+		{"/tasks?limit=many", "The limit must be", "/tasks", "Back to the first page", false},
 	} {
 		code, body, _ := get(t, h, c.target)
 		if code != http.StatusBadRequest || !strings.Contains(body, "<h1>Invalid request</h1>") || !strings.Contains(body, c.wrong) ||
-			strings.Contains(body, upgrade) != c.cursor || !strings.Contains(body, `<a class="btn" href="`+c.back+`">`) ||
+			strings.Contains(body, upgrade) != c.cursor || !strings.Contains(body, `<a class="btn primary" href="`+c.back+`">`) ||
 			!strings.Contains(body, c.label+"</a>") {
 			t.Errorf("GET %s: status %d, want 400, a page that says %q, and the link %q to %s\n%s", c.target, code, c.wrong, c.label, c.back, body)
 		}
@@ -1475,7 +1476,7 @@ func TestRetryRefusedByADedupeKey(t *testing.T) {
 
 	rec := post(t, h, "/tasks/"+id+"/retry", "same-origin")
 	if body := rec.Body.String(); rec.Code != http.StatusConflict ||
-		!strings.Contains(body, "cannot retry task "+id+": task "+holder+" holds its dedupe key") ||
+		!strings.Contains(body, "Cannot retry task "+id+": task "+holder+" holds its dedupe key.") ||
 		!strings.Contains(body, `href="/tasks/`+id+`"`) {
 		t.Fatalf("refused retry: %d\n%s", rec.Code, body)
 	}
@@ -2180,4 +2181,145 @@ func TestActionNotices(t *testing.T) {
 			t.Fatalf("%s: a notice was shown", path)
 		}
 	}
+}
+
+// A page that the dashboard shows in place of another says what happened,
+// in plain words, and offers the way on, the most useful first. A page of a
+// cause that may pass tries its address again, with the script, and a
+// failed action leads back to where it was sent from: it is never sent
+// again. No page shows a detail of the error, which the log has.
+func TestStatusPages(t *testing.T) {
+	t.Parallel()
+	pool, down := poolThatCanFail(t)
+	client, _, schema := setupOn(t, pool)
+	t.Cleanup(func() { down.Store(false) })
+	logs := &actionLog{}
+	h := handler(t, client, &ui.Config{Logger: slog.New(logs)})
+	res, err := client.Enqueue(t.Context(), greet{Name: "x"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strconv.FormatInt(res.ID, 10)
+	serve := func(method, target string) *httptest.ResponseRecorder {
+		if method == http.MethodPost {
+			return post(t, h, target, "same-origin")
+		}
+		req := httptest.NewRequestWithContext(t.Context(), method, target, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	check := func(what string, rec *httptest.ResponseRecorder, w statusPage) {
+		t.Helper()
+		checkStatusPage(t, what, rec, w, schema)
+	}
+
+	check("a task that does not exist", serve(http.MethodGet, "/tasks/999999"), statusPage{
+		http.StatusNotFound, "Task not found", "Task 999999 does not exist.", []string{"primary /tasks Back to the tasks"}, false,
+	})
+	check("an address of no page", serve(http.MethodGet, "/nowhere"), statusPage{
+		http.StatusNotFound, "Page not found", "Nothing exists at this address.", []string{"primary / Back to the overview"}, false,
+	})
+	check("an action on a task that does not exist", serve(http.MethodPost, "/tasks/999999/retry"), statusPage{
+		http.StatusNotFound, "Not found", "It may have been deleted meanwhile.", []string{"primary /tasks Back to the tasks"}, false,
+	})
+
+	// A statement that the database refuses is a failure that the dashboard
+	// does not know: here, a table that is not there.
+	rename := func(from, to string) {
+		if _, err := pool.Exec(context.WithoutCancel(t.Context()), "ALTER TABLE "+schema+"."+from+" RENAME TO "+to); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rename("workers", "workers_gone")
+	check("a failure", serve(http.MethodGet, "/workers"), statusPage{
+		http.StatusInternalServerError, "Something went wrong",
+		"The dashboard could not read what this page shows. The server log has the details.",
+		[]string{"primary /workers Try again", "quiet / Back to the overview"},
+		true,
+	})
+	rename("workers_gone", "workers")
+
+	down.Store(true)
+	pool.Reset() // the connections that the pool holds go too
+	const unreachable, title = "The dashboard is running, but it cannot connect to its database.", "Can’t reach the database"
+	check("the overview without its database", serve(http.MethodGet, "/"), statusPage{
+		http.StatusServiceUnavailable, title, unreachable, []string{"primary / Try again"}, true,
+	})
+	check("a list without its database", serve(http.MethodGet, "/tasks?state=dead"), statusPage{
+		http.StatusServiceUnavailable, title, unreachable, []string{"primary /tasks?state=dead Try again", "quiet / Back to the overview"}, true,
+	})
+	check("an action without its database", serve(http.MethodPost, "/tasks/"+id+"/retry"), statusPage{
+		http.StatusServiceUnavailable, title, unreachable + " The action did not finish: check the page before you try again.",
+		[]string{"primary /tasks/" + id + " Back to the task"},
+		true,
+	})
+	check("a bulk action without its database", serve(http.MethodPost, "/tasks/bulk/cancel?queue=default"), statusPage{
+		http.StatusServiceUnavailable, title, "The action did not finish", []string{"primary /tasks?queue=default Back to the tasks"}, true,
+	})
+	down.Store(false)
+	if code, _, _ := get(t, h, "/"); code != http.StatusOK {
+		t.Errorf("the overview with its database back: %d", code)
+	}
+	// The log has what the pages leave out.
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	if n := strings.Count(strings.Join(logs.messages, "\n"), "dashboard request failed"); n != 5 {
+		t.Errorf("logged %q, want a failed request for each of the 5 failures", logs.messages)
+	}
+}
+
+// statusPage is what a status page should say.
+type statusPage struct {
+	code    int
+	title   string
+	text    string
+	actions []string // each link's look, address, and label, the main one first
+	retry   bool     // it tries again, with the script
+}
+
+// checkStatusPage checks a status page, and that it shows no detail of an
+// error: no address, no class of error, and no name in the database.
+func checkStatusPage(t *testing.T, what string, rec *httptest.ResponseRecorder, w statusPage, schema string) {
+	t.Helper()
+	page := regexp.MustCompile(`(?s)<template data-unreachable>.*?</template>`).ReplaceAllString(rec.Body.String(), "")
+	var actions []string
+	for _, m := range regexp.MustCompile(`<a class="btn (primary|quiet)" href="([^"]*)">.*?</svg>([^<]+)</a>`).FindAllStringSubmatch(page, -1) {
+		actions = append(actions, m[1]+" "+html.UnescapeString(m[2])+" "+m[3])
+	}
+	if rec.Code != w.code || !strings.Contains(page, "<h1>"+w.title+"</h1>") || !strings.Contains(page, w.text) ||
+		!slices.Equal(actions, w.actions) || strings.Contains(page, `data-live="retry"`) != w.retry ||
+		strings.Contains(page, "data-retry") != w.retry || (rec.Header().Get("Retry-After") != "") != (w.code == http.StatusServiceUnavailable) {
+		t.Errorf("%s: %d, actions %q, want %d %q saying %q, actions %q, trying again: %t\n%s",
+			what, rec.Code, actions, w.code, w.title, w.text, w.actions, w.retry, page)
+	}
+	for _, detail := range []string{"taskmill:", "127.0.0.1", "dial tcp", "refused", "failed to connect", "user=", "SQLSTATE", "workers_gone", schema} {
+		if strings.Contains(page, detail) {
+			t.Errorf("%s: the page shows %q, a detail of the error\n%s", what, detail, page)
+		}
+	}
+}
+
+// poolThatCanFail returns a pool of the test database that cannot connect
+// while down is set, as when the database is out of reach.
+func poolThatCanFail(t *testing.T) (*pgxpool.Pool, *atomic.Bool) {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	down := new(atomic.Bool)
+	dial := cfg.ConnConfig.DialFunc
+	cfg.ConnConfig.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if down.Load() {
+			return nil, &net.OpError{Op: "dial", Net: network, Err: errors.New("connect: connection refused")}
+		}
+		return dial(ctx, network, addr)
+	}
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool, down
 }

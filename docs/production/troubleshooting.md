@@ -234,12 +234,12 @@ This is on purpose, so that counting stays cheap on a large backlog: the
 dashboard shows "10,000+". To watch a backlog, use lag: it has no cap
 ([Monitoring](monitoring.md#know-the-limits-of-each-signal)).
 
-### The dashboard says "Taking too long" or "Something went wrong"
+### The dashboard says "Can’t reach the database", "Taking too long", or "Something went wrong"
 
-- **Cause:** the database did not answer a page within 10 seconds, or a
-  task list within 5: "Taking too long". Other failures are in the log.
-- **Do:** try again, and check the database's load. A task list with a queue
-  and a state is fast: see [Find tasks](../guides/operations-api.md#find-tasks).
+- **Cause:** the dashboard cannot connect to the database, or it did not
+  answer within 10 seconds, or a task list within 5. The log has the rest.
+- **Do:** wait: the page tries again by itself. If it repeats, check the
+  database. [Fast lists](../guides/operations-api.md#find-tasks) have a queue and a state.
 
 ## See also
 

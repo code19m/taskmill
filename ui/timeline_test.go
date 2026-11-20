@@ -199,7 +199,7 @@ func TestTaskColumnsEndTogether(t *testing.T) {
 	_, body, _ := get(t, handler(t, client, nil), "/tasks/"+strconv.FormatInt(res.ID, 10))
 	columns := regexp.MustCompile(`(?s)<div class="task-layout">\s*<div class="stack">.*<h2>Metadata</h2>.*` +
 		`<section class="card flush">\s*<div class="card-head"><h2>Errors <span class="subtle">0</span></h2></div>\s*` +
-		`<div class="card-body"><p class="empty-note">No errors</p></div>\s*</section>\s*</div>\s*<aside class="card flush details">`)
+		`<div class="card-body"><div class="empty-note"><p class="empty-title">No errors</p></div></div>\s*</section>\s*</div>\s*<aside class="card flush details">`)
 	if !columns.MatchString(body) {
 		t.Errorf("the task's page does not end its left column with the card of its errors, beside the details:\n%s", body)
 	}

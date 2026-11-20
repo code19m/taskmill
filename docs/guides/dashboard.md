@@ -36,13 +36,13 @@ mux.Handle("/taskmill/", requireAdmin(dashboard)) // requireAdmin: your own logi
   requests itself, so don't wrap it in `http.StripPrefix`.
 - It is safe on a busy production database. It reads only through the
   [`Client`](operations-api.md)'s queries, which have time limits. An open
-  tab updates itself every few seconds, and only while it is visible.
+  tab updates every few seconds while it is visible, and less often while
+  the server fails: a page that failed tries again by itself.
 - A request can take 10 seconds when the database is slow. Then the page
   says "Taking too long". So set the `WriteTimeout` of your `http.Server`
   above 10 seconds, or leave it unset: a shorter one closes the connection
   before that page arrives. For a shorter limit, set a deadline in the
-  request's context: the dashboard answers with the same page at your
-  deadline.
+  request's context: the dashboard answers with the same page then.
 
 ## Run it on its own
 

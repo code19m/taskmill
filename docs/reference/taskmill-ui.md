@@ -120,11 +120,15 @@ queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.
 | 400 | A filter value is not valid, such as an unknown state. Or the `cursor` is not one that this list made, as in a bookmark from before an upgrade. Or the `limit` is not a number from 1 to 250. Or `since` or `before` is not a time in one of their forms, or `since` is not before `before`. Or a bulk action, or its page, got no filter. Or an action on a queue or a schedule got no valid `name` |
 | 401 | The login is missing or wrong, when basic authentication is on |
 | 403 | An action in read-only mode, or a `POST` from another site |
-| 404 | No such page, task, or schedule. With a prefix, also a path that only starts like it, such as `/admin/tasksx` |
-| 405 | The path exists, but not with this method |
+| 404 | No such page, task, or schedule, also for a `GET` of an action's path. With a prefix, also a path that only starts like it, such as `/admin/tasksx` |
+| 405 | A method that the path does not take, such as a `POST` to a page |
 | 409 | The action does not fit, such as a retry of a running task. Or a retry of a canceled task whose dedupe key another task holds: the page names that task |
-| 500 | A read or an action failed. The log has `dashboard request failed` |
-| 503 | The database did not answer within the request's 10 seconds, or before an earlier deadline that your app set in the request's context. Or a list of tasks read for more than its 5 seconds. The page says "Taking too long" |
+| 500 | A read or an action failed for another reason. The page says "Something went wrong", and the log has `dashboard request failed` |
+| 503 | The dashboard cannot connect to the database: the page says "Can’t reach the database", and the log has `dashboard request failed`. Or the database did not answer within the request's 10 seconds, or before an earlier deadline that your app set in the request's context, or a list of tasks read for more than its 5 seconds: the page says "Taking too long". Either has `Retry-After: 5` |
+
+With JavaScript, a page that answers 500 or 503 tries its address again
+by itself, 5, 10, 20, and 40 seconds apart, then once a minute, and shows
+the page once it answers. It never sends an action again.
 
 ## Actions in the log
 

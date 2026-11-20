@@ -454,26 +454,26 @@ func TestTaskListKeepsItsRangeOfCreationTimes(t *testing.T) {
 func TestTaskListRefusesARangeThatIsNotOne(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
-	const order = "the range must start before it ends"
+	const order = "The range must start before it ends."
 	for _, c := range []struct{ target, wrong, back string }{
-		{"/tasks?state=dead&since=yesterday", "since must be a time such as 2026-01-31T14:05Z", "/tasks?state=dead"},
-		{"/tasks?queue=mail&state=dead&before=2021-03-04&limit=100", "before must be a time", "/tasks?queue=mail&state=dead"},
-		{"/tasks?state=dead&since=2021-02-30T00:00Z", "since must be a time", "/tasks?state=dead"},
-		{"/tasks?state=dead&since=2021-03-04T11:00:00.5Z", "since must be a time", "/tasks?state=dead"},
-		{"/tasks?state=dead&since=2021-03-04T11:00:00%2B5", "since must be a time", "/tasks?state=dead"},
-		{"/tasks?state=dead&before=0001-01-01T00:00:00Z", "before must be a time", "/tasks?state=dead"},        // the zero time: no bound, to the client
-		{"/tasks?state=dead&before=0001-01-01T05:00:00%2B05:00", "before must be a time", "/tasks?state=dead"}, // the same instant
-		{"/tasks?state=dead&since=9999-12-31T23:59:59-00:01", "since must be a time", "/tasks?state=dead"},     // the year 10000, in UTC
-		{"/tasks?state=dead&since=%3Cscript%3Ealert(1)%3C/script%3E", "since must be a time", "/tasks?state=dead"},
+		{"/tasks?state=dead&since=yesterday", "Since must be a time such as 2026-01-31T14:05Z", "/tasks?state=dead"},
+		{"/tasks?queue=mail&state=dead&before=2021-03-04&limit=100", "Before must be a time", "/tasks?queue=mail&state=dead"},
+		{"/tasks?state=dead&since=2021-02-30T00:00Z", "Since must be a time", "/tasks?state=dead"},
+		{"/tasks?state=dead&since=2021-03-04T11:00:00.5Z", "Since must be a time", "/tasks?state=dead"},
+		{"/tasks?state=dead&since=2021-03-04T11:00:00%2B5", "Since must be a time", "/tasks?state=dead"},
+		{"/tasks?state=dead&before=0001-01-01T00:00:00Z", "Before must be a time", "/tasks?state=dead"},        // the zero time: no bound, to the client
+		{"/tasks?state=dead&before=0001-01-01T05:00:00%2B05:00", "Before must be a time", "/tasks?state=dead"}, // the same instant
+		{"/tasks?state=dead&since=9999-12-31T23:59:59-00:01", "Since must be a time", "/tasks?state=dead"},     // the year 10000, in UTC
+		{"/tasks?state=dead&since=%3Cscript%3Ealert(1)%3C/script%3E", "Since must be a time", "/tasks?state=dead"},
 		{"/tasks?state=dead&since=2021-03-04T11:00Z&before=2021-03-04T11:00Z", order, "/tasks?state=dead"},
 		{"/tasks?state=dead&since=2021-03-04T16:00%2B05:00&before=2021-03-04T10:59Z", order, "/tasks?state=dead"},
 		// A list in the order of the IDs, whose range is one of creation times.
-		{"/tasks?before=never", "before must be a time", "/tasks"},
+		{"/tasks?before=never", "Before must be a time", "/tasks"},
 		{"/tasks?queue=mail&state=available&since=2021-03-04T11:00Z&before=2021-03-04T10:00Z&limit=100", order, "/tasks?queue=mail&state=available"},
 	} {
 		code, body, _ := get(t, h, c.target)
 		if code != http.StatusBadRequest || !strings.Contains(body, "<h1>Invalid request</h1>") || !strings.Contains(body, c.wrong) ||
-			!strings.Contains(body, `<a class="btn" href="`+html.EscapeString(c.back)+`">`) || !strings.Contains(body, "Clear the range</a>") {
+			!strings.Contains(body, `<a class="btn primary" href="`+html.EscapeString(c.back)+`">`) || !strings.Contains(body, "Clear the range</a>") {
 			t.Errorf("GET %s: status %d, want 400, a page that says %q, and a link to %s that clears the range\n%s", c.target, code, c.wrong, c.back, body)
 		}
 		if strings.Contains(body, "alert(1)") || strings.Contains(body, "yesterday") {

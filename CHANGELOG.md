@@ -7,6 +7,43 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The dashboard's status pages stand in the middle of the page: a picture,
+  a title that says what happened, what it means, and the way on, "Try
+  again" first for a failure. A page that failed tries again by itself, 5,
+  10, 20, and 40 seconds apart and then once a minute, says when in a quiet
+  note, and shows the page once the server answers. An action is never sent
+  again: its page tries the page that the action was sent from.
+- When the dashboard cannot connect to its database, a page says "Can’t
+  reach the database" and answers 503 with `Retry-After`, where it said
+  "Something went wrong" with 500.
+- A page that gets no answer at all, because the network or the dashboard
+  is down, or because a proxy answers in its place, says "Can’t reach the
+  dashboard" in place, and tries again by itself, where the browser showed
+  its own error page, which stayed.
+- An action that gets no answer says what may have happened: from a device
+  that is offline, it was not sent; when the session ended, it did not
+  apply; otherwise it may have applied, and the page shows what is true as
+  soon as the dashboard answers.
+- Empty lists say what is missing and why, with a way on: a task list that
+  its filters leave empty offers to clear them. A missing task, an address
+  of no page, and a refused value have pages of the same kind, which name
+  what happened in plain words.
+- The script gives up on a request after 15 seconds, where it gave up after
+  10, the server's own limit, and missed its "Taking too long" page.
+- On a phone, the Live button says "Reconnecting", "Offline", or "Signed
+  out" in words too.
+
+### Fixed
+
+- A click on a link of a dashboard that fails costs one request, where it
+  cost two: the script loaded the address again after the page that said
+  the request failed. A failure page also showed "Live", and stayed after
+  the database came back.
+- The back and forward buttons no longer stop with a script error, which
+  left the buttons of an action that was on its way disabled.
+
 ## [0.12.1] - 2026-11-20
 
 ### Added

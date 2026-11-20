@@ -40,7 +40,7 @@
     {{end}}</tbody>
   </table>
   </div>
-  {{else}}<div class="card-body">{{template "empty" "No workers are running"}}</div>{{end}}
+  {{else}}<div class="card-body">{{template "empty" (dict "Glyph" "server" "Title" "No workers are running" "Text" "Tasks wait until a worker starts. Running workers show here.")}}</div>{{end}}
 </section>
 </div>
 {{template "foot" .}}{{end}}

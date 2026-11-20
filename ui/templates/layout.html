@@ -40,14 +40,16 @@
 </header>
 {{with .Notice}}<div class="toast" role="status" data-toast>{{template "icon-check"}}<span class="toast-message">{{.}}</span></div>{{end}}
 <div class="main">
-<main id="main" class="content" tabindex="-1" data-now="{{instant .Now}}"{{if and .Nav (not .Static)}} data-live{{end}}>
+<main id="main" class="content" tabindex="-1" data-now="{{instant .Now}}"{{if .Retry}} data-live="retry"{{else if and .Nav (not .Static)}} data-live{{end}}>
 {{end}}
 
 {{define "foot"}}
 </main>
 </div>
-{{/* The notice that the script shows when an action got no answer. */}}
-<template data-failure><div class="toast failed" role="alert">{{template "icon-alert"}}<span class="toast-message">The action failed, or its answer did not arrive. Check the page before you try again.</span></div></template>
+{{/* The notice that the script shows when an action got no answer: it says what may have happened. */}}
+<template data-failure><div class="toast failed" role="alert">{{template "icon-alert"}}<span class="toast-message"></span></div></template>
+{{/* The page that the script shows in place of one that got no answer. */}}
+<template data-unreachable>{{template "status" unreachable}}</template>
 {{/* The dialog that asks before an action. It asks what a form on the page
    says in its data-confirm attributes. For an action on many tasks, it
    shows what the action's own page says, in the part of that page that
@@ -202,4 +204,25 @@
    script words it in the reader's time zone. */}}
 {{define "at"}} title="{{timestamp .}}" data-time="{{instant .}}"{{end}}
 
-{{define "empty"}}<p class="empty-note">{{.}}</p>{{end}}
+{{/* What an empty list says, in its card: a picture, what is not there,
+   and why, or what may help, with a link that does. Its arguments are
+   Glyph, Title, Text, and a link: Href, Label, and Icon. */}}
+{{define "empty"}}<div class="empty-note">{{with .Glyph}}<span class="empty-glyph">{{template "glyph" .}}</span>{{end}}<p class="empty-title">{{.Title}}</p>
+  {{- with .Text}}<p>{{.}}</p>{{end}}{{with .Href}}<a class="btn sm" href="{{.}}">{{template "icon" $.Icon}}{{$.Label}}</a>{{end}}</div>{{end}}
+
+{{/* The pictures of the status pages and of empty lists, drawn as the icons
+   are, larger. */}}
+{{define "glyph"}}<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{{- if eq . "database"}}<ellipse cx="12" cy="5.75" rx="7" ry="2.75"/><path d="M5 5.75v12.5c0 1.5 3.1 2.75 7 2.75s7-1.25 7-2.75V5.75M5 12c0 1.5 3.1 2.75 7 2.75s7-1.25 7-2.75M3.5 3.5l17 17"/>
+{{- else if eq . "slow"}}<path d="M6.5 3.5h11M6.5 20.5h11M7.75 3.5v2.4a4 4 0 0 0 1.75 3.3L12 11l2.5-1.8a4 4 0 0 0 1.75-3.3V3.5M7.75 20.5v-2.4a4 4 0 0 1 1.75-3.3L12 13l2.5 1.8a4 4 0 0 1 1.75 3.3v2.4"/>
+{{- else if eq . "alert"}}<path d="M10.3 4.3 3 17.2a2 2 0 0 0 1.7 3h14.6a2 2 0 0 0 1.7-3L13.7 4.3a2 2 0 0 0-3.4 0ZM12 9.5v4.25M12 17v.01"/>
+{{- else if eq . "offline"}}<path d="M7.25 18.75h10a3.75 3.75 0 0 0 .55-7.46 5.75 5.75 0 0 0-11.1-.95 4.25 4.25 0 0 0 .55 8.41ZM3.5 3.5l17 17"/>
+{{- else if eq . "search"}}<circle cx="10.75" cy="10.75" r="6.25"/><path d="m15.5 15.5 5 5"/>
+{{- else if eq . "refused"}}<circle cx="12" cy="12" r="8.25"/><path d="m6.2 6.2 11.6 11.6"/>
+{{- else if eq . "lock"}}<rect x="5" y="10.5" width="14" height="10" rx="2"/><path d="M8.5 10.5v-3a3.5 3.5 0 0 1 7 0v3"/>
+{{- else if eq . "inbox"}}<path d="M3.5 13.5h4.75l1.5 2.5h4.5l1.5-2.5h4.75M6.2 5.5h11.6a1 1 0 0 1 .95.7l1.75 7.3V18a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 18v-4.5l1.75-7.3a1 1 0 0 1 .95-.7Z"/>
+{{- else if eq . "filter"}}<path d="M4 5h16l-6.25 7.5V18l-3.5 1.75V12.5Z"/>
+{{- else if eq . "done"}}<circle cx="12" cy="12" r="8.25"/><path d="m8.5 12.25 2.4 2.25 4.6-4.75"/>
+{{- else if eq . "clock"}}<circle cx="12" cy="12" r="8.25"/><path d="M12 7.5V12l3 2"/>
+{{- else if eq . "server"}}<rect x="3.5" y="4" width="17" height="7" rx="1.75"/><rect x="3.5" y="13" width="17" height="7" rx="1.75"/><path d="M7 7.5h.01M7 16.5h.01"/>
+{{- end}}</svg>{{end}}
