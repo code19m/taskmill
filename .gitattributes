@@ -2,3 +2,9 @@
 
 *.go diff=golang
 *.md diff=markdown
+
+# ent's generated code in the ORM example: hidden in diffs and language
+# statistics. Its schema and the generate directive are written by hand.
+examples/orms/ent/** linguist-generated=true
+examples/orms/ent/schema/** linguist-generated=false
+examples/orms/ent/generate.go linguist-generated=false
