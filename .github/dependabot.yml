@@ -1,12 +1,12 @@
 version: 2
 updates:
-  # Each group makes one pull request update every module. The otel module
-  # and the ORM examples build against the core next to them, so a dependency
-  # that they share, such as pgx, passes CI only when it changes in all. A
-  # group holds version updates or security updates, not both, so each kind
-  # has its group.
+  # Each group makes one pull request update every module. The otel module,
+  # the ORM examples, and the browser tests build against the core next to
+  # them, so a dependency that they share, such as pgx, passes CI only when it
+  # changes in all. A group holds version updates or security updates, not
+  # both, so each kind has its group.
   - package-ecosystem: gomod
-    directories: [/, /otel, /examples/orms]
+    directories: [/, /otel, /examples/orms, /ui/browsertest]
     schedule:
       interval: weekly
     commit-message:

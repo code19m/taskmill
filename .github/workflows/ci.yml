@@ -21,8 +21,8 @@ concurrency:
 # Every job runs a Makefile target, so `make check` reproduces CI locally,
 # except the GoReleaser job (`make release-check`) and the API job (`make
 # api`, which needs a committed tree). The targets check every module of the
-# repository: the core, otel/, and examples/orms/, and internal/compat where
-# it applies.
+# repository: the core, otel/, examples/orms/, and ui/browsertest/, and
+# internal/compat where it applies.
 jobs:
   lint:
     name: Lint
@@ -39,6 +39,7 @@ jobs:
             go.sum
             otel/go.sum
             examples/orms/go.sum
+            ui/browsertest/go.sum
             internal/compat/go.sum
             Makefile
             .golangci.yml
@@ -73,6 +74,7 @@ jobs:
             go.sum
             otel/go.sum
             examples/orms/go.sum
+            ui/browsertest/go.sum
       # The same database as `make db` locally, with the same settings.
       - run: make db TEST_POSTGRES=postgres:${{ matrix.postgres }}-alpine
       - run: make test
@@ -143,8 +145,25 @@ jobs:
             go.sum
             otel/go.sum
             examples/orms/go.sum
+            ui/browsertest/go.sum
       - run: make db
       - run: make test-pgbouncer
+
+  # The dashboard's script, run in the Chrome of GitHub's Ubuntu runners.
+  browser:
+    name: Browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: ui/browsertest/go.sum
+      - run: make db
+      - run: make test-browser
 
   vuln:
     name: Vulnerabilities
@@ -162,6 +181,7 @@ jobs:
             go.sum
             otel/go.sum
             examples/orms/go.sum
+            ui/browsertest/go.sum
             Makefile
       - run: make vuln
 
@@ -212,7 +232,7 @@ jobs:
   ci-ok:
     name: CI OK
     if: always()
-    needs: [lint, test, pgbouncer, vuln, api, compat, otel-release, release-check]
+    needs: [lint, test, pgbouncer, browser, vuln, api, compat, otel-release, release-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
