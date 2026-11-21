@@ -121,6 +121,13 @@ All notable changes to taskmill are recorded here. The format follows
   page again.
 - The overview's **Waiting** card leads to the scheduled, retryable, and
   pending tasks that it counts, not to the scheduled ones alone.
+- `ui.New` refuses a `BasicAuth` username with a colon, and a username or
+  password with a control character, with `ErrInvalidArgument`: nobody could
+  log in with them. So does `taskmill-ui` with `TASKMILL_UI_USERNAME` and
+  `TASKMILL_UI_PASSWORD`.
+- The dashboard reads `Accept-Encoding` as RFC 9110 does: a weight of zero
+  in any form, such as `q=0.0` or `Q=0`, refuses gzip, `*` accepts it, and
+  every line of the header counts.
 
 ### Security
 

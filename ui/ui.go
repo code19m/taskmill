@@ -49,6 +49,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/code19m/taskmill"
 )
@@ -99,9 +100,12 @@ type Config struct {
 }
 
 // BasicAuth is the one user that may use the dashboard. Set it in
-// [Config.BasicAuth].
+// [Config.BasicAuth]. Neither field may hold a control character, such as a
+// line break at the end of a value read from a file: a browser cannot send
+// one.
 type BasicAuth struct {
-	// Username is the user's name. Required.
+	// Username is the user's name. Required. It must not hold a colon:
+	// basic authentication ends the name at the first one.
 	Username string
 
 	// Password is the user's password. Required.
@@ -111,8 +115,9 @@ type BasicAuth struct {
 // New returns the dashboard for client. cfg may be nil. It returns an
 // error that wraps [taskmill.ErrInvalidArgument] if client is nil, if
 // cfg.Prefix does not start with a slash, if cfg.BasicAuth has an empty
-// username or password, or if an entry of cfg.FrameAncestors is empty or
-// holds a space, comma, or semicolon.
+// username or password, a username with a colon, or a control character in
+// either, or if an entry of cfg.FrameAncestors is empty or holds a space,
+// comma, or semicolon.
 //
 // The handler has nothing to close: it starts no goroutine, and it reaches
 // the database only through client. That is why New returns a plain
@@ -186,6 +191,10 @@ func checkConfig(client *taskmill.Client, cfg *Config) (ancestors string, err er
 		return "", invalid("Prefix %q is not a path: start it with /", cfg.Prefix)
 	case cfg.BasicAuth != nil && (cfg.BasicAuth.Username == "" || cfg.BasicAuth.Password == ""):
 		return "", invalid("BasicAuth needs a username and a password")
+	case cfg.BasicAuth != nil && strings.Contains(cfg.BasicAuth.Username, ":"):
+		return "", invalid("BasicAuth's username holds a colon, which ends a username in basic authentication")
+	case cfg.BasicAuth != nil && strings.ContainsFunc(cfg.BasicAuth.Username+cfg.BasicAuth.Password, unicode.IsControl):
+		return "", invalid("BasicAuth's username or password holds a control character, such as a line break, which a browser cannot send")
 	}
 
 	for _, o := range cfg.FrameAncestors {

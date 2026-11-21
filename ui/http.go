@@ -190,14 +190,41 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, code int, name s
 	_, _ = w.Write(body) // the client may be gone; there is no one to tell
 }
 
+// acceptsGzip reports whether a request accepts a gzip response, as RFC 9110
+// reads Accept-Encoding, over all its lines: by the weight of gzip, or else
+// of "*", the other codings. A weight of 0 refuses, and so does one that is
+// not a number from 0 to 1.
 func acceptsGzip(r *http.Request) bool {
-	for part := range strings.SplitSeq(r.Header.Get("Accept-Encoding"), ",") {
-		coding, params, _ := strings.Cut(strings.TrimSpace(part), ";")
-		if strings.EqualFold(strings.TrimSpace(coding), "gzip") {
-			return strings.ReplaceAll(params, " ", "") != "q=0"
+	named, others := -1.0, -1.0 // the weights; -1 if not named
+	for _, line := range r.Header.Values("Accept-Encoding") {
+		for part := range strings.SplitSeq(line, ",") {
+			coding, params, _ := strings.Cut(part, ";")
+			switch strings.ToLower(strings.TrimSpace(coding)) {
+			case "gzip":
+				named = weight(params)
+			case "*":
+				others = weight(params)
+			}
 		}
 	}
-	return false
+
+	if named < 0 {
+		return others > 0
+	}
+	return named > 0
+}
+
+// weight reads the weight of a coding, such as " q=0.5": 1 if it has none,
+// and 0 if it is not a number from 0 to 1.
+func weight(params string) float64 {
+	name, value, ok := strings.Cut(params, "=")
+	if !ok || !strings.EqualFold(strings.TrimSpace(name), "q") {
+		return 1
+	}
+	if q, err := strconv.ParseFloat(strings.TrimSpace(value), 64); err == nil && q >= 0 && q <= 1 {
+		return q
+	}
+	return 0
 }
 
 // path returns an absolute path inside the dashboard.

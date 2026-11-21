@@ -97,12 +97,14 @@ func TestHandlerServesItsSettings(t *testing.T) {
 		t.Fatalf("a path outside the prefix: got %d, want 404", rec.Code)
 	}
 
-	// The dashboard refuses settings that would serve it wrongly.
+	// The dashboard refuses settings that would serve it wrongly, or that
+	// nobody could log in with.
 	for name, value := range map[string]string{
 		"TASKMILL_UI_PREFIX":          "admin/jobs",
 		"TASKMILL_UI_FRAME_ANCESTORS": "https://admin.example.com;script-src *",
+		"TASKMILL_UI_USERNAME":        "ops:team",
 	} {
-		cfg, err := loadConfig(env(map[string]string{"TASKMILL_DATABASE_URL": "postgres://db", name: value}))
+		cfg, err := loadConfig(env(map[string]string{"TASKMILL_DATABASE_URL": "postgres://db", "TASKMILL_UI_PASSWORD": "s3cret", name: value}))
 		if err != nil {
 			t.Fatal(err)
 		}
