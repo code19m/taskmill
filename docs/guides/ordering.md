@@ -93,8 +93,8 @@ until you act, for as long as it takes. To fix it:
    `taskmill_queue_halted_groups` is above 0
    ([Monitoring](../production/monitoring.md)). In the
    [dashboard](dashboard.md), the dead task's page says "This task halts its
-   FIFO group", with a **View group** button, while tasks of the group wait
-   behind it. From code, list the halted groups:
+   FIFO group", with a **View group** button. From code, list the halted
+   groups:
 
    ```go
    page, err := client.Groups(ctx, &taskmill.GroupParams{Halted: true})

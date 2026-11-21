@@ -121,6 +121,10 @@ All notable changes to taskmill are recorded here. The format follows
   page again.
 - The overview's **Waiting** card leads to the scheduled, retryable, and
   pending tasks that it counts, not to the scheduled ones alone.
+- A task's page says "This task halts its FIFO group" for every dead task
+  that halts its group, also while no task waits behind it. When its group
+  cannot be read, the page shows the task and says so: before, the whole
+  page failed.
 - `ui.New` refuses a `BasicAuth` username with a colon, and a username or
   password with a control character, with `ErrInvalidArgument`: nobody could
   log in with them. So does `taskmill-ui` with `TASKMILL_UI_USERNAME` and

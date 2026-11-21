@@ -3,7 +3,9 @@ package ui_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"html"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -1084,6 +1086,89 @@ func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, s
 	return client, pool, schema, read, trips
 }
 
+// breakReads breaks the connection of each read on its pool that names its
+// key, before the read starts, as a network that fails does.
+type breakReads struct {
+	key    string
+	broken atomic.Int64
+}
+
+func (b *breakReads) breakIf(conn *pgx.Conn, args []any) {
+	if strings.Contains(fmt.Sprint(args...), b.key) && conn.PgConn().Conn().Close() == nil {
+		b.broken.Add(1)
+	}
+}
+
+func (b *breakReads) TraceQueryStart(ctx context.Context, conn *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	b.breakIf(conn, d.Args)
+	return ctx
+}
+
+func (*breakReads) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (b *breakReads) TraceBatchStart(ctx context.Context, conn *pgx.Conn, d pgx.TraceBatchStartData) context.Context {
+	for _, q := range d.Batch.QueuedQueries {
+		b.breakIf(conn, q.Arguments)
+	}
+	return ctx
+}
+
+func (*breakReads) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+func (*breakReads) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData)     {}
+
+// A task's page says how the task stands in its FIFO group. A dead task
+// halts its group whether or not tasks wait behind it, since a task added
+// later waits too: the page says so, and how many wait. A page whose group
+// cannot be read shows the task without it, says so, and logs why.
+func TestTaskPagesSayHowTheTaskStandsInItsGroup(t *testing.T) {
+	t.Parallel()
+	failing := &breakReads{key: "group-that-fails"}
+	client, pool, schema := setupTraced(t, failing)
+	ctx := t.Context()
+	var params []taskmill.EnqueueParams
+	for _, group := range []string{"full", "full", "full", "alone", failing.key, failing.key} {
+		params = append(params, taskmill.EnqueueParams{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{GroupKey: group}})
+	}
+	res, err := client.EnqueueMany(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, head := range []int64{res[0].ID, res[3].ID} {
+		if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, head); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE `+schema+`.groups g SET halted_task_id = t.id, halted_at = now()
+		    FROM `+schema+`.tasks t WHERE t.id = $1 AND g.queue = t.queue AND g.group_key = t.group_key`, head); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	logs := &actionLog{}
+	h := handler(t, client, &ui.Config{Logger: slog.New(logs)})
+	for _, tc := range []struct {
+		task  int64
+		wants []string
+	}{
+		{res[0].ID, []string{"This task halts its FIFO group.</strong>", "2 tasks wait behind it until you retry or delete it."}},
+		{res[3].ID, []string{"This task halts its FIFO group.</strong>", "A task added to the group waits behind it until you retry or delete it."}},
+		{res[5].ID, []string{"<h1 class=\"task-heading\"><span>#" + strconv.FormatInt(res[5].ID, 10), "Its place in its FIFO group could not be read."}},
+	} {
+		code, body, _ := get(t, h, "/tasks/"+strconv.FormatInt(tc.task, 10))
+		for _, want := range tc.wants {
+			if code != http.StatusOK || !strings.Contains(body, want) {
+				t.Errorf("task %d (%d): want %s on its page", tc.task, code, want)
+			}
+		}
+	}
+
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	if failing.broken.Load() == 0 || !slices.Contains(logs.messages, "read FIFO group failed") {
+		t.Errorf("broke %d reads of the group, and logged %q; want a warning for each", failing.broken.Load(), logs.messages)
+	}
+}
+
 // The task list shows no payload and no metadata, and one line of each
 // task's last error. So a page must not read them from the database: a
 // payload can take 1 MiB, and an open page asks again every 5 seconds. The
@@ -1235,7 +1320,7 @@ func TestPagesMakeFewRoundTrips(t *testing.T) {
 	}{
 		{"/", 5, "the queues, the workers, the schedules, the settings, and the activity"},
 		{"/tasks", 2, "the tasks, and the queues"},
-		{"/tasks/" + strconv.FormatInt(ids[0], 10), 3, "the task, the count of the tasks behind it, and the queues"},
+		{"/tasks/" + strconv.FormatInt(ids[0], 10), 3, "the task, its group, and the queues"},
 		{"/tasks/" + strconv.FormatInt(ids[1], 10), 3, "the task, the task ahead of it, and the queues"},
 		{"/tasks/bulk/retry?state=dead", 2, "the count, and the queues"},
 		{"/schedules", 2, "the schedules, and the queues"},

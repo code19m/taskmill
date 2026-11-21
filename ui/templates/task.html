@@ -19,15 +19,20 @@
   {{end}}
 </header>
 <div class="page">
-{{if $g.Waiting.N}}
+{{if $g.Halts}}
 <div class="callout failed" role="note">
   <div><strong>This task halts its FIFO group.</strong>
-    {{$g.Waits}} behind it until you retry or delete it.</div>
+    {{if $g.Waiting.N}}{{$g.Waits}}{{else}}A task added to the group waits{{end}} behind it until you retry or delete it.</div>
   <a class="btn sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group{{template "icon" "next"}}</a>
 </div>
 {{else if $g.Head}}
 <div class="callout" role="note">
   <div>Waits behind <a class="strong" href="{{path "/tasks/"}}{{$g.Head.ID}}">#{{$g.Head.ID}}</a> {{template "task-state" $g.Head.State}} in its FIFO group.</div>
+  <a class="btn sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group{{template "icon" "next"}}</a>
+</div>
+{{else if $g.Unread}}
+<div class="callout" role="note">
+  <div>Its place in its FIFO group could not be read.</div>
   <a class="btn sm" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" $t.GroupKey}}">View group{{template "icon" "next"}}</a>
 </div>
 {{end}}

@@ -63,9 +63,9 @@ A banner at the top of a task's page says how the task stands in its
 
 | The task | The banner |
 |---|---|
-| Dead, with tasks of its group waiting behind it | "This task halts its FIFO group", with how many tasks wait, and a **View group** button |
-| Dead, with no task of its group waiting | None. A task that you add to the group later still waits behind it |
+| Dead, and its group waits for it | "This task halts its FIFO group", with how many tasks wait behind it, or that a task added to the group waits, and a **View group** button |
 | Pending | "Waits behind" the task that its group runs first, with that task's state |
+| Its group could not be read | That it could not be read. The page shows the task, and its next update tries again |
 
 ## Schedules
 

@@ -202,6 +202,7 @@ the others: [Run tasks on a schedule](../guides/schedules.md).
 | `dashboard request failed` | Warn | A page or an action at `path` failed. The page says "Can’t reach the database" when the dashboard cannot connect to it, and "Something went wrong" otherwise. | Check the database, if it repeats. |
 | `dashboard request timed out` | Warn | The database did not answer within 10 seconds, or before an earlier deadline that your app set in the request's context. Or it ended a read of tasks at the read's limit of 5 seconds. The page says "Taking too long". | Check the database's load. For a task list at `path`, see [which lists read more](https://pkg.go.dev/github.com/code19m/taskmill#Client.List) than they show. |
 | `read activity failed` | Warn | The overview's charts could not read their history, and show none. | Check the database, if it repeats. |
+| `read FIFO group failed` | Warn | A task's page could not read how the task stands in its FIFO group, and shows the task without it. | Check the database, if it repeats. |
 | `read filter choices failed` | Warn | The task list could not read the choices of a filter, named by `target`. | Check the database, if it repeats. |
 | `search groups failed` | Warn | The search for FIFO groups in a filter failed. | Check the database, if it repeats. |
 | `render page failed` | Error | A page template failed: `page` names it. | Please [report it](https://github.com/code19m/taskmill/issues). |
