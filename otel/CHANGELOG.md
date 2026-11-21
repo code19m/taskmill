@@ -20,6 +20,12 @@ rename spans, attributes, or metrics to follow them, and says so here.
   [Metrics and traces](../docs/reference/metrics.md#worker-counters) lists
   them. Requires taskmill v0.15.0, whose `Worker.Stats` it reads.
 
+### Fixed
+
+- `EnqueueMiddleware` panicked when an enqueue middleware before it had set
+  a task's `Metadata` to nil. It now gives the task new metadata for the
+  span's context.
+
 ## [0.4.3] - 2026-11-18
 
 ### Fixed

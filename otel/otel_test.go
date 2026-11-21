@@ -808,6 +808,35 @@ func TestPublisherThatPanicsEndsItsSpans(t *testing.T) {
 
 // With no span to store, as under a no-op tracer, the trace context that the
 // metadata or the headers brought is still removed: it is another trace's.
+// An enqueue middleware may set a task's metadata to nil. The span's context
+// still reaches the task.
+func TestEnqueueMiddlewareAfterOneThatClearedTheMetadata(t *testing.T) {
+	t.Parallel()
+	in := tmotel.New(&tmotel.Config{
+		TracerProvider: sdktrace.NewTracerProvider(),
+		MeterProvider:  sdkmetric.NewMeterProvider(),
+		Propagator:     propagation.TraceContext{},
+	})
+	removeMetadata := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		for _, task := range tasks {
+			task.Metadata = nil
+		}
+		return next(ctx)
+	}
+	client := taskmilltest.NewClient(t, testPool(t), &taskmill.ClientConfig{
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{removeMetadata, in.EnqueueMiddleware},
+	})
+
+	res, err := client.Enqueue(t.Context(), sendEmail{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := client.Get(t.Context(), res.ID)
+	if err != nil || info.Metadata["traceparent"] == "" {
+		t.Errorf("got the metadata %q, %v, want the span's traceparent", info.Metadata, err)
+	}
+}
+
 func TestWithoutASpanAnOldTraceContextIsRemoved(t *testing.T) {
 	t.Parallel()
 	in := tmotel.New(&tmotel.Config{
