@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -112,10 +113,90 @@ func TestNewMigrationsBuildIndexesOnline(t *testing.T) {
 	}
 
 	for _, m := range all[lastBlocking:] {
-		if len(m.Blocking) > 0 {
-			t.Errorf("migration %04d_%s builds an index that blocks writes to %v: "+
-				"build it with CREATE INDEX CONCURRENTLY in an online step, a migration whose first line is %q (see CONTRIBUTING.md)",
-				m.Version, m.Name, m.Blocking, onlineMarker)
+		for _, stmt := range mayBlock(m) {
+			t.Errorf("migration %04d_%s may build or rebuild an index that blocks writes: %q. "+
+				"Build it with CREATE INDEX CONCURRENTLY in an online step, a migration whose first line is %q (see CONTRIBUTING.md)",
+				m.Version, m.Name, stmt, onlineMarker)
+		}
+	}
+}
+
+// indexWords are the words of a statement that may build an index, or
+// rebuild one.
+var indexWords = regexp.MustCompile(`(?i)\b(INDEX|UNIQUE|PRIMARY|EXCLUDE|REINDEX)\b`)
+
+// alterTable reads the table of an ALTER TABLE statement.
+var alterTable = regexp.MustCompile(`(?i)^ALTER TABLE (?:IF EXISTS )?(?:ONLY )?([a-z0-9_]+\.[a-z0-9_]+)\b`)
+
+// mayBlock returns the statements of m that may build or rebuild an index
+// with a lock that blocks writes, unless m is online. It fails closed: a
+// statement that names an index or a key may, unless it uses an index that
+// exists, comments, or works on a table that m itself creates, which is
+// empty. A table created IF NOT EXISTS may hold rows.
+func mayBlock(m Migration) []string {
+	if m.Online {
+		return nil
+	}
+
+	var out []string
+	created := make(map[string]bool)
+	for _, stmt := range statements(m.SQL) {
+		words := wordsOf(stmt)
+		table := ""
+		if match := createIndex.FindStringSubmatch(words); match != nil {
+			table = match[1]
+		} else if match := alterTable.FindStringSubmatch(words); match != nil {
+			table = match[1]
+		}
+
+		switch upper := strings.ToUpper(words); {
+		case strings.HasPrefix(upper, "CREATE TABLE "):
+			if match := createTable.FindStringSubmatch(words); match != nil {
+				created[match[1]] = true
+			}
+		case !indexWords.MatchString(words), usingIndex.MatchString(words), strings.HasPrefix(upper, "COMMENT ON "):
+		case table != "" && created[table]:
+		default:
+			out = append(out, words)
+		}
+	}
+	return out
+}
+
+// The rule of TestNewMigrationsBuildIndexesOnline catches every statement
+// that builds an index with a lock that blocks writes, also through a key, a
+// DO block, or a table created IF NOT EXISTS, and lets the others pass,
+// whatever their comments and quoted text say.
+func TestTheOnlineRuleFailsClosed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		body    string
+		blocked int // how many statements the rule refuses
+	}{
+		{"REINDEX TABLE __SCHEMA__.tasks", 1},
+		{"REINDEX INDEX __SCHEMA__.tasks_fetch_idx", 1},
+		{"CREATE INDEX tasks_kind_idx ON __SCHEMA__.tasks (kind)", 1},
+		{"DROP INDEX __SCHEMA__.tasks_fetch_idx", 1},
+		{"ALTER TABLE __SCHEMA__.tasks ADD COLUMN x integer UNIQUE", 1},
+		{"ALTER TABLE __SCHEMA__.tasks ADD COLUMN y integer PRIMARY KEY", 1},
+		{"ALTER TABLE __SCHEMA__.workers ADD CONSTRAINT workers_excl EXCLUDE USING gist (id WITH =)", 1},
+		{"DO $$ BEGIN CREATE INDEX tasks_kind_idx ON __SCHEMA__.tasks (kind); END $$", 1},
+		{"CREATE TABLE IF NOT EXISTS __SCHEMA__.t (a integer PRIMARY KEY); CREATE INDEX t_a_idx ON __SCHEMA__.t (a)", 1},
+		{"CREATE TABLE __SCHEMA__.t (a integer PRIMARY KEY); CREATE UNIQUE INDEX t_a_idx ON __SCHEMA__.t (a);" +
+			"ALTER TABLE __SCHEMA__.t ADD COLUMN b integer UNIQUE", 0},
+		{"ALTER TABLE __SCHEMA__.tasks ADD CONSTRAINT tasks_k_key UNIQUE USING INDEX tasks_k_idx", 0},
+		{"COMMENT ON COLUMN __SCHEMA__.tasks.kind IS 'an INDEX, built concurrently; a PRIMARY key'", 0},
+		{"-- CREATE INDEX tasks_kind_idx ON __SCHEMA__.tasks (kind);\nUPDATE __SCHEMA__.queues /* REINDEX */ SET name = 'unique'", 0},
+	}
+
+	for _, tt := range tests {
+		m, err := Parse("0010_test.sql", "SET LOCAL lock_timeout = '5s';\n"+tt.body, "billing")
+		if err != nil {
+			t.Errorf("%q: %v", tt.body, err)
+			continue
+		}
+		if got := mayBlock(m); len(got) != tt.blocked {
+			t.Errorf("%q: the rule refuses %q, want %d statements", tt.body, got, tt.blocked)
 		}
 	}
 }

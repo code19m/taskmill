@@ -54,7 +54,7 @@ var (
 	dropOnline   = regexp.MustCompile(`(?i)^DROP INDEX CONCURRENTLY (?:IF EXISTS )?([a-z0-9_]+\.[a-z0-9_]+)$`)
 	createIndex  = regexp.MustCompile(`(?i)^CREATE (?:UNIQUE )?INDEX (?:IF NOT EXISTS )?(?:[a-z0-9_]+ )?ON (?:ONLY )?([a-z0-9_]+\.[a-z0-9_]+)\b`)
 	addKey       = regexp.MustCompile(`(?i)^ALTER TABLE (?:IF EXISTS )?(?:ONLY )?([a-z0-9_]+\.[a-z0-9_]+) .*\bADD (?:CONSTRAINT [a-z0-9_]+ )?(?:UNIQUE|PRIMARY KEY)\b`)
-	createTable  = regexp.MustCompile(`(?i)^CREATE TABLE (?:IF NOT EXISTS )?([a-z0-9_]+\.[a-z0-9_]+)\b`)
+	createTable  = regexp.MustCompile(`(?i)^CREATE TABLE ([a-z0-9_]+\.[a-z0-9_]+)\b`) // not IF NOT EXISTS: that table may hold rows
 	concurrently = regexp.MustCompile(`(?i)\bCONCURRENTLY\b`)
 	usingIndex   = regexp.MustCompile(`(?i)\bUSING INDEX\b`)
 )
@@ -102,7 +102,7 @@ func Parse(file, body, schema string) (Migration, error) {
 
 	created := make(map[string]bool)
 	for _, stmt := range statements(m.SQL) {
-		words := strings.Join(strings.Fields(stmt), " ")
+		words := wordsOf(stmt)
 		switch {
 		case m.Online:
 			s, ok := onlineStatement(stmt, words)
@@ -148,23 +148,77 @@ func onlineStatement(stmt, words string) (Statement, bool) {
 	return Statement{}, false
 }
 
-// statements returns the statements of a migration, without its comment
-// lines.
+// statements returns the statements of a migration, without its comments.
+// It splits at each semicolon outside quoted text, also inside the body of
+// a DO block or a function: the parts still name what the body does.
 func statements(sql string) []string {
-	var code strings.Builder
-	for line := range strings.Lines(sql) {
-		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
-			code.WriteString(line)
+	var out []string
+	var stmt strings.Builder
+	end := func() {
+		if s := strings.TrimSpace(stmt.String()); s != "" {
+			out = append(out, s)
 		}
+		stmt.Reset()
 	}
 
-	var out []string
-	for stmt := range strings.SplitSeq(code.String(), ";") {
-		if stmt = strings.TrimSpace(stmt); stmt != "" {
-			out = append(out, stmt)
+	for i := 0; i < len(sql); i++ {
+		switch rest := sql[i:]; {
+		case rest[0] == '\'':
+			n := quoted(rest)
+			stmt.WriteString(rest[:n])
+			i += n - 1
+		case strings.HasPrefix(rest, "--"):
+			n := strings.IndexByte(rest, '\n')
+			if n < 0 {
+				n = len(rest)
+			}
+			i += n - 1
+		case strings.HasPrefix(rest, "/*"):
+			n := strings.Index(rest, "*/")
+			if n < 0 {
+				n = len(rest) - 2
+			}
+			stmt.WriteByte(' ')
+			i += n + 1
+		case rest[0] == ';':
+			end()
+		default:
+			stmt.WriteByte(rest[0])
 		}
 	}
+	end()
 	return out
+}
+
+// quoted returns the length of the quoted text that s starts with, quotes
+// included. Two quotes in a row stand for one inside it.
+func quoted(s string) int {
+	for i := 1; i < len(s); i++ {
+		if s[i] != '\'' {
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == '\'' {
+			i++
+			continue
+		}
+		return i + 1
+	}
+	return len(s)
+}
+
+// wordsOf returns the words of stmt, joined by single spaces, with each
+// quoted text emptied: what the statement does, not what its text says.
+func wordsOf(stmt string) string {
+	var code strings.Builder
+	for i := 0; i < len(stmt); i++ {
+		if stmt[i] == '\'' {
+			i += quoted(stmt[i:]) - 1
+			code.WriteString("''")
+			continue
+		}
+		code.WriteByte(stmt[i])
+	}
+	return strings.Join(strings.Fields(code.String()), " ")
 }
 
 // Latest returns the highest migration version.
