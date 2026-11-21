@@ -183,7 +183,7 @@ func (w *Worker) fetchFree(ctx context.Context, q *queueState, slots int) (tasks
 // count's answer only tells the worker how far the limit held it back. It
 // returns errQueueHeld if it gave up waiting for the row.
 func (w *Worker) fetchLimited(ctx context.Context, q *queueState, slots int) (tasks []*liveAttempt, more, atLimit bool, err error) {
-	conn, err := w.client.pool.Acquire(ctx)
+	conn, err := w.acquire(ctx)
 	if err != nil {
 		return nil, false, false, err
 	}
@@ -340,7 +340,12 @@ func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limi
 	b.Queue(sql, w.leaseArgs(q, limit, extra)...)
 	b.Queue("COMMIT")
 
-	br := w.client.pool.SendBatch(ctx, b)
+	conn, err := w.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Release()
+	br := conn.SendBatch(ctx, b)
 	defer func() { _ = br.Close() }()
 
 	for range 2 {

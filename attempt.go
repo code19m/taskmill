@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/code19m/taskmill/internal/recovered"
 )
 
@@ -533,33 +535,11 @@ func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 		w.released.Add(1)
 	}
 
-	// Only a grouped task's outcome takes several statements that must
-	// commit together. Their transaction waits for a row that another
-	// transaction holds, such as the group's while a transaction enqueues
-	// into it, for lockWait at most. Meanwhile it holds the task's row,
-	// which the renewal of the lease skips: a longer wait could outlast the
-	// lease, and the rescue would record a lost lease in place of this
-	// outcome. So the transaction gives up, and tries again, for as long as
-	// the row is held and the lease renewed in between.
 	var ended attemptEnd
 	try := func(ctx context.Context) error {
 		var err error
-		if t.info.GroupKey == "" {
-			ended, err = w.recordTx(ctx, pgxExecutor{q: w.client.pool}, t, o)
-			return err
-		}
-		return w.client.inTx(ctx, func(q querier) error {
-			if _, err := q.exec(ctx, lockTimeoutSQL, w.timing.lockTimeout()); err != nil {
-				return err
-			}
-			if ended, err = w.recordTx(ctx, q, t, o); err != nil {
-				return err
-			}
-			// The timeout was for the rows. At the commit, a notification
-			// waits its turn, as every other one does: see liftLockTimeout.
-			_, err = q.exec(ctx, liftLockTimeout)
-			return err
-		})
+		ended, err = w.recordOnce(ctx, t, o)
+		return err
 	}
 	err := w.whileLeased(ctx, []*liveAttempt{t}, try)
 	for delay := blockedRetryDelay; pgCode(err) == codeLockNotAvailable; delay = min(2*delay, blockedRetryMax) {
@@ -579,6 +559,41 @@ func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "record attempt failed; the task is rescued when its lease runs out",
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, err))
 	}
+}
+
+// recordOnce makes one try of record. Only a grouped task's outcome takes
+// several statements that must commit together. Their transaction waits for
+// a row that another transaction holds, such as the group's while a
+// transaction enqueues into it, for lockWait at most. Meanwhile it holds the
+// task's row, which the renewal of the lease skips: a longer wait could
+// outlast the lease, and the rescue would record a lost lease in place of
+// this outcome. So the transaction gives up, and record tries again, for as
+// long as the row is held and the lease renewed in between.
+func (w *Worker) recordOnce(ctx context.Context, t *liveAttempt, o outcome) (attemptEnd, error) {
+	conn, err := w.acquire(ctx)
+	if err != nil {
+		return endedOther, err
+	}
+	defer conn.Release()
+
+	if t.info.GroupKey == "" {
+		return w.recordTx(ctx, pgxExecutor{q: conn}, t, o)
+	}
+	ended := endedOther
+	err = pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+		q := pgxExecutor{q: tx}
+		if _, err := q.exec(ctx, lockTimeoutSQL, w.timing.lockTimeout()); err != nil {
+			return err
+		}
+		if ended, err = w.recordTx(ctx, q, t, o); err != nil {
+			return err
+		}
+		// The timeout was for the rows. At the commit, a notification waits
+		// its turn, as every other one does: see liftLockTimeout.
+		_, err = q.exec(ctx, liftLockTimeout)
+		return err
+	})
+	return ended, err
 }
 
 // attemptEnd is how recording an outcome ended an attempt, for the activity.

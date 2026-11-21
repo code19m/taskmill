@@ -92,12 +92,14 @@ postgres://shop@db.internal:5432/shop?pool_max_conns=15
 ```
 
 Why: a running task holds no connection of its own. But if your handlers use
-the same pool, they can take every connection. Then the worker cannot renew
-its tasks' [leases](../concepts/glossary.md#lease) in time, and tasks run twice.
+the same pool, they can take every connection. While `Run` runs, the worker
+keeps one connection for lease renewals, check-ins, and completions, so its
+tasks' [leases](../concepts/glossary.md#lease) still renew. Fetches and the
+records of failed attempts wait for a connection, so tasks start late.
 
-The 5 extra connections are for the worker's own work. If the pool is full
-and a lease renewal has to wait for a connection, the worker logs the warning
-`the pool was full, so renewing leases waited`, at most once a minute.
+The 5 extra connections are for the worker's own work. If a fetch or a
+failure record waits for a connection, the worker logs `the pool was full,
+so the worker waited for a connection`, at most once a minute.
 
 | Process | `pool_max_conns` | Connections it opens, at most |
 |---|---|---|

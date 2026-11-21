@@ -20,12 +20,13 @@ const (
 )
 
 // maintainer does the installation-wide work of one elected worker. Its main
-// loop elects the leader, then rescues expired leases and enqueues schedules
-// once per interval. Queues whose tasks wait are woken in a loop of their
-// own, which also sends the heartbeat that workers count on, and due tasks
-// are promoted in another, as they come due. Statistics, retention, and the
-// comparison of the workers' schedules have a loop each too, so that slow
-// work in one never delays the others.
+// loop only takes or renews the leader's lease, so that no work delays the
+// renewal and lets the role change hands. Expired leases are rescued, and
+// due schedules enqueued, once per interval in a loop of their own. Queues
+// whose tasks wait are woken in another, which also sends the heartbeat
+// that workers count on, and due tasks are promoted in another, as they come
+// due. Statistics, retention, and the comparison of the workers' schedules
+// have a loop each too, so that slow work in one never delays the others.
 type maintainer struct {
 	w      *Worker
 	c      *Client
@@ -67,6 +68,12 @@ func (m *maintainer) run(ctx context.Context) {
 	var loops sync.WaitGroup
 	loops.Go(func() { m.wakeLoop(ctx) })
 	loops.Go(func() { m.promoteLoop(ctx) })
+	loops.Go(func() {
+		m.every(ctx, m.w.timing.maintainer, func(ctx context.Context) {
+			m.rescue(ctx)
+			m.runSchedules(ctx)
+		})
+	})
 	loops.Go(func() { m.every(ctx, m.w.timing.stats, m.refreshStats) })
 	loops.Go(func() { m.every(ctx, m.w.timing.scheduleCheck, m.compareSchedules) })
 	loops.Go(func() {
@@ -108,19 +115,14 @@ func (m *maintainer) takeOver(ctx context.Context) {
 	m.cycle(ctx)
 }
 
-// cycle renews or tries to take the leadership, and if this worker leads,
-// rescues expired leases and enqueues due schedules.
+// cycle renews the leadership, or tries to take it once per election
+// interval.
 func (m *maintainer) cycle(ctx context.Context) {
 	if !m.leader.Load() && time.Since(m.lastElection) < m.w.timing.election {
 		return
 	}
 	m.lastElection = time.Now()
-	if !m.elect(ctx) {
-		return
-	}
-
-	m.rescue(ctx)
-	m.runSchedules(ctx)
+	m.elect(ctx)
 }
 
 // wakeLoop wakes the queues whose tasks wait once per interval while this
@@ -174,11 +176,12 @@ func (m *maintainer) promoteLoop(ctx context.Context) {
 }
 
 // every calls work once per interval while this worker leads, until ctx
-// ends. Statistics, retention, and the comparison of schedules each run in
-// such a loop of their own: retention can take long, when a detach waits
-// for a transaction that reads the history, or a backlog of old tasks takes
-// many batches, and the statistics, which lag is read from, must stay fresh
-// meanwhile. The comparison waits for neither.
+// ends. The rescue with the schedules, statistics, retention, and the
+// comparison of schedules each run in such a loop of their own: retention
+// can take long, when a detach waits for a transaction that reads the
+// history, or a backlog of old tasks takes many batches, and the
+// statistics, which lag is read from, must stay fresh meanwhile. The
+// comparison waits for neither, and the election for none.
 func (m *maintainer) every(ctx context.Context, interval time.Duration, work func(context.Context)) {
 	tick := time.NewTicker(m.w.timing.maintainer)
 	defer tick.Stop()

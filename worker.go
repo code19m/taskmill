@@ -105,9 +105,11 @@ var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with
 // typical; it also takes part in electing the maintainer, which promotes due
 // tasks, rescues expired leases, runs schedules, and applies retention.
 //
-// A worker uses the pool of its [Client], plus one connection of its own for
-// notifications. Run may be called again after it returned, but not while it
-// runs.
+// A worker uses the pool of its [Client]: while Run runs, it keeps one of
+// the pool's connections for the statements that keep its leases and record
+// its successes, so that handlers that hold every other connection cannot
+// make them wait. It also has one connection of its own for notifications.
+// Run may be called again after it returned, but not while it runs.
 //
 // The [guide to workers and queues] shows how to choose the queues, limit
 // how many tasks run, and stop a worker cleanly.
@@ -154,7 +156,8 @@ type Worker struct {
 	completions   chan *liveAttempt // successful attempts of Run, for the completer
 	completerDone chan struct{}     // closed when the current Run's completer returns
 
-	poolWarned atomic.Int64 // when renewing leases last warned that the pool was full, in Unix nanoseconds
+	own        ownConn      // the connection that Run keeps for renewals, check-ins, and completions
+	poolWarned atomic.Int64 // when the worker last warned that it waited for a full pool, in Unix nanoseconds
 	noHandler  kindWarnings // the kinds without a handler whose tasks the worker met
 
 	// The failures of operations that the worker repeats, which it logs
@@ -326,6 +329,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		queueHints:  make(chan struct{}, 1),
 		completions: make(chan *liveAttempt, completionBatch),
 	}
+	w.own = ownConn{w: w, turn: make(chan struct{}, 1)}
 
 	if c.Handlers != nil {
 		for kind, reg := range c.Handlers.byKind {
@@ -582,6 +586,11 @@ func (w *Worker) Run(ctx context.Context) error {
 	// by cleanupTimeout.
 	recordCtx, stopRecording := context.WithCancel(base)
 	defer stopRecording()
+
+	// The worker's own connection is taken before any handler can take
+	// the pool's, and given back once nothing more uses it.
+	w.own.keep(ctx)
+	defer w.own.release()
 
 	w.released.Store(0)
 	w.completerDone = make(chan struct{})

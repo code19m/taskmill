@@ -53,8 +53,13 @@ func (w *Worker) checkIn(ctx context.Context) {
 	// Leases first: on a slow database they need the check-in's time more
 	// than the worker's own row, which only shows that it is alive.
 	w.renewLeases(ctx, ts)
-	tag, err := w.client.pool.Exec(ctx, w.client.sql.checkInWorker, w.id)
-	if err == nil && tag.RowsAffected() == 0 {
+	var listed bool
+	err := w.own.do(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
+		tag, err := conn.Exec(ctx, w.client.sql.checkInWorker, w.id)
+		listed = tag.RowsAffected() > 0
+		return err
+	})
+	if err == nil && !listed {
 		// The maintainer removed this worker as stale, after a pause such as
 		// the machine's sleep, while it kept working: it registers again.
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "worker was removed as stale; registering again")
@@ -150,40 +155,120 @@ type renewal struct {
 // renew extends the leases of the given attempts and returns those that still
 // own their tasks.
 func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[int64]renewal, error) {
-	conn, err := w.acquireForRenewal(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Release()
-
-	r, err := conn.Query(ctx, w.client.sql.renewLeases, ids, tokens, w.cfg.LeaseDuration.Microseconds())
-	if err != nil {
-		return nil, err
-	}
-	defer r.Close()
-
-	renewals := make(map[int64]renewal, len(ids))
-	for r.Next() {
-		var id int64
-		var got renewal
-		if err := r.Scan(&id, &got.renewed, &got.cancelRequested); err != nil {
-			return nil, err
+	var renewals map[int64]renewal
+	err := w.own.do(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
+		r, err := conn.Query(ctx, w.client.sql.renewLeases, ids, tokens, w.cfg.LeaseDuration.Microseconds())
+		if err != nil {
+			return err
 		}
-		// A renewed task appears twice: renewed, and owned.
-		prev := renewals[id]
-		renewals[id] = renewal{renewed: prev.renewed || got.renewed, cancelRequested: prev.cancelRequested || got.cancelRequested}
+		defer r.Close()
+
+		renewals = make(map[int64]renewal, len(ids))
+		for r.Next() {
+			var id int64
+			var got renewal
+			if err := r.Scan(&id, &got.renewed, &got.cancelRequested); err != nil {
+				return err
+			}
+			// A renewed task appears twice: renewed, and owned.
+			prev := renewals[id]
+			renewals[id] = renewal{renewed: prev.renewed || got.renewed, cancelRequested: prev.cancelRequested || got.cancelRequested}
+		}
+		return r.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
-	return renewals, r.Err()
+	return renewals, nil
 }
 
-// acquireForRenewal takes a connection of the pool to renew leases. If every
-// connection was in use, and the renewal waited for one for at least a tenth
-// of its time, it warns, at most once per failureReport: handlers that share
-// the pool may hold all its connections, and if renewals keep waiting, leases
-// run out and tasks run twice. It judges by what happened, not by the pool's
-// size, because it cannot see which pool the handlers use. A wait for a new
-// connection to open, or a short wait, is normal.
-func (w *Worker) acquireForRenewal(ctx context.Context) (*pgxpool.Conn, error) {
+// ownConn is the connection that the worker keeps from its client's pool
+// while Run runs, for the statements that keep its leases and record its
+// successes: renewals, check-ins, and completions. Handlers that share the
+// pool can hold every other connection for longer than a lease: were these
+// statements to wait for one, leases would run out, and tasks that succeeded
+// would run again. The statements take turns. Outside Run, as for RunTask,
+// each statement takes a connection of the pool. Why one connection:
+// https://github.com/code19m/taskmill/blob/main/docs/design/schema-statements.md.
+type ownConn struct {
+	w    *Worker
+	turn chan struct{} // full while a statement, keep, or release uses the fields below
+	conn *pgxpool.Conn // nil until a statement takes one, and after an error that broke it
+	kept bool          // Run runs: keep conn between statements
+}
+
+// keep starts keeping a connection, and takes it now: Run calls it before
+// any handler runs, while the pool has a free connection. If that fails, the
+// first statement takes one.
+func (o *ownConn) keep(ctx context.Context) {
+	o.turn <- struct{}{}
+	defer func() { <-o.turn }()
+	o.kept = true
+	if conn, err := o.w.acquire(ctx); err == nil {
+		o.conn = conn
+	}
+}
+
+// release stops keeping the connection, and gives it back to the pool.
+func (o *ownConn) release() {
+	o.turn <- struct{}{}
+	defer func() { <-o.turn }()
+	o.kept = false
+	if o.conn != nil {
+		o.conn.Release()
+		o.conn = nil
+	}
+}
+
+// do runs fn on the kept connection, once it is its turn, or, outside Run,
+// on a connection of the pool. On the kept connection, fn has a third of the
+// lease at most, but a second at least: a statement that hangs, as on a
+// connection that died without a word, then holds up the next renewal by
+// about one check-in, which a lease outlasts. If fn's error left the
+// connection unusable, the pool closes it, and the next statement takes
+// another: only that one may wait for handlers.
+func (o *ownConn) do(ctx context.Context, fn func(context.Context, *pgxpool.Conn) error) error {
+	select {
+	case o.turn <- struct{}{}:
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+	if !o.kept {
+		<-o.turn
+		conn, err := o.w.acquire(ctx)
+		if err != nil {
+			return err
+		}
+		defer conn.Release()
+		return fn(ctx, conn)
+	}
+	defer func() { <-o.turn }()
+
+	if o.conn == nil {
+		conn, err := o.w.acquire(ctx)
+		if err != nil {
+			return err
+		}
+		o.conn = conn
+	}
+	ctx, cancel := context.WithTimeout(ctx, max(o.w.cfg.LeaseDuration/3, time.Second))
+	defer cancel()
+	err := fn(ctx, o.conn)
+	if c := o.conn.Conn(); err != nil && (c.IsClosed() || c.PgConn().IsBusy() || c.PgConn().TxStatus() != 'I') {
+		o.conn.Release()
+		o.conn = nil
+	}
+	return err
+}
+
+// acquire takes a connection of the pool for a statement of the worker. If
+// every connection was in use, and it waited for one for a while, it warns,
+// at most once per failureReport: handlers that share the pool may hold all
+// its connections, and the worker's fetches and records then wait for them.
+// It judges by what happened, not by the pool's size, because it cannot see
+// which pool the handlers use. A wait for a new connection to open, or a
+// short wait, is normal.
+func (w *Worker) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	s := w.client.pool.Stat()
 	full := s.IdleConns() == 0 && s.TotalConns() >= s.MaxConns()
 
@@ -191,13 +276,13 @@ func (w *Worker) acquireForRenewal(ctx context.Context) (*pgxpool.Conn, error) {
 	conn, err := w.client.pool.Acquire(ctx)
 	waited := time.Since(start)
 
-	if !full || waited < w.cfg.LeaseDuration/30 { // a renewal has a third of the lease
+	if !full || waited < w.cfg.LeaseDuration/30 {
 		return conn, err
 	}
 	now, last := time.Now().UnixNano(), w.poolWarned.Load()
 	if now-last >= int64(w.timing.failureReport) && w.poolWarned.CompareAndSwap(last, now) {
 		w.logger.LogAttrs(ctx, slog.LevelWarn,
-			"the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own",
+			"the pool was full, so the worker waited for a connection; raise MaxConns, or give handlers a pool of their own",
 			slog.Duration(logKeyDuration, waited), slog.Int(logKeyMaxConns, int(s.MaxConns())))
 	}
 	return conn, err

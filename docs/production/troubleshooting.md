@@ -27,6 +27,7 @@ shows many available tasks.
 | New workers cannot read the queues' pauses and limits, so they take no task | `operation failed` or `operation still failing` for `load queue settings`, since the worker started | Fix what the error names: the database, or the role's right to read `queues` |
 | No maintainer runs | `taskmill_stats_age_seconds` is over 60 | See [the next entry](#retries-delayed-tasks-or-schedules-dont-run) |
 | Fetches got slow | A transaction has been open for a long time | See [Throughput falls over hours](#throughput-falls-over-hours) |
+| Handlers hold every connection of the pool | The warning `the pool was full, so the worker waited for a connection` | Raise `pool_max_conns`, or give handlers a pool of their own |
 
 ### Retries, delayed tasks, or schedules don't run
 
@@ -106,7 +107,6 @@ are expected ([Guarantees](../concepts/guarantees.md)), so
 
 | Likely cause | Check | Do |
 |---|---|---|
-| Handlers use up the pool's connections | The warning `the pool was full, so renewing leases waited` | [Size the pool](database.md#size-the-connection-pool) |
 | A pod was killed before it drained | `terminationGracePeriodSeconds` below the [grace period that workers need](deploys.md#stop-workers-without-losing-work), or pods killed because they used too much memory (`OOMKilled`) | Raise the grace period, or the memory limit |
 | A handler ignores its context | The log `handler ignored shutdown; releasing its task` | Make the handler return when `ctx` ends |
 | A failover or network outage of more than about 20 s | `operation still failing` during the incident | Expected: [When the database fails](database.md#when-the-database-fails) |
@@ -225,7 +225,6 @@ worker has not read the settings of its queues`, or `the worker is not running`.
 | Likely cause | Check | Do |
 |---|---|---|
 | The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases`, or for `load queue settings` in a new worker | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
-| Handlers hold every connection of the pool | The warning `the pool was full, so renewing leases waited` | Raise `pool_max_conns`, or give handlers their own pool |
 | `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix that error: see [the errors at start](#errors-at-start-and-in-calls) |
 
 ### Counts in the dashboard stop at 10,000

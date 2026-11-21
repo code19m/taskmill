@@ -1318,6 +1318,36 @@ func TestSlowRetentionDelaysNeitherPromotionNorStatistics(t *testing.T) {
 	}
 }
 
+// The maintainer renews its lease apart from its work: a rescue or a pass
+// over the schedules that takes longer than the lease does not let the role
+// change hands.
+func TestSlowRescueKeepsTheMaintainersLease(t *testing.T) {
+	t.Parallel()
+	slow := &beforeStatement{fragment: "'code', 'lease_lost'"} // the rescue
+	e := newTracedEnv(t, slow)
+	held, release := make(chan struct{}), make(chan struct{})
+	hold := func() {
+		close(held)
+		<-release
+	}
+	slow.call.Store(&hold)
+
+	const lease = 500 * time.Millisecond
+	w := newWorker(t, e, &taskmill.WorkerConfig{})
+	taskmill.SetTiming(w, taskmill.Timing{LeaderLease: lease})
+	startWorker(t, w)
+	t.Cleanup(sync.OnceFunc(func() { close(release) })) // before the worker stops
+
+	recv(t, held, "the maintainer's first rescue")
+	var since time.Time
+	if err := e.pool.QueryRow(t.Context(), "SELECT now()").Scan(&since); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the lease to be renewed while the rescue is held", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.leader WHERE name = 'maintainer' AND expires_at > $1", since.Add(3*lease)) == 1
+	})
+}
+
 // A failover can drop the packets of the old server's connections without
 // resetting them: a statement sent on one waits for as long as the
 // operating system waits for an answer, often 15 minutes, while the

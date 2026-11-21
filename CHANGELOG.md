@@ -28,6 +28,19 @@ All notable changes to taskmill are recorded here. The format follows
   for each other's commits, and the design pages say why a notification
   wakes every worker of its queue. The pool size and a stopping worker's
   grace period each have one page, which the others link to.
+- When handlers that share the pool held every connection for longer than
+  a lease, the worker's lease renewals and completions waited for a
+  connection: leases ran out, and tasks ran twice, even tasks that had
+  succeeded. While `Run` runs, the worker now keeps one connection of its
+  pool for renewals, check-ins, and completions, which never wait for
+  handlers. It works through PgBouncer in transaction mode too. Fetches and
+  failed attempts still take connections of the pool, and the warning of a
+  full pool, now `the pool was full, so the worker waited for a
+  connection`, is about them.
+- The maintainer renewed its lease only after it had rescued expired
+  leases and run the due schedules. When those took longer than the lease,
+  10 seconds, the role changed hands for no reason. The renewal now has a
+  loop of its own, and the rescue and the schedules another.
 
 ## [0.14.0] - 2026-11-21
 

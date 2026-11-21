@@ -133,6 +133,19 @@ running and renews it at the next check-in. An attempt that completed its
 task with `CompleteTx` is never canceled as lost: its own transaction holds
 the row until it commits.
 
+While `Run` runs, the worker keeps one connection of its pool for the
+renewals, the check-ins, and the completions. Handlers that share the pool
+can hold every other connection for longer than a lease. Renewals that
+waited for one would let leases run out, and completions that waited could
+give up once the lease might have run out: either way, tasks would run
+twice. The statements take turns on the connection, each for a moment, and
+none holds it for more than a third of the lease, or a second if that is
+longer: a statement that hangs delays the next renewal by about one
+check-in, which a lease outlasts. Fetches and failed attempts take
+connections of the pool, and may wait. We rejected a second pool of the
+worker's own: it would open connections that the application did not
+size, and skip the hooks of its pool.
+
 ## Complete
 
 One statement completes a batch: it deletes the tasks whose attempts still

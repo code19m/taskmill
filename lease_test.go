@@ -235,15 +235,17 @@ func TestLeaseRenewalSkipsLockedTasks(t *testing.T) {
 	}
 }
 
-// poolWaitWarning is what a worker logs when renewing leases waited for a
-// connection of its client's pool.
-const poolWaitWarning = "the pool was full, so renewing leases waited; raise MaxConns, or give handlers a pool of their own"
-
-// connHolders returns handlers that each take a connection from pool, and
-// hold it until release is closed or their context ends. Each says so on
-// started while it has room: a retried task never blocks there.
+// connHolders returns handlers that hold a connection of pool each, as
+// holdConn does.
 func connHolders(pool *pgxpool.Pool, started chan<- struct{}, release <-chan struct{}) *taskmill.Handlers {
-	return handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+	return handlers(holdConn(pool, started, release), nil)
+}
+
+// holdConn returns a handler that takes a connection from pool, and holds it
+// until release is closed or its context ends. It says so on started while
+// that has room: a retried task never blocks there.
+func holdConn(pool *pgxpool.Pool, started chan<- struct{}, release <-chan struct{}) func(context.Context, *taskmill.Task[sendEmail]) error {
+	return func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
 		conn, err := pool.Acquire(ctx)
 		if err != nil {
 			return err
@@ -261,40 +263,73 @@ func connHolders(pool *pgxpool.Pool, started chan<- struct{}, release <-chan str
 		case <-ctx.Done():
 			return context.Cause(ctx)
 		}
-	}, nil)
+	}
 }
 
-func TestWorkerWarnsWhenHandlersHoldEveryPoolConnection(t *testing.T) {
+func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
 	t.Parallel()
-	pool := testdb.PoolSize(t, 2)
+	pool := testdb.PoolSize(t, 3)
 	logs := &logRecorder{}
 	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
+	watch := *e
+	watch.pool = testdb.Pool(t) // the test's own reads: the worker's pool is full
 
-	started, release := make(chan struct{}, 2), make(chan struct{})
-	defer close(release)
+	// Three handlers take a connection each and hold it for longer than a
+	// lease, as handlers that share the pool with the worker can. Two others
+	// return once the pool is full, so that their completions find no free
+	// connection either.
+	const lease = 600 * time.Millisecond
+	holding, full, release := make(chan struct{}, 3), make(chan struct{}), make(chan struct{})
+	hold := holdConn(pool, holding, release)
+	runs := map[int64]*atomic.Int32{}
+	var ids []int64
+	for i := range 5 {
+		id := e.enqueue(t, sendEmail{UserID: int64(i)}, nil)
+		ids, runs[id] = append(ids, id), &atomic.Int32{}
+	}
 	runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers:      connHolders(pool, started, release),
-		Queues:        defaultQueue(2),
-		LeaseDuration: 600 * time.Millisecond,
+		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			runs[task.ID].Add(1)
+			if task.Args.UserID < 3 {
+				return hold(ctx, task)
+			}
+			<-full
+			return nil
+		}, nil),
+		Queues:        defaultQueue(5),
+		LeaseDuration: lease,
+		NoMaintainer:  true,
 	})
 
-	e.enqueue(t, sendEmail{UserID: 1}, nil)
-	e.enqueue(t, sendEmail{UserID: 2}, nil)
-	recv(t, started, "a handler to take a connection")
-	recv(t, started, "a handler to take a connection")
-
-	// The worker warns before the leases run out, and once a minute at most,
-	// however many renewals wait.
-	waitFor(t, "the pool warning", func() bool { return logs.count(poolWaitWarning) > 0 })
-	waitFor(t, "a lease to be lost", func() bool { return logs.count("attempt lost its lease; canceling it") > 0 })
-
-	if n := logs.count(poolWaitWarning); n != 1 {
-		t.Errorf("the pool warning was logged %d times, want once", n)
+	// The worker keeps a connection of its own, so two handlers hold the
+	// rest, and the third waits for one.
+	recv(t, holding, "a handler to take a connection")
+	recv(t, holding, "a handler to take a connection")
+	var since time.Time
+	if err := watch.pool.QueryRow(t.Context(), "SELECT now()").Scan(&since); err != nil {
+		t.Fatal(err)
 	}
-	for _, r := range logs.all() {
-		if r.Message == poolWaitWarning && (r.Level != slog.LevelWarn || attr(r, "max_conns") != "2") {
-			t.Errorf("got %s, want a warning with max_conns=2", recordText(r))
+	close(full)
+
+	waitFor(t, "the tasks that returned to complete", func() bool {
+		return watch.count(t, "SELECT count(*) FROM {s}.task_history WHERE id = ANY($1)", ids[3:]) == 2
+	})
+	waitFor(t, "the leases of the running tasks to be renewed for a while", func() bool {
+		return watch.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = ANY($1) AND lease_expires_at > $2",
+			ids[:3], since.Add(3*lease)) == 3
+	})
+
+	close(release)
+	waitFor(t, "every task to complete", func() bool {
+		return watch.count(t, "SELECT count(*) FROM {s}.task_history WHERE id = ANY($1)", ids) == len(ids)
+	})
+	for id, n := range runs {
+		if n.Load() != 1 {
+			t.Errorf("task %d ran %d times, want once", id, n.Load())
 		}
+	}
+	if n := logs.count("attempt lost its lease; canceling it"); n > 0 {
+		t.Errorf("%d attempts lost their leases", n)
 	}
 }
 

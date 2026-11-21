@@ -10,11 +10,11 @@ maintainer counts the queues.
 | Step | What it does |
 |---|---|
 | Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
-| Rescue | Every second, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
+| Rescue | Every second, in a loop of its own with the schedules' runs, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, because the maintainer does not know each kind's retry policy, and caps the exponent so that a task with thousands of attempts cannot overflow it. |
 | Retention | Every minute, in a loop of its own, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that made no check-in for 5 minutes, or for twice their `LeaseDuration` if that is longer, and schedules that no maintainer has defined for a day. |
 | History | Every minute, keeps partitions for today and the next 6 days, and drops up to 10 partitions whose whole day is older than the retention period (see [Operational notes](schema.md#operational-notes)). |
 | Statistics | Every 10 seconds, in a loop of its own, so that a long retention pass never delays it, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. [Queue statistics and health](schema-statistics.md) says how. |
-| Election | An upsert on `leader` that succeeds only for the current leader, or when no other worker's lease lasts. |
+| Election | An upsert on `leader` that succeeds only for the current leader, or when no other worker's lease lasts. The leader renews every second, in the maintainer's main loop, which runs no other step: a slow rescue or schedule never lets the lease run out. |
 | Schedule comparison | Every minute, in a loop of its own, reads the live workers whose stored schedules differ from its own, up to 10, in one statement. |
 
 - **Retention stays on its index.** It finds the queues that have dead or
