@@ -108,7 +108,9 @@ created. Each task of a batch counts as one attempt.
 | `taskmill.worker.pool.waits`<br/>`taskmill_worker_pool_waits_total` | Counter | `{wait}` | Fetches and records of failed attempts that found every connection of the pool in use |
 | `taskmill.worker.slots`<br/>`taskmill_worker_slots` | UpDownCounter | `{slot}` | The slots of the worker's queues, one per unit of `Concurrency`, by `taskmill.slot.state`: `free`, `running`, or `stuck`, held by a handler that did not return 5 seconds after its context ended |
 
-- **They have no other attributes.** The workers of one process add up.
+- **They have no other attributes.** The workers of one process add up. A
+  worker counts from 0, so replacing it with a new one looks like a reset
+  of the counters, which `rate` and `increase` allow for.
 - **A collection costs nothing** but a read of the worker's memory.
 - **An attempt that is still running** counts in `started`, and in neither
   `succeeded` nor `failed`. Nor does an attempt that snoozed, was

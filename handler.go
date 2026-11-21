@@ -367,7 +367,9 @@ func (hs *Handlers) fail(err error) {
 // [ExponentialBackoff].
 //
 // The worker calls the policy each time a failed attempt leads to a retry,
-// before it records the failure. So Backoff must return fast, with no I/O.
+// before it records the failure. The maintainer calls it too, in the
+// transaction that rescues the tasks whose workers lost their leases. So
+// Backoff must return fast, with no I/O.
 //
 // The [guide to retries] shows how to change the wait, and what happens to a
 // task with no attempts left.

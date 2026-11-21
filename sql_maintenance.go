@@ -129,10 +129,10 @@ SELECT CASE WHEN $3 THEN pg_notify($1, '{heartbeat}') END FROM woken`
 // crashed or lost the database. $1 and $2 are the default backoff's
 // base and maximum in seconds; the exponent is capped so that tasks
 // with thousands of attempts cannot overflow it. Tasks of kinds with
-// another retry policy get their delays from rescueBackoffSQL. It locks a grouped
-// task's group first, skipping groups that other transactions hold,
-// such as one that enqueues into the group: it never waits for them,
-// and a later run rescues those tasks.
+// another retry policy get their delays from rescueBackoffSQL. It locks
+// a grouped task's group first, skipping groups that other transactions
+// hold, such as one that enqueues into the group: it never waits for
+// them, and a later run rescues those tasks.
 var rescueSQL = `
 WITH expired AS (
     SELECT t.id FROM {s}.tasks t

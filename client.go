@@ -170,10 +170,10 @@ func (c *Client) Get(ctx context.Context, id int64) (*TaskInfo, error) {
 // task's context is canceled, and the task becomes canceled when its attempt
 // ends, unless the handler completed it. A batch keeps running, and its
 // handler sees the request with [Task.CancelRequested]: the task becomes
-// canceled when its batch ends, unless the batch completed it. Cancel frees the task's dedupe key right away, and
-// [Client.Retry] of the canceled task takes it back. It returns
-// [ErrNotFound] if no task has the ID, and [ErrInvalidState] if the task
-// already finished.
+// canceled when its batch ends, unless the batch completed it. Cancel frees
+// the task's dedupe key right away, and [Client.Retry] of the canceled task
+// takes it back. It returns [ErrNotFound] if no task has the ID, and
+// [ErrInvalidState] if the task already finished.
 //
 // Cancel runs again by itself, up to 5 times in all, when another
 // transaction changes the task under its locks, or when PostgreSQL ends its

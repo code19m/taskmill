@@ -70,9 +70,12 @@ var workerCounters = []struct {
 // https://github.com/code19m/taskmill/blob/main/docs/production/monitoring.md.
 //
 // Each process reports its own workers, so aggregate them with sum. The
-// values of several workers of one process add up. Unregister the returned
-// registration to stop observing. It returns an error that wraps
-// [taskmill.ErrInvalidArgument] if w is nil.
+// values of several workers of one process add up, without an attribute
+// that tells them apart. A worker counts from 0, so replacing one with a
+// new one, as after Run returned, looks like a reset of the counters, which
+// rate and increase allow for. Unregister the returned registration to stop
+// observing. It returns an error that wraps [taskmill.ErrInvalidArgument]
+// if w is nil.
 func (in *Instrumentation) ObserveWorker(w *taskmill.Worker) (metric.Registration, error) {
 	if w == nil {
 		return nil, fmt.Errorf("%w: otel: worker is nil", taskmill.ErrInvalidArgument)
