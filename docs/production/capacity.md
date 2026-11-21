@@ -2,7 +2,8 @@
 
 This page helps you estimate what taskmill needs before you go live: how
 many workers, how many connections, and how much disk. The results are
-estimates. Measure your own system once it runs.
+estimates. Measure your own system once it runs, and watch for the signs
+that you outgrow taskmill.
 
 ## Estimate the workers
 
@@ -34,9 +35,10 @@ tasks running at the same time ÷ Concurrency = workers
 
 ## Estimate the connections
 
-Each worker opens its total `Concurrency` plus 5 connections, plus 1 for
-notifications. The 4 workers above open 4 × 31 = 124. Count the peak of a
-rollout too:
+Each worker opens its pool, sized as
+[Size the connection pool](database.md#size-the-connection-pool) says, plus
+1 connection for notifications. With a pool of 30 each, the 4 workers above
+open 4 × 31 = 124. Count the peak of a rollout too:
 [Count the database connections](kubernetes.md#count-the-database-connections).
 
 ## Estimate the disk
@@ -94,6 +96,33 @@ payloads and handlers that do nothing
 ([Performance](../reference/performance.md#where-the-numbers-come-from)).
 Use them to choose a starting size. Then watch lag, the database's CPU, and
 its disk, and correct the size.
+
+## Know when you outgrow taskmill
+
+taskmill fits while one PostgreSQL database carries your tasks well. These
+signs say that it no longer does:
+
+| Sign | What you see |
+|---|---|
+| Your rates near the measured limits | Enqueues or runs stay near the rates in [Performance](../reference/performance.md#throughput), and more workers no longer cut the [lag](../concepts/glossary.md#lag) |
+| The queues hurt your app's database | taskmill's statements lead the database's CPU or WAL, or your app's queries slow down while the queues are busy |
+| Many services consume the same events | Each producer enqueues into the schema of every consumer, and must know them all |
+| Producers write from other regions | Each enqueue waits a round trip to the primary ([Run in several regions](backups-and-failover.md#run-in-several-regions)) |
+
+First try the cheaper fixes: fewer, larger workers on a busy queue,
+`EnqueueMany` for bulk work, and `DiscardCompleted` for busy kinds whose
+history nobody reads. If the signs stay, move to a broker one kind at a
+time, with no task lost:
+
+1. **Publish the kind's work with the [outbox](../guides/outbox.md)**
+   instead of enqueueing it, in the same transaction. Consumers of the
+   broker take the work over.
+2. **Drain the kind:** keep its handler until no unfinished task of the kind
+   is left, as [Remove a kind](../recipes/change-a-task-safely.md#remove-a-kind)
+   says.
+3. **Repeat for each kind.** In the end, the schema holds only the outbox's
+   messages, and the workers run only its
+   [relay](../concepts/glossary.md#relay).
 
 ## See also
 

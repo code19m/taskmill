@@ -7,13 +7,12 @@ upgrade, see [Upgrading](../production/upgrading.md).
 ## Status
 
 - The latest release is **v0.14.0**.
-- **The API is final for v1.0.0.** v1.0.0 is not tagged yet: it waits for
-  more use in production. [The API's shape](../design/api-shape.md) says
-  why the API has this shape, and which other shapes we rejected.
 - taskmill follows [Semantic Versioning](https://semver.org/). Before v1.0.0,
   it allows a minor release to break the API. If one does, the
   [changelog](../../CHANGELOG.md) marks the change with **Breaking:** and
   says how to migrate.
+- [The API's shape](../design/api-shape.md) says why the API has this shape,
+  and which other shapes we rejected.
 
 ## What never changes within a major version
 

@@ -88,7 +88,7 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Deploys](docs/production/deploys.md): you ship a new version of your app, change a task, or run on a serverless platform
 - [Kubernetes](docs/production/kubernetes.md): you want manifests to copy
 - [Autoscaling](docs/production/autoscaling.md): you want KEDA to add and remove workers
-- [Capacity planning](docs/production/capacity.md): you estimate workers, connections, and disk
+- [Capacity planning](docs/production/capacity.md): you estimate workers, connections, and disk, or wonder if you outgrow taskmill
 - [Monitoring](docs/production/monitoring.md): you set up alerts
 - [Security](docs/production/security.md): you protect the dashboard, the database, and the data in your tasks
 - [Troubleshooting](docs/production/troubleshooting.md): something is wrong right now

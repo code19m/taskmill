@@ -49,7 +49,8 @@ time=… level=INFO msg="worker started" worker_id=… queues="[default emails]"
 
 The worker now runs at most 5 tasks of each queue at the same time, so 10
 in all. That is the number in the comment above `cfg.MaxConns`: the pool
-needs one connection for each of them, plus 5.
+needs one connection for each of them, plus 5
+([why](../production/database.md#size-the-connection-pool)).
 
 ## Step 3. Remind the customer a minute later
 

@@ -47,6 +47,20 @@ module. River offers several of these only in its paid River Pro. Choose
 River if you need workflows, a command-line tool, or many years of use in
 production.
 
+## taskmill and other tools
+
+Each of these fits some projects better than taskmill:
+
+| Tool | What it is | It fits better when | What it costs you |
+|---|---|---|---|
+| [Asynq](https://github.com/hibiken/asynq) | A task queue for Go that keeps tasks in Redis | Your data is not in PostgreSQL, or you already run Redis and no task must commit with your data | An enqueue can't join your PostgreSQL transaction: a task enqueued before the commit outlives a rollback, and one enqueued after it is lost if the process crashes in between. What a crash of Redis loses depends on its persistence settings |
+| [Temporal](https://temporal.io) | Durable workflows as a service: workflow code whose steps survive crashes, run by a Temporal cluster or the paid Temporal Cloud | Long processes with many steps, timers, and waits for outside events, across services and languages | A cluster to run, with a database of its own, or a cloud bill. Workflow code must be deterministic. Starting a workflow can't join your transaction |
+| [pgmq](https://github.com/pgmq/pgmq) | A message queue in PostgreSQL, like Amazon SQS, used through SQL functions | Programs in many languages share queues through SQL, and plain messages are enough | It stores and hands out messages. The workers, retries with backoff, cron schedules, and a dashboard are yours to build |
+| PostgreSQL with a broker: Kafka, NATS, or RabbitMQ | Your data in PostgreSQL, and events in a system made for streams | Many services consume the same events, at high rates, or replay them | One more system to run, secure, and watch. A publish can't join your transaction: taskmill's outbox fills that gap |
+
+When you outgrow taskmill, [Capacity planning](../production/capacity.md#know-when-you-outgrow-taskmill)
+lists the signs, and how to move to a broker one kind at a time.
+
 ## What does it cost?
 
 - **Work for your database.** Each task is a few row writes. Idle workers
@@ -91,9 +105,10 @@ Each row says what to do instead:
 - **pgx**, the PostgreSQL driver. If your app uses `database/sql`, it must
   use pgx's driver, `github.com/jackc/pgx/v5/stdlib`. lib/pq does not work.
 
-## Is it stable?
+## Will the API change?
 
-The API is final for v1.0.0. That release waits for more use in production.
+It may: taskmill is before v1.0.0, so a minor release may break the API. The
+changelog marks each such change with **Breaking:** and says how to migrate.
 [Compatibility](../reference/compatibility.md) says what each release
 promises, and which Go and PostgreSQL versions we support.
 

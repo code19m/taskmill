@@ -7,6 +7,28 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Docs on when taskmill fits less well.
+  [Why taskmill](docs/start/why-taskmill.md#taskmill-and-other-tools)
+  compares it with Asynq, Temporal, pgmq, and PostgreSQL with a broker.
+  [Capacity planning](docs/production/capacity.md#know-when-you-outgrow-taskmill)
+  lists the signs that you outgrow taskmill, and how to move to a broker one
+  kind at a time. [How taskmill is built](docs/design/README.md#decisions)
+  indexes the design decisions, with what would reopen each.
+
+### Fixed
+
+- Docs that were incomplete. [Guarantees](docs/concepts/guarantees.md)
+  names the handler that ignores its context and is abandoned, while its
+  task may run again, and says that dead tasks are deleted after the
+  dead-task retention, 30 days by default. Services that share one database
+  name what that couples: their taskmill releases, and the database's load
+  and failures. The outbox guide says that stores with the same key wait
+  for each other's commits, and the design pages say why a notification
+  wakes every worker of its queue. The pool size and a stopping worker's
+  grace period each have one page, which the others link to.
+
 ## [0.14.0] - 2026-11-21
 
 ### Changed

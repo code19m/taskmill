@@ -8,7 +8,8 @@
 //
 // The fault scenarios start worker and producer processes, kill them, cut
 // them off from the database, and restart the database, then check each
-// invariant exactly. A failed check fails the run.
+// invariant exactly. A failed check, such as a missed target or a lost task,
+// ends the run with exit status 2; an error ends it at once with 1.
 package main
 
 import (
@@ -129,7 +130,7 @@ func main() {
 	}
 
 	if violations > 0 {
-		fail(fmt.Errorf("%d checks failed", violations))
+		exit(2, fmt.Errorf("%d checks failed", violations))
 	}
 }
 
@@ -557,9 +558,14 @@ func percentiles(ds []time.Duration) string {
 	return fmt.Sprintf("p50 %s, p99 %s, max %s", pct(ds, 50), pct(ds, 99), pct(ds, 100))
 }
 
-func fail(err error) {
+func fail(err error) { exit(1, err) }
+
+// exit reports err and ends the run with code: 2 for failed checks, apart
+// from 1 for errors, so that a run that only measures can tell a missed
+// target from a broken run.
+func exit(code int, err error) {
 	fmt.Fprintln(os.Stderr, "bench:", err)
-	os.Exit(1)
+	os.Exit(code)
 }
 
 // violations counts the checks that failed.

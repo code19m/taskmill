@@ -13,7 +13,7 @@ when you need them.
 | [Deploys](deploys.md) | you ship a new version of your app, change a task, or run on a serverless platform |
 | [Kubernetes](kubernetes.md) | you want manifests to copy |
 | [Autoscaling](autoscaling.md) | you want KEDA to add and remove workers |
-| [Capacity planning](capacity.md) | you estimate workers, connections, and disk |
+| [Capacity planning](capacity.md) | you estimate workers, connections, and disk, or wonder if you outgrow taskmill |
 | [Monitoring](monitoring.md) | you set up alerts |
 | [Security](security.md) | you protect the dashboard, the database, and the data in your tasks |
 | [Troubleshooting](troubleshooting.md) | something is wrong right now |

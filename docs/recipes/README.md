@@ -66,7 +66,7 @@ Each row is one recipe, in reading order:
 |---|---|---|
 | Run workers in production | A worker deployment of its own, from the same image | [Deploys](../production/deploys.md) |
 | Run migrations | `Migrate` at the start of every process | [Deploys](../production/deploys.md) |
-| Size the connection pool | One pool: the worker's total `Concurrency`, plus 5 | [Database](../production/database.md) |
+| Size the connection pool | One pool for the worker and its handlers, sized for its total `Concurrency` | [Database](../production/database.md#size-the-connection-pool) |
 | Use PgBouncer | A direct connection in `ListenConfig` | [Connection poolers](../production/connection-poolers.md) |
 | Add the dashboard to my app | `ui.New`, behind your own login | [The dashboard](../guides/dashboard.md) |
 | Scale workers with the load | KEDA, on the queue's available plus running tasks | [Autoscaling](../production/autoscaling.md) |

@@ -70,9 +70,10 @@ schema, and let the web servers and workers of one app share it. See
 taskmill needs a pgx pool (`*pgxpool.Pool`). Your own code may still use
 `database/sql`: see [Use your own transactions](transactions.md).
 
-Use one pool for taskmill and your handlers. Give it the worker's total
-`Concurrency`, plus 5 connections. A worker that reads one queue with the
-default concurrency of 10 needs 15:
+Use one pool for taskmill and your handlers, sized as
+[Size the connection pool](../production/database.md#size-the-connection-pool)
+says. A worker that reads one queue with the default concurrency of 10
+needs 15:
 
 ```text
 DATABASE_URL=postgres://app@db/shop?pool_max_conns=15

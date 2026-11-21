@@ -237,7 +237,7 @@ time=… level=INFO msg="worker stopped" worker_id=… released=0
 | In the code | taskmill calls it |
 |---|---|
 | `runWeb`: a client, and no worker | a process that only [enqueues](../concepts/glossary.md#enqueue), such as a web server |
-| `connect(ctx, 17)` | a pool for the worker: its total [concurrency](../concepts/glossary.md#concurrency), plus 5 |
+| `connect(ctx, 17)` | a pool [sized for the worker](../production/database.md#size-the-connection-pool): its total [concurrency](../concepts/glossary.md#concurrency), plus 5 |
 | `worker.Health()` | the answer for a readiness probe |
 | `worker.Run(ctx)` after Ctrl-C or `SIGTERM` | a worker that [drains](../concepts/glossary.md#drain): running tasks get 20 seconds to finish |
 

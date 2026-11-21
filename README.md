@@ -113,9 +113,10 @@ You need Go 1.26 or newer, and PostgreSQL 15 or newer.
 
 ## Status
 
-The API is final for v1.0.0, which is not tagged yet: it waits for more use
-in production. [Compatibility](docs/reference/compatibility.md) says what
-each release promises.
+taskmill is before v1.0.0, so a minor release may break the API: the
+changelog marks each such change with **Breaking:** and says how to migrate.
+[Compatibility](docs/reference/compatibility.md) says what each release
+promises.
 
 ## Contributing
 

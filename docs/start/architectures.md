@@ -49,6 +49,16 @@ service's task types are the contract between you.
 contract, versions, privileges, traces, and tests. To see every service in
 one place, read [One dashboard for many services](../recipes/one-dashboard-for-many-services.md).
 
+Sharing the database couples the services in two ways:
+
+- **Versions.** Services that enqueue into each other's schemas must stay
+  within one taskmill release of each other
+  ([Compatibility](../reference/compatibility.md#old-code-on-a-newer-schema)).
+- **Load and failures.** One service's busy queues slow the others' queries,
+  and when the database is slow or down, so is every service that uses it.
+
+If that coupling is too tight, give each service its own database.
+
 ## A database per service
 
 No transaction spans two databases. So the sending service publishes events

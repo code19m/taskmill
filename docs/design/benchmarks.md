@@ -8,9 +8,9 @@ The targets are release gates for v1.0.0. A release that misses one either
 fixes it, or changes the target here, with the measurements that justify
 the change.
 
-## Reference hardware
+## Target hardware
 
-The targets apply to this setup, so that anyone can reproduce them:
+The targets apply to this setup:
 
 | Role | Specification | Example |
 |---|---|---|
@@ -27,18 +27,39 @@ settings that taskmill's migrations set on its own tables. `fsync` and
 number is the median of three runs. Handlers do nothing, unless a scenario
 says otherwise.
 
+## Reference runner
+
+The [Benchmarks workflow](../../.github/workflows/bench.yml) measures on a
+machine that anyone can use, every Sunday and on demand:
+
+| What | Setup |
+|---|---|
+| Runner | GitHub-hosted `ubuntu-24.04`, the standard runner of a public repository: 4 vCPUs (x64), 16 GiB RAM, 14 GiB SSD |
+| Database | PostgreSQL 18 (`postgres:18-alpine`, pinned by digest) in Docker on the same runner, with the settings of [Running the benchmarks](#running-the-benchmarks) |
+| Run | Every scenario but the soak (E3), once, with `-duration 1m` and `-container`; the fault scenarios at full size |
+
+The database and the benchmark share 4 CPUs, so compare a run with other
+runs, not with the targets. GitHub fixes the runner's size, not its CPU
+model, so each report starts with its machine: compare several runs before
+you trust a small change. The report is in the run's summary and in its
+artifact `bench-report`. A failed check shows there as **FAIL**; only an
+error fails the run.
+
 ## Latest results
 
-No run on the reference hardware exists yet. These results come from a
+> [!NOTE]
+> **Placeholder:** the first run on the reference runner replaces this note
+> and the laptop run below: its date, commit, machine, and every result.
+
+No run on the target hardware exists yet. These results come from a
 smaller laptop run in October 2026: they show the shape of the results, not
-the numbers of the reference hardware. No number was measured again after
+the numbers of the target hardware. No number was measured again after
 the latest changes to the fetch, completion, renewal, and election statements.
 
-- **Machine:** Apple M5, 10 cores, 16 GiB, shared with builds, tests, and an
-  example application. Throughput moved by up to half between runs.
-- **Database:** PostgreSQL 18.6 in Docker Desktop (a VM with 6 CPUs and 6
-  GiB), started as in [Running the benchmarks](#running-the-benchmarks), and
-  reached from the host through Docker's port forwarding. Docker on macOS
+- **Machine:** Apple M5, 10 cores, 16 GiB, shared with other work.
+  Throughput moved by up to half between runs.
+- **Database:** PostgreSQL 18.6 in Docker Desktop (6 CPUs, 6 GiB), started
+  as in [Running the benchmarks](#running-the-benchmarks). Docker on macOS
   makes `fsync` cheaper than real disks do, so numbers that depend on
   commits are higher than on a server.
 - **Shorter runs:** enqueue and latency scenarios ran for 10 seconds, backlog
@@ -46,10 +67,8 @@ the latest changes to the fetch, completion, renewal, and election statements.
   warm-up, and the soak (E3) for 1 hour. Throughput and L1 to L3 are the
   median of three runs.
 
-**Where this run misses.** T1, T3 end to end, and S2 (just, in one of two
-runs) miss here, and need a run on the reference hardware before v1.0.0.
-S3 misses at 1,000 tasks a second: a notification wakes every worker of its
-queue.
+**Where this run misses:** T1, T3 end to end, S2 (just, in one of two
+runs), and S3 at 1,000 tasks a second.
 
 ### Throughput
 
@@ -62,11 +81,9 @@ queue.
 | T5 | Outbox relay with a batch publisher, 10,000 keys: ≥ 10,000 messages/s | One relay worker with concurrency 8 draining 200,000 messages on 10,000 keys: 26,818 messages/s |
 
 - **T1 is limited by the network path, not by taskmill.** Each enqueue is
-  one round trip, so 16 producers do at most 16 per round-trip time. A bare
+  one round trip, so 16 producers do at most 16 per round-trip time: a bare
   one-row `INSERT` from 16 goroutines reaches about 15,500 per second on the
-  same connection. taskmill's enqueue does more (it encodes the payload,
-  checks the options, and limits notifications), and the one quiet run of
-  the three still reached 16,379 tasks/s.
+  same connection. The one quiet run of the three reached 16,379 tasks/s.
 - **T3 end to end** ran 8 producers enqueueing batches of 100, holding back
   while 20,000 tasks waited, beside 2 workers with concurrency 64. 4 workers
   with concurrency 16 batch less: 15,536 tasks/s, 0.58 statements per task.
@@ -90,13 +107,12 @@ queue.
   tasks a second in transactions of 10. **L4** measured the starts of
   delayed tasks, retries, snoozes, and schedule runs, against the database's
   clock.
-- **L5 and L6 include the time the design adds.** For L5, a killed worker's
-  [lease](../concepts/glossary.md#lease) expires one lease duration after its last
-  renewal; once a second, the maintainer makes the tasks of expired leases
-  retryable; the first retry waits 1 second, with 10% jitter. For L6, `Run`
-  cancels the attempts' contexts at the drain timeout, waits a fixed 5
-  seconds of grace, then releases the tasks still running, one statement
-  each, and unregisters.
+- **L5 and L6 include the time the design adds.** For L5, a killed
+  worker's [lease](../concepts/glossary.md#lease) expires one lease after
+  its last renewal; the maintainer rescues its tasks within a second; the
+  first retry waits 1 second, with 10% jitter. For L6, `Run` cancels the
+  attempts' contexts at the drain timeout, waits 5 seconds of grace, then
+  releases the tasks still running, and unregisters.
 
 ### Scalability
 
@@ -108,8 +124,7 @@ queue.
 
 - **S1 and S2** compare T3 end to end with and without the waiting tasks,
   which were vacuumed, analyzed, and on disk first. Runs here move by up to
-  a fifth (T3 alone: 17,164 to 20,859 tasks/s), so S2 needs a run on the
-  reference hardware.
+  a fifth (T3 alone: 17,164 to 20,859 tasks/s).
 - **S1 and S2 catch bad plans.** With millions of tasks waiting, statistics
   can make a bad plan look cheap. They caught two such bugs, both fixed (see
   the [changelog](../../CHANGELOG.md)): promotion of due tasks must use its
@@ -117,16 +132,15 @@ queue.
   renewing leases must find each task by its ID, not read
   `tasks_running_idx`. Run them after you change those statements.
 - **S3** runs one maintainer and 50 worker processes that take tasks from
-  100 queues each, with concurrency 1. Idle, processes started together poll at nearly
-  the same moments. Then 1,000 tasks a second arrive in random queues, a
-  fifth of them delayed, and a worker process is killed every 10 seconds.
-- **S3 fails at 1,000 tasks a second, because of a design cost.** A
-  notification wakes every worker of its queue, so about 1,000
-  notifications a second each wake 50 processes, which all fetch, and all
-  but one find nothing. That uses the database's 4 CPUs, and the slowest
-  loop, promotion or statistics, takes 1.2 to 2.1 seconds (the laptop's load
-  average reached 83). The lesson for users: on one queue, a few workers
-  with more concurrency cost the database less than many small ones.
+  100 queues each, with concurrency 1. Idle, processes started together
+  poll at nearly the same moments. Then 1,000 tasks a second arrive in
+  random queues, a fifth of them delayed, and a worker process is killed
+  every 10 seconds.
+- **S3 fails at 1,000 tasks a second, because of a design cost:** a
+  notification wakes every worker of its queue
+  ([why](schema-maintenance.md#notifications)). Each notification makes 50
+  processes fetch, and all but one find nothing. That uses the database's
+  4 CPUs, and the slowest loop takes 1.2 to 2.1 seconds (load average 83).
 
 ### Resource use
 
@@ -149,10 +163,8 @@ queue.
   heartbeat (within 5 seconds); then once a minute, ± 6 seconds, since the
   maintainer's wake already nudges every queue whose tasks wait.
 - **E7** keeps 500 connections listening on channels of their own, as the
-  workers of other schemas do. PostgreSQL wakes every listening connection
-  in a database for each notification, whatever its channel, so the cost
-  grows with schemas × listening connections. That is why the heartbeat
-  runs every 5 seconds, not with every wake. E7 needs `-container`.
+  workers of other schemas do, which every notification wakes
+  ([why](schema-maintenance.md#notifications)).
 
 ### Reliability under faults
 
@@ -186,8 +198,7 @@ whose worker died before it reported.
   tasks until the late results arrived, so a wrongly accepted one would show.
 - **F8:** tests that need a session of their own (a session setting, a
   startup parameter, or `LISTEN`) connect directly. F8 caught two `Migrate`
-  bugs, both fixed: one with `max_prepared_statements`
-  ([pgbouncer#1630](https://github.com/pgbouncer/pgbouncer/issues/1630)),
+  bugs, both fixed: one with `max_prepared_statements` ([pgbouncer#1630](https://github.com/pgbouncer/pgbouncer/issues/1630)),
   one when several processes migrate a new schema at the same time.
 - **F9** ran L4 under libfaketime. Times that taskmill sets come from the
   database's clock; a run time that your code passes comes from its own
@@ -201,18 +212,20 @@ target against a real database, and prints a Markdown report. It counts
 statements with a pgx query tracer, WAL with `pg_current_wal_lsn()`,
 connections with `pg_stat_activity`, and memory with `ps`. The fault
 scenarios start worker and producer processes, kill them, restart the
-database, and cut a worker off with a proxy. A failed check fails the run.
+database, and cut a worker off with a proxy. A failed check, such as a
+missed target, ends the run with exit status 2; an error ends it with 1.
 
 `make bench` runs every scenario against the database of `make db`. It has
 PostgreSQL's default settings, so its numbers are lower and vary more. For
-numbers you can compare with this page, use the same settings:
+numbers you can compare with this page, use the settings of the reference
+runner, as its workflow does:
 
 ```sh
 docker run -d --name taskmill-bench-db --cpus 4 -p 54330:5432 \
   -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill postgres:18-alpine \
   -c shared_buffers=1GB -c max_wal_size=8GB -c max_connections=700
 TASKMILL_TEST_DATABASE_URL='postgres://postgres:postgres@localhost:54330/taskmill?sslmode=disable' \
-  go run ./internal/cmd/bench -container taskmill-bench-db
+  go run ./internal/cmd/bench -container taskmill-bench-db -duration 1m
 ```
 
 - `-container` names the database's Docker container, which F6 restarts and
@@ -222,24 +235,11 @@ TASKMILL_TEST_DATABASE_URL='postgres://postgres:postgres@localhost:54330/taskmil
   recreates its own schema, `taskmill_bench`.
 
 `make faults` runs the fault scenarios as the nightly CI run does: F1 to F7
-at a tenth of their size, and F9 against databases whose clocks are 5
-minutes ahead and behind. It starts and removes them itself
-([`faults.sh`](../../internal/cmd/bench/faults.sh)). `make test-pgbouncer`
-runs F8.
-
-To run F9 by hand, start PostgreSQL under libfaketime, and pass the skew.
-The timing scenario then fails, rather than skips F9, if the database's
-clock is not off by that much:
-
-```sh
-printf 'FROM postgres:18-alpine\nRUN apk add --no-cache libfaketime\n' | docker build -t taskmill-faketime -
-docker run -d --name taskmill-bench-skew -p 54333:5432 \
-  -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill \
-  -e LD_PRELOAD=/usr/lib/faketime/libfaketime.so.1 -e FAKETIME=+5m -e DONT_FAKE_MONOTONIC=1 -e NO_FAKE_STAT=1 \
-  taskmill-faketime
-go run ./internal/cmd/bench -db 'postgres://postgres:postgres@localhost:54333/taskmill?sslmode=disable' \
-  -scenarios timing -skew 5m
-```
+at a tenth of their size, and F9 against databases of its own whose clocks
+are 5 minutes ahead and behind
+([`faults.sh`](../../internal/cmd/bench/faults.sh) shows how).
+`make test-pgbouncer` runs F8. With `-skew`, the timing scenario fails,
+rather than skips F9, if the database's clock is not off by that much.
 
 ## See also
 

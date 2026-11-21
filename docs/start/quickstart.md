@@ -193,7 +193,7 @@ and exits. To remove the database too, run `docker rm -f taskmill-pg`.
 | `return errors.New(…)` | a failed [attempt](../concepts/glossary.md#attempt), retried after a [backoff](../concepts/glossary.md#backoff) |
 | `return taskmill.Permanent(…)` | a [dead task](../concepts/glossary.md#dead-task) |
 | `taskmill.Migrate(…)` | [migrate](../concepts/glossary.md#migrate): create taskmill's tables. Without it, `NewClient` fails |
-| `cfg.MaxConns = 15` | a pool sized for the worker: its concurrency (10) plus 5 |
+| `cfg.MaxConns = 15` | a pool [sized for the worker](../production/database.md#size-the-connection-pool): its concurrency (10) plus 5 |
 | `worker.Run(ctx)`, then Ctrl-C | a [worker](../concepts/glossary.md#worker) that [drains](../concepts/glossary.md#drain), then stops |
 
 You ran a finished program. To write it yourself, in small steps, and then
