@@ -276,6 +276,9 @@ func (m *migrator) lock(ctx context.Context) (pgx.Tx, error) { //nolint:ireturn 
 		if pgCode(err) != codeLockNotAvailable {
 			return nil, err
 		}
+		if pause == lockPause {
+			m.logger.LogAttrs(ctx, slog.LevelInfo, "waiting for another process to migrate")
+		}
 		if err := sleep(ctx, pause); err != nil {
 			return nil, err
 		}
@@ -370,23 +373,49 @@ func (m *migrator) record(ctx context.Context, tx pgx.Tx, mig migrations.Migrati
 // the migrations table. tx holds no other lock, and no snapshot while it
 // waits, so the builds never wait for it. Then it records mig in tx.
 func (m *migrator) applyOnline(ctx context.Context, tx pgx.Tx, mig migrations.Migration) error {
+	fail := func(err error) error { return fmt.Errorf("migration %04d_%s: %w", mig.Version, mig.Name, err) }
 	if m.pool.Stat().MaxConns() < 2 {
-		return fmt.Errorf("migration %04d_%s builds an index online, on a second connection, "+
-			"and the pool has only one: let it open at least 2", mig.Version, mig.Name)
-	}
-	// A build of a large table takes minutes, while tx waits.
-	if _, err := tx.Exec(ctx, "SET LOCAL idle_in_transaction_session_timeout = 0"); err != nil {
-		return err
+		return fail(errors.New("it builds an index online, on a second connection, and the pool has only one: let it open at least 2"))
 	}
 
+	var timeouts string
+	if err := m.pool.QueryRow(ctx, buildTimeoutsSQL).Scan(&timeouts); err != nil {
+		return err
+	}
+	if timeouts != "" {
+		return fail(fmt.Errorf("it builds an index online, which can take minutes, and the connections have %s, "+
+			"which would cancel the build and leave an invalid index: run Migrate as a role without them, "+
+			"as after ALTER ROLE ... SET statement_timeout = 0", timeouts))
+	}
+
+	if _, err := tx.Exec(ctx, keepOpenSQL); err != nil {
+		return err
+	}
 	start := time.Now()
 	for _, st := range mig.Statements {
-		if err := m.runOnline(ctx, st); err != nil {
-			return fmt.Errorf("migration %04d_%s: %w", mig.Version, mig.Name, err)
+		if err := m.runOnline(ctx, tx, mig, st); err != nil {
+			return fail(err)
 		}
 	}
 	return m.record(ctx, tx, mig, start)
 }
+
+// buildTimeoutsSQL lists the timeouts of the pool's connections that would
+// cancel a build: lock_timeout too, since a build waits for every older
+// transaction. It returns an empty string if none is set.
+const buildTimeoutsSQL = `
+SELECT concat_ws(', ',
+    CASE WHEN current_setting('lock_timeout') <> '0' THEN 'lock_timeout = ' || current_setting('lock_timeout') END,
+    CASE WHEN current_setting('statement_timeout') <> '0' THEN 'statement_timeout = ' || current_setting('statement_timeout') END,
+    CASE WHEN coalesce(current_setting('transaction_timeout', true), '0') <> '0'
+         THEN 'transaction_timeout = ' || current_setting('transaction_timeout', true) END)`
+
+// keepOpenSQL keeps the transaction that holds the lock open while the builds
+// take minutes: neither its idleness nor, from PostgreSQL 17, its age ends
+// it. A proxy may still end it, which runOnline checks.
+const keepOpenSQL = `
+SELECT set_config('idle_in_transaction_session_timeout', '0', true),
+       CASE WHEN current_setting('server_version_num')::integer >= 170000 THEN set_config('transaction_timeout', '0', true) END`
 
 // indexState is the state of an index in the catalog.
 type indexState int
@@ -397,16 +426,16 @@ const (
 	indexValid
 )
 
-// runOnline runs st, a statement of an online step, until its index is
+// runOnline runs st, a statement of the online step mig, until its index is
 // valid, or gone for a drop. An earlier Migrate may have left the index
 // invalid, when its build failed or was canceled: it is dropped, and built
-// again. The lock of the migrations table keeps every other Migrate from
-// building meanwhile, and indexState waits for a build that still runs
-// although its Migrate is gone.
-func (m *migrator) runOnline(ctx context.Context, st migrations.Statement) error {
+// again. The lock of the migrations table, in lock, keeps every other
+// Migrate from building meanwhile, and awaitIndex waits for a build that
+// still runs although its Migrate is gone.
+func (m *migrator) runOnline(ctx context.Context, lock pgx.Tx, mig migrations.Migration, st migrations.Statement) error {
 	build := st.Table != ""
 	for range 3 { // a drop, a build, and a last look
-		state, err := m.indexState(ctx, st)
+		state, err := m.awaitIndex(ctx, mig, st)
 		if err != nil {
 			return err
 		}
@@ -414,6 +443,12 @@ func (m *migrator) runOnline(ctx context.Context, st migrations.Statement) error
 			return nil
 		}
 
+		// Without the lock, another process may have applied later
+		// migrations, such as one that drops this index. A ping takes no
+		// snapshot, which a build could wait for.
+		if err := lock.Conn().Ping(ctx); err != nil {
+			return fmt.Errorf("the lock of the migrations table ended: %w", err)
+		}
 		stmt := st.SQL
 		if build && state == indexInvalid {
 			stmt = "DROP INDEX CONCURRENTLY " + st.Index
@@ -425,58 +460,53 @@ func (m *migrator) runOnline(ctx context.Context, st migrations.Statement) error
 	return fmt.Errorf("index %s: not built or dropped after 3 tries", st.Index)
 }
 
-// indexState returns the state of the index of st, once no session builds
-// or drops an index of its table any more. Such a session is a Migrate
-// whose process or connection is gone: its build goes on. A second build or
-// drop that waited for its table would make PostgreSQL end one of the two as
-// a deadlock, so indexState looks without waiting, and looks again after a
-// pause. It also waits for autovacuum, which takes the same lock.
-func (m *migrator) indexState(ctx context.Context, st migrations.Statement) (indexState, error) {
+// indexSQL returns the version of the schema $3, the state of the index $1,
+// and whether a session holds a lock of the index's table $2 that a build
+// waits for. Such a session is mostly a build of a Migrate whose process or
+// connection is gone. Autovacuum takes such a lock too, and ends its work
+// when a build waits for it.
+const indexSQL = `
+SELECT (SELECT coalesce(max(version), 0) FROM %s.migrations),
+       (SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1)),
+       EXISTS (SELECT FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+               WHERE l.locktype = 'relation' AND l.granted AND l.pid <> pg_backend_pid()
+                 AND l.relation = coalesce(to_regclass(nullif($2, '')), (SELECT indrelid FROM pg_index WHERE indexrelid = to_regclass($1)))
+                 AND l.mode IN ('ShareUpdateExclusiveLock', 'ShareLock', 'ShareRowExclusiveLock', 'ExclusiveLock', 'AccessExclusiveLock')
+                 AND a.backend_type <> 'autovacuum worker')`
+
+// awaitIndex returns the state of the index of st, once no other session
+// builds an index of its table. A second build that waited for the table
+// would make PostgreSQL end one of the two as a deadlock, so awaitIndex
+// looks without waiting, and looks again after a pause. It fails if another
+// process applied mig meanwhile: then this one lost its lock.
+func (m *migrator) awaitIndex(ctx context.Context, mig migrations.Migration, st migrations.Statement) (indexState, error) {
+	query := fmt.Sprintf(indexSQL, m.schema)
+	logged := false
 	for pause := lockPause; ; pause = min(2*pause, lockPauseMax) {
-		var state indexState
-		err := pgx.BeginTxFunc(ctx, m.pool, readCommitted, func(tx pgx.Tx) (err error) {
-			state, err = readIndex(ctx, tx, st)
-			return err
-		})
-		if pgCode(err) != codeLockNotAvailable {
-			return state, err
+		var version int
+		var valid *bool
+		var busy bool
+		if err := m.pool.QueryRow(ctx, query, st.Index, st.Table).Scan(&version, &valid, &busy); err != nil {
+			return 0, err
+		}
+
+		switch {
+		case version >= mig.Version:
+			return 0, fmt.Errorf("another process applied it meanwhile: this one lost the lock of the migrations table")
+		case !busy && valid == nil:
+			return indexMissing, nil
+		case !busy && *valid:
+			return indexValid, nil
+		case !busy:
+			return indexInvalid, nil
+		case !logged:
+			logged = true
+			m.logger.LogAttrs(ctx, slog.LevelInfo, "waiting for an index build",
+				slog.Int(logKeyVersion, mig.Version), slog.String(logKeyName, mig.Name))
 		}
 		if err := sleep(ctx, pause); err != nil {
 			return 0, err
 		}
-	}
-}
-
-// readIndex returns the state of the index of st, in tx, which it makes
-// lock the index's table against builds and drops, without waiting.
-func readIndex(ctx context.Context, tx pgx.Tx, st migrations.Statement) (indexState, error) {
-	table := st.Table
-	if table == "" {
-		err := tx.QueryRow(ctx, `SELECT n.nspname || '.' || c.relname
-		                         FROM pg_index i JOIN pg_class c ON c.oid = i.indrelid JOIN pg_namespace n ON n.oid = c.relnamespace
-		                         WHERE i.indexrelid = to_regclass($1)`, st.Index).Scan(&table)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return indexMissing, nil
-		}
-		if err != nil {
-			return 0, err
-		}
-	}
-
-	if _, err := tx.Exec(ctx, "LOCK TABLE "+table+" IN SHARE UPDATE EXCLUSIVE MODE NOWAIT"); err != nil {
-		return 0, err
-	}
-	var valid *bool
-	if err := tx.QueryRow(ctx, "SELECT (SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass($1))", st.Index).Scan(&valid); err != nil {
-		return 0, err
-	}
-	switch {
-	case valid == nil:
-		return indexMissing, nil
-	case *valid:
-		return indexValid, nil
-	default:
-		return indexInvalid, nil
 	}
 }
 
