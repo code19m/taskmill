@@ -69,6 +69,135 @@ func TestQueueConcurrencyLimitAcrossWorkers(t *testing.T) {
 	}
 }
 
+// Many workers, each with more slots than the limit, fetch from one queue
+// with a MaxRunning limit at the same time: no more tasks than the limit
+// ever run, by the handlers' count and by the database's.
+func TestManyWorkersKeepTheLimitExact(t *testing.T) {
+	t.Parallel()
+	e := newEnvWith(t, testdb.PoolSize(t, 32), nil)
+	const limit = 4
+	e.limitDefaultQueue(t, limit)
+
+	var active, peak atomic.Int32
+	hs := handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+		storeMax(&peak, active.Add(1))
+		defer active.Add(-1)
+		time.Sleep(5 * time.Millisecond)
+		return nil
+	}, nil)
+	for range 6 {
+		runWorker(t, e, &taskmill.WorkerConfig{Handlers: hs, Queues: defaultQueue(8), NoMaintainer: true})
+	}
+
+	params := make([]taskmill.EnqueueParams, 300)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}}
+	}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
+	}
+
+	var most int
+	waitFor(t, "every task to complete", func() bool {
+		most = max(most, e.count(t, "SELECT count(*) FROM {s}.tasks WHERE state = 'running'"))
+		return e.count(t, "SELECT count(*) FROM {s}.tasks") == 0
+	})
+	if p := peak.Load(); p > limit || most > limit {
+		t.Fatalf("up to %d handlers ran, and the database counted up to %d running tasks; want at most %d", p, most, limit)
+	}
+}
+
+// batchLog keeps the statements of each batch that a pool's connections
+// send.
+type batchLog struct {
+	mu      sync.Mutex
+	open    map[*pgx.Conn][]string
+	batches [][]string
+}
+
+func (*batchLog) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+
+func (*batchLog) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (b *batchLog) TraceBatchStart(ctx context.Context, conn *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.open == nil {
+		b.open = map[*pgx.Conn][]string{}
+	}
+	b.open[conn] = nil
+	return ctx
+}
+
+func (b *batchLog) TraceBatchQuery(_ context.Context, conn *pgx.Conn, d pgx.TraceBatchQueryData) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.open[conn] = append(b.open[conn], d.SQL)
+}
+
+func (b *batchLog) TraceBatchEnd(_ context.Context, conn *pgx.Conn, _ pgx.TraceBatchEndData) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.batches = append(b.batches, b.open[conn])
+	delete(b.open, conn)
+}
+
+// holding reports whether a batch held the row of a limited queue from its
+// lock to its commit.
+func (b *batchLog) holding() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.ContainsFunc(b.batches, func(sqls []string) bool {
+		return slices.ContainsFunc(sqls, func(s string) bool { return strings.Contains(s, queueLock) }) && slices.Contains(sqls, "COMMIT")
+	})
+}
+
+// A fetch from a queue with a MaxRunning limit sends the statements from the
+// lock of the queue's row to the commit in one round trip, so that the row
+// is held while the database works, and not while the network carries
+// answers: the queue's fetches take the row in turn, and each held it for
+// four round trips, so a slow network bounded the queue's throughput.
+func TestLimitedFetchHoldsTheQueueRowForOneRoundTrip(t *testing.T) {
+	t.Parallel()
+	sent := &batchLog{}
+	e := newTracedEnv(t, sent)
+	e.limitDefaultQueue(t, 5)
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1), NoMaintainer: true})
+
+	e.waitState(t, e.enqueue(t, sendEmail{}, nil), taskmill.StateCompleted)
+	if !sent.holding() {
+		t.Fatal("no batch took the queue's row and committed: the fetch held the row across round trips")
+	}
+}
+
+// A fetch that takes a task for each free slot says that more may wait,
+// also when it fills a batch with more tasks after that, and also from a
+// queue with a limit that leaves room: the worker then fetches again at
+// once, without waiting for a poll.
+func TestFetchThatFillsABatchSaysThatMoreMayWait(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int32{0, 100} {
+		e := newEnv(t)
+		if limit > 0 {
+			e.limitDefaultQueue(t, int(limit))
+		}
+		var hs taskmill.Handlers
+		taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) {}), &taskmill.HandlerOptions{BatchSize: 10})
+		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(4), NoMaintainer: true})
+		for range 30 {
+			e.enqueue(t, report{}, &taskmill.EnqueueOptions{Queue: taskmill.DefaultQueue})
+		}
+
+		n, more, atLimit, err := taskmill.Fetch(t.Context(), w, taskmill.DefaultQueue, 4, limit)
+		if err != nil || n != 10 || !more || atLimit {
+			t.Errorf("limit %d: took %d tasks, more %v, at the limit %v, %v; want a batch of 10, and more",
+				limit, n, more, atLimit, err)
+		}
+	}
+}
+
 // A wait for a row before a task is taken must not be taken off the task's
 // lease: the task would start with a lease that is almost over, and be
 // rescued while it runs.

@@ -36,6 +36,11 @@ All notable changes to taskmill are recorded here. The format follows
   100 values, as `GroupParams.Queues` did: a call with more returns an error
   that wraps `ErrInvalidArgument`, not a statement with an array of any
   size. The dashboard sends at most 100.
+- A fetch from a queue with a `MaxRunning` limit holds the queue's row for
+  one round trip, not four: the worker sends the transaction in one batch,
+  up to its commit. With 4 workers of 16 slots, a limit of 32, and a network
+  of 1 ms, such a queue runs about 4,400 tasks a second, where it ran 1,500;
+  with 4 ms, 2,000 where it ran 500. The limit stays exact.
 - A worker warns of tasks of a kind that it has no handler for at most once
   a minute per kind, with the number of tasks, as `no handler for task kind;
   its tasks wait for a worker that has one`. It warned once per task, and a

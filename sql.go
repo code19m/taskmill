@@ -34,6 +34,7 @@ type statements struct {
 
 	// sql_attempts.go: fetch tasks, and record how their attempts end.
 	fetch            string
+	fetchLimited     string
 	fetchKind        string
 	leaseTask        string
 	atLimit          string
@@ -153,6 +154,7 @@ func newStatements(schema string) *statements {
 		dedupeLookup: q(dedupeLookupSQL),
 
 		fetch:            q(fetchSQL),
+		fetchLimited:     q(fetchLimitedSQL),
 		fetchKind:        q(fetchKindSQL),
 		leaseTask:        q(leaseTaskSQL),
 		atLimit:          q(atLimitSQL),

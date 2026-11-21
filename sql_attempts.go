@@ -25,18 +25,34 @@ const leasedColumns = `t.id, t.queue, t.kind, t.priority, t.attempt, t.max_attem
 // taken, not from now(), the start of the transaction: the fetch of
 // a queue with a MaxRunning limit waits for the queue's row first,
 // and that wait must not be taken off the lease.
-var fetchSQL = `
+var fetchSQL = fetchUpTo(`$2`)
+
+// $1 queue, $2 limit, $3 lease in microseconds, $4 worker ID.
+//
+// fetchLimitedSQL is fetchSQL for a queue with a MaxRunning limit, after
+// lockQueueSQL in the same transaction. It leases no more tasks than the
+// limit leaves room for, and counts the running tasks itself. It runs
+// as a statement of its own after the lock, so it sees the tasks of the
+// fetches that held the row before.
+var fetchLimitedSQL = fetchUpTo(`least($2::bigint, greatest(0,
+          coalesce((SELECT max_running FROM {s}.queues WHERE name = $1), $2::bigint)
+          - (SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND state = 'running')))`)
+
+// fetchUpTo returns fetchSQL with limit as its LIMIT.
+func fetchUpTo(limit string) string {
+	return `
 WITH picked AS (
     SELECT id FROM {s}.tasks
     WHERE state = 'available' AND queue = $1
     ORDER BY priority DESC, run_at, id
-    LIMIT $2
+    LIMIT ` + limit + `
     FOR UPDATE SKIP LOCKED
 )
 UPDATE {s}.tasks t
 SET ` + leaseSet(`$3`, `$4`) + `
 WHERE t.id = ANY(ARRAY(SELECT id FROM picked))
 RETURNING ` + leasedColumns
+}
 
 // $1 queue, $2 limit, $3 lease in microseconds, $4 worker ID, $5 kind,
 // $6 most candidates to look at.
@@ -99,8 +115,8 @@ SELECT coalesce((
 // $1 queue.
 //
 // lockQueueSQL serializes fetches from a queue with a MaxRunning limit.
-// countRunning then runs as its own statement, so it sees the tasks
-// that fetches committed while lockQueue waited.
+// countRunning and fetchLimited then run as statements of their own, so
+// they see the tasks that fetches committed while lockQueue waited.
 const lockQueueSQL = `SELECT max_running FROM {s}.queues WHERE name = $1 FOR UPDATE`
 
 // $1 queue.

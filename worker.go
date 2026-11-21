@@ -114,17 +114,20 @@ var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with
 //
 // [guide to workers and queues]: https://github.com/code19m/taskmill/blob/main/docs/guides/workers-and-queues.md
 type Worker struct {
-	client    *Client
-	cfg       WorkerConfig
-	id        string
-	host      string
-	handlers  map[string]*registration
-	queues    map[string]*queueState
-	timing    timing
-	logger    *slog.Logger
-	listen    *pgx.ConnConfig
-	version   string
-	schedules []compiledSchedule
+	client   *Client
+	cfg      WorkerConfig
+	id       string
+	host     string
+	handlers map[string]*registration
+	// batchKinds reports that a handler is a batch handler: fetches may
+	// lease more tasks to fill its batches.
+	batchKinds bool
+	queues     map[string]*queueState
+	timing     timing
+	logger     *slog.Logger
+	listen     *pgx.ConnConfig
+	version    string
+	schedules  []compiledSchedule
 
 	// The names of the schedules, sorted, and the hash of each one's
 	// definition, in the same order.
@@ -333,6 +336,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 				r.opts.Retry = ExponentialBackoff{}
 			}
 			w.handlers[kind] = &r
+			w.batchKinds = w.batchKinds || r.runBatch != nil
 		}
 	}
 

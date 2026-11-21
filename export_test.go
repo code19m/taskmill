@@ -69,6 +69,16 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.scheduleReport, t.ScheduleReport)
 }
 
+// Fetch runs one fetch from queue, which w serves, with slots free, as the
+// fetch loop of a running w does when the queue's limit is maxRunning, or
+// none for 0. It returns how many tasks it leased, and its more and atLimit.
+func Fetch(ctx context.Context, w *Worker, queue string, slots int, maxRunning int32) (n int, more, atLimit bool, err error) {
+	q := w.queues[queue]
+	q.maxRunning.Store(maxRunning)
+	tasks, more, atLimit, err := w.fetch(ctx, q, slots)
+	return len(tasks), more, atLimit, err
+}
+
 // Notifying reports whether the maintainer's heartbeats reach w.
 func Notifying(w *Worker) bool {
 	return w.notifying.Load()

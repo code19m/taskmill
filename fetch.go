@@ -141,52 +141,131 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	dbCtx, cancel := outlive(ctx, recordTimeout, cleanupTimeout)
 	defer cancel()
 
-	// A queue with a MaxRunning limit fetches in one transaction, which
-	// checks the capacity first. Other queues run each fetch statement in a
-	// transaction of its own, sent in one round trip.
-	lease, allowed := leaseFunc(w.leaseAlone), maxFetch
-	var tx pgx.Tx
 	if limited {
-		tx, allowed, err = w.beginLimited(dbCtx, q)
-		switch {
-		case errors.Is(err, errQueueHeld):
+		tasks, more, atLimit, err = w.fetchLimited(dbCtx, q, slots)
+		if errors.Is(err, errQueueHeld) {
 			w.logger.LogAttrs(ctx, slog.LevelDebug, "fetch gave up waiting for the queue's row", slog.String(logKeyQueue, q.name))
 			return nil, false, true, nil
-		case err != nil:
-			return nil, false, false, err
 		}
-		defer func() { _ = tx.Rollback(dbCtx) }() // a no-op after commit
-		lease = w.leaseIn(tx)
+	} else {
+		tasks, more, err = w.fetchFree(dbCtx, q, slots)
 	}
 
-	limit := min(slots, allowed)
-	out, err := lease(dbCtx, q, w.client.sql.fetch, limit)
-	if err != nil {
-		return nil, false, false, err
-	}
-	more = limit > 0 && len(out) == limit
-	atLimit = allowed < slots && len(out) == limit
-
-	extra, err := w.fillBatches(dbCtx, q, lease, out, allowed-len(out))
-	if err != nil && tx != nil {
-		return nil, false, false, err // rolled back: nothing was leased
-	}
-	out = append(out, extra...)
-
-	if tx != nil {
-		if err := tx.Commit(dbCtx); err != nil {
-			return nil, false, false, err
-		}
-	}
-
-	slices.SortFunc(out, func(a, b *liveAttempt) int {
+	slices.SortFunc(tasks, func(a, b *liveAttempt) int {
 		return cmp.Or(
 			cmp.Compare(b.info.Priority, a.info.Priority),
 			a.info.RunAt.Compare(b.info.RunAt),
 			cmp.Compare(a.info.ID, b.info.ID),
 		)
 	})
-	return out, more, atLimit, err
+	return tasks, more, atLimit, err
+}
+
+// fetchFree is fetch for a queue without a MaxRunning limit. Each fetch
+// statement runs in a transaction of its own, sent in one round trip.
+func (w *Worker) fetchFree(ctx context.Context, q *queueState, slots int) (tasks []*liveAttempt, more bool, err error) {
+	limit := min(slots, maxFetch)
+	out, err := w.leaseAlone(ctx, q, w.client.sql.fetch, limit)
+	if err != nil {
+		return nil, false, err
+	}
+
+	extra, err := w.fillBatches(ctx, q, w.leaseAlone, out, maxFetch-len(out))
+	return append(out, extra...), len(out) == limit, err
+}
+
+// fetchLimited is fetch for a queue with a MaxRunning limit, in one
+// transaction that locks the queue's row first, so that the fetches of all
+// workers count each other's tasks. The statements up to the fetch, and
+// the commit unless batches are to be filled, go in one round trip: the
+// row is held for that one, not for four. So the fetch cannot wait for the
+// answer of the count of the running tasks: it counts them itself, and the
+// count's answer only tells the worker how far the limit held it back. It
+// returns errQueueHeld if it gave up waiting for the row.
+func (w *Worker) fetchLimited(ctx context.Context, q *queueState, slots int) (tasks []*liveAttempt, more, atLimit bool, err error) {
+	conn, err := w.client.pool.Acquire(ctx)
+	if err != nil {
+		return nil, false, false, err
+	}
+	defer conn.Release()
+
+	committed := !w.batchKinds
+	b := &pgx.Batch{}
+	b.Queue("BEGIN")
+	b.Queue(limitedSettings)
+	b.Queue(w.client.sql.lockQueue, q.name)
+	b.Queue(w.client.sql.countRunning, q.name)
+	b.Queue(w.client.sql.fetchLimited, w.leaseArgs(q, min(slots, maxFetch), nil)...)
+	if committed {
+		b.Queue("COMMIT")
+	}
+
+	allowed, out, err := w.readLimited(conn.SendBatch(ctx, b), committed)
+	fetched := len(out) // by the first lease, before the batches fill
+	if err == nil && !committed {
+		var extra []*liveAttempt
+		if extra, err = w.fillBatches(ctx, q, w.leaseIn(conn), out, allowed-len(out)); err == nil {
+			out = append(out, extra...)
+			_, err = conn.Exec(ctx, "COMMIT")
+		}
+	}
+	if err != nil {
+		// The transaction may still be open, after a failed statement: the
+		// connection goes back to the pool without it. Tasks that a commit
+		// leased all the same, as when the connection failed during the
+		// commit, are rescued when their leases run out.
+		_, _ = conn.Exec(ctx, "ROLLBACK")
+		if pgCode(err) == codeLockNotAvailable {
+			err = errQueueHeld
+		}
+		return nil, false, false, err
+	}
+
+	limit := min(slots, allowed)
+	return out, limit > 0 && fetched == limit, allowed < slots && fetched == limit, nil
+}
+
+// readLimited reads the results of fetchLimited's batch, and closes it. It
+// returns how many more tasks of the queue the limit allows, and the tasks
+// that the fetch leased, which are leased once committed is true, or the
+// worker commits later.
+func (w *Worker) readLimited(br pgx.BatchResults, committed bool) (allowed int, out []*liveAttempt, err error) {
+	defer func() { err = cmp.Or(err, br.Close()) }()
+	for range 2 { // BEGIN and the settings
+		if _, err := br.Exec(); err != nil {
+			return 0, nil, err
+		}
+	}
+
+	allowed = maxFetch
+	var maxRunning *int
+	switch err := br.QueryRow().Scan(&maxRunning); {
+	case errors.Is(err, pgx.ErrNoRows): // no settings: no limit
+	case err != nil:
+		return 0, nil, err
+	}
+
+	var running int
+	if err := br.QueryRow().Scan(&running); err != nil {
+		return 0, nil, err
+	}
+	if maxRunning != nil {
+		allowed = max(*maxRunning-running, 0)
+	}
+
+	r, err := br.Query()
+	if err != nil {
+		return 0, nil, err
+	}
+	if out, err = w.scanAllLeased(r); err != nil {
+		return 0, nil, err
+	}
+	if committed {
+		if _, err := br.Exec(); err != nil {
+			return 0, nil, err
+		}
+	}
+	return allowed, out, nil
 }
 
 // leaseFunc runs a fetch statement for up to limit tasks of q, with extra
@@ -225,65 +304,19 @@ func (w *Worker) atLimit(ctx context.Context, queue string) (full bool, err erro
 	return full, err
 }
 
-// beginLimited begins the fetch transaction of a queue with a MaxRunning
-// limit, and returns how many more of its tasks may run. It returns
-// errQueueHeld if it cannot lock the queue's row in the time that
-// limitedSettings allow.
-func (w *Worker) beginLimited(ctx context.Context, q *queueState) (pgx.Tx, int, error) { //nolint:ireturn // pgx represents a transaction as an interface
-	tx, err := w.client.pool.Begin(ctx)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	allowed := 0
-	if _, err = tx.Exec(ctx, limitedSettings); err == nil {
-		allowed, err = w.capacity(ctx, tx, q.name)
-	}
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return nil, 0, err
-	}
-	return tx, allowed, nil
-}
-
-// leaseIn returns a leaseFunc that runs fetch statements in tx.
-func (w *Worker) leaseIn(tx pgx.Tx) leaseFunc {
-	return func(ctx context.Context, q *queueState, sql string, limit int, extra ...any) ([]*liveAttempt, error) {
+// leaseIn returns a leaseFunc that runs fetch statements on q, in the
+// transaction that is open on it.
+func (w *Worker) leaseIn(q PgxQuerier) leaseFunc {
+	return func(ctx context.Context, queue *queueState, sql string, limit int, extra ...any) ([]*liveAttempt, error) {
 		if limit <= 0 {
 			return nil, nil
 		}
-		r, err := tx.Query(ctx, sql, w.leaseArgs(q, limit, extra)...)
+		r, err := q.Query(ctx, sql, w.leaseArgs(queue, limit, extra)...)
 		if err != nil {
 			return nil, err
 		}
 		return w.scanAllLeased(r)
 	}
-}
-
-// capacity locks a limited queue's row and returns how many more of its tasks
-// may run. It counts running tasks in a statement of its own, after taking the
-// lock, so that it sees what concurrent fetches committed. It returns
-// errQueueHeld if the wait for the lock timed out.
-func (w *Worker) capacity(ctx context.Context, tx pgx.Tx, queue string) (int, error) {
-	var maxRunning *int
-	if err := tx.QueryRow(ctx, w.client.sql.lockQueue, queue).Scan(&maxRunning); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return maxFetch, nil
-		}
-		if pgCode(err) == codeLockNotAvailable {
-			return 0, errQueueHeld
-		}
-		return 0, err
-	}
-	if maxRunning == nil {
-		return maxFetch, nil
-	}
-
-	var running int
-	if err := tx.QueryRow(ctx, w.client.sql.countRunning, queue).Scan(&running); err != nil {
-		return 0, err
-	}
-	return max(*maxRunning-running, 0), nil
 }
 
 // errQueueHeld reports that the fetch of a queue with a MaxRunning limit

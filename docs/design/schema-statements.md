@@ -90,7 +90,14 @@ queue with a backlog is at its limit most of the time, and the fetch then
 ends there, with one read. Otherwise a transaction locks the queue's row in
 `queues`, counts the running tasks again through `tasks_running_idx`, and
 fetches at most the remaining capacity. This serializes fetches for limited
-queues only. The transaction waits at most 1 second for the queue's row.
+queues only. The worker sends the transaction in one round trip, up to its
+commit, so the row is held while the database works, not while the
+network carries answers: with four round trips under the lock, a network
+of 4 ms bounded a queue to about 500 tasks a second. So the fetch cannot
+wait for the count's answer: it counts again in its own `LIMIT`. Each runs
+as a statement of its own after the lock, and sees what the fetches before
+committed. Only to fill batches does the commit wait for a second round
+trip. The transaction waits at most 1 second for the queue's row.
 Then the fetch gives up, with only a Debug line, and the worker fetches
 again when the queue is next woken or polled: the queue's fetches take the
 row in turn, and with many workers the turns alone can take a second.
