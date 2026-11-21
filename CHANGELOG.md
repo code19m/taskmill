@@ -17,12 +17,6 @@ All notable changes to taskmill are recorded here. The format follows
   kind at a time. [How taskmill is built](docs/design/README.md#decisions)
   indexes the design decisions, with what would reopen each.
 
-### Changed
-
-- The docs no longer say that the API is final for v1.0.0. Before v1.0.0, a
-  minor release may break the API, marked **Breaking:** here with how to
-  migrate.
-
 ### Fixed
 
 - Docs that were incomplete. [Guarantees](docs/concepts/guarantees.md)
