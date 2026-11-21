@@ -471,6 +471,25 @@ func TestLeasesOutlastSessionsThatTheServerEnds(t *testing.T) {
 	}
 }
 
+// A check-in that used all its time leaves the reserve as it is: a ping
+// that fails because the time ran out says nothing of the connection.
+func TestReserveOutlastsACheckInOutOfTime(t *testing.T) {
+	t.Parallel()
+	e := newEnvWith(t, testdb.PoolSize(t, 6), nil)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+	taskmill.KeepReserve(t.Context(), t, w)
+	pid := taskmill.ReservePID(w)
+
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+	for range 20 {
+		taskmill.RefreshReserve(ended, w)
+	}
+	if got := taskmill.ReservePID(w); got != pid {
+		t.Fatalf("the reserve's session is %d after check-ins out of time, want %d, the one it had", got, pid)
+	}
+}
+
 // A reserve whose session ended, as in a failover, is replaced, and the
 // statement runs again on the new one, also while handlers hold every other
 // connection: the pool closes the broken one, and its place takes the new

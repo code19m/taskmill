@@ -125,6 +125,11 @@ func ReservePID(w *Worker) uint32 {
 	return w.reserve.conn.Conn().PgConn().PID()
 }
 
+// RefreshReserve keeps w's reserve ready, as each check-in does, with ctx.
+func RefreshReserve(ctx context.Context, w *Worker) {
+	w.reserve.refresh(ctx)
+}
+
 // OnReserve runs sql on w's reserve, as a renewal does when the pool has no
 // connection free.
 func OnReserve(ctx context.Context, w *Worker, sql string) error {

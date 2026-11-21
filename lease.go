@@ -15,9 +15,14 @@ import (
 // tracks, and the tries to record a result while its lease may still be
 // held.
 
-// checkInLoop checks the worker in every third of the lease, until ctx ends.
+// checkInLoop checks the worker in every third of the lease, and keeps its
+// reserve ready, until ctx ends. The reserve has a time of its own, because
+// a check-in may use up all of its time.
 func (w *Worker) checkInLoop(ctx context.Context) {
-	w.everyThirdOfLease(ctx, w.checkIn)
+	w.everyThirdOfLease(ctx, func(checkInCtx context.Context) {
+		w.checkIn(checkInCtx)
+		w.reserve.refresh(ctx)
+	})
 }
 
 // everyThirdOfLease calls fn every third of the lease, each time with that
@@ -71,7 +76,6 @@ func (w *Worker) checkIn(ctx context.Context) {
 		now := time.Now()
 		w.reached.Store(&now)
 	}
-	w.reserve.refresh(ctx)
 }
 
 // Health reports whether the worker runs and is in touch with the database:
@@ -282,8 +286,10 @@ func (r *reserve) do(ctx context.Context, fn func(context.Context, *pgxpool.Conn
 // firewall, or a failover may have ended its session meanwhile. It drops a
 // connection that fails either way.
 func (r *reserve) run(ctx context.Context, fn func(context.Context, *pgxpool.Conn) error) error {
-	if r.conn != nil && time.Since(r.used) > time.Second && r.conn.Ping(ctx) != nil {
-		r.drop()
+	if r.conn != nil && time.Since(r.used) > time.Second {
+		if err := r.check(ctx); err != nil {
+			return err
+		}
 	}
 	if r.conn == nil {
 		if err := r.take(ctx); err != nil {
@@ -302,11 +308,13 @@ func (r *reserve) run(ctx context.Context, fn func(context.Context, *pgxpool.Con
 }
 
 // refresh keeps the reserve ready while the pool has connections to spare,
-// at each check-in: it takes one if it has none, and replaces one that is
-// older than the pool's MaxConnLifetime, which the pool would have closed,
-// or that does not answer a ping. It waits a thirtieth of the lease for the
-// pool at most. A connection that is only old stays until a new one comes.
+// after each check-in: it takes one if it has none, and replaces one that
+// is older than the pool's MaxConnLifetime, which the pool would have
+// closed, or that does not answer a ping. It has a thirtieth of the lease. A
+// connection that is only old stays until a new one comes.
 func (r *reserve) refresh(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, r.w.cfg.LeaseDuration/30)
+	defer cancel()
 	select {
 	case r.turn <- struct{}{}:
 	case <-ctx.Done():
@@ -314,26 +322,42 @@ func (r *reserve) refresh(ctx context.Context) {
 	}
 	defer func() { <-r.turn }()
 
-	if !r.kept {
+	if !r.kept || ctx.Err() != nil {
 		return
 	}
 	old := r.conn != nil && r.lifetime > 0 && time.Since(r.taken) >= r.lifetime
-	if r.conn != nil && !old && r.conn.Ping(ctx) == nil {
-		r.used = time.Now()
-		return
-	}
 	if r.conn != nil && !old {
-		r.drop() // it did not answer
+		if err := r.check(ctx); err != nil || r.conn != nil {
+			return // out of time, or it answered
+		}
 	}
 
-	wait, cancel := context.WithTimeout(ctx, r.w.cfg.LeaseDuration/30)
-	defer cancel()
-	conn, err := r.w.acquire(wait)
+	conn, err := r.w.acquire(ctx)
 	if err != nil {
 		return
 	}
 	r.drop()
 	r.conn, r.taken, r.used = conn, time.Now(), time.Now()
+}
+
+// check pings the reserve's connection, and drops it if it does not answer.
+// It returns an error only if ctx ended first: that says nothing of the
+// connection, which it keeps. One that the ended ping left closed goes the
+// next time.
+func (r *reserve) check(ctx context.Context) error {
+	if r.conn.Conn().IsClosed() {
+		r.drop()
+		return nil
+	}
+	if err := r.conn.Ping(ctx); err != nil {
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		r.drop()
+		return nil
+	}
+	r.used = time.Now()
+	return nil
 }
 
 // take takes the reserve's connection from the pool.
