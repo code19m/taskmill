@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -406,6 +407,43 @@ func TestFailureOfAGroupedTaskWaitsForItsGroupWithItsLease(t *testing.T) {
 		t.Fatalf("the task's last error is %q, want the handler's", last.Message)
 	}
 }
+
+// A completion that the database takes long for, longer than a third of
+// the lease, still goes through: the task runs once.
+func TestSlowCompletionCompletesTheTaskOnce(t *testing.T) {
+	t.Parallel()
+	e := newTracedEnv(t, &slowStatement{fragment: "SELECT DISTINCT id, lease_token FROM unnest", delay: 1500 * time.Millisecond})
+	var runs atomic.Int32
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			runs.Add(1)
+			return nil
+		}, nil),
+		Queues:        defaultQueue(1),
+		LeaseDuration: 3 * time.Second,
+	})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 || runs.Load() != 1 {
+		t.Fatalf("completed on attempt %d after %d runs, want one", info.Attempt, runs.Load())
+	}
+}
+
+// slowStatement makes each statement that contains fragment take delay
+// longer, as a busy database would.
+type slowStatement struct {
+	fragment string
+	delay    time.Duration
+}
+
+func (s *slowStatement) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, s.fragment) {
+		time.Sleep(s.delay)
+	}
+	return ctx
+}
+
+func (*slowStatement) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	t.Parallel()

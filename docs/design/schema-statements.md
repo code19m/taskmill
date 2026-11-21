@@ -133,18 +133,35 @@ running and renews it at the next check-in. An attempt that completed its
 task with `CompleteTx` is never canceled as lost: its own transaction holds
 the row until it commits.
 
-While `Run` runs, the worker keeps one connection of its pool for the
-renewals, the check-ins, and the completions. Handlers that share the pool
-can hold every other connection for longer than a lease. Renewals that
-waited for one would let leases run out, and completions that waited could
-give up once the lease might have run out: either way, tasks would run
-twice. The statements take turns on the connection, each for a moment, and
-none holds it for more than a third of the lease, or a second if that is
-longer: a statement that hangs delays the next renewal by about one
-check-in, which a lease outlasts. Fetches and failed attempts take
-connections of the pool, and may wait. We rejected a second pool of the
-worker's own: it would open connections that the application did not
-size, and skip the hooks of its pool.
+Handlers that share the worker's pool can hold every connection for
+longer than a lease, and renewals that waited for one would let leases run
+out: tasks would run twice. So while `Run` runs, the worker keeps one
+connection of the pool idle in reserve. A renewal or a check-in takes a
+connection of the pool first, and only if none comes within a thirtieth of
+the lease does it run on the reserve. The reserve is pinged before use
+once it was idle for more than a second, as the pool pings its own,
+because a server or a firewall may have ended its session meanwhile. At
+each check-in it is pinged, and replaced once older than the pool's
+`MaxConnLifetime`, while the pool has connections to spare. When it broke,
+the pool closes it, and the statement runs again, once, on a new one,
+which takes the broken one's place in the pool. A statement on it has the
+renewal's time, a third of the lease.
+
+Completions, fetches, and the records of failed attempts use the pool
+alone. A completion that waits for a connection keeps its lease, because
+renewals continue, and it tries until the lease that it began with could
+have run out.
+
+The worker keeps a reserve only if the pool has its total `Concurrency`
+plus 5 connections, the size that
+[Database](../production/database.md#size-the-connection-pool) asks for,
+and warns otherwise. A smaller pool cannot spare one: workers that share
+it, each keeping one, could hold all of it, and then none could fetch, and
+the application could not enqueue. Through a pooler in transaction mode,
+the reserve is a connection to the pooler, not to PostgreSQL: transactions
+of handlers that hold every server connection of the pooler still make
+renewals wait. We rejected a second pool of the worker's own: it would
+open connections that the application did not count in its pool's size.
 
 ## Complete
 

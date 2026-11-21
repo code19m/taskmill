@@ -21,7 +21,8 @@ All notable changes to taskmill are recorded here. The format follows
   [Database](docs/production/database.md#size-the-connection-pool) asks
   for. pgx's default size, the larger of 4 and the number of CPUs, is below
   the default `Concurrency` of 10, so handlers that share the pool could
-  take every connection, and nothing said so until something waited.
+  take every connection, and nothing said so until something waited. Such a
+  pool also leaves the worker no reserve for its renewals.
 - `Worker.Stats` returns a worker's counts, in a `WorkerStats`: the attempts
   that it started, and those whose success or failure it recorded, its lost
   leases, abandoned handlers, blocked completions, and waits for a full
@@ -60,14 +61,15 @@ All notable changes to taskmill are recorded here. The format follows
   wakes every worker of its queue. The pool size and a stopping worker's
   grace period each have one page, which the others link to.
 - When handlers that share the pool held every connection for longer than
-  a lease, the worker's lease renewals and completions waited for a
-  connection: leases ran out, and tasks ran twice, even tasks that had
-  succeeded. While `Run` runs, the worker now keeps one connection of its
-  pool for renewals, check-ins, and completions, which never wait for
-  handlers. It works through PgBouncer in transaction mode too. Fetches and
-  failed attempts still take connections of the pool, and the warning of a
-  full pool, now `the pool was full, so the worker waited for a
-  connection`, is about them.
+  a lease, the worker's lease renewals waited for a connection: leases ran
+  out, and tasks ran twice. While `Run` runs, the worker now keeps one
+  connection of its pool idle in reserve, if the pool has its total
+  `Concurrency` plus 5 connections: a smaller pool cannot spare one. A
+  renewal or a check-in that finds no connection of the pool within a
+  thirtieth of the lease runs on the reserve. Through a pooler in
+  transaction mode, the reserve does not hold a server connection of the
+  pooler. The warning of a full pool, now `the pool was full, so the worker
+  waited for a connection`, is about the worker's other statements.
 - The maintainer renewed its lease only after it had rescued expired
   leases and run the due schedules. When those took longer than the lease,
   10 seconds, the role changed hands for no reason. The renewal now has a

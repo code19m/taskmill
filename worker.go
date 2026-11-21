@@ -107,10 +107,12 @@ var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with
 // typical; it also takes part in electing the maintainer, which promotes due
 // tasks, rescues expired leases, runs schedules, and applies retention.
 //
-// A worker uses the pool of its [Client]: while Run runs, it keeps one of
-// the pool's connections for the statements that keep its leases and record
-// its successes, so that handlers that hold every other connection cannot
-// make them wait. It also has one connection of its own for notifications.
+// A worker uses the pool of its [Client]. While Run runs, if the pool has at
+// least the worker's total Concurrency plus 5 connections, the worker keeps
+// one of them idle in reserve: a renewal of leases that finds every other
+// connection in use, as when handlers that share the pool hold them, runs
+// on it, so that leases do not run out. The worker also has one connection
+// of its own for notifications.
 // Run may be called again after it returned, but not while it runs.
 //
 // The [guide to workers and queues] shows how to choose the queues, limit
@@ -159,7 +161,7 @@ type Worker struct {
 	completerDone chan struct{}     // closed when the current Run's completer returns
 
 	counts     counters     // what Stats reports
-	own        ownConn      // the connection that Run keeps for renewals, check-ins, and completions
+	reserve    reserve      // the connection that Run keeps for renewals and check-ins that find the pool full
 	poolWarned atomic.Int64 // when the worker last warned that it waited for a full pool, in Unix nanoseconds
 	noHandler  kindWarnings // the kinds without a handler whose tasks the worker met
 
@@ -343,7 +345,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		queueHints:  make(chan struct{}, 1),
 		completions: make(chan *liveAttempt, completionBatch),
 	}
-	w.own = ownConn{w: w, turn: make(chan struct{}, 1)}
+	w.reserve = reserve{w: w, turn: make(chan struct{}, 1)}
 
 	if c.Handlers != nil {
 		for kind, reg := range c.Handlers.byKind {
@@ -449,23 +451,26 @@ func (w *Worker) warnUnservedKinds(ctx context.Context) {
 		"the worker does not read the default queue of these registered kinds", slog.Any(logKeyKinds, kinds))
 }
 
-// warnSmallPool warns if the pool has fewer connections than the worker's
-// total Concurrency plus poolSpare, the size that the docs ask for: handlers
-// that share the pool can then take every connection, and the worker's own
-// statements wait for them. pgx's default size, the larger of 4 and the
-// number of CPUs, is below the default Concurrency. It only warns: the pool
-// is the application's to size.
-func (w *Worker) warnSmallPool(ctx context.Context) {
+// sizedPool reports whether the pool has at least the worker's total
+// Concurrency plus poolSpare connections, the size that the docs ask for,
+// and warns if not: handlers that share the pool can then take every
+// connection, and the worker's own statements wait for them. pgx's default
+// size, the larger of 4 and the number of CPUs, is below the default
+// Concurrency. It only warns: the pool is the application's to size.
+func (w *Worker) sizedPool(ctx context.Context) bool {
 	concurrency := 0
 	for _, q := range w.queues {
 		concurrency += cap(q.slots)
 	}
 
-	if conns := int(w.client.pool.Stat().MaxConns()); conns < concurrency+poolSpare {
-		w.logger.LogAttrs(ctx, slog.LevelWarn, "the pool has fewer connections than the worker's total Concurrency plus 5; "+
-			"see https://github.com/code19m/taskmill/blob/main/docs/production/database.md#size-the-connection-pool",
-			slog.Int(logKeyMaxConns, conns), slog.Int(logKeyConcurrency, concurrency))
+	conns := int(w.client.pool.Stat().MaxConns())
+	if conns >= concurrency+poolSpare {
+		return true
 	}
+	w.logger.LogAttrs(ctx, slog.LevelWarn, "the pool has fewer connections than the worker's total Concurrency plus 5; "+
+		"see https://github.com/code19m/taskmill/blob/main/docs/production/database.md#size-the-connection-pool",
+		slog.Int(logKeyMaxConns, conns), slog.Int(logKeyConcurrency, concurrency))
+	return false
 }
 
 // queueState is one queue that the worker serves.
@@ -615,7 +620,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.listenFailures = newIncidentLog(w, "listen for notifications")
 
 	w.prepareHistory(ctx)
-	w.warnSmallPool(ctx)
+	sized := w.sizedPool(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
 
@@ -624,10 +629,14 @@ func (w *Worker) Run(ctx context.Context) error {
 	recordCtx, stopRecording := context.WithCancel(base)
 	defer stopRecording()
 
-	// The worker's own connection is taken before any handler can take
-	// the pool's, and given back once nothing more uses it.
-	w.own.keep(ctx)
-	defer w.own.release()
+	// A pool of that size spares the worker a reserve, which it takes before
+	// any handler can take the pool's, and gives back once nothing more uses
+	// it. A smaller pool cannot spare one: workers that share it could hold
+	// all of it, and then none could fetch.
+	if sized {
+		w.reserve.keep(ctx)
+		defer w.reserve.release()
+	}
 
 	w.released.Store(0)
 	w.completerDone = make(chan struct{})
@@ -870,9 +879,12 @@ type WorkerStats struct {
 	// held: the task's, or its FIFO group's.
 	CompletionsBlocked int64
 
-	// PoolWaits counts the fetches and records of failed attempts that found
-	// every connection of the pool in use, and waited for one. Handlers that
-	// share the pool hold them, or the pool is too small: see [Worker].
+	// PoolWaits counts the statements of the worker that found every
+	// connection of the pool in use, and waited for one: fetches,
+	// completions, the records of failed attempts, renewals of leases, and
+	// check-ins. Handlers that share the pool hold them, or the pool is too
+	// small. A renewal waits a thirtieth of the lease at most, and then uses
+	// the worker's reserve: see [Worker].
 	PoolWaits int64
 
 	// Slots is the sum of the Concurrency of the worker's queues.

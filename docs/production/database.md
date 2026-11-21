@@ -91,11 +91,12 @@ Give each worker's pool its **total `Concurrency` plus 5** connections. Add up
 postgres://shop@db.internal:5432/shop?pool_max_conns=15
 ```
 
-Why: a running task holds no connection of its own. But if your handlers use
-the same pool, they can take every connection. While `Run` runs, the worker
-keeps one connection for lease renewals, check-ins, and completions, so its
-tasks' [leases](../concepts/glossary.md#lease) still renew. Fetches and the
-records of failed attempts wait for a connection, so tasks start late.
+Why: a running task holds no connection of its own, but handlers that use the
+same pool can take every connection. In a pool of this size, the worker keeps
+one in reserve while `Run` runs, so its tasks'
+[leases](../concepts/glossary.md#lease) still renew, while its fetches and
+completions wait, and tasks start late. In a smaller pool, the worker keeps
+none: renewals wait too, leases can run out, and tasks run twice.
 
 The 5 extra connections are for the worker's own work. `Run` warns at start
 if the pool is smaller: `the pool has fewer connections than the worker's

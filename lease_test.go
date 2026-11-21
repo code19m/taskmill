@@ -3,6 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strings"
@@ -236,6 +237,39 @@ func TestLeaseRenewalSkipsLockedTasks(t *testing.T) {
 	}
 }
 
+// holdAll returns a handler's work that takes up to most connections of
+// pool, as many as it gets, and holds them until release is closed or its
+// context ends.
+func holdAll(pool *pgxpool.Pool, most int, release <-chan struct{}) func(context.Context) error {
+	return func(ctx context.Context) error {
+		taking, stop := context.WithCancel(ctx)
+		defer stop()
+		go func() {
+			select {
+			case <-release:
+				stop()
+			case <-taking.Done():
+			}
+		}()
+
+		var conns []*pgxpool.Conn
+		defer func() {
+			for _, c := range conns {
+				c.Release()
+			}
+		}()
+		for len(conns) < most {
+			c, err := pool.Acquire(taking)
+			if err != nil {
+				break
+			}
+			conns = append(conns, c)
+		}
+		<-taking.Done()
+		return context.Cause(ctx) // nil once released
+	}
+}
+
 // connHolders returns handlers that hold a connection of pool each, as
 // holdConn does.
 func connHolders(pool *pgxpool.Pool, started chan<- struct{}, release <-chan struct{}) *taskmill.Handlers {
@@ -267,21 +301,21 @@ func holdConn(pool *pgxpool.Pool, started chan<- struct{}, release <-chan struct
 	}
 }
 
-func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
+func TestHandlersThatHoldThePoolDoNotCostLeases(t *testing.T) {
 	t.Parallel()
-	pool := testdb.PoolSize(t, 3)
+	pool := testdb.PoolSize(t, 10) // the size that the docs ask for: Concurrency 5, plus 5
 	logs := &logRecorder{}
 	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
 	watch := *e
 	watch.pool = testdb.Pool(t) // the test's own reads: the worker's pool is full
 
-	// Three handlers take a connection each and hold it for longer than a
-	// lease, as handlers that share the pool with the worker can. Two others
-	// return once the pool is full, so that their completions find no free
-	// connection either.
+	// Three handlers take up to 4 connections each, every one that the
+	// worker leaves them, and hold them for longer than a lease, as handlers
+	// that share the pool with the worker can. Two others return once the
+	// pool is full: their completions wait for it, and are not lost.
 	const lease = 600 * time.Millisecond
-	holding, full, release := make(chan struct{}, 3), make(chan struct{}), make(chan struct{})
-	hold := holdConn(pool, holding, release)
+	full, release := make(chan struct{}), make(chan struct{})
+	hold := holdAll(pool, 4, release)
 	runs := map[int64]*atomic.Int32{}
 	var ids []int64
 	for i := range 5 {
@@ -292,7 +326,7 @@ func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
 		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
 			runs[task.ID].Add(1)
 			if task.Args.UserID < 3 {
-				return hold(ctx, task)
+				return hold(ctx)
 			}
 			<-full
 			return nil
@@ -303,25 +337,23 @@ func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
 	})
 	startWorker(t, w)
 
-	// The worker keeps a connection of its own, so two handlers hold the
-	// rest, and the third waits for one.
-	recv(t, holding, "a handler to take a connection")
-	recv(t, holding, "a handler to take a connection")
+	waitFor(t, "the handlers to hold every free connection", func() bool {
+		s := pool.Stat()
+		return s.AcquiredConns() == s.MaxConns()
+	})
 	var since time.Time
 	if err := watch.pool.QueryRow(t.Context(), "SELECT now()").Scan(&since); err != nil {
 		t.Fatal(err)
 	}
 	close(full)
 
-	waitFor(t, "the tasks that returned to complete", func() bool {
-		return watch.count(t, "SELECT count(*) FROM {s}.task_history WHERE id = ANY($1)", ids[3:]) == 2
-	})
 	waitFor(t, "the leases of the running tasks to be renewed for a while", func() bool {
 		return watch.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = ANY($1) AND lease_expires_at > $2",
 			ids[:3], since.Add(3*lease)) == 3
 	})
-	// The two free slots fetch, and wait for the full pool.
-	waitFor(t, "a fetch to wait for the pool", func() bool { return w.Stats().PoolWaits > 0 })
+	// The completions of the tasks that returned, and the fetches of their
+	// free slots, wait for the full pool.
+	waitFor(t, "a statement to wait for the pool", func() bool { return w.Stats().PoolWaits > 0 })
 
 	close(release)
 	waitFor(t, "every task to complete", func() bool {
@@ -330,8 +362,8 @@ func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
 	const poolWarning = "the pool was full, so the worker waited for a connection; raise MaxConns, or give handlers a pool of their own"
 	waitFor(t, "the warning that the fetch waited", func() bool { return logs.count(poolWarning) > 0 })
 	for _, r := range logs.all() {
-		if r.Message == poolWarning && (r.Level != slog.LevelWarn || attr(r, "max_conns") != "3") {
-			t.Errorf("got %s, want a warning with max_conns=3", recordText(r))
+		if r.Message == poolWarning && (r.Level != slog.LevelWarn || attr(r, "max_conns") != "10") {
+			t.Errorf("got %s, want a warning with max_conns=10", recordText(r))
 		}
 	}
 	for id, n := range runs {
@@ -341,6 +373,157 @@ func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
 	}
 	if n := logs.count("attempt lost its lease; canceling it"); n > 0 {
 		t.Errorf("%d attempts lost their leases", n)
+	}
+}
+
+// A pool below the size that the docs ask for cannot spare a connection:
+// workers that share it keep none, so that they never hold all of it, and
+// each of them still fetches. Here three workers share two connections.
+func TestWorkersThatShareASmallPoolKeepNoConnection(t *testing.T) {
+	t.Parallel()
+	e := newEnvWith(t, testdb.PoolSize(t, 2), nil)
+	watch := *e
+	watch.pool = testdb.Pool(t) // the test's own reads: kept connections would leave it none
+	ids := make([]int64, 6)
+	for i := range ids {
+		ids[i] = e.enqueue(t, sendEmail{UserID: int64(i)}, nil)
+	}
+
+	for range 3 {
+		runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1), NoMaintainer: true})
+	}
+	waitFor(t, "every task to complete", func() bool {
+		return watch.count(t, "SELECT count(*) FROM {s}.task_history WHERE id = ANY($1)", ids) == len(ids)
+	})
+}
+
+// A pool of one or two connections spares no reserve: the worker runs its
+// tasks on the pool alone.
+func TestWorkerRunsTasksWithATinyPool(t *testing.T) {
+	t.Parallel()
+	for _, conns := range []int32{1, 2} {
+		e := newEnvWith(t, testdb.PoolSize(t, conns), nil)
+		watch := *e
+		watch.pool = testdb.Pool(t)
+		id := e.enqueue(t, sendEmail{}, nil)
+		runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+		waitFor(t, fmt.Sprintf("the task to complete with a pool of %d", conns), func() bool {
+			return watch.count(t, "SELECT count(*) FROM {s}.task_history WHERE id = $1", id) == 1
+		})
+	}
+}
+
+// A server that ends idle sessions, as idle_session_timeout does, ends the
+// sessions of the pool and of the reserve between check-ins. Renewals still
+// find a live connection, and the leases hold.
+func TestLeasesOutlastSessionsThatTheServerEnds(t *testing.T) {
+	t.Parallel()
+	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := cfg.ConnConfig.Copy() // notifications need a session that stays
+	cfg.MaxConns = 6
+	cfg.ConnConfig.RuntimeParams["idle_session_timeout"] = "1000"
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	logs := &logRecorder{}
+	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
+
+	// A check-in every 1.3 seconds: each finds the sessions of a second ago
+	// ended.
+	const lease = 4 * time.Second
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			}
+		}, nil),
+		Queues:        defaultQueue(1),
+		LeaseDuration: lease,
+		NoMaintainer:  true,
+		ListenConfig:  listen,
+	})
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the handler to start")
+
+	var since time.Time
+	if err := pool.QueryRow(t.Context(), "SELECT now()").Scan(&since); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the lease to be renewed for longer than a lease", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND lease_expires_at > $2", id, since.Add(2*lease)) == 1
+	})
+	close(release)
+	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 {
+		t.Errorf("completed on attempt %d, want 1", info.Attempt)
+	}
+	if n := logs.count("attempt lost its lease; canceling it"); n > 0 {
+		t.Errorf("%d attempts lost their leases", n)
+	}
+}
+
+// A reserve whose session ended, as in a failover, is replaced, and the
+// statement runs again on the new one, also while handlers hold every other
+// connection: the pool closes the broken one, and its place takes the new
+// one.
+func TestBrokenReserveIsReplaced(t *testing.T) {
+	t.Parallel()
+	pool := testdb.PoolSize(t, 6)
+	e := newEnvWith(t, pool, nil)
+	ended := testdb.Pool(t) // the test's own statements: the pool fills up
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+	taskmill.KeepReserve(t.Context(), t, w)
+	end := func() {
+		t.Helper()
+		pid := int(taskmill.ReservePID(w))
+		var done bool
+		if err := ended.QueryRow(t.Context(), "SELECT pg_terminate_backend($1)", pid).Scan(&done); err != nil {
+			t.Fatal(err)
+		}
+		if !done {
+			t.Skip("a pooler in front of the database hides the reserve's session")
+		}
+		waitFor(t, "the reserve's session to end", func() bool {
+			var n int
+			if err := ended.QueryRow(t.Context(), "SELECT count(*) FROM pg_stat_activity WHERE pid = $1", pid).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			return n == 0
+		})
+	}
+
+	end()
+	if err := taskmill.OnReserve(t.Context(), w, "SELECT 1"); err != nil {
+		t.Fatalf("a statement on a reserve whose session ended: %v, want it run on a new one", err)
+	}
+
+	var held []*pgxpool.Conn
+	defer func() {
+		for _, c := range held {
+			c.Release()
+		}
+	}()
+	for s := pool.Stat(); s.AcquiredConns() < s.MaxConns(); s = pool.Stat() {
+		c, err := pool.Acquire(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, c)
+	}
+	end()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second) // a renewal's time, with a lease of 3 seconds
+	defer cancel()
+	if err := taskmill.OnReserve(ctx, w, "SELECT 1"); err != nil {
+		t.Fatalf("in a full pool, a statement on a reserve whose session ended: %v, want it run on a new one", err)
 	}
 }
 

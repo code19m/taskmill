@@ -55,6 +55,7 @@ your handlers must follow.
 |---|---|---|
 | A worker crashes after the work, before it saves the result | The lease runs out, and another worker runs the task | You cannot prevent it: make the handler safe to run twice |
 | A worker loses the database for more than about 20 seconds | The worker cannot renew its leases, so it stops its tasks. They run again, or become dead if that was their last attempt | If your database's failover takes longer than that, [Database](../production/database.md#when-the-database-fails) shows what to change, and what it costs |
+| Handlers use every connection of a pool smaller than your total concurrency plus 5 | Such a pool cannot spare the worker a reserve connection, so it cannot renew its leases in time | [Size the pool](../production/database.md#size-the-connection-pool) for the worker, or give handlers a pool of their own |
 | A handler ignores its context after its `Timeout` | 5 seconds later, the worker abandons the attempt and fails it, so the task is retried while the handler may still run | Return quickly when `ctx` ends |
 | A handler ignores the end of its context at shutdown | The worker gives the task back ([release](glossary.md#release)), and it starts again on another worker | Return quickly when `ctx` ends |
 | The platform kills the worker before it [drains](glossary.md#drain) | The same as a crash | Give the process the grace period that [Deploys](../production/deploys.md#stop-workers-without-losing-work) asks for |

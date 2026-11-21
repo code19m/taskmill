@@ -53,8 +53,9 @@ func (w *Worker) checkIn(ctx context.Context) {
 	// Leases first: on a slow database they need the check-in's time more
 	// than the worker's own row, which only shows that it is alive.
 	w.renewLeases(ctx, ts)
+
 	var listed bool
-	err := w.own.do(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
+	err := w.leaseStatement(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
 		tag, err := conn.Exec(ctx, w.client.sql.checkInWorker, w.id)
 		listed = tag.RowsAffected() > 0
 		return err
@@ -70,6 +71,7 @@ func (w *Worker) checkIn(ctx context.Context) {
 		now := time.Now()
 		w.reached.Store(&now)
 	}
+	w.reserve.refresh(ctx)
 }
 
 // Health reports whether the worker runs and is in touch with the database:
@@ -164,7 +166,7 @@ type renewal struct {
 // own their tasks.
 func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[int64]renewal, error) {
 	var renewals map[int64]renewal
-	err := w.own.do(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
+	err := w.leaseStatement(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
 		r, err := conn.Query(ctx, w.client.sql.renewLeases, ids, tokens, w.cfg.LeaseDuration.Microseconds())
 		if err != nil {
 			return err
@@ -190,83 +192,167 @@ func (w *Worker) renew(ctx context.Context, ids []int64, tokens []int32) (map[in
 	return renewals, nil
 }
 
-// ownConn is the connection that the worker keeps from its client's pool
-// while Run runs, for the statements that keep its leases and record its
-// successes: renewals, check-ins, and completions. Handlers that share the
-// pool can hold every other connection for longer than a lease: were these
-// statements to wait for one, leases would run out, and tasks that succeeded
-// would run again. The statements take turns. Outside Run, as for RunTask,
-// each statement takes a connection of the pool. Why one connection:
+// leaseStatement runs fn, a renewal or a check-in, on a connection of the
+// pool. If the pool has none free within a thirtieth of the lease, as when
+// handlers that share it hold every connection, fn runs on the worker's
+// reserve instead: renewals that waited longer could let leases run out,
+// and tasks would run twice.
+func (w *Worker) leaseStatement(ctx context.Context, fn func(context.Context, *pgxpool.Conn) error) error {
+	wait, cancel := context.WithTimeout(ctx, w.cfg.LeaseDuration/30)
+	conn, err := w.acquire(wait)
+	cancel()
+	if err != nil && ctx.Err() == nil {
+		return w.reserve.do(ctx, fn)
+	}
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	return fn(ctx, conn)
+}
+
+// reserve is a connection of the pool that the worker keeps idle while Run
+// runs, for the renewals and check-ins that find no connection of the pool
+// free: see leaseStatement. Run keeps one only if the pool has the size
+// that the docs ask for: a smaller pool cannot spare it. Without one, as
+// outside Run, those statements wait for the pool, as the others do. Why:
 // https://github.com/code19m/taskmill/blob/main/docs/design/schema-statements.md.
-type ownConn struct {
-	w    *Worker
-	turn chan struct{} // full while a statement, keep, or release uses the fields below
-	conn *pgxpool.Conn // nil until a statement takes one, and after an error that broke it
-	kept bool          // Run runs: keep conn between statements
+type reserve struct {
+	w        *Worker
+	turn     chan struct{} // full while a statement, keep, refresh, or release uses the fields below
+	conn     *pgxpool.Conn // nil until taken, and once it broke
+	taken    time.Time     // when conn was taken from the pool
+	used     time.Time     // when conn last answered
+	lifetime time.Duration // the pool's MaxConnLifetime: once older, conn is replaced
+	kept     bool          // Run runs, with a pool of the size that the docs ask for
 }
 
-// keep starts keeping a connection, and takes it now: Run calls it before
-// any handler runs, while the pool has a free connection. If that fails, the
-// first statement takes one.
-func (o *ownConn) keep(ctx context.Context) {
-	o.turn <- struct{}{}
-	defer func() { <-o.turn }()
-	o.kept = true
-	if conn, err := o.w.acquire(ctx); err == nil {
-		o.conn = conn
-	}
+// keep starts keeping a reserve, and takes it now: Run calls it before any
+// handler runs. It waits a third of the lease for a connection at most, so
+// that Run starts also while others hold the whole pool. The next check-in
+// then tries again.
+func (r *reserve) keep(ctx context.Context) {
+	r.turn <- struct{}{}
+	defer func() { <-r.turn }()
+	r.kept, r.lifetime = true, r.w.client.pool.Config().MaxConnLifetime
+
+	ctx, cancel := context.WithTimeout(ctx, r.w.cfg.LeaseDuration/3)
+	defer cancel()
+	_ = r.take(ctx) // failed: a later check-in takes one
 }
 
-// release stops keeping the connection, and gives it back to the pool.
-func (o *ownConn) release() {
-	o.turn <- struct{}{}
-	defer func() { <-o.turn }()
-	o.kept = false
-	if o.conn != nil {
-		o.conn.Release()
-		o.conn = nil
-	}
+// release stops keeping the reserve, and gives it back to the pool.
+func (r *reserve) release() {
+	r.turn <- struct{}{}
+	defer func() { <-r.turn }()
+	r.kept = false
+	r.drop()
 }
 
-// do runs fn on the kept connection, once it is its turn, or, outside Run,
-// on a connection of the pool. On the kept connection, fn has a third of the
-// lease at most, but a second at least: a statement that hangs, as on a
-// connection that died without a word, then holds up the next renewal by
-// about one check-in, which a lease outlasts. If fn's error left the
-// connection unusable, the pool closes it, and the next statement takes
-// another: only that one may wait for handlers.
-func (o *ownConn) do(ctx context.Context, fn func(context.Context, *pgxpool.Conn) error) error {
+// do runs fn on the reserve, once it is its turn, or, without a reserve, on
+// a connection of the pool. If the reserve's connection broke, as when the
+// server ended its session, do takes another and runs fn again, once.
+func (r *reserve) do(ctx context.Context, fn func(context.Context, *pgxpool.Conn) error) error {
 	select {
-	case o.turn <- struct{}{}:
+	case r.turn <- struct{}{}:
 	case <-ctx.Done():
 		return context.Cause(ctx)
 	}
-	if !o.kept {
-		<-o.turn
-		conn, err := o.w.acquire(ctx)
+	if !r.kept {
+		<-r.turn
+		conn, err := r.w.acquire(ctx)
 		if err != nil {
 			return err
 		}
 		defer conn.Release()
 		return fn(ctx, conn)
 	}
-	defer func() { <-o.turn }()
+	defer func() { <-r.turn }()
 
-	if o.conn == nil {
-		conn, err := o.w.acquire(ctx)
-		if err != nil {
-			return err
-		}
-		o.conn = conn
-	}
-	ctx, cancel := context.WithTimeout(ctx, max(o.w.cfg.LeaseDuration/3, time.Second))
-	defer cancel()
-	err := fn(ctx, o.conn)
-	if c := o.conn.Conn(); err != nil && (c.IsClosed() || c.PgConn().IsBusy() || c.PgConn().TxStatus() != 'I') {
-		o.conn.Release()
-		o.conn = nil
+	err := r.run(ctx, fn)
+	if err != nil && r.conn == nil && ctx.Err() == nil {
+		err = r.run(ctx, fn)
 	}
 	return err
+}
+
+// run runs fn on the reserve's connection. It takes one if it has none, and
+// pings it first if it was idle for more than a second, as the pool does
+// with its own: a reserve is idle most of the time, and a server, a
+// firewall, or a failover may have ended its session meanwhile. It drops a
+// connection that fails either way.
+func (r *reserve) run(ctx context.Context, fn func(context.Context, *pgxpool.Conn) error) error {
+	if r.conn != nil && time.Since(r.used) > time.Second && r.conn.Ping(ctx) != nil {
+		r.drop()
+	}
+	if r.conn == nil {
+		if err := r.take(ctx); err != nil {
+			return err
+		}
+	}
+
+	err := fn(ctx, r.conn)
+	if c := r.conn.Conn(); err != nil && (c.IsClosed() || c.PgConn().IsBusy() || c.PgConn().TxStatus() != 'I') {
+		r.drop()
+	}
+	if err == nil {
+		r.used = time.Now()
+	}
+	return err
+}
+
+// refresh keeps the reserve ready while the pool has connections to spare,
+// at each check-in: it takes one if it has none, and replaces one that is
+// older than the pool's MaxConnLifetime, which the pool would have closed,
+// or that does not answer a ping. It waits a thirtieth of the lease for the
+// pool at most. A connection that is only old stays until a new one comes.
+func (r *reserve) refresh(ctx context.Context) {
+	select {
+	case r.turn <- struct{}{}:
+	case <-ctx.Done():
+		return
+	}
+	defer func() { <-r.turn }()
+
+	if !r.kept {
+		return
+	}
+	old := r.conn != nil && r.lifetime > 0 && time.Since(r.taken) >= r.lifetime
+	if r.conn != nil && !old && r.conn.Ping(ctx) == nil {
+		r.used = time.Now()
+		return
+	}
+	if r.conn != nil && !old {
+		r.drop() // it did not answer
+	}
+
+	wait, cancel := context.WithTimeout(ctx, r.w.cfg.LeaseDuration/30)
+	defer cancel()
+	conn, err := r.w.acquire(wait)
+	if err != nil {
+		return
+	}
+	r.drop()
+	r.conn, r.taken, r.used = conn, time.Now(), time.Now()
+}
+
+// take takes the reserve's connection from the pool.
+func (r *reserve) take(ctx context.Context) error {
+	conn, err := r.w.acquire(ctx)
+	if err != nil {
+		return err
+	}
+	r.conn, r.taken, r.used = conn, time.Now(), time.Now()
+	return nil
+}
+
+// drop gives the reserve's connection back to the pool, which closes it if
+// it broke or is too old.
+func (r *reserve) drop() {
+	if r.conn != nil {
+		r.conn.Release()
+		r.conn = nil
+	}
 }
 
 // acquire takes a connection of the pool for a statement of the worker. If

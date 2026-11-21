@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // completer records successful attempts in batches, on record, until ctx
@@ -133,15 +132,15 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*liveAttempt) []compl
 	return done
 }
 
-// completeBatch completes a batch of successful attempts, on the worker's own
-// connection. Ungrouped tasks complete in one statement, which skips the
-// rows that other transactions hold. Grouped tasks complete in one
-// transaction, which first locks their groups' rows and then their own,
-// skipping rows that other transactions hold. It returns the tasks whose
-// rows or groups' rows were held, for example by a transaction that cancels
-// a task or enqueues into a group, so that the completer tries them again
-// later instead of waiting for those locks; they stay tracked, so their
-// leases are renewed once the rows are free.
+// completeBatch completes a batch of successful attempts. Ungrouped tasks
+// complete in one statement, which skips the rows that other transactions
+// hold. Grouped tasks complete in one transaction, which first locks their
+// groups' rows and then their own, skipping rows that other transactions
+// hold. It returns the tasks whose rows or groups' rows were held, for
+// example by a transaction that cancels a task or enqueues into a group, so
+// that the completer tries them again later instead of waiting for those
+// locks; they stay tracked, so their leases are renewed once the rows are
+// free.
 func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (blocked []*liveAttempt) {
 	var plain, grouped []*liveAttempt
 	for _, t := range batch {
@@ -156,11 +155,13 @@ func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (block
 		var done []completedTask
 		var held map[int64]bool
 		err := w.whileLeased(ctx, plain, func(ctx context.Context) error {
-			return w.own.do(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
-				var err error
-				done, held, err = w.client.completeSkipping(ctx, w.logger, pgxExecutor{q: conn}, completionsOf(plain))
+			conn, err := w.acquire(ctx)
+			if err != nil {
 				return err
-			})
+			}
+			defer conn.Release()
+			done, held, err = w.client.completeSkipping(ctx, w.logger, pgxExecutor{q: conn}, completionsOf(plain))
+			return err
 		})
 		if err == nil {
 			blocked = slices.DeleteFunc(slices.Clone(plain), func(t *liveAttempt) bool { return !held[t.att.id] })
@@ -175,12 +176,15 @@ func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (block
 	var done []completedTask
 	var heldGroups []*liveAttempt
 	err := w.whileLeased(ctx, grouped, func(ctx context.Context) error {
-		return w.own.do(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
-			return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
-				var err error
-				heldGroups, done, err = w.completeLocked(ctx, pgxExecutor{q: tx}, grouped)
-				return err
-			})
+		conn, err := w.acquire(ctx)
+		if err != nil {
+			return err
+		}
+		defer conn.Release()
+		return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+			var err error
+			heldGroups, done, err = w.completeLocked(ctx, pgxExecutor{q: tx}, grouped)
+			return err
 		})
 	})
 	if err != nil {

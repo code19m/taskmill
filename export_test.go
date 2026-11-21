@@ -7,9 +7,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // BatchTimeout is the time that a batch of a bulk action has.
@@ -77,6 +79,34 @@ func Fetch(ctx context.Context, w *Worker, queue string, slots int, maxRunning i
 	q.maxRunning.Store(maxRunning)
 	tasks, more, atLimit, err := w.fetch(ctx, q, slots)
 	return len(tasks), more, atLimit, err
+}
+
+// KeepReserve makes w keep a reserve connection, as Run does when it starts
+// with a pool of the size that the docs ask for, until the test ends.
+func KeepReserve(ctx context.Context, tb testing.TB, w *Worker) {
+	tb.Helper()
+	w.reserve.keep(ctx)
+	tb.Cleanup(w.reserve.release)
+}
+
+// ReservePID returns the process ID of the server session of w's reserve,
+// or 0 if it has none.
+func ReservePID(w *Worker) uint32 {
+	w.reserve.turn <- struct{}{}
+	defer func() { <-w.reserve.turn }()
+	if w.reserve.conn == nil {
+		return 0
+	}
+	return w.reserve.conn.Conn().PgConn().PID()
+}
+
+// OnReserve runs sql on w's reserve, as a renewal does when the pool has no
+// connection free.
+func OnReserve(ctx context.Context, w *Worker, sql string) error {
+	return w.reserve.do(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
+		_, err := conn.Exec(ctx, sql)
+		return err
+	})
 }
 
 // TrailingNotification reports whether c holds a notification of queue back,
