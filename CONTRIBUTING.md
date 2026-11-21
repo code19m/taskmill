@@ -98,11 +98,13 @@ your judgment:
 - **Keep to its design:** [How the dashboard is built](docs/design/README.md#how-the-dashboard-is-built)
   says what its pages and its scripts may use, and the top of
   [style.css](ui/static/style.css) says how it looks.
-- **Test the script in a browser:** a change to `ui/static/app.js` gets a
-  test in [ui/browsertest](ui/browsertest/doc.go), which `make
-  test-browser` runs. A word function that the script shares with the
-  server, such as `ago`, gets its cases in
-  [ui/internal/twins](ui/internal/twins/twins.go).
+- **Test the script in a browser:** the script is native ES modules in
+  `ui/static`, with no build step. [app.js](ui/static/app.js) imports the
+  others, and starts them in order: a module adds its listeners in its
+  `listen` function, never as it loads. A change to a module gets a test
+  in [ui/browsertest](ui/browsertest/doc.go), which `make test-browser`
+  runs. A word function that the script shares with the server, such as
+  `ago`, gets its cases in [ui/internal/twins](ui/internal/twins/twins.go).
 - **Look at it:** in the light and the dark theme, and at the width of a
   phone. No test sees how a page looks.
 
