@@ -70,6 +70,7 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 })
 // ...
 _, err = tel.ObserveQueues(client) // the queue gauges
+_, err = tel.ObserveWorker(worker) // the worker counters
 ```
 
 What you get:
@@ -81,6 +82,7 @@ What you get:
 | Span `send {topic}` | Each outbox message sent to the broker. The message's headers carry the trace on to the consumers. If your publisher panics, the spans of its messages end with the error type `panic` |
 | Counters and histograms | Tasks enqueued, and how long enqueues and attempts take, per queue and kind. Failures carry an `error.type`, such as `timeout` |
 | Queue gauges | Tasks per queue and state, the queue's [lag](../concepts/glossary.md#lag), and how old the counts are. See [below](#watch-queue-depth-and-lag) |
+| Worker counters | Attempts, lost leases, abandoned handlers, pool waits, and the slots by state, per process. See [Metrics and traces](../reference/metrics.md#worker-counters) |
 
 The metrics never carry task IDs, so they create few time series.
 [Metrics and traces](../reference/metrics.md) lists every name and

@@ -77,7 +77,11 @@ func (w *Worker) checkIn(ctx context.Context) {
 // and otherwise an error that says why. A worker out of touch for that long
 // can no longer keep its tasks' leases. It is also an error until Run has
 // read the settings of the worker's queues, which it does when it starts:
-// the worker fetches no task before that. Health reads only memory, so a
+// the worker fetches no task before that. And it is an error while handlers
+// that did not return 5 seconds after their context ended, by their
+// Timeout, a cancel, or a lost lease, hold every slot of the worker's
+// queues: the worker can start no task until one of them returns, and
+// [WorkerStats.SlotsStuck] counts them. Health reads only memory, so a
 // readiness probe may call it often. It fails while the database is out of
 // reach, which restarting the worker does not fix: do not base a liveness
 // probe on it. The error wraps none of taskmill's error values.
@@ -95,6 +99,10 @@ func (w *Worker) Health() error {
 	}
 	if !w.settled.Load() {
 		return errors.New("taskmill: the worker has not read the settings of its queues")
+	}
+	if s := w.Stats(); s.Slots > 0 && s.SlotsStuck == s.Slots {
+		return fmt.Errorf("taskmill: all %d slots of the worker are held by handlers that did not return %s after their context ended",
+			s.SlotsStuck, w.timing.shutdownGrace)
 	}
 	return nil
 }
@@ -262,16 +270,19 @@ func (o *ownConn) do(ctx context.Context, fn func(context.Context, *pgxpool.Conn
 }
 
 // acquire takes a connection of the pool for a statement of the worker. If
-// every connection was in use, and it waited for one for a while, it warns,
-// at most once per failureReport: handlers that share the pool may hold all
-// its connections, and the worker's fetches and records then wait for them.
-// It judges by what happened, not by the pool's size, because it cannot see
-// which pool the handlers use. A wait for a new connection to open, or a
-// short wait, is normal.
+// every connection was in use, it counts a pool wait, and if it then waited
+// for a while, it warns, at most once per failureReport: handlers that share
+// the pool may hold all its connections, and the worker's fetches and
+// records wait for them. It judges by what happened, not by the pool's size,
+// because it cannot see which pool the handlers use. A wait for a new
+// connection to open, or a short wait, is normal.
 func (w *Worker) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	s := w.client.pool.Stat()
 	full := s.IdleConns() == 0 && s.TotalConns() >= s.MaxConns()
 
+	if full {
+		w.counts.poolWaits.Add(1)
+	}
 	start := time.Now()
 	conn, err := w.client.pool.Acquire(ctx)
 	waited := time.Since(start)
@@ -298,6 +309,7 @@ func (w *Worker) loseLease(ctx context.Context, t *liveAttempt) {
 	if !running || t.att.completedInTx.Load() || t.lost.Swap(true) {
 		return
 	}
+	w.counts.leasesLost.Add(1)
 	w.logger.LogAttrs(ctx, slog.LevelWarn, "attempt lost its lease; canceling it",
 		slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind))
 	t.cancelAttempt(ErrLeaseLost)
@@ -391,6 +403,7 @@ func (w *Worker) track(ctx context.Context, t *liveAttempt) {
 	w.mu.Unlock()
 
 	if replaced && !old.lost.Swap(true) {
+		w.counts.leasesLost.Add(1)
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "attempt lost its lease; canceling it",
 			slog.Int64(logKeyTaskID, old.att.id), slog.String(logKeyKind, old.info.Kind))
 		old.cancelAttempt(ErrLeaseLost)

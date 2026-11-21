@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -287,7 +288,7 @@ func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
 		id := e.enqueue(t, sendEmail{UserID: int64(i)}, nil)
 		ids, runs[id] = append(ids, id), &atomic.Int32{}
 	}
-	runWorker(t, e, &taskmill.WorkerConfig{
+	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
 			runs[task.ID].Add(1)
 			if task.Args.UserID < 3 {
@@ -300,6 +301,7 @@ func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
 		LeaseDuration: lease,
 		NoMaintainer:  true,
 	})
+	startWorker(t, w)
 
 	// The worker keeps a connection of its own, so two handlers hold the
 	// rest, and the third waits for one.
@@ -318,11 +320,20 @@ func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
 		return watch.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = ANY($1) AND lease_expires_at > $2",
 			ids[:3], since.Add(3*lease)) == 3
 	})
+	// The two free slots fetch, and wait for the full pool.
+	waitFor(t, "a fetch to wait for the pool", func() bool { return w.Stats().PoolWaits > 0 })
 
 	close(release)
 	waitFor(t, "every task to complete", func() bool {
 		return watch.count(t, "SELECT count(*) FROM {s}.task_history WHERE id = ANY($1)", ids) == len(ids)
 	})
+	const poolWarning = "the pool was full, so the worker waited for a connection; raise MaxConns, or give handlers a pool of their own"
+	waitFor(t, "the warning that the fetch waited", func() bool { return logs.count(poolWarning) > 0 })
+	for _, r := range logs.all() {
+		if r.Message == poolWarning && (r.Level != slog.LevelWarn || attr(r, "max_conns") != "3") {
+			t.Errorf("got %s, want a warning with max_conns=3", recordText(r))
+		}
+	}
 	for id, n := range runs {
 		if n.Load() != 1 {
 			t.Errorf("task %d ran %d times, want once", id, n.Load())
@@ -335,10 +346,9 @@ func TestLeasesAndCompletionsDoNotWaitForHandlersThatHoldThePool(t *testing.T) {
 
 func TestWorkerDoesNotWarnWhenHandlersHaveTheirOwnPool(t *testing.T) {
 	t.Parallel()
-	// taskmill's pool has fewer connections than the worker's concurrency
-	// plus 5, and the handlers hold every connection of their own pool.
+	// The handlers hold every connection of their own pool.
 	logs := &logRecorder{}
-	e := newEnvWith(t, testdb.PoolSize(t, 16), &taskmill.ClientConfig{Logger: slog.New(logs)})
+	e := newEnvWith(t, testdb.PoolSize(t, 25), &taskmill.ClientConfig{Logger: slog.New(logs)})
 	own := testdb.PoolSize(t, 4)
 	const lease = 600 * time.Millisecond
 	started, release := make(chan struct{}, 4), make(chan struct{})
@@ -404,7 +414,7 @@ func testLostLease(t *testing.T, lose func(e *env, id int64) (release func())) {
 	e := newEnv(t)
 	started := make(chan int64, 1)
 	causes := make(chan error, 1)
-	runWorker(t, e, &taskmill.WorkerConfig{
+	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
 			if task.Attempt > 1 {
 				return nil
@@ -417,6 +427,7 @@ func testLostLease(t *testing.T, lose func(e *env, id int64) (release func())) {
 		Queues:        defaultQueue(1),
 		LeaseDuration: 300 * time.Millisecond,
 	})
+	startWorker(t, w)
 
 	id := e.enqueue(t, sendEmail{}, nil)
 	recv(t, started, "a handler to start")
@@ -437,6 +448,9 @@ func testLostLease(t *testing.T, lose func(e *env, id int64) (release func())) {
 	info := e.waitState(t, id, taskmill.StateCompleted)
 	if info.Attempt != 2 || len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseLost {
 		t.Fatalf("got attempt %d with errors %+v, want attempt 2 after a lost lease", info.Attempt, info.Errors)
+	}
+	if n := w.Stats().LeasesLost; n != 1 {
+		t.Errorf("the worker counted %d lost leases, want 1", n)
 	}
 }
 
@@ -518,6 +532,48 @@ func TestHealthFollowsTheDatabase(t *testing.T) {
 	if w.Health() == nil {
 		t.Error("a stopped worker is healthy")
 	}
+}
+
+// A handler that ignores its context keeps its slot after the worker
+// abandons its attempt. Once such handlers hold every slot, the worker can
+// start no task, and Health says so. One free slot is enough to be healthy.
+func TestHealthFailsWhileStuckHandlersHoldEverySlot(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	started, release := make(chan struct{}, 2), make(chan struct{})
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-release // ignores its context
+			return nil
+		}, &taskmill.HandlerOptions{Timeout: 100 * time.Millisecond}),
+		Queues: defaultQueue(2),
+	})
+	startWorker(t, w)
+	unblock := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unblock) // before the worker stops
+
+	once := &taskmill.EnqueueOptions{MaxAttempts: 1}
+	e.enqueue(t, sendEmail{}, once)
+	recv(t, started, "the first handler to start")
+	waitFor(t, "a stuck slot", func() bool { return w.Stats().SlotsStuck == 1 })
+	if err := w.Health(); err != nil {
+		t.Fatalf("with one slot of two stuck: %v, want healthy", err)
+	}
+
+	e.enqueue(t, sendEmail{}, once)
+	recv(t, started, "the second handler to start")
+	waitFor(t, "the worker to be unhealthy", func() bool { return w.Health() != nil })
+	if err := w.Health(); !strings.Contains(err.Error(), "all 2 slots") {
+		t.Errorf("got %q, want an error that says that all 2 slots are stuck", err)
+	}
+	if s := w.Stats(); s.HandlersAbandoned != 2 || s.Slots != 2 || s.SlotsBusy != 2 || s.SlotsStuck != 2 {
+		t.Errorf("got %+v, want 2 abandoned handlers that hold both slots", s)
+	}
+
+	unblock()
+	waitFor(t, "the worker to be healthy again", func() bool { return w.Health() == nil })
+	waitFor(t, "the slots to be free", func() bool { s := w.Stats(); return s.SlotsBusy == 0 && s.SlotsStuck == 0 })
 }
 
 func TestLeasedTasksAreFoundByID(t *testing.T) {

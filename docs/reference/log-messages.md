@@ -45,7 +45,7 @@ The same key always means the same thing.
 | `released` | Tasks given back to their queue at shutdown |
 | `queues`, `kinds`, `group`, `partition` | Names of queues, kinds, a FIFO group, a history partition |
 | `workers`, `missing_here`, `missing_there`, `defined_differently` | Workers whose schedules differ from the maintainer's, and the names of those schedules (see [The maintainer](#the-maintainer)) |
-| `max_conns`, `timeout` | Settings named by the line |
+| `max_conns`, `concurrency`, `timeout` | Settings named by the line |
 | `version`, `name` | A migration, or the version of `taskmill-ui` |
 | `action`, `target`, `skipped`, `path`, `page` | The dashboard's actions and requests |
 | `addr`, `prefix`, `read_only` | The settings of `taskmill-ui` |
@@ -117,6 +117,7 @@ backticks.
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
+| `the pool has fewer connections than the worker's total Concurrency plus 5; see https://github.com/code19m/taskmill/blob/main/docs/production/database.md#size-the-connection-pool` | Warn | `Run` started with a pool of `max_conns` connections, fewer than `concurrency`, the sum of its queues' `Concurrency`, plus 5. Handlers that share the pool can take every connection, and the worker's fetches and failed attempts wait for them. pgx's default size, the larger of 4 and the number of CPUs, is below the default `Concurrency` of 10. | Raise the pool's `MaxConns`, for example with `pool_max_conns` in the URL. See [Database](../production/database.md#size-the-connection-pool). |
 | `worker started` | Info | `Run` started, and reads the queues in `queues`. | Nothing. |
 | `the worker does not read the default queue of these registered kinds` | Warn | The worker has handlers for `kinds`, but does not read their default queues. Their tasks wait for another worker. | Add the queues to `WorkerConfig.Queues`, or run a worker that reads them. |
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended while `tasks` tasks ran. It waits up to `timeout` for them. A worker that runs no task does not log this line. | Nothing. |

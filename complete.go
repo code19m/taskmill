@@ -72,6 +72,7 @@ func (w *Worker) warnBlocked(ctx context.Context, blocked []*liveAttempt) {
 			t.blockedSince = now
 		case !t.blockedWarned && now.Sub(t.blockedSince) > w.cfg.LeaseDuration:
 			t.blockedWarned = true
+			w.counts.blocked.Add(1)
 			w.logger.LogAttrs(ctx, slog.LevelWarn, "completion waits for a row that another transaction holds",
 				slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind),
 				slog.Duration(logKeyDuration, now.Sub(t.blockedSince)))
@@ -294,6 +295,7 @@ func (w *Worker) afterComplete(ctx context.Context, ts []*liveAttempt, done []co
 	}
 
 	if err == nil {
+		w.counts.succeeded.Add(int64(len(done)))
 		w.countCompleted(done)
 		w.madeRoom(done)
 	}

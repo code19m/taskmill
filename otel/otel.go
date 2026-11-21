@@ -14,8 +14,9 @@
 // Both record metrics: messaging.client.sent.messages and
 // messaging.client.operation.duration for enqueues, and
 // messaging.process.duration for attempts. [Instrumentation.ObserveQueues]
-// adds gauges of the installation's queues, and [Instrumentation.Publisher]
-// traces what the outbox publishes to a broker.
+// adds gauges of the installation's queues, [Instrumentation.ObserveWorker]
+// counters of a worker, such as its lost leases, and
+// [Instrumentation.Publisher] traces what the outbox publishes to a broker.
 //
 // Attributes are those of the conventions, with messaging.system "taskmill"
 // and the queue as messaging.destination.name, plus taskmill.task.kind and,

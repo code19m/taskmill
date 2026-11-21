@@ -16,6 +16,26 @@ All notable changes to taskmill are recorded here. The format follows
   lists the signs that you outgrow taskmill, and how to move to a broker one
   kind at a time. [How taskmill is built](docs/design/README.md#decisions)
   indexes the design decisions, with what would reopen each.
+- `Worker.Run` warns when the pool has fewer connections than the worker's
+  total `Concurrency` plus 5, the size that
+  [Database](docs/production/database.md#size-the-connection-pool) asks
+  for. pgx's default size, the larger of 4 and the number of CPUs, is below
+  the default `Concurrency` of 10, so handlers that share the pool could
+  take every connection, and nothing said so until something waited.
+- `Worker.Stats` returns a worker's counts, in a `WorkerStats`: the attempts
+  that it started, and those whose success or failure it recorded, its lost
+  leases, abandoned handlers, blocked completions, and waits for a full
+  pool, and how many of its slots are busy, or stuck with handlers that
+  ignore their context. Most of these showed only in the logs. The `otel`
+  module exports them with `Instrumentation.ObserveWorker`, and
+  [Monitoring](docs/production/monitoring.md) says which to alert on.
+
+### Changed
+
+- `Worker.Health` fails while handlers that did not return 5 seconds after
+  their context ended hold every slot of the worker's queues. Such a worker
+  can start no task, but its probe passed. The error says how many slots
+  are stuck.
 
 ### Fixed
 

@@ -27,6 +27,7 @@ const (
 	defaultPollInterval  = time.Second
 	defaultDrainTimeout  = 20 * time.Second
 	defaultConcurrency   = 10
+	poolSpare            = 5 // connections of the pool for the worker's own statements, beyond its Concurrency
 
 	minLeaseDuration  = 100 * time.Millisecond
 	recordTimeout     = 30 * time.Second       // bound on one try to record a result
@@ -156,6 +157,7 @@ type Worker struct {
 	completions   chan *liveAttempt // successful attempts of Run, for the completer
 	completerDone chan struct{}     // closed when the current Run's completer returns
 
+	counts     counters     // what Stats reports
 	own        ownConn      // the connection that Run keeps for renewals, check-ins, and completions
 	poolWarned atomic.Int64 // when the worker last warned that it waited for a full pool, in Unix nanoseconds
 	noHandler  kindWarnings // the kinds without a handler whose tasks the worker met
@@ -432,6 +434,25 @@ func (w *Worker) warnUnservedKinds(ctx context.Context) {
 		"the worker does not read the default queue of these registered kinds", slog.Any(logKeyKinds, kinds))
 }
 
+// warnSmallPool warns if the pool has fewer connections than the worker's
+// total Concurrency plus poolSpare, the size that the docs ask for: handlers
+// that share the pool can then take every connection, and the worker's own
+// statements wait for them. pgx's default size, the larger of 4 and the
+// number of CPUs, is below the default Concurrency. It only warns: the pool
+// is the application's to size.
+func (w *Worker) warnSmallPool(ctx context.Context) {
+	concurrency := 0
+	for _, q := range w.queues {
+		concurrency += cap(q.slots)
+	}
+
+	if conns := int(w.client.pool.Stat().MaxConns()); conns < concurrency+poolSpare {
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "the pool has fewer connections than the worker's total Concurrency plus 5; "+
+			"see https://github.com/code19m/taskmill/blob/main/docs/production/database.md#size-the-connection-pool",
+			slog.Int(logKeyMaxConns, conns), slog.Int(logKeyConcurrency, concurrency))
+	}
+}
+
 // queueState is one queue that the worker serves.
 type queueState struct {
 	name       string
@@ -440,6 +461,7 @@ type queueState struct {
 	freed      chan struct{} // nudges the fetch loop: a slot was freed, or a recorded completion made room
 	paused     atomic.Bool   // the queue is paused, or Run has not read its settings yet
 	maxRunning atomic.Int32  // installation-wide limit; 0 means none
+	stuck      atomic.Int32  // slots whose handlers did not return shutdownGrace after their context ended
 }
 
 func (q *queueState) nudge() {
@@ -579,6 +601,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.listenFailures = newIncidentLog(w, "listen for notifications")
 
 	w.prepareHistory(ctx)
+	w.warnSmallPool(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
 
@@ -693,6 +716,7 @@ func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.Ca
 	}
 	w.mu.Unlock()
 
+	w.counts.abandoned.Add(int64(len(abandoned)))
 	for _, t := range abandoned {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler ignored shutdown; releasing its task",
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind))
@@ -786,6 +810,96 @@ func (w *Worker) runDirect(ctx context.Context, t *liveAttempt) {
 	} else {
 		w.runOne(attemptCtx, record, t)
 	}
+}
+
+// WorkerStats are counts of what a [Worker] did since [NewWorker] created it,
+// and how busy its slots are now: [Worker.Stats] returns them. The counts
+// only grow, so a metrics system reads them as counters, and their rates
+// say how often each thing happens. Each task of a batch counts as one
+// attempt.
+//
+// The [monitoring page] says which of them to alert on.
+//
+// [monitoring page]: https://github.com/code19m/taskmill/blob/main/docs/production/monitoring.md
+type WorkerStats struct {
+	// AttemptsStarted counts the attempts whose handler the worker started,
+	// in Run and in RunTask. A task that the worker ends without a handler,
+	// as one of a kind that it has no handler for, does not count.
+	AttemptsStarted int64
+
+	// AttemptsSucceeded counts the attempts whose success was recorded: their
+	// tasks completed, also those that the handler completed with
+	// [Task.CompleteTx].
+	AttemptsSucceeded int64
+
+	// AttemptsFailed counts the attempts whose failure was recorded: their
+	// tasks wait to be retried, or are dead. An attempt whose task the
+	// maintainer rescued after its worker lost the lease counts in
+	// LeasesLost, on that worker, if it still runs.
+	AttemptsFailed int64
+
+	// LeasesLost counts the attempts that lost their leases: the worker
+	// could not renew a lease in time, or fetched a task again whose older
+	// attempt still ran. Their results are discarded, and their tasks may
+	// run twice.
+	LeasesLost int64
+
+	// HandlersAbandoned counts the attempts whose handler did not return 5
+	// seconds after its context ended, by its Timeout, a cancel, a lost
+	// lease, or Run's shutdown, so that the worker abandoned it: see
+	// [HandlerOptions.Timeout]. The handler's goroutine keeps its slot until
+	// it returns.
+	HandlersAbandoned int64
+
+	// CompletionsBlocked counts the successful attempts whose completion
+	// waited longer than LeaseDuration for a row that another transaction
+	// held: the task's, or its FIFO group's.
+	CompletionsBlocked int64
+
+	// PoolWaits counts the fetches and records of failed attempts that found
+	// every connection of the pool in use, and waited for one. Handlers that
+	// share the pool hold them, or the pool is too small: see [Worker].
+	PoolWaits int64
+
+	// Slots is the sum of the Concurrency of the worker's queues.
+	Slots int
+
+	// SlotsBusy is how many slots running attempts and batches hold now.
+	SlotsBusy int
+
+	// SlotsStuck is how many of those are held by handlers that did not
+	// return 5 seconds after their context ended. While they hold every
+	// slot, [Worker.Health] fails.
+	SlotsStuck int
+}
+
+// counters hold what WorkerStats counts. The worker adds to them as it
+// works, without a lock.
+type counters struct {
+	started, succeeded, failed, leasesLost, abandoned, blocked, poolWaits atomic.Int64
+}
+
+// Stats returns what the worker did since [NewWorker] created it, and how
+// busy its slots are now. It reads only memory, so a metrics system may call
+// it at every collection. The otel module exports it with
+// Instrumentation.ObserveWorker.
+func (w *Worker) Stats() WorkerStats {
+	s := WorkerStats{
+		AttemptsStarted:    w.counts.started.Load(),
+		AttemptsSucceeded:  w.counts.succeeded.Load(),
+		AttemptsFailed:     w.counts.failed.Load(),
+		LeasesLost:         w.counts.leasesLost.Load(),
+		HandlersAbandoned:  w.counts.abandoned.Load(),
+		CompletionsBlocked: w.counts.blocked.Load(),
+		PoolWaits:          w.counts.poolWaits.Load(),
+	}
+	for _, q := range w.queues {
+		s.Slots += cap(q.slots)
+		s.SlotsBusy += len(q.slots)
+		s.SlotsStuck += int(q.stuck.Load())
+	}
+	s.SlotsStuck = min(s.SlotsStuck, s.SlotsBusy) // a stuck handler that just returned may still count
+	return s
 }
 
 // leaseTask leases one task for RunTask, or explains why it cannot.

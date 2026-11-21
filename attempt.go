@@ -53,6 +53,7 @@ func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 		return
 	}
 
+	w.counts.started.Add(1)
 	ctx, cancelTimeout := context.WithTimeoutCause(ctx, t.reg.opts.Timeout, ErrAttemptTimeout)
 	defer cancelTimeout()
 	start := time.Now()
@@ -68,6 +69,7 @@ func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 // runs in its own goroutine, and the batch starts once every chain has
 // either reached the handler or returned early.
 func (w *Worker) runBatch(parent, record context.Context, tasks []*liveAttempt) {
+	w.counts.started.Add(int64(len(tasks)))
 	reg := tasks[0].reg
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
@@ -191,6 +193,20 @@ func (w *Worker) runChain(ctx, record context.Context, c *batchChains, i int, t 
 // and watch only warns. An attempt that lost its lease is abandoned all the
 // same: its task may run again anyway.
 func (w *Worker) watch(ctx, record context.Context, ts []*liveAttempt, start time.Time) (stop func()) {
+	// The slot of Run's attempts counts as stuck from the end of the grace
+	// until the handler returns, for Stats and Health: state goes from
+	// watching to stuck to finished, or from watching to finished.
+	q := w.queues[ts[0].info.Queue]
+	if ts[0].direct {
+		q = nil // RunTask's attempts take no slot
+	}
+	const (
+		watching int32 = iota
+		stuck
+		finished
+	)
+	var state atomic.Int32
+
 	returned := make(chan struct{})
 	stopAfter := context.AfterFunc(ctx, func() {
 		cause := context.Cause(ctx)
@@ -206,6 +222,12 @@ func (w *Worker) watch(ctx, record context.Context, ts []*liveAttempt, start tim
 		case <-grace.C:
 		}
 
+		if q != nil {
+			q.stuck.Add(1)
+			if !state.CompareAndSwap(watching, stuck) {
+				q.stuck.Add(-1) // the handler returned meanwhile
+			}
+		}
 		for _, t := range ts {
 			if q := w.queues[t.info.Queue]; q != nil && q.maxRunning.Load() > 0 && !errors.Is(cause, ErrLeaseLost) {
 				w.logger.LogAttrs(record, slog.LevelWarn, "handler ignored its context; its task keeps running because its queue has a MaxRunning limit",
@@ -221,6 +243,9 @@ func (w *Worker) watch(ctx, record context.Context, ts []*liveAttempt, start tim
 		once.Do(func() {
 			stopAfter()
 			close(returned)
+			if state.Swap(finished) == stuck {
+				q.stuck.Add(-1)
+			}
 		})
 	}
 }
@@ -235,6 +260,7 @@ func (w *Worker) abandon(record context.Context, t *liveAttempt, cause error, st
 		return
 	}
 
+	w.counts.abandoned.Add(1)
 	w.logger.LogAttrs(record, slog.LevelWarn, "handler ignored its context; abandoning its attempt",
 		slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, cause))
 	err := fmt.Errorf("the handler did not return %s after its context ended: %w", w.timing.shutdownGrace, cause)
@@ -525,6 +551,7 @@ func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 	defer w.untrack(t)
 
 	if o.kind == outcomeDiscard && t.att.completedInTx.Load() {
+		w.counts.succeeded.Add(1)
 		w.tally.add(t.info.Queue, 1, 0) // the handler's transaction completed it
 	}
 	if o.kind == outcomeDiscard || o.kind == outcomeComplete {
@@ -551,8 +578,10 @@ func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 	}
 	switch {
 	case err == nil && ended == endedFailed:
+		w.counts.failed.Add(1)
 		w.tally.add(t.info.Queue, 0, 1)
 	case err == nil && ended == endedCompleted:
+		w.counts.succeeded.Add(1)
 		w.tally.add(t.info.Queue, 1, 0)
 	}
 	if err != nil {

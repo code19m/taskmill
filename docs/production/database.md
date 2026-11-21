@@ -97,9 +97,12 @@ keeps one connection for lease renewals, check-ins, and completions, so its
 tasks' [leases](../concepts/glossary.md#lease) still renew. Fetches and the
 records of failed attempts wait for a connection, so tasks start late.
 
-The 5 extra connections are for the worker's own work. If a fetch or a
-failure record waits for a connection, the worker logs `the pool was full,
-so the worker waited for a connection`, at most once a minute.
+The 5 extra connections are for the worker's own work. `Run` warns at start
+if the pool is smaller: `the pool has fewer connections than the worker's
+total Concurrency plus 5`. If a fetch or a failure record waits for a
+connection later, the worker logs `the pool was full, so the worker waited
+for a connection`, at most once a minute, and counts the wait in
+`taskmill_worker_pool_waits_total`.
 
 | Process | `pool_max_conns` | Connections it opens, at most |
 |---|---|---|
@@ -118,8 +121,8 @@ To add up the connections of all your pods, see
 
 | Situation | What to use | Why |
 |---|---|---|
-| Handlers use the database for short queries | **One pool** for taskmill and your handlers, sized as above | Simple. The worker logs a warning if the pool is too small |
-| Handlers hold connections for a long time | A pool of their own for the handlers | taskmill's work never waits for them. taskmill's pool can then be smaller than `Concurrency` plus 5, and the warning tells you if it is too small |
+| Handlers use the database for short queries | **One pool** for taskmill and your handlers, sized as above | Simple. The worker warns if the pool is too small |
+| Handlers hold connections for a long time | A pool of their own for the handlers | taskmill's work never waits for them. Keep taskmill's pool at `Concurrency` plus 5 anyway: `pool_max_conns` is only a cap, since pgx opens only the connections that it uses |
 
 ## Keep long transactions from slowing the queue
 

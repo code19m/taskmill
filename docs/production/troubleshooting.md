@@ -99,10 +99,10 @@ zero, because each task waits for its next retry, not for a worker.
 
 ### A task ran twice
 
-**You see:** a handler ran twice for one task. The logs show `attempt lost
-its lease; canceling it`, or `rescued tasks whose workers lost their leases`:
-the maintainer [rescued](../concepts/glossary.md#rescue) them. Some repeats
-are expected ([Guarantees](../concepts/guarantees.md)), so
+**You see:** a handler ran twice for one task, with the log `attempt lost its lease;
+canceling it` and a growing `taskmill_worker_leases_lost_total`, or the maintainer
+[rescued](../concepts/glossary.md#rescue) them: `rescued tasks whose workers lost
+their leases`. Some repeats are expected ([Guarantees](../concepts/guarantees.md)):
 [make handlers safe to run twice](../recipes/do-work-once.md).
 
 | Likely cause | Check | Do |
@@ -218,13 +218,14 @@ Later, maybe `task history has no partition for today`.
 
 ### Kubernetes marks workers as not ready
 
-**You see:** worker pods are not ready, and a rollout stops. `/healthz`
-returns 503, with `the worker has not reached the database for …`, `the
-worker has not read the settings of its queues`, or `the worker is not running`.
+**You see:** worker pods are not ready, and a rollout stops. `/healthz` returns 503, with `the
+worker has not reached the database for …`, `the worker has not read the settings of its queues`,
+`all N slots of the worker are held by handlers that …`, or `the worker is not running`.
 
 | Likely cause | Check | Do |
 |---|---|---|
 | The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases`, or for `load queue settings` in a new worker | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
+| Handlers that ignore their context hold every slot | That message on `/healthz`, and the log `handler ignored its context; abandoning its attempt` | Make handlers return when `ctx` ends. A restart frees the slots |
 | `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix that error: see [the errors at start](#errors-at-start-and-in-calls) |
 
 ### Counts in the dashboard stop at 10,000

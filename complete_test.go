@@ -314,7 +314,7 @@ func TestHeldTaskDoesNotHoldUpOtherCompletions(t *testing.T) {
 	e := newEnv(t).withLogger(t, slog.New(logs))
 	release := make(chan struct{})
 	started := make(chan struct{}, 10)
-	runWorker(t, e, &taskmill.WorkerConfig{
+	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
 			<-release
@@ -324,6 +324,7 @@ func TestHeldTaskDoesNotHoldUpOtherCompletions(t *testing.T) {
 		LeaseDuration: time.Second,
 		NoMaintainer:  true,
 	})
+	startWorker(t, w)
 
 	var ids []int64
 	for range 5 {
@@ -355,6 +356,9 @@ func TestHeldTaskDoesNotHoldUpOtherCompletions(t *testing.T) {
 	}
 	if n := logs.count(waits); n != 1 {
 		t.Errorf("the held completion was logged %d times, want once", n)
+	}
+	if n := w.Stats().CompletionsBlocked; n != 1 {
+		t.Errorf("the worker counted %d blocked completions, want 1", n)
 	}
 }
 
