@@ -13,9 +13,10 @@ import (
 )
 
 // codePages are the pages whose reader writes or runs the code they show,
-// each with the Go files of its example program. The examples compile and
-// have tests, so code that a page takes from them is code that works.
+// each with the Go files of its example. The examples compile and have
+// tests, so code that a page takes from them is code that works.
 var codePages = map[string][]string{
+	"README.md":                                  {"examples/internal/readme/readme.go"},
 	"docs/start/quickstart.md":                   {"examples/quickstart/main.go"},
 	"docs/tutorial/1-first-task.md":              {"examples/quickstart/main.go", "examples/quickstart/main_test.go"},
 	"docs/tutorial/2-tasks-with-your-data.md":    {"examples/quickstart/main.go", "examples/quickstart/main_test.go"},

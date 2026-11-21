@@ -9,6 +9,10 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Changed
 
+- The README is easier to scan: what taskmill is, why, and how to start
+  come first. A test now runs its code, and its pictures show the current
+  dashboard. It links to [Packages](docs/reference/packages.md) instead of
+  listing the packages.
 - The dashboard serves its static files at `/static/{version}/{name}`, in
   place of `/static/{name}?v=...`, and its script as native ES modules
   that the page preloads, with no build step. The pages work as before,
