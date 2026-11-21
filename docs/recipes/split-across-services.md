@@ -135,6 +135,11 @@ billing's workers first.
     priority, any `max_attempts`, a payload over the size limit, or a task
     of a FIFO group that the group's row does not count. Such a task runs
     beside the group's head.
+  - **Write a row that taskmill cannot read,** such as metadata that is not
+    an object of strings, or an infinite run time. A worker makes such a
+    task dead with `invalid_row`, and every list of billing's that holds
+    it fails, with its dashboard page, until the row is corrected or
+    deleted.
   - **Choose a task's ID.** Rows with IDs ahead of the sequence make later
     enqueues fail with a duplicate key, for every producer, until the
     sequence has passed them. The grant needs the column: an enqueue

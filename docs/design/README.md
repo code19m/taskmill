@@ -20,7 +20,7 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | 7 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
 | 8 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
 | 9 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
-| 10 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
+| 10 | [Rows that taskmill did not write](schema-rows.md) | Which rows taskmill supports, which values the tables refuse, and which guards contain the others |
 | 11 | [Schema migrations](schema-migrations.md) | How `Migrate` changes a busy schema: one process at a time, indexes built online, and a guard for the older migrations that block writes |
 | 12 | [The API's shape](api-shape.md) | Why each point of the API has its shape, and when we look at it again |
 | 13 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry, the ORM examples, and the browser tests have modules of their own, and how to add a dependency |
@@ -50,6 +50,8 @@ make us look at it again:
 | The heartbeat comes every 5 seconds, not with every wake | [Maintenance and notifications](schema-maintenance.md#notifications) | Schemas in one database that no longer pay for each other's notifications |
 | Migrations build indexes online, while `Migrate` holds the lock of `migrations` in a second connection | [Schema migrations](schema-migrations.md#online-steps) | An index of the history, which PostgreSQL cannot build concurrently on a partitioned table; or a schema change other than an index that blocks writes |
 | The querier interfaces, the untagged result types, `ui.New`, a missing result, and the names | [The API's shape](api-shape.md#when-we-look-at-a-point-again) | The condition of each point, in the table there |
+| A retry takes back the dedupe key that its cancel freed | [Operator actions](schema-operations.md#a-retry-takes-its-dedupe-key-back) | A dedupe promise that ends at the cancel, if users would rather have a retry that never conflicts |
+| The maintainer compares the workers' schedules, by a hash of each definition | [Maintenance and notifications](schema-maintenance.md#maintenance) | Schedules that a deploy step stores once, instead of each worker defining them |
 | The dashboard is rendered on the server, with no framework | [How the dashboard is built](#how-the-dashboard-is-built) | A dashboard that grows far beyond five pages, or needs a JSON API anyway |
 
 ## Change the docs with the code

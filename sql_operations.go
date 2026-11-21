@@ -10,10 +10,8 @@ package taskmill
 // with them, and the key's window still lasts. Only a canceled task gave its
 // key away. A task in another state that stores one was retried by the
 // previous release, which leaves the columns as they are: it ran on without
-// its key, and so asks for none when it is dead. A stored key that is not
-// one, which only a write by hand leaves, counts as none: the table of the
-// keys would refuse it, and fail the retry.
-const keyedSQL = `(t.state = 'canceled' AND t.freed_key_expires_at > now() AND octet_length(t.freed_key) = 32)`
+// its key, and so asks for none when it is dead.
+const keyedSQL = `(t.state = 'canceled' AND t.freed_key_expires_at > now())`
 
 // keyFreeSQL matches the tasks t that hold no dedupe key, or whose key's row it
 // locks. It skips key rows that other transactions hold, such as an enqueue
@@ -62,12 +60,12 @@ SELECT id FROM wanted WHERE id NOT IN (SELECT task_id FROM taken)`
 //
 // keyHolderSQL reads who holds the dedupe key that task $1 stores, for
 // the error of a retry that takeKeys refused: the task that holds
-// it, and the end of that task's window, if it ends. The task is 0
+// it, and the end of that task's window. The task is 0
 // if it no longer exists: a completed task keeps its key for its
 // window, also after its history is gone. It returns no row if no
 // task holds the key any more.
 const keyHolderSQL = `
-SELECT coalesce(h.id, 0), CASE WHEN isfinite(d.expires_at) THEN d.expires_at END
+SELECT coalesce(h.id, 0), d.expires_at
 FROM {s}.tasks t
 JOIN {s}.dedupe_keys d ON d.key = t.freed_key AND d.expires_at > now()
 LEFT JOIN LATERAL (
@@ -131,15 +129,11 @@ SELECT least($2::bigint,
 // locked tasks meet gates too. The pick statements read the next batch of
 // the tasks that a bulk action changes, in ID order after $5 up to $6, the
 // action's last task or the end of the batch's window: those of states $4
-// that match the filters. Each batch starts where the last one ended, so a
-// bulk action reads each task once, and the oldest tasks of a FIFO group
-// come first. They return each of them, and whether they hold its lock: they
-// skip the tasks, the FIFO groups, and the dedupe keys that other
-// transactions hold, the groups ($7, $8) that the action left before, and
-// tasks that changed meanwhile. They report whether each task's group had a
-// row, which they then hold. A cancel skips running tasks already asked to
-// stop. They also report the tasks that must take a dedupe key back if they
-// are retried.
+// that match the filters. They return each of them, whether they hold its
+// lock, whether its group had a row, which they then hold, and whether it
+// must take a dedupe key back if it is retried. They skip what other
+// transactions hold, and the groups ($7, $8) that the action left before:
+// the page on operator actions says why.
 func pickSQL(cond, gates string) string {
 	return `
 WITH candidates AS (

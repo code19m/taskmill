@@ -89,9 +89,10 @@ type HandlerOptions struct {
 	// work, while the task already runs again. The context of a batch
 	// handler ends only with this timeout, so a batch is abandoned only
 	// after it: each of its tasks fails with [CodeTimeout]. In a queue with
-	// a [QueueSettings.MaxRunning] limit, nothing is abandoned: a task that
-	// ran again would break the limit. Its task stays running until the
-	// handler returns, and the worker logs a warning. It must not be
+	// a [QueueSettings.MaxRunning] limit, only an attempt that lost its lease
+	// is abandoned, since its task may run again anyway. Any other task there
+	// stays running until the handler returns, and the worker logs a
+	// warning: a task that ran again would break the limit. It must not be
 	// negative. Default: 1 minute.
 	Timeout time.Duration
 

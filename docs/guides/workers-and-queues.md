@@ -116,7 +116,8 @@ err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) {
   without a limit, the worker gives up on such a handler 5 seconds after
   its context ended, and the task runs again. In a queue with a limit, the
   task stays running, and counts, until the handler returns: the worker
-  only logs a warning.
+  only logs a warning. The exception is an attempt that lost its lease: its
+  task may run again anyway, so the worker gives up on it too.
 
 For a partner API, combine a small `MaxRunning` with `Snooze`: see
 [Call a rate-limited API](../recipes/call-a-rate-limited-api.md).

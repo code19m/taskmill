@@ -110,10 +110,6 @@ type ListResult struct {
 //     [TaskInfo.FinishedAt], and then by ID in the same way.
 //   - Every other list is ordered by ID, the newest task first.
 //
-// A time that is infinite, as only an UPDATE by hand writes it, reads as the
-// zero time, and comes before or after all others in the order of its
-// time.
-//
 // IDs follow creation times only roughly. A task's creation time is the
 // start of the transaction that enqueued it, and its ID is as new as the
 // moment of its insert: a task that a long transaction enqueues at its end
@@ -163,28 +159,13 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 		return nil, err
 	}
 
-	var (
-		out  ListResult
-		at   pgtype.Timestamptz // the time of the task last read, in the order of a time
-		last pgtype.Timestamptz // that of the page's last task, where the next page starts
-	)
-
-	// In the order of a time, each row ends with that time once more, as the
-	// column holds it: the cursor needs it, and scanTaskInfo reads an
-	// infinite time as the zero time.
-	var orderedBy []any
-	if page.order != byID {
-		orderedBy = []any{&at}
-	}
-
+	var out ListResult
 	err = c.readAlone(ctx, page.settings, page.sql, page.args, func(r pgx.Rows) error {
-		info, err := scanTaskInfo(r, orderedBy...)
+		info, err := scanTaskInfo(r)
 		if err != nil {
 			return err
 		}
-		if out.Tasks = append(out.Tasks, *info); len(out.Tasks) == page.limit {
-			last = at
-		}
+		out.Tasks = append(out.Tasks, *info)
 		return nil
 	})
 	if err != nil {
@@ -193,10 +174,13 @@ func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, err
 
 	if len(out.Tasks) > page.limit {
 		out.Tasks = out.Tasks[:page.limit]
-		if id := out.Tasks[page.limit-1].ID; page.order == byID {
-			out.Next = encodeCursor(id)
-		} else {
-			out.Next = encodeTimeCursor(page.order, last, id)
+		switch last := out.Tasks[page.limit-1]; page.order {
+		case byID:
+			out.Next = encodeCursor(last.ID)
+		case byCreation:
+			out.Next = encodeTimeCursor(page.order, last.CreatedAt, last.ID)
+		case byFinish:
+			out.Next = encodeTimeCursor(page.order, last.FinishedAt, last.ID)
 		}
 	}
 	return &out, nil
@@ -345,7 +329,7 @@ type timeRange struct {
 // every task of the time that ends the range. listCreated takes the end of
 // its range this way.
 func (r timeRange) below(at pgtype.Timestamptz, id int64) (pgtype.Timestamptz, int64) {
-	if !r.until.Valid || at.InfinityModifier == pgtype.NegativeInfinity || at.InfinityModifier == pgtype.Finite && at.Time.Before(r.until.Time) {
+	if !r.until.Valid || at.InfinityModifier == pgtype.Finite && at.Time.Before(r.until.Time) {
 		return at, id
 	}
 	return r.until, math.MinInt64
@@ -552,26 +536,15 @@ func decodeCursor(cursor string) (int64, error) {
 // the page's last task, as "c<time>,<ID>" in creation order and as
 // "f<time>,<ID>" in finish order: no cursor in ID order, which is a number,
 // starts with a letter. The time is the number that PostgreSQL stores,
-// microseconds since the year 2000, and so it holds every time that a
-// column can: the largest and the smallest number are the two infinite
-// times.
+// microseconds since the year 2000.
 const (
 	pgEpoch     = 946_684_800               // the year 2000 in Unix seconds
 	pgFirstTime = -211_813_488_000_000_000  // 4714-11-24 BC, the first time of PostgreSQL
 	pgTimesEnd  = 9_223_371_331_200_000_000 // the year 294277, which PostgreSQL's times end before
 )
 
-func encodeTimeCursor(order listOrder, at pgtype.Timestamptz, id int64) string {
-	var micros int64
-	switch at.InfinityModifier {
-	case pgtype.Infinity:
-		micros = math.MaxInt64
-	case pgtype.NegativeInfinity:
-		micros = math.MinInt64
-	case pgtype.Finite:
-		micros = (at.Time.Unix()-pgEpoch)*1e6 + int64(at.Time.Nanosecond())/1e3
-	}
-
+func encodeTimeCursor(order listOrder, at time.Time, id int64) string {
+	micros := (at.Unix()-pgEpoch)*1e6 + int64(at.Nanosecond())/1e3
 	return base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, "%c%d,%d", order, micros, id))
 }
 
@@ -589,10 +562,6 @@ func decodeTimeCursor(order listOrder, cursor string) (at pgtype.Timestamptz, id
 	switch {
 	case err != nil || !ordered || errTime != nil || errID != nil:
 		return at, 0, invalidArgument("invalid cursor")
-	case micros == math.MaxInt64:
-		at.InfinityModifier = pgtype.Infinity
-	case micros == math.MinInt64:
-		at.InfinityModifier = pgtype.NegativeInfinity
 	case micros < pgFirstTime || micros >= pgTimesEnd:
 		return at, 0, invalidArgument("invalid cursor")
 	default:

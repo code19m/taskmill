@@ -202,7 +202,7 @@ has:
 | [`lease_lost`](https://pkg.go.dev/github.com/code19m/taskmill#CodeLeaseLost) | Usually nothing: the task is retried. If you see it often, check for crashed workers and the database |
 | [`panic`](https://pkg.go.dev/github.com/code19m/taskmill#CodePanic) | Fix the bug, then retry the task. The message holds the stack trace |
 | [`invalid_payload`](https://pkg.go.dev/github.com/code19m/taskmill#CodeInvalidPayload) | Usually a payload change that old tasks don't fit. Fix the type, then retry or delete the tasks: see [Change a task safely](../recipes/change-a-task-safely.md) |
-| [`invalid_row`](https://pkg.go.dev/github.com/code19m/taskmill#CodeInvalidRow) | Something other than taskmill wrote the task's row: another database role, or SQL by hand. Find it. Correct the row and retry the task, or delete the task. A retry alone ends the same way |
+| [`invalid_row`](https://pkg.go.dev/github.com/code19m/taskmill#CodeInvalidRow) | Something other than taskmill wrote the task's row: another database role, or SQL by hand. Find it. The task's dashboard page, and every list that holds the task, such as the dead tasks, fail until you correct the row with SQL and retry the task, or delete the task with `Client.Delete`. A retry alone ends the same way |
 | [`unknown_kind`](https://pkg.go.dev/github.com/code19m/taskmill#CodeUnknownKind) | Run a worker that handles the kind, then retry the task, or delete it |
 | [`no_handler`](https://pkg.go.dev/github.com/code19m/taskmill#CodeNoHandler) | Usually a rolling deploy: wait. If it lasts, check that every worker of the queue has the same handlers |
 

@@ -44,7 +44,10 @@ transaction of its own.
   second. The action then reads in windows, starting with that batch: a
   batch reads at most the next 100,000 tasks of each table, whether they
   match or not, and moves to the window's end once it finds less than a full
-  batch before it. It still reads each task once, in ID order.
+  batch before it. It still reads each task once, in ID order. A window is
+  counted in tasks, not in IDs, which completed tasks leave far apart. A
+  statement that somebody canceled with `pg_cancel_backend` has the code of
+  one that ran out of time, so it moves to windows too, once.
 - **No waiting while holding rows.** The batch's one statement that picks
   tasks reads the next 1,000 without locks, then locks those it can, the
   rows of their groups, and the rows of their dedupe keys, all with
@@ -122,6 +125,10 @@ stores the key and the end of its window in the task's own row: `freed_key`
 and `freed_key_expires_at`. A running task that is asked to stop gets them
 then, with the key's release.
 
+**Why it stays,** though few retry a canceled task with a key: without it,
+the dedupe promise breaks silently, and the same work runs twice. It costs
+two columns that only a cancel writes, and one statement in a retry.
+
 A retry claims the stored key as an enqueue does, with the window's old
 end: it gets the key if no row has it, or if the row's window has ended.
 Then it clears the two columns. If another task holds the key, a `Retry`
@@ -134,7 +141,6 @@ is fixed at the enqueue, and a task past it has no claim, canceled or not.
 | Two columns, not the task's metadata | Producers write metadata, and handlers and tools copy it. A key there could be forged, or travel to another task. Only a role with `UPDATE` on `tasks` writes the columns: the grants of a role that only enqueues leave them out |
 | The retry is refused whatever state the holder is in | A completed or dead holder still stands for the work until its window ends, as it does for an enqueue |
 | The refusal names the holder only if that task exists | A completed task keeps its key for its window, also when no history is kept of it. Nobody can cancel or delete a task that is gone, so the error gives the end of the window |
-| A stored key that is not 32 bytes counts as none | `dedupe_keys` would refuse it, and one such row would fail every batch of a bulk retry |
 | The columns are not copied to the history | A task that completes after its cancel was requested needs no key back |
 
 Two things follow from the claim. A transaction of the caller that enqueues

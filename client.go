@@ -322,7 +322,7 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 // heldKey says who holds the dedupe key that a retried task did not get.
 type heldKey struct {
 	by    int64     // the task that holds it; 0 if that task no longer exists, or no task holds the key now
-	until time.Time // the end of that task's window; zero if it has no end, or no task holds the key now
+	until time.Time // the end of that task's window; zero if no task holds the key now
 }
 
 // String says it as the reason of a refused retry. It names the holder only
@@ -341,9 +341,7 @@ func (h heldKey) String() string {
 // get back.
 func (c *Client) keyHolder(ctx context.Context, q querier, id int64) (heldKey, error) {
 	var held heldKey
-	var until *time.Time
-	_, err := queryRow(ctx, q, c.sql.keyHolder, []any{id}, &held.by, &until)
-	held.until = deref(until)
+	_, err := queryRow(ctx, q, c.sql.keyHolder, []any{id}, &held.by, &held.until)
 	return held, err
 }
 
@@ -436,16 +434,10 @@ const deadlockTries = 5
 
 // inLockOrder runs fn in a transaction on the client's pool, as Cancel,
 // Delete, and Retry need it. It runs fn again, in a new transaction, when
-// the first lost to another transaction over the order of their locks:
-//
-//   - takeTask found its locks in the wrong order: the rollback releases
-//     them.
-//   - PostgreSQL ended the transaction to end a deadlock. It may pick any of
-//     the transactions that wait for each other, also one that kept the
-//     order, when another, such as a CancelTx, could not.
-//
-// The last try runs without verifyOrder, as CancelTx does, and returns what
-// it gets.
+// takeTask found its locks in the wrong order, or when PostgreSQL ended the
+// transaction to end a deadlock. The last try runs without verifyOrder, as
+// CancelTx does. The lock order is in
+// https://github.com/code19m/taskmill/blob/main/docs/design/schema-groups.md.
 //
 // fn's errors say what it was doing. The begin and the commit of the
 // transaction fail outside fn, so inLockOrder wraps their errors in the same
@@ -475,24 +467,11 @@ func isDeadlock(err error) bool {
 
 // takeTask runs take, which is lockTask or deleteTask, on task id for Cancel
 // and Delete, and returns what it read of the task. It reports whether take
-// found the task.
-//
-// The lock order of FIFO groups is: a pending task's row is locked only
-// after its group's row, and with a group's row in hand, no row of a task
-// that is not pending is waited for. takeTask reads whether the task is
-// pending before it holds a lock, and a Retry, a promotion, or the commit of
-// the task's enqueue may change that before it holds one. With verifyOrder,
-// it finds out once it holds a lock:
-//
-//   - With the group's row, which every change into and out of pending
-//     takes, it takes the task only if the task is still pending.
-//   - With the task's row alone, it reads the state that the lock protects.
-//
-// verifyOrder: return errLockOrder if the task changed between pending and
-// another state while it was being locked; the caller must then roll back,
-// which releases the locks, and start again. Only a caller that owns its
-// transaction can do that, so verifyOrder is false on the last try and in
-// CancelTx, where takeTask continues with the locks as they are.
+// found the task. It locks a pending task's group first, and any other task
+// first, as the lock order of FIFO groups asks. With verifyOrder, it returns
+// errLockOrder if the task changed between pending and another state while
+// it was being locked: the caller rolls back and starts again. CancelTx,
+// which cannot, and the last try continue with the locks as they are.
 func (c *Client) takeTask(ctx context.Context, q querier, id int64, take string, verifyOrder bool) (t lockedTask, found bool, err error) {
 	groupLocked, err := queryRow(ctx, q, c.sql.lockPendingGroup, []any{id}, new(bool))
 	if err != nil {

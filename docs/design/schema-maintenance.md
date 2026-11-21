@@ -19,8 +19,14 @@ maintainer counts the queues.
 
 - **Retention stays on its index.** It finds the queues that have dead or
   canceled tasks with one probe each, and reads each queue's old tasks as a
-  range of `tasks_finished_idx`: a few pages when no task is old enough. It
-  looks up each old task's halt by its group's key.
+  range of `tasks_finished_idx`: a few pages when no task is old enough. A
+  limit on each range lets the planner read it in order and stop. Without
+  one, the planner, which cannot know the cutoff that the statement reads
+  from the settings, expects old tasks everywhere, and scans the table.
+- **It looks up each old task's halt by its group's key,** one lookup per
+  old task, kept a lookup by `OFFSET 0`. Joined to the groups instead, the
+  statement can read every halted group of each queue, or every old task
+  before it deletes the first.
 - **A schedule's day counts from when a maintainer last defined it,** not
   from its last run or change. Each pass notes in `updated_at` that its
   maintainer defines a schedule, once the note is an hour old. So a rolling
@@ -31,11 +37,13 @@ maintainer counts the queues.
 - **The maintainer compares the workers' schedules, because a difference
   is silent.** It runs only its own schedules. A worker that lacks one
   stops it while it leads, and one that defines it in another way changes
-  it. So each worker that takes part in the election stores, when it
-  registers, the names of its schedules in `schedules`, and a hash of each
-  one's definition in `schedule_hashes`. A worker's schedules never change,
-  so the check-in writes nothing more. A worker with `NoMaintainer`, and one
-  of a release without the columns, store `NULL`, and are not compared.
+  it, and nothing else shows it. So each worker that takes part in the
+  election stores, when it registers, the names of its schedules in
+  `schedules`, and a hash of each one's definition in `schedule_hashes`.
+  A worker's schedules never change, so the check-in writes nothing more,
+  and the check costs one statement a minute. A worker with
+  `NoMaintainer`, and one of a release without the columns, store `NULL`,
+  and are not compared.
 - **Two definitions hash the same exactly when their runs happen at the
   same times and enqueue the same task.** The hash covers the expression,
   the time zone, the queue, the kind, the priority, the most attempts, the
@@ -85,9 +93,8 @@ maintainer counts the queues.
 - **A failed election try writes nothing.** The upsert proposes its row only
   if no other worker's lease lasts. A conflict would lock the leader's row,
   and make every try of every other worker a write.
-- **A lease that no worker writes is no lease:** one that ends later than
-  two leases from now, such as a row written by hand. Otherwise it would
-  keep every worker from leading: see
+- **A lease that ends later than two leases from now is no lease,** so
+  that a row written by hand cannot keep every worker from leading: see
   [Rows that taskmill did not write](schema-rows.md).
 - **A worker that stops deletes its lease,** also when it does not know that
   it holds one, as after a renewal whose answer was lost. The same statement

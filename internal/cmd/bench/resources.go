@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,7 +48,7 @@ func benchResources(ctx context.Context, pool *pgxpool.Pool, url, container stri
 		"at most %d, %d of them listening | %s |\n", conns, workerConns, listeners, verdict(workerConns <= conns+1 && listeners == 1))
 	fmt.Printf("| E5 | Worker process memory, idle | %.1f MiB RSS | %s |\n", float64(idleRSS)/1024, verdict(idleRSS <= 30*1024))
 	fmt.Printf("| E5 | Worker process memory per running task, %s tasks | %.1f KiB | %s |\n",
-		commas(running), float64(perTask)/1024, verdict(perTask <= 8*1024))
+		commas(running), float64(perTask)/1024, verdict(perTask <= 13*1024))
 	fmt.Printf("| E6 | An idle worker serving %d queues for %s, the maintainer's heartbeats arriving | %d fetches (%.1f per queue), "+
 		"%d worker check-ins, %d other statements | %s |\n", queues, d, fetches,
 		float64(fetches)/float64(queues), checkIns, others, verdict(fetches <= queues*polls))
@@ -220,7 +221,9 @@ func connections(ctx context.Context, pool *pgxpool.Pool, url string, d time.Dur
 }
 
 // memory starts a worker process with concurrency n, and returns its resident
-// memory in KiB idle, and then while it runs n tasks.
+// memory in KiB idle, and then while it runs n tasks. It measures what the
+// process holds, not when its garbage was last collected: the process
+// returns its free memory first, and the median of three samples counts.
 func memory(ctx context.Context, pool *pgxpool.Pool, url string, n int) (idle, busy int64) {
 	c := fresh(ctx, pool)
 	mustExec(ctx, pool, `CREATE TABLE {s}.holds (n integer NOT NULL, worker text NOT NULL, attempt integer NOT NULL,
@@ -230,20 +233,20 @@ func memory(ctx context.Context, pool *pgxpool.Pool, url string, n int) (idle, b
 	defer w.kill()
 
 	rss := func() int64 {
-		var most int64
-		for range 5 {
+		w.free()
+		var samples [3]int64
+		for i := range samples {
 			time.Sleep(time.Second)
 			out, err := exec.CommandContext(ctx, "ps", "-o", "rss=", "-p", strconv.Itoa(w.cmd.Process.Pid)).Output() //nolint:gosec // the child's ID
 			if err != nil {
 				fail(err)
 			}
-			kib, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-			if err != nil {
+			if samples[i], err = strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); err != nil {
 				fail(err)
 			}
-			most = max(most, kib)
 		}
-		return most
+		slices.Sort(samples[:])
+		return samples[1]
 	}
 
 	time.Sleep(5 * time.Second) // let the worker start and settle

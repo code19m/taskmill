@@ -75,9 +75,8 @@ other task, with no new index and no migration:
   costly, and the merge is a sort that the page needs. The database then
   takes about 100 ms, on PostgreSQL 15, to compile a read of under 1 ms.
 - **The cursor holds the finish time and the ID** of the page's last task,
-  the time as PostgreSQL stores it. So a list gets past an infinite finish
-  time, which only an `UPDATE` by hand writes. Each order refuses the
-  cursors of the others, as an invalid argument.
+  the time as PostgreSQL stores it. Each order refuses the cursors of the
+  others, as an invalid argument.
 
 The finish order is also the better order for this list. In ID order, a
 task that died a second ago can be many pages down, behind tasks that were

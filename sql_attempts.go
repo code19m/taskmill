@@ -168,15 +168,9 @@ WHERE ` + leasedSQL + ` AND t.cancel_requested_at IS NOT NULL`
 // leases: it moves them to history, except tasks $3, which it only
 // deletes. It returns each task it finished, with true.
 //
-// It waits for a row that another transaction holds. So it first
-// locks the tasks that the attempts own, in the order of their IDs,
-// and then deletes the tasks it holds. While it waits for a task, it
-// holds only tasks with lower IDs, and cannot deadlock with a
-// transaction that takes tasks in that order too, such as one that
-// cancels several. A delete alone takes the rows as its plan meets
-// them: in the order of the attempts, or in that of the table, where
-// a renewed lease moves a row behind newer ones. A read that locks
-// sorts first, whatever its plan.
+// It waits for a row that another transaction holds, so it first locks
+// the tasks in the order of their IDs, and then deletes them: the page on
+// key statements says why.
 const completeSQL = `
 WITH held AS (
     SELECT t.id FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
@@ -319,13 +313,10 @@ RETURNING queue, coalesce(group_key, ''), state::text`
 // renew a lease, end an attempt, or rescue an expired lease read what it
 // wrote, and cannot know which statement took the task.
 //
-// The attempt and the lease token stay in the range of their columns for any
-// row, so that one row cannot fail the fetch of every task taken with it.
-// The attempt stops at the task's maximum: a row can wait in a queue with no
-// attempt left, such as a dead task that an UPDATE by hand made available,
-// and then runs once more. The token stops at the largest integer, where the
-// worker makes the task dead: a token that cannot grow cannot tell the next
-// attempt from this one.
+// The attempt stops at the task's maximum, so that a row written by hand
+// with no attempt left cannot fail the fetch of every task taken with it.
+// The token stops at the largest integer, where the worker makes the task
+// dead: a token that cannot grow cannot tell the next attempt from this one.
 func leaseSet(us, by string) string {
 	return `state = 'running',
     attempt = least(t.attempt + 1, t.max_attempts),

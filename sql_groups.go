@@ -48,25 +48,16 @@ JOIN wanted w ON g.queue = w.queue AND g.group_key = w.group_key`
 // once: an UPDATE changes a row once.
 //
 // $4 are the tasks that left, or none. If one of them halts its
-// group, the halt ends here, with the task's place in the count. A
-// halt that stayed would name a task that is no longer counted, or
-// no longer exists: a retry of that task would end the halt and
-// count the task as still there, and nothing could end the halt of
-// a task that is gone. A task that taskmill halted a group by is
-// dead, and leaves only when it is deleted, but a row written by
-// hand can name any task.
+// group, the halt ends here, with the task's place in the count: a
+// halt must not name a task that is no longer counted.
 //
 // It locks the rows, and waits for one that another transaction
 // holds. The plan decides in which order it takes the rows of
 // several groups: a nested loop takes them in the order of the
 // arrays, and a hash join can take them as they lie in the table.
 //
-// A count stops at zero. Only a row that taskmill did not write
-// counts fewer tasks than its group holds, and a count below zero
-// breaks the table's rule: the error would fail the caller's
-// transaction, which in a rescue ends the expired leases of every
-// queue, and in a completion the tasks of every other group in the
-// batch.
+// A count stops at zero, so that a row written by hand that counts
+// too few tasks cannot fail a rescue or a completion of other groups.
 const recountGroupsSQL = `
 UPDATE {s}.groups g
 SET tasks = greatest(g.tasks + u.n, 0),

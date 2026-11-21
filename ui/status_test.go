@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
 	"github.com/code19m/taskmill/ui"
 )
@@ -107,6 +108,42 @@ func TestStatusPages(t *testing.T) {
 	defer logs.mu.Unlock()
 	if n := strings.Count(strings.Join(logs.messages, "\n"), "dashboard request failed"); n != 5 {
 		t.Errorf("logged %q, want a failed request for each of the 5 failures", logs.messages)
+	}
+}
+
+// taskmill does not support a task's row that it cannot read, such as one
+// written by hand with an infinite time. A page that meets one fails as any
+// failure does, and the pages without it still work.
+func TestARowThatDoesNotDecodeFailsOnlyItsPages(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	h := handler(t, client, nil)
+	good, err := client.Enqueue(t.Context(), greet{Name: "x"}, &taskmill.EnqueueOptions{Queue: "fine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var bad int64
+	err = pool.QueryRow(t.Context(), "INSERT INTO "+schema+`.tasks (queue, kind, state, run_at, created_at, payload, max_attempts)
+	                                 VALUES ('broken', 'greet', 'available', now(), 'infinity', '{}', 1) RETURNING id`).Scan(&bad)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, target := range []string{"/tasks?queue=broken", "/tasks/" + strconv.FormatInt(bad, 10)} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, target, nil))
+		checkStatusPage(t, target, rec, wantStatus{
+			http.StatusInternalServerError, "Something went wrong",
+			"The dashboard could not read what this page shows. The server log has the details.",
+			[]string{"primary " + target + " Try again", "quiet / Back to the overview"},
+			true,
+		}, schema)
+	}
+	for _, target := range []string{"/", "/schedules", "/workers", "/tasks?queue=fine", "/tasks/" + strconv.FormatInt(good.ID, 10)} {
+		if code, _, _ := get(t, h, target); code != http.StatusOK {
+			t.Errorf("%s beside the row that does not decode: %d, want 200", target, code)
+		}
 	}
 }
 
