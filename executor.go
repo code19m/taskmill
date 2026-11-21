@@ -16,7 +16,10 @@ import (
 // [Client.CancelTx] and [Task.CompleteTx] run several statements that must
 // commit together, so they need a transaction: a [pgx.Tx], a [*sql.Tx], or a
 // type with Commit and Rollback methods, such as *sqlx.Tx. They return
-// [ErrInvalidArgument] for anything else.
+// [ErrInvalidArgument] for anything else. An enqueue counts every other
+// executor as outside a transaction, also a type that wraps a pgx.Tx with
+// only Exec and Query: it logs a failed second read of a dedupe key, and
+// does not return it (see [EnqueueResult.ID]).
 //
 // Executor is sealed: only this package implements it, which lets its methods
 // change without breaking callers.

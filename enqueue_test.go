@@ -83,6 +83,7 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 		opts *taskmill.EnqueueOptions
 	}{
 		{"nil args", nil, nil},
+		{"nil pointer args", (*sendEmail)(nil), nil},
 		{"empty kind", emptyKind{}, nil},
 		{"priority out of range", sendEmail{}, &taskmill.EnqueueOptions{Priority: 9}},
 		{"negative max attempts", sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: -1}},
@@ -1031,14 +1032,21 @@ func behind[T any](t *testing.T, e *env, holder pgx.Tx, enqueue func() (T, error
 	return got.res, got.err
 }
 
-// beforeKeyRead calls a function once, before a connection of the pool sends
-// the statement with which an enqueue reads a dedupe key again.
-type beforeKeyRead struct {
-	call atomic.Pointer[func()]
+// beforeStatement calls a function once, before a connection of the pool
+// sends a statement that contains fragment.
+type beforeStatement struct {
+	fragment string
+	call     atomic.Pointer[func()]
 }
 
-func (b *beforeKeyRead) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
-	if strings.Contains(d.SQL, "SELECT key, task_id FROM") {
+// beforeKeyRead returns a beforeStatement for the statement with which an
+// enqueue reads a dedupe key again.
+func beforeKeyRead() *beforeStatement {
+	return &beforeStatement{fragment: "SELECT key, task_id FROM"}
+}
+
+func (b *beforeStatement) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, b.fragment) {
 		if f := b.call.Swap(nil); f != nil {
 			(*f)()
 		}
@@ -1046,7 +1054,7 @@ func (b *beforeKeyRead) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.
 	return ctx
 }
 
-func (*beforeKeyRead) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (*beforeStatement) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 // plainAndKeyed returns the params of a task without a key, for the queue
 // "plain", and of a task with the dedupe key of opts.
@@ -1058,23 +1066,26 @@ func plainAndKeyed(opts *taskmill.EnqueueOptions) []taskmill.EnqueueParams {
 }
 
 // The second read of a dedupe key only fills in the ID of the task that took
-// the key. On the client's pool the enqueue has committed by then. So if the
-// read finds no ID, the enqueue still returns its results: an error would
-// say that nothing was stored, and the caller's next try would store the
-// task without a key again.
+// the key. Outside a transaction the enqueue has committed by then: on the
+// client's pool, and on a connection of the caller's. So if the read finds
+// no ID, the enqueue still returns its results: an error would say that
+// nothing was stored, and the caller's next try would store the task
+// without a key again.
 func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
 		name   string
 		gone   bool // the task that took the key is deleted before the read; otherwise the read fails
+		conn   bool // the enqueue runs on a connection outside a transaction; otherwise on the client's pool
 		logged int  // warnings of a failed read
 	}{
 		{name: "the read fails", logged: 1},
+		{name: "the read fails on a connection", conn: true, logged: 1},
 		{name: "the task that took the key is deleted", gone: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			read, logs := &beforeKeyRead{}, &logRecorder{}
+			read, logs := beforeKeyRead(), &logRecorder{}
 			e := newTracedEnv(t, read).withLogger(t, slog.New(logs))
 			opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
 			holder, first := e.holdKey(t, opts)
@@ -1091,9 +1102,7 @@ func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
 			}
 			read.call.Store(&before)
 
-			res, err := behind(t, e, holder, func() ([]taskmill.EnqueueResult, error) {
-				return e.client.EnqueueMany(ctx, plainAndKeyed(opts))
-			})
+			res, err := behind(t, e, holder, e.enqueueMany(ctx, t, c.conn, plainAndKeyed(opts)))
 			if err != nil || len(res) != 2 || res[0].ID == 0 || res[0].Duplicate || res[1] != (taskmill.EnqueueResult{Duplicate: true}) {
 				t.Fatalf("got %+v, %v; want a new task, and a duplicate without an ID", res, err)
 			}
@@ -1107,11 +1116,29 @@ func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
 	}
 }
 
+// enqueueMany returns a call that enqueues params on ctx: on the client's
+// pool, or, if conn, on a connection of e's pool outside a transaction.
+func (e *env) enqueueMany(ctx context.Context, t *testing.T, conn bool, params []taskmill.EnqueueParams) func() ([]taskmill.EnqueueResult, error) {
+	t.Helper()
+	if !conn {
+		return func() ([]taskmill.EnqueueResult, error) { return e.client.EnqueueMany(ctx, params) }
+	}
+
+	c, err := e.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Release)
+	return func() ([]taskmill.EnqueueResult, error) {
+		return e.client.EnqueueManyTx(ctx, taskmill.Pgx(c.Conn()), params)
+	}
+}
+
 // In the caller's transaction nothing is committed yet, so the enqueue
 // returns the error of the read, and the caller rolls back.
 func TestEnqueueTxReturnsTheFailedReadOfADuplicate(t *testing.T) {
 	t.Parallel()
-	read := &beforeKeyRead{}
+	read := beforeKeyRead()
 	e := newTracedEnv(t, read)
 	opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
 	holder, _ := e.holdKey(t, opts)
@@ -1127,5 +1154,31 @@ func TestEnqueueTxReturnsTheFailedReadOfADuplicate(t *testing.T) {
 	})
 	if !errors.Is(err, context.Canceled) || res != nil {
 		t.Fatalf("got %+v, %v; want the error of the read", res, err)
+	}
+}
+
+// A call with no tasks does nothing: it stores nothing and runs no enqueue
+// middleware, which may expect at least one task.
+func TestEnqueueOfNoTasksDoesNothing(t *testing.T) {
+	t.Parallel()
+	called := false
+	atLeastOne := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		called = true
+		if len(tasks) == 0 {
+			return errors.New("no tasks")
+		}
+		return next(ctx)
+	}
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{atLeastOne}})
+
+	if res, err := e.client.EnqueueMany(t.Context(), nil); res != nil || err != nil {
+		t.Fatalf("EnqueueMany: got %v, %v; want nothing", res, err)
+	}
+	tx := e.begin(t)
+	if res, err := e.client.EnqueueManyTx(t.Context(), taskmill.Pgx(tx), []taskmill.EnqueueParams{}); res != nil || err != nil {
+		t.Fatalf("EnqueueManyTx: got %v, %v; want nothing", res, err)
+	}
+	if called {
+		t.Fatal("the middleware ran for no tasks")
 	}
 }

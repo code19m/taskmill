@@ -40,6 +40,71 @@ func TestPauseAndResumeQueue(t *testing.T) {
 	e.waitState(t, id, taskmill.StateCompleted)
 }
 
+// A queue whose settings are back to their defaults keeps no row, so a
+// pause or a limit that named a queue by mistake, and was undone, does not
+// list that queue for good. A queue that keeps one setting keeps its row.
+func TestQueueWithoutSettingsIsNotKept(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	limit := func(n int) func(*taskmill.QueueSettings) { return func(s *taskmill.QueueSettings) { s.MaxRunning = n } }
+	for _, err := range []error{
+		e.client.PauseQueue(ctx, "emials"), e.client.ResumeQueue(ctx, "emials"),
+		e.client.UpdateQueue(ctx, "retired", limit(4)), e.client.UpdateQueue(ctx, "retired", limit(0)),
+		e.client.PauseQueue(ctx, "limited"), e.client.UpdateQueue(ctx, "limited", limit(2)), e.client.ResumeQueue(ctx, "limited"),
+		e.client.UpdateQueue(ctx, "stopped", limit(3)), e.client.PauseQueue(ctx, "stopped"), e.client.UpdateQueue(ctx, "stopped", limit(0)),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	queues, err := e.client.Queues(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, q := range queues {
+		names = append(names, q.Name)
+	}
+	if !slices.Equal(names, []string{"limited", "stopped"}) {
+		t.Fatalf("got the queues %v, want only those that keep a setting", names)
+	}
+	if queues[0].Paused || queues[0].Settings.MaxRunning != 2 || !queues[1].Paused || queues[1].Settings.MaxRunning != 0 {
+		t.Fatalf("got %+v, want limited with its limit, and stopped paused", queues)
+	}
+}
+
+// A later release may add a setting to the queues table that this one does
+// not know. A row that holds such a setting is kept: deleting it would lose
+// the setting. One whose new column is NULL holds nothing, and goes.
+func TestQueueKeepsASettingOfALaterRelease(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	e.exec(t, "ALTER TABLE {s}.queues ADD COLUMN max_per_second integer")
+	limit := func(n int) func(*taskmill.QueueSettings) { return func(s *taskmill.QueueSettings) { s.MaxRunning = n } }
+
+	for _, name := range []string{"kept", "gone"} {
+		if err := e.client.UpdateQueue(ctx, name, limit(4)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e.exec(t, "UPDATE {s}.queues SET max_per_second = 10 WHERE name = 'kept'")
+	for _, name := range []string{"kept", "gone"} {
+		if err := errors.Join(e.client.PauseQueue(ctx, name), e.client.ResumeQueue(ctx, name), e.client.UpdateQueue(ctx, name, limit(0))); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if n := e.count(t, "SELECT count(*) FROM {s}.queues WHERE name = 'kept' AND max_per_second = 10"); n != 1 {
+		t.Error("the row with the setting of a later release was deleted")
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.queues WHERE name = 'gone'"); n != 0 {
+		t.Error("the row without settings was kept")
+	}
+}
+
 func TestUpdateQueue(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

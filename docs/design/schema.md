@@ -131,7 +131,7 @@ and `freed_key_expires_at` for a [retry](schema-operations.md#a-retry-takes-its-
 
 ### Settings, coordination, and bookkeeping
 
-- `queues` holds `paused_at` and `max_running` for the queues that have them.
+- `queues` holds `paused_at` and `max_running` for the queues that have them: see [A queue's settings](schema-operations.md#a-queues-settings).
 - `settings` has exactly one row, enforced by a `CHECK` on its key. Settings
   live in the database rather than in each process's configuration, so every
   worker that becomes the maintainer applies the same retention.
@@ -179,6 +179,7 @@ period and deleting old rows.
 | `tasks_pending_idx` | `queue, group_key, id` | `pending` | Promoting the next task of a group; counting pending tasks |
 | `tasks_finished_idx` | `queue, state, finalized_at` | `dead`, `canceled` | Retention; counting dead and canceled tasks; listing them, latest first |
 | `tasks_created_idx` | `queue, created_at, id` | All but `running` | Listing a range of creation times. A fetch writes no entry to it; every other change of state writes one |
+| `tasks_group_head_idx` | `queue, group_key` | Grouped, not `pending` or `canceled`: each group's head | Finding the task that a pending task waits behind. Only grouped tasks write entries, about 170 bytes of WAL each |
 
 The fetch index's key matches the fetch query's `ORDER BY` exactly. PostgreSQL
 reads the first rows of the index in order and stops at the `LIMIT`, with no
@@ -189,8 +190,7 @@ sort, however long the backlog. Measured: fetching 10 tasks from a queue with
 did, every lease renewal would write an index entry. `INCLUDE` adds columns
 to an index's entries without making them part of its key. With `queue` and
 `state` in `tasks_due_idx`, and `state` in `tasks_finished_idx`, statistics
-count those tasks from the index alone, without reading the table (an
-index-only scan).
+count those tasks from the index alone (an index-only scan).
 
 ## Operational notes
 

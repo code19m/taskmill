@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/code19m/taskmill/internal/argkind"
@@ -77,8 +79,19 @@ type BatchHandler[A Args] interface {
 //
 // [guide to handling tasks]: https://github.com/code19m/taskmill/blob/main/docs/guides/handle-tasks.md
 type HandlerOptions struct {
-	// Timeout bounds each attempt, or each batch. It must not be negative.
-	// Default: 1 minute.
+	// Timeout bounds each attempt, or each batch: the handler's context is
+	// canceled with [ErrAttemptTimeout] then. A handler that has not returned
+	// 5 seconds after its context was canceled, by this timeout, a cancel of
+	// its task, or a lost lease, is abandoned: its attempt ends as the cause
+	// says, its task is retried or canceled, and its result is ignored. Its
+	// goroutine keeps its slot until it returns, and it may still finish its
+	// work, while the task already runs again. The context of a batch
+	// handler ends only with this timeout, so a batch is abandoned only
+	// after it: each of its tasks fails with [CodeTimeout]. In a queue with
+	// a [QueueSettings.MaxRunning] limit, nothing is abandoned: a task that
+	// ran again would break the limit. Its task stays running until the
+	// handler returns, and the worker logs a warning. It must not be
+	// negative. Default: 1 minute.
 	Timeout time.Duration
 
 	// Retry decides the delay before each retry. A task whose worker lost its
@@ -223,9 +236,99 @@ func defaultQueueOf[A Args]() (queue string) {
 func newTask[A Args](info *TaskInfo, a *attempt) (*Task[A], error) {
 	var args A
 	if err := json.Unmarshal(info.Payload, &args); err != nil {
-		return nil, &failure{code: CodeInvalidPayload, permanent: true, err: fmt.Errorf("decode payload: %w", err)}
+		return nil, &failure{code: CodeInvalidPayload, permanent: true, err: decodeError[A](err)}
 	}
 	return &Task[A]{TaskInfo: *info, Args: args, attempt: a}, nil
+}
+
+// decodeError says why a payload did not decode into A, without a value of
+// the payload: the error is stored with the task, logged, and set as a
+// span's status, where payloads must not appear. encoding/json quotes the
+// numbers and characters that it rejects, and an UnmarshalJSON method of
+// the application may quote anything, so only the field, the JSON type, the
+// Go type, and the place remain.
+func decodeError[A Args](err error) error {
+	if e, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+		kind, _, _ := strings.Cut(e.Value, " ") // "number -5" holds the number
+		if field := fieldPath(reflect.TypeFor[A](), e.Field); field != "" {
+			return fmt.Errorf("decode payload: the field %s holds a JSON %s, which does not fit %s", field, kind, e.Type)
+		}
+		return fmt.Errorf("decode payload: a JSON %s does not fit %s", kind, e.Type)
+	}
+	if e, ok := errors.AsType[*json.SyntaxError](err); ok {
+		return fmt.Errorf("decode payload: the JSON is not valid at byte %d", e.Offset)
+	}
+	return fmt.Errorf("decode payload: it does not decode into %s", reflect.TypeFor[A]())
+}
+
+// fieldPath returns path, the path of a field in t as encoding/json reports
+// it, without the values of the payload that it may hold: the keys of maps.
+// Releases of Go differ in what the path holds: some put in the key of
+// each map and the index of each list, others leave both out. So fieldPath
+// follows t along the names of the fields, skips the indexes, and ends at
+// a map with "[key]": a key may hold dots, so what follows it cannot be
+// told from the key. It also ends at a name that t does not have. The
+// result is the same on every release: "items.qty", or "scores[key]".
+func fieldPath(t reflect.Type, path string) string {
+	var names []string
+	indexes := 0 // the lists passed since the last name, whose indexes may come next
+	for name := range strings.SplitSeq(path, ".") {
+		var lists int
+		t, lists = elements(t)
+		indexes += lists
+		if _, err := strconv.Atoi(name); err == nil && indexes > 0 {
+			indexes--
+			continue
+		}
+		indexes = 0
+
+		if t.Kind() == reflect.Map {
+			return strings.Join(names, ".") + "[key]"
+		}
+		f, ok := jsonField(t, name)
+		if !ok {
+			return strings.Join(names, ".")
+		}
+		names = append(names, name)
+		t = f.Type
+	}
+
+	// A path that leaves keys out ends at the map.
+	if t, _ = elements(t); t.Kind() == reflect.Map {
+		return strings.Join(names, ".") + "[key]"
+	}
+	return strings.Join(names, ".")
+}
+
+// elements returns the type that t holds through pointers, lists, and
+// arrays, and how many lists and arrays it passed.
+func elements(t reflect.Type) (reflect.Type, int) {
+	lists := 0
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		if t.Kind() != reflect.Pointer {
+			lists++
+		}
+		t = t.Elem()
+	}
+	return t, lists
+}
+
+// jsonField returns the field of t, a struct, that encoding/json names name
+// in a path: its name in JSON, or the Go name of an embedded struct.
+func jsonField(t reflect.Type, name string) (reflect.StructField, bool) {
+	if t.Kind() != reflect.Struct {
+		return reflect.StructField{}, false
+	}
+	for f := range t.Fields() {
+		tag := f.Tag.Get("json")
+		jsonName, _, _ := strings.Cut(tag, ",")
+		switch {
+		case tag == "-":
+		case jsonName == name, jsonName == "" && f.Name == name, f.Anonymous && f.Name == name:
+			return f, true
+		}
+	}
+	return reflect.StructField{}, false
 }
 
 func (hs *Handlers) add(reg *registration) {

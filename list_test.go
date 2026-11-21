@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
 				return err
 			},
 			"Count kind": func() error {
-				_, err := e.client.Count(ctx, &taskmill.TaskFilter{Kinds: []string{s}})
+				_, err := e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{Kinds: []string{s}}})
 				return err
 			},
 			"RetryMatching group": func() error {
@@ -64,6 +65,96 @@ func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
 				t.Errorf("%s(%q): got %v, want ErrInvalidArgument", name, s, err)
 			}
 		}
+	}
+}
+
+// Each filter takes at most 100 values, as the dashboard sends: a call with
+// more is an error, not a statement with an array of any size.
+func TestFiltersTakeAtMost100Values(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	names := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = "q" + strconv.Itoa(i)
+		}
+		return out
+	}
+	states := slices.Repeat([]taskmill.State{taskmill.StateDead}, 101)
+
+	for name, filter := range map[string]taskmill.TaskFilter{
+		"queues": {Queues: names(101)}, "kinds": {Kinds: names(101)}, "groups": {GroupKeys: names(101)}, "states": {States: states},
+	} {
+		if _, err := e.client.List(ctx, &taskmill.ListParams{Filter: filter}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("List with 101 %s: got %v, want ErrInvalidArgument", name, err)
+		}
+		if _, err := e.client.Count(ctx, &taskmill.CountParams{Filter: filter}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("Count with 101 %s: got %v, want ErrInvalidArgument", name, err)
+		}
+	}
+	if _, err := e.client.Activity(ctx, &taskmill.ActivityParams{Queues: names(101)}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Errorf("Activity with 101 queues: got %v, want ErrInvalidArgument", err)
+	}
+	if _, err := e.client.List(ctx, &taskmill.ListParams{Filter: taskmill.TaskFilter{Queues: names(100)}}); err != nil {
+		t.Errorf("List with 100 queues: %v", err)
+	}
+}
+
+// An error about a name that is too long quotes only its start: the name
+// may be megabytes long.
+func TestErrorsQuoteOnlyTheStartOfALongName(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	long := strings.Repeat("q", 1<<20)
+	for name, call := range map[string]func() error{
+		"Enqueue": func() error {
+			_, err := e.client.Enqueue(t.Context(), sendEmail{}, &taskmill.EnqueueOptions{Queue: long})
+			return err
+		},
+		"List": func() error {
+			_, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.State(long)}}})
+			return err
+		},
+	} {
+		if err := call(); !errors.Is(err, taskmill.ErrInvalidArgument) || len(err.Error()) > 200 {
+			t.Errorf("%s: got an error of %d bytes, want ErrInvalidArgument with the start of the name", name, len(err.Error()))
+		}
+	}
+}
+
+// The dashboard's page of a pending task shows the task that it waits
+// behind: its group's head, the one task of the group that is neither
+// pending nor canceled. The list that finds it reads the head alone, however
+// many tasks its queue holds.
+func TestListFindsTheHeadOfAGroupAlone(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'q', 'email.send', 'available', now(), '{}', 3 FROM generate_series(1, 20000)`)
+	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "q", GroupKey: "g"})
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'q', 'email.send', 'available', now(), '{}', 3 FROM generate_series(1, 20000)`)
+	for range 10 {
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "q", GroupKey: "g"})
+	}
+	e.exec(t, "ANALYZE {s}.tasks")
+
+	params := &taskmill.ListParams{Filter: taskmill.TaskFilter{
+		Queues: []string{"q"}, GroupKeys: []string{"g"}, States: []taskmill.State{
+			taskmill.StateScheduled, taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateRetryable, taskmill.StateDead,
+		},
+	}, Limit: 1, Summary: true}
+	page, err := e.client.List(t.Context(), params)
+	if err != nil || len(page.Tasks) != 1 || page.Tasks[0].ID != head {
+		t.Fatalf("got %+v, %v; want the head, task %d", page, err, head)
+	}
+	read, err := taskmill.ListRowsRead(t.Context(), e.client, params, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read > 5 {
+		t.Fatalf("finding the head read %d rows", read)
 	}
 }
 

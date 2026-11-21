@@ -22,10 +22,12 @@ const (
 // field outside its limits is an error that wraps [ErrInvalidArgument].
 type ActivityParams struct {
 	// Queues limits the activity to these queues. Empty means all queues.
+	// Maximum: 100 names.
 	Queues []string
 
-	// Since is when the period starts. Default: an hour ago. Activity is
-	// kept for 24 hours, in points of one minute.
+	// Since is when the period starts, a time that PostgreSQL can store,
+	// from 4713 BC to 294276 AD. Default: an hour ago. Activity is kept for
+	// 24 hours, in points of one minute.
 	Since time.Time
 
 	// Step is how much time each point covers, in whole minutes. Default: a
@@ -103,6 +105,9 @@ func activityParams(params *ActivityParams) (ActivityParams, []string, error) {
 	}
 	if p.Since.IsZero() {
 		p.Since = time.Now().Add(-time.Hour)
+	}
+	if err := checkTime("since", p.Since); err != nil {
+		return p, nil, err
 	}
 
 	queues, err := checkFilter("queue name", p.Queues, maxNameLength)

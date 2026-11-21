@@ -7,8 +7,101 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `Client.Count` takes `*CountParams`, not a bare
+  `*TaskFilter`, as every other read and action takes params: an option
+  such as a time range can then be added later without breaking callers.
+  To migrate, write `client.Count(ctx, &taskmill.CountParams{Filter: f})`
+  for `client.Count(ctx, &f)`. Nil still counts every task.
+- A handler that ignores its context no longer keeps its task for good.
+  Its timeout, a cancel, or a delete changed nothing, and nothing was
+  logged. Now, 5 seconds after its context was canceled, the worker
+  abandons the attempt, logs `handler ignored its context; abandoning its
+  attempt`, and ends it as the cause says: a timeout fails it with the code
+  `timeout`, so the task is retried, and a cancel cancels the task. The
+  handler's goroutine keeps its slot until it returns, and may still finish
+  its work later, while the task already runs again: at-least-once delivery
+  allows that. A batch is abandoned only after its `Timeout`, which alone
+  ends its context. In a queue with a `MaxRunning` limit nothing is
+  abandoned, so that the limit holds: the task stays running until the
+  handler returns, and the worker logs a warning.
+- `Run` returns at most about `DrainTimeout` plus 10 seconds after its
+  context ended, also when the database does not answer. Each step after
+  the drain had 30 seconds of its own, so with an unreachable database
+  `Run` took a minute, and the platform killed the process. Now the steps
+  share 5 seconds: a result that cannot be recorded by then is rescued once
+  its lease runs out, and its task runs again.
+- Each filter of `TaskFilter`, and `ActivityParams.Queues`, takes at most
+  100 values, as `GroupParams.Queues` did: a call with more returns an error
+  that wraps `ErrInvalidArgument`, not a statement with an array of any
+  size. The dashboard sends at most 100.
+- A fetch from a queue with a `MaxRunning` limit holds the queue's row for
+  one round trip, not four: the worker sends the transaction in one batch,
+  up to its commit. With 4 workers of 16 slots, a limit of 32, and a network
+  of 1 ms, such a queue runs about 4,400 tasks a second, where it ran 1,500;
+  with 4 ms, 2,000 where it ran 500. The limit stays exact.
+- A worker warns of tasks of a kind that it has no handler for at most once
+  a minute per kind, with the number of tasks, as `no handler for task kind;
+  its tasks wait for a worker that has one`. It warned once per task, and a
+  rolling deploy flooded the log. The line for each task is at Debug.
+
 ### Fixed
 
+- A panic in an enqueue middleware, or in the encoding of a schedule's
+  args, during a scheduled run no longer ends the maintainer's process, and
+  the process of every maintainer elected after it. The pass fails, with
+  the stack in the `run schedules` line, and the run stays due.
+- The maintainer no longer stalls for about 15 minutes on a connection
+  that stops answering without a reset, as in a failover that drops its
+  packets. Promotions and heartbeats stopped while the election, on other
+  connections, kept the role. Each statement of the maintainer's work now
+  ends within its lease of 10 seconds, and the next try takes a new
+  connection.
+- A task's row that another transaction holds, such as an open `CancelTx`,
+  no longer stalls every completion of the worker. The batch waited for the
+  row, and after 30 seconds all its tasks were rescued as lost leases:
+  tasks that had succeeded ran again, or became dead. The completion now
+  skips held rows and tries them again shortly, and warns once of a task
+  that waits for longer than its lease. The failure, snooze, or release of
+  a grouped task waits for its group's row at most a second at a time, so
+  its lease stays renewed, and its own error is recorded, not `lease_lost`.
+- A handler that ends its goroutine with `runtime.Goexit`, as `t.Fatal`
+  does in a test, no longer leaves its task running for good, its lease
+  renewed by a goroutine that never stops. `RunTask` and `Run` give the
+  task back to its queue. `RunTask` also bounds its last read of the task.
+- The maintainer no longer logs the end of a difference between the
+  workers' schedules that a comparison found after its term ended.
+- `EnqueueTx` and `EnqueueManyTx` with an executor that is no transaction,
+  such as `SQL(db)` or `Pgx(conn)`, no longer return an error after the
+  tasks were stored, when the second read of a dedupe key fails: a retry
+  stored the tasks without a key twice. Like `Enqueue`, they log the failed
+  read and return the results.
+- A nil pointer as `Args`, such as `var a *Receipt`, and a nil entry in
+  `ClientConfig.EnqueueMiddleware` or `WorkerConfig.Middleware`, are errors
+  that wrap `ErrInvalidArgument`. They panicked in every call.
+- A queue whose settings are back to their defaults is no longer stored:
+  `PauseQueue` and `ResumeQueue` of a mistyped name, or a `MaxRunning` set
+  back to 0, kept the queue in `Client.Queues`, the dashboard, and the
+  `otel` gauges for good.
+- `Outbox.Store` rejects a topic or a header name that is not valid UTF-8
+  or holds a NUL character. Such bytes silently became U+FFFD, so two
+  topics became one, while their messages kept separate orders. The doc of
+  `Message.Value` no longer says that the topic is stored in base64.
+- `Client.Activity` returns an error that wraps `ErrInvalidArgument` for a
+  `Since` that PostgreSQL cannot store, as the other reads do, not the
+  database's error.
+- A batch of `DeleteMatching` changes at most 1,000 tasks of both tables in
+  all, as `BulkResult.Changed` promises. It took up to 1,000 of each.
+- An error about a name that is too long quotes only its start: it quoted
+  the whole value, of any size.
+- A list of a FIFO group's tasks that are not pending, as the dashboard's
+  page of a pending task reads to show the task that it waits behind,
+  reads the group's head alone. It read every task of the queue: 70 to 120
+  ms on a queue of 126,000 tasks, at each update of the page. Migration 9
+  adds the index of the heads: while it builds, writes wait about a tenth
+  of a second for each million tasks, and each grouped task then writes
+  about 170 bytes more WAL. Ungrouped tasks write nothing more.
 - Docs that were wrong or unclear. Retried tasks run before new work, as
   [Recover from an incident](docs/recipes/recover-from-an-incident.md) now
   says. The order of a list and what a page reads are in the doc comment of
@@ -17,6 +110,15 @@ All notable changes to taskmill are recorded here. The format follows
   attempt becomes dead, and the failover checklist looks for it. A new
   page, [Dashboard pages](docs/reference/dashboard-pages.md), says what each
   part of a dashboard page shows.
+
+### Security
+
+- A payload that does not decode no longer puts its values in the task's
+  errors, the log, and the span's status. `encoding/json` quotes numbers
+  and characters that it rejects, and an `UnmarshalJSON` method may quote
+  anything. The error now names the field, with `[key]` in place of a
+  map's key, and the types, the place of a syntax error, or only the `Args`
+  type, with the code `invalid_payload` as before.
 
 ## [0.13.0] - 2026-11-21
 

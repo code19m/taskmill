@@ -11,6 +11,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,7 +62,7 @@ type timing struct {
 	idlePoll        time.Duration // how often idle queues poll while the maintainer's heartbeats arrive
 	quiet           time.Duration // how long a queue leaves notifications waiting after the fetch for one found nothing
 	listen          time.Duration // bound on opening the notification connection, and on its answer when heartbeats stop
-	lockWait        time.Duration // how long a schedule's run waits for a row that another transaction holds, such as a FIFO group's
+	lockWait        time.Duration // how long a schedule's run, or a grouped task's outcome, waits for a row that another transaction holds, such as a FIFO group's
 	scheduleCheck   time.Duration // how often the maintainer compares the workers' schedules with its own
 	scheduleGrace   time.Duration // how long they may differ before it logs an error
 	scheduleReport  time.Duration // how often it logs again while they differ, at most
@@ -91,6 +92,11 @@ var defaultTiming = timing{
 	scheduleReport:  time.Hour,
 }
 
+// lockTimeout returns lockWait as a value of the setting lock_timeout.
+func (t *timing) lockTimeout() string {
+	return strconv.FormatInt(t.lockWait.Milliseconds(), 10) + "ms"
+}
+
 // errListenConfig reports a ListenConfig that pgx cannot connect with.
 var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with pgx.ParseConfig")
 
@@ -108,17 +114,20 @@ var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with
 //
 // [guide to workers and queues]: https://github.com/code19m/taskmill/blob/main/docs/guides/workers-and-queues.md
 type Worker struct {
-	client    *Client
-	cfg       WorkerConfig
-	id        string
-	host      string
-	handlers  map[string]*registration
-	queues    map[string]*queueState
-	timing    timing
-	logger    *slog.Logger
-	listen    *pgx.ConnConfig
-	version   string
-	schedules []compiledSchedule
+	client   *Client
+	cfg      WorkerConfig
+	id       string
+	host     string
+	handlers map[string]*registration
+	// batchKinds reports that a handler is a batch handler: fetches may
+	// lease more tasks to fill its batches.
+	batchKinds bool
+	queues     map[string]*queueState
+	timing     timing
+	logger     *slog.Logger
+	listen     *pgx.ConnConfig
+	version    string
+	schedules  []compiledSchedule
 
 	// The names of the schedules, sorted, and the hash of each one's
 	// definition, in the same order.
@@ -146,6 +155,7 @@ type Worker struct {
 	completerDone chan struct{}     // closed when the current Run's completer returns
 
 	poolWarned atomic.Int64 // when renewing leases last warned that the pool was full, in Unix nanoseconds
+	noHandler  kindWarnings // the kinds without a handler whose tasks the worker met
 
 	// The failures of operations that the worker repeats, which it logs
 	// only now and then. Leases and results are renewed and recorded by
@@ -219,12 +229,17 @@ type WorkerConfig struct {
 
 	// DrainTimeout is how long Run waits for running tasks after its context
 	// is canceled, before canceling their contexts and, 5 seconds later,
-	// releasing them. Keep it at least 10 seconds below the time the platform
-	// gives a stopping process. It must not be negative. Default: 20 seconds.
+	// releasing them. Run then has 5 seconds more to record the results that
+	// are left, release those tasks, and unregister. What it cannot record by
+	// then, as when the database does not answer, is rescued once its lease
+	// runs out, and the task runs again. So Run returns at most about
+	// DrainTimeout plus 10 seconds after its context is canceled. Keep
+	// DrainTimeout at least 10 seconds below the time the platform gives a
+	// stopping process. It must not be negative. Default: 20 seconds.
 	DrainTimeout time.Duration
 
 	// Middleware wraps every attempt, in order: the first is the outermost.
-	// Default: none.
+	// A nil entry is an error that wraps [ErrInvalidArgument]. Default: none.
 	Middleware []Middleware
 
 	// Schedules are recurring tasks that the maintainer enqueues. Each name
@@ -321,6 +336,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 				r.opts.Retry = ExponentialBackoff{}
 			}
 			w.handlers[kind] = &r
+			w.batchKinds = w.batchKinds || r.runBatch != nil
 		}
 	}
 
@@ -357,6 +373,9 @@ func resolveWorkerConfig(c *WorkerConfig) error {
 	}
 	if len(c.Queues) > 0 && len(kinds) == 0 {
 		return invalidArgument("a worker with queues needs handlers")
+	}
+	if slices.ContainsFunc(c.Middleware, func(m Middleware) bool { return m == nil }) {
+		return invalidArgument("a middleware is nil")
 	}
 
 	queues := make(map[string]QueueOptions)
@@ -437,6 +456,12 @@ type liveAttempt struct {
 	// completedDirectly is set once RunTask recorded the completion.
 	completedDirectly bool
 
+	// Only the completer uses these: since when the completion has found the
+	// task's row, or its group's, held by other transactions, and whether
+	// it warned of that.
+	blockedSince  time.Time
+	blockedWarned bool
+
 	mu        sync.Mutex
 	cancel    context.CancelCauseFunc // set once a single attempt starts
 	state     attemptState
@@ -458,6 +483,7 @@ const (
 // runState is the state of one call to [Worker.Run].
 type runState struct {
 	attemptCtx context.Context // parent of every attempt; canceled with ErrShutdown once DrainTimeout passes
+	recordCtx  context.Context // where results are recorded; canceled cleanupTimeout after the drain
 	fetching   sync.WaitGroup  // the fetch loops
 	inflight   sync.WaitGroup  // the running attempts and batches
 }
@@ -496,7 +522,9 @@ func (w *Worker) register(ctx context.Context) ([]string, error) {
 // Run fetches and runs tasks until ctx is canceled. It then stops fetching
 // and, if it is the maintainer, resigns, so that another worker takes over
 // right away. It waits up to DrainTimeout for running tasks, cancels and
-// releases those still running, and returns nil. If ctx ends before the
+// releases those still running, and returns nil, at most about DrainTimeout
+// plus 10 seconds after ctx ended, even when the database does not answer:
+// see [WorkerConfig.DrainTimeout]. If ctx ends before the
 // worker registered, it returns nil right away. It returns an error only if
 // the worker cannot start: it is already running, which is
 // [ErrInvalidState], or it cannot register in the database.
@@ -550,10 +578,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
 
+	// Results are recorded on recordCtx, which outlives ctx, and the drain,
+	// by cleanupTimeout.
+	recordCtx, stopRecording := context.WithCancel(base)
+	defer stopRecording()
+
 	w.released.Store(0)
 	w.completerDone = make(chan struct{})
 	completerCtx, stopCompleter := context.WithCancel(base)
-	go w.completer(completerCtx)
+	go w.completer(completerCtx, recordCtx)
 
 	loopsCtx, stopLoops := context.WithCancel(base)
 	var loops sync.WaitGroup
@@ -570,16 +603,22 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	attemptCtx, stopAttempts := context.WithCancelCause(base)
-	r := &runState{attemptCtx: attemptCtx}
+	r := &runState{attemptCtx: attemptCtx, recordCtx: recordCtx}
 	for _, q := range w.queues {
 		r.fetching.Go(func() { w.fetchLoop(ctx, r, q) })
 	}
 
 	<-ctx.Done()
-	w.drain(base, r, stopAttempts)
+	abandoned := w.drain(base, r, stopAttempts)
 
-	// Attempts that ended before drain gave up may still be recording their
-	// results, through the completer too.
+	// What follows has one deadline, so that Run returns soon also when the
+	// database does not answer: the release of the tasks whose handlers did
+	// not return, the results that attempts that ended before are still
+	// recording, also through the completer, the activity, and the worker's
+	// row. What is not recorded by then is rescued when its lease runs out.
+	stop := time.AfterFunc(cleanupTimeout, stopRecording)
+	defer stop.Stop()
+	w.release(recordCtx, abandoned)
 	w.recording.Wait()
 
 	stopCompleter()
@@ -587,20 +626,19 @@ func (w *Worker) Run(ctx context.Context) error {
 	stopLoops()
 	loops.Wait()
 
-	stopCtx, cancel := context.WithTimeout(base, recordTimeout)
-	defer cancel()
-	w.flushActivity(stopCtx)
-	if _, err := w.client.pool.Exec(stopCtx, w.client.sql.deleteWorker, w.id); err != nil {
-		w.logger.LogAttrs(stopCtx, slog.LevelWarn, "unregister worker failed", slog.Any(logKeyError, err))
+	w.flushActivity(recordCtx)
+	if _, err := w.client.pool.Exec(recordCtx, w.client.sql.deleteWorker, w.id); err != nil {
+		w.logger.LogAttrs(base, slog.LevelWarn, "unregister worker failed", slog.Any(logKeyError, err))
 	}
-	w.logger.LogAttrs(stopCtx, slog.LevelInfo, "worker stopped", slog.Int64(logKeyReleased, w.released.Load()))
+	w.logger.LogAttrs(base, slog.LevelInfo, "worker stopped", slog.Int64(logKeyReleased, w.released.Load()))
 	return nil
 }
 
 // drain ends a run whose context has ended. It waits for the fetch loops and
 // for the running attempts. Once DrainTimeout has passed, it cancels the
-// attempts, and it releases the tasks of those that do not return in time.
-func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.CancelCauseFunc) {
+// attempts, and it returns those that do not return in time, abandoned: their
+// tasks are to be released.
+func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.CancelCauseFunc) []*liveAttempt {
 	done := make(chan struct{})
 	go func() {
 		r.fetching.Wait() // the fetch loops start attempts, so they end first
@@ -619,14 +657,14 @@ func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.Ca
 	// and so for the very attempts that this timeout cancels.
 	select {
 	case <-done:
-		return
+		return nil
 	case <-time.After(w.cfg.DrainTimeout):
 	}
 
 	stopAttempts(ErrShutdown)
 	select {
 	case <-done:
-		return
+		return nil
 	case <-time.After(w.timing.shutdownGrace):
 	}
 
@@ -650,16 +688,14 @@ func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.Ca
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler ignored shutdown; releasing its task",
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind))
 	}
-	w.release(ctx, abandoned)
+	return abandoned
 }
 
-// release gives tasks back to their queues while the worker stops. One
-// deadline bounds all of it: a database that does not answer then delays
-// the shutdown once, and not once for each task. A task that is not released
-// by then is rescued when its lease runs out.
+// release gives tasks back to their queues while the worker stops. The
+// deadline of ctx bounds all of it: a database that does not answer then
+// delays the shutdown once, and not once for each task. A task that is not
+// released by then is rescued when its lease runs out.
 func (w *Worker) release(ctx context.Context, ts []*liveAttempt) {
-	ctx, cancel := context.WithTimeout(ctx, recordTimeout)
-	defer cancel()
 	for _, t := range ts {
 		w.record(ctx, t, outcome{kind: outcomeRelease})
 	}
@@ -687,6 +723,8 @@ func (w *Worker) runningTasks() int {
 // It does not need Run to be running, which makes it the tool for tests. If
 // ctx is canceled before the handler returns, the handler's context is
 // canceled too, and the task goes back to its queue without using an attempt.
+// So does a task whose handler ends the goroutine with [runtime.Goexit], as
+// t.Fatal in a test does.
 //
 // A task of a kind that the worker has no handler for is snoozed, with a
 // no_handler note in its errors, as Run does, and returned.
@@ -701,29 +739,11 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	}
 	t.direct = true
 	w.track(ctx, t)
+	w.runDirect(ctx, t)
 
-	// The lease is renewed every third of it while the handler runs, and
-	// while its result is recorded.
-	renewCtx, stopRenewing := context.WithCancel(context.WithoutCancel(ctx))
-	var renewing sync.WaitGroup
-	renewing.Go(func() {
-		w.everyThirdOfLease(renewCtx, func(ctx context.Context) { w.renewLeases(ctx, []*liveAttempt{t}) })
-	})
-
-	attemptCtx, stopAttempt := context.WithCancelCause(context.WithoutCancel(ctx))
-	stopAfter := context.AfterFunc(ctx, func() { stopAttempt(ErrShutdown) })
-	if t.reg != nil && t.reg.runBatch != nil {
-		w.runBatch(attemptCtx, []*liveAttempt{t})
-	} else {
-		w.runOne(attemptCtx, t)
-	}
-
-	stopAfter()
-	stopAttempt(nil)
-	stopRenewing()
-	renewing.Wait()
-
-	info, err := w.client.Get(context.WithoutCancel(ctx), id)
+	getCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	info, err := w.client.Get(getCtx, id)
 	if errors.Is(err, ErrNotFound) && t.completedDirectly {
 		// The kind discards completed tasks: the task was deleted as it
 		// completed.
@@ -732,6 +752,31 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 		return &done, nil
 	}
 	return info, err
+}
+
+// runDirect runs the attempt t of RunTask in the calling goroutine, and
+// renews its lease every third of it while the handler runs, and while its
+// result is recorded. The cleanup is deferred: a handler that ends the
+// goroutine with runtime.Goexit, as t.Fatal does in a test, stops the
+// renewals all the same, and its task goes back to its queue (see runOne).
+func (w *Worker) runDirect(ctx context.Context, t *liveAttempt) {
+	renewCtx, stopRenewing := context.WithCancel(context.WithoutCancel(ctx))
+	var renewing sync.WaitGroup
+	defer renewing.Wait()
+	defer stopRenewing()
+	renewing.Go(func() {
+		w.everyThirdOfLease(renewCtx, func(ctx context.Context) { w.renewLeases(ctx, []*liveAttempt{t}) })
+	})
+
+	attemptCtx, stopAttempt := context.WithCancelCause(context.WithoutCancel(ctx))
+	defer stopAttempt(nil)
+	defer context.AfterFunc(ctx, func() { stopAttempt(ErrShutdown) })()
+	record := context.WithoutCancel(ctx)
+	if t.reg != nil && t.reg.runBatch != nil {
+		w.runBatch(attemptCtx, record, []*liveAttempt{t})
+	} else {
+		w.runOne(attemptCtx, record, t)
+	}
 }
 
 // leaseTask leases one task for RunTask, or explains why it cannot.

@@ -26,8 +26,9 @@ import (
 // all workers. Define the same schedules on every worker that takes part in
 // the maintainer election: the elected maintainer runs its own definitions.
 // It compares them with those of the other workers, by name and by
-// definition, and logs an error when they keep differing for longer than a
-// rolling deploy takes: the [schedules guide] says when. A definition is all
+// definition, once a minute. It logs an error when they have differed for
+// 10 minutes, longer than a rolling deploy takes, again at most once an hour
+// while they differ, and a line when they match again. A definition is all
 // that decides when a run happens and which task it enqueues, except the
 // metadata, so args that hold a value of each process, such as the time
 // that the worker started, count as a difference. If it defines any,
@@ -36,8 +37,9 @@ import (
 // keeps its state, such as a pause: a rolling deploy or a rollback in which
 // some workers do not define it loses nothing.
 //
-// Runs that are missed while no maintainer runs, or while the schedule is
-// paused, collapse into one run, for the first time that was missed. Each
+// The maintainer enqueues each run within about a second of its time. Runs
+// that are missed while no maintainer runs, or while the schedule is paused,
+// collapse into one run, for the first time that was missed. Each
 // run's task carries the schedule's name and the time the run is for in its
 // metadata; see [MetadataSchedule]. In a handler, read that time with
 // [TaskInfo.ScheduledFor]: the task's RunAt is that time only until the
@@ -195,7 +197,7 @@ func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 // compileSchedule validates one schedule, and resolves the options of its
 // task.
 func compileSchedule(s Schedule) (compiledSchedule, error) {
-	if s.Args == nil {
+	if noArgs(s.Args) {
 		return compiledSchedule{}, invalidArgument("schedule %q has no args", s.Name)
 	}
 	if o := s.Options; o != nil && (!o.RunAt.IsZero() || o.DedupeKey != "" || o.DedupeWindow != 0) {
@@ -338,13 +340,18 @@ func (m *maintainer) runSchedules(ctx context.Context) {
 }
 
 // enqueueDue does the work of runSchedules, and returns the errors of the
-// schedules that failed: one schedule's failure does not stop the others.
+// schedules that failed: one schedule's failure does not stop the others,
+// except a statement that ran out of time. The database is slow or out of
+// reach then, and each of the other schedules would wait as long: the pass
+// stops, and the next one tries again.
 func (m *maintainer) enqueueDue(ctx context.Context) error {
+	readCtx, cancel := m.bound(ctx)
+	defer cancel()
 	var now time.Time
-	if err := m.c.pool.QueryRow(ctx, "SELECT now()").Scan(&now); err != nil {
+	if err := m.c.pool.QueryRow(readCtx, "SELECT now()").Scan(&now); err != nil {
 		return fmt.Errorf("read database time: %w", err)
 	}
-	states, err := m.loadSchedules(ctx)
+	states, err := m.loadSchedules(readCtx)
 	if err != nil {
 		return fmt.Errorf("load schedules: %w", err)
 	}
@@ -354,6 +361,9 @@ func (m *maintainer) enqueueDue(ctx context.Context) error {
 		s := &m.w.schedules[i]
 		if err := m.syncSchedule(ctx, s, states[s.Name], now); err != nil {
 			errs = append(errs, fmt.Errorf("schedule %s: %w", s.Name, err))
+			if errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
 		}
 	}
 	return errors.Join(errs...)
@@ -381,7 +391,22 @@ func (m *maintainer) loadSchedules(ctx context.Context) (map[string]*scheduleSta
 
 // syncSchedule brings a schedule's row up to date with its definition, and
 // enqueues its run if one is due.
-func (m *maintainer) syncSchedule(ctx context.Context, s *compiledSchedule, st *scheduleState, now time.Time) error {
+//
+// It runs code of the application: the encoding of the schedule's args, and
+// the enqueue middleware. A panic there must not end the worker's process,
+// and then the process of every maintainer elected after it. It fails the
+// schedule's pass instead, as an error with the stack: the transaction of
+// the run rolls back, so the run stays due, and the next pass tries again.
+func (m *maintainer) syncSchedule(ctx context.Context, s *compiledSchedule, st *scheduleState, now time.Time) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = panicFailure(r)
+		}
+	}()
+
+	ctx, cancel := m.bound(ctx)
+	defer cancel()
+
 	payload, err := json.Marshal(s.Args)
 	if err != nil {
 		return fmt.Errorf("encode args: %w", err)
@@ -451,8 +476,7 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		// An enqueue into a FIFO group waits for the group's row. The election
 		// runs in the same loop, so give up after a moment, and try again in
 		// the next cycle.
-		wait := strconv.FormatInt(m.w.timing.lockWait.Milliseconds(), 10) + "ms"
-		if _, err := tx.Exec(ctx, lockTimeoutSQL, wait); err != nil {
+		if _, err := tx.Exec(ctx, lockTimeoutSQL, m.w.timing.lockTimeout()); err != nil {
 			return err
 		}
 
@@ -473,7 +497,7 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		// The enqueue middleware sees taskmill's own metadata, and cannot
 		// change it: a handler must find the run's time whatever it does.
 		run.reservedMeta = s.reservedMetadata(s.scheduledFor(due))
-		if _, err = m.c.storeThrough(ctx, pgxExecutor{q: tx}, []*resolvedTask{run}); err != nil {
+		if _, err = m.c.storeThrough(ctx, pgxExecutor{q: tx}, false, []*resolvedTask{run}); err != nil {
 			return err
 		}
 
@@ -494,7 +518,10 @@ func (m *maintainer) pruneSchedules(ctx context.Context) {
 	if len(m.w.schedules) == 0 {
 		return
 	}
-	_, err := m.c.pool.Exec(ctx, m.c.sql.pruneSchedules, m.w.scheduleNames)
+
+	pruneCtx, cancel := m.bound(ctx)
+	defer cancel()
+	_, err := m.c.pool.Exec(pruneCtx, m.c.sql.pruneSchedules, m.w.scheduleNames)
 	m.pruneFailures.observe(ctx, err)
 }
 
@@ -504,16 +531,23 @@ func (m *maintainer) pruneSchedules(ctx context.Context) {
 // compares them also when this maintainer defines none, which is the worst
 // case: then no schedule runs.
 func (m *maintainer) compareSchedules(ctx context.Context) {
+	term, ok := m.watch.current()
+	if !ok {
+		return
+	}
+
 	diff, err := m.otherSchedules(ctx)
 	m.compareFailures.observe(ctx, err)
 	if err == nil {
-		m.watch.observe(ctx, m.w, diff)
+		m.watch.observe(ctx, m.w, diff, term)
 	}
 }
 
 // otherSchedules returns how the schedules of up to 10 other live workers
 // differ from this maintainer's.
 func (m *maintainer) otherSchedules(ctx context.Context) (*scheduleDiff, error) {
+	ctx, cancel := m.bound(ctx)
+	defer cancel()
 	r, err := m.c.pool.Query(ctx, m.c.sql.otherSchedules, m.w.scheduleNames, m.w.scheduleHashes)
 	if err != nil {
 		return nil, err
@@ -605,17 +639,34 @@ func (d *scheduleDiff) attrs(lasted time.Duration) []slog.Attr {
 // for a few minutes, so it logs nothing until the difference has lasted for
 // timing.scheduleGrace: then an error, again at most once per
 // timing.scheduleReport while it lasts, and a line when it ends. It starts
-// over in each term of the maintainer.
+// over in each term of the maintainer, and counts only the comparisons of
+// the term: one that a term began and that ended after it may report what
+// changed between the terms, such as a difference that ended, which is the
+// next term's to find.
 type scheduleWatch struct {
 	mu     sync.Mutex
+	term   int       // counts the terms of the maintainer
+	open   bool      // the term lasts
 	since  time.Time // when the comparison first found the difference; zero while there is none
 	logged time.Time // when it was last logged; zero if not yet
 }
 
-// observe takes the outcome of one comparison.
-func (s *scheduleWatch) observe(ctx context.Context, w *Worker, d *scheduleDiff) {
+// current returns the term that a comparison which starts now belongs to,
+// and false between terms.
+func (s *scheduleWatch) current() (term int, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.term, s.open
+}
+
+// observe takes the outcome of one comparison, which began in term. It
+// drops the outcome if that term has ended.
+func (s *scheduleWatch) observe(ctx context.Context, w *Worker, d *scheduleDiff, term int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.open || s.term != term {
+		return
+	}
 
 	now := time.Now()
 	switch {
@@ -634,11 +685,20 @@ func (s *scheduleWatch) observe(ctx context.Context, w *Worker, d *scheduleDiff)
 	}
 }
 
-// reset forgets the difference without a line, at the start of a term.
-func (s *scheduleWatch) reset() {
+// start begins a term without the difference of the last one, and without
+// a line.
+func (s *scheduleWatch) start() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.since, s.logged = time.Time{}, time.Time{}
+	s.term++
+	s.open, s.since, s.logged = true, time.Time{}, time.Time{}
+}
+
+// end ends the term: the comparisons under way count for nothing.
+func (s *scheduleWatch) end() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.open = false
 }
 
 // jsonEqual reports whether a and b hold the same JSON value, as PostgreSQL's

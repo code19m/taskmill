@@ -33,19 +33,21 @@ type statements struct {
 	dedupeLookup string
 
 	// sql_attempts.go: fetch tasks, and record how their attempts end.
-	fetch         string
-	fetchKind     string
-	leaseTask     string
-	atLimit       string
-	lockQueue     string
-	countRunning  string
-	renewLeases   string
-	cancelRequest string
-	complete      string
-	lockLeased    string
-	fail          string
-	snooze        string
-	release       string
+	fetch            string
+	fetchLimited     string
+	fetchKind        string
+	leaseTask        string
+	atLimit          string
+	lockQueue        string
+	countRunning     string
+	renewLeases      string
+	cancelRequest    string
+	complete         string
+	completeSkipping string
+	lockLeased       string
+	fail             string
+	snooze           string
+	release          string
 
 	// sql_groups.go: change the rows of FIFO groups.
 	haltGroup         string
@@ -60,31 +62,32 @@ type statements struct {
 	createGroups      string
 
 	// sql_operations.go: what an operator changes: tasks, queues, settings, and schedules.
-	lockTask        string
-	takeKeys        string
-	keyHolder       string
-	releaseKeys     string
-	deleteTask      string
-	deleteHistory   string
-	taskExists      string
-	lastTask        string
-	windowEnd       string
-	pickRetry       string
-	pickCancel      string
-	pickDelete      string
-	retryTasks      string
-	cancelTasks     string
-	deleteTasks     string
-	pickCompleted   string
-	deleteCompleted string
-	readQueue       string
-	swapQueue       string
-	pauseQueue      string
-	queueSettings   string
-	readSettings    string
-	swapSettings    string
-	runSchedule     string
-	pauseSchedule   string
+	lockTask         string
+	takeKeys         string
+	keyHolder        string
+	releaseKeys      string
+	deleteTask       string
+	deleteHistory    string
+	taskExists       string
+	lastTask         string
+	windowEnd        string
+	pickRetry        string
+	pickCancel       string
+	pickDelete       string
+	retryTasks       string
+	cancelTasks      string
+	deleteTasks      string
+	pickCompleted    string
+	deleteCompleted  string
+	readQueue        string
+	swapQueue        string
+	deleteEmptyQueue string
+	pauseQueue       string
+	queueSettings    string
+	readSettings     string
+	swapSettings     string
+	runSchedule      string
+	pauseSchedule    string
 
 	// sql_maintenance.go: the maintainer's work, and the workers' rows.
 	upsertWorker     string
@@ -150,19 +153,21 @@ func newStatements(schema string) *statements {
 		enqueuePlain: q(enqueuePlainSQL),
 		dedupeLookup: q(dedupeLookupSQL),
 
-		fetch:         q(fetchSQL),
-		fetchKind:     q(fetchKindSQL),
-		leaseTask:     q(leaseTaskSQL),
-		atLimit:       q(atLimitSQL),
-		lockQueue:     q(lockQueueSQL),
-		countRunning:  q(countRunningSQL),
-		renewLeases:   q(renewLeasesSQL),
-		cancelRequest: q(cancelRequestSQL),
-		complete:      q(completeSQL),
-		lockLeased:    q(lockLeasedSQL),
-		fail:          q(failSQL),
-		snooze:        q(snoozeSQL),
-		release:       q(releaseSQL),
+		fetch:            q(fetchSQL),
+		fetchLimited:     q(fetchLimitedSQL),
+		fetchKind:        q(fetchKindSQL),
+		leaseTask:        q(leaseTaskSQL),
+		atLimit:          q(atLimitSQL),
+		lockQueue:        q(lockQueueSQL),
+		countRunning:     q(countRunningSQL),
+		renewLeases:      q(renewLeasesSQL),
+		cancelRequest:    q(cancelRequestSQL),
+		complete:         q(completeSQL),
+		completeSkipping: q(completeSkippingSQL),
+		lockLeased:       q(lockLeasedSQL),
+		fail:             q(failSQL),
+		snooze:           q(snoozeSQL),
+		release:          q(releaseSQL),
 
 		haltGroup:         q(haltGroupSQL),
 		lockGroups:        q(lockGroupsSQL),
@@ -175,31 +180,32 @@ func newStatements(schema string) *statements {
 		releaseHalts:      q(releaseHaltsSQL),
 		createGroups:      q(createGroupsSQL),
 
-		lockTask:        q(lockTaskSQL),
-		takeKeys:        q(takeKeysSQL),
-		keyHolder:       q(keyHolderSQL),
-		releaseKeys:     q(releaseKeysSQL),
-		deleteTask:      q(deleteTaskSQL),
-		deleteHistory:   q(deleteHistorySQL),
-		taskExists:      q(taskExistsSQL),
-		lastTask:        q(lastTaskSQL),
-		windowEnd:       q(windowEndSQL),
-		pickRetry:       q(pickRetrySQL),
-		pickCancel:      q(pickCancelSQL),
-		pickDelete:      q(pickDeleteSQL),
-		retryTasks:      q(retryTasksSQL),
-		cancelTasks:     q(cancelTasksSQL),
-		deleteTasks:     q(deleteTasksSQL),
-		pickCompleted:   q(pickCompletedSQL),
-		deleteCompleted: q(deleteCompletedSQL),
-		readQueue:       q(readQueueSQL),
-		swapQueue:       q(swapQueueSQL),
-		pauseQueue:      q(pauseQueueSQL),
-		queueSettings:   q(queueSettingsSQL),
-		readSettings:    q(readSettingsSQL),
-		swapSettings:    q(swapSettingsSQL),
-		runSchedule:     q(runScheduleSQL),
-		pauseSchedule:   q(pauseScheduleSQL),
+		lockTask:         q(lockTaskSQL),
+		takeKeys:         q(takeKeysSQL),
+		keyHolder:        q(keyHolderSQL),
+		releaseKeys:      q(releaseKeysSQL),
+		deleteTask:       q(deleteTaskSQL),
+		deleteHistory:    q(deleteHistorySQL),
+		taskExists:       q(taskExistsSQL),
+		lastTask:         q(lastTaskSQL),
+		windowEnd:        q(windowEndSQL),
+		pickRetry:        q(pickRetrySQL),
+		pickCancel:       q(pickCancelSQL),
+		pickDelete:       q(pickDeleteSQL),
+		retryTasks:       q(retryTasksSQL),
+		cancelTasks:      q(cancelTasksSQL),
+		deleteTasks:      q(deleteTasksSQL),
+		pickCompleted:    q(pickCompletedSQL),
+		deleteCompleted:  q(deleteCompletedSQL),
+		readQueue:        q(readQueueSQL),
+		swapQueue:        q(swapQueueSQL),
+		deleteEmptyQueue: q(deleteEmptyQueueSQL),
+		pauseQueue:       q(pauseQueueSQL),
+		queueSettings:    q(queueSettingsSQL),
+		readSettings:     q(readSettingsSQL),
+		swapSettings:     q(swapSettingsSQL),
+		runSchedule:      q(runScheduleSQL),
+		pauseSchedule:    q(pauseScheduleSQL),
 
 		upsertWorker:     q(upsertWorkerSQL),
 		checkInWorker:    q(checkInWorkerSQL),

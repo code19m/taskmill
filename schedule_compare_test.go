@@ -6,9 +6,13 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/code19m/taskmill"
 )
@@ -316,5 +320,62 @@ func TestMaintainerComparesAnewInEachTerm(t *testing.T) {
 	waitFor(t, "two comparisons in the new term", func() bool { return sent.count("schedule_hashes <>") >= 2 })
 	if n := logs.count(schedulesMatch); n != 0 {
 		t.Errorf("a new term logged the end of a difference that an earlier term found")
+	}
+}
+
+// heldComparison holds the next comparison of the workers' schedules before
+// a connection sends it, once armed, until the test lets it go.
+type heldComparison struct {
+	armed  atomic.Bool
+	held   chan struct{} // the comparison waits
+	resume chan struct{} // it may go on
+	ended  chan struct{} // its answer has been read
+	mine   atomic.Pointer[pgx.Conn]
+}
+
+func newHeldComparison() *heldComparison {
+	return &heldComparison{held: make(chan struct{}), resume: make(chan struct{}), ended: make(chan struct{})}
+}
+
+func (h *heldComparison) TraceQueryStart(ctx context.Context, conn *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, "schedule_hashes <>") && h.armed.CompareAndSwap(true, false) {
+		h.mine.Store(conn)
+		close(h.held)
+		<-h.resume
+	}
+	return ctx
+}
+
+func (h *heldComparison) TraceQueryEnd(_ context.Context, conn *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if h.mine.CompareAndSwap(conn, nil) {
+		close(h.ended)
+	}
+}
+
+// A comparison that a term began and that ends after it counts for nothing:
+// it may find what changed between the terms, such as the end of a
+// difference, which is the next term's to find. Here the difference that
+// the first term logged ends while it is over, during its last comparison.
+func TestComparisonAcrossTheEndOfATermCountsForNothing(t *testing.T) {
+	t.Parallel()
+	h := newHeldComparison()
+	e := newTracedEnv(t, h)
+	logs := &logRecorder{}
+	maintainer := runMaintainer(t, e.withLogger(t, slog.New(logs)), compareTiming, &taskmill.WorkerConfig{})
+	_, stopOther := runCompared(t, e, compareTiming, &taskmill.WorkerConfig{Schedules: digest})
+	waitFor(t, "the error", func() bool { return len(differLines(logs)) == 1 })
+
+	h.armed.Store(true)
+	recv(t, h.held, "a comparison to start")
+	e.exec(t, "UPDATE {s}.leader SET worker_id = 'nobody', expires_at = now() + interval '3 seconds'")
+	waitFor(t, "the term to end", func() bool { return logs.count("no longer maintainer") == 1 })
+	stopOther()
+	close(h.resume)
+	recv(t, h.ended, "the comparison to end")
+
+	e.exec(t, "UPDATE {s}.leader SET worker_id = $1, expires_at = now() + interval '3 seconds'", maintainer)
+	waitFor(t, "a new term", func() bool { return logs.count("elected maintainer") == 2 })
+	if n := logs.count(schedulesMatch); n != 0 {
+		t.Errorf("a comparison that ended after its term logged the end of the difference")
 	}
 }

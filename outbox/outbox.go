@@ -61,7 +61,9 @@ var relayRetry = taskmill.ExponentialBackoff{Base: time.Second, Max: 5 * time.Mi
 
 // Message is an event to publish. Save it with [Outbox.Store].
 type Message struct {
-	// Topic is the broker destination, such as a Kafka topic. Required.
+	// Topic is the broker destination, such as a Kafka topic. Required. It
+	// must be valid UTF-8, without a NUL character, as must the names of
+	// the headers.
 	Topic string
 
 	// Key orders messages: messages with the same topic and key are
@@ -69,9 +71,11 @@ type Message struct {
 	// without a key are published in any order. Default: none.
 	Key []byte
 
-	// Value is the message body. The topic, the key, the value, and the
-	// headers are stored base64-encoded in one task payload, whose 1 MiB
-	// limit allows about 750 KiB of Value. Default: empty.
+	// Value is the message body. The message is stored in one task payload,
+	// as JSON: the key, the value, and the values of the headers
+	// base64-encoded, and the topic and the names of the headers as text.
+	// The payload's limit of 1 MiB allows about 750 KiB of Value. Default:
+	// empty.
 	Value []byte
 
 	// Headers are passed to the broker with the message. They share the
@@ -137,9 +141,10 @@ func New(client *taskmill.Client) *Outbox {
 }
 
 // Store saves msgs in the outbox inside the caller's transaction, so they are
-// published only if the transaction commits. A message without a topic or
-// over the payload limit (see [Message.Value]), or a call over the limits of
-// [taskmill.Client.EnqueueMany], 10,000 messages and 64 MiB, fails with an
+// published only if the transaction commits. A message without a topic, with
+// a topic or a header name that is not valid UTF-8 or holds a NUL character,
+// or over the payload limit (see [Message.Value]), or a call over the limits
+// of [taskmill.Client.EnqueueMany], 10,000 messages and 64 MiB, fails with an
 // error that wraps [taskmill.ErrInvalidArgument], and leaves the transaction
 // usable. A call with no messages does nothing.
 func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Message) error {
@@ -152,8 +157,8 @@ func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Messag
 
 	params := make([]taskmill.EnqueueParams, len(msgs))
 	for i, m := range msgs {
-		if m.Topic == "" {
-			return fmt.Errorf("%w: outbox message %d of %d has no topic", taskmill.ErrInvalidArgument, i+1, len(msgs))
+		if problem := checkNames(m); problem != "" {
+			return fmt.Errorf("%w: outbox message %d of %d %s", taskmill.ErrInvalidArgument, i+1, len(msgs), problem)
 		}
 		params[i] = taskmill.EnqueueParams{
 			Args:    message{ID: uuid.NewV7(), Topic: m.Topic, Key: m.Key, Value: m.Value, Headers: m.Headers},
@@ -163,6 +168,30 @@ func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Messag
 
 	_, err := o.client.EnqueueManyTx(ctx, tx, params)
 	return err
+}
+
+// checkNames returns what is wrong with the topic and the header names of m,
+// or "". They are stored as JSON text, which would turn bytes that are not
+// UTF-8 into U+FFFD: two topics would become one, while the keys that order
+// their messages stay apart. And jsonb cannot hold a NUL character.
+func checkNames(m Message) string {
+	switch {
+	case m.Topic == "":
+		return "has no topic"
+	case !text(m.Topic):
+		return "has a topic that is not valid UTF-8 or holds a NUL character"
+	}
+	for name := range m.Headers {
+		if !text(name) {
+			return "has a header name that is not valid UTF-8 or holds a NUL character"
+		}
+	}
+	return ""
+}
+
+// text reports whether s is valid UTF-8 without a NUL character.
+func text(s string) bool {
+	return utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }
 
 // RelayOptions configure a relay. The zero value keeps the defaults.

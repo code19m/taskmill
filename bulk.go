@@ -31,9 +31,10 @@ const (
 
 // TaskFilter selects tasks by queue, state, kind, and FIFO group, for
 // [Client.List], [Client.Count], and the bulk actions: a task matches if it
-// matches every filter that is set. A queue name or kind has at most 128
-// characters, and a group key at most 256. An unknown state, like a value
-// that is empty or too long, is an error that wraps [ErrInvalidArgument].
+// matches every filter that is set. Each filter takes at most 100 values. A
+// queue name or kind has at most 128 characters, and a group key at most
+// 256. An unknown state, like a value that is empty or too long, or a filter
+// with too many values, is an error that wraps [ErrInvalidArgument].
 type TaskFilter struct {
 	// Queues limits the tasks to these queues. Empty means all queues.
 	Queues []string
@@ -154,9 +155,12 @@ func match(filter *TaskFilter, states []State) (*filterArgs, error) {
 	if f.groups, err = checkFilter("group key", filter.GroupKeys, maxGroupKeyLength); err != nil {
 		return nil, err
 	}
+	if len(filter.States) > maxFilterValues {
+		return nil, invalidArgument("%d states, more than the limit of %d", len(filter.States), maxFilterValues)
+	}
 	for _, s := range filter.States {
 		if !s.valid() {
-			return nil, invalidArgument("unknown state %q", s)
+			return nil, invalidArgument("unknown state %q", prefix(string(s)))
 		}
 	}
 
@@ -173,10 +177,20 @@ func match(filter *TaskFilter, states []State) (*filterArgs, error) {
 	return &f, nil
 }
 
-// Count counts the tasks that match filter, which may be nil. It counts at
-// most 10,000 tasks per state. Like [Client.List], the query is canceled
-// after 5 seconds.
-func (c *Client) Count(ctx context.Context, filter *TaskFilter) (*TaskCounts, error) {
+// CountParams selects the tasks that [Client.Count] counts.
+type CountParams struct {
+	// Filter selects the tasks. Empty means every task.
+	Filter TaskFilter
+}
+
+// Count counts the tasks that params select. params may be nil, which
+// counts every task. It counts at most 10,000 tasks per state. Like
+// [Client.List], the query is canceled after 5 seconds.
+func (c *Client) Count(ctx context.Context, params *CountParams) (*TaskCounts, error) {
+	var filter *TaskFilter
+	if params != nil {
+		filter = &params.Filter
+	}
 	f, err := match(filter, allStates)
 	if err != nil {
 		return nil, err
@@ -770,9 +784,15 @@ func (c *Client) deleteBatch(ctx context.Context, q querier, run *bulkRun) (step
 		s.end = min(s.end, run.end(idsOf(completed)))
 	}
 
-	// The tasks after the end come again in the next batch.
+	// The tasks after the end come again in the next batch. Of both tables,
+	// a batch takes one batch of tasks in all, as BulkResult.Changed says.
 	beyond := func(t bulkTask) bool { return t.id > s.end }
-	ts, completed = s.locked(slices.DeleteFunc(ts, beyond)), s.locked(slices.DeleteFunc(completed, beyond))
+	ts, completed = slices.DeleteFunc(ts, beyond), slices.DeleteFunc(completed, beyond)
+	if len(ts)+len(completed) > maintenanceBatch {
+		s.end = slices.Sorted(slices.Values(append(idsOf(ts), idsOf(completed)...)))[maintenanceBatch-1]
+		ts, completed = slices.DeleteFunc(ts, beyond), slices.DeleteFunc(completed, beyond)
+	}
+	ts, completed = s.locked(ts), s.locked(completed)
 
 	if len(completed) > 0 {
 		if _, err := q.exec(ctx, c.sql.deleteCompleted, idsOf(completed)); err != nil {

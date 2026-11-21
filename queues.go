@@ -1,6 +1,7 @@
 package taskmill
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -17,8 +18,11 @@ import (
 // limit.
 type QueueSettings struct {
 	// MaxRunning caps the tasks of the queue running at the same time across
-	// all workers of the installation. Each task of a batch counts. It must
-	// not be negative, and is at most 2,147,483,647. Zero means no limit.
+	// all workers of the installation. Each task of a batch counts. A
+	// handler that ignores its context keeps its task running, and counting,
+	// until it returns: it is not abandoned, as in a queue without a limit
+	// (see [HandlerOptions.Timeout]). It must not be negative, and is at most
+	// 2,147,483,647. Zero means no limit.
 	MaxRunning int
 }
 
@@ -94,9 +98,12 @@ type QueueInfo struct {
 }
 
 // UpdateQueue changes a queue's installation-wide settings for every worker,
-// and creates the queue if needed. update gets a copy of the current
-// settings and changes the ones it means to, so that settings it does not
-// know of, such as those of a later version, keep their values.
+// and stores them for a queue that had none. A queue whose settings are back
+// to their defaults, and that is not paused, is no longer stored:
+// [Client.Queues] lists it only while it holds tasks or workers read it.
+// update gets a copy of the current settings and changes the ones it means
+// to, so that settings it does not know of, such as those of a later
+// version, keep their values.
 //
 // No lock is held while update runs. The settings are written back only if
 // they did not change meanwhile; if they did, update runs again on the new
@@ -142,15 +149,26 @@ func (c *Client) UpdateQueue(ctx context.Context, name string, update func(*Queu
 			next = &s.MaxRunning
 		}
 
-		var swapped int
-		err := c.pool.QueryRow(ctx, c.sql.swapQueue,
+		// One round trip, and one transaction: the statements of a batch run
+		// in one, so the delete of a row that holds no settings any more
+		// finds what the swap wrote.
+		b := &pgx.Batch{}
+		b.Queue(c.sql.swapQueue,
 			name,                 // $1
 			limit,                // $2
 			next,                 // $3
 			c.schema,             // $4
 			notifyQueue+"|"+name, // $5
-		).Scan(&swapped)
-		if err != nil {
+		)
+		b.Queue(c.sql.deleteEmptyQueue, name)
+		br := c.pool.SendBatch(ctx, b)
+
+		var swapped int
+		err := br.QueryRow().Scan(&swapped)
+		if err == nil {
+			_, err = br.Exec()
+		}
+		if err = cmp.Or(err, br.Close()); err != nil {
 			return false, fail(err)
 		}
 		return swapped == 1, nil
@@ -166,7 +184,9 @@ func (c *Client) PauseQueue(ctx context.Context, name string) error {
 }
 
 // ResumeQueue undoes [Client.PauseQueue]. Workers apply it as fast as a
-// pause, and like PauseQueue it never returns [ErrNotFound].
+// pause, and like PauseQueue it never returns [ErrNotFound]. A queue that it
+// leaves with its default settings is no longer stored, as with
+// [Client.UpdateQueue].
 func (c *Client) ResumeQueue(ctx context.Context, name string) error {
 	return c.setQueuePaused(ctx, name, false)
 }
@@ -180,6 +200,11 @@ func (c *Client) setQueuePaused(ctx context.Context, name string, paused bool) e
 	err := pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, c.sql.pauseQueue, name, paused); err != nil {
 			return err
+		}
+		if !paused {
+			if _, err := tx.Exec(ctx, c.sql.deleteEmptyQueue, name); err != nil {
+				return err
+			}
 		}
 
 		_, err := tx.Exec(ctx, notifySQL, c.schema, notifyQueue+"|"+name)

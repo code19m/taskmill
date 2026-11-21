@@ -302,6 +302,105 @@ func TestLockedGroupDoesNotHoldUpOtherCompletions(t *testing.T) {
 	}
 }
 
+// A task's row that another transaction holds, as an open CancelTx does,
+// keeps only that task's completion waiting, not those of the tasks that
+// complete with it: their statement skips the row, and the worker tries it
+// again once the row is free. If the row stays held for longer than the
+// lease, the worker warns once. (No maintainer runs here: its rescue would
+// take the task whose lease ran out, once the row is free.)
+func TestHeldTaskDoesNotHoldUpOtherCompletions(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	release := make(chan struct{})
+	started := make(chan struct{}, 10)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-release
+			return nil
+		}, nil),
+		Queues:        defaultQueue(10),
+		LeaseDuration: time.Second,
+		NoMaintainer:  true,
+	})
+
+	var ids []int64
+	for range 5 {
+		ids = append(ids, e.enqueue(t, sendEmail{}, nil))
+	}
+	for range ids {
+		recv(t, started, "a handler to start")
+	}
+
+	held := ids[2]
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", held)
+
+	close(release)
+	for _, id := range ids {
+		if id != held {
+			e.waitState(t, id, taskmill.StateCompleted)
+		}
+	}
+	e.wantState(t, held, taskmill.StateRunning)
+
+	const waits = "completion waits for a row that another transaction holds"
+	waitFor(t, "the warning", func() bool { return logs.count(waits) > 0 })
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if info := e.waitState(t, held, taskmill.StateCompleted); info.Attempt != 1 {
+		t.Fatalf("completed on attempt %d, want 1", info.Attempt)
+	}
+	if n := logs.count(waits); n != 1 {
+		t.Errorf("the held completion was logged %d times, want once", n)
+	}
+}
+
+// The failure of a grouped task's last attempt halts its group, so it waits
+// for the group's row, which a transaction that enqueues into the group
+// holds. It waits without holding the task's row for long, which the
+// renewal of the lease would skip: the lease stays renewed however long the
+// group is held, and the failure is recorded once the group is free.
+func TestFailureOfAGroupedTaskWaitsForItsGroupWithItsLease(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	const lease = time.Second
+	failed := make(chan struct{}, 1)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			failed <- struct{}{}
+			return errors.New("the API refused")
+		}, nil),
+		Queues:        defaultQueue(1),
+		LeaseDuration: lease,
+	})
+	timing := testTiming
+	timing.LockWait = 50 * time.Millisecond
+	taskmill.SetTiming(w, timing)
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g", MaxAttempts: 1})
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'g' FOR UPDATE")
+	startWorker(t, w)
+	recv(t, failed, "the attempt to fail")
+
+	// Longer than the lease.
+	time.Sleep(3 * lease)
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND lease_expires_at > now()", id); n != 1 {
+		t.Fatal("the lease ran out while the failure waited for the group")
+	}
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	info := e.waitState(t, id, taskmill.StateDead)
+	if last := info.Errors[len(info.Errors)-1]; last.Message != "the API refused" {
+		t.Fatalf("the task's last error is %q, want the handler's", last.Message)
+	}
+}
+
 func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	t.Parallel()
 	// A small pool, as pgxpool's default is on a small machine.

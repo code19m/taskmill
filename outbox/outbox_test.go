@@ -217,15 +217,56 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 	}
 }
 
-func TestStoreRejectsMessagesWithoutTopic(t *testing.T) {
+// A topic and the names of headers are stored as text: bytes that are not
+// UTF-8 would turn into U+FFFD, so that two topics would become one.
+func TestStoreRejectsMessagesWithoutAValidTopic(t *testing.T) {
 	t.Parallel()
 	_, ob, pool := setup(t)
 
-	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
-		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Value: []byte("x")})
+	for name, m := range map[string]outbox.Message{
+		"no topic":                        {Value: []byte("x")},
+		"a topic that is not UTF-8":       {Topic: "orders\xff"},
+		"a topic with NUL":                {Topic: "orders\x00"},
+		"a header name that is not UTF-8": {Topic: "orders", Headers: map[string][]byte{"trace\xff": nil}},
+	} {
+		err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+			return ob.Store(t.Context(), taskmill.Pgx(tx), m)
+		})
+		if !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("%s: got %v, want ErrInvalidArgument", name, err)
+		}
+	}
+}
+
+// A Store of no messages does nothing: it runs no enqueue middleware, which
+// may expect at least one task.
+func TestStoreOfNoMessagesDoesNothing(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	schema := testdb.Schema(t, pool)
+	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{
+		Schema: schema,
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+			called = true
+			if len(tasks) == 0 {
+				return errors.New("no tasks")
+			}
+			return next(ctx)
+		}},
 	})
-	if !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+		return outbox.New(client).Store(t.Context(), taskmill.Pgx(tx))
+	})
+	if err != nil || called {
+		t.Fatalf("got %v, and the middleware ran: %v; want nothing", err, called)
 	}
 }
 

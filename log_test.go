@@ -246,7 +246,8 @@ func TestLogsLeaveOutPayloadsAndMetadata(t *testing.T) {
 	for _, want := range []string{
 		`level=DEBUG msg="attempt failed; retrying"`,
 		`level=ERROR msg="attempt failed; the task is dead"`,
-		`level=WARN msg="no handler for task kind; snoozing"`,
+		`level=WARN msg="no handler for task kind; its tasks wait for a worker that has one"`,
+		`level=DEBUG msg="no handler for task kind; snoozing"`,
 	} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("no line has %s", want)
@@ -373,7 +374,7 @@ type proxy struct {
 
 	mu    sync.Mutex
 	down  bool
-	conns map[net.Conn]bool
+	conns map[net.Conn]*atomic.Bool // each open connection, and whether freezeOpen froze it
 }
 
 func newProxy(t *testing.T, url string) *proxy {
@@ -400,7 +401,7 @@ func newProxy(t *testing.T, url string) *proxy {
 		host:   host,
 		port:   uint16(portNum),
 		target: net.JoinHostPort(cfg.ConnConfig.Host, strconv.Itoa(int(cfg.ConnConfig.Port))),
-		conns:  map[net.Conn]bool{},
+		conns:  map[net.Conn]*atomic.Bool{},
 	}
 
 	go func() {
@@ -420,6 +421,17 @@ func newProxy(t *testing.T, url string) *proxy {
 		p.cut(true)
 	})
 	return p
+}
+
+// freezeOpen freezes the connections that are open now, for good, as a
+// failover that drops the packets of the old server's connections does.
+// New connections pass.
+func (p *proxy) freezeOpen() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, frozen := range p.conns {
+		frozen.Store(true)
+	}
 }
 
 // cut closes every connection and refuses new ones, or accepts them again.
@@ -447,16 +459,17 @@ func (p *proxy) forward(client net.Conn) {
 		}
 		return
 	}
-	p.conns[client], p.conns[server] = true, true
+	frozen := new(atomic.Bool)
+	p.conns[client], p.conns[server] = frozen, frozen
 	p.mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {
-		p.pipe(server, client)
+		p.pipe(server, client, frozen)
 		_ = server.Close()
 		close(done)
 	}()
-	p.pipe(client, server)
+	p.pipe(client, server, frozen)
 	_ = client.Close()
 	<-done
 
@@ -467,8 +480,8 @@ func (p *proxy) forward(client net.Conn) {
 }
 
 // pipe copies src to dst until either fails, dropping what it reads while
-// the proxy is frozen.
-func (p *proxy) pipe(dst, src net.Conn) {
+// the proxy or the connection is frozen.
+func (p *proxy) pipe(dst, src net.Conn, frozen *atomic.Bool) {
 	buf := make([]byte, 32<<10)
 	for {
 		n, err := src.Read(buf)
@@ -476,7 +489,7 @@ func (p *proxy) pipe(dst, src net.Conn) {
 			return
 		}
 
-		if p.frozen.Load() {
+		if p.frozen.Load() || frozen.Load() {
 			continue
 		}
 		if _, err := dst.Write(buf[:n]); err != nil {

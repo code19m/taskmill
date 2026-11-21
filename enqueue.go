@@ -107,10 +107,13 @@ type EnqueueResult struct {
 	// can happen only when another transaction took the key while the
 	// enqueue ran: the enqueue then reads the key a second time. The ID is 0
 	// if the task that took the key was canceled or deleted meanwhile, or if
-	// that read failed. [Client.Enqueue] and [Client.EnqueueMany] have
-	// committed by then, so they log a failed read and return no error. In
-	// the caller's transaction, the enqueue returns the error of a failed
-	// read, so that the caller can roll back.
+	// that read failed. An enqueue outside a transaction has committed by
+	// then, whether on the client's pool or on an [Executor] of a pool or a
+	// connection, so it logs a failed read and returns no error. In the
+	// caller's transaction, the enqueue returns the error of a failed read,
+	// so that the caller can roll back. A type that wraps a [pgx.Tx] with
+	// only Exec and Query counts as outside a transaction: on it, a failed
+	// read is logged, and not returned.
 	ID int64
 
 	// Duplicate reports that the DedupeKey was already taken, so no task was
@@ -167,10 +170,11 @@ type EnqueueTask struct {
 // notifies the workers of a task that may start now, so a worker with a free
 // slot usually starts it within milliseconds.
 //
-// It returns an error that wraps [ErrInvalidArgument] for nil args, for an
-// option outside its limits, and for a payload that cannot be stored: [Args]
-// and [EnqueueOptions] have the rules. To enqueue in the same transaction as
-// the application's own writes, use [Client.EnqueueTx].
+// It returns an error that wraps [ErrInvalidArgument] for nil args, also a
+// nil pointer, for an option outside its limits, and for a payload that
+// cannot be stored: [Args] and [EnqueueOptions] have the rules. To enqueue
+// in the same transaction as the application's own writes, use
+// [Client.EnqueueTx].
 //
 // If PostgreSQL ends the transaction to end a deadlock, which other
 // transactions can open around a FIFO group's row or a dedupe key (SQLSTATE
@@ -178,7 +182,7 @@ type EnqueueTask struct {
 // the try before was saved. [Client.EnqueueTx] cannot do that in the
 // caller's transaction, and returns the error.
 func (c *Client) Enqueue(ctx context.Context, args Args, opts *EnqueueOptions) (EnqueueResult, error) {
-	res, err := c.enqueue(ctx, pgxExecutor{q: c.pool}, []EnqueueParams{{Args: args, Options: opts}})
+	res, err := c.enqueue(ctx, pgxExecutor{q: c.pool}, true, []EnqueueParams{{Args: args, Options: opts}})
 	if err != nil {
 		return EnqueueResult{}, err
 	}
@@ -200,7 +204,7 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 		return EnqueueResult{}, err
 	}
 
-	res, err := c.enqueue(ctx, q, []EnqueueParams{{Args: args, Options: opts}})
+	res, err := c.enqueue(ctx, q, false, []EnqueueParams{{Args: args, Options: opts}})
 	if err != nil {
 		return EnqueueResult{}, err
 	}
@@ -218,7 +222,7 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 //
 // Like [Client.Enqueue], it runs again by itself after a deadlock.
 func (c *Client) EnqueueMany(ctx context.Context, params []EnqueueParams) ([]EnqueueResult, error) {
-	return c.enqueue(ctx, pgxExecutor{q: c.pool}, params)
+	return c.enqueue(ctx, pgxExecutor{q: c.pool}, true, params)
 }
 
 // EnqueueManyTx is [Client.EnqueueMany] in the caller's transaction. tx may
@@ -228,7 +232,7 @@ func (c *Client) EnqueueManyTx(ctx context.Context, tx Executor, params []Enqueu
 	if err != nil {
 		return nil, err
 	}
-	return c.enqueue(ctx, q, params)
+	return c.enqueue(ctx, q, false, params)
 }
 
 // enqueueBatch holds a batch as the parallel arrays that the enqueue
@@ -245,7 +249,10 @@ type enqueueBatch struct {
 	plain                 bool            // no task uses a dedupe key or a FIFO group
 }
 
-func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams) ([]EnqueueResult, error) {
+// enqueue stores the tasks of params with the statement of q. own says that
+// q is the client's own pool, on which the statement is a transaction of its
+// own for sure, and so may run again after a deadlock.
+func (c *Client) enqueue(ctx context.Context, q querier, own bool, params []EnqueueParams) ([]EnqueueResult, error) {
 	if len(params) == 0 {
 		return nil, nil
 	}
@@ -269,15 +276,23 @@ func (c *Client) enqueue(ctx context.Context, q querier, params []EnqueueParams)
 		tasks[i] = t
 	}
 
-	return c.storeThrough(ctx, q, tasks)
+	return c.storeThrough(ctx, q, own, tasks)
 }
 
 // storeThrough stores tasks through the enqueue middleware, if there is any.
 // The middleware sees taskmill's own metadata of a task, and store sets it
 // again after the middleware.
-func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedTask) ([]EnqueueResult, error) {
+//
+// Outside a transaction, the statement commits when it ends. So once it
+// succeeded, an error after it, of the middleware or of the second read of
+// a dedupe key, must not say that nothing was stored: a caller that then
+// enqueues again would store the tasks without a dedupe key twice. It is
+// logged instead. Only in a transaction does the error return, so that the
+// caller can roll back. q says which it is, whoever owns it: own only says
+// whether a deadlock may be tried again.
+func (c *Client) storeThrough(ctx context.Context, q querier, own bool, tasks []*resolvedTask) ([]EnqueueResult, error) {
 	if len(c.enqueueMiddleware) == 0 {
-		return c.store(ctx, q, tasks)
+		return c.store(ctx, q, own, tasks)
 	}
 	views := make([]*EnqueueTask, len(tasks))
 	for i, t := range tasks {
@@ -292,7 +307,7 @@ func (c *Client) storeThrough(ctx context.Context, q querier, tasks []*resolvedT
 			tasks[i].meta = v.Metadata
 		}
 
-		res, err := c.store(ctx, q, tasks)
+		res, err := c.store(ctx, q, own, tasks)
 		if err != nil {
 			return err
 		}
@@ -324,7 +339,7 @@ var errEnqueueNextTwice = errors.New("taskmill: enqueue middleware called next t
 var errNotEnqueued = classError("taskmill: enqueue middleware returned nil without enqueueing the tasks", "middleware")
 
 // store writes resolved tasks with one statement.
-func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([]EnqueueResult, error) {
+func (c *Client) store(ctx context.Context, q querier, own bool, tasks []*resolvedTask) ([]EnqueueResult, error) {
 	b := enqueueBatch{due: make(map[string]bool), plain: true}
 	pos := make([]int, len(tasks))     // the batch row of tasks[i]
 	repeat := make([]bool, len(tasks)) // tasks[i] repeats an earlier dedupe key of the batch
@@ -352,7 +367,7 @@ func (c *Client) store(ctx context.Context, q querier, tasks []*resolvedTask) ([
 		b.add(t, meta, now)
 	}
 
-	results, err := c.insertWithRetry(ctx, q, &b)
+	results, err := c.insertWithRetry(ctx, q, own, &b)
 	if err != nil {
 		return nil, err
 	}
@@ -382,19 +397,15 @@ func inBatch(err error, i, n int) error {
 
 // insertWithRetry runs the enqueue statement on a batch, and runs it again
 // after a deadlock when it is a transaction of its own, on the client's
-// pool. It then finds the tasks of the duplicates that the statement could
-// not see.
-func (c *Client) insertWithRetry(ctx context.Context, q querier, b *enqueueBatch) ([]EnqueueResult, error) {
+// pool: own. It then finds the tasks of the duplicates that the statement
+// could not see.
+func (c *Client) insertWithRetry(ctx context.Context, q querier, own bool, b *enqueueBatch) ([]EnqueueResult, error) {
 	notify := make([]string, 0, len(b.due))
 	for queue := range b.due {
 		if c.notifier.allow(ctx, queue) {
 			notify = append(notify, queue)
 		}
 	}
-
-	// Only on the client's own pool is the enqueue statement known to be a
-	// transaction of its own: any other executor may be in the caller's.
-	ownTx := q == querier(pgxExecutor{q: c.pool})
 
 	var results []EnqueueResult
 	var missing [][]byte // duplicates whose existing task the statement could not see
@@ -405,9 +416,10 @@ func (c *Client) insertWithRetry(ctx context.Context, q querier, b *enqueueBatch
 		// transactions opened: the enqueue only waited between them, for a
 		// group's row or a dedupe key. On the client's own pool, the
 		// statement is a transaction of its own, so nothing of it stays,
-		// and it runs again, as Cancel does: see inLockOrder. In the
-		// caller's transaction it cannot: that transaction is over.
-		if try == deadlockTries || !isDeadlock(err) || !ownTx {
+		// and it runs again, as Cancel does: see inLockOrder. Any other
+		// executor may be in the caller's transaction, which is over: a
+		// connection on which the caller began one is no pgx.Tx.
+		if try == deadlockTries || !isDeadlock(err) || !own {
 			break
 		}
 	}
@@ -417,13 +429,11 @@ func (c *Client) insertWithRetry(ctx context.Context, q querier, b *enqueueBatch
 
 	if len(missing) > 0 {
 		if err := c.resolveDuplicates(ctx, q, b, results, missing); err != nil {
-			if !ownTx {
+			if q.inTx() {
 				return nil, err // the caller rolls back
 			}
-			// The tasks are committed, and the read only fills in IDs. An
-			// error would say that nothing was stored, and a caller that
-			// then enqueues again would store the tasks without a dedupe
-			// key twice.
+			// The tasks are committed, and the read only fills in IDs: see
+			// storeThrough.
 			c.logger.LogAttrs(ctx, slog.LevelWarn, "find duplicates failed after the enqueue committed; the duplicates have no ID",
 				slog.Int(logKeyTasks, len(missing)), slog.Any(logKeyError, err))
 		}
@@ -554,7 +564,7 @@ func (t *resolvedTask) metadataCopy() map[string]string {
 // resolve merges a task's options over its kind's defaults and taskmill's,
 // and validates the result.
 func resolve(p EnqueueParams) (*resolvedTask, error) {
-	if p.Args == nil {
+	if noArgs(p.Args) {
 		return nil, invalidArgument("args is nil")
 	}
 	kind := p.Args.Kind()

@@ -17,10 +17,16 @@ import (
 	"github.com/code19m/taskmill/internal/recovered"
 )
 
-// runOne runs a single attempt and records its outcome.
-func (w *Worker) runOne(parent context.Context, t *liveAttempt) {
+// runOne runs a single attempt and records its outcome, on record: a
+// context that outlives parent, which ends the attempt.
+func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
+	// A handler or middleware that ends its goroutine with runtime.Goexit, as
+	// t.Fatal does in a test, skips the end of the attempt: its task goes
+	// back to its queue. After any other end, the attempt is finished, and
+	// this does nothing.
+	defer w.finish(record, t, outcome{kind: outcomeRelease}, time.Time{})
 
 	t.mu.Lock()
 	t.cancel = cancel
@@ -37,63 +43,63 @@ func (w *Worker) runOne(parent context.Context, t *liveAttempt) {
 		// No code of the application sees a task whose row the worker cannot
 		// trust: not its handler, and not the middleware, whose result would
 		// decide what becomes of the task.
-		w.finish(ctx, t, outcome{kind: outcomeDead, err: t.invalid, msg: t.invalid.Error(), code: CodeInvalidRow}, time.Time{})
+		w.finish(record, t, outcome{kind: outcomeDead, err: t.invalid, msg: t.invalid.Error(), code: CodeInvalidRow}, time.Time{})
 		return
 	}
 	if t.reg == nil {
-		w.finish(ctx, t, w.unknownKind(ctx, t), time.Time{})
+		w.finish(record, t, w.unknownKind(ctx, t), time.Time{})
 		return
 	}
 
 	ctx, cancelTimeout := context.WithTimeoutCause(ctx, t.reg.opts.Timeout, ErrAttemptTimeout)
+	defer cancelTimeout()
 	start := time.Now()
+	stopWatch := w.watch(ctx, record, []*liveAttempt{t}, start)
+	defer stopWatch()
 	err := w.invoke(ctx, t, func(ctx context.Context) error { return t.reg.run(ctx, t.info, t.att) })
-	cause := context.Cause(ctx)
-	cancelTimeout()
-	w.finish(ctx, t, outcomeOf(t, err, cause), start)
+	stopWatch()
+	w.finish(record, t, outcomeOf(t, err, context.Cause(ctx)), start)
 }
 
-// runBatch runs a batch handler for tasks. Middleware still wraps each task:
-// each one's chain runs in its own goroutine, and the batch starts once every
-// chain has either reached the handler or returned early.
-func (w *Worker) runBatch(parent context.Context, tasks []*liveAttempt) {
+// runBatch runs a batch handler for tasks, and records their outcomes on
+// record, as runOne does. Middleware still wraps each task: each one's chain
+// runs in its own goroutine, and the batch starts once every chain has
+// either reached the handler or returned early.
+func (w *Worker) runBatch(parent, record context.Context, tasks []*liveAttempt) {
 	reg := tasks[0].reg
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
 	ctx, cancelTimeout := context.WithTimeoutCause(ctx, reg.opts.Timeout, ErrAttemptTimeout)
 	defer cancelTimeout()
+	// As in runOne: tasks whose chain or batch handler ended its goroutine go
+	// back to their queue.
+	defer func() {
+		for _, t := range tasks {
+			w.finish(record, t, outcome{kind: outcomeRelease}, time.Time{})
+		}
+	}()
 
-	type arrival struct {
-		index  int
-		result chan error
+	c := &batchChains{
+		arrivals: make(chan arrival, len(tasks)),
+		early:    make(chan struct{}, len(tasks)),
+		ended:    make(chan struct{}),
+		errs:     make([]error, len(tasks)),
 	}
-	arrivals := make(chan arrival, len(tasks))
-	early := make(chan struct{}, len(tasks))
-	errs := make([]error, len(tasks))
-	var chains sync.WaitGroup
+	defer close(c.ended)
 	start := time.Now()
+	stopWatch := w.watch(ctx, record, tasks, start)
+	defer stopWatch()
 
 	for i, t := range tasks {
-		chains.Go(func() {
-			var reached atomic.Bool
-			errs[i] = w.invoke(ctx, t, func(context.Context) error {
-				reached.Store(true)
-				a := arrival{index: i, result: make(chan error, 1)}
-				arrivals <- a
-				return <-a.result
-			})
-			if !reached.Load() {
-				early <- struct{}{}
-			}
-		})
+		c.running.Go(func() { w.runChain(ctx, record, c, i, t) })
 	}
 
 	var arrived []arrival
 	for pending := len(tasks); pending > 0; pending-- {
 		select {
-		case a := <-arrivals:
+		case a := <-c.arrivals:
 			arrived = append(arrived, a)
-		case <-early:
+		case <-c.early:
 		}
 	}
 
@@ -110,12 +116,127 @@ func (w *Worker) runBatch(parent context.Context, tasks []*liveAttempt) {
 			a.result <- results[j]
 		}
 	}
-	chains.Wait()
+	c.running.Wait()
+	stopWatch()
 
 	cause := context.Cause(ctx)
 	for i, t := range tasks {
-		w.finish(ctx, t, outcomeOf(t, errs[i], cause), start)
+		w.finish(record, t, outcomeOf(t, c.errs[i], cause), start)
 	}
+}
+
+// batchChains are the middleware chains of the tasks of a batch.
+type batchChains struct {
+	arrivals chan arrival   // a chain reached the handler
+	early    chan struct{}  // a chain returned without reaching it
+	ended    chan struct{}  // closed when runBatch returns
+	errs     []error        // what each chain returned
+	running  sync.WaitGroup // the chains
+}
+
+// arrival is a chain of a batch that reached the handler, at index of the
+// batch's tasks, and waits for its result.
+type arrival struct {
+	index  int
+	result chan error
+}
+
+// runChain runs the middleware chain of task t, at index i of a batch. At
+// the handler, it waits for the batch's result for t. A batch handler that
+// ends its goroutine leaves it without one: its next returns errBatchEnded.
+func (w *Worker) runChain(ctx, record context.Context, c *batchChains, i int, t *liveAttempt) {
+	var reached, returned atomic.Bool
+	defer func() {
+		if !returned.Load() { // the chain ended its goroutine
+			w.finish(record, t, outcome{kind: outcomeRelease}, time.Time{})
+		}
+		if !reached.Load() {
+			c.early <- struct{}{}
+		}
+	}()
+
+	c.errs[i] = w.invoke(ctx, t, func(context.Context) error {
+		reached.Store(true)
+		a := arrival{index: i, result: make(chan error, 1)}
+		c.arrivals <- a
+		select {
+		case err := <-a.result:
+			return err
+		case <-c.ended:
+			return errBatchEnded
+		}
+	})
+	returned.Store(true)
+}
+
+// watch abandons the attempts ts if their handler has not returned
+// shutdownGrace after ctx, the handler's context, was canceled: after a
+// timeout, a cancel, or a lost lease. taskmill cannot stop the code of a
+// handler, and one that ignores its context would otherwise keep its tasks
+// for good: their leases renewed, and every timeout, cancel, or delete
+// without effect. Each attempt then ends as if the handler had returned the
+// context's error: a timeout fails it, a cancel cancels its task, and a
+// lost lease ends it without a result. The goroutine of the handler keeps
+// its slot until it returns, so Concurrency still bounds the goroutines,
+// and its result is ignored. A shutdown is left to the drain, which releases
+// the tasks instead. The returned stop must be called once the handler
+// returned.
+//
+// The attempts of a queue with a MaxRunning limit are not abandoned: their
+// tasks would run again while the handler still runs, and more of the
+// queue's tasks would run than the limit allows, which protects whatever
+// the handlers call. Their tasks stay running until the handler returns,
+// and watch only warns. An attempt that lost its lease is abandoned all the
+// same: its task may run again anyway.
+func (w *Worker) watch(ctx, record context.Context, ts []*liveAttempt, start time.Time) (stop func()) {
+	returned := make(chan struct{})
+	stopAfter := context.AfterFunc(ctx, func() {
+		cause := context.Cause(ctx)
+		if errors.Is(cause, ErrShutdown) {
+			return
+		}
+
+		grace := time.NewTimer(w.timing.shutdownGrace)
+		defer grace.Stop()
+		select {
+		case <-returned:
+			return
+		case <-grace.C:
+		}
+
+		for _, t := range ts {
+			if q := w.queues[t.info.Queue]; q != nil && q.maxRunning.Load() > 0 && !errors.Is(cause, ErrLeaseLost) {
+				w.logger.LogAttrs(record, slog.LevelWarn, "handler ignored its context; its task keeps running because its queue has a MaxRunning limit",
+					slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, cause))
+				continue
+			}
+			w.abandon(record, t, cause, start)
+		}
+	})
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			stopAfter()
+			close(returned)
+		})
+	}
+}
+
+// abandon ends an attempt whose handler ignored the cancel of its context,
+// for watch.
+func (w *Worker) abandon(record context.Context, t *liveAttempt, cause error, start time.Time) {
+	t.mu.Lock()
+	running := t.state == attemptRunning
+	t.mu.Unlock()
+	if !running {
+		return
+	}
+
+	w.logger.LogAttrs(record, slog.LevelWarn, "handler ignored its context; abandoning its attempt",
+		slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, cause))
+	err := fmt.Errorf("the handler did not return %s after its context ended: %w", w.timing.shutdownGrace, cause)
+	w.finish(record, t, outcomeOf(t, err, cause), start)
 }
 
 // safeBatch calls a batch handler and turns a panic into an error for every
@@ -154,6 +275,10 @@ func (w *Worker) invoke(ctx context.Context, t *liveAttempt, call func(context.C
 		return call(ctx)
 	}, errNextTwice, errSkippedHandler)
 }
+
+// errBatchEnded is what the next of a batch's task returns when the batch
+// handler ended its goroutine without results.
+var errBatchEnded = errors.New("taskmill: the batch handler ended its goroutine")
 
 // errNextTwice fails the second call of next in an attempt's middleware.
 var errNextTwice = errors.New("taskmill: middleware called next twice")
@@ -293,21 +418,62 @@ func (w *Worker) unknownKind(ctx context.Context, t *liveAttempt) outcome {
 		return outcome{kind: outcomeDead, code: CodeUnknownKind, err: err, msg: err.Error()}
 	}
 
-	// Warn once per task, not at every snooze: a deploy can leave many tasks
-	// waiting for an hour.
-	level := slog.LevelDebug
 	if since.IsZero() {
-		level = slog.LevelWarn
+		w.noHandler.warn(ctx, w, t.info.Kind)
 	}
-	w.logger.LogAttrs(ctx, level, "no handler for task kind; snoozing",
+	w.logger.LogAttrs(ctx, slog.LevelDebug, "no handler for task kind; snoozing",
 		slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind))
 
 	o.delay = min(w.timing.noHandlerSnooze, limit-waited)
 	return o
 }
 
-// finish records an attempt's outcome, unless shutdown already released its
-// task. start is when the handler started, or zero if none ran.
+// kindWarnings warns of the tasks of kinds that the worker has no handler
+// for: per kind, at most once per timing.failureReport, with the number of
+// tasks that began to wait since the last line. A rolling deploy can leave
+// thousands of tasks of a new kind to workers of the old release, and a line
+// for each would flood the log. It keeps at most maxKindWarnings kinds, and
+// forgets them all when it would keep more: the kinds come from rows that
+// any producer writes.
+type kindWarnings struct {
+	mu    sync.Mutex
+	kinds map[string]*kindWarning
+}
+
+// kindWarning is what kindWarnings knows of one kind.
+type kindWarning struct {
+	logged time.Time // when it was last logged
+	tasks  int       // the tasks that began to wait since then
+}
+
+// maxKindWarnings is the most kinds that kindWarnings keeps.
+const maxKindWarnings = 1000
+
+// warn counts a task of kind that began to wait for a handler, and logs the
+// count if the kind was not logged for timing.failureReport.
+func (k *kindWarnings) warn(ctx context.Context, w *Worker, kind string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.kinds == nil || len(k.kinds) >= maxKindWarnings && k.kinds[kind] == nil {
+		k.kinds = make(map[string]*kindWarning)
+	}
+
+	kw := k.kinds[kind]
+	if kw == nil {
+		kw = &kindWarning{}
+		k.kinds[kind] = kw
+	}
+	kw.tasks++
+	if now := time.Now(); now.Sub(kw.logged) >= w.timing.failureReport {
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "no handler for task kind; its tasks wait for a worker that has one",
+			slog.String(logKeyKind, kind), slog.Int(logKeyTasks, kw.tasks))
+		kw.logged, kw.tasks = now, 0
+	}
+}
+
+// finish records an attempt's outcome on ctx, unless the attempt has ended
+// already: its outcome was recorded, or a shutdown released its task. start
+// is when the handler started, or zero if none ran.
 func (w *Worker) finish(ctx context.Context, t *liveAttempt, o outcome, start time.Time) {
 	t.mu.Lock()
 	if t.state != attemptRunning {
@@ -342,12 +508,12 @@ func (w *Worker) finish(ctx context.Context, t *liveAttempt, o outcome, start ti
 
 	switch {
 	case o.kind == outcomeComplete && t.direct:
-		done := w.completeWaiting(context.WithoutCancel(ctx), []*liveAttempt{t})
+		done := w.completeWaiting(ctx, []*liveAttempt{t})
 		t.completedDirectly = len(done) == 1
 	case o.kind == outcomeComplete:
 		w.completions <- t // Run stops the completer only after every result is in
 	default:
-		w.record(context.WithoutCancel(ctx), t, o)
+		w.record(ctx, t, o)
 	}
 }
 
@@ -368,19 +534,41 @@ func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 	}
 
 	// Only a grouped task's outcome takes several statements that must
-	// commit together.
+	// commit together. Their transaction waits for a row that another
+	// transaction holds, such as the group's while a transaction enqueues
+	// into it, for lockWait at most. Meanwhile it holds the task's row,
+	// which the renewal of the lease skips: a longer wait could outlast the
+	// lease, and the rescue would record a lost lease in place of this
+	// outcome. So the transaction gives up, and tries again, for as long as
+	// the row is held and the lease renewed in between.
 	var ended attemptEnd
-	err := w.whileLeased(ctx, []*liveAttempt{t}, func(ctx context.Context) error {
+	try := func(ctx context.Context) error {
 		var err error
 		if t.info.GroupKey == "" {
 			ended, err = w.recordTx(ctx, pgxExecutor{q: w.client.pool}, t, o)
 			return err
 		}
 		return w.client.inTx(ctx, func(q querier) error {
-			ended, err = w.recordTx(ctx, q, t, o)
+			if _, err := q.exec(ctx, lockTimeoutSQL, w.timing.lockTimeout()); err != nil {
+				return err
+			}
+			if ended, err = w.recordTx(ctx, q, t, o); err != nil {
+				return err
+			}
+			// The timeout was for the rows. At the commit, a notification
+			// waits its turn, as every other one does: see liftLockTimeout.
+			_, err = q.exec(ctx, liftLockTimeout)
 			return err
 		})
-	})
+	}
+	err := w.whileLeased(ctx, []*liveAttempt{t}, try)
+	for delay := blockedRetryDelay; pgCode(err) == codeLockNotAvailable; delay = min(2*delay, blockedRetryMax) {
+		select {
+		case <-ctx.Done(): // the next try fails at once
+		case <-time.After(delay):
+		}
+		err = w.whileLeased(ctx, []*liveAttempt{t}, try)
+	}
 	switch {
 	case err == nil && ended == endedFailed:
 		w.tally.add(t.info.Queue, 0, 1)

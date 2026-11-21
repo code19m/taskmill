@@ -173,15 +173,7 @@ type expiredPartition struct {
 // PostgreSQL allows a table only one unfinished detach. So the pass detaches
 // no more, and still drops what is detached already.
 func (m *maintainer) dropHistory(ctx context.Context) error {
-	r, err := m.c.pool.Query(ctx, m.c.sql.expiredHistory, historyDrops, historyDropMark)
-	if err != nil {
-		return err
-	}
-	expired, err := pgx.CollectRows(r, func(row pgx.CollectableRow) (expiredPartition, error) {
-		var p expiredPartition
-		err := row.Scan(&p.name, &p.attached, &p.pending)
-		return p, err
-	})
+	expired, err := m.expiredHistory(ctx)
 	if err != nil {
 		return err
 	}
@@ -207,6 +199,21 @@ func (m *maintainer) dropHistory(ctx context.Context) error {
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "dropped expired history", slog.String(logKeyPartition, p.name))
 	}
 	return errors.Join(errs...)
+}
+
+// expiredHistory returns the history partitions that dropHistory drops.
+func (m *maintainer) expiredHistory(ctx context.Context) ([]expiredPartition, error) {
+	ctx, cancel := m.bound(ctx)
+	defer cancel()
+	r, err := m.c.pool.Query(ctx, m.c.sql.expiredHistory, historyDrops, historyDropMark)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(r, func(row pgx.CollectableRow) (expiredPartition, error) {
+		var p expiredPartition
+		err := row.Scan(&p.name, &p.attached, &p.pending)
+		return p, err
+	})
 }
 
 // detachPartition marks and detaches one history partition. DETACH ...

@@ -187,6 +187,41 @@ func TestBulkActionBehindAHeadPromotesNothing(t *testing.T) {
 	})
 }
 
+// A batch of DeleteMatching takes at most 1,000 tasks of both tables in
+// all, as BulkResult.Changed promises: an action that stops early has
+// changed at most a batch more than it counted. Here the action stops
+// after its first batch, which it counts.
+func TestDeleteMatchingTakesOneBatchOfBothTables(t *testing.T) {
+	t.Parallel()
+	first := &beforeStatement{fragment: ".task_history WHERE id = ANY($1::bigint[])"}
+	e := newTracedEnv(t, first)
+
+	// 1,500 dead tasks and 1,500 completed ones, their IDs interleaved.
+	e.exec(t, `INSERT INTO {s}.tasks (id, queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           OVERRIDING SYSTEM VALUE
+	           SELECT 2 * i, 'default', 'email.send', 'dead', now(), '{}', 3, now() FROM generate_series(1, 1500) i`)
+	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+	                                         priority, attempt, max_attempts, payload, metadata, errors)
+	           SELECT 2 * i + 1, now(), 'default', now(), 'email.send', now(), 'w', now(), 2, 1, 3, '{}', '{}', '[]'
+	           FROM generate_series(1, 1500) i`)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stop := func() { cancel() }
+	first.call.Store(&stop)
+
+	res, err := e.client.DeleteMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead, taskmill.StateCompleted}}))
+	if !errors.Is(err, context.Canceled) || res.Next == "" {
+		t.Fatalf("got %+v, %v; want the action to stop after its first batch", res, err)
+	}
+	if res.Changed == 0 || res.Changed > 1000 {
+		t.Fatalf("the first batch changed %d tasks, want at most 1000", res.Changed)
+	}
+	if left := e.count(t, "SELECT (SELECT count(*) FROM {s}.tasks) + (SELECT count(*) FROM {s}.task_history)"); int64(left) != 3000-res.Changed {
+		t.Fatalf("%d tasks are left, but the action counted %d of 3000 as deleted", left, res.Changed)
+	}
+}
+
 func TestDeleteMatching(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -1269,7 +1304,7 @@ func TestBulkActionsCheckTheFilter(t *testing.T) {
 		}
 	}
 
-	if _, err := e.client.Count(t.Context(), &taskmill.TaskFilter{States: []taskmill.State{"lost"}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+	if _, err := e.client.Count(t.Context(), &taskmill.CountParams{Filter: taskmill.TaskFilter{States: []taskmill.State{"lost"}}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Errorf("count with an unknown state: got %v, want ErrInvalidArgument", err)
 	}
 }
@@ -1303,9 +1338,9 @@ func TestCount(t *testing.T) {
 		t.Fatalf("all tasks: %+v, %v; want %+v", got, err, want)
 	}
 
-	got, err = e.client.Count(ctx, &taskmill.TaskFilter{
+	got, err = e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{
 		Kinds: []string{"email.send"}, States: []taskmill.State{taskmill.StateAvailable, taskmill.StateCompleted},
-	})
+	}})
 	want = &taskmill.TaskCounts{
 		States: map[taskmill.State]taskmill.TaskCount{taskmill.StateAvailable: n(2), taskmill.StateCompleted: n(1)},
 		Cancel: n(2), Delete: n(3),
@@ -1318,7 +1353,7 @@ func TestCount(t *testing.T) {
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 	           SELECT 'big', 'k', 'available', now(), '{}', 3 FROM generate_series(1, 10001)`)
 	e.die(t, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "big"}))
-	got, err = e.client.Count(ctx, &taskmill.TaskFilter{Queues: []string{"big"}})
+	got, err = e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{Queues: []string{"big"}}})
 	capped := taskmill.TaskCount{N: 10000, Capped: true}
 	if err != nil || got.States[taskmill.StateAvailable] != capped || got.Cancel != capped || got.Retry != n(1) ||
 		got.Delete != (taskmill.TaskCount{N: 10001, Capped: true}) {
@@ -1331,7 +1366,7 @@ func TestCount(t *testing.T) {
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_expires_at, cancel_requested_at)
 	           SELECT 'busy', 'k', 'running', now(), '{}', 3, 1, now() + interval '1 hour', CASE WHEN i % 3 = 0 THEN now() END
 	           FROM generate_series(1, 10001) i`)
-	got, err = e.client.Count(ctx, &taskmill.TaskFilter{Queues: []string{"busy"}})
+	got, err = e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{Queues: []string{"busy"}}})
 	if err != nil || got.States[taskmill.StateRunning] != capped || got.Cancel != (taskmill.TaskCount{N: 6668, Capped: true}) {
 		t.Fatalf("running tasks over the cap, a third of them asked to stop: %+v, %v", got, err)
 	}

@@ -1317,3 +1317,76 @@ func TestSlowRetentionDelaysNeitherPromotionNorStatistics(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A failover can drop the packets of the old server's connections without
+// resetting them: a statement sent on one waits for as long as the
+// operating system waits for an answer, often 15 minutes, while the
+// election keeps the maintainer's role on new connections. Each statement
+// of the maintainer's work ends within a leader lease, so a task that comes
+// due is promoted on a new connection soon after.
+func TestMaintainerOutlastsConnectionsThatStopAnswering(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = db.host, db.port, nil
+	// pgx holds the place of a broken connection in the pool for up to 15
+	// seconds while it closes it, so the pool has room beyond the
+	// connections that the proxy freezes.
+	cfg.MaxConns = 30
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	e := newEnvWith(t, pool, nil)
+	w := newWorker(t, e, &taskmill.WorkerConfig{}) // it only takes part in maintenance
+	// Each frozen connection holds a statement for a lease: a short one lets
+	// the maintainer go through them soon.
+	timing := testTiming
+	timing.LeaderLease = time.Second
+	taskmill.SetTiming(w, timing)
+	startWorker(t, w)
+	// Closing the frozen connections lets the worker stop, also when the test
+	// fails: cleanups run last first.
+	t.Cleanup(func() {
+		db.cut(true)
+		pool.Reset()
+		db.cut(false)
+	})
+	waitFor(t, "the worker to lead", func() bool {
+		ws, err := e.client.Workers(t.Context())
+		return err == nil && len(ws) == 1 && ws[0].Maintainer
+	})
+
+	// The pool keeps more idle connections than the maintainer's loops take
+	// at once, and the proxy freezes them all: each loop meets one.
+	held := make([]*pgxpool.Conn, 8)
+	for i := range held {
+		if held[i], err = pool.Acquire(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range held {
+		c.Release()
+	}
+	db.freezeOpen()
+
+	// The test watches through a client of its own, which the proxy leaves
+	// alone.
+	direct, err := taskmill.NewClient(t.Context(), testdb.Pool(t), &taskmill.ClientConfig{Schema: e.schema, Logger: testLogger(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := direct.Enqueue(t.Context(), sendEmail{}, &taskmill.EnqueueOptions{RunAt: time.Now().Add(500 * time.Millisecond)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the task to be promoted", func() bool {
+		info, err := direct.Get(t.Context(), res.ID)
+		return err == nil && info.State == taskmill.StateAvailable
+	})
+}

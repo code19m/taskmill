@@ -78,13 +78,16 @@ var (
 
 	// ErrTaskCanceled is the cause of a handler's context when the task was
 	// canceled while it ran. The task becomes canceled when the attempt ends,
-	// unless the handler returns nil, which completes it.
+	// unless the handler returns nil, which completes it. A handler that has
+	// not returned 5 seconds later is abandoned, and the task becomes
+	// canceled: see [HandlerOptions.Timeout].
 	ErrTaskCanceled = classError("taskmill: task canceled", "canceled")
 
 	// ErrAttemptTimeout is the cause of a handler's context when the attempt
 	// ran longer than [HandlerOptions.Timeout]. A failure that the handler
 	// then returns is recorded with the code [CodeTimeout]; returning nil
-	// completes the task.
+	// completes the task. A handler that has not returned 5 seconds later is
+	// abandoned, and the attempt fails with that code all the same.
 	ErrAttemptTimeout = classError("taskmill: attempt timed out", "timeout")
 
 	// ErrShutdown is the cause of a handler's context when the worker is

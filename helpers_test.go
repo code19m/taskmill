@@ -123,21 +123,35 @@ func newTracedEnv(t *testing.T, tracer pgx.QueryTracer) *env {
 	return newEnvWith(t, pool, nil)
 }
 
-// statementLog keeps the statements that a pool's connections send outside
-// batches.
+// statementLog keeps the statements that a pool's connections send, alone
+// or in batches.
 type statementLog struct {
 	mu   sync.Mutex
 	sent []string
 }
 
 func (l *statementLog) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.sent = append(l.sent, d.SQL)
+	l.add(d.SQL)
 	return ctx
 }
 
 func (*statementLog) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (*statementLog) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	return ctx
+}
+
+func (l *statementLog) TraceBatchQuery(_ context.Context, _ *pgx.Conn, d pgx.TraceBatchQueryData) {
+	l.add(d.SQL)
+}
+
+func (*statementLog) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
+
+func (l *statementLog) add(sql string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sent = append(l.sent, sql)
+}
 
 // reset forgets the statements sent so far.
 func (l *statementLog) reset() {

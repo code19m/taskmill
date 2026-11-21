@@ -3,6 +3,8 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -197,21 +199,65 @@ func TestPanicAfterTheHandlerReturnedFailsTheAttempt(t *testing.T) {
 	}
 }
 
+// cardArgs is a payload whose decoding fails with an error that quotes it.
+type cardArgs struct{ Card string }
+
+func (cardArgs) Kind() string { return "card.charge" }
+
+func (*cardArgs) UnmarshalJSON(b []byte) error { return fmt.Errorf("not a card: %s", b) }
+
+// scoreArgs is a payload with a map, whose keys are values of the payload,
+// and a list of structs.
+type scoreArgs struct {
+	Scores map[string]int `json:"scores"`
+	Items  []struct {
+		Qty int `json:"qty"`
+	} `json:"items"`
+}
+
+func (scoreArgs) Kind() string { return "score.add" }
+
+// A payload that does not decode makes its task dead right away. The error
+// that says why is stored, logged, and set as a span's status, where a
+// payload must not appear: it names the field and the types, not the value
+// that encoding/json, or the application's UnmarshalJSON, quoted.
 func TestWorkerRejectsUndecodablePayload(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
-	runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil),
-		Queues:   defaultQueue(1),
-	})
+	for _, c := range []struct {
+		name, kind, payload, says string
+	}{
+		{"wrong type", "email.send", `{"to": 4111111111111111}`, "the field to holds a JSON number, which does not fit string"},
+		{"number out of range", "email.send", `{"user_id": 41111111111111111111}`, "the field user_id holds a JSON number, which does not fit int64"},
+		{"rejected by the type", "card.charge", `{"Card": "4111111111111111"}`, "it does not decode into taskmill_test.cardArgs"},
+		{"wrong type under a key", "score.add", `{"scores": {"4111@example.com": "x"}}`, "the field scores[key] holds a JSON string, which does not fit int"},
+		{"wrong type in a list", "score.add", `{"items": [{"qty": "4111"}]}`, "the field items.qty holds a JSON string, which does not fit int"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			logs := &logRecorder{}
+			e := newEnv(t).withLogger(t, slog.New(logs))
+			hs := handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil)
+			taskmill.AddHandler(hs, taskmill.HandlerFunc[cardArgs](func(context.Context, *taskmill.Task[cardArgs]) error { return nil }), nil)
+			taskmill.AddHandler(hs, taskmill.HandlerFunc[scoreArgs](func(context.Context, *taskmill.Task[scoreArgs]) error { return nil }), nil)
+			runWorker(t, e, &taskmill.WorkerConfig{Handlers: hs, Queues: defaultQueue(1)})
 
-	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
-	           VALUES ('default', 'email.send', 'available', now(), '{"user_id": "not a number"}', 5)`)
-	id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
+			e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+			           VALUES ('default', $1, 'available', now(), $2, 5)`, c.kind, c.payload)
+			id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
 
-	info := e.waitState(t, id, taskmill.StateDead)
-	if info.Attempt != 1 || info.Errors[0].Code != taskmill.CodeInvalidPayload {
-		t.Fatalf("got attempt %d, errors %+v", info.Attempt, info.Errors)
+			info := e.waitState(t, id, taskmill.StateDead)
+			if info.Attempt != 1 || info.Errors[0].Code != taskmill.CodeInvalidPayload || !strings.Contains(info.Errors[0].Message, c.says) {
+				t.Fatalf("got attempt %d, errors %+v; want one that says %q", info.Attempt, info.Errors, c.says)
+			}
+			for _, r := range logs.all() {
+				if line := recordText(r); strings.Contains(line, "4111") {
+					t.Errorf("a log line shows the payload: %s", line)
+				}
+			}
+			if strings.Contains(info.Errors[0].Message, "4111") {
+				t.Errorf("the error shows the payload: %s", info.Errors[0].Message)
+			}
+		})
 	}
 }
 
@@ -280,6 +326,33 @@ func TestWorkerSnoozesUnknownKinds(t *testing.T) {
 	}
 	if waited := info.Errors[1].At.Sub(info.Errors[0].At); waited < timeout {
 		t.Fatalf("gave up after %s, want at least %s", waited, timeout)
+	}
+}
+
+// A rolling deploy can leave many tasks of a new kind to the workers of the
+// old release. Each worker warns once a minute per kind, with how many
+// tasks began to wait, and logs each task at Debug.
+func TestTasksWithoutAHandlerWarnOncePerKind(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	const n = 200
+	for range n {
+		e.enqueue(t, report{}, &taskmill.EnqueueOptions{Queue: taskmill.DefaultQueue})
+	}
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(50)})
+	waitFor(t, "every task to wait", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE state = 'scheduled'") == n
+	})
+
+	warned := slices.DeleteFunc(logs.all(), func(r slog.Record) bool {
+		return r.Message != "no handler for task kind; its tasks wait for a worker that has one"
+	})
+	if len(warned) != 1 || warned[0].Level != slog.LevelWarn || attr(warned[0], "kind") != "report.build" {
+		t.Fatalf("got the warnings %v, want one for the kind", warned)
+	}
+	if got := logs.count("no handler for task kind; snoozing"); got != n {
+		t.Fatalf("got %d lines for the tasks, want %d", got, n)
 	}
 }
 
@@ -854,5 +927,155 @@ func TestMiddlewareThatSkipsSomeTasksOfABatch(t *testing.T) {
 			want = taskmill.StateRetryable
 		}
 		e.waitState(t, id, want)
+	}
+}
+
+// A handler that ignores its context would keep its task running for good:
+// its timeout, a cancel, or a delete would change nothing. 5 seconds after
+// its context ends (here 200 ms), the worker abandons its attempt as the
+// cause says, and logs it, while the handler's goroutine keeps its slot
+// until it returns: the next task waits for it, as Concurrency says. The
+// handler's late result counts for nothing.
+func TestHandlerThatIgnoresItsTimeoutIsAbandoned(t *testing.T) {
+	t.Parallel()
+	s := runStuckHandler(t, 300*time.Millisecond)
+	info := s.e.waitState(t, s.stuck, taskmill.StateDead)
+	if len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeTimeout ||
+		!strings.Contains(info.Errors[0].Message, "the handler did not return") {
+		t.Errorf("got the errors %+v, want one with the code timeout that says the handler did not return", info.Errors)
+	}
+	s.check(t, taskmill.StateDead)
+}
+
+// So is a handler that ignores the cancel of its task: the task is
+// canceled.
+func TestHandlerThatIgnoresACancelIsAbandoned(t *testing.T) {
+	t.Parallel()
+	s := runStuckHandler(t, time.Hour)
+	if err := s.e.client.Cancel(t.Context(), s.stuck); err != nil {
+		t.Fatal(err)
+	}
+	s.e.waitState(t, s.stuck, taskmill.StateCanceled)
+	s.check(t, taskmill.StateCanceled)
+}
+
+// In a queue with a MaxRunning limit, the worker does not abandon a handler
+// that ignores its context: its task would run again while the handler
+// still runs, beyond the limit, which protects what the handlers call. The
+// task stays running until the handler returns, and the worker warns.
+func TestHandlerThatIgnoresItsTimeoutInALimitedQueueKeepsItsTask(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	e.limitDefaultQueue(t, 1)
+	var runs atomic.Int32
+	unblock := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			if runs.Add(1) == 1 {
+				<-unblock // ignores its context
+			}
+			return nil
+		}, &taskmill.HandlerOptions{Timeout: 300 * time.Millisecond}),
+		Queues: defaultQueue(2),
+	})
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 2})
+	const kept = "handler ignored its context; its task keeps running because its queue has a MaxRunning limit"
+	waitFor(t, "the warning", func() bool { return logs.count(kept) == 1 })
+	if info := e.get(t, id); info.State != taskmill.StateRunning || info.Attempt != 1 || runs.Load() != 1 {
+		t.Fatalf("the task is %s on attempt %d, after %d runs; want running on its first, alone", info.State, info.Attempt, runs.Load())
+	}
+
+	close(unblock)
+	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 || runs.Load() != 1 {
+		t.Fatalf("completed on attempt %d after %d runs, want one", info.Attempt, runs.Load())
+	}
+	if n := logs.count("handler ignored its context; abandoning its attempt"); n != 0 {
+		t.Errorf("the attempt of a limited queue was abandoned")
+	}
+}
+
+// stuckHandler is a worker of one slot whose handler of a task ignores its
+// context, and a task that waits behind it.
+type stuckHandler struct {
+	e           *env
+	logs        *logRecorder
+	stuck, next int64
+	started     chan int64
+	unblock     chan struct{}
+}
+
+// runStuckHandler runs a stuckHandler whose handlers have the timeout
+// timeout, and waits until the stuck task's handler runs.
+func runStuckHandler(t *testing.T, timeout time.Duration) *stuckHandler {
+	t.Helper()
+	s := &stuckHandler{logs: &logRecorder{}, started: make(chan int64, 2), unblock: make(chan struct{})}
+	s.e = newEnv(t).withLogger(t, slog.New(s.logs))
+	runWorker(t, s.e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			s.started <- task.ID
+			if task.Args.To == "stuck" {
+				<-s.unblock // ignores its context
+			}
+			return nil
+		}, &taskmill.HandlerOptions{Timeout: timeout}),
+		Queues: defaultQueue(1),
+	})
+	t.Cleanup(func() { close(s.unblock) })
+
+	s.stuck = s.e.enqueue(t, sendEmail{To: "stuck"}, &taskmill.EnqueueOptions{MaxAttempts: 1})
+	recv(t, s.started, "the handler to start")
+	s.next = s.e.enqueue(t, sendEmail{}, nil)
+	return s
+}
+
+// check checks, once the stuck task is in state, that the worker logged the
+// abandoned attempt once, and that the next task started only once the
+// stuck handler returned, and left the stuck task as it was.
+func (s *stuckHandler) check(t *testing.T, state taskmill.State) {
+	t.Helper()
+	if n := s.logs.count("handler ignored its context; abandoning its attempt"); n != 1 {
+		t.Errorf("the abandoned attempt was logged %d times, want once", n)
+	}
+	if n := s.e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND state = 'available'", s.next); n != 1 {
+		t.Errorf("the next task started while the abandoned handler kept its slot")
+	}
+
+	s.unblock <- struct{}{}
+	if got := recv(t, s.started, "the next task to start"); got != s.next {
+		t.Fatalf("task %d started, want %d", got, s.next)
+	}
+	s.e.waitState(t, s.next, taskmill.StateCompleted)
+	s.e.wantState(t, s.stuck, state)
+}
+
+// A task keeps its last 20 errors: after 25 failed attempts, those of
+// attempts 6 to 25.
+func TestTaskKeepsItsLast20Errors(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			return errors.New("the partner is down")
+		}, nil),
+		NoMaintainer: true,
+	})
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 25})
+	for range 25 {
+		if _, err := w.RunTask(t.Context(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	info := e.get(t, id)
+	if info.State != taskmill.StateDead || len(info.Errors) != 20 {
+		t.Fatalf("got %s with %d errors, want dead with 20", info.State, len(info.Errors))
+	}
+	for i, err := range info.Errors {
+		if err.Attempt != 6+i {
+			t.Fatalf("error %d is of attempt %d, want %d", i, err.Attempt, 6+i)
+		}
 	}
 }

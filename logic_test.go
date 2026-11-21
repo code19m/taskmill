@@ -61,6 +61,43 @@ var jsonPairs = []struct {
 	{`["a", "b"]`, `["ab"]`, false},
 }
 
+// The path of a field that did not decode is the same on every release of
+// Go: some put the keys of maps and the indexes of lists in it, and others
+// leave them out. The keys are values of the payload, and never show.
+func TestFieldPathIsTheSameOnEveryRelease(t *testing.T) {
+	t.Parallel()
+	type team struct {
+		Size int `json:"size"`
+	}
+	type payload struct {
+		Scores map[string]int  `json:"scores"`
+		Teams  map[string]team `json:"teams"`
+		Items  []struct {
+			Qty int `json:"qty"`
+		} `json:"items"`
+		Grid  [][]team `json:"grid"`
+		Inner *struct {
+			Name string
+		} `json:"inner"`
+	}
+	typ := reflect.TypeFor[payload]()
+
+	for want, paths := range map[string][]string{
+		"scores[key]": {"scores", "scores.alice@example.com"},
+		"teams[key]":  {"teams.size", "teams.a.b.size"},
+		"items.qty":   {"items.qty", "items.3.qty"},
+		"grid.size":   {"grid.size", "grid.1.2.size"},
+		"inner.Name":  {"inner.Name"},
+		"":            {"", "unknown.field"},
+	} {
+		for _, path := range paths {
+			if got := fieldPath(typ, path); got != want {
+				t.Errorf("fieldPath(%q) = %q, want %q", path, got, want)
+			}
+		}
+	}
+}
+
 func TestJSONEqual(t *testing.T) {
 	t.Parallel()
 	for _, tt := range append(jsonPairs, struct {

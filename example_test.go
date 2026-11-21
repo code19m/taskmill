@@ -132,20 +132,96 @@ func ExampleClient_EnqueueTx() {
 	}
 }
 
-// This example enqueues a task that starts in 10 minutes at the earliest,
-// and then before the other waiting tasks of its queue.
+// This example enqueues a task with the defaults: in the default queue, to
+// start right away.
 func ExampleClient_Enqueue() {
 	ctx := context.Background()
 	var client *taskmill.Client // from taskmill.NewClient
 
-	res, err := client.Enqueue(ctx, SendReceipt{OrderID: 7, Email: "a@example.com"}, &taskmill.EnqueueOptions{
+	res, err := client.Enqueue(ctx, SendReceipt{OrderID: 7, Email: "a@example.com"}, nil)
+	if err != nil {
+		log.Fatal(err) // such as ErrInvalidArgument for a payload that cannot be stored
+	}
+	log.Printf("enqueued task %d", res.ID)
+}
+
+// This example enqueues a task that starts in 10 minutes at the earliest.
+// Then it starts before the waiting tasks of its queue whose priority is
+// lower, and after those of higher priority, and of the same priority that
+// were due before it.
+func ExampleEnqueueOptions() {
+	ctx := context.Background()
+	var client *taskmill.Client // from taskmill.NewClient
+
+	_, err := client.Enqueue(ctx, SendReceipt{OrderID: 7, Email: "a@example.com"}, &taskmill.EnqueueOptions{
 		RunAt:    time.Now().Add(10 * time.Minute),
 		Priority: taskmill.PriorityHigh,
 	})
 	if err != nil {
 		log.Fatal(err) // such as ErrInvalidArgument for an option outside its limits
 	}
-	log.Printf("enqueued task %d", res.ID)
+}
+
+// This example migrates the schema "taskmill", which NewClient checks.
+func ExampleMigrate() {
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Several processes may migrate at the same time: one applies the
+	// migrations while the others wait.
+	if err := taskmill.Migrate(ctx, pool, nil); err != nil {
+		log.Fatal(err)
+	}
+	pool.Close()
+}
+
+// This example creates a client that logs through the application's logger.
+func ExampleNewClient() {
+	ctx := context.Background()
+	var pool *pgxpool.Pool // the application's pool, of a migrated database
+
+	client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: slog.Default()})
+	if errors.Is(err, taskmill.ErrSchemaOutdated) {
+		log.Fatal("run taskmill.Migrate first")
+	}
+	if err != nil {
+		log.Fatal(err)
+	}
+	_ = client // share it: it is safe for concurrent use
+}
+
+// This example creates a worker that runs the tasks of one kind, in the
+// kind's default queue.
+func ExampleNewWorker() {
+	var client *taskmill.Client // from taskmill.NewClient
+
+	var handlers taskmill.Handlers
+	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[SendReceipt](
+		func(ctx context.Context, t *taskmill.Task[SendReceipt]) error {
+			return deliverReceipt(ctx, t.Args.Email, t.Args.OrderID)
+		},
+	), nil)
+
+	worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{Handlers: &handlers})
+	if err != nil {
+		log.Fatal(err) // ErrInvalidArgument, such as for a kind registered twice
+	}
+	_ = worker // run it with Run
+}
+
+// This example runs a worker until the process is told to stop. Run then
+// waits for the running tasks, up to DrainTimeout, and returns.
+func ExampleWorker_Run() {
+	var worker *taskmill.Worker // from taskmill.NewWorker
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := worker.Run(ctx); err != nil {
+		log.Print(err) // it could not start: it could not register, or it runs already
+	}
 }
 
 // This example deduplicates an enqueue: enqueueing the same key again within
@@ -347,6 +423,7 @@ func ExampleMigrations() {
 	// 0006_refused_rows
 	// 0007_created_order
 	// 0008_worker_schedules
+	// 0009_group_heads
 }
 
 // This example retries every dead task of one queue, once the cause of their

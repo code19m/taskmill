@@ -21,7 +21,6 @@ import (
 const (
 	defaultListLimit = 100
 	maxListLimit     = 1000
-	maxGroupQueues   = 100 // most queues named in one Groups call, each read up to a page
 )
 
 // ListParams filters and pages [Client.List]. A field outside its limits is
@@ -490,9 +489,6 @@ func (c *Client) groupsQuery(p *GroupParams) (sql string, args []any, err error)
 		return "", nil, invalidArgument("limit must be between 1 and %d", maxListLimit)
 	}
 
-	if len(p.Queues) > maxGroupQueues {
-		return "", nil, invalidArgument("at most %d queue names", maxGroupQueues)
-	}
 	queues, err := checkFilter("queue name", p.Queues, maxNameLength)
 	if err != nil {
 		return "", nil, err

@@ -25,9 +25,17 @@ func validateSchema(schema string) (string, error) {
 	return schema, nil
 }
 
-// checkFilter checks that a filter's values are valid names, and returns them
-// as a slice that is never nil: NULL would match nothing.
+// maxFilterValues is the most values of one filter, such as the queues of a
+// TaskFilter. A call of Groups reads up to a page of each queue.
+const maxFilterValues = 100
+
+// checkFilter checks that a filter has at most maxFilterValues values, which
+// are valid names, and returns them as a slice that is never nil: NULL would
+// match nothing.
 func checkFilter(what string, values []string, maxLen int) ([]string, error) {
+	if len(values) > maxFilterValues {
+		return nil, invalidArgument("%d values of %s, more than the limit of %d", len(values), what, maxFilterValues)
+	}
 	out := make([]string, 0, len(values))
 	for _, v := range values {
 		if err := checkName(what, v, maxLen); err != nil {
@@ -67,7 +75,19 @@ func checkName(what, s string, maxLen int) error {
 	case strings.ContainsRune(s, 0):
 		return invalidArgument("%s contains a NUL character", what)
 	case utf8.RuneCountInString(s) > maxLen:
-		return invalidArgument("%s %q is longer than %d characters", what, s, maxLen)
+		return invalidArgument("%s that starts with %q is longer than %d characters", what, prefix(s), maxLen)
 	}
 	return nil
+}
+
+// prefix returns the first 32 bytes of s, at most, cut at a character's
+// start: an error quotes only that much of a value that may be megabytes
+// long.
+func prefix(s string) string {
+	for i := range s {
+		if i > 32-utf8.UTFMax {
+			return s[:i]
+		}
+	}
+	return s
 }
