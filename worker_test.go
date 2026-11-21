@@ -359,6 +359,8 @@ func TestNewWorkerRejectsInvalidConfig(t *testing.T) {
 		{"negative concurrency", &taskmill.WorkerConfig{Handlers: handlers(noop, nil), Queues: defaultQueue(-1)}},
 		{"tiny lease", &taskmill.WorkerConfig{LeaseDuration: time.Millisecond}},
 		{"negative drain", &taskmill.WorkerConfig{DrainTimeout: -time.Second}},
+		{"wait for a handler below a minute", &taskmill.WorkerConfig{NoHandlerWait: 59 * time.Second}},
+		{"wait for a handler above a week", &taskmill.WorkerConfig{NoHandlerWait: 7*24*time.Hour + time.Second}},
 		{"nil middleware", &taskmill.WorkerConfig{Middleware: []taskmill.Middleware{nil}}},
 		{"schedule without args", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{{Name: "x", Cron: "* * * * *"}}}},
 		{"schedule with nil pointer args", &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{

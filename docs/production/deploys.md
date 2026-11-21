@@ -149,11 +149,15 @@ to fix.
 ## Add a new kind during a rollout
 
 A worker takes any task from the queues it reads, whatever its kind. If the
-worker has no handler for the kind, the task waits up to an hour for a worker
-that has one. [Change a task safely](../recipes/change-a-task-safely.md) shows
-the flow.
+worker has no handler for the kind, the task waits for a worker that has one,
+up to the worker's `NoHandlerWait`: an hour by default.
+[Change a task safely](../recipes/change-a-task-safely.md) shows the flow.
 
 - Deploy the workers that handle a new kind before the code that enqueues it.
+- If the rollout of those workers, a canary included, takes longer than an
+  hour, first deploy a release whose workers set a longer `NoHandlerWait`,
+  up to 7 days. The workers of the old release are the ones that meet the
+  new kind's tasks, so their wait is the one that counts.
 - Every worker that reads a queue needs a handler for every kind in it.
   Otherwise, give those kinds a queue of their own.
 - Never rename a kind, and never change a payload so that old handlers

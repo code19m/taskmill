@@ -29,6 +29,17 @@ All notable changes to taskmill are recorded here. The format follows
   ignore their context. Most of these showed only in the logs. The `otel`
   module exports them with `Instrumentation.ObserveWorker`, and
   [Monitoring](docs/production/monitoring.md) says which to alert on.
+- `WorkerConfig.NoHandlerWait` sets how long a task of a kind that the
+  worker has no handler for waits for one, before it becomes dead with
+  `unknown_kind`: from 1 minute to 7 days, 1 hour by default, as before.
+  The hour was fixed, so a canary or a rollout longer than that killed the
+  tasks of a kind that it added.
+  [Deploys](docs/production/deploys.md#add-a-new-kind-during-a-rollout) says
+  how to set it.
+- `Task.CancelRequested` reports that the task's cancellation was
+  requested while it runs. A batch handler, whose context a cancel does not
+  end, could not see the request, and ran the canceled task's work all the
+  same. It can now skip it.
 
 ### Changed
 

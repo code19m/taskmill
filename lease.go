@@ -318,7 +318,7 @@ func (w *Worker) loseLease(ctx context.Context, t *liveAttempt) {
 // requestCancel cancels the attempt because its task's cancellation was
 // requested.
 func (t *liveAttempt) requestCancel() {
-	if !t.cancelRequested.Swap(true) {
+	if !t.att.cancelRequested.Swap(true) {
 		t.cancelAttempt(ErrTaskCanceled)
 	}
 }

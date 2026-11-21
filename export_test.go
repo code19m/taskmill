@@ -58,7 +58,7 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.shutdownGrace, t.ShutdownGrace)
 	set(&w.timing.reconnectMin, t.Reconnect)
 	set(&w.timing.reconnectMax, t.Reconnect)
-	set(&w.timing.noHandlerWait, t.NoHandlerWait)
+	set(&w.cfg.NoHandlerWait, t.NoHandlerWait) // below the field's limits
 	set(&w.timing.failureReport, t.FailureReport)
 	set(&w.timing.idlePoll, t.IdlePoll)
 	set(&w.timing.quiet, t.Quiet)

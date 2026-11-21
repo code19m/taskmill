@@ -225,7 +225,7 @@ func (w *Worker) handleNotification(payload string) (heartbeat bool) {
 		w.mu.Lock()
 		t := w.attempts[id]
 		w.mu.Unlock()
-		if t != nil && !t.cancelRequested.Load() && !t.hinted.Swap(true) {
+		if t != nil && !t.att.cancelRequested.Load() && !t.hinted.Swap(true) {
 			signal(w.cancelHints)
 		}
 	case notifyQueue:

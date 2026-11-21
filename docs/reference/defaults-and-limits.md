@@ -17,7 +17,7 @@ It is in the doc comment of that identifier.
 | The length of a queue name, a kind, a schedule name, or a group key | [`EnqueueOptions`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions), [`Args`](https://pkg.go.dev/github.com/code19m/taskmill#Args), and [`Schedule`](https://pkg.go.dev/github.com/code19m/taskmill#Schedule) |
 | The tasks and bytes of one enqueue call | [`Client.EnqueueMany`](https://pkg.go.dev/github.com/code19m/taskmill#Client.EnqueueMany) |
 | The waits between retries, and the number of attempts | [`ExponentialBackoff`](https://pkg.go.dev/github.com/code19m/taskmill#ExponentialBackoff) and [`EnqueueOptions`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions) |
-| A task whose kind has no handler | [`CodeNoHandler`](https://pkg.go.dev/github.com/code19m/taskmill#CodeNoHandler) |
+| A task whose kind has no handler | [`CodeNoHandler`](https://pkg.go.dev/github.com/code19m/taskmill#CodeNoHandler) and [`WorkerConfig`](https://pkg.go.dev/github.com/code19m/taskmill#WorkerConfig) |
 | The length of the error history | [`TaskInfo`](https://pkg.go.dev/github.com/code19m/taskmill#TaskInfo) and [`AttemptError`](https://pkg.go.dev/github.com/code19m/taskmill#AttemptError) |
 | The lease, the check-in, polling, and shutdown | [`WorkerConfig`](https://pkg.go.dev/github.com/code19m/taskmill#WorkerConfig) |
 | A worker's connections, and its health | [`Worker`](https://pkg.go.dev/github.com/code19m/taskmill#Worker) and [`Worker.Health`](https://pkg.go.dev/github.com/code19m/taskmill#Worker.Health) |

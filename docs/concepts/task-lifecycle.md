@@ -102,9 +102,10 @@ taskmill cancels its handler's context, and `context.Cause(ctx)` returns
 | anything but nil, such as the context's error | `canceled` |
 | nil, because it finished the work first | `completed`, because the work was done |
 
-A [batch handler](glossary.md#batch-handler) does not see the request. The
-batch's result for that task decides: nil completes it, and an error
-cancels it ([Handle tasks in batches](../guides/batch-handlers.md)).
+A [batch handler](glossary.md#batch-handler) keeps running, and sees the
+request on the task, with `CancelRequested`. The batch's result for that
+task decides: nil completes it, and an error cancels it
+([Handle tasks in batches](../guides/batch-handlers.md)).
 
 ## How long finished tasks are kept
 

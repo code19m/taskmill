@@ -34,7 +34,7 @@ func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 	t.cancel = cancel
 	t.mu.Unlock()
 
-	if t.cancelRequested.Load() {
+	if t.att.cancelRequested.Load() {
 		cancel(ErrTaskCanceled)
 	}
 	if t.lost.Load() {
@@ -376,7 +376,7 @@ func classify(t *liveAttempt, err, cause error) outcome {
 		return outcome{kind: outcomeDiscard}
 	case err == nil:
 		return outcome{kind: outcomeComplete}
-	case t.cancelRequested.Load():
+	case t.att.cancelRequested.Load():
 		return outcome{kind: outcomeCancel}
 	case errors.Is(cause, ErrShutdown):
 		return outcome{kind: outcomeRelease}
@@ -424,7 +424,7 @@ func classify(t *liveAttempt, err, cause error) outcome {
 // canceled while it waited. After any of these, the next worker without a
 // handler starts a new wait.
 func (w *Worker) unknownKind(ctx context.Context, t *liveAttempt) outcome {
-	limit := w.timing.noHandlerWait
+	limit := w.cfg.NoHandlerWait
 	var since time.Time
 	for _, e := range slices.Backward(t.info.Errors) {
 		if e.Code != CodeNoHandler {

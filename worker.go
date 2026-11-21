@@ -26,10 +26,13 @@ const (
 	defaultLeaseDuration = 30 * time.Second
 	defaultPollInterval  = time.Second
 	defaultDrainTimeout  = 20 * time.Second
+	defaultNoHandlerWait = time.Hour
 	defaultConcurrency   = 10
 	poolSpare            = 5 // connections of the pool for the worker's own statements, beyond its Concurrency
 
 	minLeaseDuration  = 100 * time.Millisecond
+	minNoHandlerWait  = time.Minute
+	maxNoHandlerWait  = 7 * 24 * time.Hour
 	recordTimeout     = 30 * time.Second       // bound on one try to record a result
 	recordRetryFirst  = 100 * time.Millisecond // first wait before trying to record a result again
 	recordRetryMax    = 2 * time.Second        // longest wait between those tries
@@ -56,7 +59,6 @@ type timing struct {
 	settings        time.Duration // how often queue settings are reloaded
 	shutdownGrace   time.Duration // how long canceled attempts get to return before release
 	noHandlerSnooze time.Duration // how long a task of an unknown kind is snoozed at a time
-	noHandlerWait   time.Duration // how long it waits for a handler before it becomes dead
 	reconnectMin    time.Duration // first wait before reconnecting the listener
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
 	failureReport   time.Duration // how often an operation that keeps failing logs, at most
@@ -80,7 +82,6 @@ var defaultTiming = timing{
 	settings:        10 * time.Second,
 	shutdownGrace:   5 * time.Second,
 	noHandlerSnooze: time.Minute,
-	noHandlerWait:   time.Hour,
 	reconnectMin:    time.Second,
 	reconnectMax:    30 * time.Second,
 	failureReport:   time.Minute,
@@ -242,6 +243,17 @@ type WorkerConfig struct {
 	// DrainTimeout at least 10 seconds below the time the platform gives a
 	// stopping process. It must not be negative. Default: 20 seconds.
 	DrainTimeout time.Duration
+
+	// NoHandlerWait is how long a task of a kind that this worker has no
+	// handler for waits for a worker that has one, before this worker makes
+	// it dead with [CodeUnknownKind]. Meanwhile the worker snoozes the task 1
+	// minute at a time, without using its attempts. The wait counts from
+	// the first time a worker met the task without a handler: see
+	// [CodeNoHandler]. In a rolling deploy that adds a kind, the workers of
+	// the old release meet its tasks, so their wait is the one that counts:
+	// give them, a release ahead, a wait longer than the whole rollout,
+	// canary included. Minimum: 1 minute. Maximum: 7 days. Default: 1 hour.
+	NoHandlerWait time.Duration
 
 	// Middleware wraps every attempt, in order: the first is the outermost.
 	// A nil entry is an error that wraps [ErrInvalidArgument]. Default: none.
@@ -409,10 +421,13 @@ func resolveWorkerConfig(c *WorkerConfig) error {
 		return invalidArgument("PollInterval must not be negative")
 	case c.DrainTimeout < 0:
 		return invalidArgument("DrainTimeout must not be negative")
+	case c.NoHandlerWait != 0 && (c.NoHandlerWait < minNoHandlerWait || c.NoHandlerWait > maxNoHandlerWait):
+		return invalidArgument("NoHandlerWait must be between %s and %s", minNoHandlerWait, maxNoHandlerWait)
 	}
 	c.LeaseDuration = cmp.Or(c.LeaseDuration, defaultLeaseDuration)
 	c.PollInterval = cmp.Or(c.PollInterval, defaultPollInterval)
 	c.DrainTimeout = cmp.Or(c.DrainTimeout, defaultDrainTimeout)
+	c.NoHandlerWait = cmp.Or(c.NoHandlerWait, defaultNoHandlerWait)
 	return nil
 }
 
@@ -493,9 +508,8 @@ type liveAttempt struct {
 	state     attemptState
 	renewedAt time.Time // last confirmation that the lease is held
 
-	lost            atomic.Bool // the lease is gone: the result must be discarded
-	cancelRequested atomic.Bool // the task's row said that its cancellation was requested
-	hinted          atomic.Bool // a notification said so, and the row is not read yet
+	lost   atomic.Bool // the lease is gone: the result must be discarded
+	hinted atomic.Bool // a notification said that the task's cancellation was requested, and the row is not read yet
 }
 
 type attemptState int

@@ -329,6 +329,33 @@ func TestWorkerSnoozesUnknownKinds(t *testing.T) {
 	}
 }
 
+// A rolling deploy that adds a kind can take longer than an hour. Workers of
+// the old release with a longer NoHandlerWait keep its tasks waiting, where
+// the default of an hour makes them dead.
+func TestNoHandlerWaitIsTheWorkersOwn(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+	patient := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, NoHandlerWait: 3 * time.Hour})
+	hasty := newWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	info, err := patient.RunTask(t.Context(), id)
+	if err != nil || info.State != taskmill.StateScheduled || !strings.Contains(info.Errors[0].Message, "waiting up to 3h0m0s") {
+		t.Fatalf("got %+v, %v, want a snooze with a note of a wait of 3 hours", info, err)
+	}
+	e.exec(t, `UPDATE {s}.tasks SET errors = jsonb_set(errors, '{0,at}', to_jsonb(now() - interval '2 hours')) WHERE id = $1`, id)
+
+	if info, err = patient.RunTask(t.Context(), id); err != nil || info.State != taskmill.StateScheduled {
+		t.Fatalf("after 2 hours of a wait of 3: got %+v, %v, want the task to wait on", info, err)
+	}
+	info, err = hasty.RunTask(t.Context(), id)
+	if last := info.Errors[len(info.Errors)-1]; err != nil || info.State != taskmill.StateDead || last.Code != taskmill.CodeUnknownKind {
+		t.Fatalf("after 2 hours of a wait of 1: got %+v, %v, want the task dead with unknown_kind", info, err)
+	}
+}
+
 // A rolling deploy can leave many tasks of a new kind to the workers of the
 // old release. Each worker warns once a minute per kind, with how many
 // tasks began to wait, and logs each task at Debug.
@@ -695,6 +722,50 @@ func TestBatchHandler(t *testing.T) {
 	if w := wrapped.Load(); w != 11 {
 		t.Fatalf("middleware wrapped %d attempts, want 11 (10 plus one retry)", w)
 	}
+}
+
+// A cancel does not end a batch's context, but the batch handler sees it
+// on the task, and can skip the task's work.
+func TestBatchHandlerSeesACancelRequest(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	res, err := e.client.EnqueueMany(t.Context(), []taskmill.EnqueueParams{
+		{Args: sendEmail{To: "kept"}}, {Args: sendEmail{To: "canceled"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{}, 1)
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler(&hs, emailBatch(func(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+		started <- struct{}{}
+		errs := make([]error, len(tasks))
+		for i, task := range tasks {
+			for task.Args.To == "canceled" && !task.CancelRequested() && ctx.Err() == nil {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if task.CancelRequested() {
+				errs[i] = taskmill.ErrTaskCanceled
+			}
+		}
+		return errs
+	}), nil)
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+
+	recv(t, started, "the batch to start")
+	if err := e.client.Cancel(t.Context(), res[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	e.waitState(t, res[1].ID, taskmill.StateCanceled)
+	e.waitState(t, res[0].ID, taskmill.StateCompleted)
+}
+
+// emailBatch adapts a function to taskmill.BatchHandler.
+type emailBatch func(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error
+
+func (f emailBatch) HandleBatch(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+	return f(ctx, tasks)
 }
 
 func TestCancelRequestWinsOverOtherOutcomes(t *testing.T) {
