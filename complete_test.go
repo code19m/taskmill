@@ -390,11 +390,13 @@ func TestFailureOfAGroupedTaskWaitsForItsGroupWithItsLease(t *testing.T) {
 	startWorker(t, w)
 	recv(t, failed, "the attempt to fail")
 
-	// Longer than the lease.
-	time.Sleep(3 * lease)
-	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND lease_expires_at > now()", id); n != 1 {
-		t.Fatal("the lease ran out while the failure waited for the group")
+	var since time.Time
+	if err := e.pool.QueryRow(t.Context(), "SELECT now()").Scan(&since); err != nil {
+		t.Fatal(err)
 	}
+	waitFor(t, "the lease to be renewed for longer than a lease while the failure waits", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND lease_expires_at > $2", id, since.Add(3*lease)) == 1
+	})
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}

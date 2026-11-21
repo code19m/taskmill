@@ -129,7 +129,7 @@ func TestIdleWorkerPollsWhenNotificationsDoNotArrive(t *testing.T) {
 
 func TestIdleWorkerPollsWhileTheMaintainerFailsOver(t *testing.T) {
 	t.Parallel()
-	e, _ := newCountedEnv(t)
+	e, fetches := newCountedEnv(t)
 
 	// A maintainer that crashed holds the role until its lease runs out, so
 	// no heartbeat comes, and nothing wakes a queue whose notification was
@@ -140,7 +140,7 @@ func TestIdleWorkerPollsWhileTheMaintainerFailsOver(t *testing.T) {
 	w, started := newIdleWorker(t, e, nil)
 	taskmill.SetTiming(w, taskmill.Timing{LeaderLease: time.Minute})
 	startWorker(t, w)
-	time.Sleep(500 * time.Millisecond)
+	waitFor(t, "the worker to poll", func() bool { return fetches.n.Load() >= 5 })
 	if taskmill.Notifying(w) {
 		t.Fatal("the worker counts on notifications without heartbeats")
 	}
@@ -434,7 +434,7 @@ func TestIdleWorkerFindsATaskWhoseNotificationWasLost(t *testing.T) {
 
 func TestIdleWorkerFindsATaskCommittedAfterItsNotification(t *testing.T) {
 	t.Parallel()
-	e, _ := newCountedEnv(t)
+	e, counted := newCountedEnv(t)
 	w, started := startIdleWorker(t, e, nil)
 	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
 
@@ -442,13 +442,19 @@ func TestIdleWorkerFindsATaskCommittedAfterItsNotification(t *testing.T) {
 	// leaves its notification to the end of that window, which comes before
 	// its transaction commits. The maintainer then wakes the queue.
 	e.enqueue(t, sendEmail{}, nil)
+	sent := counted.notified.Load()
 	tx := e.begin(t)
 	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err != nil {
 		t.Fatal(err)
 	}
+	// On a slow machine the window can end before the second enqueue, which
+	// then notifies in its own transaction.
+	trailing := taskmill.TrailingNotification(e.client, "a")
 
 	recv(t, started, "the first task to start")
-	time.Sleep(200 * time.Millisecond)
+	if trailing {
+		waitFor(t, "the trailing notification", func() bool { return counted.notified.Load() > sent })
+	}
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +523,7 @@ func TestEveryWayATaskBecomesAvailableNotifies(t *testing.T) {
 	id = e.enqueue(t, sendEmail{}, once)
 	runsSoon("first run", id)
 	e.waitState(t, id, taskmill.StateDead)
-	time.Sleep(gap)
+	time.Sleep(gap) // a wait for the throttle's window to pass, not for a result: the retry then notifies itself
 	if err := e.client.Retry(t.Context(), id); err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +533,7 @@ func TestEveryWayATaskBecomesAvailableNotifies(t *testing.T) {
 	id = e.enqueue(t, sendEmail{}, once)
 	runsSoon("first run", id)
 	e.waitState(t, id, taskmill.StateDead)
-	time.Sleep(gap)
+	time.Sleep(gap) // the same
 	if _, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"bulk"}}}); err != nil {
 		t.Fatal(err)
 	}
@@ -570,23 +576,35 @@ func TestEveryWayATaskBecomesAvailableNotifies(t *testing.T) {
 	runsSoon("release", id)
 }
 
-// fetchCounter counts the fetches that a pool's connections send, and the
-// heartbeats that a maintainer sends on them.
+// fetchCounter counts the fetches that a pool's connections send, the
+// heartbeats that a maintainer sends on them, and the notifications sent
+// alone, outside a transaction, such as the throttle's trailing ones.
 type fetchCounter struct {
 	n          atomic.Int64
 	heartbeats atomic.Int64
+	notified   atomic.Int64
 }
 
-func (c *fetchCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+// alone marks the context of a notification that is sent alone.
+type alone struct{}
+
+func (c *fetchCounter) TraceQueryStart(ctx context.Context, conn *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
 	// The statement that wakes the queues sends the heartbeat too, if its
 	// last argument says so.
 	if strings.Contains(d.SQL, "pg_notify($1, 'h|')") && slices.Contains(d.Args, any(true)) {
 		c.heartbeats.Add(1)
 	}
+	if d.SQL == "SELECT pg_notify($1, $2)" && conn.PgConn().TxStatus() == 'I' {
+		return context.WithValue(ctx, alone{}, true)
+	}
 	return ctx
 }
 
-func (*fetchCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (c *fetchCounter) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryEndData) {
+	if ctx.Value(alone{}) != nil && d.Err == nil { // committed: sent
+		c.notified.Add(1)
+	}
+}
 
 func (*fetchCounter) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
 	return ctx

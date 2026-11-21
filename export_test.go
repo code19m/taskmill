@@ -79,6 +79,14 @@ func Fetch(ctx context.Context, w *Worker, queue string, slots int, maxRunning i
 	return len(tasks), more, atLimit, err
 }
 
+// TrailingNotification reports whether c holds a notification of queue back,
+// to send it when the throttle's window ends.
+func TrailingNotification(c *Client, queue string) bool {
+	c.notifier.mu.Lock()
+	defer c.notifier.mu.Unlock()
+	return c.notifier.trailing[queue]
+}
+
 // Notifying reports whether the maintainer's heartbeats reach w.
 func Notifying(w *Worker) bool {
 	return w.notifying.Load()
