@@ -1058,18 +1058,21 @@ func plainAndKeyed(opts *taskmill.EnqueueOptions) []taskmill.EnqueueParams {
 }
 
 // The second read of a dedupe key only fills in the ID of the task that took
-// the key. On the client's pool the enqueue has committed by then. So if the
-// read finds no ID, the enqueue still returns its results: an error would
-// say that nothing was stored, and the caller's next try would store the
-// task without a key again.
+// the key. Outside a transaction the enqueue has committed by then: on the
+// client's pool, and on a connection of the caller's. So if the read finds
+// no ID, the enqueue still returns its results: an error would say that
+// nothing was stored, and the caller's next try would store the task
+// without a key again.
 func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
 		name   string
 		gone   bool // the task that took the key is deleted before the read; otherwise the read fails
+		conn   bool // the enqueue runs on a connection outside a transaction; otherwise on the client's pool
 		logged int  // warnings of a failed read
 	}{
 		{name: "the read fails", logged: 1},
+		{name: "the read fails on a connection", conn: true, logged: 1},
 		{name: "the task that took the key is deleted", gone: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -1091,9 +1094,7 @@ func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
 			}
 			read.call.Store(&before)
 
-			res, err := behind(t, e, holder, func() ([]taskmill.EnqueueResult, error) {
-				return e.client.EnqueueMany(ctx, plainAndKeyed(opts))
-			})
+			res, err := behind(t, e, holder, e.enqueueMany(ctx, t, c.conn, plainAndKeyed(opts)))
 			if err != nil || len(res) != 2 || res[0].ID == 0 || res[0].Duplicate || res[1] != (taskmill.EnqueueResult{Duplicate: true}) {
 				t.Fatalf("got %+v, %v; want a new task, and a duplicate without an ID", res, err)
 			}
@@ -1104,6 +1105,24 @@ func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
 				t.Errorf("a failed read was logged %d times, want %d", n, c.logged)
 			}
 		})
+	}
+}
+
+// enqueueMany returns a call that enqueues params on ctx: on the client's
+// pool, or, if conn, on a connection of e's pool outside a transaction.
+func (e *env) enqueueMany(ctx context.Context, t *testing.T, conn bool, params []taskmill.EnqueueParams) func() ([]taskmill.EnqueueResult, error) {
+	t.Helper()
+	if !conn {
+		return func() ([]taskmill.EnqueueResult, error) { return e.client.EnqueueMany(ctx, params) }
+	}
+
+	c, err := e.pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Release)
+	return func() ([]taskmill.EnqueueResult, error) {
+		return e.client.EnqueueManyTx(ctx, taskmill.Pgx(c.Conn()), params)
 	}
 }
 

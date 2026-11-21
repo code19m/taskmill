@@ -54,6 +54,11 @@ All notable changes to taskmill are recorded here. The format follows
   task back to its queue. `RunTask` also bounds its last read of the task.
 - The maintainer no longer logs the end of a difference between the
   workers' schedules that a comparison found after its term ended.
+- `EnqueueTx` and `EnqueueManyTx` with an executor that is no transaction,
+  such as `SQL(db)` or `Pgx(conn)`, no longer return an error after the
+  tasks were stored, when the second read of a dedupe key fails: a retry
+  stored the tasks without a key twice. Like `Enqueue`, they log the failed
+  read and return the results.
 - Docs that were wrong or unclear. Retried tasks run before new work, as
   [Recover from an incident](docs/recipes/recover-from-an-incident.md) now
   says. The order of a list and what a page reads are in the doc comment of

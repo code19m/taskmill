@@ -495,7 +495,7 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		// The enqueue middleware sees taskmill's own metadata, and cannot
 		// change it: a handler must find the run's time whatever it does.
 		run.reservedMeta = s.reservedMetadata(s.scheduledFor(due))
-		if _, err = m.c.storeThrough(ctx, pgxExecutor{q: tx}, []*resolvedTask{run}); err != nil {
+		if _, err = m.c.storeThrough(ctx, pgxExecutor{q: tx}, false, []*resolvedTask{run}); err != nil {
 			return err
 		}
 
