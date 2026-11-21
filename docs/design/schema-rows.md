@@ -73,10 +73,11 @@ that the code runs anyway:
 | A lease in `leader` that ends far ahead | It counts as no lease (`electMaintainerSQL`) | The election of a maintainer |
 
 Any other read that meets such a row fails, with an error that names the
-column or the task: `Client.Get`, a list that holds the task, and the
-dashboard's page of either. The rest of the dashboard works. The worker's
-log line for a task that became dead with `invalid_row` names the value.
-Correct or delete the row: a retry ends the same way until then.
+task and the column: `Client.Get`, every list that holds the task, such as
+the dead tasks once a worker made it dead, and their dashboard pages. The
+rest of the dashboard works. The worker's log line for a task that became
+dead with `invalid_row` names the value. Correct the row, or delete it with
+`Client.Delete`: a retry ends the same way until then.
 
 - **Why no `CHECK` on `tasks`.** A constraint cannot refuse an object with a
   value that is no string, or tell a lease token that was counted from one

@@ -305,7 +305,7 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 
 // scanTaskInfo reads one row of taskColumns. A row that taskmill did not
 // write, such as one with an infinite time or metadata that is not an object
-// of strings, is an error: see
+// of strings, is an error that names the task, whose ID is read first: see
 // https://github.com/code19m/taskmill/blob/main/docs/design/schema-rows.md.
 func scanTaskInfo(r rows) (*TaskInfo, error) {
 	var (
@@ -318,11 +318,10 @@ func scanTaskInfo(r rows) (*TaskInfo, error) {
 
 	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
 		&metadata, &payload, &errs, &info.CreatedAt, &info.RunAt, &attemptedAt, &finishedAt)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		info.Metadata, err = decodeMetadata(metadata)
 	}
-
-	if info.Metadata, err = decodeMetadata(metadata); err != nil {
+	if err != nil {
 		return nil, fmt.Errorf("task %d: %w", info.ID, err)
 	}
 

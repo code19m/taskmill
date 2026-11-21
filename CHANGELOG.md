@@ -78,10 +78,11 @@ All notable changes to taskmill are recorded here. The format follows
   are stuck.
 - taskmill supports only the rows that its releases write, as
   [Compatibility](docs/reference/compatibility.md) now says. `Client.Get`,
-  `Client.List`, and their dashboard pages return an error for a task
-  whose row was written by hand with an infinite time or metadata that is
-  not an object of strings, instead of showing it without those values.
-  The rest of the dashboard works, and the guards that keep such a row
+  `Client.List`, and their dashboard pages return an error that names the
+  task, for a task whose row was written by hand with an infinite time or
+  metadata that is not an object of strings, instead of showing it without
+  those values. Every list that holds such a task fails, such as the dead
+  tasks once a worker made it dead. The rest of the dashboard works, and the guards that keep such a row
   from stopping a queue, the rescue, the statistics, or the election stay:
   [Rows that taskmill did not write](docs/design/schema-rows.md).
 

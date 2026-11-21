@@ -273,6 +273,27 @@ func TestListChecksItsParams(t *testing.T) {
 	}
 }
 
+// taskmill does not support a task's row that it cannot read. Get, and a
+// list that holds such a row, fail with an error that names the task.
+func TestReadsOfARowThatDoesNotDecodeNameTheTask(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for _, set := range []string{`run_at = 'infinity'`, `metadata = '"text"'`} {
+		id := e.insertTask(t, set)
+		named := "task " + strconv.FormatInt(id, 10) + ":"
+
+		_, err := e.client.Get(t.Context(), id)
+		if err == nil || !strings.Contains(err.Error(), named) {
+			t.Errorf("get of a row with %s: %v, want an error that names task %d", set, err, id)
+		}
+		_, err = e.client.List(t.Context(), nil)
+		if err == nil || !strings.Contains(err.Error(), named) {
+			t.Errorf("list with a row with %s: %v, want an error that names task %d", set, err, id)
+		}
+		e.exec(t, "DELETE FROM {s}.tasks WHERE id = $1", id)
+	}
+}
+
 // A list of only dead tasks, only canceled tasks, or both comes in the order
 // in which the tasks finished, latest first, and by ID among the tasks of
 // one finish time. Its pages chain in that order, also through tasks that
