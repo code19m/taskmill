@@ -471,6 +471,22 @@ func TestRescueCapsTheBackoffOfManyAttempts(t *testing.T) {
 	}
 }
 
+// The rescue runs once per maintenance interval, as the election does.
+func TestRescueRunsEveryInterval(t *testing.T) {
+	t.Parallel()
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+
+	const rescue, election = "'code', 'lease_lost'", "leader AS l (name, worker_id"
+	sent.reset()
+	waitFor(t, "20 renewals of the maintainer's lease", func() bool { return sent.count(election) >= 20 })
+	if rescues, elections := sent.count(rescue), sent.count(election); 4*rescues < 3*elections {
+		t.Errorf("%d rescues in the time of %d renewals, want about as many", rescues, elections)
+	}
+}
+
 // The maintainer that rescues a task retries it after the backoff of the
 // kind's retry policy, if it has a handler for the kind, and after the
 // default backoff otherwise.

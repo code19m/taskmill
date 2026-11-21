@@ -188,15 +188,19 @@ func (m *maintainer) every(ctx context.Context, interval time.Duration, work fun
 	var last time.Time
 
 	for {
+		var now time.Time
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case now = <-tick.C:
 		}
 
-		if m.leader.Load() && time.Since(last) >= interval {
+		// The interval counts from tick to tick, with half a tick to spare:
+		// counted from the end of the work, an interval of one tick would
+		// pass only at every other tick.
+		if m.leader.Load() && now.Sub(last) >= interval-m.w.timing.maintainer/2 {
+			last = now
 			work(ctx)
-			last = time.Now()
 		}
 	}
 }
