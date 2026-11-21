@@ -125,9 +125,9 @@ supported PostgreSQL version.
 - **Tasks do not show up in the order of their finish times,** because a
   finish time is the start of a transaction, not its commit. A walk
   through the pages can miss a task that finishes meanwhile, and can return
-  twice a task that is retried and finishes again.
-  [Manage tasks from code](../guides/operations-api.md#find-tasks) says how
-  a caller polls for new dead tasks.
+  twice a task that is retried and finishes again. The doc comment of
+  [`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List)
+  says how a caller polls for new dead tasks.
 - **A filter by kind or FIFO group reads a queue's dead or canceled tasks
   until the page is full:** all of them in a queue that has none of that
   kind. It never reads a task of another state, and with a

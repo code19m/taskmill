@@ -110,13 +110,22 @@ bounds, with a custom plan and with a generic one.
 
 ## What the creation order costs
 
-- **Every task writes two more index entries:** one when it is enqueued,
-  and one in the history when it completes. Measured with small payloads,
-  1,000 tasks at a time through enqueue, fetch, and completion: 12,939 WAL
-  records and 1.46 MB of WAL, where the same tasks wrote 10,929 records and
-  1.24 MB without the two indexes. That is 18% more. The fetch writes what
-  it wrote before. An entry takes about 42 bytes: 6.3 MB for 150,951 tasks,
-  and 21 MB beside the history's 135 MB.
+- **A task writes one more index entry each time it changes to a state
+  other than `running`,** and one in the history when it completes. An
+  update that changes `state` is never HOT, because `state` is in the
+  condition of every partial index. So `tasks_created_idx` gets a new entry
+  at the enqueue, and at each promotion, failure, retry, snooze, release,
+  rescue, cancel, and promotion in a FIFO group. A task that runs right
+  away writes two entries; one that fails 3 times and then completes writes
+  8. The fetch writes none: a running task is not in the index.
+- **What that costs, measured with small payloads.** 1,000 tasks at a time
+  through enqueue, fetch, and completion wrote 12,939 WAL records and
+  1.46 MB of WAL, where the same tasks wrote 10,929 records and 1.24 MB
+  without the two indexes: 18% more. Measured with `pg_walinspect`,
+  promoting 5,000 delayed tasks wrote 5,315 records to the index, 715 kB:
+  35% of that step's WAL. Failing 2,500 attempts wrote 2,326. An entry
+  takes about 42 bytes: 6.3 MB for 150,951 tasks, and 21 MB beside the
+  history's 135 MB.
 - **`List` has three orders, and a cursor belongs to the order that made
   it.** The range chooses the order with the states, so a list changes its
   order when it gets a range. The two orders differ only for tasks whose
@@ -143,7 +152,7 @@ bounds, with a custom plan and with a generic one.
 | The range as a filter in ID order, with no index | Not bounded: 508,072 rows and 20,664 buffers for the page of an hour 3 days back, and more for an older hour |
 | A range of IDs, found by probing the primary key at both ends of the range | Not exact: see the long transaction above. To find its tasks, each row would need a flag, set at the insert, that says "created long before its ID", and an index of the flagged rows by creation time. The flag trusts the database's clock, and a row written by hand has none. A page would also read every task with other creation times that lies between its own in ID order |
 | Indexes on `created_at, id`, without the queue | A page of all queues reads only its rows: 51, where the chosen indexes read 1,939. But a queue's page reads the tasks of every queue until it is full: 18,964 rows for the completed tasks of `q042` in 7 days, and all 369,524 of the range for a queue with less than a page in it. That grows with the table, and a small queue beside a busy one is common |
-| Both pairs of indexes | Four entries for each task. The second pair would only make the list of all queues cheaper, which the first pair already bounds |
+| Both pairs of indexes | Twice the entries of the chosen pair. The second pair would only make the list of all queues cheaper, which the first pair already bounds |
 | `tasks_created_idx` with the running tasks | One list fewer to merge, and no running task read from outside the range. But each fetch then writes an index entry: 28% more WAL records for a task, not 18% |
 | The stored creation time as the time of the insert, which follows the IDs more closely | Still not exact: two transactions get their IDs and their times in different orders. And `created_at` would change its meaning for every reader |
 | Every list that is not in finish order in creation order | One order fewer in the API. But the lists that read an index in ID order today would each need an index in creation order, and `List` would change its order for every caller |
@@ -152,6 +161,6 @@ bounds, with a custom plan and with a generic one.
 
 - [Lists and counts](schema-lists.md): the ID order, the finish order, and counts
 - [Storage schema](schema.md#indexes-on-tasks): the indexes on `tasks`
-- [Manage tasks from code](../guides/operations-api.md#find-tasks): the user's view
+- [`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List) on pkg.go.dev: the user's view
 
 **Next:** [Operator actions](schema-operations.md)

@@ -40,7 +40,7 @@ need the maintainer, which another worker replaces within about 12 seconds.
 | Workers restart again and again | Pod restarts, and [the errors at start](#errors-at-start-and-in-calls) | Fix the error |
 | The database is out of reach | `operation still failing` for `elect maintainer` | Fix the database or the network |
 | Only schedules: the maintainer does not define them | The log line `the schedules of other workers differ from the maintainer's`, or the mark *schedules differ* in Dashboard › Workers | Define the same `Schedules` on every worker that can become the maintainer |
-| Only one schedule: it is paused, by you or by [an upgrade that repaired it](upgrading.md#what-a-migration-repairs) | Dashboard › Schedules | Resume it |
+| Only one schedule: it is paused | Dashboard › Schedules | Resume it |
 
 ### Tasks start seconds late
 
@@ -239,7 +239,7 @@ dashboard shows "10,000+". To watch a backlog, use lag: it has no cap
 - **Cause:** the dashboard cannot connect to the database, or it did not
   answer within 10 seconds, or a task list within 5. The log has the rest.
 - **Do:** wait: the page tries again by itself. If it repeats, check the
-  database. [Fast lists](../guides/operations-api.md#find-tasks) have a queue and a state.
+  database. [`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List) says which lists read more than they show.
 
 ## See also
 

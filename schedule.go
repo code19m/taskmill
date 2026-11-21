@@ -128,11 +128,10 @@ const (
 // Location. For a Location whose offset is not a whole number of minutes,
 // the time is in UTC.
 //
-// It returns the zero time for a task that no schedule enqueued, and for a
-// run that a maintainer of an older release enqueued, which stored no such
-// time: a handler can fall back to RunAt then. It also returns the zero
-// time for a task of a list in summary, which comes without its metadata:
-// see [ListParams.Summary].
+// It returns the zero time for a task that no schedule enqueued, such as
+// one enqueued by hand: a handler can fall back to RunAt then. It also
+// returns the zero time for a task of a list in summary, which comes
+// without its metadata: see [ListParams.Summary].
 func (t *TaskInfo) ScheduledFor() time.Time {
 	at, err := time.Parse(time.RFC3339Nano, t.Metadata[MetadataScheduledFor])
 	if err != nil {

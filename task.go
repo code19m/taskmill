@@ -182,8 +182,7 @@ type ErrorCode string
 // Error codes.
 const (
 	// CodeLeaseLost means the worker lost the attempt's lease: it crashed,
-	// stopped, or lost the database. Entries that taskmill recorded before
-	// v0.3.0 have the code "lease_expired" instead.
+	// stopped, or lost the database.
 	CodeLeaseLost ErrorCode = "lease_lost"
 
 	// CodePanic means the handler panicked, or code of the application that

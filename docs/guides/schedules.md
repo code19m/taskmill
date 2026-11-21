@@ -60,15 +60,11 @@ taskmill keeps this time in the task's
 next to the schedule's name, as `taskmill.schedule`. So the dashboard shows
 which schedule made a task.
 
-`ScheduledFor` returns the zero time in two cases. So fall back to
-`t.RunAt`, as the handler above does:
-
-- **No schedule enqueued the task.** To test a handler as a scheduled run,
-  enqueue its task with a time such as `2026-11-12T03:00:00+01:00` in its
-  `Metadata`, under `taskmill.MetadataScheduledFor`.
-- **An older maintainer enqueued the run.** While you upgrade, a worker of
-  the older taskmill release may still enqueue runs, and it stores no such
-  time.
+`ScheduledFor` returns the zero time when no schedule enqueued the task,
+such as a task that you enqueue by hand. So fall back to `t.RunAt`, as the
+handler above does. To test a handler as a scheduled run, enqueue its task
+with a time such as `2026-11-12T03:00:00+01:00` in its `Metadata`, under
+`taskmill.MetadataScheduledFor`.
 
 ## Write the timetable
 

@@ -152,8 +152,26 @@ backticks.
 | `resign maintainer failed; another worker takes over when the lease runs out` | Warn | A stopping maintainer could not hand over. The next one starts within about 12 seconds. | Nothing, unless it repeats. |
 | `rescued tasks whose workers lost their leases` | Warn | `tasks` attempts failed because their workers stopped renewing their leases: a worker crashed, was killed, or lost the database. The tasks are retried. Those with no attempts left become dead. | If it repeats, look for crashed or killed workers, and check the grace period at shutdown and the pool size. |
 | `dropped expired history` | Info | Retention dropped the history `partition`. | Nothing. |
-| `the schedules of other workers differ from the maintainer's` | Error | For `duration`, at least 10 minutes, the workers in `workers`, up to 10, have defined other schedules than this maintainer, which `worker_id` names. `missing_here`: schedules that they define, and the maintainer does not: these don't run now. `missing_there`: schedules that the maintainer defines, and some of them do not: these stop while one of them leads. `defined_differently`: schedules that they define in another way, such as another timetable, priority, or payload. Each list names up to 20 schedules, then how many more. Logged again at most once an hour while it lasts. A rolling deploy that changes a schedule ends well before, and a worker that is stopping is not compared. | Fix the side that lacks schedules. When the maintainer lacks them (`missing_here`), as when it defines none, `workers` lists the workers that are right, and the one to fix is `worker_id`. Give every worker that can become the maintainer the same `Schedules`, or set `NoMaintainer` on the others: [Run tasks on a schedule](../guides/schedules.md). |
+| `the schedules of other workers differ from the maintainer's` | Error | Other workers have defined other schedules than this maintainer, for at least 10 minutes. Its fields, below, say which. Logged again at most once an hour while it lasts. | Fix the side that lacks schedules, as the fields below say. |
 | `the schedules of other workers match the maintainer's again` | Info | The workers define the same schedules again, after the error above. `duration` says how long they differed. | Nothing. |
+
+The line `the schedules of other workers differ from the maintainer's` has
+these fields. Each list names up to 20 schedules, then how many more.
+
+| Field | What it holds |
+|---|---|
+| `worker_id` | The maintainer |
+| `workers` | Up to 10 workers whose schedules differ from the maintainer's |
+| `duration` | How long they have differed: at least 10 minutes. A rolling deploy that changes a schedule ends well before, and a worker that is stopping is not compared |
+| `missing_here` | Schedules that those workers define, and the maintainer does not. These don't run now |
+| `missing_there` | Schedules that the maintainer defines, and some of those workers do not. These stop while one of those workers leads |
+| `defined_differently` | Schedules that those workers define in another way, such as another timetable, priority, or payload |
+
+Fix the side that lacks schedules. When the maintainer lacks them
+(`missing_here`), as when it defines none, `workers` lists the workers
+that are right, and the one to fix is `worker_id`. Give every worker that
+can become the maintainer the same `Schedules`, or set `NoMaintainer` on
+the others: [Run tasks on a schedule](../guides/schedules.md).
 
 ### Notifications
 
@@ -178,7 +196,7 @@ backticks.
 |---|---|---|---|
 | `dashboard action` | Info | Someone did `action` on `target` in the dashboard. A bulk action also has `tasks`: how many tasks it changed, and `skipped`: how many it left, because another transaction held them. [Actions in the log](taskmill-ui.md#actions-in-the-log) lists every `action`. | Nothing. To log who did it, see [One dashboard for many services](../recipes/one-dashboard-for-many-services.md). |
 | `dashboard request failed` | Warn | A page or an action at `path` failed. The page says "Can’t reach the database" when the dashboard cannot connect to it, and "Something went wrong" otherwise. | Check the database, if it repeats. |
-| `dashboard request timed out` | Warn | The database did not answer within 10 seconds, or before an earlier deadline that your app set in the request's context. Or it ended a read of tasks at the read's limit of 5 seconds. The page says "Taking too long". | Check the database's load. For a task list at `path`, see [which lists are fast](../guides/operations-api.md#find-tasks). |
+| `dashboard request timed out` | Warn | The database did not answer within 10 seconds, or before an earlier deadline that your app set in the request's context. Or it ended a read of tasks at the read's limit of 5 seconds. The page says "Taking too long". | Check the database's load. For a task list at `path`, see [which lists read more](https://pkg.go.dev/github.com/code19m/taskmill#Client.List) than they show. |
 | `read activity failed` | Warn | The overview's charts could not read their history, and show none. | Check the database, if it repeats. |
 | `read filter choices failed` | Warn | The task list could not read the choices of a filter, named by `target`. | Check the database, if it repeats. |
 | `search groups failed` | Warn | The search for FIFO groups in a filter failed. | Check the database, if it repeats. |

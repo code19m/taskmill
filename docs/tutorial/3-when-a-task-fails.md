@@ -93,9 +93,10 @@ time=… level=INFO msg="open the dashboard" url=http://localhost:8080/taskmill/
 Open <http://localhost:8080/taskmill/> in a browser. Within about 10
 seconds, the menu shows **Dead 1**: the task of step 2.
 
-**Overview** shows the queue `default` and two charts. **Tasks** lists every
-task with its state and its last error. **Workers** shows your worker,
-marked as the maintainer.
+**Overview** shows the queue `default` and two charts. The chart of
+attempts shows each minute about 15 seconds after the minute ends.
+**Tasks** lists every task with its state and its last error. **Workers**
+shows your worker, marked as the maintainer.
 
 ## Step 4. Retry the dead task
 

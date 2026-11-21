@@ -391,8 +391,8 @@ func (s *shop) handlers() *taskmill.Handlers {
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[SyncWithPartner](s.syncWithPartner), &taskmill.HandlerOptions{Timeout: 10 * time.Second})
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[BuildReport](
 		func(ctx context.Context, t *taskmill.Task[BuildReport]) error {
-			// The minute the report is for, on every attempt. A run that a
-			// maintainer of an older release enqueued carries no such time.
+			// The minute the report is for, on every attempt. A task that
+			// no schedule enqueued, such as one enqueued by hand, has none.
 			minute := t.ScheduledFor()
 			if minute.IsZero() {
 				minute = t.RunAt

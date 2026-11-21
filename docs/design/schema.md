@@ -178,7 +178,7 @@ period and deleting old rows.
 | `tasks_running_idx` | `queue` | `running` | Lease rescue; `MaxRunning` limits; counting running tasks |
 | `tasks_pending_idx` | `queue, group_key, id` | `pending` | Promoting the next task of a group; counting pending tasks |
 | `tasks_finished_idx` | `queue, state, finalized_at` | `dead`, `canceled` | Retention; counting dead and canceled tasks; listing them, latest first |
-| `tasks_created_idx` | `queue, created_at, id` | All but `running` | Listing a range of creation times. A fetch writes no entry to it |
+| `tasks_created_idx` | `queue, created_at, id` | All but `running` | Listing a range of creation times. A fetch writes no entry to it; every other change of state writes one |
 
 The fetch index's key matches the fetch query's `ORDER BY` exactly. PostgreSQL
 reads the first rows of the index in order and stops at the `LIMIT`, with no

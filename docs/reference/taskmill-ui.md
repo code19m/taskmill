@@ -162,4 +162,4 @@ the person, see
 - [Kubernetes](../production/kubernetes.md): manifests with the probes
 - [`taskmill-ui`](https://pkg.go.dev/github.com/code19m/taskmill/cmd/taskmill-ui) and [`ui.Config`](https://pkg.go.dev/github.com/code19m/taskmill/ui#Config) on pkg.go.dev
 
-**Next:** [Log messages](log-messages.md)
+**Next:** [Dashboard pages](dashboard-pages.md)

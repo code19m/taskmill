@@ -41,9 +41,11 @@ rollout too:
 
 ## Estimate the disk
 
-A task takes about 240 bytes, plus its payload and its metadata, indexes
-included. A task with a small payload of about 90 bytes takes about 340
-bytes, waiting or in history.
+A task takes about 300 bytes, plus its payload and its metadata, indexes
+included. A task with a small payload of about 100 bytes takes about 420
+bytes while it waits, and about 390 in history. The `tasks` table leaves a
+fifth of each page free, so that PostgreSQL can write each change of a task
+in the same page, which costs less. The history fills its pages.
 
 | Where | What it holds | Estimate |
 |---|---|---|
@@ -51,8 +53,8 @@ bytes, waiting or in history.
 | The `tasks` table | Tasks that wait or run. Dead and canceled tasks stay for `DeadRetention` (30 days) | Your largest backlog × the size of a task |
 | The write-ahead log (WAL) | Every change, until PostgreSQL archives or recycles it | About 0.9 KiB per task from fetch to history, with a small payload. The enqueue and larger payloads add to it |
 
-For example, 1 million tasks a day at 340 bytes need about 2.7 GB of
-history: 1,000,000 × 8 × 340 bytes.
+For example, 1 million tasks a day at 390 bytes need about 3.1 GB of
+history: 1,000,000 × 8 × 390 bytes.
 
 To see how much the history uses now, ask PostgreSQL for the size of its
 partitions:

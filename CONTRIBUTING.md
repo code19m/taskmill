@@ -111,7 +111,7 @@ Three more checks run on a schedule:
 | Run | When | What it does |
 |---|---|---|
 | Faults | Every night, and on pull requests that change them | Runs the fault scenarios (`make faults`). |
-| Fuzz | Every day | Runs each fuzz target for 3 minutes. A failing input is kept as an artifact of the run, for the fix and its seed. |
+| Fuzz | Every day | Runs each fuzz target for 3 minutes, in a job of its own (`make fuzz FUZZ=…`). A failing input is kept as an artifact of the run, for the fix and its seed. |
 | Scorecard | Every week, and on every push to `main` | Rates the project's security practices, for the badge in the README. |
 
 ## Commit messages
