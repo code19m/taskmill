@@ -50,6 +50,8 @@ make us look at it again:
 | The heartbeat comes every 5 seconds, not with every wake | [Maintenance and notifications](schema-maintenance.md#notifications) | Schemas in one database that no longer pay for each other's notifications |
 | Migrations build indexes online, while `Migrate` holds the lock of `migrations` in a second connection | [Schema migrations](schema-migrations.md#online-steps) | An index of the history, which PostgreSQL cannot build concurrently on a partitioned table; or a schema change other than an index that blocks writes |
 | The querier interfaces, the untagged result types, `ui.New`, a missing result, and the names | [The API's shape](api-shape.md#when-we-look-at-a-point-again) | The condition of each point, in the table there |
+| A retry takes back the dedupe key that its cancel freed | [Operator actions](schema-operations.md#a-retry-takes-its-dedupe-key-back) | A dedupe promise that ends at the cancel, if users would rather have a retry that never conflicts |
+| The maintainer compares the workers' schedules, by a hash of each definition | [Maintenance and notifications](schema-maintenance.md#maintenance) | Schedules that a deploy step stores once, instead of each worker defining them |
 | The dashboard is rendered on the server, with no framework | [How the dashboard is built](#how-the-dashboard-is-built) | A dashboard that grows far beyond five pages, or needs a JSON API anyway |
 
 ## Change the docs with the code

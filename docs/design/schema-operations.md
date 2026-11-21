@@ -122,6 +122,10 @@ stores the key and the end of its window in the task's own row: `freed_key`
 and `freed_key_expires_at`. A running task that is asked to stop gets them
 then, with the key's release.
 
+**Why it stays,** though few retry a canceled task with a key: without it,
+the dedupe promise breaks silently, and the same work runs twice. It costs
+two columns that only a cancel writes, and one statement in a retry.
+
 A retry claims the stored key as an enqueue does, with the window's old
 end: it gets the key if no row has it, or if the row's window has ended.
 Then it clears the two columns. If another task holds the key, a `Retry`

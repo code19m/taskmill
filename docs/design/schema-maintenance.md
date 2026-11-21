@@ -31,11 +31,13 @@ maintainer counts the queues.
 - **The maintainer compares the workers' schedules, because a difference
   is silent.** It runs only its own schedules. A worker that lacks one
   stops it while it leads, and one that defines it in another way changes
-  it. So each worker that takes part in the election stores, when it
-  registers, the names of its schedules in `schedules`, and a hash of each
-  one's definition in `schedule_hashes`. A worker's schedules never change,
-  so the check-in writes nothing more. A worker with `NoMaintainer`, and one
-  of a release without the columns, store `NULL`, and are not compared.
+  it, and nothing else shows it. So each worker that takes part in the
+  election stores, when it registers, the names of its schedules in
+  `schedules`, and a hash of each one's definition in `schedule_hashes`.
+  A worker's schedules never change, so the check-in writes nothing more,
+  and the check costs one statement a minute. A worker with
+  `NoMaintainer`, and one of a release without the columns, store `NULL`,
+  and are not compared.
 - **Two definitions hash the same exactly when their runs happen at the
   same times and enqueue the same task.** The hash covers the expression,
   the time zone, the queue, the kind, the priority, the most attempts, the
