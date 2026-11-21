@@ -9,7 +9,7 @@ people may only look. Others may retry and delete tasks."
 | Your setup | Use | Why |
 |---|---|---|
 | The services are written in Go | **Each service mounts its [dashboard](../concepts/glossary.md#dashboard) with `ui.New`,** on an internal address. The admin app forwards a path to each | Each dashboard runs its own service's taskmill version |
-| A service isn't written in Go | `taskmill-ui` next to that service, with `TASKMILL_UI_PREFIX` and `TASKMILL_SCHEMA`. The admin app forwards the same way | No Go code needed |
+| A service serves no HTTP from Go, such as one whose Go part only runs workers | `taskmill-ui` next to that service, with `TASKMILL_UI_PREFIX` and `TASKMILL_SCHEMA`. The admin app forwards the same way | No Go code needed |
 | All schemas are in one database, and the admin app is in Go | The admin app mounts one `ui.New` per schema itself | Less to deploy, but its taskmill version must fit every schema |
 
 ## The recommended way
