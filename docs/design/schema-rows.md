@@ -133,4 +133,4 @@ the pages that show the queues.
 - [Queue statistics and health](schema-statistics.md): how the maintainer replaces the statistics
 - [Upgrading](../production/upgrading.md): what a migration repairs in your tables
 
-**Next:** [The API's shape](api-shape.md)
+**Next:** [Schema migrations](schema-migrations.md)

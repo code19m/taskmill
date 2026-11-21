@@ -16,6 +16,30 @@ All notable changes to taskmill are recorded here. The format follows
   lists the signs that you outgrow taskmill, and how to move to a broker one
   kind at a time. [How taskmill is built](docs/design/README.md#decisions)
   indexes the design decisions, with what would reopen each.
+- Migrations build and drop indexes online, with `CREATE INDEX
+  CONCURRENTLY`, so that enqueues, fetches, and completions continue. Such
+  an *online step* runs outside a transaction, while `Migrate` keeps its
+  lock in a second connection of the pool, which then needs 2. The next
+  `Migrate` drops and builds again an index that a failed or canceled build
+  left invalid. A test keeps the indexes of every new migration online, and
+  `Migration.Online` tells a team with its own migration tool to apply such
+  a migration outside a transaction.
+
+### Changed
+
+- **Breaking:** `Migrate` refuses an old migration that makes writes wait
+  while it builds an index, as migrations 7 and 9 do to `tasks`, when it
+  would read more rows than the new `MigrateConfig.MaxBlockingIndexRows`:
+  1,000,000 by default, about half a second of waiting writes. It then
+  changes nothing. Only schemas from before v0.14.0 have such a migration
+  pending. To migrate such a schema, run `Migrate` as a job of its own at a
+  quiet time, with the limit raised, or with -1 for no limit.
+- Pending migrations run in one transaction only up to the next online
+  step, and a `Migrate` that fails keeps the migrations that it recorded.
+  A process that waits for another's migration tries the lock again at
+  least every second, instead of waiting in the lock's queue, where it
+  would block an online build. The deploy docs now run `Migrate` as a
+  job of its own, before the rollout.
 
 ### Fixed
 

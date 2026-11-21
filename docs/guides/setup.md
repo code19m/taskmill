@@ -36,8 +36,8 @@ if err != nil {
 
 | Situation | What to use | Why |
 |---|---|---|
-| Most apps | `Migrate` before `NewClient`, in every process | A deploy needs no extra step |
-| Your deploys change the schema before the new code starts | `Migrate` in a Job | See [Deploys](../production/deploys.md) |
+| Production | `Migrate` in a job of its own, before the rollout | A migration that builds an index can take minutes on a large table. See [Deploys](../production/deploys.md#run-migrations) |
+| Development, or a small schema | `Migrate` before `NewClient`, in every process | No extra step |
 | You manage all schema changes with goose, Atlas, or Flyway | `Migrations` | See [Use your own migration tool](../recipes/use-your-migration-tool.md) |
 
 Run your workers as the database role that owns taskmill's tables. Every

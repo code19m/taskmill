@@ -1,13 +1,15 @@
 // Package migrations holds taskmill's versioned schema migrations.
 //
 // Each migration is a file named NNNN_name.sql. The placeholder __SCHEMA__ in
-// a file stands for the schema name, which the caller validates.
+// a file stands for the schema name, which the caller validates. A file whose
+// first line is "-- online" is an online step: see [Migration.Online].
 package migrations
 
 import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -20,7 +22,42 @@ type Migration struct {
 	Version int
 	Name    string
 	SQL     string
+
+	// Online marks an online step: statements that build or drop an index
+	// with CONCURRENTLY, which PostgreSQL runs only outside a transaction,
+	// one at a time, without blocking writes. Statements holds them, in
+	// order.
+	Online     bool
+	Statements []Statement
+
+	// Blocking names the tables, schema-qualified, on which a migration
+	// that is not online builds an index that blocks writes while it reads
+	// the table: CREATE INDEX, or a unique or primary key constraint. Tables
+	// that the migration creates itself are left out: they are empty.
+	Blocking []string
 }
+
+// Statement is one statement of an online step.
+type Statement struct {
+	SQL   string
+	Index string // the index that it builds or drops, schema-qualified
+	Table string // the table that it indexes, schema-qualified; empty for a drop
+}
+
+// onlineMarker is the first line of an online step.
+const onlineMarker = "-- online"
+
+// The statements that the migrations are read for, with their words joined
+// by single spaces. Names are schema-qualified, as __SCHEMA__.name.
+var (
+	createOnline = regexp.MustCompile(`(?i)^CREATE (?:UNIQUE )?INDEX CONCURRENTLY ([a-z0-9_]+) ON (([a-z0-9_]+)\.[a-z0-9_]+)\b`)
+	dropOnline   = regexp.MustCompile(`(?i)^DROP INDEX CONCURRENTLY (?:IF EXISTS )?([a-z0-9_]+\.[a-z0-9_]+)$`)
+	createIndex  = regexp.MustCompile(`(?i)^CREATE (?:UNIQUE )?INDEX (?:IF NOT EXISTS )?(?:[a-z0-9_]+ )?ON (?:ONLY )?([a-z0-9_]+\.[a-z0-9_]+)\b`)
+	addKey       = regexp.MustCompile(`(?i)^ALTER TABLE (?:IF EXISTS )?(?:ONLY )?([a-z0-9_]+\.[a-z0-9_]+) .*\bADD (?:CONSTRAINT [a-z0-9_]+ )?(?:UNIQUE|PRIMARY KEY)\b`)
+	createTable  = regexp.MustCompile(`(?i)^CREATE TABLE (?:IF NOT EXISTS )?([a-z0-9_]+\.[a-z0-9_]+)\b`)
+	concurrently = regexp.MustCompile(`(?i)\bCONCURRENTLY\b`)
+	usingIndex   = regexp.MustCompile(`(?i)\bUSING INDEX\b`)
+)
 
 // All returns every migration for schema, in version order.
 func All(schema string) ([]Migration, error) {
@@ -31,21 +68,16 @@ func All(schema string) ([]Migration, error) {
 
 	all := make([]Migration, 0, len(entries))
 	for _, e := range entries {
-		version, name, ok := parseName(e.Name())
-		if !ok {
-			return nil, fmt.Errorf("invalid migration file name %q", e.Name())
-		}
-
 		body, err := fs.ReadFile(files, e.Name())
 		if err != nil {
 			return nil, fmt.Errorf("read migration %s: %w", e.Name(), err)
 		}
 
-		all = append(all, Migration{
-			Version: version,
-			Name:    name,
-			SQL:     strings.ReplaceAll(string(body), "__SCHEMA__", schema),
-		})
+		m, err := Parse(e.Name(), string(body), schema)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, m)
 	}
 
 	// ReadDir sorts by name, and names start with zero-padded versions.
@@ -57,9 +89,87 @@ func All(schema string) ([]Migration, error) {
 	return all, nil
 }
 
+// Parse returns the migration that the file named file holds, with the text
+// body, for schema.
+func Parse(file, body, schema string) (Migration, error) {
+	version, name, ok := parseName(file)
+	if !ok {
+		return Migration{}, fmt.Errorf("invalid migration file name %q", file)
+	}
+	m := Migration{Version: version, Name: name, SQL: strings.ReplaceAll(body, "__SCHEMA__", schema)}
+	first, _, _ := strings.Cut(m.SQL, "\n")
+	m.Online = strings.TrimSpace(first) == onlineMarker
+
+	created := make(map[string]bool)
+	for _, stmt := range statements(m.SQL) {
+		words := strings.Join(strings.Fields(stmt), " ")
+		switch {
+		case m.Online:
+			s, ok := onlineStatement(stmt, words)
+			if !ok {
+				return Migration{}, fmt.Errorf("migration %s is online, so each of its statements must be "+
+					"CREATE INDEX CONCURRENTLY name ON schema.table, or DROP INDEX CONCURRENTLY schema.name, not %q", file, words)
+			}
+			m.Statements = append(m.Statements, s)
+		case concurrently.MatchString(words):
+			return Migration{}, fmt.Errorf("migration %s uses CONCURRENTLY, which runs only outside a transaction: "+
+				"put the statement in an online step, a migration whose first line is %q", file, onlineMarker)
+		}
+
+		if match := createTable.FindStringSubmatch(words); match != nil {
+			created[match[1]] = true
+		}
+		table := ""
+		if match := createIndex.FindStringSubmatch(words); match != nil {
+			table = match[1]
+		} else if match := addKey.FindStringSubmatch(words); match != nil && !usingIndex.MatchString(words) {
+			table = match[1]
+		}
+		if table != "" && !created[table] {
+			m.Blocking = append(m.Blocking, table)
+		}
+	}
+
+	if m.Online && len(m.Statements) == 0 {
+		return Migration{}, fmt.Errorf("migration %s is online, and has no statement", file)
+	}
+	return m, nil
+}
+
+// onlineStatement reads stmt, a statement of an online step, whose words
+// are words.
+func onlineStatement(stmt, words string) (Statement, bool) {
+	if match := createOnline.FindStringSubmatch(words); match != nil {
+		return Statement{SQL: stmt, Index: match[3] + "." + match[1], Table: match[2]}, true
+	}
+	if match := dropOnline.FindStringSubmatch(words); match != nil {
+		return Statement{SQL: stmt, Index: match[1]}, true
+	}
+	return Statement{}, false
+}
+
+// statements returns the statements of a migration, without its comment
+// lines.
+func statements(sql string) []string {
+	var code strings.Builder
+	for line := range strings.Lines(sql) {
+		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
+			code.WriteString(line)
+		}
+	}
+
+	var out []string
+	for stmt := range strings.SplitSeq(code.String(), ";") {
+		if stmt = strings.TrimSpace(stmt); stmt != "" {
+			out = append(out, stmt)
+		}
+	}
+	return out
+}
+
 // Latest returns the highest migration version.
 func Latest() int {
-	all, err := All("")
+	all, err := All("taskmill")
 	if err != nil {
 		return 0
 	}
