@@ -18,9 +18,9 @@ package taskmill
 // so the due ones come first. The halted groups stop at the cap itself ($1 -
 // 1), as they have no capped flag. The most failures are the highest attempt
 // among the $3 counted tasks that retry last, and each queue's own task that
-// retries last, read backward from the last one counted. A run time that is
-// infinite is no oldest task: only a row that taskmill did not write has
-// one, and Go cannot read it as a time. The page on statistics says why.
+// retries last, read backward from the last one counted. A run time written
+// by hand that is infinite is no oldest task, so that it cannot fail the
+// counts of every queue.
 var countStatsSQL = `
 WITH RECURSIVE ` + queuesWith(`available`, `= 'available'`) + `, ` +
 	queuesWith(`running`, `= 'running'`) + `, ` +

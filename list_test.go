@@ -273,11 +273,31 @@ func TestListChecksItsParams(t *testing.T) {
 	}
 }
 
+// taskmill does not support a task's row that it cannot read. Get, and a
+// list that holds such a row, fail with an error that names the task.
+func TestReadsOfARowThatDoesNotDecodeNameTheTask(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	for _, set := range []string{`run_at = 'infinity'`, `metadata = '"text"'`} {
+		id := e.insertTask(t, set)
+		named := "task " + strconv.FormatInt(id, 10) + ":"
+
+		_, err := e.client.Get(t.Context(), id)
+		if err == nil || !strings.Contains(err.Error(), named) {
+			t.Errorf("get of a row with %s: %v, want an error that names task %d", set, err, id)
+		}
+		_, err = e.client.List(t.Context(), nil)
+		if err == nil || !strings.Contains(err.Error(), named) {
+			t.Errorf("list with a row with %s: %v, want an error that names task %d", set, err, id)
+		}
+		e.exec(t, "DELETE FROM {s}.tasks WHERE id = $1", id)
+	}
+}
+
 // A list of only dead tasks, only canceled tasks, or both comes in the order
 // in which the tasks finished, latest first, and by ID among the tasks of
-// one finish time. Its pages chain in that order: through tasks that share
-// a finish time, as those that one bulk action cancels do, and past the
-// finish times that only an UPDATE by hand writes, the infinite ones. Every
+// one finish time. Its pages chain in that order, also through tasks that
+// share a finish time, as those that one bulk action cancels do. Every
 // other list keeps the order of the IDs. A cursor of one order is no cursor
 // for the other, and the cursors of earlier releases are all of the ID
 // order.
@@ -299,8 +319,8 @@ func TestListsOfFinishedTasksComeLatestFirst(t *testing.T) {
 	                        (2, 'a', 'email.send', 'dead', '2026-01-01 00:00:01+00', 'g'),
 	                        (3, 'a', 'email.send', 'canceled', '2026-01-01 00:00:02+00', NULL),
 	                        (4, 'b', 'report.build', 'dead', '2026-01-01 00:00:02+00', NULL),
-	                        (6, 'b', 'email.send', 'canceled', 'infinity', NULL),
-	                        (7, 'a', 'email.send', 'dead', '-infinity', NULL),
+	                        (6, 'b', 'email.send', 'canceled', '2026-01-01 00:00:04+00', NULL),
+	                        (7, 'a', 'email.send', 'dead', '2026-01-01 00:00:00+00', NULL),
 	                        (8, 'a', 'email.send', 'available', NULL, NULL)
 	                ) AS v(id, queue, kind, state, finished, grp)`)
 
@@ -522,24 +542,6 @@ func TestListsTakeARangeOfCreationTimes(t *testing.T) {
 						params, limit, zone.session, got, next, c.want)
 				}
 			}
-		}
-	}
-
-	// Two tasks get the creation times that only an UPDATE by hand writes.
-	// A range with one bound holds the infinite time on its side, and a page
-	// continues past either.
-	e.exec(t, "UPDATE {s}.tasks SET created_at = CASE id WHEN 9 THEN 'infinity' ELSE '-infinity' END::timestamptz WHERE id IN (9, 20)")
-	for _, c := range []struct {
-		since, before time.Time
-		want          []int64
-	}{
-		{second(4), time.Time{}, []int64{9, 13, 1}},
-		{time.Time{}, second(2), []int64{3, 20}},
-		{second(1), second(2), []int64{3}},
-	} {
-		params := taskmill.ListParams{CreatedSince: c.since, CreatedBefore: c.before, Limit: 1}
-		if got, next := listed(t, e.client, params, len(c.want)+1); next != "" || !slices.Equal(got, c.want) {
-			t.Errorf("%+v in pages of 1: got %v and next %q, want %v and no next page", params, got, next, c.want)
 		}
 	}
 }

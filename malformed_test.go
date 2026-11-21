@@ -16,10 +16,12 @@ import (
 	"github.com/code19m/taskmill"
 )
 
-// The tests in this file write rows that taskmill never writes, as a role
-// with INSERT on tasks can, or an UPDATE by hand. Such a task must fail
-// alone: the tasks fetched, counted, or rescued with it are not its business.
-// The small tables refuse such a row instead.
+// The tests in this file write rows that taskmill never writes, as an UPDATE
+// by hand, or a role that may insert tasks, can. Such a row must not stop a
+// queue, the rescue, the statistics, or the election: the tasks fetched,
+// counted, or rescued with it are not its business. A FIFO group counts each
+// of its tasks that leaves it. The small tables refuse such a row instead.
+// See docs/design/schema-rows.md.
 
 // insertTask writes an available task of the default queue by hand, first
 // in line, changes it with the SET clause set, and returns its ID.
@@ -117,9 +119,13 @@ func failsAlone(t *testing.T, set string, limited bool) {
 		}
 	}
 
-	info := e.waitState(t, bad, taskmill.StateDead)
-	if n := len(info.Errors); info.Attempt != 1 || n != 1 || info.Errors[0].Code != taskmill.CodeInvalidRow {
-		t.Errorf("the malformed task: attempt %d, errors %+v; want one attempt that failed with invalid_row", info.Attempt, info.Errors)
+	// Get cannot read the row either, so SQL reads what became of it.
+	waitFor(t, "the malformed task to become dead", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND state = 'dead'", bad) == 1
+	})
+	if n := e.count(t, `SELECT count(*) FROM {s}.tasks WHERE id = $1 AND attempt = 1
+	                    AND jsonb_array_length(errors) = 1 AND errors -> 0 ->> 'code' = $2`, bad, taskmill.CodeInvalidRow); n != 1 {
+		t.Error("the malformed task did not end after one attempt that failed with invalid_row")
 	}
 	if sawBad.Load() {
 		t.Error("the handler or the middleware ran for the malformed task")
@@ -176,41 +182,6 @@ func TestErrorsThatAreNotAnArrayCountAsNone(t *testing.T) {
 		if errs := e.get(t, id).Errors; len(errs) != 1 || errs[0].Code != taskmill.CodeLeaseLost {
 			t.Errorf("the rescued task %d has the errors %+v, want the lost lease alone", id, errs)
 		}
-	}
-}
-
-// The dashboard lists tasks with Client.List, 50 to a page: one row that
-// does not decode must not hide the others.
-func TestListShowsMalformedTasks(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-
-	var ids []int64
-	for _, set := range []string{
-		`metadata = '{"tenant": "shop"}'`,
-		`metadata = '"text"'`,
-		`errors = '[7, {"attempt": 1, "at": "2026-01-02T03:04:05Z", "message": "kept"}]'`,
-		`created_at = '-infinity', run_at = 'infinity', state = 'scheduled'`,
-	} {
-		ids = append(ids, e.insertTask(t, set))
-	}
-
-	res, err := e.client.List(t.Context(), nil)
-	if err != nil || len(res.Tasks) != len(ids) {
-		t.Fatalf("list: %v; want %d tasks", err, len(ids))
-	}
-
-	if got := e.get(t, ids[0]).Metadata; got["tenant"] != "shop" {
-		t.Errorf("metadata of an ordinary task: %v", got)
-	}
-	if got := e.get(t, ids[1]).Metadata; got != nil {
-		t.Errorf("metadata that is not an object decoded as %v, want none", got)
-	}
-	if got := e.get(t, ids[2]).Errors; len(got) != 1 || got[0].Message != "kept" {
-		t.Errorf("errors with an entry that is no object decoded as %+v, want the entry that decodes", got)
-	}
-	if got := e.get(t, ids[3]); !got.CreatedAt.IsZero() || !got.RunAt.IsZero() {
-		t.Errorf("infinite times decoded as %v and %v, want zero times", got.CreatedAt, got.RunAt)
 	}
 }
 

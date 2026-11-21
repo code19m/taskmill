@@ -11,6 +11,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/exec"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -99,6 +100,14 @@ func (p *proc) release(wave int) {
 	}
 }
 
+// free makes the child collect its garbage and return the memory that it
+// frees to the system, as debug.FreeOSMemory does.
+func (p *proc) free() {
+	if _, err := fmt.Fprintln(p.stdin, "free"); err != nil {
+		fail(err)
+	}
+}
+
 func runChild(ctx context.Context, url, spec string) {
 	var cfg child
 	if err := json.Unmarshal([]byte(spec), &cfg); err != nil {
@@ -114,6 +123,9 @@ func runChild(ctx context.Context, url, spec string) {
 		defer cancel()
 		lines := bufio.NewScanner(os.Stdin)
 		for lines.Scan() {
+			if lines.Text() == "free" {
+				debug.FreeOSMemory()
+			}
 			if n, err := strconv.Atoi(strings.TrimPrefix(lines.Text(), "release ")); err == nil && n > 0 && n < len(waves) {
 				close(waves[n])
 			}

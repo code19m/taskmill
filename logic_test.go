@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"math"
 	"reflect"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -750,3 +751,35 @@ func (l *lineLog) Handle(_ context.Context, r slog.Record) error {
 func (l *lineLog) WithAttrs([]slog.Attr) slog.Handler { return l }
 
 func (l *lineLog) WithGroup(string) slog.Handler { return l }
+
+// A handler that returns as its context ends, in one goroutine, ends the
+// watch before the context's callback arms the grace timer. The timer must
+// not outlive the watch: it holds the attempts, with their payloads, for the
+// whole grace.
+func TestWatchLeavesNoTimerAfterTheHandlerReturned(t *testing.T) {
+	t.Parallel()
+	w := &Worker{timing: defaultTiming, logger: slog.New(slog.DiscardHandler)}
+	w.timing.shutdownGrace = time.Hour
+
+	freed := make(chan struct{})
+	func() {
+		a := &liveAttempt{info: &TaskInfo{Queue: DefaultQueue}, att: &attempt{}}
+		runtime.AddCleanup(a, func(freed chan struct{}) { close(freed) }, freed)
+		ctx, cancel := context.WithCancelCause(t.Context())
+		stop := w.watch(ctx, t.Context(), []*liveAttempt{a}, time.Now())
+		cancel(ErrTaskCanceled)
+		stop()
+	}()
+
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		runtime.GC()
+		select {
+		case <-freed:
+			return
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the attempt is still held 5 seconds after its watch stopped")
+		}
+	}
+}

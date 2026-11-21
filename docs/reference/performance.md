@@ -51,7 +51,7 @@ Read them as rough sizes, not as a promise for your hardware.
 | SQL statements per task, end to end | About 0.16: fetches and completions serve many tasks each |
 | WAL written per task, from fetch to history | About 0.9 KiB |
 | Size of the `tasks` table during an hour at 10,000 tasks a second | At the end, at most 6% bigger than after 15 minutes |
-| Worker memory | About 17 MiB idle, plus about 8 KiB per running task |
+| Worker memory | About 20 MiB idle, plus about 12 KiB per running task, of which 8 KiB is the stack of a handler that called the database |
 | Database connections | A client uses its pool. A worker uses its pool, plus 1 connection for notifications |
 | An idle worker | About one fetch per queue per minute, plus a few small queries |
 | Many schemas in one database | 100 schemas with 500 workers cost the database about a quarter of a CPU, for the [heartbeats](../concepts/glossary.md#heartbeat) of the [maintainers](../concepts/glossary.md#maintainer) |

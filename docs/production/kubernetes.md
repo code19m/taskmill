@@ -50,8 +50,8 @@ spec:
   argument, such as `shop worker` or `shop migrate`:
   [One binary, two roles](deploys.md#one-binary-two-roles) shows the code.
 - Workers get no traffic, so they need no Service and no `preStop` hook.
-- A worker itself needs about 17 MiB of memory when idle, plus about 8 KiB
-  per running task ([Performance](../reference/performance.md)). Size the
+- A worker itself needs little memory
+  ([Performance](../reference/performance.md#resource-use)). Size the
   limits for your handlers.
 - Run at least 2 replicas. With one, a lost node stops all work, and the
   [maintainer](../concepts/glossary.md#maintainer) with it, until Kubernetes

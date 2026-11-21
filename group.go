@@ -43,20 +43,10 @@ func (s *groupSet) add(queue, group string) {
 // has no row, which should never happen, is logged.
 //
 // Callers run it in the transaction that changed the tasks, and pass their
-// logger: a worker's names it. It waits for a group's row that another
-// transaction holds. It takes the rows of several groups in the order that
-// the plan of its statement gives, which is not always the order of left:
-// a caller cannot choose a lock order here. The callers with more than one
-// group hold the rows before they call: lockGroups, the pick statements,
-// and the rescue took them, and only rows that were free.
-//
-// The exception is completeWaiting with several groups: the last
-// completions of a worker that stops, for the groups whose rows were held
-// until then. It can meet a transaction that takes the same rows in another
-// order, such as one of the application that enqueues into several groups.
-// PostgreSQL then ends one of the two, and a completion that it ended runs
-// again (whileLeased). The task of RunTask, which completeWaiting completes
-// too, has one group at most.
+// logger: a worker's names it. It takes the rows of several groups in the
+// order of its plan, so the callers with more than one group lock the rows
+// first, and only those that are free. The exception, the last completions
+// of a stopping worker (completeWaiting), runs again after a deadlock.
 func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier, left []groupLeave) error {
 	if len(left) == 0 {
 		return nil

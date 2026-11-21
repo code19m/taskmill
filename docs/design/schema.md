@@ -12,7 +12,7 @@ tables and indexes, and why each was chosen. Eight more pages cover the rest:
 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
-| [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
+| [Rows that taskmill did not write](schema-rows.md) | Which rows taskmill supports, which values the tables refuse, and which guards contain the others |
 
 The exact definitions are in [`internal/migrations`](../../internal/migrations),
 and the statements in the `sql_*.go` files that [`sql.go`](../../sql.go)
@@ -39,7 +39,7 @@ configurable, so several schemas can share a database. It must match
    transaction mode, such as PgBouncer.
 4. **The database enforces the lifecycle's invariants** with `CHECK`
    constraints, as a second line of defense behind the code. The small tables
-   also refuse what no release writes. Elsewhere, the code survives [such a row](schema-rows.md).
+   also refuse what no release writes. Elsewhere, a few guards contain [such a row](schema-rows.md).
 5. **Frequent updates touch no indexed column.** Lease renewals change only
    `lease_expires_at`, which no index contains, so PostgreSQL can update the
    row in place (a HOT update) without writing to any index.

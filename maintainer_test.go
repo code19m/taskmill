@@ -124,22 +124,11 @@ func TestRescueHaltsOrLeavesTheGroupsOfItsTasks(t *testing.T) {
 	deadHead, behindDead := insert("dies", "max_attempts = 1")
 	canceledHead, behindCanceled := insert("cancels", "cancel_requested_at = now()")
 
-	// Two tasks of one group in one batch, and a halt that names one of them,
-	// which only rows written by hand give. Each task is counted out, and
-	// the halt ends with its task, so the task behind them takes over. The
-	// check of the groups at the end of the test fails on a wrong count.
-	e.insertTask(t, expiredLease+`, group_key = 'both', cancel_requested_at = now()`)
-	named := e.insertTask(t, expiredLease+`, group_key = 'both', cancel_requested_at = now()`)
-	behindBoth := e.insertTask(t, `state = 'pending', group_key = 'both'`)
-	e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
-	           VALUES ('default', 'both', 3, $1, now())`, named)
-
 	taskmill.Rescue(t.Context(), newWorker(t, e, &taskmill.WorkerConfig{}))
 
 	wantStates(t, e, map[int64]taskmill.State{
 		deadHead: taskmill.StateDead, behindDead: taskmill.StatePending,
 		canceledHead: taskmill.StateCanceled, behindCanceled: taskmill.StateAvailable,
-		named: taskmill.StateCanceled, behindBoth: taskmill.StateAvailable,
 	})
 	if n := e.count(t, "SELECT count(*) FROM {s}.groups WHERE group_key = 'dies' AND halted_task_id = $1", deadHead); n != 1 {
 		t.Error("the dead head does not halt its group")
