@@ -64,7 +64,9 @@ func newMaintainer(w *Worker) *maintainer {
 	}
 }
 
-func (m *maintainer) run(ctx context.Context) {
+// run does the maintainer's work until ctx ends, and then resigns, until
+// stop ends at the latest: the deadline of the worker's shutdown.
+func (m *maintainer) run(ctx, stop context.Context) {
 	var loops sync.WaitGroup
 	loops.Go(func() { m.wakeLoop(ctx) })
 	loops.Go(func() { m.promoteLoop(ctx) })
@@ -90,7 +92,7 @@ func (m *maintainer) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			m.resign(context.WithoutCancel(ctx))
+			m.resign(stop)
 			return
 		case <-m.w.resigned:
 			m.takeOver(ctx)

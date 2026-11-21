@@ -237,11 +237,12 @@ type WorkerConfig struct {
 
 	// DrainTimeout is how long Run waits for running tasks after its context
 	// is canceled, before canceling their contexts and, 5 seconds later,
-	// releasing them. Run then has 5 seconds more to record the results that
-	// are left, release those tasks, and unregister. What it cannot record by
-	// then, as when the database does not answer, is rescued once its lease
-	// runs out, and the task runs again. So Run returns at most about
-	// DrainTimeout plus 10 seconds after its context is canceled. Keep
+	// releasing them. Run then has 5 seconds more at most to record the
+	// results that are left, release those tasks, give up the maintainer's
+	// role, and unregister. What it cannot record by then, as when the
+	// database does not answer, is rescued once its lease runs out, and the
+	// task runs again. So Run returns at most about DrainTimeout plus 10
+	// seconds after its context is canceled. Keep
 	// DrainTimeout at least 10 seconds below the time the platform gives a
 	// stopping process. It must not be negative. Default: 20 seconds.
 	DrainTimeout time.Duration
@@ -654,7 +655,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	if !w.cfg.NoMaintainer {
 		// The maintainer stops with ctx, as the fetches do: a worker that
 		// drains resigns, so that one that stays leads meanwhile.
-		loops.Go(func() { newMaintainer(w).run(ctx) })
+		loops.Go(func() { newMaintainer(w).run(ctx, recordCtx) })
 	}
 
 	attemptCtx, stopAttempts := context.WithCancelCause(base)
@@ -664,14 +665,20 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	<-ctx.Done()
+	stopped := time.Now()
 	abandoned := w.drain(base, r, stopAttempts)
 
 	// What follows has one deadline, so that Run returns soon also when the
 	// database does not answer: the release of the tasks whose handlers did
 	// not return, the results that attempts that ended before are still
-	// recording, also through the completer, the activity, and the worker's
-	// row. What is not recorded by then is rescued when its lease runs out.
-	stop := time.AfterFunc(cleanupTimeout, stopRecording)
+	// recording, also through the completer, the maintainer's resignation,
+	// the activity, and the worker's row. What is not recorded by then is
+	// rescued when its lease runs out. The deadline comes cleanupTimeout
+	// after the drain, but no later than the bound that DrainTimeout's doc
+	// gives: a fetch under way can hold the drain up until cleanupTimeout
+	// after ctx ended.
+	latest := time.Until(stopped.Add(w.cfg.DrainTimeout + w.timing.shutdownGrace + cleanupTimeout))
+	stop := time.AfterFunc(min(cleanupTimeout, latest), stopRecording)
 	defer stop.Stop()
 	w.release(recordCtx, abandoned)
 	w.recording.Wait()
