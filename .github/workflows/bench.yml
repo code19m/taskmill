@@ -1,0 +1,68 @@
+name: Benchmarks
+
+# The benchmarks of docs/design/benchmarks.md on its reference runner, every
+# week and on demand. The report goes to the job summary and to an artifact.
+# A missed target is a result, not a failure: only an error fails the run.
+on:
+  schedule:
+    - cron: "41 3 * * 0" # Sundays.
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-24.04 # an exact image, so that runs compare
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      POSTGRES: postgres:18-alpine@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+      DB: postgres://postgres:postgres@localhost:54330/taskmill?sslmode=disable
+      REPORT: ${{ github.workspace }}/bench.md
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      # In Docker, not as a service container: a service takes no server
+      # settings, and F6 restarts the database by its container's name.
+      - name: Start PostgreSQL with the settings of benchmarks.md
+        run: |
+          docker run -d --name taskmill-bench-db -p 54330:5432 \
+            -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill "$POSTGRES" \
+            -c shared_buffers=1GB -c max_wal_size=8GB -c max_connections=700
+          until docker exec taskmill-bench-db pg_isready -h 127.0.0.1 -U postgres -q; do sleep 0.2; done
+      # GitHub promises the runner's size, not its CPU model: the report
+      # starts with the machine it ran on. The bench exits with 2 when a
+      # check failed, and with 1 on an error.
+      - name: Run every scenario but the soak
+        run: |
+          go build -o bin/bench ./internal/cmd/bench
+          {
+            echo "# Benchmarks on the reference runner"
+            echo
+            echo "- Commit: $GITHUB_SHA, $(date -u '+%Y-%m-%d %H:%M') UTC"
+            echo "- CPU: $(nproc) × $(lscpu | sed -n 's/^Model name: *//p')"
+            echo "- Memory: $(awk '/^MemTotal:/ { printf "%.1f GiB", $2 / 1048576 }' /proc/meminfo)"
+            echo "- PostgreSQL: $(docker exec taskmill-bench-db psql -U postgres -tAc 'SHOW server_version')"
+            echo
+          } > "$REPORT"
+          status=0
+          bin/bench -db "$DB" -container taskmill-bench-db -duration 1m >> "$REPORT" || status=$?
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          case "$status" in
+            0) ;;
+            2) echo "::warning::A check failed or a target was missed: see the report." ;;
+            *) exit "$status" ;;
+          esac
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-report
+          path: bench.md
+          if-no-files-found: ignore

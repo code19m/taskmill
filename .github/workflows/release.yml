@@ -21,6 +21,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write # create the release
+      checks: read # see that CI passed on the commit
       packages: write # push the image
       id-token: write # sign the attestations
       attestations: write # store the attestations
@@ -46,6 +47,21 @@ jobs:
         run: |
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main ||
             { echo "::error::$GITHUB_REF_NAME is not on main: release from main only."; exit 1; }
+      # The push to main ran CI on this commit, and its "CI OK" job passes
+      # only when every other job did. A re-run of a job is a newer check run.
+      - name: Check that CI passed on the commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          result=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=CI+OK&filter=all&per_page=100" \
+            --jq '[.check_runs[] | select(.app.slug == "github-actions")] | max_by(.started_at) | if . then .conclusion // .status else "none" end')
+          case "$result" in
+            success) ;;
+            none) echo "::error::CI has not run on $GITHUB_SHA: release a commit that CI passed on main."; exit 1 ;;
+            queued | in_progress | pending | requested | waiting)
+              echo "::error::CI is still running on $GITHUB_SHA: once it passes, re-run this workflow."; exit 1 ;;
+            *) echo "::error::CI did not pass on $GITHUB_SHA (CI OK: $result): fix main, and release a commit that CI passed."; exit 1 ;;
+          esac
       - name: Log in to the container registry
         env:
           TOKEN: ${{ github.token }}

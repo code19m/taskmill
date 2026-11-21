@@ -106,11 +106,12 @@ and the [title check](#commit-messages).
 | Release config | `make release-check` | `.goreleaser.yaml` is not valid, or `make release-notes` can no longer read CHANGELOG.md. |
 | CodeQL | none | Code scanning finds new alerts. It reports them on the pull request and in the Security tab. |
 
-Three more checks run on a schedule:
+Four more checks run on a schedule:
 
 | Run | When | What it does |
 |---|---|---|
 | Faults | Every night, and on pull requests that change them | Runs the fault scenarios (`make faults`). |
+| Benchmarks | Every week, and on demand | Runs the benchmarks on the [reference runner](docs/design/benchmarks.md#reference-runner), and keeps the report in the run's summary. Only an error fails it. |
 | Fuzz | Every day | Runs each fuzz target for 3 minutes, in a job of its own (`make fuzz FUZZ=…`). A failing input is kept as an artifact of the run, for the fix and its seed. |
 | Scorecard | Every week, and on every push to `main` | Rates the project's security practices, for the badge in the README. |
 

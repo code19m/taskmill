@@ -88,11 +88,16 @@ The tag starts the [release workflow](../../.github/workflows/release.yml).
 It runs [GoReleaser](https://goreleaser.com) as configured in
 [.goreleaser.yaml](../../.goreleaser.yaml).
 
-It refuses two kinds of tag:
+It refuses three kinds of tag, before it publishes anything:
 
 - a tag that is not a version, such as `v1.0.0` or `v1.0.0-rc.1`;
-- a tag that is not on `main`. This guards against mistakes. It is not a
-  security control: the tag ruleset is.
+- a tag that is not on `main`;
+- a tag on a commit whose CI did not pass: the latest run of its `CI OK`
+  check must have succeeded. If CI still runs, wait for it, then run the
+  release workflow again.
+
+The last two guard against mistakes. They are not a security control: the
+tag ruleset is.
 
 It publishes these:
 
