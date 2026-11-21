@@ -32,7 +32,9 @@ var queueStates = []taskmill.State{
 	taskmill.StatePending, taskmill.StateDead, taskmill.StateCanceled,
 }
 
-// totals sums the task counts of every queue.
+// totals sums the task counts of every queue. Waiting holds the scheduled,
+// retryable, and pending tasks: the overview's card of that name leads to the
+// list of the three states.
 type totals struct {
 	Available, Running, Waiting, Dead taskmill.TaskCount
 }

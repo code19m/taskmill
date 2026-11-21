@@ -6,6 +6,11 @@ dashboard, protect it, and act on tasks in it, read
 
 ## Overview
 
+The cards at the top count the tasks of every queue, and each leads to their
+list. **Waiting** counts the tasks that wait for their time, for a retry, or
+behind another task of their FIFO group: the scheduled, retryable, and
+pending tasks.
+
 The **Activity** card shows the last 1, 6, or 24 hours, in steps of 1, 5,
 or 15 minutes. To read the values of one step, point at a chart, or press
 and drag on a touch screen: a note shows them, with the step's time on your

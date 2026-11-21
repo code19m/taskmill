@@ -3,6 +3,7 @@ package ui_test
 import (
 	"context"
 	"errors"
+	"html"
 	"math"
 	"net"
 	"net/http"
@@ -437,6 +438,48 @@ func TestOverviewSaysWhenItsCountsWereTaken(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The overview's Waiting card counts the tasks that wait for their time, for
+// a retry, or behind another task of their FIFO group, and it leads to the
+// list of all of them.
+func TestOverviewWaitingCardLeadsToEveryWaitingTask(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	ctx := t.Context()
+	res, err := client.EnqueueMany(ctx, []taskmill.EnqueueParams{
+		{Args: greet{Name: "later"}, Options: &taskmill.EnqueueOptions{RunAt: time.Now().Add(time.Hour)}},
+		{Args: greet{Name: "retried"}},
+		{Args: greet{Name: "first"}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
+		{Args: greet{Name: "behind"}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'retryable', attempt = 1, run_at = now() + interval '1 hour' WHERE id = $1`, res[1].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handler(t, client, nil)
+	_, body, _ := get(t, h, "/")
+	var link string
+	for _, card := range regexp.MustCompile(`(?s)<a class="card stat[^"]*" href="([^"]*)">(.*?)</a>`).FindAllStringSubmatch(body, -1) {
+		if strings.Contains(card[2], "Waiting</span>") {
+			link = html.UnescapeString(card[1])
+		}
+	}
+	if link == "" {
+		t.Fatalf("the overview has no Waiting card\n%s", body)
+	}
+
+	_, ids := listTasks(t, h, link)
+	want := []string{strconv.FormatInt(res[0].ID, 10), strconv.FormatInt(res[1].ID, 10), strconv.FormatInt(res[3].ID, 10)}
+	slices.Sort(ids)
+	slices.Sort(want)
+	if !slices.Equal(ids, want) {
+		t.Errorf("the Waiting card leads to %s, which lists the tasks %v, want the scheduled, retryable, and pending %v", link, ids, want)
 	}
 }
 

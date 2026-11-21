@@ -9,7 +9,7 @@
 <section class="stats" aria-label="Totals">
   {{template "stat" (dict "State" "available" "Label" "Available" "Count" $d.Totals.Available)}}
   {{template "stat" (dict "State" "running" "Label" "Running" "Count" $d.Totals.Running)}}
-  {{template "stat" (dict "State" "scheduled" "Label" "Waiting" "Count" $d.Totals.Waiting)}}
+  {{template "stat" (dict "State" "scheduled" "Query" "state=scheduled&state=retryable&state=pending" "Label" "Waiting" "Count" $d.Totals.Waiting)}}
   {{template "stat" (dict "State" "dead" "Label" "Dead" "Count" $d.Totals.Dead "Failed" $d.Totals.Dead.N)}}
   <a class="card stat" href="{{path "/schedules"}}"{{if $d.Schedules}} title="{{if not $d.NextRun.IsZero}}Next run {{ago $.Now $d.NextRun}}{{else}}All paused{{end}}"{{end}}>
     <span class="stat-label">{{template "icon-schedules"}}Schedules</span>
@@ -83,9 +83,10 @@
 {{template "foot" .}}{{end}}
 
 {{/* A total of tasks: a card that leads to their list. Its arguments are
-   the State of the list and of the icon, the Label, the Count, and Failed,
-   which marks a count of tasks that need a person. */}}
-{{define "stat"}}<a class="card stat{{if .Failed}} failed{{end}}" href="{{path (print "/tasks?state=" .State)}}">
+   the State of the icon, and of the list unless Query is the list's query,
+   the Label, the Count, and Failed, which marks a count of tasks that need a
+   person. */}}
+{{define "stat"}}<a class="card stat{{if .Failed}} failed{{end}}" href="{{path (print "/tasks?" (or .Query (print "state=" .State)))}}">
     <span class="stat-label">{{template "state-icon" .State}}{{.Label}}</span>
     <span class="stat-value"{{with atLeast .Count}} title="{{.}}"{{end}}>{{count .Count}}</span>
   </a>{{end}}

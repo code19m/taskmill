@@ -119,6 +119,8 @@ All notable changes to taskmill are recorded here. The format follows
 - The Back button no longer shows, frozen, the page that said why an action
   did not apply, in place of the page that sent it: the browser loads that
   page again.
+- The overview's **Waiting** card leads to the scheduled, retryable, and
+  pending tasks that it counts, not to the scheduled ones alone.
 
 ### Security
 
