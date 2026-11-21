@@ -38,13 +38,13 @@ const workLimit = time.Minute
 // pool connects to, and returns a client for it. cfg may be nil; its Schema
 // must be empty.
 //
-// The schema is dropped when the test ends, on a connection of pool. A worker
-// that the test stopped may have left a statement that the database still
-// runs, and a drop that met it could fail the test with a deadlock. So the
-// drop first waits until pool has closed the connections of such statements,
-// for up to a second. Where that cannot tell, through a proxy such as
-// PgBouncer or on a pool that other tests use, a drop that PostgreSQL ended
-// as a deadlock is tried again.
+// When the test ends, the client is closed, and the schema is dropped on a
+// connection of pool. A worker that the test stopped may have left a
+// statement that the database still runs, and a drop that met it could fail
+// the test with a deadlock. So the drop first waits until pool has closed
+// the connections of such statements, for up to a second. Where that cannot
+// tell, through a proxy such as PgBouncer or on a pool that other tests use,
+// a drop that PostgreSQL ended as a deadlock is tried again.
 func NewClient(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *taskmill.Client {
 	tb.Helper()
 	var c taskmill.ClientConfig
@@ -77,6 +77,7 @@ func NewClient(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *t
 	if err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
 	}
+	tb.Cleanup(client.Close) // cleanups run last first: before the drop
 	return client
 }
 

@@ -122,5 +122,7 @@ SELECT ids.ord, ids.id, false FROM ids CROSS JOIN notified ORDER BY ids.ord`
 // $1 dedupe keys.
 //
 // dedupeLookupSQL reads the tasks that hold the keys $1, for the duplicates
-// whose holder the enqueue could not see.
+// whose holder the enqueue could not see. It returns a holder whose window
+// ended since, as it should: that task held the key when the enqueue
+// statement found it taken.
 const dedupeLookupSQL = `SELECT key, task_id FROM {s}.dedupe_keys WHERE key = ANY($1::bytea[])`

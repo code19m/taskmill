@@ -58,6 +58,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 
 	var handlers taskmill.Handlers
 	taskmill.AddHandler(&handlers, taskmill.HandlerFunc[billingtasks.CreateInvoice](

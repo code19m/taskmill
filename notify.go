@@ -42,9 +42,11 @@ type notifier struct {
 	logger  *slog.Logger
 
 	mu       sync.Mutex
-	last     map[string]time.Time // last notification per queue, until forget drops it
-	trailing map[string]bool      // the queues with a trailing notification scheduled
-	forgetAt int                  // the size of last at which forget next looks through it
+	last     map[string]time.Time   // last notification per queue, until forget drops it
+	trailing map[string]*time.Timer // the trailing notification scheduled for each queue
+	forgetAt int                    // the size of last at which forget next looks through it
+	closed   bool                   // close was called: no more trailing notifications
+	sending  sync.WaitGroup         // trailing notifications being sent
 }
 
 func newNotifier(pool *pgxpool.Pool, channel string, logger *slog.Logger) *notifier {
@@ -53,13 +55,14 @@ func newNotifier(pool *pgxpool.Pool, channel string, logger *slog.Logger) *notif
 		channel:  channel,
 		logger:   logger,
 		last:     make(map[string]time.Time),
-		trailing: make(map[string]bool),
+		trailing: make(map[string]*time.Timer),
 	}
 }
 
 // allow reports whether the caller may notify queue now, inside its own
 // transaction. If not, it schedules a trailing notification instead, which
-// keeps ctx's values but not its cancellation.
+// keeps ctx's values but not its cancellation, unless the notifier is
+// closed.
 func (n *notifier) allow(ctx context.Context, queue string) bool {
 	now := time.Now()
 
@@ -71,12 +74,25 @@ func (n *notifier) allow(ctx context.Context, queue string) bool {
 		n.last[queue] = now
 		return true
 	}
-	if !n.trailing[queue] {
-		n.trailing[queue] = true
+	if _, scheduled := n.trailing[queue]; !scheduled && !n.closed {
 		detached := context.WithoutCancel(ctx)
-		time.AfterFunc(notifyWindow-now.Sub(n.last[queue]), func() { n.sendTrailing(detached, queue) })
+		n.trailing[queue] = time.AfterFunc(notifyWindow-now.Sub(n.last[queue]), func() { n.sendTrailing(detached, queue) })
 	}
 	return false
+}
+
+// close drops the trailing notifications that are scheduled, schedules no
+// more, and waits for those being sent.
+func (n *notifier) close() {
+	n.mu.Lock()
+	n.closed = true
+	for _, t := range n.trailing {
+		t.Stop()
+	}
+	clear(n.trailing)
+	n.mu.Unlock()
+
+	n.sending.Wait()
 }
 
 // forget drops the queues whose last notification is older than the window:
@@ -99,9 +115,15 @@ func (n *notifier) forget(now time.Time) {
 // sendTrailing sends the notification that allow deferred.
 func (n *notifier) sendTrailing(ctx context.Context, queue string) {
 	n.mu.Lock()
+	if n.closed { // close stopped the timer too late
+		n.mu.Unlock()
+		return
+	}
 	delete(n.trailing, queue)
 	n.last[queue] = time.Now()
+	n.sending.Add(1)
 	n.mu.Unlock()
+	defer n.sending.Done()
 
 	ctx, cancel := context.WithTimeout(ctx, cleanupTimeout)
 	defer cancel()

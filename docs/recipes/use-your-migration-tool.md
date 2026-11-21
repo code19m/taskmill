@@ -29,6 +29,9 @@ func main() {
             continue // written by an earlier run
         }
         sql := "-- +goose Up\n" + m.SQL
+        if m.Online { // CREATE INDEX CONCURRENTLY runs only outside a transaction
+            sql = "-- +goose NO TRANSACTION\n" + sql
+        }
         if m.Version > 0 { // record it, so that NewClient finds the schema up to date
             sql += fmt.Sprintf("\nINSERT INTO %s.migrations (version, name) VALUES (%d, '%s');\n", schema, m.Version, m.Name)
         }
@@ -41,13 +44,14 @@ func main() {
 }
 ```
 
-For Atlas or Flyway, change the file name and the first line:
+For Atlas or Flyway, change the file name, the first line, and what marks
+an online migration, one that builds an index outside a transaction:
 
-| Tool | File name | First line |
-|---|---|---|
-| goose | `20261029120000_taskmill_0001_initial.sql` | `-- +goose Up` |
-| Atlas | `20261029120000_taskmill_0001_initial.sql`, then run `atlas migrate hash` | none |
-| Flyway | `V20261029120000__taskmill_0001_initial.sql` | none |
+| Tool | File name | First line | An online migration |
+|---|---|---|---|
+| goose | `20261029120000_taskmill_0001_initial.sql` | `-- +goose Up` | `-- +goose NO TRANSACTION` before it |
+| Atlas | `20261029120000_taskmill_0001_initial.sql`, then run `atlas migrate hash` | none | `-- atlas:txmode none` |
+| Flyway | `V20261029120000__taskmill_0001_initial.sql` | none | A file beside it, named after it with `.conf` added, that holds `executeInTransaction=false` |
 
 Then apply the files with your tool, **before** you deploy the new taskmill
 version. Your old code keeps working on the newer schema. If you skip this
@@ -61,7 +65,9 @@ step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
 - **The program writes each migration once,** and names new files after the
   current time. So your tool applies them after the files you already have.
 - **Each file runs in its own transaction,** which some migrations need.
-  goose, Atlas, and Flyway do this by default.
+  goose, Atlas, and Flyway do this by default. An online migration runs
+  outside one: `CREATE INDEX CONCURRENTLY` builds an index while writes
+  continue, and PostgreSQL refuses it in a transaction.
 
 ## Other options
 
@@ -79,6 +85,8 @@ step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
   [maintainer](../concepts/glossary.md#maintainer) adds and drops a
   partition of the history table, and PostgreSQL allows that only to the
   owner. Run your tool as that role, or change the owner afterwards.
+- **A failed online migration leaves an invalid index.** Drop it with
+  `DROP INDEX CONCURRENTLY`, then apply the migration again.
 - **Workers create the history partitions, not your tool.** Each worker
   creates the partitions of the next 7 days when it starts, before it runs
   a task. So the first completed tasks keep their history too. If the

@@ -69,6 +69,7 @@ func runWeb(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer client.Close() // before the pool closes
 	handler, err := routes(pool, client, logger)
 	if err != nil {
 		return err
@@ -124,6 +125,7 @@ func runWorker(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 	worker, err := newWorker(client, logger)
 	if err != nil {
 		return err
@@ -200,8 +202,7 @@ func run(logger *slog.Logger) error {
 }
 ```
 
-Start the program without a role, with `go run .`. **You should see** the
-error `usage: shop web|worker`.
+Run `go run .` without a role. **You should see** `usage: shop web|worker`.
 
 ## Step 5. Run the two roles
 
@@ -211,9 +212,8 @@ Start the web role with `go run . web`, and place an order:
 curl -s -d email=user7@example.com localhost:8080/orders
 ```
 
-**You should see** the order's answer, but no receipt in the log. Open
-**Tasks** in the dashboard: the receipt waits as `available`, because no
-worker runs.
+**You should see** the order's answer, and no receipt in the log: in the
+dashboard, **Tasks** shows the receipt as `available`, as no worker runs.
 
 In a second terminal, start the worker role with `go run . worker`. **You
 should see** `worker started`, and then `receipt sent` for the order that

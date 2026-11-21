@@ -112,6 +112,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer client.Close() // before the pool closes
 
 	// The worker takes tasks from the database and runs their handlers.
 	var handlers taskmill.Handlers

@@ -41,9 +41,37 @@ All notable changes to taskmill are recorded here. The format follows
   requested while it runs. A batch handler, whose context a cancel does not
   end, could not see the request, and ran the canceled task's work all the
   same. It can now skip it.
+- Migrations build and drop indexes online, with `CREATE INDEX
+  CONCURRENTLY`, so that enqueues, fetches, and completions continue. Such
+  an *online step* runs outside a transaction, while `Migrate` keeps its
+  lock in a second connection of the pool, which then needs 2. The next
+  `Migrate` drops and builds again an index that a failed or canceled build
+  left invalid. `Migrate` refuses such a step while the pool's connections
+  have a `lock_timeout`, `statement_timeout`, or `transaction_timeout`,
+  which would cancel the build. A test keeps the indexes of every new
+  migration online, and `Migration.Online` tells a team with its own
+  migration tool to apply such a migration outside a transaction.
+- `Client.Close` stops the client's background work: the notifications
+  that it held back to wake workers less often were sent from a timer, also
+  after the application had closed its pool. `taskmilltest.NewClient`
+  closes its client when the test ends.
 
 ### Changed
 
+- **Breaking:** `Migrate` refuses an old migration that makes writes wait
+  while it builds an index, when it would read more rows than the new
+  `MigrateConfig.MaxBlockingIndexRows`: 1,000,000 by default, about half a
+  second of waiting writes. These are migrations 3 on `groups`, 7 on
+  `tasks` and the history, and 9 on `tasks`. It then changes nothing, and
+  returns an error that wraps the new `ErrBlockingMigration`. Only schemas
+  from before v0.14.0 have such a migration pending. To migrate such a schema, run `Migrate` as a job of its own at a
+  quiet time, with the limit raised, or with -1 for no limit.
+- Pending migrations run in one transaction only up to the next online
+  step, and a `Migrate` that fails keeps the migrations that it recorded.
+  A process that waits for another's migration tries the lock again at
+  least every second, instead of waiting in the lock's queue, where it
+  would block an online build. The deploy docs now run `Migrate` as a
+  job of its own, before the rollout.
 - `Worker.Health` fails while handlers that did not return 5 seconds after
   their context ended hold every slot of the worker's queues. Such a worker
   can start no task, but its probe passed. The error says how many slots
@@ -84,6 +112,15 @@ All notable changes to taskmill are recorded here. The format follows
   1,000 slots idle for a second or two: a fetch took its most, 1,000 tasks,
   but measured "more may wait" against the limit, and said nothing more
   waited. It now fetches again right away.
+- A duplicate enqueue no longer reports the task ID 0 when the task that
+  holds its dedupe key committed while the enqueue ran. The enqueue finds
+  that task, also after the caller's context ended; if the task was
+  canceled or deleted meanwhile, it enqueues the duplicate as a task of its
+  own, after the call's other tasks of its FIFO group. If the database
+  fails before the enqueue finds the task, it returns an error that wraps
+  the new `ErrStoredWithoutIDs`, which says that the tasks without a dedupe
+  key are stored, and no longer logs `find duplicates failed after the
+  enqueue committed; the duplicates have no ID`.
 - The dashboard's live updates get 304 Not Modified again for a page that
   did not change. A page with relative times, such as "Counted 4s ago" on
   the overview, or the times of workers, schedules, and tasks, changed

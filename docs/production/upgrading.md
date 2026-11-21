@@ -17,9 +17,11 @@ each kind of release may change is in
    go get github.com/code19m/taskmill/otel@latest # if you use it
    ```
 
-3. **Migrate the schema.** If your processes call `Migrate` at start, the
-   first new pod does it. If you migrate in a Job or with your own tool, do
-   it now, before the rollout.
+3. **Migrate the schema** now, before the rollout: run your migration Job,
+   or your own tool. If your processes call `Migrate` at start instead, the
+   first new pod does it. If `Migrate` refuses a migration that would block
+   writes to a large table, follow
+   [Migrations that block writes](deploys.md#migrations-that-block-writes).
 4. **Roll out your apps and workers.** Old and new pods share the queues
    while the rollout runs. Old workers finish or give back their tasks as
    they stop.

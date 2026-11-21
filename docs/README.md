@@ -142,6 +142,7 @@ These pages are for contributors.
 - [Maintenance and notifications](design/schema-maintenance.md)
 - [Queue statistics and health](design/schema-statistics.md)
 - [Rows that taskmill did not write](design/schema-rows.md)
+- [Schema migrations](design/schema-migrations.md)
 - [The API's shape](design/api-shape.md)
 - [Dependencies and modules](design/dependencies.md)
 - [Benchmarks](design/benchmarks.md)

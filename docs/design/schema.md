@@ -228,14 +228,11 @@ count those tasks from the index alone (an index-only scan).
 - **There is no default partition.** Attaching a partition would then have to
   scan and lock it. If a day's partition is missing, completions skip history
   and the worker logs an error, so the gap shows up in alerts.
-- **Schema changes are versioned.** Each migration is recorded in
-  `migrations`. `Migrate` first creates the schema and that table, in a
-  transaction of their own. Then it applies all pending migrations in one
-  transaction, which locks `migrations` in `SHARE ROW EXCLUSIVE` mode, so
-  only one process migrates at a time. The others wait for that lock, with
-  no limit but their context, and then find nothing left to do. A migration
-  therefore cannot use `CREATE INDEX CONCURRENTLY`: the one that indexes
-  creation times [makes writes wait](schema-creation-order.md#what-the-creation-order-costs).
+- **Schema changes are versioned,** and recorded in `migrations`. One
+  process migrates at a time, under a lock of that table. Every migration
+  after version 9 builds and drops its indexes with `CONCURRENTLY`, which
+  blocks no writes, and `Migrate` guards the older ones that block them:
+  [Schema migrations](schema-migrations.md) says how.
 - **Only table locks, never advisory locks.** PostgreSQL lets every role of
   a database take an advisory lock, also a role with no rights on taskmill's
   schema, which could then keep `Migrate` and workers from starting. A lock

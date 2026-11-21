@@ -232,6 +232,7 @@ func runWeb(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer client.Close() // before the pool closes
 	handler, err := routes(pool, client, logger)
 	if err != nil {
 		return err
@@ -278,6 +279,7 @@ func runWorker(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 	worker, err := newWorker(client, logger)
 	if err != nil {
 		return err

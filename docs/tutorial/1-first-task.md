@@ -133,6 +133,7 @@ In `run`, replace `return nil` with a
 	if err != nil {
 		return err
 	}
+	defer client.Close() // before the pool closes
 ```
 
 Below the client, [enqueue](../concepts/glossary.md#enqueue) one task.
