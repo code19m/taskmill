@@ -1,5 +1,5 @@
-github.com/code19m/taskmill v0.14.0 h1:ZrZTjY10cGYIkIxIeLdOXcHDOd0LpK+9S51YPsUHLcM=
-github.com/code19m/taskmill v0.14.0/go.mod h1:uAS79KxVMrkZsaTzwd/2qwVi8CoukRZ2QSPPO8oRMxo=
+github.com/code19m/taskmill v0.15.0 h1:GoUVd5tkqgNSWyfAKehhqvFnpxIJCzbp98Cjx9FOq7c=
+github.com/code19m/taskmill v0.15.0/go.mod h1:uAS79KxVMrkZsaTzwd/2qwVi8CoukRZ2QSPPO8oRMxo=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
