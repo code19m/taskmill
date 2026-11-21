@@ -1049,3 +1049,33 @@ func (s *stuckHandler) check(t *testing.T, state taskmill.State) {
 	s.e.waitState(t, s.next, taskmill.StateCompleted)
 	s.e.wantState(t, s.stuck, state)
 }
+
+// A task keeps its last 20 errors: after 25 failed attempts, those of
+// attempts 6 to 25.
+func TestTaskKeepsItsLast20Errors(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			return errors.New("the partner is down")
+		}, nil),
+		NoMaintainer: true,
+	})
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 25})
+	for range 25 {
+		if _, err := w.RunTask(t.Context(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	info := e.get(t, id)
+	if info.State != taskmill.StateDead || len(info.Errors) != 20 {
+		t.Fatalf("got %s with %d errors, want dead with 20", info.State, len(info.Errors))
+	}
+	for i, err := range info.Errors {
+		if err.Attempt != 6+i {
+			t.Fatalf("error %d is of attempt %d, want %d", i, err.Attempt, 6+i)
+		}
+	}
+}

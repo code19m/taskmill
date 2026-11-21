@@ -1156,3 +1156,29 @@ func TestEnqueueTxReturnsTheFailedReadOfADuplicate(t *testing.T) {
 		t.Fatalf("got %+v, %v; want the error of the read", res, err)
 	}
 }
+
+// A call with no tasks does nothing: it stores nothing and runs no enqueue
+// middleware, which may expect at least one task.
+func TestEnqueueOfNoTasksDoesNothing(t *testing.T) {
+	t.Parallel()
+	called := false
+	atLeastOne := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		called = true
+		if len(tasks) == 0 {
+			return errors.New("no tasks")
+		}
+		return next(ctx)
+	}
+	e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{atLeastOne}})
+
+	if res, err := e.client.EnqueueMany(t.Context(), nil); res != nil || err != nil {
+		t.Fatalf("EnqueueMany: got %v, %v; want nothing", res, err)
+	}
+	tx := e.begin(t)
+	if res, err := e.client.EnqueueManyTx(t.Context(), taskmill.Pgx(tx), []taskmill.EnqueueParams{}); res != nil || err != nil {
+		t.Fatalf("EnqueueManyTx: got %v, %v; want nothing", res, err)
+	}
+	if called {
+		t.Fatal("the middleware ran for no tasks")
+	}
+}

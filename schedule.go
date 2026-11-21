@@ -26,8 +26,9 @@ import (
 // all workers. Define the same schedules on every worker that takes part in
 // the maintainer election: the elected maintainer runs its own definitions.
 // It compares them with those of the other workers, by name and by
-// definition, and logs an error when they keep differing for longer than a
-// rolling deploy takes: the [schedules guide] says when. A definition is all
+// definition, once a minute. It logs an error when they have differed for
+// 10 minutes, longer than a rolling deploy takes, again at most once an hour
+// while they differ, and a line when they match again. A definition is all
 // that decides when a run happens and which task it enqueues, except the
 // metadata, so args that hold a value of each process, such as the time
 // that the worker started, count as a difference. If it defines any,
@@ -36,8 +37,9 @@ import (
 // keeps its state, such as a pause: a rolling deploy or a rollback in which
 // some workers do not define it loses nothing.
 //
-// Runs that are missed while no maintainer runs, or while the schedule is
-// paused, collapse into one run, for the first time that was missed. Each
+// The maintainer enqueues each run within about a second of its time. Runs
+// that are missed while no maintainer runs, or while the schedule is paused,
+// collapse into one run, for the first time that was missed. Each
 // run's task carries the schedule's name and the time the run is for in its
 // metadata; see [MetadataSchedule]. In a handler, read that time with
 // [TaskInfo.ScheduledFor]: the task's RunAt is that time only until the
