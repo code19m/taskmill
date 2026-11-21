@@ -47,58 +47,43 @@ error fails the run.
 
 ## Latest results
 
-> [!NOTE]
-> **Placeholder:** the first run on the reference runner replaces this note
-> and the laptop run below: its date, commit, machine, and every result.
+The [Benchmarks workflow](../../.github/workflows/bench.yml) ran on the
+reference runner on 21 November 2026, on commit `1d1f779`, the code that
+v0.15.0 releases
+([run 44906576337](https://github.com/code19m/taskmill/actions/runs/44906576337)).
+Its machine: 4 × Intel Xeon 6975P-C, 15.3 GiB of memory, PostgreSQL 18.6.
+No run on the target hardware exists yet.
 
-No run on the target hardware exists yet. These laptop runs, of October
-2026 and of November for E5, show the shape of the results, not the target
-hardware's numbers. Only E5 was measured after the latest statement changes.
-
-- **Machine:** Apple M5, 10 cores, 16 GiB, shared with other work.
-  Throughput moved by up to half between runs.
-- **Database:** PostgreSQL 18.6 in Docker Desktop (6 CPUs, 6 GiB), started
-  as in [Running the benchmarks](#running-the-benchmarks). Docker on macOS
-  makes `fsync` cheaper than real disks do, so numbers that depend on
-  commits are higher than on a server.
-- **Shorter runs:** enqueue and latency scenarios ran for 10 seconds, backlog
-  drains for 200,000 tasks, end-to-end runs for 60 seconds after a 30-second
-  warm-up, and the soak (E3) for 1 hour. Throughput and L1 to L3 are the
-  median of three runs.
-
-**Where this run misses:** T1, T3 end to end, S2 (just, in one of two
-runs), and S3 at 1,000 tasks a second.
+**Where this run misses:** T1, T3 end to end, and S3. The targets are for
+the target hardware, where the database has 8 CPUs of its own; here it
+shares 4 with the benchmark. S3 misses because of a design cost.
 
 ### Throughput
 
 | ID | Target | Result |
 |---|---|---|
-| T1 | Enqueue one task per transaction, 16 producers: ≥ 15,000 tasks/s | 8,460 tasks/s; 8,015 to 16,379 across runs: below target in two runs of three, see below |
-| T2 | Enqueue in batches of 100, 8 producers: ≥ 150,000 tasks/s | 189,110 tasks/s; 175,120 to 366,130 |
-| T3 | End to end: enqueue, fetch, run, complete, history kept: ≥ 20,000 tasks/s | 16,879 tasks/s end to end, sustained: below target on this laptop. One worker with concurrency 64 draining 200,000 queued tasks: 31,382 tasks/s |
-| T4 | T3 with FIFO groups, 100,000 keys: ≥ 5,000 tasks/s | One worker with concurrency 64 draining 200,000 tasks in 100,000 groups: 25,769 tasks/s |
-| T5 | Outbox relay with a batch publisher, 10,000 keys: ≥ 10,000 messages/s | One relay worker with concurrency 8 draining 200,000 messages on 10,000 keys: 26,818 messages/s |
+| T1 | Enqueue one task per transaction, 16 producers: ≥ 15,000 tasks/s | 10,651 tasks/s: below target |
+| T2 | Enqueue in batches of 100, 8 producers: ≥ 150,000 tasks/s | 151,153 tasks/s |
+| T3 | End to end: enqueue, fetch, run, complete, history kept: ≥ 20,000 tasks/s | 16,291 tasks/s end to end, sustained: below target. One worker with concurrency 64 draining 200,000 queued tasks: 26,320 tasks/s |
+| T4 | T3 with FIFO groups, 100,000 keys: ≥ 5,000 tasks/s | One worker with concurrency 64 draining 200,000 tasks in 100,000 groups: 18,770 tasks/s |
+| T5 | Outbox relay with a batch publisher, 10,000 keys: ≥ 10,000 messages/s | One relay worker with concurrency 8 draining 200,000 messages on 10,000 keys: 20,466 messages/s |
 
-- **T1 is limited by the network path, not by taskmill.** Each enqueue is
-  one round trip, so 16 producers do at most 16 per round-trip time: a bare
-  one-row `INSERT` from 16 goroutines reaches about 15,500 per second on the
-  same connection. The one quiet run of the three reached 16,379 tasks/s.
+- **T1 commits each task on its own:** one round trip and one durable
+  commit per task, where T2 has one for 100 tasks.
 - **T3 end to end** ran 8 producers enqueueing batches of 100, holding back
-  while 20,000 tasks waited, beside 2 workers with concurrency 64. 4 workers
-  with concurrency 16 batch less: 15,536 tasks/s, 0.58 statements per task.
-- **A backlog drains slower as it goes,** and taskmill, not the laptop,
-  causes it. Each fetch reads the queue's entries in `tasks_fetch_idx` from
-  the front, where fetched tasks' entries stay, marked dead, until
-  autovacuum removes them.
+  while 20,000 tasks waited, beside 2 workers with concurrency 64.
+- **A backlog drains slower as it goes.** Each fetch reads the queue's
+  entries in `tasks_fetch_idx` from the front, where fetched tasks' entries
+  stay, marked dead, until autovacuum removes them.
 
 ### Latency
 
 | ID | Target | Result |
 |---|---|---|
-| L1 | Pickup latency of an idle worker, from enqueue commit to handler start: p50 ≤ 5 ms, p99 ≤ 20 ms | p50 4.5 ms, p99 10 ms |
-| L2 | Pickup latency at half of T3's throughput: p99 ≤ 100 ms | p50 19 ms, p99 44 ms, at 10,000 tasks/s |
-| L3 | `Enqueue` call latency, one task, no load: p99 ≤ 5 ms | p50 0.4 ms, p99 0.5 ms |
-| L4 | Start of a scheduled task after its run time: p99 ≤ 1.5 s | p50 37 ms, p99 426 ms, max 1.0 s, over 3,601 starts |
+| L1 | Pickup latency of an idle worker, from enqueue commit to handler start: p50 ≤ 5 ms, p99 ≤ 20 ms | p50 1.6 ms, p99 2.6 ms, max 5.6 ms, over 591 tasks |
+| L2 | Pickup latency at half of T3's throughput: p99 ≤ 100 ms | p50 16.4 ms, p99 46.7 ms, max 67 ms, at 10,000 tasks/s |
+| L3 | `Enqueue` call latency, one task, no load: p99 ≤ 5 ms | p50 0.3 ms, p99 0.4 ms, max 2 ms |
+| L4 | Start of a scheduled task after its run time: p99 ≤ 1.5 s | p50 37.8 ms, p99 320.1 ms, max 1.0 s, over 3,601 starts |
 | L5 | A killed worker's task running again: ≤ lease duration + 2.5 s | 5.06 s with a 3 s lease: the lease + 2.06 s |
 | L6 | `Worker.Run` returning after its context is canceled: ≤ drain timeout + 6 s | 7.01 s with a 2 s drain timeout and handlers that ignore their contexts: the drain timeout + 5.01 s |
 
@@ -117,13 +102,12 @@ runs), and S3 at 1,000 tasks a second.
 
 | ID | Target | Result |
 |---|---|---|
-| S1 | T3 with 10 million scheduled and 1 million available tasks waiting: within 20% of T3 | Two runs: 14,869 tasks/s against 17,164 without them, 87%; and 16,257 against 18,539, 88%: pass |
-| S2 | T3 with 100,000 FIFO groups holding pending tasks in another queue: within 10% of T3 | Two runs: 12,522 tasks/s against 17,164, 73%; and 16,671 against 18,539, 89.9%: just below target here |
-| S3 | 100 queues read by 50 worker processes: maintainer cycle under 1 s | At 1,000 tasks/s, three runs on a busy laptop: slowest loop 1.23 to 2.12 s: fails, see below. Idle first: 153 transactions/s on average, 456 to 464 in the busiest 10 seconds |
+| S1 | T3 with 10 million scheduled and 1 million available tasks waiting: within 20% of T3 | 15,589 tasks/s against 16,814 without them, 93%: pass |
+| S2 | T3 with 100,000 FIFO groups holding pending tasks in another queue: within 10% of T3 | 15,684 tasks/s against 16,814, 93%: pass |
+| S3 | 100 queues read by 50 worker processes: maintainer cycle under 1 s | At 1,000 tasks/s, slowest iteration of each loop: statistics 3.25 s, promotion 1.38 s, wake 1.03 s, main 0.75 s: fails, see below. Idle first: 148 transactions/s on average, 457 in the busiest 10 seconds |
 
 - **S1 and S2** compare T3 end to end with and without the waiting tasks,
-  which were vacuumed, analyzed, and on disk first. Runs here move by up to
-  a fifth (T3 alone: 17,164 to 20,859 tasks/s).
+  which were vacuumed, analyzed, and checkpointed first.
 - **S1 and S2 catch bad plans.** With millions of tasks waiting, statistics
   can make a bad plan look cheap. They caught two such bugs, both fixed (see
   the [changelog](../../CHANGELOG.md)): promotion of due tasks must use its
@@ -138,20 +122,21 @@ runs), and S3 at 1,000 tasks a second.
 - **S3 fails at 1,000 tasks a second, because of a design cost:** a
   notification wakes every worker of its queue
   ([why](schema-maintenance.md#notifications)). Each notification makes 50
-  processes fetch, and all but one find nothing. That uses the database's
-  4 CPUs, and the slowest loop takes 1.2 to 2.1 seconds (load average 83).
+  processes fetch, and all but one find nothing. The database shares the
+  runner's 4 CPUs with those processes, and the maintainer's slowest
+  statements took 1.4 to 2.1 s: promotion, statistics, and storing activity.
 
 ### Resource use
 
 | ID | Target | Result |
 |---|---|---|
 | E1 | SQL statements per task under load, ungrouped: ≤ 3 | 0.13 while one worker drains a backlog; 0.16 end to end, enqueues included |
-| E2 | WAL written per task, history kept: ≤ 2 KiB | 0.81 KiB from fetch to history, without the history's [index of creation time](schema-creation-order.md#what-the-creation-order-costs), which was measured apart: 0.11 KiB more |
-| E3 | `tasks` heap and index size during a 4-hour run at half of T3: within 2× of their size after the first hour | 36 million tasks in 1 hour at 10,000 tasks/s, none left waiting, completed tasks discarded (the table sees the same writes): heap 167 MiB throughout, indexes 88 to 116 MiB; at most 283 MiB, 1.06× its size after 15 minutes: pass |
+| E2 | WAL written per task, history kept: ≤ 2 KiB | 0.99 KiB from fetch to history |
+| E3 | `tasks` heap and index size during a 4-hour run at half of T3: within 2× of their size after the first hour | Not in this run, which skips the soak. A 1-hour laptop run in October 2026, before the latest statement changes: 36 million tasks at 10,000 tasks/s, none left waiting, completed tasks discarded (the table sees the same writes): heap 167 MiB throughout, indexes 88 to 116 MiB; at most 283 MiB, 1.06× its size after 15 minutes: pass |
 | E4 | Database connections: a client uses its pool only; a worker, its pool plus one `LISTEN` connection | A client with a pool of 8 used at most 8; a worker with a pool of 8 and concurrency 64, at most 9, one of them listening: pass |
-| E5 | Worker memory: idle ≤ 30 MiB RSS; ≤ 13 KiB per running task | The benchmark program, a little bigger than a worker, on macOS: 19.8 MiB idle; 11.9 KiB per running task, with 10,000 handlers waiting, the median of three runs: pass |
-| E6 | An idle worker's load: while the maintainer's heartbeats arrive, about one fetch per queue per minute, plus updates of the worker's own row; while they do not, one fetch per queue per poll interval | Heartbeats arriving, 10 queues for 3 minutes: 90 fetches, 9.0 per queue, of which up to 7 before the first heartbeat; 17 updates of the worker's own row; 29 other statements: pass |
-| E7 | The database's CPU for heartbeats when several schemas share a database (no target) | 500 connections listening: 0.24 CPUs at 20 heartbeats a second, what 100 schemas send, and 1.11 CPUs at 100 a second; about 24 µs per heartbeat per listening connection |
+| E5 | Worker memory: idle ≤ 30 MiB RSS; ≤ 13 KiB per running task | The benchmark program, a little bigger than a worker: 15.4 MiB idle; 11.7 KiB per running task, with 10,000 handlers waiting: pass |
+| E6 | An idle worker's load: while the maintainer's heartbeats arrive, about one fetch per queue per minute, plus updates of the worker's own row; while they do not, one fetch per queue per poll interval | Heartbeats arriving, 10 queues for 1 minute: 70 fetches, 7.0 per queue, of which up to 7 before the first heartbeat; 5 updates of the worker's own row; 20 other statements: pass |
+| E7 | The database's CPU for heartbeats when several schemas share a database (no target) | 500 connections listening: 0.15 CPUs at 20 heartbeats a second, what 100 schemas send, and 0.62 CPUs at 100 a second; about 14.9 µs per heartbeat per listening connection |
 
 - **E1 counts every statement,** with a fetch's `BEGIN`, settings, and
   `COMMIT` ([Fetch](schema-statements.md#fetch)). End to end, batches are smaller.
@@ -160,7 +145,7 @@ runs), and S3 at 1,000 tasks a second.
 - **E5 measures what a task holds:** the process frees its garbage before
   three samples, and the median counts: 8 KiB of a handler's stack after a
   database call, about 3 KiB of taskmill's, 1 KiB of the runtime's, and 1 KiB
-  of room. The October code measures about 11.5 KiB so, not its old 7.9 KiB.
+  of room.
 - **E6** measured a worker with `NoMaintainer`. Each queue fetches at start,
   when the notification connection starts, and every second until the first
   heartbeat (within 5 seconds); then once a minute, ± 6 seconds.
@@ -178,19 +163,20 @@ whose worker died before it reported.
 |---|---|---|
 | F1 | 1 million tasks while a random worker is killed every 10 s: every task completes; none is lost or stuck | 60,000 completed, 0 left: pass |
 | F2 | F1: every task appears exactly once in history | 60,000 distinct of 60,000: pass |
-| F3 | F1: extra handler calls ≤ kills × worker concurrency | 417 extra, bound 976: pass |
-| F4 | 10,000 FIFO groups of 100 tasks, 5% of attempts failing: no handler sees a task before the one ahead of it; nothing after a dead head runs | 1 million tasks: 0 calls before the task ahead completed, 0 after their own, 0 past a dead head; 993,523 completed, none twice; 137 dead heads, 6,340 tasks waiting behind them; each task accounted for, 0 lost; groups exact: pass |
-| F5 | 1 million enqueues of 100,000 dedupe keys from 20 processes at the same time: exactly 100,000 tasks | 100,000 tasks in 16 s; 100,000 enqueues reported a new task, 0 results named another task; no producer saw an error; FIFO groups, on every fifth key, exact: pass |
-| F6 | PostgreSQL restarted during a run: workers resume within 10 s; no task lost | Shut down cleanly: back after 0.7 s, and a task fetched after it completed 0.17 s later. Crashed and down for 15 s, longer than the maintainer's lease: 0.41 s after it was back. 60,000 completed once, 0 left: pass |
-| F7 | A worker cut off from the database for longer than its lease: its late result is rejected; the task completes once | 0 of 16 tasks completed by the cut worker's stale attempts; 116 completed once, 0 left; the cut worker ran new tasks on its own: pass |
+| F3 | F1: extra handler calls ≤ kills × worker concurrency | 410 extra, bound 2,144: pass |
+| F4 | 10,000 FIFO groups of 100 tasks, 5% of attempts failing: no handler sees a task before the one ahead of it; nothing after a dead head runs | 1 million tasks: 0 calls before the task ahead completed, 0 after their own, 0 past a dead head; 992,020 completed, none twice; 153 dead heads, 7,827 tasks waiting behind them; each task accounted for, 0 lost; groups exact: pass |
+| F5 | 1 million enqueues of 100,000 dedupe keys from 20 processes at the same time: exactly 100,000 tasks | 100,000 tasks in 36 s; 100,000 enqueues reported a new task, 0 results named another task; no producer saw an error; FIFO groups, on every fifth key, exact: pass |
+| F6 | PostgreSQL restarted during a run: workers resume within 10 s; no task lost | Shut down cleanly: back after 0.8 s, and workers resumed 0.23 s later. Crashed and down for 15 s, longer than the maintainer's lease: back after 15.5 s, and workers resumed 1.7 s later. 60,000 completed once, 0 left, 0 extra calls: pass |
+| F7 | A worker cut off from the database for longer than its lease: its late result is rejected; the task completes once | 0 of 16 tasks completed by the cut worker's stale attempts; 116 completed once, 0 left; the cut worker ran 100 new tasks on its own in 20 ms: pass |
 | F8 | The integration suite behind PgBouncer in transaction mode: passes, with `LISTEN` on a direct connection | Every test passes through PgBouncer 1.25.2; CI checks it on every pull request: pass |
-| F9 | Application servers' clocks 5 minutes off: no early or late starts beyond L4 | Database clock 5 minutes ahead: 0 early starts, p99 432 ms late, 0 leases lost. 5 minutes behind: 0 early, p99 677 ms, 0 leases lost: pass |
+| F9 | Application servers' clocks 5 minutes off: no early or late starts beyond L4 | Not in this run: the database's clock agreed with the runner's. The [Faults workflow](../../.github/workflows/faults.yml) on the same code ([run 44906006554](https://github.com/code19m/taskmill/actions/runs/44906006554)), database clock 5 minutes ahead: 0 early starts, p99 812.9 ms late, 0 leases lost. 5 minutes behind: 0 early, p99 632.8 ms, 0 leases lost: pass |
 
 - **F1 to F3** ran 60,000 tasks on 4 worker processes with concurrency 16,
-  and killed one with `SIGKILL` every second, ten times as often as the
-  target. The extra calls are the at-least-once guarantee at work.
-- **F4** also killed a worker process every 2 seconds (93 kills, beside
-  52,283 failed attempts), and allowed 3 attempts, so some
+  and killed one with `SIGKILL` every second (134 kills), ten times as
+  often as the target. The extra calls are the at-least-once guarantee at
+  work.
+- **F4** also killed a worker process every 2 seconds (94 kills, beside
+  52,282 failed attempts), and allowed 3 attempts, so some
   [heads](../concepts/glossary.md#head) (a group's first task) died and
   halted their groups. Each task is checked to have completed once, to be a
   dead head, or to wait behind one.

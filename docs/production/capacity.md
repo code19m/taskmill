@@ -53,7 +53,7 @@ in the same page, which costs less. The history fills its pages.
 |---|---|---|
 | The history table | Completed tasks, for `HistoryRetention` (7 days) plus up to 1 day | Completed tasks per day × 8 days × the size of a task |
 | The `tasks` table | Tasks that wait or run. Dead and canceled tasks stay for `DeadRetention` (30 days) | Your largest backlog × the size of a task |
-| The write-ahead log (WAL) | Every change, until PostgreSQL archives or recycles it | About 0.9 KiB per task from fetch to history, with a small payload. The enqueue and larger payloads add to it |
+| The write-ahead log (WAL) | Every change, until PostgreSQL archives or recycles it | About 1 KiB per task from fetch to history, with a small payload. The enqueue and larger payloads add to it |
 
 For example, 1 million tasks a day at 390 bytes need about 3.1 GB of
 history: 1,000,000 × 8 × 390 bytes.
@@ -86,13 +86,13 @@ stops while a worker runs. Plan for a compute that stays on.
 
 When many schemas share one database, PostgreSQL wakes every listening
 connection for each notification. 100 schemas with 500 workers cost the
-database about a quarter of a CPU
-([Performance](../reference/performance.md#resource-use)).
+database about 0.15 of a CPU
+([benchmarks](../design/benchmarks.md#resource-use)).
 
 ## Know the limits of these numbers
 
-The sizes and speeds on this page come from runs on a laptop, with small
-payloads and handlers that do nothing
+The sizes and speeds on this page come from benchmark runs on 4 CPUs
+shared with the database, with small payloads and handlers that do nothing
 ([Performance](../reference/performance.md#where-the-numbers-come-from)).
 Use them to choose a starting size. Then watch lag, the database's CPU, and
 its disk, and correct the size.

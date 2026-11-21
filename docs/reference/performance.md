@@ -6,19 +6,16 @@ have every target, the method, and how to run them yourself.
 
 ## Where the numbers come from
 
-All numbers below come from one run on a laptop, not on server hardware:
+The numbers below come from runs of v0.15.0's code on GitHub's standard
+runner, not on server hardware
+([the latest results](../design/benchmarks.md#latest-results)):
 
-- **Machine:** an Apple M5 laptop, with 10 cores and 16 GiB of memory. Other
-  work ran on it at the same time, so results moved by up to half between
-  runs.
-- **Database:** PostgreSQL 18 in Docker, limited to 4 CPUs, with
-  `shared_buffers = 1GB`. Docker on macOS makes disk syncs cheaper than real
-  disks do, so numbers bound by commits are higher than on a server.
-- **Runs:** shorter than the targets ask: 60 seconds end to end instead of
-  10 minutes, and a 1-hour soak instead of 4 hours. Handlers do nothing.
-- **Age:** the run is older than the latest changes to the statements that
-  fetch tasks, complete them, and renew leases. No number below was
-  measured again after those changes.
+- **Machine:** 4 CPUs (Intel Xeon 6975P-C) and 15.3 GiB of memory, shared
+  by the database and the benchmark.
+- **Database:** PostgreSQL 18.6 in Docker, on the same machine, with
+  `shared_buffers = 1GB`.
+- **Runs:** shorter than the targets ask: 1 minute instead of 10, and one
+  run instead of three. Handlers do nothing.
 
 Read them as rough sizes, not as a promise for your hardware.
 
@@ -26,21 +23,21 @@ Read them as rough sizes, not as a promise for your hardware.
 
 | Scenario | Result |
 |---|---|
-| One worker, with `Concurrency` 64, drains a backlog | About 30,000 tasks a second |
-| The same, with tasks in 100,000 FIFO groups | About 26,000 tasks a second |
-| End to end: [producers](../concepts/glossary.md#producer) enqueue, 2 workers run and complete, history kept | About 17,000 tasks a second |
-| One outbox relay publishes messages on 10,000 keys | About 27,000 messages a second |
-| `EnqueueMany` in batches of 100, 8 producers | About 190,000 tasks a second |
-| `Enqueue`, one task per transaction, 16 producers | 8,000 to 16,000 tasks a second, limited by database round trips |
+| One worker, with `Concurrency` 64, drains a backlog | About 26,000 tasks a second |
+| The same, with tasks in 100,000 FIFO groups | About 19,000 tasks a second |
+| End to end: [producers](../concepts/glossary.md#producer) enqueue, 2 workers run and complete, history kept | About 16,000 tasks a second |
+| One outbox relay publishes messages on 10,000 keys | About 20,000 messages a second |
+| `EnqueueMany` in batches of 100, 8 producers | About 150,000 tasks a second |
+| `Enqueue`, one task per transaction, 16 producers | About 11,000 tasks a second: each task is a round trip and a commit |
 
 ## Latency
 
 | Scenario | Result |
 |---|---|
-| An idle worker starts a new task | About 5 ms after the commit (p99: 10 ms) |
-| The same, at 10,000 tasks a second | p99: about 45 ms |
-| An `Enqueue` call, one task | p99: 0.5 ms |
-| A delayed task, retry, or schedule run starts after its time | p99: about 0.4 s; at most 1 s |
+| An idle worker starts a new task | About 2 ms after the commit (p99: 3 ms) |
+| The same, at 10,000 tasks a second | p99: about 47 ms |
+| An `Enqueue` call, one task | p99: 0.4 ms |
+| A delayed task, retry, or schedule run starts after its time | p99: about 0.3 s; at most 1 s |
 | A killed worker's task runs again | After the [lease](../concepts/glossary.md#lease), plus about 2 seconds |
 | `Worker.Run` returns when its handlers ignore shutdown | After `DrainTimeout`, plus about 5 seconds |
 
@@ -49,12 +46,12 @@ Read them as rough sizes, not as a promise for your hardware.
 | What | Result |
 |---|---|
 | SQL statements per task, end to end | About 0.16: fetches and completions serve many tasks each |
-| WAL written per task, from fetch to history | About 0.9 KiB |
-| Size of the `tasks` table during an hour at 10,000 tasks a second | At the end, at most 6% bigger than after 15 minutes |
-| Worker memory | About 20 MiB idle, plus about 12 KiB per running task, of which 8 KiB is the stack of a handler that called the database |
+| WAL written per task, from fetch to history | About 1 KiB |
+| Size of the `tasks` table during an hour at 10,000 tasks a second | At the end, at most 6% bigger than after 15 minutes, in a laptop run of older code |
+| Worker memory | About 15 MiB idle, plus about 12 KiB per running task, of which 8 KiB is the stack of a handler that called the database |
 | Database connections | A client uses its pool. A worker uses its pool, plus 1 connection for notifications |
 | An idle worker | About one fetch per queue per minute, plus a few small queries |
-| Many schemas in one database | 100 schemas with 500 workers cost the database about a quarter of a CPU, for the [heartbeats](../concepts/glossary.md#heartbeat) of the [maintainers](../concepts/glossary.md#maintainer) |
+| Many schemas in one database | 100 schemas with 500 workers cost the database about 0.15 of a CPU, for the [heartbeats](../concepts/glossary.md#heartbeat) of the [maintainers](../concepts/glossary.md#maintainer) |
 
 ## Reliability under faults
 
@@ -67,8 +64,8 @@ Every fault test passed. Each one fails on a single lost or repeated task:
 - **FIFO groups** with failing attempts and killed workers: no task ran
   before the one ahead of it, and nothing ran past a dead task.
 - **Dedupe keys** raced by 20 processes: exactly one task per key.
-- **PostgreSQL restarted**, cleanly or killed: workers resumed within a
-  second of its return, and no task was lost.
+- **PostgreSQL restarted**, cleanly or killed: workers resumed within 2
+  seconds of its return, and no task was lost.
 - **A worker that lost its connection to the database** for longer than its
   lease: none of its late results counted, and every task completed once.
 - **PgBouncer** in transaction mode: every test passes, and CI checks it on
@@ -78,24 +75,24 @@ Every fault test passed. Each one fails on a single lost or repeated task:
 
 ## Honest limits
 
-- **No server run yet.** The targets are set for an 8-CPU database server.
-  These numbers come from a shared laptop.
-- **The laptop run does not reach four targets.** Three of them need a run
-  on server hardware. They are enqueueing one task per transaction,
-  end-to-end throughput, and throughput while 100,000 FIFO groups wait in
-  another queue. The last one reached 73% to 90% of normal, against a
-  target of 90%.
-- **The fourth is a real cost: many small workers on one queue.** The test
+- **No server run yet.** The targets are set for a database server with 8
+  CPUs of its own. In these runs, the database shared 4 CPUs with the
+  benchmark.
+- **These runs miss three targets.** Enqueueing one task per transaction
+  reached about 11,000 tasks a second, against 15,000, and end-to-end
+  throughput about 16,000, against 20,000. Only a run on that server can
+  judge these two.
+- **The third is a real cost: many small workers on one queue.** The test
   ran 50 worker processes that each read the same 100 queues, at 1,000
-  tasks a second. The maintainer's work then took 1.2 to 2.1 seconds a
-  round, against a target of 1. Each new task wakes every worker of its
-  queue, and all but one find nothing.
+  tasks a second. The slowest round of the maintainer's work then took
+  3.2 seconds, against a target of 1. Each new task wakes every worker of
+  its queue, and all but one find nothing.
 
 ## What this means for you
 
 | You want to… | Do this | Why |
 |---|---|---|
-| Enqueue thousands of tasks | `EnqueueMany`, in batches of 100 or more | About 20 times faster than one task per call |
+| Enqueue thousands of tasks | `EnqueueMany`, in batches of 100 or more | About 14 times faster than one task per call |
 | Run more tasks of a busy queue | Raise `Concurrency` on fewer workers, before you add many small ones | Every new task wakes every worker of its queue |
 | Keep fetches fast over hours | Keep long transactions away from the database | They stop vacuum, and fetches slow down. See [Database](../production/database.md) |
 

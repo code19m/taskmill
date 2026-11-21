@@ -99,8 +99,8 @@ flowchart LR
 **10. Round numbers in prose,** and link to the exact value: the identifier on
 pkg.go.dev, or [Fixed timings and limits](../reference/defaults-and-limits.md).
 Contributor pages, such as [Benchmarks](benchmarks.md), keep exact numbers.
-- Before: "One worker drained a backlog at over 31,000 tasks per second…"
-- After: "One worker runs about 30,000 tasks a second on a laptop."
+- Before: "One worker drained a backlog at 26,320 tasks per second…"
+- After: "One worker runs about 26,000 tasks a second on 4 CPUs."
 
 **11. Put rare edge cases in godoc,** and link the identifier on pkg.go.dev,
 as `https://pkg.go.dev/github.com/code19m/taskmill#ErrInvalidArgument`.

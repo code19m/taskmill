@@ -85,6 +85,11 @@ All notable changes to taskmill are recorded here. The format follows
   tasks once a worker made it dead. The rest of the dashboard works, and the guards that keep such a row
   from stopping a queue, the rescue, the statistics, or the election stay:
   [Rows that taskmill did not write](docs/design/schema-rows.md).
+- [Benchmarks](docs/design/benchmarks.md#latest-results) report a run of
+  this release's code on the reference runner, GitHub's standard runner
+  with 4 CPUs, in place of laptop runs of older code. The docs that quote a
+  speed, such as [Performance](docs/reference/performance.md), quote this
+  run. It misses three targets: T1, T3 end to end, and S3.
 
 ### Fixed
 
