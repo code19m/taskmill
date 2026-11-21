@@ -423,6 +423,7 @@ func ExampleMigrations() {
 	// 0006_refused_rows
 	// 0007_created_order
 	// 0008_worker_schedules
+	// 0009_group_heads
 }
 
 // This example retries every dead task of one queue, once the cause of their

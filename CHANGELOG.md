@@ -95,6 +95,13 @@ All notable changes to taskmill are recorded here. The format follows
   all, as `BulkResult.Changed` promises. It took up to 1,000 of each.
 - An error about a name that is too long quotes only its start: it quoted
   the whole value, of any size.
+- A list of a FIFO group's tasks that are not pending, as the dashboard's
+  page of a pending task reads to show the task that it waits behind,
+  reads the group's head alone. It read every task of the queue: 70 to 120
+  ms on a queue of 126,000 tasks, at each update of the page. Migration 9
+  adds the index of the heads: while it builds, writes wait about a tenth
+  of a second for each million tasks, and each grouped task then writes
+  about 170 bytes more WAL. Ungrouped tasks write nothing more.
 - Docs that were wrong or unclear. Retried tasks run before new work, as
   [Recover from an incident](docs/recipes/recover-from-an-incident.md) now
   says. The order of a list and what a page reads are in the doc comment of

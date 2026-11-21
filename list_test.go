@@ -123,6 +123,41 @@ func TestErrorsQuoteOnlyTheStartOfALongName(t *testing.T) {
 	}
 }
 
+// The dashboard's page of a pending task shows the task that it waits
+// behind: its group's head, the one task of the group that is neither
+// pending nor canceled. The list that finds it reads the head alone, however
+// many tasks its queue holds.
+func TestListFindsTheHeadOfAGroupAlone(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'q', 'email.send', 'available', now(), '{}', 3 FROM generate_series(1, 20000)`)
+	head := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "q", GroupKey: "g"})
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'q', 'email.send', 'available', now(), '{}', 3 FROM generate_series(1, 20000)`)
+	for range 10 {
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "q", GroupKey: "g"})
+	}
+	e.exec(t, "ANALYZE {s}.tasks")
+
+	params := &taskmill.ListParams{Filter: taskmill.TaskFilter{
+		Queues: []string{"q"}, GroupKeys: []string{"g"}, States: []taskmill.State{
+			taskmill.StateScheduled, taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateRetryable, taskmill.StateDead,
+		},
+	}, Limit: 1, Summary: true}
+	page, err := e.client.List(t.Context(), params)
+	if err != nil || len(page.Tasks) != 1 || page.Tasks[0].ID != head {
+		t.Fatalf("got %+v, %v; want the head, task %d", page, err, head)
+	}
+	read, err := taskmill.ListRowsRead(t.Context(), e.client, params, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read > 5 {
+		t.Fatalf("finding the head read %d rows", read)
+	}
+}
+
 func TestListPagesNewestFirst(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
