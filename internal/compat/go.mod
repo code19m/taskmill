@@ -3,7 +3,7 @@ module github.com/code19m/taskmill/internal/compat
 go 1.26.0
 
 require (
-	github.com/code19m/taskmill v0.13.0
+	github.com/code19m/taskmill v0.14.0
 	github.com/jackc/pgx/v5 v5.13.0
 )
 
