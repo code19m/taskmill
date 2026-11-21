@@ -1,11 +1,11 @@
 # Operator actions
 
 This page explains the statements that retry, cancel, and delete tasks: one
-task, or every task that matches a filter. The operations API and the
-dashboard run them. [Lists and counts](schema-lists.md) has the statements
-that read tasks, [Key statements](schema-statements.md) has those that
-workers run, and [`sql_operations.go`](../../sql_operations.go) has the
-exact text.
+task, or every task that matches a filter, and those that change a queue's
+settings. The operations API and the dashboard run them.
+[Lists and counts](schema-lists.md) has the statements that read tasks,
+[Key statements](schema-statements.md) has those that workers run, and
+[`sql_operations.go`](../../sql_operations.go) has the exact text.
 
 ## One task
 
@@ -150,6 +150,23 @@ takes none. Its retry leaves what a cancel of this release stored, on a
 task that runs on without its key. Only a canceled task takes a key back,
 so that task asks for none if it dies. After another cancel, a retry of
 this release takes the stored key back if it is free.
+
+## A queue's settings
+
+A row of `queues` holds the settings of one queue: `paused_at` and
+`max_running`. A queue without a row has the defaults: it runs, without a
+limit. `Client.Queues` lists every queue that has a row, besides those that
+hold tasks or that workers read. So a queue whose settings go back to their
+defaults loses its row: a pause or a limit that named a queue by mistake,
+and was undone, would list that queue for good.
+
+The delete runs after the change, in its transaction, which holds the row:
+a statement cannot change a row and delete it too. A concurrent change of
+the other setting waits for that transaction. Then it finds no row, and
+inserts one. A later release may add a setting in a column of its own,
+which this release does not know: the delete leaves a row in which any
+column but the known ones holds a value, so that a rolling deploy loses
+no setting.
 
 ## See also
 

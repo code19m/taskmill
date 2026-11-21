@@ -3,6 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"strconv"
@@ -198,21 +199,65 @@ func TestPanicAfterTheHandlerReturnedFailsTheAttempt(t *testing.T) {
 	}
 }
 
+// cardArgs is a payload whose decoding fails with an error that quotes it.
+type cardArgs struct{ Card string }
+
+func (cardArgs) Kind() string { return "card.charge" }
+
+func (*cardArgs) UnmarshalJSON(b []byte) error { return fmt.Errorf("not a card: %s", b) }
+
+// scoreArgs is a payload with a map, whose keys are values of the payload,
+// and a list of structs.
+type scoreArgs struct {
+	Scores map[string]int `json:"scores"`
+	Items  []struct {
+		Qty int `json:"qty"`
+	} `json:"items"`
+}
+
+func (scoreArgs) Kind() string { return "score.add" }
+
+// A payload that does not decode makes its task dead right away. The error
+// that says why is stored, logged, and set as a span's status, where a
+// payload must not appear: it names the field and the types, not the value
+// that encoding/json, or the application's UnmarshalJSON, quoted.
 func TestWorkerRejectsUndecodablePayload(t *testing.T) {
 	t.Parallel()
-	e := newEnv(t)
-	runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil),
-		Queues:   defaultQueue(1),
-	})
+	for _, c := range []struct {
+		name, kind, payload, says string
+	}{
+		{"wrong type", "email.send", `{"to": 4111111111111111}`, "the field to holds a JSON number, which does not fit string"},
+		{"number out of range", "email.send", `{"user_id": 41111111111111111111}`, "the field user_id holds a JSON number, which does not fit int64"},
+		{"rejected by the type", "card.charge", `{"Card": "4111111111111111"}`, "it does not decode into taskmill_test.cardArgs"},
+		{"wrong type under a key", "score.add", `{"scores": {"4111@example.com": "x"}}`, "the field scores[key] holds a JSON string, which does not fit int"},
+		{"wrong type in a list", "score.add", `{"items": [{"qty": "4111"}]}`, "the field items.qty holds a JSON string, which does not fit int"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			logs := &logRecorder{}
+			e := newEnv(t).withLogger(t, slog.New(logs))
+			hs := handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil)
+			taskmill.AddHandler(hs, taskmill.HandlerFunc[cardArgs](func(context.Context, *taskmill.Task[cardArgs]) error { return nil }), nil)
+			taskmill.AddHandler(hs, taskmill.HandlerFunc[scoreArgs](func(context.Context, *taskmill.Task[scoreArgs]) error { return nil }), nil)
+			runWorker(t, e, &taskmill.WorkerConfig{Handlers: hs, Queues: defaultQueue(1)})
 
-	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
-	           VALUES ('default', 'email.send', 'available', now(), '{"user_id": "not a number"}', 5)`)
-	id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
+			e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+			           VALUES ('default', $1, 'available', now(), $2, 5)`, c.kind, c.payload)
+			id := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
 
-	info := e.waitState(t, id, taskmill.StateDead)
-	if info.Attempt != 1 || info.Errors[0].Code != taskmill.CodeInvalidPayload {
-		t.Fatalf("got attempt %d, errors %+v", info.Attempt, info.Errors)
+			info := e.waitState(t, id, taskmill.StateDead)
+			if info.Attempt != 1 || info.Errors[0].Code != taskmill.CodeInvalidPayload || !strings.Contains(info.Errors[0].Message, c.says) {
+				t.Fatalf("got attempt %d, errors %+v; want one that says %q", info.Attempt, info.Errors, c.says)
+			}
+			for _, r := range logs.all() {
+				if line := recordText(r); strings.Contains(line, "4111") {
+					t.Errorf("a log line shows the payload: %s", line)
+				}
+			}
+			if strings.Contains(info.Errors[0].Message, "4111") {
+				t.Errorf("the error shows the payload: %s", info.Errors[0].Message)
+			}
+		})
 	}
 }
 
@@ -281,6 +326,33 @@ func TestWorkerSnoozesUnknownKinds(t *testing.T) {
 	}
 	if waited := info.Errors[1].At.Sub(info.Errors[0].At); waited < timeout {
 		t.Fatalf("gave up after %s, want at least %s", waited, timeout)
+	}
+}
+
+// A rolling deploy can leave many tasks of a new kind to the workers of the
+// old release. Each worker warns once a minute per kind, with how many
+// tasks began to wait, and logs each task at Debug.
+func TestTasksWithoutAHandlerWarnOncePerKind(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	const n = 200
+	for range n {
+		e.enqueue(t, report{}, &taskmill.EnqueueOptions{Queue: taskmill.DefaultQueue})
+	}
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(50)})
+	waitFor(t, "every task to wait", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE state = 'scheduled'") == n
+	})
+
+	warned := slices.DeleteFunc(logs.all(), func(r slog.Record) bool {
+		return r.Message != "no handler for task kind; its tasks wait for a worker that has one"
+	})
+	if len(warned) != 1 || warned[0].Level != slog.LevelWarn || attr(warned[0], "kind") != "report.build" {
+		t.Fatalf("got the warnings %v, want one for the kind", warned)
+	}
+	if got := logs.count("no handler for task kind; snoozing"); got != n {
+		t.Fatalf("got %d lines for the tasks, want %d", got, n)
 	}
 }
 

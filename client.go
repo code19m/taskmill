@@ -70,7 +70,8 @@ type ClientConfig struct {
 
 	// EnqueueMiddleware wraps every enqueue, in order: the first is the
 	// outermost. It can add metadata to tasks, for example to carry a trace
-	// context from the producer to the handler. Default: none.
+	// context from the producer to the handler. A nil entry is an error that
+	// wraps [ErrInvalidArgument]. Default: none.
 	EnqueueMiddleware []EnqueueMiddleware
 }
 
@@ -93,6 +94,9 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 	schema, err := validateSchema(cfg.Schema)
 	if err != nil {
 		return nil, err
+	}
+	if slices.ContainsFunc(cfg.EnqueueMiddleware, func(m EnqueueMiddleware) bool { return m == nil }) {
+		return nil, invalidArgument("an enqueue middleware is nil")
 	}
 	logger := cfg.Logger
 	if logger == nil {

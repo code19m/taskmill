@@ -152,6 +152,7 @@ type Worker struct {
 	completerDone chan struct{}     // closed when the current Run's completer returns
 
 	poolWarned atomic.Int64 // when renewing leases last warned that the pool was full, in Unix nanoseconds
+	noHandler  kindWarnings // the kinds without a handler whose tasks the worker met
 
 	// The failures of operations that the worker repeats, which it logs
 	// only now and then. Leases and results are renewed and recorded by
@@ -235,7 +236,7 @@ type WorkerConfig struct {
 	DrainTimeout time.Duration
 
 	// Middleware wraps every attempt, in order: the first is the outermost.
-	// Default: none.
+	// A nil entry is an error that wraps [ErrInvalidArgument]. Default: none.
 	Middleware []Middleware
 
 	// Schedules are recurring tasks that the maintainer enqueues. Each name
@@ -368,6 +369,9 @@ func resolveWorkerConfig(c *WorkerConfig) error {
 	}
 	if len(c.Queues) > 0 && len(kinds) == 0 {
 		return invalidArgument("a worker with queues needs handlers")
+	}
+	if slices.ContainsFunc(c.Middleware, func(m Middleware) bool { return m == nil }) {
+		return invalidArgument("a middleware is nil")
 	}
 
 	queues := make(map[string]QueueOptions)

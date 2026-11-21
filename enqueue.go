@@ -170,10 +170,11 @@ type EnqueueTask struct {
 // notifies the workers of a task that may start now, so a worker with a free
 // slot usually starts it within milliseconds.
 //
-// It returns an error that wraps [ErrInvalidArgument] for nil args, for an
-// option outside its limits, and for a payload that cannot be stored: [Args]
-// and [EnqueueOptions] have the rules. To enqueue in the same transaction as
-// the application's own writes, use [Client.EnqueueTx].
+// It returns an error that wraps [ErrInvalidArgument] for nil args, also a
+// nil pointer, for an option outside its limits, and for a payload that
+// cannot be stored: [Args] and [EnqueueOptions] have the rules. To enqueue
+// in the same transaction as the application's own writes, use
+// [Client.EnqueueTx].
 //
 // If PostgreSQL ends the transaction to end a deadlock, which other
 // transactions can open around a FIFO group's row or a dedupe key (SQLSTATE
@@ -563,7 +564,7 @@ func (t *resolvedTask) metadataCopy() map[string]string {
 // resolve merges a task's options over its kind's defaults and taskmill's,
 // and validates the result.
 func resolve(p EnqueueParams) (*resolvedTask, error) {
-	if p.Args == nil {
+	if noArgs(p.Args) {
 		return nil, invalidArgument("args is nil")
 	}
 	kind := p.Args.Kind()

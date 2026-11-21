@@ -217,15 +217,24 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 	}
 }
 
-func TestStoreRejectsMessagesWithoutTopic(t *testing.T) {
+// A topic and the names of headers are stored as text: bytes that are not
+// UTF-8 would turn into U+FFFD, so that two topics would become one.
+func TestStoreRejectsMessagesWithoutAValidTopic(t *testing.T) {
 	t.Parallel()
 	_, ob, pool := setup(t)
 
-	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
-		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Value: []byte("x")})
-	})
-	if !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	for name, m := range map[string]outbox.Message{
+		"no topic":                        {Value: []byte("x")},
+		"a topic that is not UTF-8":       {Topic: "orders\xff"},
+		"a topic with NUL":                {Topic: "orders\x00"},
+		"a header name that is not UTF-8": {Topic: "orders", Headers: map[string][]byte{"trace\xff": nil}},
+	} {
+		err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+			return ob.Store(t.Context(), taskmill.Pgx(tx), m)
+		})
+		if !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("%s: got %v, want ErrInvalidArgument", name, err)
+		}
 	}
 }
 

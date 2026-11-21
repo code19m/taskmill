@@ -120,7 +120,9 @@ ALTER DEFAULT PRIVILEGES FOR ROLE shop IN SCHEMA taskmill
 | Metrics | Queues, kinds, states, and error classes, but no task IDs or payloads |
 
 So keep secrets out of payloads and out of your handlers' errors. Store an
-ID in the payload, and look the secret up in the handler.
+ID in the payload, and look the secret up in the handler. A payload that
+does not decode fails its task with an error that names the field and the
+types, never a value of the payload.
 
 In a connection URL, percent-encode the password: `@` is `%40`, and `/` is
 `%2F`. Otherwise pgx takes a part of the password for the host or the

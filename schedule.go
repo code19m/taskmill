@@ -195,7 +195,7 @@ func compileSchedules(ss []Schedule) ([]compiledSchedule, error) {
 // compileSchedule validates one schedule, and resolves the options of its
 // task.
 func compileSchedule(s Schedule) (compiledSchedule, error) {
-	if s.Args == nil {
+	if noArgs(s.Args) {
 		return compiledSchedule{}, invalidArgument("schedule %q has no args", s.Name)
 	}
 	if o := s.Options; o != nil && (!o.RunAt.IsZero() || o.DedupeKey != "" || o.DedupeWindow != 0) {

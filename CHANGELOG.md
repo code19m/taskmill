@@ -32,6 +32,14 @@ All notable changes to taskmill are recorded here. The format follows
   `Run` took a minute, and the platform killed the process. Now the steps
   share 5 seconds: a result that cannot be recorded by then is rescued once
   its lease runs out, and its task runs again.
+- Each filter of `TaskFilter`, and `ActivityParams.Queues`, takes at most
+  100 values, as `GroupParams.Queues` did: a call with more returns an error
+  that wraps `ErrInvalidArgument`, not a statement with an array of any
+  size. The dashboard sends at most 100.
+- A worker warns of tasks of a kind that it has no handler for at most once
+  a minute per kind, with the number of tasks, as `no handler for task kind;
+  its tasks wait for a worker that has one`. It warned once per task, and a
+  rolling deploy flooded the log. The line for each task is at Debug.
 
 ### Fixed
 
@@ -64,6 +72,24 @@ All notable changes to taskmill are recorded here. The format follows
   tasks were stored, when the second read of a dedupe key fails: a retry
   stored the tasks without a key twice. Like `Enqueue`, they log the failed
   read and return the results.
+- A nil pointer as `Args`, such as `var a *Receipt`, and a nil entry in
+  `ClientConfig.EnqueueMiddleware` or `WorkerConfig.Middleware`, are errors
+  that wrap `ErrInvalidArgument`. They panicked in every call.
+- A queue whose settings are back to their defaults is no longer stored:
+  `PauseQueue` and `ResumeQueue` of a mistyped name, or a `MaxRunning` set
+  back to 0, kept the queue in `Client.Queues`, the dashboard, and the
+  `otel` gauges for good.
+- `Outbox.Store` rejects a topic or a header name that is not valid UTF-8
+  or holds a NUL character. Such bytes silently became U+FFFD, so two
+  topics became one, while their messages kept separate orders. The doc of
+  `Message.Value` no longer says that the topic is stored in base64.
+- `Client.Activity` returns an error that wraps `ErrInvalidArgument` for a
+  `Since` that PostgreSQL cannot store, as the other reads do, not the
+  database's error.
+- A batch of `DeleteMatching` changes at most 1,000 tasks of both tables in
+  all, as `BulkResult.Changed` promises. It took up to 1,000 of each.
+- An error about a name that is too long quotes only its start: it quoted
+  the whole value, of any size.
 - Docs that were wrong or unclear. Retried tasks run before new work, as
   [Recover from an incident](docs/recipes/recover-from-an-incident.md) now
   says. The order of a list and what a page reads are in the doc comment of
@@ -72,6 +98,15 @@ All notable changes to taskmill are recorded here. The format follows
   attempt becomes dead, and the failover checklist looks for it. A new
   page, [Dashboard pages](docs/reference/dashboard-pages.md), says what each
   part of a dashboard page shows.
+
+### Security
+
+- A payload that does not decode no longer puts its values in the task's
+  errors, the log, and the span's status. `encoding/json` quotes numbers
+  and characters that it rejects, and an `UnmarshalJSON` method may quote
+  anything. The error now names the field, with `[key]` in place of a
+  map's key, and the types, the place of a syntax error, or only the `Args`
+  type, with the code `invalid_payload` as before.
 
 ## [0.13.0] - 2026-11-21
 

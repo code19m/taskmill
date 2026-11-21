@@ -131,7 +131,7 @@ and `freed_key_expires_at` for a [retry](schema-operations.md#a-retry-takes-its-
 
 ### Settings, coordination, and bookkeeping
 
-- `queues` holds `paused_at` and `max_running` for the queues that have them.
+- `queues` holds `paused_at` and `max_running` for the queues that have them: see [A queue's settings](schema-operations.md#a-queues-settings).
 - `settings` has exactly one row, enforced by a `CHECK` on its key. Settings
   live in the database rather than in each process's configuration, so every
   worker that becomes the maintainer applies the same retention.

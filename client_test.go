@@ -1188,3 +1188,14 @@ func TestNewClientRequiresReadCommitted(t *testing.T) {
 		t.Fatalf("got %v, want ErrInvalidArgument about the isolation level", err)
 	}
 }
+
+func TestNewClientRejectsANilEnqueueMiddleware(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	_, err := taskmill.NewClient(t.Context(), e.pool, &taskmill.ClientConfig{
+		Schema: e.schema, EnqueueMiddleware: []taskmill.EnqueueMiddleware{nil},
+	})
+	if !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}

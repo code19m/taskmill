@@ -83,6 +83,7 @@ func TestEnqueueRejectsInvalidOptions(t *testing.T) {
 		opts *taskmill.EnqueueOptions
 	}{
 		{"nil args", nil, nil},
+		{"nil pointer args", (*sendEmail)(nil), nil},
 		{"empty kind", emptyKind{}, nil},
 		{"priority out of range", sendEmail{}, &taskmill.EnqueueOptions{Priority: 9}},
 		{"negative max attempts", sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: -1}},
@@ -1031,14 +1032,21 @@ func behind[T any](t *testing.T, e *env, holder pgx.Tx, enqueue func() (T, error
 	return got.res, got.err
 }
 
-// beforeKeyRead calls a function once, before a connection of the pool sends
-// the statement with which an enqueue reads a dedupe key again.
-type beforeKeyRead struct {
-	call atomic.Pointer[func()]
+// beforeStatement calls a function once, before a connection of the pool
+// sends a statement that contains fragment.
+type beforeStatement struct {
+	fragment string
+	call     atomic.Pointer[func()]
 }
 
-func (b *beforeKeyRead) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
-	if strings.Contains(d.SQL, "SELECT key, task_id FROM") {
+// beforeKeyRead returns a beforeStatement for the statement with which an
+// enqueue reads a dedupe key again.
+func beforeKeyRead() *beforeStatement {
+	return &beforeStatement{fragment: "SELECT key, task_id FROM"}
+}
+
+func (b *beforeStatement) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, b.fragment) {
 		if f := b.call.Swap(nil); f != nil {
 			(*f)()
 		}
@@ -1046,7 +1054,7 @@ func (b *beforeKeyRead) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.
 	return ctx
 }
 
-func (*beforeKeyRead) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+func (*beforeStatement) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 // plainAndKeyed returns the params of a task without a key, for the queue
 // "plain", and of a task with the dedupe key of opts.
@@ -1077,7 +1085,7 @@ func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			read, logs := &beforeKeyRead{}, &logRecorder{}
+			read, logs := beforeKeyRead(), &logRecorder{}
 			e := newTracedEnv(t, read).withLogger(t, slog.New(logs))
 			opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
 			holder, first := e.holdKey(t, opts)
@@ -1130,7 +1138,7 @@ func (e *env) enqueueMany(ctx context.Context, t *testing.T, conn bool, params [
 // returns the error of the read, and the caller rolls back.
 func TestEnqueueTxReturnsTheFailedReadOfADuplicate(t *testing.T) {
 	t.Parallel()
-	read := &beforeKeyRead{}
+	read := beforeKeyRead()
 	e := newTracedEnv(t, read)
 	opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
 	holder, _ := e.holdKey(t, opts)

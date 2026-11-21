@@ -34,6 +34,13 @@ func setup(tb testing.TB) *taskmill.Client {
 	return client
 }
 
+// keepQueue gives a queue settings that the tests never reach, a limit of
+// 1,000 running tasks, so that the queue is stored and the overview lists
+// it, also after a pause and a resume.
+func keepQueue(ctx context.Context, client *taskmill.Client, name string) error {
+	return client.UpdateQueue(ctx, name, func(s *taskmill.QueueSettings) { s.MaxRunning = 1000 })
+}
+
 // setupDB migrates a fresh schema, and returns a client for it, with its
 // pool and name. When the test ends, it checks the schema's FIFO groups.
 func setupDB(tb testing.TB) (*taskmill.Client, *pgxpool.Pool, string) {

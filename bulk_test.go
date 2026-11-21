@@ -187,6 +187,41 @@ func TestBulkActionBehindAHeadPromotesNothing(t *testing.T) {
 	})
 }
 
+// A batch of DeleteMatching takes at most 1,000 tasks of both tables in
+// all, as BulkResult.Changed promises: an action that stops early has
+// changed at most a batch more than it counted. Here the action stops
+// after its first batch, which it counts.
+func TestDeleteMatchingTakesOneBatchOfBothTables(t *testing.T) {
+	t.Parallel()
+	first := &beforeStatement{fragment: ".task_history WHERE id = ANY($1::bigint[])"}
+	e := newTracedEnv(t, first)
+
+	// 1,500 dead tasks and 1,500 completed ones, their IDs interleaved.
+	e.exec(t, `INSERT INTO {s}.tasks (id, queue, kind, state, run_at, payload, max_attempts, finalized_at)
+	           OVERRIDING SYSTEM VALUE
+	           SELECT 2 * i, 'default', 'email.send', 'dead', now(), '{}', 3, now() FROM generate_series(1, 1500) i`)
+	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+	                                         priority, attempt, max_attempts, payload, metadata, errors)
+	           SELECT 2 * i + 1, now(), 'default', now(), 'email.send', now(), 'w', now(), 2, 1, 3, '{}', '{}', '[]'
+	           FROM generate_series(1, 1500) i`)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	stop := func() { cancel() }
+	first.call.Store(&stop)
+
+	res, err := e.client.DeleteMatching(ctx, bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead, taskmill.StateCompleted}}))
+	if !errors.Is(err, context.Canceled) || res.Next == "" {
+		t.Fatalf("got %+v, %v; want the action to stop after its first batch", res, err)
+	}
+	if res.Changed == 0 || res.Changed > 1000 {
+		t.Fatalf("the first batch changed %d tasks, want at most 1000", res.Changed)
+	}
+	if left := e.count(t, "SELECT (SELECT count(*) FROM {s}.tasks) + (SELECT count(*) FROM {s}.task_history)"); int64(left) != 3000-res.Changed {
+		t.Fatalf("%d tasks are left, but the action counted %d of 3000 as deleted", left, res.Changed)
+	}
+}
+
 func TestDeleteMatching(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

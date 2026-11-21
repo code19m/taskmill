@@ -105,7 +105,7 @@ func TestActionNotices(t *testing.T) {
 func TestQueueActionsKeepThePeriodOfTheCharts(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
-	if err := client.UpdateQueue(t.Context(), "mail", func(*taskmill.QueueSettings) {}); err != nil {
+	if err := keepQueue(t.Context(), client, "mail"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -155,7 +155,7 @@ func TestActionsWorkForAnyName(t *testing.T) {
 	names := []string{"emails:high", ".", "..", "a/b?c#d%2Fe", `x"><script>`, "two\nlines"}
 	schedules := make([]taskmill.Schedule, len(names))
 	for i, name := range names {
-		if err := client.UpdateQueue(t.Context(), name, func(*taskmill.QueueSettings) {}); err != nil {
+		if err := keepQueue(t.Context(), client, name); err != nil {
 			t.Fatal(err)
 		}
 		schedules[i] = taskmill.Schedule{Name: name, Cron: "@daily", Args: greet{}}
@@ -239,7 +239,7 @@ func TestReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := client.UpdateQueue(t.Context(), "default", func(*taskmill.QueueSettings) {}); err != nil {
+	if err := keepQueue(t.Context(), client, "default"); err != nil {
 		t.Fatal(err)
 	}
 

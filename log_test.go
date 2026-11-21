@@ -246,7 +246,8 @@ func TestLogsLeaveOutPayloadsAndMetadata(t *testing.T) {
 	for _, want := range []string{
 		`level=DEBUG msg="attempt failed; retrying"`,
 		`level=ERROR msg="attempt failed; the task is dead"`,
-		`level=WARN msg="no handler for task kind; snoozing"`,
+		`level=WARN msg="no handler for task kind; its tasks wait for a worker that has one"`,
+		`level=DEBUG msg="no handler for task kind; snoozing"`,
 	} {
 		if !strings.Contains(logged, want) {
 			t.Errorf("no line has %s", want)

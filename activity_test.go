@@ -93,6 +93,11 @@ func TestActivitySteps(t *testing.T) {
 			t.Fatalf("step %v: got %v", step, err)
 		}
 	}
+	// A time that PostgreSQL cannot store.
+	since := lastTimestamp.Add(time.Microsecond)
+	if _, err := e.client.Activity(t.Context(), &taskmill.ActivityParams{Since: since}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("a start after the last timestamp: got %v", err)
+	}
 }
 
 // The maintainer counts the tasks several times a minute, and a minute of

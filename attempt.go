@@ -418,17 +418,57 @@ func (w *Worker) unknownKind(ctx context.Context, t *liveAttempt) outcome {
 		return outcome{kind: outcomeDead, code: CodeUnknownKind, err: err, msg: err.Error()}
 	}
 
-	// Warn once per task, not at every snooze: a deploy can leave many tasks
-	// waiting for an hour.
-	level := slog.LevelDebug
 	if since.IsZero() {
-		level = slog.LevelWarn
+		w.noHandler.warn(ctx, w, t.info.Kind)
 	}
-	w.logger.LogAttrs(ctx, level, "no handler for task kind; snoozing",
+	w.logger.LogAttrs(ctx, slog.LevelDebug, "no handler for task kind; snoozing",
 		slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind))
 
 	o.delay = min(w.timing.noHandlerSnooze, limit-waited)
 	return o
+}
+
+// kindWarnings warns of the tasks of kinds that the worker has no handler
+// for: per kind, at most once per timing.failureReport, with the number of
+// tasks that began to wait since the last line. A rolling deploy can leave
+// thousands of tasks of a new kind to workers of the old release, and a line
+// for each would flood the log. It keeps at most maxKindWarnings kinds, and
+// forgets them all when it would keep more: the kinds come from rows that
+// any producer writes.
+type kindWarnings struct {
+	mu    sync.Mutex
+	kinds map[string]*kindWarning
+}
+
+// kindWarning is what kindWarnings knows of one kind.
+type kindWarning struct {
+	logged time.Time // when it was last logged
+	tasks  int       // the tasks that began to wait since then
+}
+
+// maxKindWarnings is the most kinds that kindWarnings keeps.
+const maxKindWarnings = 1000
+
+// warn counts a task of kind that began to wait for a handler, and logs the
+// count if the kind was not logged for timing.failureReport.
+func (k *kindWarnings) warn(ctx context.Context, w *Worker, kind string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.kinds == nil || len(k.kinds) >= maxKindWarnings && k.kinds[kind] == nil {
+		k.kinds = make(map[string]*kindWarning)
+	}
+
+	kw := k.kinds[kind]
+	if kw == nil {
+		kw = &kindWarning{}
+		k.kinds[kind] = kw
+	}
+	kw.tasks++
+	if now := time.Now(); now.Sub(kw.logged) >= w.timing.failureReport {
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "no handler for task kind; its tasks wait for a worker that has one",
+			slog.String(logKeyKind, kind), slog.Int(logKeyTasks, kw.tasks))
+		kw.logged, kw.tasks = now, 0
+	}
 }
 
 // finish records an attempt's outcome on ctx, unless the attempt has ended

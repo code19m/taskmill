@@ -295,6 +295,20 @@ INSERT INTO {s}.queues AS q (name, paused_at) VALUES ($1, CASE WHEN $2 THEN now(
 ON CONFLICT (name) DO UPDATE
 SET paused_at = CASE WHEN $2 THEN coalesce(q.paused_at, now()) END, updated_at = now()`
 
+// $1 queue.
+//
+// deleteEmptyQueueSQL deletes queue $1's row if it holds no settings:
+// the queue is not paused, and has no MaxRunning limit. A queue with a
+// row is listed for good, so one that a pause or a limit named by
+// mistake would stay. It runs in the transaction that changed the row
+// and holds it. A column that a later release adds holds a setting
+// that this one does not know, which a delete would lose: the row is
+// deleted only while every such column is NULL.
+const deleteEmptyQueueSQL = `
+DELETE FROM {s}.queues q
+WHERE name = $1 AND paused_at IS NULL AND max_running IS NULL
+  AND jsonb_strip_nulls(to_jsonb(q) - 'name' - 'paused_at' - 'max_running' - 'created_at' - 'updated_at') = '{}'::jsonb`
+
 // readSettingsSQL reads the retention periods in microseconds, which
 // swapSettings compares and writes.
 const readSettingsSQL = `

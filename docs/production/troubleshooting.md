@@ -128,8 +128,8 @@ leases`. The same tasks come back, with the code `lease_lost` in their errors.
 ### Tasks die with `unknown_kind`, or wait with a `no_handler` note
 
 **You see:** after a deploy, tasks have `no_handler` notes, and the log says
-`no handler for task kind; snoozing`. If no worker with a handler takes them
-for an hour, they are dead with the code `unknown_kind`.
+`no handler for task kind; its tasks wait for a worker that has one`. If no
+worker with a handler takes them for an hour, they die with `unknown_kind`.
 
 | Likely cause | Check | Do |
 |---|---|---|

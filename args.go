@@ -1,5 +1,7 @@
 package taskmill
 
+import "reflect"
+
 // Args is the payload of a task. Its kind selects the handler that runs it,
 // and it is stored as JSON with encoding/json, at most 1 MiB.
 //
@@ -7,8 +9,9 @@ package taskmill
 // consumers agree on the kind. If a kind is renamed, tasks enqueued under the
 // old name find no handler, and become dead after an hour.
 //
-// An enqueue returns an error that wraps [ErrInvalidArgument] for a payload
-// that PostgreSQL cannot store, or that is too large:
+// An enqueue returns an error that wraps [ErrInvalidArgument] for nil Args,
+// also a nil pointer of an Args type, and for a payload that PostgreSQL
+// cannot store, or that is too large:
 //
 //   - The payload must not encode to null. It must be valid UTF-8, with no
 //     NUL character (\u0000).
@@ -29,6 +32,16 @@ type Args interface {
 	// on the value's fields: handler registration reads it from a zero
 	// value.
 	Kind() string
+}
+
+// noArgs reports whether a is nil, or a nil pointer, whose Kind may
+// dereference it.
+func noArgs(a Args) bool {
+	if a == nil {
+		return true
+	}
+	v := reflect.ValueOf(a)
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
 // ArgsWithDefaults is implemented by Args that set default enqueue options

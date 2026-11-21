@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/code19m/taskmill/internal/argkind"
@@ -234,9 +236,99 @@ func defaultQueueOf[A Args]() (queue string) {
 func newTask[A Args](info *TaskInfo, a *attempt) (*Task[A], error) {
 	var args A
 	if err := json.Unmarshal(info.Payload, &args); err != nil {
-		return nil, &failure{code: CodeInvalidPayload, permanent: true, err: fmt.Errorf("decode payload: %w", err)}
+		return nil, &failure{code: CodeInvalidPayload, permanent: true, err: decodeError[A](err)}
 	}
 	return &Task[A]{TaskInfo: *info, Args: args, attempt: a}, nil
+}
+
+// decodeError says why a payload did not decode into A, without a value of
+// the payload: the error is stored with the task, logged, and set as a
+// span's status, where payloads must not appear. encoding/json quotes the
+// numbers and characters that it rejects, and an UnmarshalJSON method of
+// the application may quote anything, so only the field, the JSON type, the
+// Go type, and the place remain.
+func decodeError[A Args](err error) error {
+	if e, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+		kind, _, _ := strings.Cut(e.Value, " ") // "number -5" holds the number
+		if field := fieldPath(reflect.TypeFor[A](), e.Field); field != "" {
+			return fmt.Errorf("decode payload: the field %s holds a JSON %s, which does not fit %s", field, kind, e.Type)
+		}
+		return fmt.Errorf("decode payload: a JSON %s does not fit %s", kind, e.Type)
+	}
+	if e, ok := errors.AsType[*json.SyntaxError](err); ok {
+		return fmt.Errorf("decode payload: the JSON is not valid at byte %d", e.Offset)
+	}
+	return fmt.Errorf("decode payload: it does not decode into %s", reflect.TypeFor[A]())
+}
+
+// fieldPath returns path, the path of a field in t as encoding/json reports
+// it, without the values of the payload that it may hold: the keys of maps.
+// Releases of Go differ in what the path holds: some put in the key of
+// each map and the index of each list, others leave both out. So fieldPath
+// follows t along the names of the fields, skips the indexes, and ends at
+// a map with "[key]": a key may hold dots, so what follows it cannot be
+// told from the key. It also ends at a name that t does not have. The
+// result is the same on every release: "items.qty", or "scores[key]".
+func fieldPath(t reflect.Type, path string) string {
+	var names []string
+	indexes := 0 // the lists passed since the last name, whose indexes may come next
+	for name := range strings.SplitSeq(path, ".") {
+		var lists int
+		t, lists = elements(t)
+		indexes += lists
+		if _, err := strconv.Atoi(name); err == nil && indexes > 0 {
+			indexes--
+			continue
+		}
+		indexes = 0
+
+		if t.Kind() == reflect.Map {
+			return strings.Join(names, ".") + "[key]"
+		}
+		f, ok := jsonField(t, name)
+		if !ok {
+			return strings.Join(names, ".")
+		}
+		names = append(names, name)
+		t = f.Type
+	}
+
+	// A path that leaves keys out ends at the map.
+	if t, _ = elements(t); t.Kind() == reflect.Map {
+		return strings.Join(names, ".") + "[key]"
+	}
+	return strings.Join(names, ".")
+}
+
+// elements returns the type that t holds through pointers, lists, and
+// arrays, and how many lists and arrays it passed.
+func elements(t reflect.Type) (reflect.Type, int) {
+	lists := 0
+	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		if t.Kind() != reflect.Pointer {
+			lists++
+		}
+		t = t.Elem()
+	}
+	return t, lists
+}
+
+// jsonField returns the field of t, a struct, that encoding/json names name
+// in a path: its name in JSON, or the Go name of an embedded struct.
+func jsonField(t reflect.Type, name string) (reflect.StructField, bool) {
+	if t.Kind() != reflect.Struct {
+		return reflect.StructField{}, false
+	}
+	for f := range t.Fields() {
+		tag := f.Tag.Get("json")
+		jsonName, _, _ := strings.Cut(tag, ",")
+		switch {
+		case tag == "-":
+		case jsonName == name, jsonName == "" && f.Name == name, f.Anonymous && f.Name == name:
+			return f, true
+		}
+	}
+	return reflect.StructField{}, false
 }
 
 func (hs *Handlers) add(reg *registration) {

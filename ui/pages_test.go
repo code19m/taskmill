@@ -71,7 +71,7 @@ func TestPagesDefineTheIconsTheyUse(t *testing.T) {
 	if err := errors.Join(
 		client.PauseSchedule(ctx, "weekly"),
 		client.PauseQueue(ctx, "mail"),
-		client.UpdateQueue(ctx, "default", func(*taskmill.QueueSettings) {}),
+		keepQueue(ctx, client, "default"),
 	); err != nil {
 		t.Fatal(err)
 	}
