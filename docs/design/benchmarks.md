@@ -158,8 +158,9 @@ runs), and S3 at 1,000 tasks a second.
 - **E2 leaves out the enqueue's WAL** and the full-page writes after
   checkpoints, which a short run misses. A long run writes more.
 - **E5 measures what a task holds:** the process frees its garbage before
-  three samples, and the median counts. A handler's stack takes 8 KiB once it
-  called the database, taskmill about 3 KiB, and the target leaves 2 KiB.
+  three samples, and the median counts: 8 KiB of a handler's stack after a
+  database call, about 3 KiB of taskmill's, 1 KiB of the runtime's, and 1 KiB
+  of room. The October code measures about 11.5 KiB so, not its old 7.9 KiB.
 - **E6** measured a worker with `NoMaintainer`. Each queue fetches at start,
   when the notification connection starts, and every second until the first
   heartbeat (within 5 seconds); then once a minute, ± 6 seconds.
@@ -231,8 +232,7 @@ TASKMILL_TEST_DATABASE_URL='postgres://postgres:postgres@localhost:54330/taskmil
 - `-container` names the database's Docker container, which F6 restarts and
   E7 measures. Without it, they are skipped.
 - The soak (E3) runs only when listed: `-scenarios soak -soak 4h`.
-- `go run ./internal/cmd/bench -help` lists the other flags. The program
-  recreates its own schema, `taskmill_bench`.
+- `-help` lists the other flags. The program recreates its schema, `taskmill_bench`.
 
 `make faults` runs the fault scenarios as the nightly CI run does: F1 to F7
 at a tenth of their size, and F9 against databases of its own whose clocks
