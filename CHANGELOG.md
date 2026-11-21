@@ -38,6 +38,10 @@ All notable changes to taskmill are recorded here. The format follows
   one that the task halts. It read them page by page until it found the
   group or the request's time ran out. Past those, the page says that the
   task's place in its group could not be read.
+- An action confirmed in the dashboard's dialog is sent also when the
+  dialog opened again right after it closed, within a few milliseconds, as
+  a browser test can. The late event of the first closing cleared the
+  action of the second, and the confirm sent nothing.
 
 ## [0.14.0] - 2026-11-21
 

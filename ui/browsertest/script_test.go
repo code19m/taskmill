@@ -184,6 +184,33 @@ func TestDialogConfirmsAnAction(t *testing.T) {
 	}
 }
 
+// A dialog that opens again at once, before the close event of its last
+// closing, still sends the action that it then confirms: that late event is
+// of the closing before. The test closes the dialog and opens it again in
+// one turn of the page, so the event comes after, and confirms once the
+// script has had it: the test's listener comes after the script's.
+func TestDialogOpenedAgainAtOnceSendsItsAction(t *testing.T) {
+	s := newSite(t)
+	id := s.enqueue(t, 1)[0]
+	p := s.open(t, "/tasks/"+key(id))
+	const button = `form[action$="/delete"] button`
+
+	p.click(button)
+	p.waitFor(`document.getElementById("confirm-dialog").open`, "the dialog")
+	p.run(`
+		const dialog = document.getElementById("confirm-dialog");
+		dialog.addEventListener("close", () => { window.lateClose = true; }, { once: true });
+		dialog.querySelector('[value="cancel"]').click();
+		document.querySelector(` + js(button) + `).click();`)
+	p.waitFor(`window.lateClose && document.getElementById("confirm-dialog").open`, "the dialog, open again after the late close event")
+	p.click(`[data-confirm-button]`)
+	p.waitFor(`location.pathname === "/tasks" && document.querySelector(".toast")?.textContent === "Task deleted."`,
+		"the task list, with the notice of the action")
+	if _, err := s.client.Get(t.Context(), id); !errors.Is(err, taskmill.ErrNotFound) {
+		t.Errorf("the task is still there after the action: %v", err)
+	}
+}
+
 // A live update asks for the page that it shows, by its ETag. While only the
 // relative times of the page changed, which the script counts on by itself,
 // it gets 304 Not Modified, and the page stays as it is; then it gets a page
