@@ -120,7 +120,7 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	counts, err := s.client.Count(r.Context(), &f)
+	counts, err := s.client.Count(r.Context(), &taskmill.CountParams{Filter: f})
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		s.refuse(w, r, http.StatusBadRequest, "Invalid filter", reason(err), link{"/tasks", "Clear the filters", "clear"})
 		return

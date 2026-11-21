@@ -39,7 +39,7 @@ func TestReadsRejectNamesThatNoTaskHas(t *testing.T) {
 				return err
 			},
 			"Count kind": func() error {
-				_, err := e.client.Count(ctx, &taskmill.TaskFilter{Kinds: []string{s}})
+				_, err := e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{Kinds: []string{s}}})
 				return err
 			},
 			"RetryMatching group": func() error {

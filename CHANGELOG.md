@@ -9,6 +9,11 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Changed
 
+- **Breaking:** `Client.Count` takes `*CountParams`, not a bare
+  `*TaskFilter`, as every other read and action takes params: an option
+  such as a time range can then be added later without breaking callers.
+  To migrate, write `client.Count(ctx, &taskmill.CountParams{Filter: f})`
+  for `client.Count(ctx, &f)`. Nil still counts every task.
 - A handler that ignores its context no longer keeps its task for good.
   Its timeout, a cancel, or a delete changed nothing, and nothing was
   logged. Now, 5 seconds after its context was canceled, the worker

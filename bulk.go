@@ -173,10 +173,20 @@ func match(filter *TaskFilter, states []State) (*filterArgs, error) {
 	return &f, nil
 }
 
-// Count counts the tasks that match filter, which may be nil. It counts at
-// most 10,000 tasks per state. Like [Client.List], the query is canceled
-// after 5 seconds.
-func (c *Client) Count(ctx context.Context, filter *TaskFilter) (*TaskCounts, error) {
+// CountParams selects the tasks that [Client.Count] counts.
+type CountParams struct {
+	// Filter selects the tasks. Empty means every task.
+	Filter TaskFilter
+}
+
+// Count counts the tasks that params select. params may be nil, which
+// counts every task. It counts at most 10,000 tasks per state. Like
+// [Client.List], the query is canceled after 5 seconds.
+func (c *Client) Count(ctx context.Context, params *CountParams) (*TaskCounts, error) {
+	var filter *TaskFilter
+	if params != nil {
+		filter = &params.Filter
+	}
 	f, err := match(filter, allStates)
 	if err != nil {
 		return nil, err

@@ -48,12 +48,12 @@ change in three deploys:
 To check step 3, filter the dashboard's task list by kind, or count:
 
 ```go
-counts, err := client.Count(ctx, &taskmill.TaskFilter{
+counts, err := client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{
     Queues: []string{"emails"},
     Kinds:  []string{"email.send_receipt"},
     States: []taskmill.State{taskmill.StateScheduled, taskmill.StatePending,
         taskmill.StateAvailable, taskmill.StateRunning, taskmill.StateRetryable},
-})
+}})
 // Remove the old handler once every count in counts.States is 0.
 ```
 

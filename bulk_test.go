@@ -1269,7 +1269,7 @@ func TestBulkActionsCheckTheFilter(t *testing.T) {
 		}
 	}
 
-	if _, err := e.client.Count(t.Context(), &taskmill.TaskFilter{States: []taskmill.State{"lost"}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
+	if _, err := e.client.Count(t.Context(), &taskmill.CountParams{Filter: taskmill.TaskFilter{States: []taskmill.State{"lost"}}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Errorf("count with an unknown state: got %v, want ErrInvalidArgument", err)
 	}
 }
@@ -1303,9 +1303,9 @@ func TestCount(t *testing.T) {
 		t.Fatalf("all tasks: %+v, %v; want %+v", got, err, want)
 	}
 
-	got, err = e.client.Count(ctx, &taskmill.TaskFilter{
+	got, err = e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{
 		Kinds: []string{"email.send"}, States: []taskmill.State{taskmill.StateAvailable, taskmill.StateCompleted},
-	})
+	}})
 	want = &taskmill.TaskCounts{
 		States: map[taskmill.State]taskmill.TaskCount{taskmill.StateAvailable: n(2), taskmill.StateCompleted: n(1)},
 		Cancel: n(2), Delete: n(3),
@@ -1318,7 +1318,7 @@ func TestCount(t *testing.T) {
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 	           SELECT 'big', 'k', 'available', now(), '{}', 3 FROM generate_series(1, 10001)`)
 	e.die(t, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "big"}))
-	got, err = e.client.Count(ctx, &taskmill.TaskFilter{Queues: []string{"big"}})
+	got, err = e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{Queues: []string{"big"}}})
 	capped := taskmill.TaskCount{N: 10000, Capped: true}
 	if err != nil || got.States[taskmill.StateAvailable] != capped || got.Cancel != capped || got.Retry != n(1) ||
 		got.Delete != (taskmill.TaskCount{N: 10001, Capped: true}) {
@@ -1331,7 +1331,7 @@ func TestCount(t *testing.T) {
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_expires_at, cancel_requested_at)
 	           SELECT 'busy', 'k', 'running', now(), '{}', 3, 1, now() + interval '1 hour', CASE WHEN i % 3 = 0 THEN now() END
 	           FROM generate_series(1, 10001) i`)
-	got, err = e.client.Count(ctx, &taskmill.TaskFilter{Queues: []string{"busy"}})
+	got, err = e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{Queues: []string{"busy"}}})
 	if err != nil || got.States[taskmill.StateRunning] != capped || got.Cancel != (taskmill.TaskCount{N: 6668, Capped: true}) {
 		t.Fatalf("running tasks over the cap, a third of them asked to stop: %+v, %v", got, err)
 	}

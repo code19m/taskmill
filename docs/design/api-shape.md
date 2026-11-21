@@ -103,6 +103,14 @@ The column keeps its name, `finalized_at`: renaming it needs a migration,
 and the workers of the release before would fail on it during a rolling
 deploy.
 
+## Every read and action takes params
+
+`Client.Count` took a bare `*TaskFilter`, the only read or action that did.
+Then no option, such as a time range, could ever be added to it without
+breaking its callers. So it takes `*CountParams`, whose `Filter` holds the
+filter, as `ListParams` and `BulkParams` do. That broke its callers once,
+while the version is below v1.0.0.
+
 ## Options we rejected
 
 | Option | Why not |

@@ -416,9 +416,9 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 	}
 	switch t.State {
 	case taskmill.StateDead:
-		counts, err := s.client.Count(r.Context(), &taskmill.TaskFilter{
+		counts, err := s.client.Count(r.Context(), &taskmill.CountParams{Filter: taskmill.TaskFilter{
 			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, States: []taskmill.State{taskmill.StatePending},
-		})
+		}})
 		if err != nil {
 			return g, err
 		}
