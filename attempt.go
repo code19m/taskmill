@@ -187,8 +187,18 @@ func (w *Worker) watch(ctx, record context.Context, ts []*liveAttempt, start tim
 	}
 
 	stopAfter := context.AfterFunc(ctx, func() {
-		if cause := context.Cause(ctx); !errors.Is(cause, ErrShutdown) {
-			h.grace.Store(time.AfterFunc(w.timing.shutdownGrace, func() { h.expire(cause) }))
+		cause := context.Cause(ctx)
+		if errors.Is(cause, ErrShutdown) {
+			return
+		}
+
+		// stop may have run since the context ended, and found no timer: it
+		// marks the watch finished before it reads the timer, so one of the
+		// two sees the other.
+		grace := time.AfterFunc(w.timing.shutdownGrace, func() { h.expire(cause) })
+		h.grace.Store(grace)
+		if h.state.Load() == watchFinished {
+			grace.Stop()
 		}
 	})
 	return func() { h.stop(stopAfter) }
