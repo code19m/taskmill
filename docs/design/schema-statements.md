@@ -146,9 +146,13 @@ once it was idle for more than a second, as the pool pings its own,
 because a server or a firewall may have ended its session meanwhile. At
 each check-in it is pinged, and replaced once older than the pool's
 `MaxConnLifetime`, while the pool has connections to spare. When it broke,
-the pool closes it, and the statement runs again, once, on a new one,
-which takes the broken one's place in the pool. A statement on it has the
-renewal's time, a third of the lease.
+the pool closes it, and the statement runs again, once, on a new
+connection, if one comes within the renewal's time, a third of the lease.
+The pool gives the broken one's place to whoever waited first, often a
+handler, so while handlers hold the pool a broken reserve may not be
+replaced. A server or a proxy that ends sessions idle for less than a third
+of the lease, as `idle_session_timeout` can, ends the reserve between
+check-ins every time, and leaves the worker none when it is needed.
 
 Completions, fetches, and the records of failed attempts use the pool
 alone. A completion that waits for a connection keeps its lease, because

@@ -94,15 +94,15 @@ postgres://shop@db.internal:5432/shop?pool_max_conns=15
 Why: a running task holds no connection of its own, but handlers that use the
 same pool can take every connection. In a pool of this size, the worker keeps
 one in reserve while `Run` runs, so its tasks'
-[leases](../concepts/glossary.md#lease) still renew, while its fetches and
-completions wait, and tasks start late. In a smaller pool, the worker keeps
-none: renewals wait too, leases can run out, and tasks run twice.
+[leases](../concepts/glossary.md#lease) still renew, while fetches wait. For
+that, the idle limit of taskmill's role, such as `idle_session_timeout` or a
+proxy's, must be longer than a third of the lease. A smaller pool spares no
+reserve: renewals wait too, leases can run out, and tasks run twice.
 
 The 5 extra connections are for the worker's own work. `Run` warns at start
 if the pool is smaller: `the pool has fewer connections than the worker's
-total Concurrency plus 5`. If a fetch or a failure record waits for a
-connection later, the worker logs `the pool was full, so the worker waited
-for a connection`, at most once a minute, and counts the wait in
+total Concurrency plus 5`. A wait for a connection later is logged as `the
+pool was full, so the worker waited for a connection`, and counted in
 `taskmill_worker_pool_waits_total`.
 
 | Process | `pool_max_conns` | Connections it opens, at most |
