@@ -1,5 +1,5 @@
 // Package twins holds the cases that the dashboard's server and its script
-// must word alike. The script, ui/static/app.js, keeps the words that the
+// must word alike. The script, in ui/static, keeps the words that the
 // server put on a page up to date, so each of its word functions has a twin
 // in the server's Go: ago, span, and visible. The tests of package ui run
 // the Go functions through these cases, and the browser tests, in

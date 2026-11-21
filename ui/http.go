@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
-	"mime"
 	"net/http"
 	"net/url"
 	"path"
@@ -201,7 +200,7 @@ var timeAttrs = []struct {
 // is the page that the client has. The script counts from the time of
 // rendering, in data-now, the relative times of the page: the words that end
 // the text of an element with a time, in data-time or data-since, if they
-// are that time's words (see count in app.js). Other words, such as
+// are that time's words (see count in times.js). Other words, such as
 // "paused", and the times themselves stay in the hash. Each part left out
 // leaves a zero byte in its place, which no page holds.
 func etag(page []byte, now time.Time) string {
@@ -317,10 +316,18 @@ func (s *server) path(p string) string {
 	return s.prefix + p
 }
 
-// asset returns the path of a static file, versioned by its content so that
-// browsers may cache it forever.
+// asset returns the path of a static file, in the folder of the current
+// version, so that browsers may cache it forever.
 func (s *server) asset(name string) string {
-	return s.path("/static/" + name + "?v=" + s.versions[name])
+	return s.path("/static/" + s.statics.version + "/" + name)
+}
+
+// statics are the static files, kept with their compressed forms, under one
+// version.
+type statics struct {
+	files   map[string]staticFile
+	version string   // a hash of every static file: the folder of their paths
+	modules []string // the modules of the script that the page preloads
 }
 
 // staticFile is a static file, kept with its compressed form.
@@ -329,36 +336,68 @@ type staticFile struct {
 	contentType   string
 }
 
-// loadStatic reads every static file, compresses it once, and hashes its
-// content for its versioned URL.
-func loadStatic() (map[string]staticFile, map[string]string) {
-	files, versions := map[string]staticFile{}, map[string]string{}
-	entries, _ := assets.ReadDir("static") // the directory is embedded, in ui.go
+// contentTypes are the types of the static files, by extension. They are
+// set here, as mime.TypeByExtension reads the host's tables: one that names
+// another type for .js or .css would stop the script or the styles, which a
+// browser runs or applies only with their own types. A static file of
+// another extension needs its type here: without one, loadStatic panics.
+var contentTypes = map[string]string{
+	".css": "text/css; charset=utf-8",
+	".js":  "text/javascript; charset=utf-8",
+	".svg": "image/svg+xml",
+}
+
+// loadStatic reads every static file, compresses it once, and hashes them
+// all for their version.
+func loadStatic() statics {
+	st := statics{files: map[string]staticFile{}}
+	sum := sha256.New()
+	entries, _ := assets.ReadDir("static") // the directory is embedded, in ui.go; its entries come by name
 	for _, e := range entries {
-		body, _ := assets.ReadFile("static/" + e.Name())
-		sum := sha256.Sum256(body)
-		versions[e.Name()] = hex.EncodeToString(sum[:4])
+		name := e.Name()
+		typ, ok := contentTypes[path.Ext(name)]
+		if !ok {
+			// The files are embedded, so every test run finds such a file,
+			// as template.Must finds a broken template.
+			panic("ui: the static file " + name + " has no type in contentTypes")
+		}
+
+		body, _ := assets.ReadFile("static/" + name)
+		hash := sha256.Sum256(body)
+		sum.Write([]byte(name + "\x00"))
+		sum.Write(hash[:])
+
 		var z bytes.Buffer
 		zw, _ := gzip.NewWriterLevel(&z, gzip.BestCompression) // the level is valid
 		_, _ = zw.Write(body)
 		_ = zw.Close()
-		f := staticFile{body: body, contentType: mime.TypeByExtension(path.Ext(e.Name()))}
+		f := staticFile{body: body, contentType: typ}
 		if z.Len() < len(body) {
 			f.gzipped = z.Bytes()
 		}
-		files[e.Name()] = f
+		st.files[name] = f
+
+		// The page loads app.js, and preloads the modules that it imports.
+		// theme.js is a classic script, which runs before the page paints.
+		if path.Ext(name) == ".js" && name != "app.js" && name != "theme.js" {
+			st.modules = append(st.modules, name)
+		}
 	}
 
-	return files, versions
+	st.version = hex.EncodeToString(sum.Sum(nil)[:4])
+	return st
 }
 
-// static serves the static files. A URL with the current version of a file
-// may be cached for a year; any other, such as one from a page that an older
-// server rendered, must be checked again.
+// static serves the static files, at /static/{version}/{name}. One version
+// covers every file, so a module's import of another, such as "./morph.js",
+// stays in its version, and a page gets the files of one version. Those of
+// the current version may be cached for a year. A request for another
+// version, such as one from a page that an older server rendered, gets the
+// current file, which the browser must check again: the page works, and its
+// script reloads it once a live update brings a page of the current version.
 func (s *server) static() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
-		f, ok := s.files[name]
+		f, ok := s.statics.files[r.PathValue("name")]
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -367,7 +406,7 @@ func (s *server) static() http.Handler {
 		h := w.Header()
 		h.Set("Content-Type", f.contentType)
 		h.Set("Vary", "Accept-Encoding")
-		if r.URL.Query().Get("v") == s.versions[name] {
+		if r.PathValue("version") == s.statics.version {
 			h.Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
 			h.Set("Cache-Control", "no-cache")

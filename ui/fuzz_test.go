@@ -24,7 +24,7 @@ func FuzzPages(f *testing.F) {
 		"/tasks?state=dead&since=0000-01-01T00:00Z", "/tasks?since=2026-11-19T14:05Z", "/tasks?state=dead&before=%ff",
 		"/tasks?queue=mail&since=2026-11-19T14:05Z&before=2026-11-20T00:00:00%2B05:00&limit=250", "/tasks?state=completed&before=9999-12-31T23:59:59Z",
 		"/tasks?since=2026-11-19T14:05Z&cursor=MTA", "/tasks?state=dead&since=2026-11-19T14:05Z&cursor=YzAsMQ", "/tasks?since=0001-01-01T00:00:01Z&cursor=YzAsMQ",
-		"/choices/groups?search=%25_", "/schedules", "/workers", "/static/ui.css?v=0",
+		"/choices/groups?search=%25_", "/schedules", "/workers", "/static/0/ui.css", "/static/0/app.js",
 		// Text that PostgreSQL rejects once failed the request.
 		"/tasks?queue=%00", "/tasks?kind=%ff", "/tasks?group=%c3", "/choices/groups?search=%00",
 	} {

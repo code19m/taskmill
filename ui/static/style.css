@@ -210,7 +210,8 @@ button, input { font-weight: inherit; } /* not the browser's 400 */
 .visually-hidden {
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
-/* Controls that need the script. theme.js marks the page before it paints. */
+/* Controls that need the script. theme.js marks the page before it paints,
+   and unmarks it if the script does not start. */
 :root:not(.js) .js-only { display: none !important; }
 
 .skip-link {

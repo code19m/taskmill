@@ -4,9 +4,13 @@ import (
 	"compress/gzip"
 	"errors"
 	"io"
+	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -137,7 +141,7 @@ func TestCompressionFollowsAcceptEncoding(t *testing.T) {
 		{[]string{"gzip;q=x"}, false},
 		{[]string{"gzip;q=-1, *"}, false},
 	} {
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/static/style.css", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/static/any/style.css", nil)
 		for _, line := range tc.lines {
 			req.Header.Add("Accept-Encoding", line)
 		}
@@ -155,7 +159,7 @@ func TestBasicAuth(t *testing.T) {
 	h := handler(t, client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops", Password: "s3cret"}})
 
 	for _, creds := range [][2]string{{}, {"ops", "wrong"}, {"other", "s3cret"}} {
-		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/static/style.css", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/static/any/style.css", nil)
 		if creds[0] != "" {
 			req.SetBasicAuth(creds[0], creds[1])
 		}
@@ -274,25 +278,78 @@ func TestNewChecksTheConfig(t *testing.T) {
 	}
 }
 
+// Every static file of a page is in the folder of the current version,
+// which may be cached for a year, and has a type that the browser takes for
+// it, whatever the host's tables say. A page from another version of the
+// server links another folder: it gets the current files, which must not be
+// cached as that version.
 func TestStaticFilesAreVersionedAndCached(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
 	h := handler(t, client, nil)
 	_, body, _ := get(t, h, "/workers")
-	m := regexp.MustCompile(`href="(/static/style\.css\?v=[0-9a-f]+)"`).FindStringSubmatch(body)
+	m := regexp.MustCompile(`href="/static/([0-9a-f]+)/style\.css"`).FindStringSubmatch(body)
 	if m == nil {
 		t.Fatalf("no versioned stylesheet link in\n%s", body)
 	}
+	version := m[1]
 
-	code, _, header := get(t, h, m[1])
-	if code != http.StatusOK || !strings.Contains(header.Get("Cache-Control"), "immutable") {
-		t.Fatalf("stylesheet: %d, %v", code, header)
+	paths := regexp.MustCompile(`(?:src|href)="(/static/[^"]*)"`).FindAllStringSubmatch(body, -1)
+	for _, p := range paths {
+		code, _, header := get(t, h, p[1])
+		if !strings.HasPrefix(p[1], "/static/"+version+"/") || code != http.StatusOK ||
+			!strings.Contains(header.Get("Cache-Control"), "immutable") {
+			t.Errorf("%s: %d, %v; want it in the folder of version %s, and immutable", p[1], code, header, version)
+		}
+		if typ := header.Get("Content-Type"); typ == "" ||
+			strings.HasSuffix(p[1], ".js") && typ != "text/javascript; charset=utf-8" {
+			t.Errorf("%s is %q, not a type that a browser takes for it", p[1], typ)
+		}
 	}
 
-	// A page from another version of the server links other versions, which
-	// must not be cached as this one.
-	code, _, header = get(t, h, "/static/style.css?v=00000000")
-	if code != http.StatusOK || header.Get("Cache-Control") != "no-cache" {
-		t.Fatalf("stylesheet of another version: %d, %v", code, header)
+	_, current, _ := get(t, h, "/static/"+version+"/style.css")
+	code, other, header := get(t, h, "/static/00000000/style.css")
+	if code != http.StatusOK || header.Get("Cache-Control") != "no-cache" || other != current {
+		t.Fatalf("stylesheet of another version: %d, %v; want the current one, not cached", code, header)
+	}
+}
+
+// The page loads the script's entry, app.js, as a module, and preloads
+// every module that it imports, directly or not, so that the browser
+// fetches them all at the same time, not each after the module that
+// imports it. theme.js is a classic script, which runs before the page
+// paints.
+func TestPagePreloadsTheModulesOfTheScript(t *testing.T) {
+	t.Parallel()
+	_, body, _ := get(t, handler(t, setup(t), nil), "/workers")
+	scripts := regexp.MustCompile(`<script (type="module" )?src="/static/[0-9a-f]+/([a-z]+\.js)"></script>`).FindAllStringSubmatch(body, -1)
+	if len(scripts) != 2 || scripts[0][1] != "" || scripts[0][2] != "theme.js" || scripts[1][1] == "" || scripts[1][2] != "app.js" {
+		t.Fatalf("the scripts of the page are %q, want theme.js, then the module app.js", scripts)
+	}
+
+	var preloaded []string
+	for _, m := range regexp.MustCompile(`<link rel="modulepreload" href="/static/[0-9a-f]+/([a-z]+\.js)">`).FindAllStringSubmatch(body, -1) {
+		preloaded = append(preloaded, m[1])
+	}
+
+	static := os.DirFS("static")
+	imported := map[string]bool{}
+	var follow func(name string)
+	follow = func(name string) {
+		source, err := fs.ReadFile(static, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range regexp.MustCompile(`from "\./([a-z]+\.js)";`).FindAllStringSubmatch(string(source), -1) {
+			if !imported[m[1]] {
+				imported[m[1]] = true
+				follow(m[1])
+			}
+		}
+	}
+	follow("app.js")
+	want := slices.Sorted(maps.Keys(imported))
+	if !slices.Equal(preloaded, want) {
+		t.Errorf("the page preloads %q, want the modules that app.js imports: %q", preloaded, want)
 	}
 }

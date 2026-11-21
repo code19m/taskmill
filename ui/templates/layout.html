@@ -9,7 +9,10 @@
 <link rel="icon" href="{{asset "favicon.svg"}}" type="image/svg+xml">
 <link rel="stylesheet" href="{{asset "style.css"}}">
 <script src="{{asset "theme.js"}}"></script>
-<script src="{{asset "app.js"}}" defer></script>
+<script type="module" src="{{asset "app.js"}}"></script>
+{{- range modules}}
+<link rel="modulepreload" href="{{asset .}}">
+{{- end}}
 </head>
 <body>
 {{template "sprite"}}
