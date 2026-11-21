@@ -7,8 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/ui"
@@ -26,15 +28,6 @@ func TestLiveUpdateResponses(t *testing.T) {
 		t.Fatalf("unchanged page: ETag %q, got %d", etag, code)
 	}
 
-	// A page names its time of rendering, which is no part of what it says:
-	// a later copy that says the same is the page that the client has.
-	rendered := regexp.MustCompile(` data-now="[^"]+"`)
-	for later := plain; rendered.FindString(later) == rendered.FindString(plain); {
-		if _, later, header = get(t, h, "/workers"); header.Get("ETag") != etag {
-			t.Fatalf("a later copy of an unchanged page has the ETag %q, want %q", header.Get("ETag"), etag)
-		}
-	}
-
 	code, zipped, header := get(t, h, "/workers", "Accept-Encoding", "gzip")
 	if code != http.StatusOK || header.Get("Content-Encoding") != "gzip" {
 		t.Fatalf("compressed page: %d, %v", code, header)
@@ -46,6 +39,75 @@ func TestLiveUpdateResponses(t *testing.T) {
 	}
 	if unzipped, err := io.ReadAll(zr); err != nil || rendered.ReplaceAllString(string(unzipped), "") != rendered.ReplaceAllString(plain, "") {
 		t.Fatalf("compressed page differs: %v", err)
+	}
+}
+
+// rendered is a page's time of rendering, from which its relative times count.
+var rendered = regexp.MustCompile(` data-now="[^"]+"`)
+
+// A live update asks for the page that it shows, and is told that the page
+// did not change while only the time did: the script keeps the relative
+// times of the page on screen counting from its time of rendering, in the
+// server's words, so a later copy that says the same once its times counted
+// on is the page that the client has. Each page here has times that count,
+// and the second between its two copies changes their words. A page whose
+// data changed is sent anew, also when only an instant changed, such as a
+// worker's check-in by a millisecond.
+func TestLiveUpdatesOfPagesWithTimesThatCount(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	ctx := t.Context()
+	res, err := client.Enqueue(ctx, greet{Name: "now"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A running task, whose timeline counts how long it runs; the counts
+	// of the maintainer; a worker that checked in; and a schedule that is
+	// due within a minute, which the overview's Schedules card names.
+	id := strconv.FormatInt(res.ID, 10)
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'running', attempt = 1, attempted_at = now(),
+	    attempted_by = 'w', lease_expires_at = now() + interval '1 minute' WHERE id = $1`, res.ID); err != nil {
+		t.Fatal(err)
+	}
+	storeCounts(t, pool, schema, "0 seconds", false)
+	if _, err := pool.Exec(ctx, `INSERT INTO `+schema+`.workers (id, queues, hostname, version) VALUES ('w', '{default}', 'h', 'v')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO `+schema+`.schedules (name, queue, kind, cron, next_run_at, last_run_at)
+	    VALUES ('minutely', 'default', 'greet', '* * * * *', now() + interval '30 seconds', now() - interval '30 seconds')`); err != nil {
+		t.Fatal(err)
+	}
+
+	// What a page words to the minute, such as the presets of the filter by
+	// time, changes at the minute: both copies come within one.
+	if left := time.Until(time.Now().Truncate(time.Minute).Add(time.Minute)); left < 5*time.Second {
+		time.Sleep(left)
+	}
+
+	h := handler(t, client, nil)
+	targets := []string{"/", "/tasks", "/tasks/" + id, "/schedules", "/workers"}
+	first, etags := map[string]string{}, map[string]string{}
+	for _, target := range targets {
+		_, body, header := get(t, h, target)
+		first[target], etags[target] = rendered.ReplaceAllString(body, ""), header.Get("ETag")
+	}
+
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second))) // the next second
+	for _, target := range targets {
+		if _, later, _ := get(t, h, target); rendered.ReplaceAllString(later, "") == first[target] {
+			t.Fatalf("%s: a second later, the page says the same: its times do not count", target)
+		}
+		if code, _, _ := get(t, h, target, "If-None-Match", etags[target]); code != http.StatusNotModified {
+			t.Errorf("%s: a live update a second later got %d, want 304: only the words of its times changed", target, code)
+		}
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.workers SET heartbeat_at = heartbeat_at + interval '1 millisecond'`); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := get(t, h, "/workers", "If-None-Match", etags["/workers"]); code != http.StatusOK {
+		t.Errorf("a live update after a check-in got %d, want 200", code)
 	}
 }
 

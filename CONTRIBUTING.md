@@ -30,7 +30,8 @@ make check
 ```
 
 `make check` runs the same checks as CI (see [Checks](#checks)), in every
-module: the core, `otel/`, and `examples/orms/`, each with its own go.mod.
+module: the core, `otel/`, `examples/orms/`, and `ui/browsertest/`, each
+with its own go.mod.
 The first run installs the pinned development tools into `./bin`.
 
 `make help` lists every target. These are the ones you need most:
@@ -41,6 +42,7 @@ The first run installs the pinned development tools into `./bin`.
 | `make check` | Run every CI check except `make release-check` and `make api`. |
 | `make fmt` | Format the code. |
 | `make test` | Run the tests with the race detector, in random order. |
+| `make test-browser` | Run the dashboard's script in Chrome or Chromium. Without one, it says so and skips. |
 | `make api` | Compare the API of the last commit with the latest release. It needs committed code, so `make check` leaves it out. |
 | `make compat` | Run the latest release on the schema that the current code migrated. |
 | `make bench` | Run the benchmarks and the fault scenarios, and print a Markdown report. |
@@ -88,6 +90,22 @@ your judgment:
 | Let examples run. | An `Example` function that needs no database has an `// Output:` comment, so it runs as a test. |
 | Fuzz input from outside. | The dashboard's query parameters, list cursors, task payloads, and cron expressions each have a fuzz target. When a fuzzer finds a bug, add its input as a seed. |
 
+## Work on the dashboard
+
+- **See it with data:** the [shop example](examples/shop/README.md) runs
+  the dashboard on a shop that places an order every second, with failures,
+  schedules, and FIFO groups.
+- **Keep to its design:** [How the dashboard is built](docs/design/README.md#how-the-dashboard-is-built)
+  says what its pages and its scripts may use, and the top of
+  [style.css](ui/static/style.css) says how it looks.
+- **Test the script in a browser:** a change to `ui/static/app.js` gets a
+  test in [ui/browsertest](ui/browsertest/doc.go), which `make
+  test-browser` runs. A word function that the script shares with the
+  server, such as `ago`, gets its cases in
+  [ui/internal/twins](ui/internal/twins/twins.go).
+- **Look at it:** in the light and the dark theme, and at the width of a
+  phone. No test sees how a page looks.
+
 ## Checks
 
 A pull request merges only when CI passes. Each check runs a Makefile
@@ -99,12 +117,13 @@ and the [title check](#commit-messages).
 | Lint | `make tidy-check lint` | golangci-lint or actionlint reports a finding, in any module or in `internal/compat`; a go.mod or go.sum is not tidy; or a committed file is over 1 MiB. |
 | Test | `make test` | A test fails, on any supported Go and PostgreSQL. The job with the newest Go writes the coverage per package to its summary. |
 | Test through PgBouncer | `make test-pgbouncer` | A test fails through PgBouncer in transaction mode. |
+| Browser | `make test-browser` | A test of the dashboard's script fails in Chrome. |
 | Vulnerabilities | `make vuln` | Code that taskmill calls has a known vulnerability. |
 | API compatibility | `make api` | A module does not build or has a bad `go.mod`. From v1.0.0 on, also an incompatible change: the job summary lists the changes. |
 | Rolling deploy | `make compat` | The latest release's client, worker, or dashboard fails on a schema that the current code migrated. See [Schema migrations](#schema-migrations). |
 | Otel on its required core | `make otel-release-check` | The `otel` module does not build, or its tests fail, against the core version it requires, once that version is released. |
 | Release config | `make release-check` | `.goreleaser.yaml` is not valid, or `make release-notes` can no longer read CHANGELOG.md. |
-| CodeQL | none | Code scanning finds new alerts. It reports them on the pull request and in the Security tab. |
+| CodeQL | none | Code scanning finds new alerts, in the Go code or in the dashboard's scripts. It reports them on the pull request and in the Security tab. |
 
 Four more checks run on a schedule:
 

@@ -22,6 +22,7 @@ func (s *server) funcs() template.FuncMap {
 		"path":        s.path,
 		"asset":       s.asset,
 		"ago":         ago,
+		"agoMinutes":  agoMinutes,
 		"timestamp":   timestamp,
 		"instant":     instant,
 		"fieldTime":   fieldTime,
@@ -94,6 +95,18 @@ func ago(now, t time.Time) string {
 		return "in " + strconv.FormatInt(n, 10) + unit
 	}
 	return strconv.FormatInt(n, 10) + unit + " ago"
+}
+
+// agoMinutes words t as ago does, but to the minute: "within a minute" for a
+// time less than a minute from now, before or after it. It is for words that
+// the script does not count, such as those of a tooltip: they change once a
+// minute at most, so a page that holds them stays the page that a client
+// has for the minute (see etag).
+func agoMinutes(now, t time.Time) string {
+	if d := now.Unix() - t.Unix(); d > -60 && d < 60 {
+		return "within a minute"
+	}
+	return ago(now, t)
 }
 
 // span words a length of time at the scale of a handler's run:

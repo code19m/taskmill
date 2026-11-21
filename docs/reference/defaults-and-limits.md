@@ -84,6 +84,7 @@ by election, that does the shared work.
 | The dashboard marks a worker as stale | After one `LeaseDuration` of that worker without a check-in: 30 seconds by default |
 | Values per filter | Up to 100 |
 | FIFO groups that a filter lists | The first 100. Its search finds the others |
+| Halted FIFO groups that a dead task's page reads to find its own | The first 1,000 of its queue whose keys contain its key. Past those, the page says that the task's place in its group could not be read |
 | Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds, or 5 seconds after a read that failed |
 | Charts | The last hour, 6 hours, or day, with one point per 1, 5, or 15 minutes. The 6 hours and the day read their history again at most every 30 seconds, and when a point becomes complete |
 

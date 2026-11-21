@@ -121,7 +121,7 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Rows that taskmill did not write](docs/design/schema-rows.md): Which values the tables refuse, and how the code survives the others
 - [Schema migrations](docs/design/schema-migrations.md): How `Migrate` changes a busy schema: one process at a time, indexes built online, and a guard for the older migrations that block writes
 - [The API's shape](docs/design/api-shape.md): Why each point of the API has its shape, and when we look at it again
-- [Dependencies and modules](docs/design/dependencies.md): Why pgx is the only dependency, why OpenTelemetry and the ORM examples have modules of their own, and how to add a dependency
+- [Dependencies and modules](docs/design/dependencies.md): Why pgx is the only dependency, why OpenTelemetry, the ORM examples, and the browser tests have modules of their own, and how to add a dependency
 - [Benchmarks](docs/design/benchmarks.md): The performance targets, how we measure them, and the latest results
 - [Releasing](docs/design/releasing.md): How the project team publishes a version
 - [Writing docs](docs/design/writing-docs.md): The style guide and the page templates
