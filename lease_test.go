@@ -537,10 +537,11 @@ func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
 	}
 
 	// The lock reads each task twice, the renewal three times and returns
-	// it, the read of cancel requests once, and the completion reads it to
-	// lock it and to delete it, and returns it.
-	if n > 10*attempts {
-		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 10*attempts)
+	// it, the read of cancel requests once, and each of the two completions
+	// reads it to lock it and to delete it, and returns it. The completion
+	// that skips held rows looks up only the tasks that it skipped again.
+	if n > 13*attempts {
+		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 13*attempts)
 	}
 }
 
@@ -590,9 +591,10 @@ func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 	twice := []int64{owned, owned, alsoOwned, alsoOwned}
 	each := []int64{owned, owned, alsoOwned}
 	statements := []string{
-		"the lock", "the renewal", "the read of cancel requests", "the completion", "the failure", "the snooze", "the release",
+		"the lock", "the renewal", "the read of cancel requests", "the completion that skips held rows", "the completion",
+		"the failure", "the snooze", "the release",
 	}
-	for i, want := range [][]int64{twice, twice, {alsoOwned}, {owned, alsoOwned}, each, each, each} {
+	for i, want := range [][]int64{twice, twice, {alsoOwned}, {owned, alsoOwned}, {owned, alsoOwned}, each, each, each} {
 		if !slices.Equal(found[i], want) {
 			t.Errorf("%s found the tasks %v, want %v", statements[i], found[i], want)
 		}

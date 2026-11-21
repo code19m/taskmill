@@ -150,7 +150,7 @@ WHERE ` + leasedSQL + ` AND t.cancel_requested_at IS NOT NULL`
 //
 // completeSQL finishes running tasks whose attempts still hold their
 // leases: it moves them to history, except tasks $3, which it only
-// deletes.
+// deletes. It returns each task it finished, with true.
 //
 // It waits for a row that another transaction holds. So it first
 // locks the tasks that the attempts own, in the order of their IDs,
@@ -168,7 +168,34 @@ WITH held AS (
     WHERE ` + leasedSQL + `
     ORDER BY t.id
     FOR UPDATE OF t
-), done AS (
+), ` + completeHeldSQL + `
+SELECT id, queue, coalesce(group_key, ''), true FROM done`
+
+// $1 task IDs, $2 lease tokens, $3 task IDs to delete without history.
+//
+// completeSkippingSQL is completeSQL for tasks outside FIFO groups,
+// without the wait: it skips the rows that other transactions hold,
+// such as one that cancels a task, and returns each such task with
+// false, after the tasks it finished. A batch of completions thus
+// never waits for one row, and the worker tries the skipped ones
+// again later. Only the attempts that it skipped are looked up again.
+const completeSkippingSQL = `
+WITH attempts AS (
+    SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
+), held AS (
+    SELECT t.id FROM attempts JOIN {s}.tasks t USING (id, lease_token)
+    WHERE ` + leasedSQL + `
+    FOR UPDATE OF t SKIP LOCKED
+), ` + completeHeldSQL + `
+SELECT id, queue, coalesce(group_key, ''), true FROM done
+UNION ALL
+SELECT t.id, '', '', false FROM attempts a JOIN {s}.tasks t USING (id, lease_token)
+WHERE NOT EXISTS (SELECT FROM held WHERE held.id = a.id) AND ` + leasedSQL
+
+// completeHeldSQL is the part of completeSQL and completeSkippingSQL
+// that finishes the tasks held: it deletes them, and copies those that
+// keep their history, all but tasks $3, into history.
+const completeHeldSQL = `done AS (
     DELETE FROM {s}.tasks
     WHERE id = ANY(ARRAY(SELECT id FROM held))
     RETURNING id, created_at, run_at, attempted_at, priority, attempt, max_attempts,
@@ -180,8 +207,7 @@ WITH held AS (
            max_attempts, queue, kind, group_key, attempted_by, payload, metadata, errors
     FROM done
     WHERE done.id <> ALL($3::bigint[])
-)
-SELECT id, queue, coalesce(group_key, '') FROM done`
+)`
 
 // $1 task IDs, $2 lease tokens.
 //

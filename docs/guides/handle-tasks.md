@@ -81,7 +81,7 @@ func (s *ReceiptSender) Handle(ctx context.Context, t *taskmill.Task[SendReceipt
 |---|---|
 | Panics | Like an error: the task is retried, and the worker keeps running. The stack trace is saved in its error history, with the code `panic` |
 | Returns an error whose `Error` method panics, such as a nil pointer in an `error` value | The same. The task is retried after the default backoff |
-| Runs longer than its `Timeout` | Its context is canceled. An error then fails the attempt, and nil completes the task |
+| Runs longer than its `Timeout` | Its context is canceled. An error then fails the attempt, and nil completes the task. If it has not returned 5 seconds later, the attempt fails with the code `timeout` all the same, except in a queue with `MaxRunning` |
 | Never runs, because the payload does not decode | The task becomes dead right away, with the code `invalid_payload` |
 
 ## Why did my context end?
@@ -106,9 +106,14 @@ In every case, do the same:
   except after `ErrLeaseLost`: then the result is ignored.
 - **Return soon.** taskmill can't stop your code: a handler that ignores its
   context keeps running, and keeps its
-  [slot](../concepts/glossary.md#slot) in the queue.
+  [slot](../concepts/glossary.md#slot) in the queue. 5 seconds after its
+  context ended, the worker gives up on it, and logs a warning: the task is
+  retried, or canceled, as the cause says, and its result is ignored. So the
+  task can run again while your code still runs. In a queue with
+  `MaxRunning`, the worker keeps the task running instead, so that the
+  limit holds, and only warns.
   [Stop a worker cleanly](workers-and-queues.md#stop-a-worker-cleanly) shows
-  what happens to it at shutdown.
+  what happens at shutdown.
 
 ## Options per kind
 

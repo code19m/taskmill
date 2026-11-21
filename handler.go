@@ -77,8 +77,19 @@ type BatchHandler[A Args] interface {
 //
 // [guide to handling tasks]: https://github.com/code19m/taskmill/blob/main/docs/guides/handle-tasks.md
 type HandlerOptions struct {
-	// Timeout bounds each attempt, or each batch. It must not be negative.
-	// Default: 1 minute.
+	// Timeout bounds each attempt, or each batch: the handler's context is
+	// canceled with [ErrAttemptTimeout] then. A handler that has not returned
+	// 5 seconds after its context was canceled, by this timeout, a cancel of
+	// its task, or a lost lease, is abandoned: its attempt ends as the cause
+	// says, its task is retried or canceled, and its result is ignored. Its
+	// goroutine keeps its slot until it returns, and it may still finish its
+	// work, while the task already runs again. The context of a batch
+	// handler ends only with this timeout, so a batch is abandoned only
+	// after it: each of its tasks fails with [CodeTimeout]. In a queue with
+	// a [QueueSettings.MaxRunning] limit, nothing is abandoned: a task that
+	// ran again would break the limit. Its task stays running until the
+	// handler returns, and the worker logs a warning. It must not be
+	// negative. Default: 1 minute.
 	Timeout time.Duration
 
 	// Retry decides the delay before each retry. A task whose worker lost its

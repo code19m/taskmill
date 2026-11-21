@@ -3,6 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"strconv"
 	"strings"
@@ -855,4 +856,124 @@ func TestMiddlewareThatSkipsSomeTasksOfABatch(t *testing.T) {
 		}
 		e.waitState(t, id, want)
 	}
+}
+
+// A handler that ignores its context would keep its task running for good:
+// its timeout, a cancel, or a delete would change nothing. 5 seconds after
+// its context ends (here 200 ms), the worker abandons its attempt as the
+// cause says, and logs it, while the handler's goroutine keeps its slot
+// until it returns: the next task waits for it, as Concurrency says. The
+// handler's late result counts for nothing.
+func TestHandlerThatIgnoresItsTimeoutIsAbandoned(t *testing.T) {
+	t.Parallel()
+	s := runStuckHandler(t, 300*time.Millisecond)
+	info := s.e.waitState(t, s.stuck, taskmill.StateDead)
+	if len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeTimeout ||
+		!strings.Contains(info.Errors[0].Message, "the handler did not return") {
+		t.Errorf("got the errors %+v, want one with the code timeout that says the handler did not return", info.Errors)
+	}
+	s.check(t, taskmill.StateDead)
+}
+
+// So is a handler that ignores the cancel of its task: the task is
+// canceled.
+func TestHandlerThatIgnoresACancelIsAbandoned(t *testing.T) {
+	t.Parallel()
+	s := runStuckHandler(t, time.Hour)
+	if err := s.e.client.Cancel(t.Context(), s.stuck); err != nil {
+		t.Fatal(err)
+	}
+	s.e.waitState(t, s.stuck, taskmill.StateCanceled)
+	s.check(t, taskmill.StateCanceled)
+}
+
+// In a queue with a MaxRunning limit, the worker does not abandon a handler
+// that ignores its context: its task would run again while the handler
+// still runs, beyond the limit, which protects what the handlers call. The
+// task stays running until the handler returns, and the worker warns.
+func TestHandlerThatIgnoresItsTimeoutInALimitedQueueKeepsItsTask(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	e.limitDefaultQueue(t, 1)
+	var runs atomic.Int32
+	unblock := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			if runs.Add(1) == 1 {
+				<-unblock // ignores its context
+			}
+			return nil
+		}, &taskmill.HandlerOptions{Timeout: 300 * time.Millisecond}),
+		Queues: defaultQueue(2),
+	})
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 2})
+	const kept = "handler ignored its context; its task keeps running because its queue has a MaxRunning limit"
+	waitFor(t, "the warning", func() bool { return logs.count(kept) == 1 })
+	if info := e.get(t, id); info.State != taskmill.StateRunning || info.Attempt != 1 || runs.Load() != 1 {
+		t.Fatalf("the task is %s on attempt %d, after %d runs; want running on its first, alone", info.State, info.Attempt, runs.Load())
+	}
+
+	close(unblock)
+	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 || runs.Load() != 1 {
+		t.Fatalf("completed on attempt %d after %d runs, want one", info.Attempt, runs.Load())
+	}
+	if n := logs.count("handler ignored its context; abandoning its attempt"); n != 0 {
+		t.Errorf("the attempt of a limited queue was abandoned")
+	}
+}
+
+// stuckHandler is a worker of one slot whose handler of a task ignores its
+// context, and a task that waits behind it.
+type stuckHandler struct {
+	e           *env
+	logs        *logRecorder
+	stuck, next int64
+	started     chan int64
+	unblock     chan struct{}
+}
+
+// runStuckHandler runs a stuckHandler whose handlers have the timeout
+// timeout, and waits until the stuck task's handler runs.
+func runStuckHandler(t *testing.T, timeout time.Duration) *stuckHandler {
+	t.Helper()
+	s := &stuckHandler{logs: &logRecorder{}, started: make(chan int64, 2), unblock: make(chan struct{})}
+	s.e = newEnv(t).withLogger(t, slog.New(s.logs))
+	runWorker(t, s.e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			s.started <- task.ID
+			if task.Args.To == "stuck" {
+				<-s.unblock // ignores its context
+			}
+			return nil
+		}, &taskmill.HandlerOptions{Timeout: timeout}),
+		Queues: defaultQueue(1),
+	})
+	t.Cleanup(func() { close(s.unblock) })
+
+	s.stuck = s.e.enqueue(t, sendEmail{To: "stuck"}, &taskmill.EnqueueOptions{MaxAttempts: 1})
+	recv(t, s.started, "the handler to start")
+	s.next = s.e.enqueue(t, sendEmail{}, nil)
+	return s
+}
+
+// check checks, once the stuck task is in state, that the worker logged the
+// abandoned attempt once, and that the next task started only once the
+// stuck handler returned, and left the stuck task as it was.
+func (s *stuckHandler) check(t *testing.T, state taskmill.State) {
+	t.Helper()
+	if n := s.logs.count("handler ignored its context; abandoning its attempt"); n != 1 {
+		t.Errorf("the abandoned attempt was logged %d times, want once", n)
+	}
+	if n := s.e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND state = 'available'", s.next); n != 1 {
+		t.Errorf("the next task started while the abandoned handler kept its slot")
+	}
+
+	s.unblock <- struct{}{}
+	if got := recv(t, s.started, "the next task to start"); got != s.next {
+		t.Fatalf("task %d started, want %d", got, s.next)
+	}
+	s.e.waitState(t, s.next, taskmill.StateCompleted)
+	s.e.wantState(t, s.stuck, state)
 }

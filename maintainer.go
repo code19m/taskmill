@@ -198,6 +198,19 @@ func (m *maintainer) every(ctx context.Context, interval time.Duration, work fun
 	}
 }
 
+// bound returns the context of one statement or transaction of the
+// maintainer's work, other than the election: ctx, ended after one leader
+// lease. A connection that stops answering without being reset, as in a
+// failover that drops packets, would hold the work for as long as the
+// operating system waits for an answer, often 15 minutes, while the election
+// keeps the maintainer's role on other connections. Bound, a stuck statement
+// ends within the lease, and the work tries again on another connection. A
+// statement that answers takes far less: a slow one has a bound of its own,
+// such as the detach of a history partition.
+func (m *maintainer) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, m.w.timing.leaderLease)
+}
+
 // outlive returns a context that keeps ctx's values, but not its end: it ends
 // after limit, or grace after ctx has ended, whichever comes first.
 func outlive(ctx context.Context, limit, grace time.Duration) (context.Context, context.CancelFunc) {
@@ -265,7 +278,7 @@ func (m *maintainer) elect(ctx context.Context) bool {
 		} {
 			f.reset()
 		}
-		m.watch.reset()
+		m.watch.start()
 	}
 
 	m.leader.Store(leader)
@@ -277,6 +290,7 @@ func (m *maintainer) elect(ctx context.Context) bool {
 		default:
 		}
 	case was && !leader:
+		m.watch.end()
 		m.w.logger.LogAttrs(ctx, slog.LevelInfo, "no longer maintainer")
 	}
 	return leader
@@ -306,7 +320,9 @@ func (m *maintainer) resign(ctx context.Context) {
 func (m *maintainer) promote(ctx context.Context) {
 	for {
 		var promoted int
-		err := m.c.pool.QueryRow(ctx, m.c.sql.promoteDue, m.c.schema).Scan(&promoted)
+		stmtCtx, cancel := m.bound(ctx)
+		err := m.c.pool.QueryRow(stmtCtx, m.c.sql.promoteDue, m.c.schema).Scan(&promoted)
+		cancel()
 		if err != nil || promoted < maintenanceBatch {
 			m.promotionFailures.observe(ctx, err)
 			return
@@ -324,7 +340,9 @@ func (m *maintainer) promote(ctx context.Context) {
 // whole installation. A queue whose workers are all busy is woken too, which
 // changes nothing; a queue whose tasks start right away is not.
 func (m *maintainer) wake(ctx context.Context, heartbeat bool) bool {
-	_, err := m.c.pool.Exec(ctx, m.c.sql.wakeQueues, m.c.schema, m.w.timing.maintainer.Microseconds(), heartbeat)
+	stmtCtx, cancel := m.bound(ctx)
+	defer cancel()
+	_, err := m.c.pool.Exec(stmtCtx, m.c.sql.wakeQueues, m.c.schema, m.w.timing.maintainer.Microseconds(), heartbeat)
 	m.wakeFailures.observe(ctx, err)
 	return err == nil
 }
@@ -354,6 +372,8 @@ func (m *maintainer) rescue(ctx context.Context) {
 // transaction, and returns their tasks. A task that became dead halts its
 // FIFO group, and one that became canceled leaves it.
 func (m *maintainer) rescueBatch(ctx context.Context) (batch []rescuedTask, err error) {
+	ctx, cancel := m.bound(ctx)
+	defer cancel()
 	err = m.c.inTx(ctx, func(q querier) error {
 		r, err := q.query(ctx, m.c.sql.rescue,
 			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds(), leaseExpired)
@@ -428,10 +448,11 @@ func (m *maintainer) retain(ctx context.Context) {
 }
 
 // applyRetention does the work of retain, and returns the errors of the
-// steps that failed: one step's failure does not stop the others.
+// steps that failed: one step's failure does not stop the others. Each
+// statement has the bound of one: see bound.
 func (m *maintainer) applyRetention(ctx context.Context) error {
 	var errs []error
-	if err := ensureHistoryPartitions(ctx, m.c.pool, m.c.schema); err != nil {
+	if err := m.ensureHistory(ctx); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -447,17 +468,34 @@ func (m *maintainer) applyRetention(ctx context.Context) error {
 	if err := m.deleteInBatches(ctx, m.c.sql.deleteActivity, activityRetention.Seconds()); err != nil {
 		errs = append(errs, fmt.Errorf("delete old activity: %w", err))
 	}
-	if _, err := m.c.pool.Exec(ctx, m.c.sql.deleteWorkers, staleWorkerAge.Seconds()); err != nil {
+	if err := m.deleteWorkers(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("delete stale workers: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+// ensureHistory creates the history partitions that the next week lacks.
+func (m *maintainer) ensureHistory(ctx context.Context) error {
+	ctx, cancel := m.bound(ctx)
+	defer cancel()
+	return ensureHistoryPartitions(ctx, m.c.pool, m.c.schema)
+}
+
+// deleteWorkers deletes the workers that stopped without unregistering.
+func (m *maintainer) deleteWorkers(ctx context.Context) error {
+	ctx, cancel := m.bound(ctx)
+	defer cancel()
+	_, err := m.c.pool.Exec(ctx, m.c.sql.deleteWorkers, staleWorkerAge.Seconds())
+	return err
 }
 
 // deleteInBatches runs a delete statement that deletes up to one batch,
 // until it deletes less than a full batch.
 func (m *maintainer) deleteInBatches(ctx context.Context, sql string, args ...any) error {
 	for {
-		tag, err := m.c.pool.Exec(ctx, sql, args...)
+		stmtCtx, cancel := m.bound(ctx)
+		tag, err := m.c.pool.Exec(stmtCtx, sql, args...)
+		cancel()
 		if err != nil || tag.RowsAffected() < maintenanceBatch {
 			return err
 		}
@@ -467,6 +505,8 @@ func (m *maintainer) deleteInBatches(ctx context.Context, sql string, args ...an
 // untilNextDue returns how long to sleep: until the next scheduled task is
 // due, but at most one maintenance interval.
 func (m *maintainer) untilNextDue(ctx context.Context) time.Duration {
+	ctx, cancel := m.bound(ctx)
+	defer cancel()
 	var secs *float64
 	if err := m.c.pool.QueryRow(ctx, m.c.sql.nextDue).Scan(&secs); err != nil || secs == nil {
 		return m.w.timing.maintainer
@@ -504,6 +544,8 @@ func (m *maintainer) refreshStats(ctx context.Context) {
 // The count only reads, so the transaction takes its locks at the end, when
 // it stores the counts.
 func (m *maintainer) recountStats(ctx context.Context) error {
+	ctx, cancel := m.bound(ctx)
+	defer cancel()
 	return pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, statsSettings); err != nil {
 			return fmt.Errorf("count tasks: %w", err)

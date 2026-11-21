@@ -1,6 +1,7 @@
 package taskmill
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -161,12 +162,14 @@ type statement struct {
 
 // leased returns the statements that find a batch of tasks by their attempts
 // (ids, tokens): the lock of a grouped completion, the lease renewal, the
-// read of cancel requests, and the completion.
+// read of cancel requests, the completion that skips held rows, and the
+// completion.
 func leased(c *Client, ids []int64, tokens []int32) []statement {
 	return []statement{
 		{c.sql.lockLeased, []any{ids, tokens}},
 		{c.sql.renewLeases, []any{ids, tokens, time.Hour.Microseconds()}},
 		{c.sql.cancelRequest, []any{ids, tokens}},
+		{c.sql.completeSkipping, []any{ids, tokens, []int64{}}},
 		{c.sql.complete, []any{ids, tokens, []int64{}}},
 	}
 }
@@ -204,44 +207,61 @@ func LeasedRowsRead(ctx context.Context, c *Client, ids []int64, tokens []int32)
 }
 
 // LeasedFound runs the same statements in one transaction, in that order,
-// the completion last. It returns the IDs of the rows that each one
-// returned, sorted.
+// the completion last. The completion that skips held rows runs in a
+// savepoint that it rolls back, so that the completion finds the tasks too.
+// It returns the IDs of the rows that each one returned, sorted.
 //
 // Before them, it runs the statements that end one attempt: the failure, the
 // snooze, and the release. The IDs of the attempts for which each of these
 // found a task come after the others, sorted.
-func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (found [7][]int64, err error) {
+func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (found [8][]int64, err error) {
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		one, err := endedFound(ctx, c, tx, ids, tokens)
 		if err != nil {
 			return err
 		}
-		copy(found[4:], one[:])
+		copy(found[5:], one[:])
 
 		for i, s := range leased(c, ids, tokens) {
-			r, err := tx.Query(ctx, s.sql, s.args...)
+			if s.sql != c.sql.completeSkipping {
+				found[i], err = foundIDs(ctx, tx, s)
+			} else if err = pgx.BeginFunc(ctx, tx, func(undo pgx.Tx) error { // a savepoint
+				found[i], err = foundIDs(ctx, undo, s)
+				return cmp.Or(err, errUndo)
+			}); errors.Is(err, errUndo) {
+				err = nil
+			}
 			if err != nil {
 				return err
 			}
-			found[i], err = pgx.CollectRows(r, func(row pgx.CollectableRow) (int64, error) {
-				values, err := row.Values()
-				if err != nil {
-					return 0, err
-				}
-				id, _ := values[0].(int64)
-				return id, nil
-			})
-			if err != nil {
-				return err
-			}
-		}
-
-		for i := range found {
 			slices.Sort(found[i])
+		}
+		for i := range found[5:] {
+			slices.Sort(found[5+i])
 		}
 		return nil
 	})
 	return found, err
+}
+
+// errUndo rolls a savepoint back.
+var errUndo = errors.New("undo")
+
+// foundIDs runs s in tx, and returns the IDs of the rows that it returned,
+// from their first column.
+func foundIDs(ctx context.Context, tx pgx.Tx, s statement) ([]int64, error) {
+	r, err := tx.Query(ctx, s.sql, s.args...)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(r, func(row pgx.CollectableRow) (int64, error) {
+		values, err := row.Values()
+		if err != nil {
+			return 0, err
+		}
+		id, _ := values[0].(int64)
+		return id, nil
+	})
 }
 
 // endedFound runs the statements that end one attempt, each for every

@@ -134,8 +134,11 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	}
 
 	// The statements run on a context that outlives ctx: once tasks are
-	// leased, they must reach the worker even if it is stopping.
-	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	// leased, they must reach the worker even if it is stopping. But only by
+	// cleanupTimeout, so that a database that does not answer holds the stop
+	// up no longer than it holds the rest of it. Tasks that a statement
+	// leased without an answer are rescued when their leases run out.
+	dbCtx, cancel := outlive(ctx, recordTimeout, cleanupTimeout)
 	defer cancel()
 
 	// A queue with a MaxRunning limit fetches in one transaction, which
@@ -446,16 +449,18 @@ func (w *Worker) dispatch(ctx context.Context, r *runState, q *queueState, tasks
 				t.state = attemptRecording
 				t.mu.Unlock()
 			}
-			w.release(context.WithoutCancel(ctx), unstarted)
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+			w.release(releaseCtx, unstarted)
+			cancel()
 			return
 		}
 
 		r.inflight.Go(func() {
 			defer q.freeSlot()
 			if len(unit) == 1 && (unit[0].reg == nil || unit[0].reg.run != nil) {
-				w.runOne(r.attemptCtx, unit[0])
+				w.runOne(r.attemptCtx, r.recordCtx, unit[0])
 			} else {
-				w.runBatch(r.attemptCtx, unit)
+				w.runBatch(r.attemptCtx, r.recordCtx, unit)
 			}
 		})
 	}

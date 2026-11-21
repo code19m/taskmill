@@ -17,8 +17,11 @@ import (
 // limit.
 type QueueSettings struct {
 	// MaxRunning caps the tasks of the queue running at the same time across
-	// all workers of the installation. Each task of a batch counts. It must
-	// not be negative, and is at most 2,147,483,647. Zero means no limit.
+	// all workers of the installation. Each task of a batch counts. A
+	// handler that ignores its context keeps its task running, and counting,
+	// until it returns: it is not abandoned, as in a queue without a limit
+	// (see [HandlerOptions.Timeout]). It must not be negative, and is at most
+	// 2,147,483,647. Zero means no limit.
 	MaxRunning int
 }
 

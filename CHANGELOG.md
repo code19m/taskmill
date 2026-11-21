@@ -7,8 +7,53 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A handler that ignores its context no longer keeps its task for good.
+  Its timeout, a cancel, or a delete changed nothing, and nothing was
+  logged. Now, 5 seconds after its context was canceled, the worker
+  abandons the attempt, logs `handler ignored its context; abandoning its
+  attempt`, and ends it as the cause says: a timeout fails it with the code
+  `timeout`, so the task is retried, and a cancel cancels the task. The
+  handler's goroutine keeps its slot until it returns, and may still finish
+  its work later, while the task already runs again: at-least-once delivery
+  allows that. A batch is abandoned only after its `Timeout`, which alone
+  ends its context. In a queue with a `MaxRunning` limit nothing is
+  abandoned, so that the limit holds: the task stays running until the
+  handler returns, and the worker logs a warning.
+- `Run` returns at most about `DrainTimeout` plus 10 seconds after its
+  context ended, also when the database does not answer. Each step after
+  the drain had 30 seconds of its own, so with an unreachable database
+  `Run` took a minute, and the platform killed the process. Now the steps
+  share 5 seconds: a result that cannot be recorded by then is rescued once
+  its lease runs out, and its task runs again.
+
 ### Fixed
 
+- A panic in an enqueue middleware, or in the encoding of a schedule's
+  args, during a scheduled run no longer ends the maintainer's process, and
+  the process of every maintainer elected after it. The pass fails, with
+  the stack in the `run schedules` line, and the run stays due.
+- The maintainer no longer stalls for about 15 minutes on a connection
+  that stops answering without a reset, as in a failover that drops its
+  packets. Promotions and heartbeats stopped while the election, on other
+  connections, kept the role. Each statement of the maintainer's work now
+  ends within its lease of 10 seconds, and the next try takes a new
+  connection.
+- A task's row that another transaction holds, such as an open `CancelTx`,
+  no longer stalls every completion of the worker. The batch waited for the
+  row, and after 30 seconds all its tasks were rescued as lost leases:
+  tasks that had succeeded ran again, or became dead. The completion now
+  skips held rows and tries them again shortly, and warns once of a task
+  that waits for longer than its lease. The failure, snooze, or release of
+  a grouped task waits for its group's row at most a second at a time, so
+  its lease stays renewed, and its own error is recorded, not `lease_lost`.
+- A handler that ends its goroutine with `runtime.Goexit`, as `t.Fatal`
+  does in a test, no longer leaves its task running for good, its lease
+  renewed by a goroutine that never stops. `RunTask` and `Run` give the
+  task back to its queue. `RunTask` also bounds its last read of the task.
+- The maintainer no longer logs the end of a difference between the
+  workers' schedules that a comparison found after its term ended.
 - Docs that were wrong or unclear. Retried tasks run before new work, as
   [Recover from an incident](docs/recipes/recover-from-an-incident.md) now
   says. The order of a list and what a page reads are in the doc comment of

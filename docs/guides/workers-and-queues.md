@@ -110,6 +110,11 @@ err := client.UpdateQueue(ctx, "partner-api", func(s *taskmill.QueueSettings) {
 - `MaxRunning` counts tasks, not batches, so it also limits how full a
   batch gets. A limit costs a little: workers take turns to fetch from
   that queue.
+- The limit holds also for a handler that ignores its context. In a queue
+  without a limit, the worker gives up on such a handler 5 seconds after
+  its context ended, and the task runs again. In a queue with a limit, the
+  task stays running, and counts, until the handler returns: the worker
+  only logs a warning.
 
 For a partner API, combine a small `MaxRunning` with `Snooze`: see
 [Call a rate-limited API](../recipes/call-a-rate-limited-api.md).
@@ -165,6 +170,12 @@ sequenceDiagram
   shared work while this one finishes its tasks.
 - A task given back uses no attempt. Another worker runs it again from the
   start. Tasks that the worker fetched but did not start go back too.
+- Then the worker has 5 seconds to save the results that are left and sign
+  off. A result that it can't save by then, for example because the
+  database doesn't answer, is
+  [rescued](../concepts/glossary.md#rescue) once its lease runs out, and
+  the task runs again. So `Run` returns at most about `DrainTimeout` plus
+  10 seconds after its context ended.
 - Give the process a grace period of at least `DrainTimeout` plus 10
   seconds: 30 seconds with the defaults, which is Kubernetes' default. See
   [Kubernetes](../production/kubernetes.md).

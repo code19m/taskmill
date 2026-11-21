@@ -83,7 +83,7 @@ successes between them.
 | `fetch tasks` | Takes tasks of the queue in `queue` | Every poll, and on each [notification](../concepts/glossary.md#notification) | The database |
 | `renew leases` | Renews the [leases](../concepts/glossary.md#lease) of running tasks | Every third of `LeaseDuration` | The database, and the pool size |
 | `record check-in` | Notes in the database that the worker is alive, at its [check-in](../concepts/glossary.md#check-in) | Every third of `LeaseDuration` | The database |
-| `record results` | Saves the results of finished attempts | After each attempt | The database |
+| `record results` | Saves the results of finished attempts | After each attempt | The database. If `error` says `lock timeout`, a transaction holds a FIFO group's row for long, such as one that enqueues into the group: the worker tries again until it is free |
 | `load queue settings` | Reads pauses and limits of the queues. A worker fetches no tasks before its first read worked | When the worker starts, then every 10 seconds. While the first read fails, again after 0.1 to 10 seconds | The database, and the role's right to read `queues` |
 | `record activity` | Writes the counts for the charts | Every 10 seconds | The database |
 | `listen for notifications` | Keeps the connection that receives notifications. Idle queues poll every `PollInterval` meanwhile | On failure, again after 1 to 30 seconds | `ListenConfig`, and any proxy in between |
@@ -91,7 +91,7 @@ successes between them.
 | `promote due tasks` | [Promotes](../concepts/glossary.md#promote) delayed tasks and retries | As they come due | The database |
 | `wake queues` | Notifies queues whose tasks wait, and sends the [heartbeat](../concepts/glossary.md#heartbeat) | Every second | The database |
 | `rescue expired leases` | [Rescues](../concepts/glossary.md#rescue) the tasks of workers that lost their leases | Every second | The database |
-| `run schedules` | Enqueues due schedule runs | Every second | The database |
+| `run schedules` | Enqueues due schedule runs | Every second | The database. If `error` starts with `panic:`, the schedule's args failed to encode, or an enqueue middleware panicked: the stack says where. The run waits, and goes once the code works |
 | `refresh statistics` | Counts tasks for `Client.Queues` | Every 10 seconds | The database |
 | `apply retention` | Prepares history partitions, and deletes old history and rows | Every minute | That the role that runs workers owns the taskmill tables. If `error` says `detach …: timeout`, a long transaction, such as a backup, uses the history: the maintainer tries again every minute |
 | `delete removed schedules` | Deletes stored schedules that are gone from the code | Every minute | The database |
@@ -120,6 +120,8 @@ backticks.
 | `worker started` | Info | `Run` started, and reads the queues in `queues`. | Nothing. |
 | `the worker does not read the default queue of these registered kinds` | Warn | The worker has handlers for `kinds`, but does not read their default queues. Their tasks wait for another worker. | Add the queues to `WorkerConfig.Queues`, or run a worker that reads them. |
 | `worker stopping; waiting for running tasks` | Info | `Run`'s context ended while `tasks` tasks ran. It waits up to `timeout` for them. A worker that runs no task does not log this line. | Nothing. |
+| `handler ignored its context; abandoning its attempt` | Warn | A handler did not return within 5 seconds after its context was canceled, by its `Timeout`, a cancel of its task, or a lost lease, which `error` names. The attempt ends as that cause says: a timeout fails it, and a cancel cancels the task. The handler may still be running, while its task runs again. | Make the handler return when its context ends. |
+| `handler ignored its context; its task keeps running because its queue has a MaxRunning limit` | Warn | The same, in a queue with a `MaxRunning` limit. The attempt is not abandoned: its task would run again beside the handler, beyond the limit. It stays running, and counts, until the handler returns. | Make the handler return when its context ends. |
 | `handler ignored shutdown; releasing its task` | Warn | A handler did not return within 5 seconds after its context was canceled. Its task goes back to the queue and runs again. The handler may still be running. | Make the handler return when its context ends. |
 | `worker stopped` | Info | `Run` returned. `released` tasks went back to their queues. | Nothing. |
 | `unregister worker failed` | Warn | The stopped worker could not remove itself from the list of workers. It stays listed, as stale, until the maintainer removes it: after 5 minutes, or twice its `LeaseDuration` if that is longer. | Nothing, unless it repeats: then check the database. |
@@ -137,6 +139,7 @@ backticks.
 | `fetch gave up waiting for the queue's row` | Debug | A fetch from `queue`, which has a `MaxRunning` limit, waited 1 second for the queue's row, and gave up. The worker fetches again when the queue is next woken or polled. This is not a failed operation: the queue's fetches take the row in turn, and with many workers the turns alone can take that long. | Nothing. |
 | `result discarded: the attempt lost its lease` | Debug | An attempt ended after it lost its lease. Its result does not count. | Nothing. |
 | `record attempt failed; the task is rescued when its lease runs out` | Warn | The result of the attempt could not be saved in time. Once the lease runs out, the maintainer rescues the task. | Check the database. |
+| `completion waits for a row that another transaction holds` | Warn | The task in `task_id` succeeded, but for longer than its lease (`duration`), another transaction has held its row, or its FIFO group's, such as an open `CancelTx`, or a transaction that enqueues into the group. The worker keeps trying; the completion goes through once the row is free, unless the maintainer has rescued the task by then. Logged once per task. | Find the long transaction in `pg_stat_activity`, and end it. |
 | `complete tasks failed; they are rescued when their leases run out` | Warn | `tasks` successful attempts could not be saved. Those tasks run again. | Check the database. |
 | `handler failed after completing its task; it stays completed` | Warn | The handler returned an error after its `CompleteTx` transaction committed. | Return nil once the transaction has committed. |
 | `enqueue middleware failed after the tasks were enqueued` | Warn | An enqueue middleware returned `error` after `tasks` tasks committed. The enqueue succeeded, but the middleware's work, such as a span, may be missing. | Fix the middleware. |

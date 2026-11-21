@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -476,6 +478,129 @@ func TestHandlerThatIgnoresShutdownIsReleased(t *testing.T) {
 	close(unblock)
 	recv(t, returned, "the handler to return")
 	e.wantState(t, id, taskmill.StateAvailable)
+}
+
+// A handler that ends its goroutine with runtime.Goexit, as t.Fatal in a
+// test does, skips the rest of RunTask. Its cleanup still runs: the task
+// goes back to its queue, and nothing renews its lease any more. A batch
+// handler runs in another goroutine than the middleware of its tasks: their
+// next returns, and no goroutine stays behind.
+func TestRunTaskOfAHandlerThatEndsItsGoroutine(t *testing.T) {
+	t.Parallel()
+	for _, batch := range []bool{false, true} {
+		t.Run(map[bool]string{false: "handler", true: "batch handler"}[batch], func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			var hs taskmill.Handlers
+			var args taskmill.Args = sendEmail{}
+			if batch {
+				taskmill.AddBatchHandler[report](&hs, batchFunc(func([]*taskmill.Task[report]) { runtime.Goexit() }), nil)
+				args = report{}
+			} else {
+				taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(context.Context, *taskmill.Task[sendEmail]) error {
+					runtime.Goexit()
+					return nil
+				}), nil)
+			}
+			nextReturned := make(chan error, 1)
+			w := newWorker(t, e, &taskmill.WorkerConfig{
+				Handlers: &hs, NoMaintainer: true, LeaseDuration: 300 * time.Millisecond,
+				Middleware: []taskmill.Middleware{func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+					err := next(ctx)
+					nextReturned <- err
+					return err
+				}},
+			})
+
+			id := e.enqueue(t, args, nil)
+			ended := make(chan struct{})
+			go func() {
+				defer close(ended)
+				_, _ = w.RunTask(t.Context(), id)
+			}()
+			recv(t, ended, "the goroutine to end")
+			if batch {
+				if err := recv(t, nextReturned, "the next of the task's middleware to return"); err == nil {
+					t.Error("the next of the task's middleware returned nil, want an error")
+				}
+			}
+
+			if info := e.waitState(t, id, taskmill.StateAvailable); info.Attempt != 0 {
+				t.Fatalf("released with attempt %d, want 0", info.Attempt)
+			}
+			// Longer than a third of the lease, at which a renewal would come.
+			time.Sleep(200 * time.Millisecond)
+			e.wantState(t, id, taskmill.StateAvailable)
+		})
+	}
+}
+
+// Run returns soon after the drain also when the database stops answering
+// while it stops: the results that it cannot record, and the worker's row,
+// share one deadline of 5 seconds, and the tasks are rescued once their
+// leases run out.
+func TestRunReturnsSoonWhenTheDatabaseStopsAnswering(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = db.host, db.port, nil
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	e := newEnvWith(t, pool, nil)
+
+	started := make(chan struct{}, 5)
+	release := make(chan struct{})
+	const drain = time.Second
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-release
+			return nil
+		}, nil),
+		Queues:       defaultQueue(5),
+		DrainTimeout: drain,
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = w.Run(ctx)
+	}()
+	// The database answers again for the cleanups of the test.
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		db.frozen.Store(false)
+		db.cut(true)
+		pool.Reset()
+		db.cut(false)
+	})
+
+	for range 5 {
+		e.enqueue(t, sendEmail{}, nil)
+	}
+	for range 5 {
+		recv(t, started, "the handlers to start")
+	}
+
+	db.frozen.Store(true)
+	close(release)
+	stopped := time.Now()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal("Run did not return within a minute")
+	}
+	if d, limit := time.Since(stopped), drain+8*time.Second; d > limit {
+		t.Fatalf("Run returned %s after its context ended, want at most %s", d.Round(time.Millisecond), limit)
+	}
 }
 
 // runTaskWorker returns a worker for the RunTask tests, a count of the batches

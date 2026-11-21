@@ -9,15 +9,16 @@ import (
 	"time"
 )
 
-// completer records successful attempts in batches: it gathers the results
-// that arrive within a moment of each other and completes them together, so
-// a busy worker needs far fewer statements, while an idle one adds only that
-// moment. It keeps completions whose FIFO groups other transactions hold, and
-// tries them again shortly, so that it never waits for another transaction's
-// lock while holding a connection.
-func (w *Worker) completer(ctx context.Context) {
+// completer records successful attempts in batches, on record, until ctx
+// ends: it gathers the results that arrive within a moment of each other and
+// completes them together, so a busy worker needs far fewer statements,
+// while an idle one adds only that moment. It keeps completions whose rows,
+// or the rows of their FIFO groups, other transactions hold, and tries them
+// again shortly, so that it never waits for another transaction's lock while
+// holding a connection, and the completions of a batch never wait for one
+// such row.
+func (w *Worker) completer(ctx, record context.Context) {
 	defer close(w.completerDone)
-	record := context.WithoutCancel(ctx)
 	var blocked []*liveAttempt // completions whose rows other transactions held
 	delay := blockedRetryDelay
 	retryBlocked := time.NewTimer(delay)
@@ -43,6 +44,7 @@ func (w *Worker) completer(ctx context.Context) {
 		// Retry blocked completions soon, then less often while they stay blocked.
 		wasBlocked := len(blocked) > 0
 		blocked = w.completeBatch(record, w.gather(batch))
+		w.warnBlocked(record, blocked)
 		switch {
 		case len(blocked) == 0:
 			delay = blockedRetryDelay
@@ -51,6 +53,25 @@ func (w *Worker) completer(ctx context.Context) {
 		}
 		if len(blocked) > 0 {
 			retryBlocked.Reset(delay)
+		}
+	}
+}
+
+// warnBlocked warns once of each completion of blocked that other
+// transactions have held up for longer than the lease: a transaction that
+// holds a task's row, or its group's, for that long is likely stuck, and
+// the completion waits for it, also past the lease.
+func (w *Worker) warnBlocked(ctx context.Context, blocked []*liveAttempt) {
+	now := time.Now()
+	for _, t := range blocked {
+		switch {
+		case t.blockedSince.IsZero():
+			t.blockedSince = now
+		case !t.blockedWarned && now.Sub(t.blockedSince) > w.cfg.LeaseDuration:
+			t.blockedWarned = true
+			w.logger.LogAttrs(ctx, slog.LevelWarn, "completion waits for a row that another transaction holds",
+				slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind),
+				slog.Duration(logKeyDuration, now.Sub(t.blockedSince)))
 		}
 	}
 }
@@ -109,12 +130,14 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*liveAttempt) []compl
 }
 
 // completeBatch completes a batch of successful attempts. Ungrouped tasks
-// complete in one statement. Grouped tasks complete in one transaction,
-// which first locks their groups' rows, skipping rows that other
-// transactions hold. It returns the tasks whose groups were held, for
-// example by a transaction that enqueues into them, so that the completer
-// tries them again later instead of waiting for those locks; they stay
-// tracked, so their leases are renewed.
+// complete in one statement, which skips the rows that other transactions
+// hold. Grouped tasks complete in one transaction, which first locks their
+// groups' rows and then their own, skipping rows that other transactions
+// hold. It returns the tasks whose rows or groups' rows were held, for
+// example by a transaction that cancels a task or enqueues into a group, so
+// that the completer tries them again later instead of waiting for those
+// locks; they stay tracked, so their leases are renewed once the rows are
+// free.
 func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (blocked []*liveAttempt) {
 	var plain, grouped []*liveAttempt
 	for _, t := range batch {
@@ -127,32 +150,38 @@ func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (block
 
 	if len(plain) > 0 {
 		var done []completedTask
+		var held map[int64]bool
 		err := w.whileLeased(ctx, plain, func(ctx context.Context) error {
 			var err error
-			done, err = w.client.complete(ctx, w.logger, pgxExecutor{q: w.client.pool}, completionsOf(plain))
+			done, held, err = w.client.completeSkipping(ctx, w.logger, pgxExecutor{q: w.client.pool}, completionsOf(plain))
 			return err
 		})
+		if err == nil {
+			blocked = slices.DeleteFunc(slices.Clone(plain), func(t *liveAttempt) bool { return !held[t.att.id] })
+			plain = slices.DeleteFunc(plain, func(t *liveAttempt) bool { return held[t.att.id] })
+		}
 		w.afterComplete(ctx, plain, done, err)
 	}
 
 	if len(grouped) == 0 {
-		return nil
+		return blocked
 	}
 	var done []completedTask
+	var heldGroups []*liveAttempt
 	err := w.whileLeased(ctx, grouped, func(ctx context.Context) error {
 		return w.client.inTx(ctx, func(q querier) error {
 			var err error
-			blocked, done, err = w.completeLocked(ctx, q, grouped)
+			heldGroups, done, err = w.completeLocked(ctx, q, grouped)
 			return err
 		})
 	})
 	if err != nil {
 		w.afterComplete(ctx, grouped, nil, err)
-		return nil
+		return blocked
 	}
 
-	w.afterComplete(ctx, slices.DeleteFunc(grouped, func(t *liveAttempt) bool { return slices.Contains(blocked, t) }), done, nil)
-	return blocked
+	w.afterComplete(ctx, slices.DeleteFunc(grouped, func(t *liveAttempt) bool { return slices.Contains(heldGroups, t) }), done, nil)
+	return append(blocked, heldGroups...)
 }
 
 // completeLocked completes, in q's transaction, the grouped tasks whose
@@ -314,25 +343,14 @@ type completedTask struct {
 
 // complete records successful attempts: it moves their tasks to history, or
 // deletes those whose kind keeps none, and advances their FIFO groups. It
-// returns the tasks it completed; an attempt that lost its lease is left
-// out. q must be a transaction if any task belongs to a FIFO group. It logs
-// to the logger of the worker that completes.
+// waits for the rows that other transactions hold. It returns the tasks it
+// completed; an attempt that lost its lease is left out. q must be a
+// transaction if any task belongs to a FIFO group. It logs to the logger of
+// the worker that completes.
 func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, cs []completion) ([]completedTask, error) {
 	fail := func(err error) error { return fmt.Errorf("taskmill: complete: %w", err) }
-	ids := make([]int64, len(cs))
-	tokens := make([]int32, len(cs))
-	discard := make([]int64, 0) // not nil: the statement compares with every element
-	keep := time.Now().UnixNano() >= c.historyGapUntil.Load()
-	for i, x := range cs {
-		ids[i], tokens[i] = x.id, x.token
-		if x.discard || !keep {
-			discard = append(discard, x.id)
-		}
-	}
-
-	done, err := c.completeTasks(ctx, q, ids, tokens, discard)
+	done, _, err := c.completeTasks(ctx, logger, q, c.sql.complete, cs)
 	if err != nil {
-		c.noteMissingHistory(ctx, logger, err)
 		return nil, fail(err)
 	}
 
@@ -346,22 +364,60 @@ func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, c
 	return done, nil
 }
 
-func (c *Client) completeTasks(ctx context.Context, q querier, ids []int64, tokens []int32, discard []int64) ([]completedTask, error) {
-	r, err := q.query(ctx, c.sql.complete, ids, tokens, discard)
+// completeSkipping completes the attempts cs of tasks outside FIFO groups,
+// as complete does, but skips the rows that other transactions hold. It
+// returns the tasks it completed, and the IDs of the attempts whose tasks it
+// skipped for that.
+func (c *Client) completeSkipping(ctx context.Context, logger *slog.Logger, q querier, cs []completion) (done []completedTask, held map[int64]bool, err error) {
+	done, held, err = c.completeTasks(ctx, logger, q, c.sql.completeSkipping, cs)
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("taskmill: complete: %w", err)
+	}
+	return done, held, nil
+}
+
+// completeTasks runs sql, completeSQL or completeSkippingSQL, on the
+// attempts cs, and returns the tasks that it completed, and those that it
+// skipped because other transactions held them.
+func (c *Client) completeTasks(ctx context.Context, logger *slog.Logger, q querier, sql string, cs []completion) (done []completedTask, held map[int64]bool, err error) {
+	ids := make([]int64, len(cs))
+	tokens := make([]int32, len(cs))
+	discard := make([]int64, 0) // not nil: the statement compares with every element
+	keep := time.Now().UnixNano() >= c.historyGapUntil.Load()
+	for i, x := range cs {
+		ids[i], tokens[i] = x.id, x.token
+		if x.discard || !keep {
+			discard = append(discard, x.id)
+		}
+	}
+
+	r, err := q.query(ctx, sql, ids, tokens, discard)
+	if err != nil {
+		c.noteMissingHistory(ctx, logger, err)
+		return nil, nil, err
 	}
 	defer r.Close()
-	var done []completedTask
 
 	for r.Next() {
 		var t completedTask
-		if err := r.Scan(&t.id, &t.queue, &t.group); err != nil {
-			return nil, err
+		var completed bool
+		if err := r.Scan(&t.id, &t.queue, &t.group, &completed); err != nil {
+			return nil, nil, err
 		}
-		done = append(done, t)
+		if completed {
+			done = append(done, t)
+			continue
+		}
+		if held == nil {
+			held = make(map[int64]bool)
+		}
+		held[t.id] = true
 	}
-	return done, r.Err()
+	if err := r.Err(); err != nil {
+		c.noteMissingHistory(ctx, logger, err)
+		return nil, nil, err
+	}
+	return done, held, nil
 }
 
 // sortedByGroup returns the grouped tasks in the order of queue and group in

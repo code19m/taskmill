@@ -33,19 +33,20 @@ type statements struct {
 	dedupeLookup string
 
 	// sql_attempts.go: fetch tasks, and record how their attempts end.
-	fetch         string
-	fetchKind     string
-	leaseTask     string
-	atLimit       string
-	lockQueue     string
-	countRunning  string
-	renewLeases   string
-	cancelRequest string
-	complete      string
-	lockLeased    string
-	fail          string
-	snooze        string
-	release       string
+	fetch            string
+	fetchKind        string
+	leaseTask        string
+	atLimit          string
+	lockQueue        string
+	countRunning     string
+	renewLeases      string
+	cancelRequest    string
+	complete         string
+	completeSkipping string
+	lockLeased       string
+	fail             string
+	snooze           string
+	release          string
 
 	// sql_groups.go: change the rows of FIFO groups.
 	haltGroup         string
@@ -150,19 +151,20 @@ func newStatements(schema string) *statements {
 		enqueuePlain: q(enqueuePlainSQL),
 		dedupeLookup: q(dedupeLookupSQL),
 
-		fetch:         q(fetchSQL),
-		fetchKind:     q(fetchKindSQL),
-		leaseTask:     q(leaseTaskSQL),
-		atLimit:       q(atLimitSQL),
-		lockQueue:     q(lockQueueSQL),
-		countRunning:  q(countRunningSQL),
-		renewLeases:   q(renewLeasesSQL),
-		cancelRequest: q(cancelRequestSQL),
-		complete:      q(completeSQL),
-		lockLeased:    q(lockLeasedSQL),
-		fail:          q(failSQL),
-		snooze:        q(snoozeSQL),
-		release:       q(releaseSQL),
+		fetch:            q(fetchSQL),
+		fetchKind:        q(fetchKindSQL),
+		leaseTask:        q(leaseTaskSQL),
+		atLimit:          q(atLimitSQL),
+		lockQueue:        q(lockQueueSQL),
+		countRunning:     q(countRunningSQL),
+		renewLeases:      q(renewLeasesSQL),
+		cancelRequest:    q(cancelRequestSQL),
+		complete:         q(completeSQL),
+		completeSkipping: q(completeSkippingSQL),
+		lockLeased:       q(lockLeasedSQL),
+		fail:             q(failSQL),
+		snooze:           q(snoozeSQL),
+		release:          q(releaseSQL),
 
 		haltGroup:         q(haltGroupSQL),
 		lockGroups:        q(lockGroupsSQL),

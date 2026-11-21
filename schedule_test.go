@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math"
 	"slices"
@@ -655,6 +656,104 @@ func TestNewWorkerCountsTheMetadataThatItAddsToAScheduledRun(t *testing.T) {
 	})
 	if !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+
+// armedArgs is the args of a schedule whose encoding panics while armed is
+// set.
+type armedArgs struct{ armed *atomic.Bool }
+
+func (armedArgs) Kind() string { return "armed" }
+
+func (a armedArgs) MarshalJSON() ([]byte, error) {
+	if a.armed.Load() {
+		panic("encoding failed")
+	}
+	return []byte(`{}`), nil
+}
+
+// A schedule's run calls code of the application in the maintainer: the
+// encoding of its args, and the enqueue middleware. A panic there fails the
+// pass, with the stack in the log, and the run stays due: the next pass
+// enqueues it once the code works.
+func TestSchedulePanicFailsThePassAndKeepsTheRunDue(t *testing.T) {
+	t.Parallel()
+	for _, where := range []string{"args", "middleware"} {
+		t.Run(where, func(t *testing.T) {
+			t.Parallel()
+			var armed atomic.Bool
+			panicky := func(ctx context.Context, _ []*taskmill.EnqueueTask, next func(context.Context) error) error {
+				if where == "middleware" && armed.Load() {
+					panic("middleware failed")
+				}
+				return next(ctx)
+			}
+			logs := &logRecorder{}
+			e := newEnvWith(t, testdb.Pool(t), &taskmill.ClientConfig{
+				EnqueueMiddleware: []taskmill.EnqueueMiddleware{panicky}, Logger: slog.New(logs),
+			})
+			var args taskmill.Args = sendEmail{}
+			if where == "args" {
+				args = armedArgs{armed: &armed}
+			}
+			w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{{Name: "digest", Cron: "@hourly", Args: args}}})
+
+			ctx := t.Context()
+			taskmill.RunSchedules(ctx, w)
+			e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
+			armed.Store(true)
+			taskmill.RunSchedules(ctx, w)
+
+			failed := operationLines(logs.all())["run schedules"]
+			if len(failed) != 1 || !strings.Contains(attr(failed[0], "error"), "panic: ") ||
+				!strings.Contains(attr(failed[0], "error"), "goroutine") {
+				t.Fatalf("got the lines %v, want one failure with the panic and its stack", failed)
+			}
+			if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 0 {
+				t.Fatalf("got %d tasks from the pass that panicked, want none", n)
+			}
+
+			armed.Store(false)
+			taskmill.RunSchedules(ctx, w)
+			if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
+				t.Fatalf("got %d tasks once the code worked, want the run that stayed due", n)
+			}
+		})
+	}
+}
+
+// A pass over the schedules stops at the first statement that runs out of
+// time, its leader lease: the database is slow or out of reach then, and
+// each of the other schedules would wait as long. The next pass runs them.
+func TestSchedulePassStopsAtAStatementThatRunsOutOfTime(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{
+		{Name: "a", Cron: "@hourly", Args: sendEmail{To: "a"}}, {Name: "b", Cron: "@hourly", Args: sendEmail{To: "b"}},
+	}})
+	taskmill.SetTiming(w, taskmill.Timing{LeaderLease: 300 * time.Millisecond, LockWait: time.Minute})
+
+	ctx := t.Context()
+	taskmill.RunSchedules(ctx, w)
+	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.schedules WHERE name = 'a' FOR UPDATE")
+
+	start := time.Now()
+	taskmill.RunSchedules(ctx, w)
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("the pass took %s", d)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 0 {
+		t.Fatalf("got %d tasks, want none: the pass went on after the statement that ran out of time", n)
+	}
+
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	taskmill.RunSchedules(ctx, w)
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 2 {
+		t.Fatalf("got %d tasks once the row was free, want both runs", n)
 	}
 }
 

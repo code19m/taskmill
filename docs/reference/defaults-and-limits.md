@@ -38,7 +38,9 @@ It is in the doc comment of that identifier.
 | Reads that notifications ask for: cancel requests, and queue settings | At most one of each kind per 20 ms |
 | Warning that the pool is full | Logged when the pool is full, and a lease renewal waits 1 second or longer for a connection (`LeaseDuration` / 30). At most once a minute |
 | A result that the worker cannot record | Tried again after 0.1 to 2 seconds, until the task's lease would run out |
-| The tasks that a stopping worker gives back | 30 seconds for all the tasks of a fetch that it could not start, and 30 seconds for all the tasks whose handlers ignored the shutdown. A task that is not given back by then is [rescued](../concepts/glossary.md#rescue) when its lease runs out |
+| The failure, snooze, or release of a grouped task waits for a row that another transaction holds | At most 1 second at a time, then tried again, for as long as the row is held |
+| A handler that ignores its context | Abandoned 5 seconds after its context was canceled by its `Timeout`, a cancel, or a lost lease; a batch handler only after its `Timeout`, which alone cancels its context. Its goroutine keeps its slot until it returns. In a queue with `MaxRunning`, not abandoned: its task stays running until it returns, and the worker warns |
+| What a stopping worker does after the drain | 5 seconds in all, to record what is left, give back the tasks whose handlers ignored the shutdown, and sign off. 5 seconds also for the tasks of a fetch that it could not start. A task that is not given back by then is [rescued](../concepts/glossary.md#rescue) when its lease runs out |
 | "Tasks available" notifications | At most one per queue per 50 ms from each client |
 | Notification connection: time to connect, and to answer when heartbeats stop | 10 seconds each |
 | Notification connection: reconnect | After 1 second, then twice as long each time, up to 30 seconds |
@@ -56,6 +58,7 @@ by election, that does the shared work.
 | Workers notice that the heartbeats stopped | After 15 seconds without one. Idle queues then poll every `PollInterval` |
 | [Promote](../concepts/glossary.md#promote) due tasks: delayed tasks, retries, and snoozed tasks | As they come due, at most 20 times a second. So a task becomes available within about 1 second of its [run time](../concepts/glossary.md#run-time) |
 | [Rescue](../concepts/glossary.md#rescue) tasks whose leases ran out | Every second |
+| One statement of the maintainer's work, or one transaction | Ends after 10 seconds (the maintainer's lease), so a connection that stops answering holds it no longer. The detach and the drop of a history partition have 30 seconds |
 | Enqueue due schedule runs | Every second |
 | Compare the schedules of the workers that can become the maintainer | Every minute. A difference is logged once it has lasted 10 minutes, then at most once an hour |
 | Dedupe window of a schedule run | 24 hours, or twice the time to the schedule's next run if that is longer |
