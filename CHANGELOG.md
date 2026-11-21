@@ -28,6 +28,16 @@ All notable changes to taskmill are recorded here. The format follows
   for each other's commits, and the design pages say why a notification
   wakes every worker of its queue. The pool size and a stopping worker's
   grace period each have one page, which the others link to.
+- The dashboard's live updates get 304 Not Modified again for a page that
+  did not change. A page with relative times, such as "Counted 4s ago" on
+  the overview, or the times of workers, schedules, and tasks, changed
+  every second, so nearly every update downloaded the whole page. The
+  overview's Schedules card now says a next run less than a minute away as
+  "within a minute".
+- The page of a dead task reads at most 1,000 halted FIFO groups to find the
+  one that the task halts. It read them page by page until it found the
+  group or the request's time ran out. Past those, the page says that the
+  task's place in its group could not be read.
 
 ## [0.14.0] - 2026-11-21
 

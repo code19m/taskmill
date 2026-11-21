@@ -11,7 +11,7 @@
   {{template "stat" (dict "State" "running" "Label" "Running" "Count" $d.Totals.Running)}}
   {{template "stat" (dict "State" "scheduled" "Query" "state=scheduled&state=retryable&state=pending" "Label" "Waiting" "Count" $d.Totals.Waiting)}}
   {{template "stat" (dict "State" "dead" "Label" "Dead" "Count" $d.Totals.Dead "Failed" $d.Totals.Dead.N)}}
-  <a class="card stat" href="{{path "/schedules"}}"{{if $d.Schedules}} title="{{if not $d.NextRun.IsZero}}Next run {{ago $.Now $d.NextRun}}{{else}}All paused{{end}}"{{end}}>
+  <a class="card stat" href="{{path "/schedules"}}"{{if $d.Schedules}} title="{{if not $d.NextRun.IsZero}}Next run {{agoMinutes $.Now $d.NextRun}}{{else}}All paused{{end}}"{{end}}>
     <span class="stat-label">{{template "icon-schedules"}}Schedules</span>
     <span class="stat-value">{{$d.Schedules}}</span>
   </a>

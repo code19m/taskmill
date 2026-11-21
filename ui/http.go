@@ -140,10 +140,7 @@ func getGzip(w io.Writer) *gzip.Writer {
 // render executes a page into a buffer before it answers, so that a failed
 // template never sends half a page. A page that the client already has, by
 // its ETag, is answered with 304 Not Modified, and others are compressed when
-// the client accepts it: live updates fetch the page every few seconds. The
-// page names its time of rendering, from which the script keeps its
-// relative times counting. That time is no part of the ETag: a page that
-// says what the client's page says is the page that the client has.
+// the client accepts it: live updates fetch the page every few seconds.
 func (s *server) render(w http.ResponseWriter, r *http.Request, code int, name string, p page) {
 	p.ReadOnly = s.readOnly
 	p.Notice = notice(r.URL.Query())
@@ -161,13 +158,9 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, code int, name s
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("Vary", "Accept-Encoding")
 	if code == http.StatusOK {
-		before, after, _ := bytes.Cut(buf.Bytes(), []byte(`data-now="`+instant(p.Now)+`"`))
-		sum := sha256.New()
-		sum.Write(before)
-		sum.Write(after)
-		etag := `W/"` + hex.EncodeToString(sum.Sum(nil)[:8]) + `"`
-		h.Set("ETag", etag)
-		if r.Header.Get("If-None-Match") == etag {
+		tag := etag(buf.Bytes(), p.Now)
+		h.Set("ETag", tag)
+		if r.Header.Get("If-None-Match") == tag {
 			w.WriteHeader(http.StatusNotModified)
 			return
 		}
@@ -188,6 +181,98 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, code int, name s
 	h.Set("Content-Length", strconv.Itoa(len(body)))
 	w.WriteHeader(code)
 	_, _ = w.Write(body) // the client may be gone; there is no one to tell
+}
+
+// timeAttrs are the attributes of a page that name a time: when the page
+// was rendered, and the time of an element whose relative time counts from
+// then, with the function that words it.
+var timeAttrs = []struct {
+	name  []byte
+	words func(now, t time.Time) string
+}{
+	{[]byte(` data-now="`), nil},
+	{[]byte(` data-time="`), ago},
+	{[]byte(` data-since="`), lasting},
+}
+
+// etag returns the ETag of a page rendered at now: a hash of what the page
+// says, less what the script keeps up to date on the page that it shows. So
+// a page that says what the client's page says, once its times counted on,
+// is the page that the client has. The script counts from the time of
+// rendering, in data-now, the relative times of the page: the words that end
+// the text of an element with a time, in data-time or data-since, if they
+// are that time's words (see count in app.js). Other words, such as
+// "paused", and the times themselves stay in the hash. Each part left out
+// leaves a zero byte in its place, which no page holds.
+func etag(page []byte, now time.Time) string {
+	sum := sha256.New()
+	hashed := 0 // page[:hashed] is in the hash
+	leaveOut := func(from, to int) {
+		sum.Write(page[hashed:from])
+		sum.Write([]byte{0})
+		hashed = to
+	}
+
+	for at := 0; ; {
+		i := bytes.Index(page[at:], []byte(" data-"))
+		if i < 0 {
+			break
+		}
+		at += i
+
+		a := 0
+		for a < len(timeAttrs) && !bytes.HasPrefix(page[at:], timeAttrs[a].name) {
+			a++
+		}
+		if a == len(timeAttrs) {
+			at++
+			continue
+		}
+
+		start := at + len(timeAttrs[a].name)
+		end := bytes.IndexByte(page[start:], '"')
+		if end < 0 {
+			break
+		}
+		end += start
+		at = end
+		words := timeAttrs[a].words
+		if words == nil {
+			leaveOut(start, end)
+			continue
+		}
+
+		// An element whose text counts names its time last.
+		t, err := time.Parse(time.RFC3339, string(page[start:end]))
+		if err == nil && bytes.HasPrefix(page[end:], []byte(`">`)) {
+			if from, to, ok := endsWith(page, end+2, words(now, t)); ok {
+				leaveOut(from, to)
+				at = to
+			}
+		}
+	}
+
+	sum.Write(page[hashed:])
+	return `W/"` + hex.EncodeToString(sum.Sum(nil)[:8]) + `"`
+}
+
+// endsWith finds words at the end of the text of the element whose content
+// starts at from, after its first child elements, such as an icon. It
+// returns where the words are, and whether they are there.
+func endsWith(page []byte, from int, words string) (start, end int, ok bool) {
+	for from < len(page) && page[from] == '<' {
+		gt := bytes.IndexByte(page[from:], '>')
+		if gt < 0 {
+			return 0, 0, false
+		}
+		from += gt + 1
+	}
+
+	end = bytes.IndexByte(page[from:], '<') + from
+	if end < from || !bytes.HasPrefix(page[end:], []byte("</")) || !bytes.HasSuffix(page[from:end], []byte(words)) {
+		return 0, 0, false
+	}
+	return end - len(words), end, true
 }
 
 // acceptsGzip reports whether a request accepts a gzip response, as RFC 9110

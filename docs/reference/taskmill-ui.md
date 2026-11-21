@@ -116,7 +116,7 @@ queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.
 | Status | When |
 |---|---|
 | 303 | An action worked. The redirect leads to a page that says so |
-| 304 | The page did not change since the browser's copy |
+| 304 | A live update: the page did not change since the copy that the browser shows, but for the relative times, such as "4s ago", that its script keeps counting |
 | 307 | With a prefix: the prefix without its last slash, such as `/admin/tasks`, or a path that is not clean, such as one with a double slash. The redirect leads to the clean path under the prefix |
 | 400 | A filter value is not valid, such as an unknown state. Or the `cursor` is not one that this list made, as in a bookmark from before an upgrade. Or the `limit` is not a number from 1 to 250. Or `since` or `before` is not a time in one of their forms, or `since` is not before `before`. Or a bulk action, or its page, got no filter. Or an action on a queue or a schedule got no valid `name` |
 | 401 | The login is missing or wrong, when basic authentication is on |

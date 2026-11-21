@@ -141,6 +141,14 @@ What follows:
   show, such as a login page, the browser loads as a full page. We rejected
   a client-side framework: it needs a JSON API, a second set of templates,
   and a build step, for a dashboard of five pages.
+- **A live update gets 304 Not Modified while only the time moved on.**
+  The script counts the relative times of the page on screen, such as "4s
+  ago", from the page's time of rendering. So the page's ETag leaves out
+  that time and those words, and keeps the instants that they count from.
+  A tooltip, which the script does not count, says a time to the minute.
+  We rejected a second rendering at a fixed time, for the ETag: it costs
+  a rendering at every update, and words that depend on the time but that
+  the script does not count would stay on screen unchanged.
 - **A time is an instant, and each side words it in the zone it knows.**
   The server knows no reader's time zone, so it words a time in UTC, and
   puts the instant beside the words. The script words it again in the zone
