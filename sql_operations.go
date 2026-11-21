@@ -129,15 +129,11 @@ SELECT least($2::bigint,
 // locked tasks meet gates too. The pick statements read the next batch of
 // the tasks that a bulk action changes, in ID order after $5 up to $6, the
 // action's last task or the end of the batch's window: those of states $4
-// that match the filters. Each batch starts where the last one ended, so a
-// bulk action reads each task once, and the oldest tasks of a FIFO group
-// come first. They return each of them, and whether they hold its lock: they
-// skip the tasks, the FIFO groups, and the dedupe keys that other
-// transactions hold, the groups ($7, $8) that the action left before, and
-// tasks that changed meanwhile. They report whether each task's group had a
-// row, which they then hold. A cancel skips running tasks already asked to
-// stop. They also report the tasks that must take a dedupe key back if they
-// are retried.
+// that match the filters. They return each of them, whether they hold its
+// lock, whether its group had a row, which they then hold, and whether it
+// must take a dedupe key back if it is retried. They skip what other
+// transactions hold, and the groups ($7, $8) that the action left before:
+// the page on operator actions says why.
 func pickSQL(cond, gates string) string {
 	return `
 WITH candidates AS (

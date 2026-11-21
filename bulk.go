@@ -399,21 +399,11 @@ func (c *Client) inBatches(ctx context.Context, run *bulkRun, batch batchFunc) (
 // its first transaction began: the wait for a connection is not the batch's
 // time.
 //
-// A batch first reads without a window, up to the action's last task. With a
-// filter that an index serves, it then reads the tasks that match and no
-// others, however large the table. Without such an index, it reads every
-// task before the next full batch of matching ones, however far apart those
-// are. So the database ends a statement of such a batch after openTimeout.
-// The action then reads in windows from there on, and tries the batch again
-// in one. It does that also if ctx ended meanwhile, since this is still the
-// batch that the action is in: a batch in a window always moves the
-// position, so an action that continues from where it stopped does not stop
-// there again.
-//
-// The database reports a statement that somebody canceled, with
-// pg_cancel_backend, under the same code as one that it ended on the
-// timeout. Only the message tells them apart, and that is in the server's
-// language. So a canceled batch is tried again in a window too, once.
+// A batch first reads without a window. Once the database ends one of its
+// statements after openTimeout, the action reads in windows from there on,
+// and tries the batch again in one, also if ctx ended meanwhile: a batch in
+// a window always moves the position. The page on operator actions says
+// why.
 func (c *Client) nextBatch(ctx context.Context, run *bulkRun, batch batchFunc) (step, error) {
 	var ends time.Time
 	if !run.windowed {
@@ -442,11 +432,8 @@ func (c *Client) nextBatch(ctx context.Context, run *bulkRun, batch batchFunc) (
 // no task beyond its end, run.until, and move the position there once they
 // find less than a full batch before it.
 //
-// A window is counted in tasks, not in IDs: completed tasks leave the tasks
-// table, so its IDs can lie far apart. Its end is only a bound on what a
-// batch reads. Whatever it is, the batches go through the IDs in order,
-// each batch through the IDs after the last one's, so the action still
-// reads each task once.
+// A window is counted in tasks, not in IDs, and its end only bounds what a
+// batch reads, so the action still reads each task once.
 //
 // The statement runs in a transaction of its own with windowSettings, all in
 // one round trip: see readAlone.

@@ -171,22 +171,10 @@ WHERE t.id = d.id AND t.state = 'retryable'`
 // deleteFinishedSQL deletes dead and canceled tasks older than the dead
 // retention, except the dead heads that keep their groups halted. It
 // locks the rows it picks and skips locked ones, so a task that an
-// operator is retrying is never deleted.
-//
-// The index of finished tasks leads with the queue, so old tasks are
-// a range of it only within one queue. The statement finds the
-// queues with one index probe each, as countStatsSQL does, and reads
-// each queue's range, up to a batch: that limit lets the planner read
-// the range in order and stop, not collect all of it first. With a
-// filter by age alone, the planner, which cannot know the cutoff that
-// the statement reads from the settings, expects old tasks everywhere,
-// and scans the whole table for them.
-//
-// A dead task halts only its own group, so its halt is found by the
-// group's key, with one lookup per old task. OFFSET 0 keeps it a
-// lookup: joined to the groups instead, the statement can read every
-// halted group for each queue, or every old task before it deletes
-// the first.
+// operator is retrying is never deleted. It reads each queue's range of
+// the index of finished tasks, up to a batch, and looks up each old
+// task's halt, kept a lookup by OFFSET 0: the page on maintenance says
+// why.
 var deleteFinishedSQL = `
 WITH RECURSIVE ` + queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, old AS (
     SELECT o.id FROM finished x
@@ -263,22 +251,11 @@ LIMIT $1`
 // $1 the caller's schedules.
 //
 // pruneSchedulesSQL deletes the schedules that no maintainer has defined
-// for a day: they were removed from the code. The day keeps a rolling
-// deploy, a canary, or a rollback, in which some workers do not define
-// a schedule, from losing its state, such as its pause.
-//
-// A schedule's updated_at says when a maintainer last defined it, if
-// nothing changed it later: the statement sets it for the schedules
-// among $1, which are the caller's. It does so only once it is an
-// hour old, so that most passes write nothing. So a schedule is
-// deleted 23 to 24 hours after a maintainer last defined it. The day
-// is written as 24 hours: see {utc}.
-//
-// The statement first locks the rows that it changes, and skips the
-// ones that another transaction holds, such as one that runs, pauses,
-// marks, or deletes the schedule: the next pass finds what is left to
-// do. So it waits for no row, and two maintainers that prune at the
-// same time cannot deadlock, whatever each one defines.
+// for a day, and notes in updated_at, once it is an hour old, that the
+// caller defines those of $1. The day is 24 hours, not a day of the
+// session's time zone (see nowUTCSQL).
+// It skips the rows that another transaction holds, so it waits for none.
+// The page on maintenance says why.
 const pruneSchedulesSQL = `
 WITH old AS (
     SELECT name, name = ANY($1) AS defined FROM {s}.schedules

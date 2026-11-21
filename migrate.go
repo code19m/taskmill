@@ -207,17 +207,10 @@ func createMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema strin
 // online step, in a transaction that holds the lock of the migrations table.
 // It reports whether no migration is left.
 //
-// One process migrates at a time: the one that holds the lock. The others
-// wait for it, then find nothing left to do. Only a role that may change the
-// table can take this lock, so a role without rights on the schema cannot
-// keep Migrate waiting, as it could with an advisory lock, which any role
-// may take. The lock lets everyone read the table, and ends with the
-// transaction, so it works behind transaction-pooling proxies.
-//
-// Only this wait has no limit but ctx: no worker writes the migrations
-// table, so it waits for another migration alone. For the tables that
-// workers use, each migration that is not online sets a lock timeout before
-// its first statement, which holds until the transaction ends.
+// One process migrates at a time: the others wait for the lock, then find
+// nothing left to do. It is a table lock, not an advisory lock, which any
+// role may take: see the page on schema migrations. Only this wait has no
+// limit but ctx, since it waits for another migration alone.
 func (m *migrator) step(ctx context.Context) (done bool, err error) {
 	tx, err := m.lock(ctx)
 	if err != nil {

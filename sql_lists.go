@@ -88,31 +88,14 @@ ORDER BY page.finalized_at DESC, page.id DESC LIMIT $5`
 // $8 below creation time, $9 created since, $10 read the history.
 //
 // listCreatedSQL pages through tasks by when they were created, latest
-// first, and by ID among the tasks of one creation time. That is the order
-// of the two indexes of creation time within one queue, so the statement
-// reads one range for each listed queue ($1), from the position ($8, $7)
-// back to the start of the range of creation times ($9), up to a page ($5),
-// and merges the ranges. No index holds tasks by creation time in the order
-// of their IDs, in which listTasks reads: IDs follow creation time only
-// roughly.
-//
-// The tasks come from three places, and the statement reads each only if the
-// list asks for its states ($2, and $10 for completed tasks): the index of
-// the tasks that are not running, the running tasks, and the history. The
-// index of tasks leaves the running ones out, so that a fetch writes nothing
-// to it. A queue runs as many tasks as its workers take at a time, so the
-// statement reads all of them, from their own index, and sorts those of the
-// range.
-//
-// With no queue named, each place finds its own queues, with one index probe
-// each. A queue named twice is read once.
-//
-// The position and the start of the range are never NULL: the first page
-// starts below the end of the range, or below the infinite time, and a range
-// without a start begins at the other infinite time. So both are conditions
-// of the index under any plan. The end of the range is no parameter of its
-// own: beside the position, PostgreSQL would start to read at the position,
-// and compare every entry from there down to the end of the range with it.
+// first, and by ID among the tasks of one creation time: the order of the
+// two indexes of creation time within one queue. It reads one range for
+// each listed queue ($1), from the position ($8, $7) back to the start of
+// the range ($9), up to a page ($5), and merges the ranges. It reads the
+// tasks that are not running, the running tasks, and the history only if
+// the list asks for their states ($2, $10). The position and the start are
+// never NULL, so that both are conditions of the index under any plan. The
+// page on creation order says why each part is there.
 var listCreatedSQL = `
 WITH RECURSIVE ` + queuesWith(`waiting`, `<> 'running'`) + `, ` +
 	queuesWith(`running`, `= 'running'`) + `, ` +

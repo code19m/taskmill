@@ -19,8 +19,14 @@ maintainer counts the queues.
 
 - **Retention stays on its index.** It finds the queues that have dead or
   canceled tasks with one probe each, and reads each queue's old tasks as a
-  range of `tasks_finished_idx`: a few pages when no task is old enough. It
-  looks up each old task's halt by its group's key.
+  range of `tasks_finished_idx`: a few pages when no task is old enough. A
+  limit on each range lets the planner read it in order and stop. Without
+  one, the planner, which cannot know the cutoff that the statement reads
+  from the settings, expects old tasks everywhere, and scans the table.
+- **It looks up each old task's halt by its group's key,** one lookup per
+  old task, kept a lookup by `OFFSET 0`. Joined to the groups instead, the
+  statement can read every halted group of each queue, or every old task
+  before it deletes the first.
 - **A schedule's day counts from when a maintainer last defined it,** not
   from its last run or change. Each pass notes in `updated_at` that its
   maintainer defines a schedule, once the note is an hour old. So a rolling

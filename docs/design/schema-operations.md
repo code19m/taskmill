@@ -44,7 +44,10 @@ transaction of its own.
   second. The action then reads in windows, starting with that batch: a
   batch reads at most the next 100,000 tasks of each table, whether they
   match or not, and moves to the window's end once it finds less than a full
-  batch before it. It still reads each task once, in ID order.
+  batch before it. It still reads each task once, in ID order. A window is
+  counted in tasks, not in IDs, which completed tasks leave far apart. A
+  statement that somebody canceled with `pg_cancel_backend` has the code of
+  one that ran out of time, so it moves to windows too, once.
 - **No waiting while holding rows.** The batch's one statement that picks
   tasks reads the next 1,000 without locks, then locks those it can, the
   rows of their groups, and the rows of their dedupe keys, all with

@@ -168,15 +168,9 @@ WHERE ` + leasedSQL + ` AND t.cancel_requested_at IS NOT NULL`
 // leases: it moves them to history, except tasks $3, which it only
 // deletes. It returns each task it finished, with true.
 //
-// It waits for a row that another transaction holds. So it first
-// locks the tasks that the attempts own, in the order of their IDs,
-// and then deletes the tasks it holds. While it waits for a task, it
-// holds only tasks with lower IDs, and cannot deadlock with a
-// transaction that takes tasks in that order too, such as one that
-// cancels several. A delete alone takes the rows as its plan meets
-// them: in the order of the attempts, or in that of the table, where
-// a renewed lease moves a row behind newer ones. A read that locks
-// sorts first, whatever its plan.
+// It waits for a row that another transaction holds, so it first locks
+// the tasks in the order of their IDs, and then deletes them: the page on
+// key statements says why.
 const completeSQL = `
 WITH held AS (
     SELECT t.id FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
