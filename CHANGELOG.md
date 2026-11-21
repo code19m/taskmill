@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-21
+
 ### Added
 
 - Docs on when taskmill fits less well.
@@ -85,6 +87,11 @@ All notable changes to taskmill are recorded here. The format follows
   tasks once a worker made it dead. The rest of the dashboard works, and the guards that keep such a row
   from stopping a queue, the rescue, the statistics, or the election stay:
   [Rows that taskmill did not write](docs/design/schema-rows.md).
+- [Benchmarks](docs/design/benchmarks.md#latest-results) report a run of
+  this release's code on the reference runner, GitHub's standard runner
+  with 4 CPUs, in place of laptop runs of older code. The docs that quote a
+  speed, such as [Performance](docs/reference/performance.md), quote this
+  run. It misses three targets: T1, T3 end to end, and S3.
 
 ### Fixed
 
@@ -2210,7 +2217,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/code19m/taskmill/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/code19m/taskmill/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/code19m/taskmill/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/code19m/taskmill/compare/v0.12.1...v0.12.2

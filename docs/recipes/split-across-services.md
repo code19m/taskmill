@@ -203,8 +203,8 @@ lacks reads as zero, so check the values too.
 - **Services in one database pay a little for each other.** PostgreSQL wakes
   every listening connection in the database for each notification,
   whatever its schema. With 100 schemas and 500 workers, the maintainers'
-  [heartbeats](../concepts/glossary.md#heartbeat) cost about a quarter of a
-  CPU.
+  [heartbeats](../concepts/glossary.md#heartbeat) cost about 0.15 of a CPU
+  ([benchmarks](../design/benchmarks.md#resource-use)).
 
 ## See also
 

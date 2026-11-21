@@ -65,10 +65,12 @@ lists the signs, and how to move to a broker one kind at a time.
 
 - **Work for your database.** Each task is a few row writes. Idle workers
   cost the database little.
-- **A speed limit.** On a laptop, one worker runs about 30,000 small tasks a
-  second. That is plenty for most apps, but less than a broker that is made
-  for streams of events. [Performance](../reference/performance.md) has the
-  numbers, and their limits.
+- **A speed limit.** One worker runs about 26,000 small tasks a second, on
+  4 CPUs that it shares with the database
+  ([benchmarks](../design/benchmarks.md#throughput)). That is plenty for
+  most apps, but less than a broker that is made for streams of events.
+  [Performance](../reference/performance.md) has the numbers, and their
+  limits.
 - **At least once, not exactly once.** A task can run twice, so your
   handlers must be safe to run twice. [Guarantees](../concepts/guarantees.md)
   shows how.

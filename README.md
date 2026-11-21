@@ -29,8 +29,8 @@ in the dashboard, in about 15 minutes.
 Also: delays, priorities, cron schedules, deduplication, limits across all
 workers, batch handlers, logs through `log/slog`, and OpenTelemetry. The
 only direct dependency is pgx. One worker with `Concurrency` 64 drained a
-backlog at about 30,000 tasks per second, with handlers that do nothing, on
-an Apple M5 laptop with PostgreSQL 18 in Docker, in October 2026
+backlog at about 26,000 tasks per second, with handlers that do nothing, on
+GitHub's standard runner: 4 CPUs shared with PostgreSQL 18, in November 2026
 ([benchmarks](docs/design/benchmarks.md#throughput)).
 
 <picture>

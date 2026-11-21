@@ -173,10 +173,10 @@ workers are idle: a new part, with its own failures. An empty fetch is
 one round trip and one probe of the queue's index, and the limits above
 bound the wakes: one notification per queue per 50 ms from each client, and
 a worker that found nothing waits 20 ms. The cost grows with the workers of
-one queue: S3 in [Benchmarks](benchmarks.md#scalability) measured 50
-processes on 100 queues at 1,000 tasks a second, and their empty fetches
-used the database's 4 CPUs. So on one queue, a few workers with more
-concurrency cost the database less than many small ones.
+one queue: S3 in [Benchmarks](benchmarks.md#scalability) ran 50 processes
+on 100 queues at 1,000 tasks a second, on 4 CPUs shared with the database,
+and the maintainer's slowest loop took 3.2 seconds. So on one queue, a few
+workers with more concurrency cost the database less than many small ones.
 
 **The maintainer wakes the queues that were missed.** That last notification
 can arrive before the transactions it stands for commit, and a producer can
