@@ -29,6 +29,10 @@ func (timedTask) Kind() string { return "bench.timed" }
 // schedule, which runs every minute, to run at least once.
 const timingRun = 75 * time.Second
 
+// stopMargin is how long before the stop a schedule run may have been
+// enqueued and still wait, because the stopping workers did not fetch it.
+const stopMargin = 2 * time.Second
+
 // L4 and F9: tasks start on time by the database's clock: delayed tasks,
 // retries, snoozes, and schedule runs. Leases last 3 seconds, and some tasks
 // run for longer, renewing theirs. Against a database whose clock is off from
@@ -91,8 +95,12 @@ func benchTiming(ctx context.Context, pool *pgxpool.Pool, wantSkew time.Duration
 	waiting := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks WHERE state = 'scheduled' AND run_at > now()")
 	// A schedule run that came due while the workers stopped waits for the
 	// next worker: the maintainer leads until its worker's tasks end, and
-	// enqueues it, but the worker no longer fetches.
-	dueAtStop := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks WHERE (payload->>'n')::int = -1 AND created_at >= $1", stopping)
+	// enqueues it, but the worker no longer fetches. So does one enqueued
+	// just before the stop, which a slow machine may not fetch in time: a
+	// run of this once-a-minute schedule that is older than that margin
+	// should have run.
+	dueAtStop := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks WHERE (payload->>'n')::int = -1 AND created_at >= $1",
+		stopping.Add(-stopMargin))
 	unfinished := scalar(ctx, pool, "SELECT count(*) FROM {s}.tasks") - waiting - dueAtStop
 	completed := scalar(ctx, pool, "SELECT count(*) FROM {s}.task_history WHERE (payload->>'n')::int >= 0")
 	lost := scalar(ctx, pool, `
