@@ -84,9 +84,9 @@ by election, that does the shared work.
 | The dashboard marks a worker as stale | After one `LeaseDuration` of that worker without a check-in: 30 seconds by default |
 | Values per filter | Up to 100 |
 | FIFO groups that a filter lists | The first 100. Its search finds the others |
-| Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds |
+| Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds, or 5 seconds after a read that failed |
 | Page of a dead task in a FIFO group | Counts up to 10,000 tasks that wait behind it |
-| Charts | The last hour, 6 hours, or day, with one point per 1, 5, or 15 minutes |
+| Charts | The last hour, 6 hours, or day, with one point per 1, 5, or 15 minutes. The 6 hours and the day read their history again at most every 30 seconds, and when a point becomes complete |
 
 The values of the `taskmill-ui` command, such as its HTTP timeouts, are in
 [The `taskmill-ui` command](taskmill-ui.md).

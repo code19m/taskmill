@@ -105,7 +105,7 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 
 	// The charts are not worth failing the page for: without their history,
 	// they say so.
-	activity, err := s.client.Activity(ctx, &taskmill.ActivityParams{Since: win.start, Step: win.step})
+	activity, err := s.activity(ctx, p, win, now)
 	if err != nil && ctx.Err() == nil {
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "read activity failed", slog.Any(logKeyError, err))
 	}

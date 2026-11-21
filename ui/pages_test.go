@@ -1150,6 +1150,55 @@ func TestTaskPagesReadNoPayloadsTheyDoNotShow(t *testing.T) {
 	}
 }
 
+// roundTripsOf returns the round trips that a request for target makes.
+func roundTripsOf(t *testing.T, h http.Handler, trips *roundTrips, target string) int64 {
+	t.Helper()
+	before := trips.n.Load()
+	if code, _, _ := get(t, h, target); code != http.StatusOK {
+		t.Fatalf("%s: %d", target, code)
+	}
+	return trips.n.Load() - before
+}
+
+// The overview of a longer period keeps its read of the activity for a while:
+// each open overview would read the counts of every queue for hours again at
+// each update. The overview of the hour reads it each time.
+func TestOverviewKeepsTheActivityOfALongerPeriod(t *testing.T) {
+	t.Parallel()
+	client, _, _, _, trips := setupCounting(t)
+	h := handler(t, client, nil)
+	for _, target := range []string{"/?range=6h", "/?range=24h"} {
+		// A read is kept for its window while as many of its steps are
+		// complete: a step can end between two requests, but not again
+		// before a third.
+		first := roundTripsOf(t, h, trips, target)
+		second, third := roundTripsOf(t, h, trips, target), roundTripsOf(t, h, trips, target)
+		if second >= first && third >= first {
+			t.Errorf("%s: the overviews after the first made %d round trips too, want one fewer: the activity is kept", target, first)
+		}
+	}
+
+	if first, second := roundTripsOf(t, h, trips, "/"), roundTripsOf(t, h, trips, "/"); second != first {
+		t.Errorf("the overview of the hour made %d round trips, then %d: it reads the activity each time", first, second)
+	}
+}
+
+// While a read of the task list's filter choices fails, the choices of that
+// read serve the next task lists for a few seconds: each would otherwise add
+// three reads that fail to its own.
+func TestTaskListsKeepAFailedReadOfTheirChoicesForAWhile(t *testing.T) {
+	t.Parallel()
+	client, pool, schema, _, trips := setupCounting(t)
+	if _, err := pool.Exec(t.Context(), `ALTER TABLE `+schema+`.schedules RENAME TO schedules_gone`); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handler(t, client, nil)
+	if first, second := roundTripsOf(t, h, trips, "/tasks"), roundTripsOf(t, h, trips, "/tasks"); second > 2 {
+		t.Errorf("the task lists made %d round trips, then %d, want at most 2 the second time: the tasks, and the queues", first, second)
+	}
+}
+
 // A page asks the database as few times as it has things to show: each read
 // of the client is one round trip, also those with a time limit of their
 // own. It matters for a dashboard far from its database, whose pages

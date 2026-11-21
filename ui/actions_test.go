@@ -18,10 +18,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
-	"github.com/code19m/taskmill/internal/testdb"
 	"github.com/code19m/taskmill/ui"
 )
 
@@ -430,18 +428,7 @@ func TestTaskListOffersBulkActions(t *testing.T) {
 func TestBulkActionStopsInTime(t *testing.T) {
 	t.Parallel()
 	picks := &pickHook{}
-	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cfg.ConnConfig.Tracer = picks
-	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(pool.Close)
-	client, _, _ := setupOn(t, pool)
+	client, _, _ := setupTraced(t, picks)
 
 	// Three batches of tasks.
 	params := make([]taskmill.EnqueueParams, 3000)
@@ -524,6 +511,73 @@ func (h *pickHook) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.Trace
 }
 
 func (*pickHook) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// countedStates records the states that each count of tasks on its pool
+// reads.
+type countedStates struct {
+	mu     sync.Mutex
+	counts [][]string
+}
+
+func (c *countedStates) TraceBatchStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceBatchStartData) context.Context {
+	for _, q := range d.Batch.QueuedQueries {
+		if !strings.Contains(q.SQL, "unflagged") {
+			continue
+		}
+		if states, ok := q.Arguments[len(q.Arguments)-1].([]string); ok {
+			c.mu.Lock()
+			c.counts = append(c.counts, slices.Sorted(slices.Values(states)))
+			c.mu.Unlock()
+		}
+	}
+	return ctx
+}
+
+func (*countedStates) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+func (*countedStates) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData)     {}
+func (*countedStates) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+func (*countedStates) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+// take returns the counts recorded since the last take.
+func (c *countedStates) take() [][]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	counts := c.counts
+	c.counts = nil
+	return counts
+}
+
+// The page that asks before a bulk action counts only the states that the
+// action changes, of those that the filter selects: the others can hold many
+// more tasks, such as every completed task of a kind before a retry, which
+// the count would read for nothing. A filter with none of those states counts
+// nothing.
+func TestBulkPagesCountOnlyWhatTheActionChanges(t *testing.T) {
+	t.Parallel()
+	counts := &countedStates{}
+	client, _, _ := setupTraced(t, counts)
+	h := handler(t, client, nil)
+	for _, tc := range []struct {
+		target string
+		want   []string // the states of the one count, sorted; nil for no count
+	}{
+		{"/tasks/bulk/retry?kind=greet", []string{"canceled", "dead"}},
+		{"/tasks/bulk/cancel?queue=default", []string{"available", "pending", "retryable", "running", "scheduled"}},
+		{"/tasks/bulk/delete?state=running&state=completed&state=dead", []string{"completed", "dead"}},
+		{"/tasks/bulk/retry?state=running", nil},
+	} {
+		code, body, _ := get(t, h, tc.target)
+		got := counts.take()
+		if code != http.StatusOK || len(got) != min(len(tc.want), 1) || len(got) == 1 && !slices.Equal(got[0], tc.want) {
+			t.Errorf("%s (%d): counted %q, want %q", tc.target, code, got, tc.want)
+		}
+		if tc.want == nil && !strings.Contains(body, "No task matches.") {
+			t.Errorf("%s: the page does not say that no task matches", tc.target)
+		}
+	}
+}
 
 // A bulk action that left tasks that other work held says so, and leads back
 // to its page to try again.

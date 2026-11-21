@@ -128,6 +128,11 @@ All notable changes to taskmill are recorded here. The format follows
 - The dashboard reads `Accept-Encoding` as RFC 9110 does: a weight of zero
   in any form, such as `q=0.0` or `Q=0`, refuses gzip, `*` accepts it, and
   every line of the header counts.
+- The dashboard reads less from a busy database. The page that asks before
+  a bulk action counts only the tasks that the action would change. The
+  overview of 6 hours or a day reads its history again at most every 30
+  seconds. After a read of the filter choices failed, task lists read them
+  again 5 seconds later, not right away.
 
 ### Security
 

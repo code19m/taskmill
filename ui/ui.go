@@ -218,6 +218,7 @@ type server struct {
 	versions map[string]string // static file name to a hash of its content
 	files    map[string]staticFile
 	choices  choiceCache
+	charts   activityCache
 }
 
 // page is what every template receives.

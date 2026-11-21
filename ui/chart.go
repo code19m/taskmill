@@ -1,26 +1,29 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/code19m/taskmill"
 )
 
 // chartPeriod is a span of time the overview's charts can show, with the step
-// of their points.
+// of their points, and how long a read of its activity serves every overview:
+// see activityCache.
 type chartPeriod struct {
-	Name       string
-	span, step time.Duration
+	Name             string
+	span, step, keep time.Duration
 }
 
 var chartPeriods = []chartPeriod{
-	{"1h", time.Hour, time.Minute},
-	{"6h", 6 * time.Hour, 5 * time.Minute},
-	{"24h", 24 * time.Hour, 15 * time.Minute},
+	{"1h", time.Hour, time.Minute, 0},
+	{"6h", 6 * time.Hour, 5 * time.Minute, 30 * time.Second},
+	{"24h", 24 * time.Hour, 15 * time.Minute, 30 * time.Second},
 }
 
 // periodOf returns the period named name, or the first one.
@@ -43,6 +46,49 @@ type window struct {
 func windowOf(p chartPeriod, now time.Time) window {
 	end := now.Truncate(p.step).Add(p.step)
 	return window{start: end.Add(-p.span), step: p.step, steps: int(p.span / p.step)}
+}
+
+// activityCache keeps a read of the activity of each period that keeps its
+// reads. A longer period reads the counts of every queue for hours, every
+// open overview would read them again at each update, and its charts change
+// little in half a minute. The hour's charts stay live.
+type activityCache struct {
+	mu   sync.Mutex
+	kept map[string]keptActivity // by the name of the period
+}
+
+// keptActivity is a read of a period's activity: of the window that starts
+// at start, at a time when complete of its steps had a complete count.
+type keptActivity struct {
+	start    time.Time
+	complete int
+	read     time.Time
+	points   []taskmill.Activity
+}
+
+// activity returns the activity of window w of period p at now: from the
+// cache, if it keeps a read of the same window, read less than p.keep ago, in
+// which as many steps had a complete count as now; or else read anew. The
+// charts only read the points, which every overview may share.
+func (s *server) activity(ctx context.Context, p chartPeriod, w window, now time.Time) ([]taskmill.Activity, error) {
+	c, complete := &s.charts, w.complete(now)
+	c.mu.Lock()
+	kept, ok := c.kept[p.Name]
+	c.mu.Unlock()
+	if ok && kept.start.Equal(w.start) && kept.complete == complete && now.Sub(kept.read) < p.keep {
+		return kept.points, nil
+	}
+
+	points, err := s.client.Activity(ctx, &taskmill.ActivityParams{Since: w.start, Step: w.step})
+	if err == nil && p.keep > 0 {
+		c.mu.Lock()
+		if c.kept == nil {
+			c.kept = map[string]keptActivity{}
+		}
+		c.kept[p.Name] = keptActivity{start: w.start, complete: complete, read: now, points: points}
+		c.mu.Unlock()
+	}
+	return points, err
 }
 
 // chart is a line chart that the server draws as SVG, so that it needs no

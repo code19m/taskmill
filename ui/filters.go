@@ -122,21 +122,28 @@ type choices struct {
 	moreGroups    bool // there are more groups than listed
 }
 
-// choiceCache keeps the filter choices for choicesTTL. They change rarely,
-// and every open task list would read them again with each live update.
+// choiceCache keeps the filter choices until a time. They change rarely, and
+// every open task list would read them again with each live update.
 type choiceCache struct {
-	mu   sync.Mutex
-	read time.Time
-	last choices
+	mu    sync.Mutex
+	until time.Time
+	last  choices
 }
 
-const choicesTTL = 30 * time.Second
+// Choices read in full are kept for choicesTTL, and those of a read that
+// failed for choicesRetry: while the database fails, each task list would
+// otherwise add three reads that fail to its own.
+const (
+	choicesTTL   = 30 * time.Second
+	choicesRetry = 5 * time.Second
+)
 
-// filterChoices returns the filter choices, read at most choicesTTL ago.
-// Choices read with an error are not kept, so the next request tries again.
+// filterChoices returns the filter choices, read at most choicesTTL ago, or
+// choicesRetry ago if a read failed. A read that the end of its request cut
+// short is not kept.
 func (s *server) filterChoices(r *http.Request) choices {
 	s.choices.mu.Lock()
-	if !s.choices.read.IsZero() && time.Since(s.choices.read) < choicesTTL {
+	if time.Now().Before(s.choices.until) {
 		c := s.choices.last
 		s.choices.mu.Unlock()
 		return c
@@ -144,11 +151,17 @@ func (s *server) filterChoices(r *http.Request) choices {
 	s.choices.mu.Unlock()
 
 	c, complete := s.readChoices(r)
-	if complete {
-		s.choices.mu.Lock()
-		s.choices.read, s.choices.last = time.Now(), c
-		s.choices.mu.Unlock()
+	if r.Context().Err() != nil {
+		return c
 	}
+
+	keep := choicesTTL
+	if !complete {
+		keep = choicesRetry
+	}
+	s.choices.mu.Lock()
+	s.choices.until, s.choices.last = time.Now().Add(keep), c
+	s.choices.mu.Unlock()
 	return c
 }
 
