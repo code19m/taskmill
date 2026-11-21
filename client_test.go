@@ -1199,3 +1199,61 @@ func TestNewClientRejectsANilEnqueueMiddleware(t *testing.T) {
 		t.Fatalf("got %v, want ErrInvalidArgument", err)
 	}
 }
+
+// A client holds back the notification of an enqueue that comes soon after
+// another into the same queue, and sends it when the window ends. Close
+// drops it, so that nothing of the client runs on the pool afterwards, and
+// the client still enqueues.
+func TestCloseDropsTheNotificationsThatTheClientHeldBack(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(t.Context()) }()
+	if _, err := conn.Exec(ctx, "LISTEN "+e.schema); err != nil {
+		t.Fatal(err)
+	}
+
+	// Two enqueues into a queue: the first notifies at once. The second is
+	// held back if it comes within the window, which two enqueues that end
+	// within it surely did. A slow database can need a few tries.
+	held := ""
+	for i := 0; held == ""; i++ {
+		if i == 20 {
+			t.Fatal("no two enqueues ended within the window")
+		}
+		queue, start := fmt.Sprintf("mail-%d", i), time.Now()
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: queue})
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: queue})
+		if time.Since(start) < taskmill.NotifyWindow {
+			held = queue
+		}
+	}
+	e.client.Close()
+	e.client.Close()
+
+	// The held-back notification was due long before this one.
+	time.Sleep(4 * taskmill.NotifyWindow)
+	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "after-close"})
+	sent := 0
+	for {
+		n, err := conn.WaitForNotification(ctx)
+		if err != nil {
+			t.Fatalf("wait for the notification after Close: %v", err)
+		}
+		if n.Payload == "a|after-close" {
+			break
+		}
+		if n.Payload == "a|"+held {
+			sent++
+		}
+	}
+	if sent != 1 {
+		t.Fatalf("queue %s got %d notifications, want the first one alone", held, sent)
+	}
+}

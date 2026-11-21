@@ -21,8 +21,9 @@ import (
 // Each error names its class through an ErrorType() string method, which
 // OpenTelemetry's semconv.ErrorType reports as error.type. The classes are
 // part of the API and do not change: "not_found", "lease_lost",
-// "invalid_state", "invalid_argument", "schema_outdated", "conflict",
-// "canceled", "timeout", and "shutdown". Failures that taskmill classifies
+// "invalid_state", "invalid_argument", "schema_outdated",
+// "blocking_migration", "conflict", "stored_without_ids", "canceled",
+// "timeout", and "shutdown". Failures that taskmill classifies
 // itself have a class, but no error value: "panic" for a handler or an
 // outbox publisher that panicked, "invalid_payload" for a payload that did
 // not decode into the kind's Args, and "middleware" for middleware that
@@ -67,6 +68,13 @@ var (
 	// version of the application starts.
 	ErrSchemaOutdated = classError("taskmill: database schema is missing or outdated", "schema_outdated")
 
+	// ErrBlockingMigration means that [Migrate] refused a pending migration
+	// that would block the writes to a large table while it builds an
+	// index: see [MigrateConfig.MaxBlockingIndexRows]. Migrate changed
+	// nothing, and trying again does not help: a person runs it at a quiet
+	// time, with the limit raised.
+	ErrBlockingMigration = classError("taskmill: a migration would block writes to a large table", "blocking_migration")
+
 	// ErrConflict means that other work stands in the way of the call.
 	// [Client.UpdateQueue] and [Client.UpdateSettings] return it when they
 	// lost to concurrent updates of the same settings each of the 10 times
@@ -75,6 +83,13 @@ var (
 	// task stands for the same work, so trying again helps only once it
 	// gave the key away.
 	ErrConflict = classError("taskmill: conflict", "conflict")
+
+	// ErrStoredWithoutIDs means that an enqueue outside a transaction stored
+	// its tasks, and then failed while it looked for the tasks that hold the
+	// dedupe keys of its duplicates: see [EnqueueResult.ID]. The tasks
+	// without a dedupe key are stored, so do not enqueue them again. Those
+	// with a dedupe key may be enqueued again, to learn their IDs.
+	ErrStoredWithoutIDs = classError("taskmill: the tasks are stored, but the IDs of their duplicates are unknown", "stored_without_ids")
 
 	// ErrTaskCanceled is the cause of a handler's context when the task was
 	// canceled while it ran. The task becomes canceled when the attempt ends,

@@ -21,12 +21,13 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | 8 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
 | 9 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
 | 10 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
-| 11 | [The API's shape](api-shape.md) | Why each point of the API has its shape, and when we look at it again |
-| 12 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry, the ORM examples, and the browser tests have modules of their own, and how to add a dependency |
-| 13 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
-| 14 | [Releasing](releasing.md) | How the project team publishes a version |
-| 15 | [Writing docs](writing-docs.md) | The style guide and the page templates |
-| 16 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
+| 11 | [Schema migrations](schema-migrations.md) | How `Migrate` changes a busy schema: one process at a time, indexes built online, and a guard for the older migrations that block writes |
+| 12 | [The API's shape](api-shape.md) | Why each point of the API has its shape, and when we look at it again |
+| 13 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry, the ORM examples, and the browser tests have modules of their own, and how to add a dependency |
+| 14 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
+| 15 | [Releasing](releasing.md) | How the project team publishes a version |
+| 16 | [Writing docs](writing-docs.md) | The style guide and the page templates |
+| 17 | [Writing doc comments](writing-godoc.md) | What a doc comment holds, and how godoc and the pages share the work |
 
 **Each page gives its decisions next to the mechanism that they explain:**
 what is so, why, and the options that we rejected. These pages are the home
@@ -47,6 +48,7 @@ make us look at it again:
 | Scalers read `Client.Queues` or the gauges, never the tables | [Queue statistics and health](schema-statistics.md#scalers-read-clientqueues-or-the-gauges-never-the-tables) | A scaling need that neither path meets |
 | A notification wakes every worker of its queue | [Maintenance and notifications](schema-maintenance.md#notifications) | Empty fetches that cost the database more than a coordinator would |
 | The heartbeat comes every 5 seconds, not with every wake | [Maintenance and notifications](schema-maintenance.md#notifications) | Schemas in one database that no longer pay for each other's notifications |
+| Migrations build indexes online, while `Migrate` holds the lock of `migrations` in a second connection | [Schema migrations](schema-migrations.md#online-steps) | An index of the history, which PostgreSQL cannot build concurrently on a partitioned table; or a schema change other than an index that blocks writes |
 | The querier interfaces, the untagged result types, `ui.New`, a missing result, and the names | [The API's shape](api-shape.md#when-we-look-at-a-point-again) | The condition of each point, in the table there |
 | The dashboard is rendered on the server, with no framework | [How the dashboard is built](#how-the-dashboard-is-built) | A dashboard that grows far beyond five pages, or needs a JSON API anyway |
 

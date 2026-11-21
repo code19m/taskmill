@@ -184,6 +184,17 @@ docs: explain at-least-once delivery
   release's client, worker, schedules, outbox, and dashboard there.
 - **A migration must be safe on a busy database.** Avoid statements that
   hold long locks on `tasks`, such as table rewrites.
+- **Build and drop indexes online.** Put them in an online step: a
+  migration whose first line is `-- online`, with only
+  `CREATE INDEX CONCURRENTLY name ON schema.table …` and
+  `DROP INDEX CONCURRENTLY schema.name` statements, without
+  `IF NOT EXISTS`. After version 9, a test fails for any other statement
+  that names an index, a key, or `REINDEX`, unless it uses `USING INDEX`,
+  is a comment, or works on a table that the same migration creates without
+  `IF NOT EXISTS`. For a unique constraint, build its index online, then add
+  the constraint with `USING INDEX` in a later migration. The history is partitioned, and has
+  no online step yet: open an issue first.
+  [Schema migrations](docs/design/schema-migrations.md) says why.
 
 ## Design decisions
 

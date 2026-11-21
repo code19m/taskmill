@@ -18,7 +18,7 @@ explains it.
 
 ## Workers and deploys
 
-- [ ] Every process calls `Migrate` before `NewClient`, or a Job does it first. ([Deploys](deploys.md#run-migrations))
+- [ ] A Job runs `Migrate` before each rollout, with a deadline that leaves time for index builds. ([Deploys](deploys.md#run-migrations))
 - [ ] `Run`'s context ends on `SIGTERM`. ([Deploys](deploys.md#stop-workers-without-losing-work))
 - [ ] The grace period leaves workers time to drain. ([Deploys](deploys.md#stop-workers-without-losing-work), [Kubernetes](kubernetes.md#give-workers-time-to-drain))
 - [ ] The readiness probe calls `Worker.Health`, and no liveness probe does. ([Kubernetes](kubernetes.md#tell-kubernetes-when-a-worker-is-ready))

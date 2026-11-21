@@ -73,10 +73,12 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer orders.Close()
 	billing, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: "billing"}) // only to enqueue
 	if err != nil {
 		return err // ErrSchemaOutdated until billing has migrated its schema
 	}
+	defer billing.Close()
 
 	if _, err := placeOrder(ctx, pool, orders, billing, "ada@example.com"); err != nil {
 		return err

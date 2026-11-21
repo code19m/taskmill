@@ -696,8 +696,16 @@ func applyWithoutMigrate(t *testing.T, pool *pgxpool.Pool, schema string, pendin
 		if m.Version > 0 {
 			sql += fmt.Sprintf("\nINSERT INTO %s.migrations (version, name) VALUES (%d, '%s');", schema, m.Version, m.Name)
 		}
-		if _, err := pool.Exec(t.Context(), sql); err != nil {
-			t.Fatalf("apply migration %d: %v", m.Version, err)
+		// Statements of a string run in one transaction: an online
+		// migration runs them one at a time, as goose's NO TRANSACTION does.
+		stmts := []string{sql}
+		if m.Online {
+			stmts = strings.Split(sql, ";")
+		}
+		for _, stmt := range stmts {
+			if _, err := pool.Exec(t.Context(), stmt); err != nil {
+				t.Fatalf("apply migration %d: %v", m.Version, err)
+			}
 		}
 	}
 }
@@ -750,4 +758,301 @@ func versions(ms []taskmill.Migration) []int {
 		out[i] = m.Version
 	}
 	return out
+}
+
+// onlineEnv returns an env whose schema is migrated, with tasks whose index
+// builds slowly, and the files of three migrations after taskmill's own: an
+// online step that builds that index and a quick one, a migration in a
+// transaction that comments the slow one, and an online step that drops the
+// quick one.
+func onlineEnv(t *testing.T, pool *pgxpool.Pool) (*env, []string) {
+	t.Helper()
+	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
+	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema}); err != nil {
+		t.Fatal(err)
+	}
+	// About a second for a build, which reads each task twice.
+	e.exec(t, `CREATE FUNCTION {s}.slow(bigint) RETURNS boolean IMMUTABLE LANGUAGE sql AS 'SELECT pg_sleep(0.002) IS NOT NULL'`)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'q', 'k', 'available', now(), '{}', 1 FROM generate_series(1, 250)`)
+
+	latest := e.count(t, "SELECT max(version) FROM {s}.migrations")
+	return e, []string{
+		fmt.Sprintf("%04d_build.sql", latest+1), `-- online
+CREATE INDEX CONCURRENTLY tasks_slow_idx ON __SCHEMA__.tasks (id) WHERE __SCHEMA__.slow(id);
+CREATE INDEX CONCURRENTLY tasks_kind_idx ON __SCHEMA__.tasks (kind);`,
+		fmt.Sprintf("%04d_comment.sql", latest+2), `SET LOCAL lock_timeout = '5s';
+COMMENT ON INDEX __SCHEMA__.tasks_slow_idx IS 'built online';`,
+		fmt.Sprintf("%04d_drop.sql", latest+3), `-- online
+DROP INDEX CONCURRENTLY __SCHEMA__.tasks_kind_idx;`,
+	}
+}
+
+// migrateWith runs taskmill.MigrateWith with files on e's schema in the
+// background, and returns its result.
+func (e *env) migrateWith(ctx context.Context, files []string) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- taskmill.MigrateWith(ctx, e.pool, &taskmill.MigrateConfig{Schema: e.schema}, files...) }()
+	return done
+}
+
+// buildSlowIndex builds, in the background, the slow index of onlineEnv's
+// first migration, as a Migrate does whose process is gone, and returns the
+// build's result.
+func (e *env) buildSlowIndex() <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.pool.Exec(context.Background(),
+			replaceSchema("CREATE INDEX CONCURRENTLY tasks_slow_idx ON {s}.tasks (id) WHERE {s}.slow(id)", e.schema))
+		done <- err
+	}()
+	return done
+}
+
+// lockHolders returns how many sessions hold the lock of e's migrations
+// table.
+func (e *env) lockHolders(t *testing.T) int {
+	t.Helper()
+	return e.count(t, `SELECT count(*) FROM pg_locks
+	                   WHERE relation = '{s}.migrations'::regclass AND mode = 'ShareRowExclusiveLock' AND granted`)
+}
+
+// waitBuilding waits until a session builds an index of e's tasks.
+func (e *env) waitBuilding(t *testing.T) {
+	t.Helper()
+	waitFor(t, "an index of tasks to build", func() bool {
+		return e.count(t, `SELECT count(*) FROM pg_stat_progress_create_index
+		                   WHERE relid = '{s}.tasks'::regclass AND phase LIKE 'building index%'`) > 0
+	})
+}
+
+// wantOnlineSteps fails the test unless the three migrations of onlineEnv
+// are applied, each once, in order.
+func (e *env) wantOnlineSteps(t *testing.T) {
+	t.Helper()
+	if n := e.count(t, "SELECT count(*) FROM pg_index WHERE indexrelid = '{s}.tasks_slow_idx'::regclass AND indisvalid"); n != 1 {
+		t.Errorf("the slow index is valid %d times, want once", n)
+	}
+	if n := e.count(t, "SELECT count(*) FROM pg_description WHERE objoid = '{s}.tasks_slow_idx'::regclass AND description = 'built online'"); n != 1 {
+		t.Error("the migration after the online step did not comment the index")
+	}
+	if n := e.count(t, "SELECT count(*) FROM pg_class WHERE oid = to_regclass('{s}.tasks_kind_idx')"); n != 0 {
+		t.Error("the second online step did not drop the quick index")
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.migrations WHERE version > (SELECT max(version) - 3 FROM {s}.migrations)"); n != 3 {
+		t.Errorf("recorded %d of the 3 migrations", n)
+	}
+}
+
+// A migration that builds an index on a busy table must not make its writes
+// wait: they would block enqueues, and the renewals of leases, past a
+// lease. An online step builds it with CONCURRENTLY, outside a transaction,
+// and the migrations after it run when it is done.
+func TestMigrateBuildsIndexesOnline(t *testing.T) {
+	t.Parallel()
+	e, files := onlineEnv(t, testdb.Pool(t))
+	migrated := e.migrateWith(t.Context(), files)
+	e.waitBuilding(t)
+
+	// A write that waited for the build would time out.
+	write := e.begin(t)
+	e.txExec(t, write, "SET LOCAL lock_timeout = '500ms'")
+	e.txExec(t, write, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	                    VALUES ('q', 'k', 'available', now(), '{}', 1)`)
+	if err := write.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recv(t, migrated, "Migrate"); err != nil {
+		t.Fatal(err)
+	}
+	e.wantOnlineSteps(t)
+}
+
+// Processes that migrate at the same time take turns at the lock of the
+// migrations table, also while an online step builds. One that waited in the
+// lock's queue, on a connection that had not read the table before, would
+// keep a snapshot, which the build waits for, while the build's process
+// waits for the build: they would stop each other until a context ended.
+// Each statement of this pool runs on a new connection, as through a proxy
+// that pools transactions it may.
+func TestConcurrentMigratesBuildAnIndexOnline(t *testing.T) {
+	t.Parallel()
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 16
+	cfg.AfterRelease = func(*pgx.Conn) bool { return false } // close it
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	e, files := onlineEnv(t, pool)
+	migrated := make([]<-chan error, 6)
+	for i := range migrated {
+		migrated[i] = e.migrateWith(t.Context(), files)
+	}
+
+	for i, done := range migrated {
+		if err := recv(t, done, "Migrate"); err != nil {
+			t.Errorf("Migrate %d: %v", i, err)
+		}
+	}
+	e.wantOnlineSteps(t)
+}
+
+// A build that fails, or is canceled, leaves its index invalid: PostgreSQL
+// maintains it on every write, and no statement uses it. The next Migrate
+// drops it and builds it again.
+func TestMigrateBuildsAgainAnIndexThatACanceledBuildLeft(t *testing.T) {
+	t.Parallel()
+	e, files := onlineEnv(t, testdb.Pool(t))
+	ctx, cancel := context.WithCancel(t.Context())
+	migrated := e.migrateWith(ctx, files)
+	e.waitBuilding(t)
+	cancel()
+
+	if err := recv(t, migrated, "the canceled Migrate"); err == nil {
+		t.Fatal("a canceled Migrate returned no error")
+	}
+	if n := e.count(t, "SELECT count(*) FROM pg_index WHERE indexrelid = '{s}.tasks_slow_idx'::regclass AND NOT indisvalid"); n != 1 {
+		t.Fatal("the canceled build left no invalid index")
+	}
+
+	if err := recv(t, e.migrateWith(t.Context(), files), "Migrate"); err != nil {
+		t.Fatal(err)
+	}
+	e.wantOnlineSteps(t)
+}
+
+// A process can stop while its build goes on in the database: the server
+// notices a client that is gone only when it answers. The next Migrate then
+// takes the lock of the migrations table, and finds an invalid index that is
+// still being built. It must neither drop that index nor build another of
+// the same table: PostgreSQL would end one of the two builds as a deadlock.
+// It waits for the build, says so once, and finds the index valid.
+func TestMigrateWaitsForABuildWhoseProcessIsGone(t *testing.T) {
+	t.Parallel()
+	e, files := onlineEnv(t, testdb.Pool(t))
+	orphan := e.buildSlowIndex()
+	e.waitBuilding(t)
+
+	logs := &logRecorder{}
+	cfg := &taskmill.MigrateConfig{Schema: e.schema, Logger: slog.New(logs)}
+	if err := taskmill.MigrateWith(t.Context(), e.pool, cfg, files...); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, orphan, "the build of the process that is gone"); err != nil {
+		t.Fatalf("the build of the process that is gone: %v", err)
+	}
+	e.wantOnlineSteps(t)
+	if n := logs.count("waiting for an index build"); n != 1 {
+		t.Errorf("logged the wait %d times, want once", n)
+	}
+}
+
+// The lock of an online step can end while its build runs: an operator ends
+// the session, or a proxy or the database ends a transaction that stayed
+// open too long. Another process then takes the lock, waits for the build,
+// and applies the migrations after it, which here drop the quick index. The
+// first process must not go on: it would build that index again.
+//
+// The first process waits for the build of a process that is gone, as the
+// second does, so the second may get ahead of it.
+func TestMigrateStopsAnOnlineStepWhoseLockEnded(t *testing.T) {
+	t.Parallel()
+	e, files := onlineEnv(t, testdb.Pool(t))
+	orphan := e.buildSlowIndex()
+	e.waitBuilding(t)
+	first := e.migrateWith(t.Context(), files)
+	waitFor(t, "the first Migrate to take the lock", func() bool { return e.lockHolders(t) == 1 })
+	time.Sleep(300 * time.Millisecond) // its pauses grow while it waits for the build
+	if n := e.count(t, `SELECT count(pg_terminate_backend(pid)) FROM pg_locks
+	                    WHERE relation = '{s}.migrations'::regclass AND mode = 'ShareRowExclusiveLock' AND granted`); n != 1 {
+		t.Fatalf("ended %d sessions that held the lock, want 1", n)
+	}
+
+	second := e.migrateWith(t.Context(), files)
+	if err := recv(t, orphan, "the build of the process that is gone"); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, second, "the second Migrate"); err != nil {
+		t.Fatalf("the second Migrate: %v", err)
+	}
+	if err := recv(t, first, "the first Migrate"); err == nil {
+		t.Fatal("the Migrate whose lock ended returned no error")
+	}
+	e.wantOnlineSteps(t)
+}
+
+// An online step runs on a second connection while the first holds the lock
+// of the migrations table. A pool of one connection would wait for the
+// second forever.
+func TestMigrateNeedsTwoConnectionsForAnOnlineStep(t *testing.T) {
+	t.Parallel()
+	e, files := onlineEnv(t, testdb.PoolSize(t, 1))
+	err := recv(t, e.migrateWith(t.Context(), files), "Migrate")
+	if err == nil || !strings.Contains(err.Error(), "at least 2") {
+		t.Fatalf("got %v, want an error that asks for 2 connections", err)
+	}
+}
+
+// A build waits for every older transaction in the database, and reads the
+// table twice: a timeout of its connection would cancel it, and leave an
+// invalid index at each try. Migrate refuses the step before it starts.
+func TestMigrateRefusesAnOnlineStepThatATimeoutWouldCancel(t *testing.T) {
+	t.Parallel()
+	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t)) // a proxy refuses the parameter
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = "30s"
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	e, files := onlineEnv(t, pool)
+
+	err = recv(t, e.migrateWith(t.Context(), files), "Migrate")
+	if err == nil || !strings.Contains(err.Error(), "statement_timeout = 30s") {
+		t.Fatalf("got %v, want an error that names the timeout", err)
+	}
+	if n := e.count(t, "SELECT count(*) FROM pg_class WHERE oid = to_regclass('{s}.tasks_slow_idx')"); n != 0 {
+		t.Fatal("Migrate began the build")
+	}
+}
+
+// Migrations 7 and 9 build indexes that block the writes to tasks while they
+// read it, about half a second for each million tasks. Teams that upgrade
+// from a release before them have them pending. Migrate applies them only on
+// tables whose rows MigrateConfig.MaxBlockingIndexRows allows, and changes
+// nothing otherwise. It counts the rows as the planner does, from the
+// statistics and the table's size now: tasks grew since ANALYZE counted
+// them.
+func TestMigrateRefusesABlockingIndexOnALargeTable(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
+	applyUpTo(t, pool, e.schema, 5)
+	const insert = `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	                SELECT 'q', 'k', 'available', now(), '{}', 1 FROM generate_series(1, $1)`
+	e.exec(t, insert, 100)
+	e.exec(t, "ANALYZE {s}.tasks")
+	e.exec(t, insert, 2000)
+
+	err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema, MaxBlockingIndexRows: 1000})
+	if !errors.Is(err, taskmill.ErrBlockingMigration) || !strings.Contains(err.Error(), "0007_created_order builds an index that blocks writes") ||
+		!strings.Contains(err.Error(), "MaxBlockingIndexRows") {
+		t.Fatalf("got %v, want ErrBlockingMigration, with migration 7 and the limit", err)
+	}
+	if v := e.count(t, "SELECT max(version) FROM {s}.migrations"); v != 5 {
+		t.Fatalf("a refused Migrate left version %d, want 5", v)
+	}
+
+	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema, MaxBlockingIndexRows: 10_000}); err != nil {
+		t.Fatalf("migrate within the limit: %v", err)
+	}
 }

@@ -19,6 +19,7 @@ client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logg
 if err != nil {
     return err
 }
+defer client.Close() // before the pool closes
 ```
 
 - taskmill keeps its tables in one PostgreSQL
@@ -26,7 +27,8 @@ if err != nil {
 - `Migrate` creates the schema, or updates it to your taskmill version. Many
   processes can run it at the same time: one applies the changes, and the
   others wait.
-- Create one `Client` per process, and share it between goroutines.
+- Create one `Client` per process, and share it between goroutines. When
+  the process ends, close it before the pool.
 
 > [!TIP]
 > Always pass a `Logger`. Without one, taskmill writes no logs, not even
@@ -36,8 +38,8 @@ if err != nil {
 
 | Situation | What to use | Why |
 |---|---|---|
-| Most apps | `Migrate` before `NewClient`, in every process | A deploy needs no extra step |
-| Your deploys change the schema before the new code starts | `Migrate` in a Job | See [Deploys](../production/deploys.md) |
+| Production | `Migrate` in a job of its own, before the rollout | A migration that builds an index can take minutes on a large table. See [Deploys](../production/deploys.md#run-migrations) |
+| Development, or a small schema | `Migrate` before `NewClient`, in every process | No extra step |
 | You manage all schema changes with goose, Atlas, or Flyway | `Migrations` | See [Use your own migration tool](../recipes/use-your-migration-tool.md) |
 
 Run your workers as the database role that owns taskmill's tables. Every

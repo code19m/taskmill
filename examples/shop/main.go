@@ -185,6 +185,7 @@ func runShop(ctx context.Context, pool *pgxpool.Pool, schema string, ln net.List
 	if err != nil {
 		return err
 	}
+	defer s.client.Close()
 	// A schedule enqueues a task on a cron expression, once per run across
 	// all workers. Every worker that may become the maintainer defines it.
 	schedules := []taskmill.Schedule{{Name: "sales-report", Cron: "* * * * *", Args: BuildReport{}}}

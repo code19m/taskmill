@@ -10,10 +10,36 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/code19m/taskmill/internal/migrations"
 )
 
 // BatchTimeout is the time that a batch of a bulk action has.
 const BatchTimeout = batchTimeout
+
+// MigrateWith runs Migrate with more migrations after taskmill's own: files
+// holds the name and then the text of each, as files of
+// internal/migrations hold them. Tests apply kinds of migration with it
+// that taskmill has none of yet.
+func MigrateWith(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig, files ...string) error {
+	m, err := newMigrator(pool, cfg)
+	if err != nil {
+		return err
+	}
+	for i := 0; i+1 < len(files); i += 2 {
+		mig, err := migrations.Parse(files[i], files[i+1], m.schema)
+		if err != nil {
+			return err
+		}
+		m.all = append(m.all, mig)
+	}
+	return m.run(ctx)
+}
+
+// NotifyWindow is the shortest gap between two notifications for one queue
+// from one client.
+const NotifyWindow = notifyWindow
 
 // HistoryDrops is the most history partitions that one retention pass drops.
 const HistoryDrops = historyDrops

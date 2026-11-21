@@ -167,20 +167,20 @@ need 3`. `taskmill-ui` exits with the same error.
 
 ### `Migrate` fails, or never returns
 
-A `Migrate` that fails applies none of its migrations: they run in one
-transaction. Only a first `Migrate` leaves something behind, the schema and
-its empty `migrations` table, which it creates first. Run it again.
+A `Migrate` that fails keeps the migrations that it recorded. Run it again:
+it continues from there ([Deploys](deploys.md#run-migrations)).
 
 | You see | Cause | Do |
 |---|---|---|
 | `canceling statement due to lock timeout` | A long transaction held a lock on a taskmill table for more than 5 seconds. A `pg_dump` backup does that until it ends | Let a pod restart or the Job's next try run it again. If it keeps failing, find the long transaction in `pg_stat_activity` |
-| The process hangs when it starts. In `pg_stat_activity`, its session has `wait_event_type = 'Lock'`, and its query starts with `LOCK TABLE taskmill.migrations` | Another process migrates, and holds the lock on the `migrations` table. This wait has no time limit. That migration is slow, or its client is gone and its transaction stays open | Find that session with the query below. If it is stuck, end it with `pg_terminate_backend`: its migration rolls back, and a waiting process migrates. Pass `Migrate` a context with a deadline, so that the wait ends with an error |
+| The process hangs when it starts | Another process migrates, and holds the lock on the `migrations` table. The others try it again every second, with no time limit. That migration is slow, such as an index of many tasks that it builds, or its client is gone and its transaction stays open | Find that session with the query below. A build shows in `pg_stat_progress_create_index`: let it end. If the session is stuck, end it with `pg_terminate_backend`: a migration in its transaction rolls back, but a build continues in a session of its own, and a waiting process waits for it, then migrates. Pass `Migrate` a context with a deadline, so that the wait ends with an error |
+| `a migration would block writes to a large table` (`ErrBlockingMigration`) | An old migration would make writes wait while it reads a large table | Follow [Migrations that block writes](deploys.md#migrations-that-block-writes) |
 
 ```sql
--- The sessions that a waiting Migrate waits for
-SELECT h.pid, h.usename, h.state, now() - h.xact_start AS open_for, left(h.query, 60) AS query
-FROM pg_stat_activity w JOIN pg_stat_activity h ON h.pid = ANY(pg_blocking_pids(w.pid))
-WHERE w.query LIKE 'LOCK TABLE %.migrations %';
+-- The session that holds the lock of the migrations table
+SELECT a.pid, a.usename, a.state, now() - a.xact_start AS open_for, left(a.query, 60) AS query
+FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+WHERE l.relation = 'taskmill.migrations'::regclass AND l.granted AND l.mode = 'ShareRowExclusiveLock';
 ```
 
 ### Enqueue calls fail

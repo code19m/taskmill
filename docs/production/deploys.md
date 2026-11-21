@@ -19,13 +19,14 @@ func run(ctx context.Context, role string) error {
         return err
     }
     defer pool.Close()
-    if err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Logger: logger}); err != nil {
-        return err
+    if role == "migrate" { // a Job of its own, before the rollout
+        return taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Logger: logger})
     }
     client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logger})
     if err != nil {
         return err
     }
+    defer client.Close()
 
     switch role {
     case "web": // enqueues tasks, and runs no worker
@@ -37,8 +38,6 @@ func run(ctx context.Context, role string) error {
         }
         go serveHealth(worker) // GET /healthz, for the readiness probe
         return worker.Run(ctx) // returns after SIGTERM, once the running tasks are drained
-    case "migrate": // for a migration Job: Migrate ran above
-        return nil
     default:
         return fmt.Errorf("unknown role %q: use web, worker, or migrate", role)
     }
@@ -90,35 +89,30 @@ Do three things:
 
 | Situation | What to use | Why |
 |---|---|---|
-| Most apps | **Call `Migrate` at the start of every process**, before `NewClient` | Safe when many pods run it at the same time: one migrates, and the others wait, then find nothing to do |
-| Your deploys change the schema before new code starts, such as a Helm `pre-upgrade` hook or an Argo CD sync wave | A Job that runs your image and calls `Migrate` | The schema is ready before any new pod starts. See [Migrate in a Job](kubernetes.md#migrate-in-a-job) |
+| Production | **Run `Migrate` in a job of its own, before the rollout**: a Kubernetes Job, a Helm `pre-upgrade` hook, an Argo CD sync wave, or a step of your pipeline | A migration that builds an index can run for minutes on a large table. At the start of a pod, it would delay every pod. See [Migrate in a Job](kubernetes.md#migrate-in-a-job) |
+| Development, or a small schema | `Migrate` at the start of every process, before `NewClient` | No extra step. One process migrates, and the others wait, then find nothing to do |
 | You manage every schema change with goose, Atlas, or Flyway | Apply `taskmill.Migrations` with your tool | One tool for all changes. See [Use your own migration tool](../recipes/use-your-migration-tool.md) |
 
 ```go
+ctx, cancel := context.WithTimeout(ctx, time.Hour) // an index of many tasks takes minutes
+defer cancel()
 if err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{Logger: logger}); err != nil {
     return err
 }
-client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logger})
 ```
 
 - Migrations only go forward. There are no down migrations.
-- All pending migrations run in one transaction. If `Migrate` fails, none
-  of them is applied: fix the cause, and run it again. Only a first
-  `Migrate` leaves something behind: the schema and its empty `migrations`
-  table, which it creates before that transaction.
+- Pending migrations run in one transaction, up to the next
+  [online step](#indexes-are-built-online). If `Migrate` fails, the
+  migrations of that transaction are not applied: fix the cause, and run
+  it again. It continues after the last migration that it recorded.
 - A migration waits at most 5 seconds for a lock on a busy taskmill table,
-  so it never blocks your workers for long. If it gives up, a pod restart or
-  the Job's next try runs it again.
-- Two migrations make writes wait for longer. Migration 7 builds two
-  indexes of creation time: enqueues, fetches, and completions wait while
-  it reads `tasks` and the history, about half a second for each million
-  tasks. Migration 9 builds an index of the heads of FIFO groups, and they
-  wait about a tenth of a second for each million tasks. Reads continue. On
-  a large schema, migrate while the queues are quiet.
+  so it never blocks your workers for long. If it gives up, the Job's next
+  try, or a pod restart, runs it again.
 - While one process migrates, the others wait for its lock on the
-  `migrations` table, as long as their context allows: the 5 seconds do not
-  apply here. Pass `Migrate` a context with a deadline, such as one minute.
-  A stuck migration then fails, and you see it:
+  `migrations` table, as long as their context allows: they try it again
+  at least every second. Give `Migrate` a deadline that leaves time for the
+  index builds. A stuck migration then fails, and you see it:
   [`Migrate` fails, or never returns](troubleshooting.md#migrate-fails-or-never-returns).
 - To read the schema's version, run
   `SELECT max(version) FROM taskmill.migrations`. When it is lower than
@@ -126,6 +120,57 @@ client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logg
   names both numbers.
 - `taskmill-ui` never migrates. Until the schema is migrated, it exits at
   start, and Kubernetes starts it again.
+
+### Indexes are built online
+
+Every migration after version 9 that adds or drops an index is an *online
+step*. It uses `CREATE INDEX CONCURRENTLY`, so enqueues, fetches, and
+completions continue while the index builds.
+
+- A build reads the table twice. Before that, it waits for the
+  transactions that write the table, and then for every older transaction
+  in the database: a long transaction anywhere delays it.
+- `Migrate` uses a second connection of the pool meanwhile, so the pool
+  needs at least 2. It works through PgBouncer in transaction mode, whose
+  own pool must then let it use 2 server connections.
+- A `lock_timeout`, `statement_timeout`, or `transaction_timeout` would
+  cancel the build, so `Migrate` refuses the step while the pool's
+  connections have one. Run it as a role without them, as after
+  `ALTER ROLE shop_migrate SET statement_timeout = 0`.
+- If you end the session of a `Migrate` that builds, its build continues in
+  the database. That `Migrate` stops, and the next one waits for the build.
+- A build that fails, or whose `Migrate` stops, leaves an *invalid index*:
+  PostgreSQL updates it on every write, and no query uses it. The next
+  `Migrate` drops it, and builds it again.
+
+### Migrations that block writes
+
+Migrations 3, 7, and 9 build their indexes inside a transaction. Writes to
+the table wait while they read it. Reads continue. A schema from before
+v0.14.0 has migration 9 pending, and one from before v0.12.0 has migration
+7 pending too.
+
+| Migration | Table | Writes wait, for each million rows |
+|---|---|---|
+| 3: an index of halted FIFO groups | `groups` | Too few rows to matter |
+| 7: indexes of creation time | `tasks` and the history | About 0.5 seconds |
+| 9: an index of the heads of FIFO groups | `tasks` | About 0.1 seconds |
+
+So `Migrate` checks first. If such a migration would read more rows than
+`MaxBlockingIndexRows` allows (1,000,000 by default, by PostgreSQL's
+estimate), `Migrate` changes nothing. It fails with an error that wraps
+`ErrBlockingMigration`, and names the migration and the rows. A retry does
+not help. Then:
+
+1. Choose a quiet time, when a pause of writes does no harm. Find it with
+   the table above.
+2. Run `Migrate` as a job of its own, with the limit raised, or removed:
+
+   ```go
+   err := taskmill.Migrate(ctx, pool, &taskmill.MigrateConfig{MaxBlockingIndexRows: -1}) // no limit
+   ```
+
+3. Roll out the new version.
 
 ## Run two versions side by side
 

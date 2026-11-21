@@ -100,20 +100,21 @@ type EnqueueParams struct {
 
 // EnqueueResult reports the outcome of enqueueing one task.
 type EnqueueResult struct {
-	// ID identifies the task: the new one, or the existing one for a
-	// duplicate.
+	// ID identifies the task: the new one, or for a duplicate the one that
+	// holds the key. It is never 0.
 	//
-	// It is 0 for a duplicate whose existing task could not be read. That
-	// can happen only when another transaction took the key while the
-	// enqueue ran: the enqueue then reads the key a second time. The ID is 0
-	// if the task that took the key was canceled or deleted meanwhile, or if
-	// that read failed. An enqueue outside a transaction has committed by
-	// then, whether on the client's pool or on an [Executor] of a pool or a
-	// connection, so it logs a failed read and returns no error. In the
-	// caller's transaction, the enqueue returns the error of a failed read,
-	// so that the caller can roll back. A type that wraps a [pgx.Tx] with
-	// only Exec and Query counts as outside a transaction: on it, a failed
-	// read is logged, and not returned.
+	// Another transaction may take the key while the enqueue runs, and
+	// commit after the enqueue's statement began, which then cannot see the
+	// task. At READ COMMITTED, the enqueue reads the key again in a second
+	// statement. If that task was canceled or deleted meanwhile, the key is
+	// free, and the enqueue stores the task after all, in a statement of its
+	// own: in a FIFO group, it then comes after the call's other tasks. An
+	// enqueue outside a transaction has committed its other tasks by then,
+	// so the end of its context does not stop this. If the database fails
+	// first, it returns an error that wraps [ErrStoredWithoutIDs]. At
+	// REPEATABLE READ or SERIALIZABLE, the enqueue fails with PostgreSQL's
+	// serialization failure (SQLSTATE 40001) instead: run the caller's
+	// transaction again.
 	ID int64
 
 	// Duplicate reports that the DedupeKey was already taken, so no task was
@@ -163,8 +164,7 @@ type EnqueueTask struct {
 // Enqueue enqueues one task in its own transaction, and returns the task's
 // ID. opts may be nil: [EnqueueOptions] has the options and their defaults.
 // If the options set a DedupeKey that is taken, Enqueue creates no task: the
-// result holds the ID of the existing task, and its Duplicate is true. In a
-// rare race that ID is 0: see [EnqueueResult.ID].
+// result holds the ID of the existing task, and its Duplicate is true.
 //
 // The [ClientConfig.EnqueueMiddleware] runs around the enqueue. The enqueue
 // notifies the workers of a task that may start now, so a worker with a free
@@ -211,9 +211,12 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 	return res[0], nil
 }
 
-// EnqueueMany enqueues several tasks in one round trip and one transaction:
-// all of them, or none if it returns an error. Results are in the same order
-// as params. One call takes at most 10,000 tasks, with at most 64 MiB of
+// EnqueueMany enqueues several tasks with one statement, in one round trip:
+// all of them, or none if it returns an error. Only when another
+// transaction takes a dedupe key of the call at the same moment does the
+// call run more statements, and an error that wraps [ErrStoredWithoutIDs]
+// then means that its tasks are stored: see [EnqueueResult.ID]. Results are
+// in the same order as params. One call takes at most 10,000 tasks, with at most 64 MiB of
 // payload and metadata in all.
 //
 // A call over these limits, or with a task that is not valid, is an error
@@ -284,12 +287,11 @@ func (c *Client) enqueue(ctx context.Context, q querier, own bool, params []Enqu
 // again after the middleware.
 //
 // Outside a transaction, the statement commits when it ends. So once it
-// succeeded, an error after it, of the middleware or of the second read of
-// a dedupe key, must not say that nothing was stored: a caller that then
-// enqueues again would store the tasks without a dedupe key twice. It is
-// logged instead. Only in a transaction does the error return, so that the
-// caller can roll back. q says which it is, whoever owns it: own only says
-// whether a deadlock may be tried again.
+// succeeded, an error of the middleware must not say that nothing was
+// stored: a caller that then enqueues again would store the tasks without a
+// dedupe key twice. It is logged instead. Only in a transaction does the
+// error return, so that the caller can roll back. q says which it is,
+// whoever owns it: own only says whether a deadlock may be tried again.
 func (c *Client) storeThrough(ctx context.Context, q querier, own bool, tasks []*resolvedTask) ([]EnqueueResult, error) {
 	if len(c.enqueueMiddleware) == 0 {
 		return c.store(ctx, q, own, tasks)
@@ -400,6 +402,32 @@ func inBatch(err error, i, n int) error {
 // pool: own. It then finds the tasks of the duplicates that the statement
 // could not see.
 func (c *Client) insertWithRetry(ctx context.Context, q querier, own bool, b *enqueueBatch) ([]EnqueueResult, error) {
+	results, missing, err := c.insertBatch(ctx, q, own, b)
+	if err != nil || len(missing) == 0 {
+		return results, err
+	}
+
+	// Outside a transaction the tasks are committed, and an error would say
+	// that nothing was stored: see storeThrough. So the caller's context
+	// does not end the search.
+	if !q.inTx() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+	}
+	if err := c.resolveDuplicates(ctx, q, own, b, results, missing); err != nil {
+		if !q.inTx() {
+			return nil, fmt.Errorf("%w: %w", ErrStoredWithoutIDs, err)
+		}
+		return nil, err // the caller rolls back
+	}
+	return results, nil
+}
+
+// insertBatch runs the enqueue statement on a batch, as insertWithRetry
+// says, and returns the results with the rows of the duplicates whose
+// existing task the statement could not see.
+func (c *Client) insertBatch(ctx context.Context, q querier, own bool, b *enqueueBatch) (results []EnqueueResult, missing []int, err error) {
 	notify := make([]string, 0, len(b.due))
 	for queue := range b.due {
 		if c.notifier.allow(ctx, queue) {
@@ -407,9 +435,6 @@ func (c *Client) insertWithRetry(ctx context.Context, q querier, own bool, b *en
 		}
 	}
 
-	var results []EnqueueResult
-	var missing [][]byte // duplicates whose existing task the statement could not see
-	var err error
 	for try := 1; ; try++ {
 		results, missing, err = c.insertTasks(ctx, q, b, notify)
 		// PostgreSQL may end the statement to end a deadlock that other
@@ -424,27 +449,15 @@ func (c *Client) insertWithRetry(ctx context.Context, q querier, own bool, b *en
 		}
 	}
 	if err != nil {
-		return nil, enqueueError(err)
+		return nil, nil, enqueueError(err)
 	}
-
-	if len(missing) > 0 {
-		if err := c.resolveDuplicates(ctx, q, b, results, missing); err != nil {
-			if q.inTx() {
-				return nil, err // the caller rolls back
-			}
-			// The tasks are committed, and the read only fills in IDs: see
-			// storeThrough.
-			c.logger.LogAttrs(ctx, slog.LevelWarn, "find duplicates failed after the enqueue committed; the duplicates have no ID",
-				slog.Int(logKeyTasks, len(missing)), slog.Any(logKeyError, err))
-		}
-	}
-	return results, nil
+	return results, missing, nil
 }
 
 // insertTasks runs the enqueue statement on a batch, and returns its results
-// in the batch's order, with the dedupe keys of the duplicates whose
-// existing task the statement could not see.
-func (c *Client) insertTasks(ctx context.Context, q querier, b *enqueueBatch, notify []string) (results []EnqueueResult, missing [][]byte, err error) {
+// in the batch's order, with the rows of the duplicates whose existing task
+// the statement could not see.
+func (c *Client) insertTasks(ctx context.Context, q querier, b *enqueueBatch, notify []string) (results []EnqueueResult, missing []int, err error) {
 	stmt := c.sql.enqueue
 	if b.plain {
 		stmt = c.sql.enqueuePlain
@@ -478,7 +491,7 @@ func (c *Client) insertTasks(ctx context.Context, q querier, b *enqueueBatch, no
 		}
 		results[ord-1] = EnqueueResult{ID: id, Duplicate: duplicate}
 		if duplicate && id == 0 {
-			missing = append(missing, b.dedupeKeys[ord-1])
+			missing = append(missing, int(ord-1))
 		}
 	}
 	return results, missing, r.Err()
@@ -495,39 +508,83 @@ func enqueueError(err error) error {
 	return fmt.Errorf("taskmill: enqueue: %w", err)
 }
 
-// resolveDuplicates finds the existing tasks of dedupe keys that a concurrent
-// enqueue committed while the enqueue statement ran, and sets their IDs in
-// results. A key that has no row any more, because its task was canceled or
-// deleted meanwhile, leaves its duplicates with the ID 0. So does every key
-// if the read fails.
-func (c *Client) resolveDuplicates(ctx context.Context, q querier, b *enqueueBatch, results []EnqueueResult, keys [][]byte) error {
+// duplicateTries is how many times an enqueue looks for the tasks that hold
+// the dedupe keys of its duplicates. Only a holder that is canceled or
+// deleted while the enqueue looks makes it look again.
+const duplicateTries = 3
+
+// resolveDuplicates finds the tasks that hold the dedupe keys of the rows
+// missing of b, and sets their IDs in results. The enqueue statement could
+// not see them: they committed while it waited for the keys. A new statement
+// sees them at READ COMMITTED. At REPEATABLE READ and SERIALIZABLE the
+// statement fails instead, with a serialization failure. A key whose task
+// was canceled or deleted meanwhile is free, so its row is enqueued again,
+// and gets a new task or the task that took the key since.
+func (c *Client) resolveDuplicates(ctx context.Context, q querier, own bool, b *enqueueBatch, results []EnqueueResult, missing []int) error {
+	for try := 1; ; try++ {
+		free, err := c.findHolders(ctx, q, b, results, missing)
+		if err != nil || len(free) == 0 {
+			return err
+		}
+		if try == duplicateTries {
+			return fmt.Errorf("taskmill: enqueue: the task that held a dedupe key was canceled or deleted %d times while the enqueue looked for it",
+				duplicateTries)
+		}
+
+		again, more, err := c.insertBatch(ctx, q, own, b.subset(free))
+		if err != nil {
+			return err
+		}
+		missing = missing[:0]
+		for i, row := range free {
+			results[row] = again[i]
+		}
+		for _, i := range more {
+			missing = append(missing, free[i])
+		}
+		if len(missing) == 0 {
+			return nil
+		}
+	}
+}
+
+// findHolders reads the tasks that hold the dedupe keys of the rows missing
+// of b, and sets their IDs in results. It returns the rows whose key has no
+// task.
+func (c *Client) findHolders(ctx context.Context, q querier, b *enqueueBatch, results []EnqueueResult, missing []int) (free []int, err error) {
 	fail := func(err error) error { return fmt.Errorf("taskmill: enqueue: find duplicates: %w", err) }
 
+	keys := make([][]byte, len(missing))
+	for i, row := range missing {
+		keys[i] = b.dedupeKeys[row]
+	}
 	r, err := q.query(ctx, c.sql.dedupeLookup, keys)
 	if err != nil {
-		return fail(err)
+		return nil, fail(err)
 	}
 	defer r.Close()
-	existing := make(map[string]int64, len(keys))
+	holders := make(map[string]int64, len(keys))
 
 	for r.Next() {
 		var key []byte
 		var id int64
 		if err := r.Scan(&key, &id); err != nil {
-			return fail(err)
+			return nil, fail(err)
 		}
-		existing[string(key)] = id
+		holders[string(key)] = id
 	}
 	if err := r.Err(); err != nil {
-		return fail(err)
+		return nil, fail(err)
 	}
 
-	for i := range results {
-		if results[i].Duplicate && results[i].ID == 0 {
-			results[i].ID = existing[string(b.dedupeKeys[i])]
+	for _, row := range missing {
+		if id, ok := holders[string(b.dedupeKeys[row])]; ok {
+			results[row].ID = id
+		} else {
+			free = append(free, row)
 		}
 	}
-	return nil
+	return free, nil
 }
 
 // resolvedTask is one task with its options resolved and validated.
@@ -641,6 +698,28 @@ func (t *resolvedTask) validate() error {
 		return invalidArgument("dedupe window must not be negative")
 	}
 	return checkTime("run time", t.runAt)
+}
+
+// subset returns a batch of the rows picked of b.
+func (b *enqueueBatch) subset(picked []int) *enqueueBatch {
+	out := &enqueueBatch{due: make(map[string]bool), plain: b.plain}
+	now := time.Now()
+	for _, i := range picked {
+		out.queues = append(out.queues, b.queues[i])
+		out.kinds = append(out.kinds, b.kinds[i])
+		out.groups = append(out.groups, b.groups[i])
+		out.priorities = append(out.priorities, b.priorities[i])
+		out.maxAttempts = append(out.maxAttempts, b.maxAttempts[i])
+		out.runAts = append(out.runAts, b.runAts[i])
+		out.dedupeKeys = append(out.dedupeKeys, b.dedupeKeys[i])
+		out.dedupeWindows = append(out.dedupeWindows, b.dedupeWindows[i])
+		out.payloads = append(out.payloads, b.payloads[i])
+		out.metadata = append(out.metadata, b.metadata[i])
+		if b.runAts[i] == nil || !b.runAts[i].After(now) {
+			out.due[b.queues[i]] = true
+		}
+	}
+	return out
 }
 
 // add appends t, with its encoded metadata, to the batch. now is the batch's
