@@ -134,7 +134,6 @@ is fixed at the enqueue, and a task past it has no claim, canceled or not.
 | Two columns, not the task's metadata | Producers write metadata, and handlers and tools copy it. A key there could be forged, or travel to another task. Only a role with `UPDATE` on `tasks` writes the columns: the grants of a role that only enqueues leave them out |
 | The retry is refused whatever state the holder is in | A completed or dead holder still stands for the work until its window ends, as it does for an enqueue |
 | The refusal names the holder only if that task exists | A completed task keeps its key for its window, also when no history is kept of it. Nobody can cancel or delete a task that is gone, so the error gives the end of the window |
-| A stored key that is not 32 bytes counts as none | `dedupe_keys` would refuse it, and one such row would fail every batch of a bulk retry |
 | The columns are not copied to the history | A task that completes after its cancel was requested needs no key back |
 
 Two things follow from the claim. A transaction of the caller that enqueues

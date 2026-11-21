@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // Priority orders tasks within a queue: higher priorities start first.
@@ -116,9 +114,7 @@ type TaskInfo struct {
 
 	// Metadata holds the tags from [EnqueueOptions.Metadata] and
 	// [EnqueueMiddleware], and for a task that a [Schedule] enqueued,
-	// taskmill's own: [MetadataSchedule] and [MetadataScheduledFor]. It is
-	// empty for a task whose row holds metadata that taskmill did not write
-	// and cannot read: see [CodeInvalidRow].
+	// taskmill's own: [MetadataSchedule] and [MetadataScheduledFor].
 	Metadata map[string]string
 
 	// Payload is the task's Args as stored, in JSON.
@@ -307,27 +303,27 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	return nil
 }
 
-// scanTaskInfo reads one row of taskColumns, and into extra the columns that
-// follow them, if any. It reads what does not decode as empty: metadata that
-// is not an object of strings, an entry of the errors that is not one, and a
-// time that is infinite. Such a row comes from another database role or an
-// UPDATE by hand, and a list must still show it, with the tasks around it. A
-// worker that takes the task makes it dead (see scanLeased).
-func scanTaskInfo(r rows, extra ...any) (*TaskInfo, error) {
+// scanTaskInfo reads one row of taskColumns. A row that taskmill did not
+// write, such as one with an infinite time or metadata that is not an object
+// of strings, is an error: see
+// https://github.com/code19m/taskmill/blob/main/docs/design/schema-rows.md.
+func scanTaskInfo(r rows) (*TaskInfo, error) {
 	var (
-		info                                      TaskInfo
-		state                                     string
-		priority, attempt, maxAttempts            int16
-		metadata, payload, errs                   []byte
-		createdAt, runAt, attemptedAt, finishedAt pgtype.Timestamptz
+		info                           TaskInfo
+		state                          string
+		priority, attempt, maxAttempts int16
+		metadata, payload, errs        []byte
+		attemptedAt, finishedAt        *time.Time
 	)
 
-	dest := []any{
-		&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
-		&metadata, &payload, &errs, &createdAt, &runAt, &attemptedAt, &finishedAt,
-	}
-	if err := r.Scan(append(dest, extra...)...); err != nil {
+	err := r.Scan(&info.ID, &info.Queue, &info.Kind, &state, &priority, &attempt, &maxAttempts, &info.GroupKey,
+		&metadata, &payload, &errs, &info.CreatedAt, &info.RunAt, &attemptedAt, &finishedAt)
+	if err != nil {
 		return nil, err
+	}
+
+	if info.Metadata, err = decodeMetadata(metadata); err != nil {
+		return nil, fmt.Errorf("task %d: %w", info.ID, err)
 	}
 
 	info.State = State(state)
@@ -335,12 +331,9 @@ func scanTaskInfo(r rows, extra ...any) (*TaskInfo, error) {
 	info.Attempt = int(attempt)
 	info.MaxAttempts = int(maxAttempts)
 	info.Payload = payload
-	info.Metadata, _ = decodeMetadata(metadata)
 	info.Errors = decodeErrors(errs)
-	info.CreatedAt, _ = finite(createdAt)
-	info.RunAt, _ = finite(runAt)
-	info.AttemptedAt, _ = finite(attemptedAt)
-	info.FinishedAt, _ = finite(finishedAt)
+	info.AttemptedAt = deref(attemptedAt)
+	info.FinishedAt = deref(finishedAt)
 	return &info, nil
 }
 
@@ -356,10 +349,9 @@ func decodeMetadata(metadata []byte) (map[string]string, error) {
 	return m, nil
 }
 
-// decodeErrors decodes a task's errors column. taskmill writes an array of
-// entries, but the column holds any JSON. The errors are a history that no
-// attempt depends on, so the entries that decode are kept, and the rest is
-// left out.
+// decodeErrors decodes a task's errors column, and keeps the entries that
+// decode: releases before 0.11 wrote an entry's time with the session's
+// offset from UTC, and Go cannot read every offset that PostgreSQL writes.
 func decodeErrors(errs []byte) []AttemptError {
 	if len(errs) == 0 || string(errs) == "[]" {
 		return nil
@@ -386,13 +378,6 @@ func decodeErrors(errs []byte) []AttemptError {
 		kept[i] = AttemptError(e)
 	}
 	return kept
-}
-
-// finite returns a stored time. It reports false, with the zero time, if the
-// time is infinite: a timestamp of PostgreSQL can be, and a time.Time
-// cannot. NULL is the zero time.
-func finite(ts pgtype.Timestamptz) (time.Time, bool) {
-	return ts.Time, ts.InfinityModifier == pgtype.Finite
 }
 
 func deref(t *time.Time) time.Time {

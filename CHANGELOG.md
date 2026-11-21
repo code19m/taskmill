@@ -76,6 +76,14 @@ All notable changes to taskmill are recorded here. The format follows
   their context ended hold every slot of the worker's queues. Such a worker
   can start no task, but its probe passed. The error says how many slots
   are stuck.
+- taskmill supports only the rows that its releases write, as
+  [Compatibility](docs/reference/compatibility.md) now says. `Client.Get`,
+  `Client.List`, and their dashboard pages return an error for a task
+  whose row was written by hand with an infinite time or metadata that is
+  not an object of strings, instead of showing it without those values.
+  The rest of the dashboard works, and the guards that keep such a row
+  from stopping a queue, the rescue, the statistics, or the election stay:
+  [Rows that taskmill did not write](docs/design/schema-rows.md).
 
 ### Fixed
 

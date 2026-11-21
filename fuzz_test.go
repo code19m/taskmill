@@ -36,8 +36,8 @@ func FuzzList(f *testing.F) {
 
 	// Cursors of a list in the order of a time, which hold a time as
 	// PostgreSQL stores it, and an ID: the first and the last time that a
-	// column can hold, the two infinite times, and times and text that no
-	// column holds, which once would have failed the call in the database.
+	// column can hold, and numbers and text that no column holds, which once
+	// would have failed the call in the database.
 	// A list of canceled tasks takes those of the finish order, and a list
 	// with a range of creation times those of the creation order.
 	for _, position := range []string{

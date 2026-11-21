@@ -62,16 +62,13 @@ ORDER BY id DESC LIMIT $5`
 // has no ID. A bound of the range of finish times that is set is a condition
 // of the index under custom plans. The page on lists says why, and what each
 // costs.
-//
-// Each row ends with the task's finish time once more, as the column holds
-// it: see List.
 var listFinishedSQL = `
 WITH RECURSIVE ` + queuesWith(`finished`, `IN ('dead', 'canceled')`) + `, listed AS (
     SELECT queue FROM finished WHERE cardinality($1::text[]) = 0 AND queue IS NOT NULL
     UNION ALL
     SELECT DISTINCT q FROM unnest($1::text[]) AS q
 )
-SELECT ` + taskColumns(`state::text`) + `, finalized_at
+SELECT ` + taskColumns(`state::text`) + `
 FROM listed AS l(name)
 CROSS JOIN unnest($2::text[]) AS selected
 CROSS JOIN LATERAL (
@@ -116,16 +113,13 @@ ORDER BY page.finalized_at DESC, page.id DESC LIMIT $5`
 // of the index under any plan. The end of the range is no parameter of its
 // own: beside the position, PostgreSQL would start to read at the position,
 // and compare every entry from there down to the end of the range with it.
-//
-// Each row ends with the task's creation time once more, as the column holds
-// it: see List.
 var listCreatedSQL = `
 WITH RECURSIVE ` + queuesWith(`waiting`, `<> 'running'`) + `, ` +
 	queuesWith(`running`, `= 'running'`) + `, ` +
 	queuesIn(`kept`, `{s}.task_history`, `true`) + `, named AS (
     SELECT DISTINCT q AS queue FROM unnest($1::text[]) AS q
 )
-SELECT ` + taskColumns(`state`) + `, created_at
+SELECT ` + taskColumns(`state`) + `
 FROM (
     ` + createdPages(`waiting`, `{s}.tasks`, `t.state::text`, `t.state <> 'running' AND `+inStates(`$2::text[]`),
 	`cardinality(array_remove($2::text[], 'running')) > 0`) + `

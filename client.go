@@ -322,7 +322,7 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 // heldKey says who holds the dedupe key that a retried task did not get.
 type heldKey struct {
 	by    int64     // the task that holds it; 0 if that task no longer exists, or no task holds the key now
-	until time.Time // the end of that task's window; zero if it has no end, or no task holds the key now
+	until time.Time // the end of that task's window; zero if no task holds the key now
 }
 
 // String says it as the reason of a refused retry. It names the holder only
@@ -341,9 +341,7 @@ func (h heldKey) String() string {
 // get back.
 func (c *Client) keyHolder(ctx context.Context, q querier, id int64) (heldKey, error) {
 	var held heldKey
-	var until *time.Time
-	_, err := queryRow(ctx, q, c.sql.keyHolder, []any{id}, &held.by, &until)
-	held.until = deref(until)
+	_, err := queryRow(ctx, q, c.sql.keyHolder, []any{id}, &held.by, &held.until)
 	return held, err
 }
 

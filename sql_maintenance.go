@@ -40,9 +40,8 @@ const deleteWorkerSQL = `DELETE FROM {s}.workers WHERE id = $1`
 // electMaintainerSQL takes or renews the maintainer's lease for $2
 // microseconds. It returns a row only if $1 is the maintainer. It proposes
 // its row only if no other worker's lease lasts, so that a failed try writes
-// nothing. Another worker's lease lasts only if it ends within two leases
-// from now: a later one is no worker's, but a row written by hand, and
-// obeyed it would keep every worker from leading. Why two leases:
+// nothing. A lease lasts only if it ends within two leases from now, so that
+// a row written by hand cannot stop the election: see
 // https://github.com/code19m/taskmill/blob/main/docs/design/schema-rows.md.
 const electMaintainerSQL = `
 INSERT INTO {s}.leader AS l (name, worker_id, elected_at, expires_at)

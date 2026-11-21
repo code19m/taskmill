@@ -260,10 +260,9 @@ SELECT coalesce(max(version), 0), current_setting('default_transaction_isolation
 const keptErrors = 20
 
 // errorsTrimmedSQL is a task's errors without the oldest entry once it holds
-// keptErrors, so that appending one keeps at most keptErrors. Errors that
-// are not an array count as none, and appending replaces them: their length
-// is an error, which in the statement that rescues expired leases would keep
-// every task of its batch from being rescued.
+// keptErrors, so that appending one keeps at most keptErrors. Errors written
+// by hand that are not an array count as none, so that they cannot fail the
+// rescue of every expired lease.
 const errorsTrimmedSQL = "(CASE WHEN jsonb_typeof(errors) <> 'array' THEN '[]' WHEN jsonb_array_length(errors) >= " +
 	"{keptErrors} THEN errors - 0 ELSE errors END)"
 

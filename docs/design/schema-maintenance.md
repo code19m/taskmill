@@ -85,9 +85,8 @@ maintainer counts the queues.
 - **A failed election try writes nothing.** The upsert proposes its row only
   if no other worker's lease lasts. A conflict would lock the leader's row,
   and make every try of every other worker a write.
-- **A lease that no worker writes is no lease:** one that ends later than
-  two leases from now, such as a row written by hand. Otherwise it would
-  keep every worker from leading: see
+- **A lease that ends later than two leases from now is no lease,** so
+  that a row written by hand cannot keep every worker from leading: see
   [Rows that taskmill did not write](schema-rows.md).
 - **A worker that stops deletes its lease,** also when it does not know that
   it holds one, as after a renewal whose answer was lost. The same statement

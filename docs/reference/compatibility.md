@@ -73,7 +73,7 @@ From v1.0.0 on, this is the promise:
 | Span, attribute, and metric names of the `otel` module | The module stays below v1 while OpenTelemetry's messaging conventions settle. Its [changelog](../../otel/CHANGELOG.md) announces each rename. |
 | The Go version that taskmill needs | It moves up after each new Go release (see below). |
 | Support for a PostgreSQL version past its end of life | It is dropped (see below). |
-| Every table except `migrations` | The tables are internal. Read and change tasks through `Client`, never with SQL. |
+| Every table except `migrations` | The tables are internal. Read and change tasks through `Client`, never with SQL. taskmill supports only the rows that its releases write: a row written by hand may make a read or a dashboard page fail ([Rows that taskmill did not write](../design/schema-rows.md)). |
 
 ## Supported Go and PostgreSQL versions
 

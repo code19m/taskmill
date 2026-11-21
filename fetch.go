@@ -413,11 +413,9 @@ func batchCounts(ts []*liveAttempt) map[string]int {
 	return counts
 }
 
-// scanLeased reads one row of leasedColumns. A row that holds what taskmill
-// never writes, as another database role or an UPDATE by hand can leave it,
-// is no error: an error would lose every task that the statement leased
-// with it. Such a task is tracked as invalid, without a handler, and runOne
-// makes it dead, alone.
+// scanLeased reads one row of leasedColumns. A row that taskmill did not
+// write is no error, which would lose every task leased with it: the task is
+// tracked as invalid, without a handler, and runOne makes it dead, alone.
 func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*liveAttempt, error) {
 	var (
 		info                    TaskInfo
@@ -441,13 +439,11 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*liveAttempt, error) {
 	info.Payload = payload
 	info.AttemptedAt = deref(attemptedAt)
 	info.Errors = decodeErrors(errs)
-	var created, due bool
-	info.CreatedAt, created = finite(createdAt)
-	info.RunAt, due = finite(runAt)
+	info.CreatedAt, info.RunAt = createdAt.Time, runAt.Time
 
 	var invalid error
 	info.Metadata, invalid = decodeMetadata(metadata)
-	if invalid == nil && (!created || !due) {
+	if invalid == nil && (createdAt.InfinityModifier != pgtype.Finite || runAt.InfinityModifier != pgtype.Finite) {
 		invalid = errors.New("the time of creation or the run time is infinite")
 	}
 	if invalid == nil && token == math.MaxInt32 {

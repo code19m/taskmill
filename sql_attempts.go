@@ -319,13 +319,10 @@ RETURNING queue, coalesce(group_key, ''), state::text`
 // renew a lease, end an attempt, or rescue an expired lease read what it
 // wrote, and cannot know which statement took the task.
 //
-// The attempt and the lease token stay in the range of their columns for any
-// row, so that one row cannot fail the fetch of every task taken with it.
-// The attempt stops at the task's maximum: a row can wait in a queue with no
-// attempt left, such as a dead task that an UPDATE by hand made available,
-// and then runs once more. The token stops at the largest integer, where the
-// worker makes the task dead: a token that cannot grow cannot tell the next
-// attempt from this one.
+// The attempt stops at the task's maximum, so that a row written by hand
+// with no attempt left cannot fail the fetch of every task taken with it.
+// The token stops at the largest integer, where the worker makes the task
+// dead: a token that cannot grow cannot tell the next attempt from this one.
 func leaseSet(us, by string) string {
 	return `state = 'running',
     attempt = least(t.attempt + 1, t.max_attempts),

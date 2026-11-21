@@ -16,10 +16,11 @@ import (
 	"github.com/code19m/taskmill"
 )
 
-// The tests in this file write rows that taskmill never writes, as a role
-// with INSERT on tasks can, or an UPDATE by hand. Such a task must fail
-// alone: the tasks fetched, counted, or rescued with it are not its business.
-// The small tables refuse such a row instead.
+// The tests in this file write rows that taskmill never writes, as an UPDATE
+// by hand can. taskmill does not support such rows, but one must not stop a
+// queue, the rescue, the statistics, or the election: the tasks fetched,
+// counted, or rescued with it are not its business. The small tables refuse
+// such a row instead. See docs/design/schema-rows.md.
 
 // insertTask writes an available task of the default queue by hand, first
 // in line, changes it with the SET clause set, and returns its ID.
@@ -35,19 +36,6 @@ VALUES ('default', 'email.send', 'available', 4, now(), '{}', 25) RETURNING id`,
 
 	e.exec(t, "UPDATE {s}.tasks SET "+set+" WHERE id = $1", id)
 	return id
-}
-
-// stateOf returns the state of a task, or "" if the task is gone.
-func (e *env) stateOf(t *testing.T, id int64) taskmill.State {
-	t.Helper()
-	info, err := e.client.Get(t.Context(), id)
-	if errors.Is(err, taskmill.ErrNotFound) {
-		return ""
-	}
-	if err != nil {
-		t.Fatalf("get task %d: %v", id, err)
-	}
-	return info.State
 }
 
 func TestMalformedTaskFailsAlone(t *testing.T) {
@@ -117,9 +105,13 @@ func failsAlone(t *testing.T, set string, limited bool) {
 		}
 	}
 
-	info := e.waitState(t, bad, taskmill.StateDead)
-	if n := len(info.Errors); info.Attempt != 1 || n != 1 || info.Errors[0].Code != taskmill.CodeInvalidRow {
-		t.Errorf("the malformed task: attempt %d, errors %+v; want one attempt that failed with invalid_row", info.Attempt, info.Errors)
+	// Get cannot read the row either, so SQL reads what became of it.
+	waitFor(t, "the malformed task to become dead", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND state = 'dead'", bad) == 1
+	})
+	if n := e.count(t, `SELECT count(*) FROM {s}.tasks WHERE id = $1 AND attempt = 1
+	                    AND jsonb_array_length(errors) = 1 AND errors -> 0 ->> 'code' = $2`, bad, taskmill.CodeInvalidRow); n != 1 {
+		t.Error("the malformed task did not end after one attempt that failed with invalid_row")
 	}
 	if sawBad.Load() {
 		t.Error("the handler or the middleware ran for the malformed task")
@@ -176,41 +168,6 @@ func TestErrorsThatAreNotAnArrayCountAsNone(t *testing.T) {
 		if errs := e.get(t, id).Errors; len(errs) != 1 || errs[0].Code != taskmill.CodeLeaseLost {
 			t.Errorf("the rescued task %d has the errors %+v, want the lost lease alone", id, errs)
 		}
-	}
-}
-
-// The dashboard lists tasks with Client.List, 50 to a page: one row that
-// does not decode must not hide the others.
-func TestListShowsMalformedTasks(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-
-	var ids []int64
-	for _, set := range []string{
-		`metadata = '{"tenant": "shop"}'`,
-		`metadata = '"text"'`,
-		`errors = '[7, {"attempt": 1, "at": "2026-01-02T03:04:05Z", "message": "kept"}]'`,
-		`created_at = '-infinity', run_at = 'infinity', state = 'scheduled'`,
-	} {
-		ids = append(ids, e.insertTask(t, set))
-	}
-
-	res, err := e.client.List(t.Context(), nil)
-	if err != nil || len(res.Tasks) != len(ids) {
-		t.Fatalf("list: %v; want %d tasks", err, len(ids))
-	}
-
-	if got := e.get(t, ids[0]).Metadata; got["tenant"] != "shop" {
-		t.Errorf("metadata of an ordinary task: %v", got)
-	}
-	if got := e.get(t, ids[1]).Metadata; got != nil {
-		t.Errorf("metadata that is not an object decoded as %v, want none", got)
-	}
-	if got := e.get(t, ids[2]).Errors; len(got) != 1 || got[0].Message != "kept" {
-		t.Errorf("errors with an entry that is no object decoded as %+v, want the entry that decodes", got)
-	}
-	if got := e.get(t, ids[3]); !got.CreatedAt.IsZero() || !got.RunAt.IsZero() {
-		t.Errorf("infinite times decoded as %v and %v, want zero times", got.CreatedAt, got.RunAt)
 	}
 }
 
@@ -303,171 +260,6 @@ func TestGroupCountThatIsTooLowFailsNoOtherGroup(t *testing.T) {
 			return e.get(t, lost).State != taskmill.StateRunning
 		})
 	})
-}
-
-// Each row is a FIFO group of three tasks that only a write by hand gives:
-// its row names a task that is not its dead head as the one that halts it,
-// or two of its tasks ran at once. A halt must end when the task that it
-// names leaves the group, however the task leaves, and only then. A halt
-// that stays names a task that is no longer counted, or no longer exists:
-// nothing ends it, or a retry of the task ends it and takes the task for one
-// that is still counted, so the count is one short and the group's last task
-// waits in pending for good.
-func TestHaltEndsWhenTheTaskItNamesLeaves(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	ctx := t.Context()
-	c := e.client
-	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers()})
-
-	// What a row does to its group: it acts on one task, on every task that
-	// matches a filter, or it rescues the tasks whose worker is gone. The
-	// tasks of a group count from 1, the oldest.
-	type op = func(context.Context, int64) error
-	type act = func(group string, ids []int64) error
-	on := func(i int, do op) act {
-		return func(_ string, ids []int64) error { return do(ctx, ids[i]) }
-	}
-	matching := func(do func(context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error), f taskmill.TaskFilter) act {
-		return func(group string, _ []int64) error {
-			f.GroupKeys = []string{group}
-			_, err := do(ctx, bulk(&f))
-			return err
-		}
-	}
-	rescue := func(string, []int64) error {
-		taskmill.Rescue(ctx, w)
-		return nil
-	}
-
-	run := func(ctx context.Context, id int64) error {
-		_, err := w.RunTask(ctx, id)
-		return err
-	}
-	cancelThen := func(next op) op {
-		return func(ctx context.Context, id int64) error {
-			if err := c.Cancel(ctx, id); err != nil {
-				return err
-			}
-			return next(ctx, id)
-		}
-	}
-
-	const (
-		// The tasks of a group, as the SET clauses of insertTask.
-		waits   = `state = 'available'`
-		behind  = `state = 'pending'`
-		dead    = `state = 'dead', finalized_at = now()`
-		stopped = expiredLease + `, cancel_requested_at = now()` // its worker is gone, and it was asked to stop
-		lost    = expiredLease + `, max_attempts = 1`            // its worker is gone, on its last attempt
-		aReport = `, kind = 'report.build'`
-
-		gone = taskmill.State("") // the task no longer exists
-	)
-	type tasks = [3]string
-	type states = [3]taskmill.State
-	available, pending := taskmill.StateAvailable, taskmill.StatePending
-	canceled, isDead := taskmill.StateCanceled, taskmill.StateDead
-	theHead := taskmill.TaskFilter{States: []taskmill.State{available}}
-	reports := taskmill.TaskFilter{Kinds: []string{report{}.Kind()}}
-	twoReports := tasks{waits + aReport, behind + aReport, behind} // the head and the next task
-
-	for _, tt := range []struct {
-		name  string // the group's key: what happens in it
-		tasks tasks  // oldest first
-		named int    // the task that the group's row names as halting it, or 0
-		do    act
-		want  states
-		count int // what the group counts afterwards
-		halt  int // the task that halts it afterwards, or 0
-	}{
-		// The halt names the head. When the head leaves, the halt ends and
-		// the next task takes over.
-		{"deleted", tasks{waits, behind, behind}, 1, on(1, c.Delete), states{gone, available, pending}, 2, 0},
-		{"canceled, then retried", tasks{waits, behind, behind}, 1, on(1, cancelThen(c.Retry)), states{pending, available, pending}, 3, 0},
-		{"canceled, then deleted", tasks{waits, behind, behind}, 1, on(1, cancelThen(c.Delete)), states{gone, available, pending}, 2, 0},
-		{"canceled in bulk", tasks{waits, behind, behind}, 1, matching(c.CancelMatching, theHead), states{canceled, available, pending}, 2, 0},
-		{"deleted in bulk", tasks{waits, behind, behind}, 1, matching(c.DeleteMatching, theHead), states{gone, available, pending}, 2, 0},
-		{"completed", tasks{waits, behind, behind}, 1, on(1, run), states{taskmill.StateCompleted, available, pending}, 2, 0},
-		{"canceled with the next task", twoReports, 1, matching(c.CancelMatching, reports), states{canceled, canceled, available}, 1, 0},
-		// The halt names a task behind the head. It ends with that task,
-		// and the head stays the head.
-		{"a pending task is named", tasks{waits, behind, behind}, 2, on(2, c.Cancel), states{available, canceled, pending}, 2, 0},
-		// A halt stays when another task leaves: a second task that is not
-		// pending, beside the dead head, or one that a rescue ends in the
-		// batch in which the head becomes dead.
-		{"another task is named", tasks{dead, waits, behind}, 1, on(2, c.Cancel), states{isDead, canceled, pending}, 2, 1},
-		{"rescued with a dead task", tasks{stopped, lost, behind}, 0, rescue, states{canceled, isDead, pending}, 2, 2},
-	} {
-		ids := make([]int64, 1, 1+len(tt.tasks)) // ids[0] is no task
-		for _, set := range tt.tasks {
-			ids = append(ids, e.insertTask(t, set+`, group_key = '`+tt.name+`'`))
-		}
-		e.exec(t, `INSERT INTO {s}.groups (queue, group_key, tasks, halted_task_id, halted_at)
-		           VALUES ('default', $1, 3, nullif($2::bigint, 0), CASE WHEN $2::bigint <> 0 THEN now() END)`,
-			tt.name, ids[tt.named])
-
-		if err := tt.do(tt.name, ids); err != nil {
-			t.Fatalf("%s: %v", tt.name, err)
-		}
-
-		for i, want := range tt.want {
-			if got := e.stateOf(t, ids[i+1]); got != want {
-				t.Errorf("%s: task %d of the group is %q, want %q", tt.name, i+1, got, want)
-			}
-		}
-		if n := e.count(t, `SELECT count(*) FROM {s}.groups WHERE group_key = $1 AND tasks = $2
-		                    AND halted_task_id IS NOT DISTINCT FROM nullif($3::bigint, 0)`,
-			tt.name, tt.count, ids[tt.halt]); n != 1 {
-			t.Errorf("%s: the group does not count %d tasks, or its halt is wrong", tt.name, tt.count)
-		}
-	}
-}
-
-// A group has two tasks that run only after a write by hand, such as an
-// UPDATE that makes a pending task available. A transaction that completes
-// both must take both off the group's count: a row that still counts one
-// stays for good, and every task enqueued into the group later waits behind
-// a head that does not exist.
-func TestCompletionCountsEveryTaskOfAGroup(t *testing.T) {
-	t.Parallel()
-	e := newEnv(t)
-	first := e.insertTask(t, `group_key = 'both'`)
-	second := e.insertTask(t, `group_key = 'both'`)
-	e.exec(t, "INSERT INTO {s}.groups (queue, group_key, tasks) VALUES ('default', 'both', 2)")
-
-	// While a transaction holds the group's row, the worker keeps both
-	// completions. A worker that stops records what it kept in one
-	// transaction, which waits for the row.
-	tx := e.begin(t)
-	e.txExec(t, tx, "SELECT FROM {s}.groups WHERE group_key = 'both' FOR UPDATE")
-
-	ran := make(chan struct{}, 2)
-	stop := runWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
-			ran <- struct{}{}
-			return nil
-		}, nil),
-		Queues: defaultQueue(2),
-	})
-	recv(t, ran, "the first task to run")
-	recv(t, ran, "the second task to run")
-
-	stopped := make(chan struct{})
-	go func() {
-		defer close(stopped)
-		stop()
-	}()
-
-	e.waitBlocked(t, "UPDATE {s}.groups")
-	if err := tx.Commit(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	recv(t, stopped, "the worker to stop")
-
-	e.wantState(t, first, taskmill.StateCompleted)
-	e.wantState(t, second, taskmill.StateCompleted)
-	// The check of the groups at the end of the test fails on a row that stays.
 }
 
 // A group's row that is gone, which only a DELETE by hand gives, must not go
