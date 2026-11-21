@@ -30,15 +30,14 @@ func (s *server) bulkLinks(f taskmill.TaskFilter) *bulkLinks {
 	}
 
 	q := filterQuery(f).Encode()
-	href := func(name string, allows func(taskmill.State) bool) string {
-		if !slices.ContainsFunc(states, allows) {
+	href := func(name string) string {
+		a := bulkActions[name]
+		if !slices.ContainsFunc(states, a.allows) {
 			return ""
 		}
-		return s.path(bulkActions[name].path + "?" + q)
+		return s.path(a.path + "?" + q)
 	}
-	return &bulkLinks{
-		href("retry", taskmill.State.CanRetry), href("cancel", taskmill.State.CanCancel), href("delete", taskmill.State.CanDelete),
-	}
+	return &bulkLinks{href("retry"), href("cancel"), href("delete")}
 }
 
 // bulkAction is an action on every task that the task list's filters select.
@@ -49,8 +48,33 @@ type bulkAction struct {
 	Explain string // what it does
 	None    string // why it may find no task
 	path    string
+	allows  func(taskmill.State) bool // the states that it changes
 	do      func(*taskmill.Client, context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error)
 	count   func(*taskmill.TaskCounts) taskmill.TaskCount
+}
+
+// changes counts the tasks that the filter selects and the action would
+// change. It counts only the states that the action changes: the others can
+// hold many more tasks, such as every completed task of a kind, which the
+// count would read for nothing. With none of those states left, it counts
+// nothing. A state that is not one stays, for the client to refuse.
+func (a bulkAction) changes(ctx context.Context, client *taskmill.Client, f taskmill.TaskFilter) (taskmill.TaskCount, error) {
+	states := f.States
+	if len(states) == 0 {
+		states = listedStates
+	}
+	f.States = slices.DeleteFunc(slices.Clone(states), func(st taskmill.State) bool {
+		return slices.Contains(listedStates, st) && !a.allows(st)
+	})
+	if len(f.States) == 0 {
+		return taskmill.TaskCount{}, nil
+	}
+
+	counts, err := client.Count(ctx, &taskmill.CountParams{Filter: f})
+	if err != nil {
+		return taskmill.TaskCount{}, err
+	}
+	return a.count(counts), nil
 }
 
 var bulkActions = map[string]bulkAction{
@@ -59,6 +83,7 @@ var bulkActions = map[string]bulkAction{
 		Explain: "They run again with a fresh set of attempts. A dead task that halts its FIFO group resumes the group. A canceled task stays canceled if another task holds its dedupe key.",
 		None:    "Retry applies to dead and canceled tasks.",
 		path:    "/tasks/bulk/retry",
+		allows:  taskmill.State.CanRetry,
 		do:      (*taskmill.Client).RetryMatching,
 		count:   func(c *taskmill.TaskCounts) taskmill.TaskCount { return c.Retry },
 	},
@@ -67,6 +92,7 @@ var bulkActions = map[string]bulkAction{
 		Explain: "Waiting tasks will not run. Running tasks stop when their handlers return.",
 		None:    "Cancel applies to unfinished tasks, except running tasks already asked to stop.",
 		path:    "/tasks/bulk/cancel",
+		allows:  taskmill.State.CanCancel,
 		do:      (*taskmill.Client).CancelMatching,
 		count:   func(c *taskmill.TaskCounts) taskmill.TaskCount { return c.Cancel },
 	},
@@ -75,6 +101,7 @@ var bulkActions = map[string]bulkAction{
 		Explain: "Running tasks are kept. This cannot be undone.",
 		None:    "Delete applies to every task except running ones.",
 		path:    "/tasks/bulk/delete",
+		allows:  taskmill.State.CanDelete,
 		do:      (*taskmill.Client).DeleteMatching,
 		count:   func(c *taskmill.TaskCounts) taskmill.TaskCount { return c.Delete },
 	},
@@ -120,7 +147,7 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	counts, err := s.client.Count(r.Context(), &taskmill.CountParams{Filter: f})
+	n, err := a.changes(r.Context(), s.client, f)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		s.refuse(w, r, http.StatusBadRequest, "Invalid filter", reason(err), link{"/tasks", "Clear the filters", "clear"})
 		return
@@ -145,7 +172,6 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 			rows = append(rows, row)
 		}
 	}
-	n := a.count(counts)
 
 	// The form carries where a run that stopped early continues.
 	action := filterQuery(f)

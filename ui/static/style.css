@@ -40,7 +40,7 @@
   --ink: #f0f0f0;
   --ink-soft: #d4d4d4;
   --ink-muted: #bcbcbc;
-  --ink-faint: #a3a3a3;
+  --ink-faint: #adadad; /* 4.5:1 on a selected option of a menu, over glass */
   --ink-ghost: #a3a3a3;
 
   --fill-hover: rgb(var(--tone-rgb) / 0.055);
@@ -328,9 +328,12 @@ button, input { font-weight: inherit; } /* not the browser's 400 */
   .appbar-inner { padding: 0 16px; gap: 12px; }
   .logo span { display: none; }
   .nav-item { padding: 6px 10px; }
-  .nav-item > svg, .live-label, .read-only-pill { display: none; }
-  /* Unless the page is out of date: then the word says why. */
-  .live:is([data-state="stale"], [data-state="offline"], [data-state="signed-out"]) .live-label { display: inline; }
+  .nav-item > svg, .read-only-pill { display: none; }
+  /* The word of the Live button names it: it leaves the sight only, and not
+     while the page is out of date, when it says why. */
+  .live:not([data-state="stale"], [data-state="offline"], [data-state="signed-out"]) .live-label {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
   .topbar { padding: 18px 16px 0; }
   .page { padding: 14px 16px 48px; }
 }
@@ -1126,7 +1129,7 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .modal-status:empty { display: none; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .modal-actions [hidden] { display: none; }
-.modal[aria-busy="true"] [data-confirm-button] { opacity: 0.55; cursor: progress; }
+[data-confirm-button][aria-disabled="true"] { opacity: 0.55; cursor: progress; }
 
 .toast {
   position: fixed; z-index: 120; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));

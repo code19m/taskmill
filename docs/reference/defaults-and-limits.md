@@ -78,15 +78,14 @@ by election, that does the shared work.
 | Time limit of one request | 10 seconds, or less if your app sets an earlier deadline in the request's context. Then the page says "Taking too long". It says the same when a list of tasks reads for more than its 5 seconds |
 | Live updates | About every 5 seconds while the browser tab is visible. While the server fails or is out of reach, 5, 10, 20, and 40 seconds apart, then 1 minute |
 | A page or an action that the page's script asks for | Given up after 15 seconds, more than the server's 10. Then the page says that no answer came, and tries again by itself, or a notice says that the action may have applied |
-| Pages kept for the back and forward buttons | The last 10 of a browser tab, in memory, so that they show right away. The browser loads an older one again |
+| Pages kept for the back and forward buttons | The last 10 of a browser tab that update themselves, in memory, so that they show right away. The browser loads an older one again, and a page that does not update itself, such as one that says why an action did not apply |
 | Tasks that the task list shows | 50 at first. "Load more" adds 50, up to 250, and every live update reads all that are shown. After 250, the list continues from its last task on a page of its own |
 | One bulk action request | Works for about 5 seconds, then offers to continue |
 | The dashboard marks a worker as stale | After one `LeaseDuration` of that worker without a check-in: 30 seconds by default |
 | Values per filter | Up to 100 |
 | FIFO groups that a filter lists | The first 100. Its search finds the others |
-| Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds |
-| Page of a dead task in a FIFO group | Counts up to 10,000 tasks that wait behind it |
-| Charts | The last hour, 6 hours, or day, with one point per 1, 5, or 15 minutes |
+| Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds, or 5 seconds after a read that failed |
+| Charts | The last hour, 6 hours, or day, with one point per 1, 5, or 15 minutes. The 6 hours and the day read their history again at most every 30 seconds, and when a point becomes complete |
 
 The values of the `taskmill-ui` command, such as its HTTP timeouts, are in
 [The `taskmill-ui` command](taskmill-ui.md).

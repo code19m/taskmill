@@ -38,7 +38,7 @@
     </div>
   </div>
 </header>
-{{with .Notice}}<div class="toast" role="status" data-toast>{{template "icon-check"}}<span class="toast-message">{{.}}</span></div>{{end}}
+{{with .Notice}}<div class="toast" data-toast>{{template "icon-check"}}<span class="toast-message">{{.}}</span></div>{{end}}
 <div class="main">
 <main id="main" class="content" tabindex="-1" data-now="{{instant .Now}}"{{if .Retry}} data-live="retry"{{else if .Live}} data-live{{end}}>
 {{end}}

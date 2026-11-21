@@ -110,6 +110,33 @@ All notable changes to taskmill are recorded here. The format follows
   attempt becomes dead, and the failover checklist looks for it. A new
   page, [Dashboard pages](docs/reference/dashboard-pages.md), says what each
   part of a dashboard page shows.
+- The dashboard works better with a keyboard, a screen reader, and a
+  magnifier. A live update that removes what had the focus gives it to the
+  page, not to the body. The Live button keeps its name on a small screen. A
+  notice is read aloud, and so is "Working on it…" in a dialog. The tooltip
+  stays while the pointer rests on it. Faint text in the dark theme has a
+  contrast of 4.5:1 on a selected option of a menu.
+- The Back button no longer shows, frozen, the page that said why an action
+  did not apply, in place of the page that sent it: the browser loads that
+  page again.
+- The overview's **Waiting** card leads to the scheduled, retryable, and
+  pending tasks that it counts, not to the scheduled ones alone.
+- A task's page says "This task halts its FIFO group" for every dead task
+  that halts its group, also while no task waits behind it. When its group
+  cannot be read, the page shows the task and says so: before, the whole
+  page failed.
+- `ui.New` refuses a `BasicAuth` username with a colon, and a username or
+  password with a control character, with `ErrInvalidArgument`: nobody could
+  log in with them. So does `taskmill-ui` with `TASKMILL_UI_USERNAME` and
+  `TASKMILL_UI_PASSWORD`.
+- The dashboard reads `Accept-Encoding` as RFC 9110 does: a weight of zero
+  in any form, such as `q=0.0` or `Q=0`, refuses gzip, `*` accepts it, and
+  every line of the header counts.
+- The dashboard reads less from a busy database. The page that asks before
+  a bulk action counts only the tasks that the action would change. The
+  overview of 6 hours or a day reads its history again at most every 30
+  seconds. After a read of the filter choices failed, task lists read them
+  again 5 seconds later, not right away.
 
 ### Security
 
@@ -119,6 +146,12 @@ All notable changes to taskmill are recorded here. The format follows
   anything. The error now names the field, with `[key]` in place of a
   map's key, and the types, the place of a syntax error, or only the `Args`
   type, with the code `invalid_payload` as before.
+- The dashboard shows the characters of a name that no one could see. A
+  queue, kind, FIFO group key, metadata, schedule, or worker whose name holds
+  a control character, or a format character, such as one that reverses the
+  text after it or one of no width, shows it as its code point, such as
+  `<U+202E>`. So a name can no longer hide or reorder a part of itself, or
+  pass for another.
 
 ## [0.13.0] - 2026-11-21
 

@@ -49,6 +49,44 @@ func TestLiveUpdateResponses(t *testing.T) {
 	}
 }
 
+// A response is compressed when the request accepts gzip, as RFC 9110 reads
+// Accept-Encoding: over all its lines, by the weight of gzip, or else of "*",
+// with a name and a weight in any case. A weight of 0 refuses, in any of its
+// forms, and so does a weight that is not one.
+func TestCompressionFollowsAcceptEncoding(t *testing.T) {
+	t.Parallel()
+	h := handler(t, setup(t), nil)
+	for _, tc := range []struct {
+		lines []string
+		gzip  bool
+	}{
+		{nil, false},
+		{[]string{"gzip"}, true},
+		{[]string{"GZip ; Q=0.5"}, true},
+		{[]string{"br", "gzip"}, true},
+		{[]string{"br, *"}, true},
+		{[]string{"deflate"}, false},
+		{[]string{"gzip;q=0"}, false},
+		{[]string{"gzip; Q=0"}, false},
+		{[]string{"gzip;q=0.0"}, false},
+		{[]string{"gzip;q=0.000, br"}, false},
+		{[]string{"gzip;q=0, *"}, false},
+		{[]string{"*;q=0"}, false},
+		{[]string{"gzip;q=x"}, false},
+		{[]string{"gzip;q=-1, *"}, false},
+	} {
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/static/style.css", nil)
+		for _, line := range tc.lines {
+			req.Header.Add("Accept-Encoding", line)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Content-Encoding") == "gzip"; got != tc.gzip {
+			t.Errorf("Accept-Encoding %q: compressed %v, want %v", tc.lines, got, tc.gzip)
+		}
+	}
+}
+
 func TestBasicAuth(t *testing.T) {
 	t.Parallel()
 	client := setup(t)
@@ -163,6 +201,8 @@ func TestNewChecksTheConfig(t *testing.T) {
 		"prefix not a path":    {client, &ui.Config{Prefix: "taskmill"}},
 		"no password":          {client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops"}}},
 		"no username":          {client, &ui.Config{BasicAuth: &ui.BasicAuth{Password: "s3cret"}}},
+		"colon in username":    {client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops:team", Password: "s3cret"}}},
+		"line break":           {client, &ui.Config{BasicAuth: &ui.BasicAuth{Username: "ops", Password: "s3cret\n"}}},
 		"injected directive":   {client, &ui.Config{FrameAncestors: []string{"https://a.example; script-src *"}}},
 		"empty frame ancestor": {client, &ui.Config{FrameAncestors: []string{""}}},
 	} {

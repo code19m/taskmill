@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -66,6 +67,24 @@ func setupOn(tb testing.TB, pool *pgxpool.Pool) (*taskmill.Client, *pgxpool.Pool
 		}
 	})
 	return client, pool, schema
+}
+
+// setupTraced is setupDB with a pool of its own, whose connections report
+// their statements to tracer.
+func setupTraced(t *testing.T, tracer pgx.QueryTracer) (*taskmill.Client, *pgxpool.Pool, string) {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return setupOn(t, pool)
 }
 
 // handler returns the interface for client, and fails the test if cfg is

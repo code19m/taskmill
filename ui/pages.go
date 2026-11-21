@@ -2,6 +2,7 @@ package ui
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,7 +33,9 @@ var queueStates = []taskmill.State{
 	taskmill.StatePending, taskmill.StateDead, taskmill.StateCanceled,
 }
 
-// totals sums the task counts of every queue.
+// totals sums the task counts of every queue. Waiting holds the scheduled,
+// retryable, and pending tasks: the overview's card of that name leads to the
+// list of the three states.
 type totals struct {
 	Available, Running, Waiting, Dead taskmill.TaskCount
 }
@@ -103,7 +106,7 @@ func (s *server) overview(w http.ResponseWriter, r *http.Request) {
 
 	// The charts are not worth failing the page for: without their history,
 	// they say so.
-	activity, err := s.client.Activity(ctx, &taskmill.ActivityParams{Since: win.start, Step: win.step})
+	activity, err := s.activity(ctx, p, win, now)
 	if err != nil && ctx.Err() == nil {
 		s.logger.LogAttrs(ctx, slog.LevelWarn, "read activity failed", slog.Any(logKeyError, err))
 	}
@@ -361,8 +364,10 @@ func orderOf(f taskmill.TaskFilter, ranged bool) listOrder {
 
 // group describes a task's place in its FIFO group.
 type group struct {
+	Halts   bool               // the task is dead, and its group waits for it
 	Waiting taskmill.TaskCount // tasks waiting behind a dead task
 	Head    *taskmill.TaskInfo // the task that a pending task waits behind, in summary
+	Unread  bool               // the group could not be read
 }
 
 // Waits says how many tasks wait behind a dead task: "1 task waits", or
@@ -398,17 +403,22 @@ func (s *server) task(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The task is worth its page without its group: the page says that the
+	// group could not be read, and its next update reads it again.
 	g, err := s.groupOf(r, info)
 	if err != nil {
-		s.fail(w, r, err)
-		return
+		if ctx.Err() == nil {
+			s.logger.LogAttrs(ctx, slog.LevelWarn, "read FIFO group failed", slog.Any(logKeyError, err))
+		}
+		g = group{Unread: true}
 	}
 
 	s.render(w, r, http.StatusOK, "task.html", page{Title: fmt.Sprintf("Task %d", id), Nav: "tasks", Dead: s.deadCount(r), Data: taskData{Task: info, Group: g}})
 }
 
-// groupOf finds, for a dead task of a FIFO group, how many tasks wait behind
-// it, and for a pending one, the task it waits behind.
+// groupOf finds, for a dead task of a FIFO group, whether it halts the group,
+// and how many tasks wait behind it, and for a pending one, the task it waits
+// behind.
 func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 	var g group
 	if t.GroupKey == "" {
@@ -416,13 +426,12 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 	}
 	switch t.State {
 	case taskmill.StateDead:
-		counts, err := s.client.Count(r.Context(), &taskmill.CountParams{Filter: taskmill.TaskFilter{
-			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, States: []taskmill.State{taskmill.StatePending},
-		}})
-		if err != nil {
+		halted, ok, err := s.haltedBy(r.Context(), t)
+		if err != nil || !ok {
 			return g, err
 		}
-		g.Waiting = counts.States[taskmill.StatePending]
+		// The group counts its waiting tasks and the dead task.
+		g.Halts, g.Waiting = true, taskmill.TaskCount{N: int64(max(0, halted.Tasks-1))}
 	case taskmill.StatePending:
 		ahead, err := s.client.List(r.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{
 			Queues: []string{t.Queue}, GroupKeys: []string{t.GroupKey}, States: []taskmill.State{
@@ -439,6 +448,31 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 	}
 
 	return g, nil
+}
+
+// haltedBy returns the FIFO group that the dead task t halts, and whether it
+// halts one. A dead task halts its group whether or not tasks wait behind it:
+// a task added to the group later waits too. It searches the halted groups of
+// t's queue by t's key, which other keys can contain, page by page, until it
+// finds the one that t halts. Halted groups are few, and each page's read has
+// its time limit, as the request has.
+func (s *server) haltedBy(ctx context.Context, t *taskmill.TaskInfo) (taskmill.GroupInfo, bool, error) {
+	params := &taskmill.GroupParams{Queues: []string{t.Queue}, Search: t.GroupKey, Halted: true}
+	for {
+		page, err := s.client.Groups(ctx, params)
+		if err != nil {
+			return taskmill.GroupInfo{}, false, err
+		}
+		for _, g := range page.Groups {
+			if g.HaltedBy == t.ID {
+				return g, true, nil
+			}
+		}
+		if page.Next == "" {
+			return taskmill.GroupInfo{}, false, nil
+		}
+		params.Cursor = page.Next
+	}
 }
 
 func (s *server) schedules(w http.ResponseWriter, r *http.Request) {

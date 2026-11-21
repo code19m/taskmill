@@ -15,8 +15,8 @@ counts as not set.
 | `TASKMILL_DATABASE_URL` | Required | A PostgreSQL connection string | Names the database to connect to |
 | `TASKMILL_SCHEMA` | `taskmill` | Matches `^[a-z_][a-z0-9_]{0,62}$` | Names the [schema](../concepts/glossary.md#schema) to show |
 | `TASKMILL_UI_ADDR` | `localhost:8080` | A host and a port | Sets the address to listen on. In a container, use `:8080` |
-| `TASKMILL_UI_USERNAME` | `admin` | Any text | Sets the user of HTTP basic authentication. It does nothing without a password |
-| `TASKMILL_UI_PASSWORD` | None | Any text | Sets that user's password. Without one, anyone who reaches the address can use the dashboard, and the command logs a warning |
+| `TASKMILL_UI_USERNAME` | `admin` | Text without a colon or a control character | Sets the user of HTTP basic authentication. It does nothing without a password |
+| `TASKMILL_UI_PASSWORD` | None | Text without a control character | Sets that user's password. Without one, anyone who reaches the address can use the dashboard, and the command logs a warning |
 | `TASKMILL_UI_READ_ONLY` | `false` | `true`, `false`, `1`, `0`, and the other values that Go's `strconv.ParseBool` accepts | `true` hides and refuses every action |
 | `TASKMILL_UI_PREFIX` | None: the root | A path that starts with `/` | Sets the path that the dashboard is served at, such as `/admin/tasks`, when a proxy forwards that path unchanged |
 | `TASKMILL_UI_FRAME_ANCESTORS` | None: no page can frame the dashboard | Origins, separated by commas or white space | Lists the origins of the pages that may show the dashboard in a frame, such as `https://admin.example.com` |
@@ -44,6 +44,7 @@ status 1.
 | `TASKMILL_UI_LOG_FORMAT` is not `text` or `json` | Use one of the two. This error is logged as text |
 | `TASKMILL_UI_PREFIX` does not start with `/` | Start it with `/` |
 | An entry of `TASKMILL_UI_FRAME_ANCESTORS` holds a semicolon | Remove it: an entry is one origin |
+| `TASKMILL_UI_USERNAME` holds a colon, or it or `TASKMILL_UI_PASSWORD` holds a control character | Remove it. Basic authentication ends a username at its first colon, and a browser cannot send a control character, such as the line break at the end of a value read from a file |
 | The address is in use, or is not valid | Change `TASKMILL_UI_ADDR` |
 
 On `SIGINT` or `SIGTERM`, the command stops listening, waits up to 10

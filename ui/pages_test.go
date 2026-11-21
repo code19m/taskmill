@@ -3,6 +3,9 @@ package ui_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"html"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -14,6 +17,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -436,6 +440,48 @@ func TestOverviewSaysWhenItsCountsWereTaken(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The overview's Waiting card counts the tasks that wait for their time, for
+// a retry, or behind another task of their FIFO group, and it leads to the
+// list of all of them.
+func TestOverviewWaitingCardLeadsToEveryWaitingTask(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	ctx := t.Context()
+	res, err := client.EnqueueMany(ctx, []taskmill.EnqueueParams{
+		{Args: greet{Name: "later"}, Options: &taskmill.EnqueueOptions{RunAt: time.Now().Add(time.Hour)}},
+		{Args: greet{Name: "retried"}},
+		{Args: greet{Name: "first"}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
+		{Args: greet{Name: "behind"}, Options: &taskmill.EnqueueOptions{GroupKey: "g"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'retryable', attempt = 1, run_at = now() + interval '1 hour' WHERE id = $1`, res[1].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handler(t, client, nil)
+	_, body, _ := get(t, h, "/")
+	var link string
+	for _, card := range regexp.MustCompile(`(?s)<a class="card stat[^"]*" href="([^"]*)">(.*?)</a>`).FindAllStringSubmatch(body, -1) {
+		if strings.Contains(card[2], "Waiting</span>") {
+			link = html.UnescapeString(card[1])
+		}
+	}
+	if link == "" {
+		t.Fatalf("the overview has no Waiting card\n%s", body)
+	}
+
+	_, ids := listTasks(t, h, link)
+	want := []string{strconv.FormatInt(res[0].ID, 10), strconv.FormatInt(res[1].ID, 10), strconv.FormatInt(res[3].ID, 10)}
+	slices.Sort(ids)
+	slices.Sort(want)
+	if !slices.Equal(ids, want) {
+		t.Errorf("the Waiting card leads to %s, which lists the tasks %v, want the scheduled, retryable, and pending %v", link, ids, want)
 	}
 }
 
@@ -895,6 +941,52 @@ func TestGroupKeysOfTheOutboxShowAsTopicAndKey(t *testing.T) {
 	}
 }
 
+// sneaky is a kind whose name holds a character of no width.
+type sneaky struct{}
+
+func (sneaky) Kind() string { return "pay\u200bment" }
+
+// A name can hold characters that no one could see: control characters, and
+// format characters, which can reverse the direction of the text after them
+// or have no width. Every page shows them, in queue names, kinds, FIFO group
+// keys, metadata, schedules, and workers, as code points or control
+// pictures, so that a name cannot hide or reorder a part of itself. Only the
+// attributes that carry a name to the server, or to the script, keep it as
+// it is.
+func TestNamesShowTheCharactersThatNoOneCouldSee(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	const queue, group = "mail\u202eliam", "orders\u202e\x1fkey\u2066"
+	res, err := client.Enqueue(t.Context(), sneaky{}, &taskmill.EnqueueOptions{
+		Queue: queue, GroupKey: group, Metadata: map[string]string{"trace\ufeff": "id\x7f\u0085"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.schedules (name, queue, kind, cron, timezone, next_run_at)
+	    VALUES ('night`+"\u202e"+`ly', $1, $2, '0 3 * * *', 'UTC', now())`, queue, sneaky{}.Kind()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, kinds, hostname, version)
+	    VALUES ($1, $2, $3, $4, 'v')`, "web\u200f-1-ab12", []string{queue}, []string{sneaky{}.Kind()}, "web\u200f"); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handler(t, client, nil)
+	carried := regexp.MustCompile(` (?:data-key|value|id|popovertarget)="[^"]*"`)
+	for _, target := range []string{"/", "/tasks", "/tasks/" + strconv.FormatInt(res.ID, 10), "/schedules", "/workers"} {
+		code, body, _ := get(t, h, target)
+		if code != http.StatusOK || !strings.Contains(body, "&lt;U&#43;202E&gt;") {
+			t.Errorf("%s (%d): no name shows its U+202E", target, code)
+		}
+		shown := carried.ReplaceAllString(body, "")
+		if at := strings.IndexFunc(shown, func(r rune) bool { return unicode.In(r, unicode.Cf) || r == 0x7f || r == 0x85 }); at >= 0 {
+			t.Errorf("%s: a character that no one could see is on the page\n%s", target, shown[max(0, at-200):min(len(shown), at+200)])
+		}
+	}
+}
+
 // The Schedules page says a schedule's cron expression in words where it can
 // say exactly what the expression means, above the expression and the time
 // zone that the times are in. An expression that it has no exact words for,
@@ -994,6 +1086,89 @@ func setupCounting(t *testing.T) (client *taskmill.Client, pool *pgxpool.Pool, s
 	return client, pool, schema, read, trips
 }
 
+// breakReads breaks the connection of each read on its pool that names its
+// key, before the read starts, as a network that fails does.
+type breakReads struct {
+	key    string
+	broken atomic.Int64
+}
+
+func (b *breakReads) breakIf(conn *pgx.Conn, args []any) {
+	if strings.Contains(fmt.Sprint(args...), b.key) && conn.PgConn().Conn().Close() == nil {
+		b.broken.Add(1)
+	}
+}
+
+func (b *breakReads) TraceQueryStart(ctx context.Context, conn *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	b.breakIf(conn, d.Args)
+	return ctx
+}
+
+func (*breakReads) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (b *breakReads) TraceBatchStart(ctx context.Context, conn *pgx.Conn, d pgx.TraceBatchStartData) context.Context {
+	for _, q := range d.Batch.QueuedQueries {
+		b.breakIf(conn, q.Arguments)
+	}
+	return ctx
+}
+
+func (*breakReads) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+func (*breakReads) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData)     {}
+
+// A task's page says how the task stands in its FIFO group. A dead task
+// halts its group whether or not tasks wait behind it, since a task added
+// later waits too: the page says so, and how many wait. A page whose group
+// cannot be read shows the task without it, says so, and logs why.
+func TestTaskPagesSayHowTheTaskStandsInItsGroup(t *testing.T) {
+	t.Parallel()
+	failing := &breakReads{key: "group-that-fails"}
+	client, pool, schema := setupTraced(t, failing)
+	ctx := t.Context()
+	var params []taskmill.EnqueueParams
+	for _, group := range []string{"full", "full", "full", "alone", failing.key, failing.key} {
+		params = append(params, taskmill.EnqueueParams{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{GroupKey: group}})
+	}
+	res, err := client.EnqueueMany(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, head := range []int64{res[0].ID, res[3].ID} {
+		if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, head); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE `+schema+`.groups g SET halted_task_id = t.id, halted_at = now()
+		    FROM `+schema+`.tasks t WHERE t.id = $1 AND g.queue = t.queue AND g.group_key = t.group_key`, head); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	logs := &actionLog{}
+	h := handler(t, client, &ui.Config{Logger: slog.New(logs)})
+	for _, tc := range []struct {
+		task  int64
+		wants []string
+	}{
+		{res[0].ID, []string{"This task halts its FIFO group.</strong>", "2 tasks wait behind it until you retry or delete it."}},
+		{res[3].ID, []string{"This task halts its FIFO group.</strong>", "A task added to the group waits behind it until you retry or delete it."}},
+		{res[5].ID, []string{"<h1 class=\"task-heading\"><span>#" + strconv.FormatInt(res[5].ID, 10), "Its place in its FIFO group could not be read."}},
+	} {
+		code, body, _ := get(t, h, "/tasks/"+strconv.FormatInt(tc.task, 10))
+		for _, want := range tc.wants {
+			if code != http.StatusOK || !strings.Contains(body, want) {
+				t.Errorf("task %d (%d): want %s on its page", tc.task, code, want)
+			}
+		}
+	}
+
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	if failing.broken.Load() == 0 || !slices.Contains(logs.messages, "read FIFO group failed") {
+		t.Errorf("broke %d reads of the group, and logged %q; want a warning for each", failing.broken.Load(), logs.messages)
+	}
+}
+
 // The task list shows no payload and no metadata, and one line of each
 // task's last error. So a page must not read them from the database: a
 // payload can take 1 MiB, and an open page asks again every 5 seconds. The
@@ -1060,6 +1235,55 @@ func TestTaskPagesReadNoPayloadsTheyDoNotShow(t *testing.T) {
 	}
 }
 
+// roundTripsOf returns the round trips that a request for target makes.
+func roundTripsOf(t *testing.T, h http.Handler, trips *roundTrips, target string) int64 {
+	t.Helper()
+	before := trips.n.Load()
+	if code, _, _ := get(t, h, target); code != http.StatusOK {
+		t.Fatalf("%s: %d", target, code)
+	}
+	return trips.n.Load() - before
+}
+
+// The overview of a longer period keeps its read of the activity for a while:
+// each open overview would read the counts of every queue for hours again at
+// each update. The overview of the hour reads it each time.
+func TestOverviewKeepsTheActivityOfALongerPeriod(t *testing.T) {
+	t.Parallel()
+	client, _, _, _, trips := setupCounting(t)
+	h := handler(t, client, nil)
+	for _, target := range []string{"/?range=6h", "/?range=24h"} {
+		// A read is kept for its window while as many of its steps are
+		// complete: a step can end between two requests, but not again
+		// before a third.
+		first := roundTripsOf(t, h, trips, target)
+		second, third := roundTripsOf(t, h, trips, target), roundTripsOf(t, h, trips, target)
+		if second >= first && third >= first {
+			t.Errorf("%s: the overviews after the first made %d round trips too, want one fewer: the activity is kept", target, first)
+		}
+	}
+
+	if first, second := roundTripsOf(t, h, trips, "/"), roundTripsOf(t, h, trips, "/"); second != first {
+		t.Errorf("the overview of the hour made %d round trips, then %d: it reads the activity each time", first, second)
+	}
+}
+
+// While a read of the task list's filter choices fails, the choices of that
+// read serve the next task lists for a few seconds: each would otherwise add
+// three reads that fail to its own.
+func TestTaskListsKeepAFailedReadOfTheirChoicesForAWhile(t *testing.T) {
+	t.Parallel()
+	client, pool, schema, _, trips := setupCounting(t)
+	if _, err := pool.Exec(t.Context(), `ALTER TABLE `+schema+`.schedules RENAME TO schedules_gone`); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handler(t, client, nil)
+	if first, second := roundTripsOf(t, h, trips, "/tasks"), roundTripsOf(t, h, trips, "/tasks"); second > 2 {
+		t.Errorf("the task lists made %d round trips, then %d, want at most 2 the second time: the tasks, and the queues", first, second)
+	}
+}
+
 // A page asks the database as few times as it has things to show: each read
 // of the client is one round trip, also those with a time limit of their
 // own. It matters for a dashboard far from its database, whose pages
@@ -1096,7 +1320,7 @@ func TestPagesMakeFewRoundTrips(t *testing.T) {
 	}{
 		{"/", 5, "the queues, the workers, the schedules, the settings, and the activity"},
 		{"/tasks", 2, "the tasks, and the queues"},
-		{"/tasks/" + strconv.FormatInt(ids[0], 10), 3, "the task, the count of the tasks behind it, and the queues"},
+		{"/tasks/" + strconv.FormatInt(ids[0], 10), 3, "the task, its group, and the queues"},
 		{"/tasks/" + strconv.FormatInt(ids[1], 10), 3, "the task, the task ahead of it, and the queues"},
 		{"/tasks/bulk/retry?state=dead", 2, "the count, and the queues"},
 		{"/schedules", 2, "the schedules, and the queues"},
