@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.27.4
 
 require (
-	github.com/chromedp/cdproto v0.160.4
+	github.com/chromedp/cdproto v0.160.5
 	github.com/chromedp/chromedp v0.24.0
 	github.com/code19m/taskmill v0.14.0
 	github.com/jackc/pgx/v5 v5.13.0
