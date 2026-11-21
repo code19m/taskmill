@@ -51,10 +51,9 @@ error fails the run.
 > **Placeholder:** the first run on the reference runner replaces this note
 > and the laptop run below: its date, commit, machine, and every result.
 
-No run on the target hardware exists yet. These results come from a
-smaller laptop run in October 2026: they show the shape of the results, not
-the numbers of the target hardware. No number was measured again after
-the latest changes to the fetch, completion, renewal, and election statements.
+No run on the target hardware exists yet. These laptop runs, of October
+2026 and of November for E5, show the shape of the results, not the target
+hardware's numbers. Only E5 was measured after the latest statement changes.
 
 - **Machine:** Apple M5, 10 cores, 16 GiB, shared with other work.
   Throughput moved by up to half between runs.
@@ -150,7 +149,7 @@ runs), and S3 at 1,000 tasks a second.
 | E2 | WAL written per task, history kept: ≤ 2 KiB | 0.81 KiB from fetch to history, without the history's [index of creation time](schema-creation-order.md#what-the-creation-order-costs), which was measured apart: 0.11 KiB more |
 | E3 | `tasks` heap and index size during a 4-hour run at half of T3: within 2× of their size after the first hour | 36 million tasks in 1 hour at 10,000 tasks/s, none left waiting, completed tasks discarded (the table sees the same writes): heap 167 MiB throughout, indexes 88 to 116 MiB; at most 283 MiB, 1.06× its size after 15 minutes: pass |
 | E4 | Database connections: a client uses its pool only; a worker, its pool plus one `LISTEN` connection | A client with a pool of 8 used at most 8; a worker with a pool of 8 and concurrency 64, at most 9, one of them listening: pass |
-| E5 | Worker memory: idle ≤ 30 MiB RSS; ≤ 8 KiB per running task | The benchmark program, a little bigger than a worker, on macOS: 17.3 MiB idle; 7.9 KiB per running task, with 10,000 handlers waiting: pass |
+| E5 | Worker memory: idle ≤ 30 MiB RSS; ≤ 13 KiB per running task | The benchmark program, a little bigger than a worker, on macOS: 19.8 MiB idle; 11.9 KiB per running task, with 10,000 handlers waiting, the median of three runs: pass |
 | E6 | An idle worker's load: while the maintainer's heartbeats arrive, about one fetch per queue per minute, plus updates of the worker's own row; while they do not, one fetch per queue per poll interval | Heartbeats arriving, 10 queues for 3 minutes: 90 fetches, 9.0 per queue, of which up to 7 before the first heartbeat; 17 updates of the worker's own row; 29 other statements: pass |
 | E7 | The database's CPU for heartbeats when several schemas share a database (no target) | 500 connections listening: 0.24 CPUs at 20 heartbeats a second, what 100 schemas send, and 1.11 CPUs at 100 a second; about 24 µs per heartbeat per listening connection |
 
@@ -158,13 +157,14 @@ runs), and S3 at 1,000 tasks a second.
   `COMMIT` ([Fetch](schema-statements.md#fetch)). End to end, batches are smaller.
 - **E2 leaves out the enqueue's WAL** and the full-page writes after
   checkpoints, which a short run misses. A long run writes more.
+- **E5 measures what a task holds:** the process frees its garbage before
+  three samples, and the median counts. A handler's stack takes 8 KiB once it
+  called the database, taskmill about 3 KiB, and the target leaves 2 KiB.
 - **E6** measured a worker with `NoMaintainer`. Each queue fetches at start,
   when the notification connection starts, and every second until the first
-  heartbeat (within 5 seconds); then once a minute, ± 6 seconds, since the
-  maintainer's wake already nudges every queue whose tasks wait.
-- **E7** keeps 500 connections listening on channels of their own, as the
-  workers of other schemas do, which every notification wakes
-  ([why](schema-maintenance.md#notifications)).
+  heartbeat (within 5 seconds); then once a minute, ± 6 seconds.
+- **E7** keeps 500 connections listening on channels of their own, as other
+  schemas' workers do ([why](schema-maintenance.md#notifications)).
 
 ### Reliability under faults
 

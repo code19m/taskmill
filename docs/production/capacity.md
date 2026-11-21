@@ -29,9 +29,9 @@ tasks running at the same time ÷ Concurrency = workers
 - **More workers do not help a queue with a limit.** A queue's `MaxRunning`
   caps its running tasks across all workers, and a
   [FIFO group](../concepts/glossary.md#fifo-group) runs one task at a time.
-- **A worker itself is small:** about 17 MiB of memory when idle, plus about
-  8 KiB per running task. Your handlers need the rest
-  ([Performance](../reference/performance.md#resource-use)).
+- **A worker itself is small**
+  ([Performance](../reference/performance.md#resource-use) has its memory).
+  Your handlers need the rest.
 
 ## Estimate the connections
 

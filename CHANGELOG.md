@@ -87,6 +87,14 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Fixed
 
+- [Performance](docs/reference/performance.md#resource-use) said that a
+  worker holds about 8 KiB per running task. It holds about 12 KiB: 8 KiB
+  of it is the stack of a handler that called the database. The benchmark
+  now measures what a task holds, after the worker returns its free memory,
+  as the median of three samples, and targets 13 KiB. An attempt whose
+  context ended no longer keeps a goroutine waiting through the 5 seconds
+  before it is abandoned, and each running attempt holds about 130 bytes
+  less.
 - Docs that were incomplete. [Guarantees](docs/concepts/guarantees.md)
   names the handler that ignores its context and is abandoned, while its
   task may run again, and says that dead tasks are deleted after the

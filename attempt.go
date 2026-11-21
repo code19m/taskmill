@@ -174,79 +174,80 @@ func (w *Worker) runChain(ctx, record context.Context, c *batchChains, i int, t 
 }
 
 // watch abandons the attempts ts if their handler has not returned
-// shutdownGrace after ctx, the handler's context, was canceled: after a
-// timeout, a cancel, or a lost lease. taskmill cannot stop the code of a
-// handler, and one that ignores its context would otherwise keep its tasks
-// for good: their leases renewed, and every timeout, cancel, or delete
-// without effect. Each attempt then ends as if the handler had returned the
-// context's error: a timeout fails it, a cancel cancels its task, and a
-// lost lease ends it without a result. The goroutine of the handler keeps
-// its slot until it returns, so Concurrency still bounds the goroutines,
-// and its result is ignored. A shutdown is left to the drain, which releases
-// the tasks instead. The returned stop must be called once the handler
-// returned.
-//
-// The attempts of a queue with a MaxRunning limit are not abandoned: their
-// tasks would run again while the handler still runs, and more of the
-// queue's tasks would run than the limit allows, which protects whatever
-// the handlers call. Their tasks stay running until the handler returns,
-// and watch only warns. An attempt that lost its lease is abandoned all the
-// same: its task may run again anyway.
+// shutdownGrace after ctx, the handler's context, ended for another reason
+// than a shutdown, which the drain handles: a handler that ignores its
+// context would otherwise keep its tasks for good. In a queue with a
+// MaxRunning limit it only warns, unless the lease was lost. The rules are
+// those of [HandlerOptions.Timeout]. The returned stop must be called once
+// the handler returned.
 func (w *Worker) watch(ctx, record context.Context, ts []*liveAttempt, start time.Time) (stop func()) {
-	// The slot of Run's attempts counts as stuck from the end of the grace
-	// until the handler returns, for Stats and Health: state goes from
-	// watching to stuck to finished, or from watching to finished.
-	q := w.queues[ts[0].info.Queue]
+	h := &handlerWatch{w: w, record: record, ts: ts, start: start, q: w.queues[ts[0].info.Queue]}
 	if ts[0].direct {
-		q = nil // RunTask's attempts take no slot
+		h.q = nil // RunTask's attempts take no slot
 	}
-	const (
-		watching int32 = iota
-		stuck
-		finished
-	)
-	var state atomic.Int32
 
-	returned := make(chan struct{})
 	stopAfter := context.AfterFunc(ctx, func() {
-		cause := context.Cause(ctx)
-		if errors.Is(cause, ErrShutdown) {
-			return
-		}
-
-		grace := time.NewTimer(w.timing.shutdownGrace)
-		defer grace.Stop()
-		select {
-		case <-returned:
-			return
-		case <-grace.C:
-		}
-
-		if q != nil {
-			q.stuck.Add(1)
-			if !state.CompareAndSwap(watching, stuck) {
-				q.stuck.Add(-1) // the handler returned meanwhile
-			}
-		}
-		for _, t := range ts {
-			if q := w.queues[t.info.Queue]; q != nil && q.maxRunning.Load() > 0 && !errors.Is(cause, ErrLeaseLost) {
-				w.logger.LogAttrs(record, slog.LevelWarn, "handler ignored its context; its task keeps running because its queue has a MaxRunning limit",
-					slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, cause))
-				continue
-			}
-			w.abandon(record, t, cause, start)
+		if cause := context.Cause(ctx); !errors.Is(cause, ErrShutdown) {
+			h.grace.Store(time.AfterFunc(w.timing.shutdownGrace, func() { h.expire(cause) }))
 		}
 	})
+	return func() { h.stop(stopAfter) }
+}
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			stopAfter()
-			close(returned)
-			if state.Swap(finished) == stuck {
-				q.stuck.Add(-1)
-			}
-		})
+// handlerWatch is what watch keeps of one handler call. Its state goes from
+// watching to stuck to finished, or from watching to finished: the slot of
+// Run's attempts counts as stuck from the end of the grace until the
+// handler returns, for Stats and Health.
+type handlerWatch struct {
+	w      *Worker
+	record context.Context
+	ts     []*liveAttempt
+	start  time.Time
+	q      *queueState // nil for RunTask's attempts
+	state  atomic.Int32
+	grace  atomic.Pointer[time.Timer] // set once the handler's context ended
+}
+
+// The states of a handlerWatch.
+const (
+	watchWatching int32 = iota
+	watchStuck
+	watchFinished
+)
+
+// expire abandons the attempts, or warns, once the grace after cause ended.
+func (h *handlerWatch) expire(cause error) {
+	if h.state.Load() == watchFinished {
+		return
+	}
+
+	if h.q != nil {
+		h.q.stuck.Add(1)
+		if !h.state.CompareAndSwap(watchWatching, watchStuck) {
+			h.q.stuck.Add(-1) // the handler returned meanwhile
+		}
+	}
+	for _, t := range h.ts {
+		if q := h.w.queues[t.info.Queue]; q != nil && q.maxRunning.Load() > 0 && !errors.Is(cause, ErrLeaseLost) {
+			h.w.logger.LogAttrs(h.record, slog.LevelWarn, "handler ignored its context; its task keeps running because its queue has a MaxRunning limit",
+				slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, cause))
+			continue
+		}
+		h.w.abandon(h.record, t, cause, h.start)
+	}
+}
+
+// stop ends the watch once the handler returned. It may be called again.
+func (h *handlerWatch) stop(stopAfter func() bool) {
+	switch h.state.Swap(watchFinished) {
+	case watchFinished:
+		return
+	case watchStuck:
+		h.q.stuck.Add(-1)
+	}
+	stopAfter()
+	if t := h.grace.Load(); t != nil {
+		t.Stop()
 	}
 }
 
