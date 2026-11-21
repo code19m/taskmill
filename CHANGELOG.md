@@ -7,6 +7,13 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The README is easier to scan: what taskmill is, why, and how to start
+  come first. A test now runs its code, and its pictures show the current
+  dashboard. It links to [Packages](docs/reference/packages.md) instead of
+  listing the packages.
+
 ## [0.15.0] - 2026-11-21
 
 ### Added
