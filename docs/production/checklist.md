@@ -7,7 +7,7 @@ explains it.
 
 - [ ] PostgreSQL is 15 or newer, and every process connects to the primary. ([Database](database.md#use-postgresql-15-or-newer-and-its-primary))
 - [ ] The role that runs your workers owns taskmill's tables. ([Database](database.md#run-workers-as-the-owner-of-taskmills-tables))
-- [ ] Each worker's `pool_max_conns` is its total `Concurrency` plus 5. ([Database](database.md#size-the-connection-pool))
+- [ ] Each worker's `pool_max_conns` is sized for its total `Concurrency`. ([Database](database.md#size-the-connection-pool))
 - [ ] `max_connections` covers every pod at the peak of a rollout. ([Kubernetes](kubernetes.md#count-the-database-connections))
 - [ ] `idle_in_transaction_session_timeout` is set, and taskmill's role has no `idle_session_timeout`. ([Database](database.md#keep-long-transactions-from-slowing-the-queue))
 - [ ] Behind a pooler in transaction mode, `ListenConfig` is a direct connection. ([Connection poolers](connection-poolers.md))
@@ -20,7 +20,7 @@ explains it.
 
 - [ ] Every process calls `Migrate` before `NewClient`, or a Job does it first. ([Deploys](deploys.md#run-migrations))
 - [ ] `Run`'s context ends on `SIGTERM`. ([Deploys](deploys.md#stop-workers-without-losing-work))
-- [ ] The grace period is at least `DrainTimeout` plus 10 seconds. ([Kubernetes](kubernetes.md#give-workers-time-to-drain))
+- [ ] The grace period leaves workers time to drain. ([Deploys](deploys.md#stop-workers-without-losing-work), [Kubernetes](kubernetes.md#give-workers-time-to-drain))
 - [ ] The readiness probe calls `Worker.Health`, and no liveness probe does. ([Kubernetes](kubernetes.md#tell-kubernetes-when-a-worker-is-ready))
 - [ ] At least 2 workers that can become the [maintainer](../concepts/glossary.md#maintainer) always run. ([Kubernetes](kubernetes.md#run-workers-in-their-own-deployment), [Autoscaling](autoscaling.md#scale-to-zero))
 - [ ] Every worker that can become the maintainer defines the same `Schedules`. ([Deploys](deploys.md#run-two-versions-side-by-side))

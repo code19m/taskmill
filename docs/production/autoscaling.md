@@ -148,7 +148,7 @@ Then give the `ScaledObject` this trigger:
   one find nothing. Many small workers on one queue waste the database's
   CPU.
 - `Concurrency` sets how many tasks a worker runs at the same time. The pool
-  follows it: `Concurrency` plus 5.
+  follows it: see [Size the connection pool](database.md#size-the-connection-pool).
 - For memory, see [Run workers in their own Deployment](kubernetes.md#run-workers-in-their-own-deployment).
 
 ## See also

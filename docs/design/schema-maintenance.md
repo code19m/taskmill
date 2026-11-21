@@ -158,6 +158,19 @@ every enqueue capped throughput near 10,000 tasks per second. So a client
 sends the first notification in its own transaction, and one for the rest
 when the 50 ms end.
 
+**A notification wakes every worker of its queue, and that stays.**
+`LISTEN` delivers each notification to every connection on the channel, so
+every idle worker of the queue fetches, and all but the first few find
+nothing. Waking one worker would need a coordinator that knows which
+workers are idle: a new part, with its own failures. An empty fetch is
+one round trip and one probe of the queue's index, and the limits above
+bound the wakes: one notification per queue per 50 ms from each client, and
+a worker that found nothing waits 20 ms. The cost grows with the workers of
+one queue: S3 in [Benchmarks](benchmarks.md#scalability) measured 50
+processes on 100 queues at 1,000 tasks a second, and their empty fetches
+used the database's 4 CPUs. So on one queue, a few workers with more
+concurrency cost the database less than many small ones.
+
 **The maintainer wakes the queues that were missed.** That last notification
 can arrive before the transactions it stands for commit, and a producer can
 crash before sending it. So once a second, the maintainer also notifies

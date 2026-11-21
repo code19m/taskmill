@@ -27,8 +27,10 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 })
 ```
 
-Then give the process at least `DrainTimeout` plus 10 seconds to stop. In
-Kubernetes, that is `terminationGracePeriodSeconds: 310` for this worker.
+Then give the process the grace period that
+[Deploys](../production/deploys.md#stop-workers-without-losing-work) asks
+for. In Kubernetes, that is `terminationGracePeriodSeconds: 310` for this
+worker.
 
 ## Why
 
@@ -85,9 +87,9 @@ not the whole export. Make each page safe to run twice
 - **Respect the context.** A handler that ignores its canceled context keeps
   running after the worker gave its task back. Then another worker may run
   the same task at the same time.
-- **Keep the grace period at least `DrainTimeout` plus 10 seconds.** If the
-  platform kills the worker sooner, its tasks wait until their leases run
-  out, and each counts as a failed attempt.
+- **Keep the grace period long enough for the drain.** If the platform
+  kills the worker sooner, its tasks wait until their leases run out, and
+  each counts as a failed attempt.
 - **Scale-downs [drain](../concepts/glossary.md#drain) too.** An autoscaler
   that removes a worker stops its long tasks after `DrainTimeout`
   ([Autoscaling](../production/autoscaling.md)).

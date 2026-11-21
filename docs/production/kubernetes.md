@@ -103,13 +103,10 @@ worker pauses a rolling deploy, which is right while the database is down.
 ## Give workers time to drain
 
 Kubernetes kills the pod when the grace period ends. So set
-`terminationGracePeriodSeconds` to at least `DrainTimeout` plus 10 seconds.
-Why: after `DrainTimeout`, the worker cancels the tasks that still run, and
-waits up to 5 seconds before it gives them back.
-
-The defaults fit: 20 seconds, and Kubernetes' 30. For a `DrainTimeout` of 2
-minutes, set 130. See
-[Stop workers without losing work](deploys.md#stop-workers-without-losing-work).
+`terminationGracePeriodSeconds` to the grace period that
+[Stop workers without losing work](deploys.md#stop-workers-without-losing-work)
+asks for. The defaults fit: 20 seconds, and Kubernetes' 30. For a
+`DrainTimeout` of 2 minutes, set 130.
 
 ## Count the database connections
 

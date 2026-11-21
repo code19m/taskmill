@@ -107,7 +107,7 @@ are expected ([Guarantees](../concepts/guarantees.md)), so
 | Likely cause | Check | Do |
 |---|---|---|
 | Handlers use up the pool's connections | The warning `the pool was full, so renewing leases waited` | [Size the pool](database.md#size-the-connection-pool) |
-| A pod was killed before it drained | `terminationGracePeriodSeconds` below `DrainTimeout` plus 10, or pods killed because they used too much memory (`OOMKilled`) | Raise the grace period, or the memory limit |
+| A pod was killed before it drained | `terminationGracePeriodSeconds` below the [grace period that workers need](deploys.md#stop-workers-without-losing-work), or pods killed because they used too much memory (`OOMKilled`) | Raise the grace period, or the memory limit |
 | A handler ignores its context | The log `handler ignored shutdown; releasing its task` | Make the handler return when `ctx` ends |
 | A failover or network outage of more than about 20 s | `operation still failing` during the incident | Expected: [When the database fails](database.md#when-the-database-fails) |
 | The handler finished, but its result was not saved | The log `complete tasks failed; they are rescued when their leases run out` | Expected after a database outage |

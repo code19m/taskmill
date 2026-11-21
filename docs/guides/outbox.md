@@ -110,6 +110,15 @@ To test your publisher, run the relay with a fake broker: see
 So choose the key by what must stay in order: the order ID, or the account
 ID.
 
+**A key also makes stores wait.** Each message with a key joins its key's
+[FIFO group](../concepts/glossary.md#fifo-group). So two transactions that
+store messages with the same topic and key wait for each other's commits
+([Task order and FIFO groups](ordering.md)). Choose the narrowest key that
+keeps the order you need: the order ID if only each order's events must
+stay in order, not the account ID. Never use one key for all messages: every
+store would wait in line. Leave the key empty when the order does not
+matter, and keep the transactions that store keyed messages short.
+
 ## Let consumers drop duplicates
 
 Publishing is **at least once**. For example, a worker can crash after the

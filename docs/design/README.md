@@ -30,9 +30,25 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 
 **Each page gives its decisions next to the mechanism that they explain:**
 what is so, why, and the options that we rejected. These pages are the home
-of "why", and there is no separate list of decisions. One reason lives with
-its policy instead: [Compatibility](../reference/compatibility.md#supported-go-and-postgresql-versions)
+of "why". One reason lives with its policy instead:
+[Compatibility](../reference/compatibility.md#supported-go-and-postgresql-versions)
 says why taskmill supports the versions that it does.
+
+## Decisions
+
+The main decisions, the page that holds each one's reasons, and what would
+make us look at it again:
+
+| Decision | Page | What would reopen it |
+|---|---|---|
+| The outbox is a package on the engine, in the core module | [Why the outbox is a package on the engine](#why-the-outbox-is-a-package-on-the-engine) | Volumes around 100,000 messages a second, which need a storage of its own behind the same API; or a dependency of its own, which makes it a module |
+| pgx is the only direct dependency | [Dependencies and modules](dependencies.md) | A need that the standard library and pgx cannot meet, with its reason recorded there |
+| The tables are internal: only `migrations` is public | [The product shape](#the-product-shape) | Users who need a SQL function to enqueue from other languages or from triggers |
+| Scalers read `Client.Queues` or the gauges, never the tables | [Queue statistics and health](schema-statistics.md#scalers-read-clientqueues-or-the-gauges-never-the-tables) | A scaling need that neither path meets |
+| A notification wakes every worker of its queue | [Maintenance and notifications](schema-maintenance.md#notifications) | Empty fetches that cost the database more than a coordinator would |
+| The heartbeat comes every 5 seconds, not with every wake | [Maintenance and notifications](schema-maintenance.md#notifications) | Schemas in one database that no longer pay for each other's notifications |
+| The querier interfaces, the untagged result types, `ui.New`, a missing result, and the names | [The API's shape](api-shape.md#when-we-look-at-a-point-again) | The condition of each point, in the table there |
+| The dashboard is rendered on the server, with no framework | [How the dashboard is built](#how-the-dashboard-is-built) | A dashboard that grows far beyond five pages, or needs a JSON API anyway |
 
 ## Change the docs with the code
 

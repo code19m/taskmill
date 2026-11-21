@@ -67,8 +67,8 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 - With `Queues`, the worker reads only those queues. If it leaves out the
   queue of a kind it handles, `Run` logs a warning.
 - A batch counts as one task toward `Concurrency`.
-- Size the pool for the sum of all `Concurrency` values, plus 5: see
-  [Set up the database and client](setup.md#size-the-pool).
+- Size the pool for the sum of all `Concurrency` values: see
+  [Size the connection pool](../production/database.md#size-the-connection-pool).
 
 > [!WARNING]
 > A worker takes every task from its queues, whatever its kind. If it has
@@ -176,9 +176,8 @@ sequenceDiagram
   [rescued](../concepts/glossary.md#rescue) once its lease runs out, and
   the task runs again. So `Run` returns at most about `DrainTimeout` plus
   10 seconds after its context ended.
-- Give the process a grace period of at least `DrainTimeout` plus 10
-  seconds: 30 seconds with the defaults, which is Kubernetes' default. See
-  [Kubernetes](../production/kubernetes.md).
+- Give the process a grace period that covers this: see
+  [Deploys](../production/deploys.md#stop-workers-without-losing-work).
 - For tasks that run longer than `DrainTimeout`, see
   [Run long tasks](../recipes/run-long-tasks.md).
 

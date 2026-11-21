@@ -15,7 +15,7 @@ your handlers must follow.
 | Promise | What it means for you |
 |---|---|
 | **A task commits with your data.** | A task added with `EnqueueTx` exists only if your transaction commits. No worker sees it before the commit. |
-| **No task is lost.** | A committed task runs until it is completed or dead, unless you cancel or delete it. Dead tasks stay, so you can see them. |
+| **No task is lost.** | A committed task runs until it is completed or dead, unless you cancel or delete it. Dead tasks stay, so you can see them, until the dead-task retention deletes them: 30 days by default ([`Settings.DeadRetention`](https://pkg.go.dev/github.com/code19m/taskmill#Settings)). A dead task that halts its FIFO group stays until you retry or delete it. |
 | **A crashed worker loses nothing.** | Its tasks run again on another worker, once their leases run out: up to 30 seconds, plus the [backoff](glossary.md#backoff). [How it works](how-it-works.md#what-if-a-worker-crashes) shows it. |
 | **One result per task.** | If two attempts overlap, only the one that holds the [lease](glossary.md#lease) can save its result. A late result is refused. |
 | **Database writes can happen exactly once.** | Write your data and complete the task in one transaction, with `CompleteTx`. |
@@ -30,9 +30,16 @@ your handlers must follow.
 
 - **Exactly once in general.** A worker can finish the work, then crash
   before it saves the result. The task then runs again.
-- **No overlap.** If a worker loses the database for longer than its lease,
-  another worker can start the same task while the first one still runs.
-  Only one of them can save a result.
+- **No overlap.** Two attempts of one task can run at the same time, and
+  only one of them can save a result:
+  - If a worker loses the database for longer than its lease, another
+    worker can start the task while the first one still runs.
+  - If a handler ignores its context for 5 seconds after its `Timeout`, a
+    cancel, or a lost lease, the worker abandons it
+    ([Fixed timings and limits](../reference/defaults-and-limits.md#workers)).
+    Its task can run again while the handler still runs. Not in a queue
+    with `MaxRunning`: there the task stays running until the handler
+    returns.
 - **One order across workers.** Tasks start in order, but they run at the
   same time, so they can finish in any order.
 - **Your last commits after an unsafe failover.** With asynchronous
@@ -48,9 +55,10 @@ your handlers must follow.
 |---|---|---|
 | A worker crashes after the work, before it saves the result | The lease runs out, and another worker runs the task | You cannot prevent it: make the handler safe to run twice |
 | A worker loses the database for more than about 20 seconds | The worker cannot renew its leases, so it stops its tasks. They run again, or become dead if that was their last attempt | If your database's failover takes longer than that, [Database](../production/database.md#when-the-database-fails) shows what to change, and what it costs |
-| Handlers use every connection of the pool | The worker cannot renew its leases in time | Give the pool your total concurrency plus 5 connections, or give handlers a pool of their own |
+| Handlers use every connection of the pool | The worker cannot renew its leases in time | [Size the pool](../production/database.md#size-the-connection-pool) for the worker, or give handlers a pool of their own |
+| A handler ignores its context after its `Timeout` | 5 seconds later, the worker abandons the attempt and fails it, so the task is retried while the handler may still run | Return quickly when `ctx` ends |
 | A handler ignores the end of its context at shutdown | The worker gives the task back ([release](glossary.md#release)), and it starts again on another worker | Return quickly when `ctx` ends |
-| The platform kills the worker before it [drains](glossary.md#drain) | The same as a crash | Give the process at least `DrainTimeout` plus 10 seconds to stop ([Deploys](../production/deploys.md)) |
+| The platform kills the worker before it [drains](glossary.md#drain) | The same as a crash | Give the process the grace period that [Deploys](../production/deploys.md#stop-workers-without-losing-work) asks for |
 
 ## Make your handler safe to run twice
 

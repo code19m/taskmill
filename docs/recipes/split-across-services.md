@@ -13,6 +13,12 @@ the services share one taskmill schema?"
 | Are parts of one app, such as a web process and a worker built from the same code | One schema for the app | It is one app, with one set of tasks. Modules of the app follow [Organize tasks by module](organize-tasks-by-module.md) |
 | Are not all written in Go | An HTTP endpoint or a broker in front of the Go service's tasks | Handlers are Go only: see [Work with other languages](work-with-other-languages.md) |
 
+One database has a cost: the services share its load and its failures, and
+services that enqueue into each other's schemas must stay within one
+taskmill release of each other
+([Check versions and privileges](#check-versions-and-privileges)). If that
+coupling is too tight, give each service its own database.
+
 ## The recommended way
 
 Each service migrates and uses its own schema. The orders service also

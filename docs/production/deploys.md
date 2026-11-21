@@ -79,6 +79,8 @@ Do three things:
 
 2. Give the process a grace period of at least `DrainTimeout` plus 10
    seconds: 30 seconds with the defaults, which is Kubernetes' default too.
+   That is the most that `Run` takes to return
+   ([each step](../guides/workers-and-queues.md#stop-a-worker-cleanly)).
 3. If tasks often run longer than `DrainTimeout`, raise both, or split the
    work into shorter tasks. See [Run long tasks](../recipes/run-long-tasks.md).
 
@@ -175,7 +177,7 @@ that never pauses:
 |---|---|
 | A function that enqueues | Create the pool and the `Client` once per instance, outside the request handler: `NewClient` checks the schema once per cold start. Give the pool only the connections that one instance's requests use at the same time, such as 2 on Lambda. Many instances open many connections, so put RDS Proxy or PgBouncer in front of the database ([Connection poolers](connection-poolers.md)) |
 | A worker that runs all the time | A process that stays up, with its CPU always on: on Cloud Run, instance-based billing, which keeps the CPU allocated, and at least one instance. A worker whose CPU slows down between requests can't renew its leases, so other workers run its tasks again |
-| A worker with a time limit: a Kubernetes CronJob, Cloud Run jobs, or one Lambda invocation (15 minutes at most) | Pass `Run` a context with a deadline that leaves `DrainTimeout` plus 10 seconds before the platform's limit. When the deadline comes, the worker stops as it does on `SIGTERM` |
+| A worker with a time limit: a Kubernetes CronJob, Cloud Run jobs, or one Lambda invocation (15 minutes at most) | Pass `Run` a context with a deadline that leaves the grace period of [step 2 above](#stop-workers-without-losing-work) before the platform's limit. When the deadline comes, the worker stops as it does on `SIGTERM` |
 
 Delayed tasks, retries, and schedules move only while some worker runs:
 the [maintainer](../concepts/glossary.md#maintainer) makes them due. With
