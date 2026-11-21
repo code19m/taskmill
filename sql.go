@@ -99,6 +99,7 @@ type statements struct {
 	nextDue          string
 	wakeQueues       string
 	rescue           string
+	rescueBackoff    string
 	deleteFinished   string
 	deleteDedupeKeys string
 	deleteWorkers    string
@@ -216,6 +217,7 @@ func newStatements(schema string) *statements {
 		nextDue:          q(nextDueSQL),
 		wakeQueues:       q(wakeQueuesSQL),
 		rescue:           q(rescueSQL),
+		rescueBackoff:    q(rescueBackoffSQL),
 		deleteFinished:   q(deleteFinishedSQL),
 		deleteDedupeKeys: q(deleteDedupeKeysSQL),
 		deleteWorkers:    q(deleteWorkersSQL),

@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/code19m/taskmill/internal/recovered"
 )
 
@@ -32,7 +34,7 @@ func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 	t.cancel = cancel
 	t.mu.Unlock()
 
-	if t.cancelRequested.Load() {
+	if t.att.cancelRequested.Load() {
 		cancel(ErrTaskCanceled)
 	}
 	if t.lost.Load() {
@@ -51,6 +53,7 @@ func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 		return
 	}
 
+	w.counts.started.Add(1)
 	ctx, cancelTimeout := context.WithTimeoutCause(ctx, t.reg.opts.Timeout, ErrAttemptTimeout)
 	defer cancelTimeout()
 	start := time.Now()
@@ -66,6 +69,7 @@ func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 // runs in its own goroutine, and the batch starts once every chain has
 // either reached the handler or returned early.
 func (w *Worker) runBatch(parent, record context.Context, tasks []*liveAttempt) {
+	w.counts.started.Add(int64(len(tasks)))
 	reg := tasks[0].reg
 	ctx, cancel := context.WithCancelCause(parent)
 	defer cancel(nil)
@@ -189,6 +193,20 @@ func (w *Worker) runChain(ctx, record context.Context, c *batchChains, i int, t 
 // and watch only warns. An attempt that lost its lease is abandoned all the
 // same: its task may run again anyway.
 func (w *Worker) watch(ctx, record context.Context, ts []*liveAttempt, start time.Time) (stop func()) {
+	// The slot of Run's attempts counts as stuck from the end of the grace
+	// until the handler returns, for Stats and Health: state goes from
+	// watching to stuck to finished, or from watching to finished.
+	q := w.queues[ts[0].info.Queue]
+	if ts[0].direct {
+		q = nil // RunTask's attempts take no slot
+	}
+	const (
+		watching int32 = iota
+		stuck
+		finished
+	)
+	var state atomic.Int32
+
 	returned := make(chan struct{})
 	stopAfter := context.AfterFunc(ctx, func() {
 		cause := context.Cause(ctx)
@@ -204,6 +222,12 @@ func (w *Worker) watch(ctx, record context.Context, ts []*liveAttempt, start tim
 		case <-grace.C:
 		}
 
+		if q != nil {
+			q.stuck.Add(1)
+			if !state.CompareAndSwap(watching, stuck) {
+				q.stuck.Add(-1) // the handler returned meanwhile
+			}
+		}
 		for _, t := range ts {
 			if q := w.queues[t.info.Queue]; q != nil && q.maxRunning.Load() > 0 && !errors.Is(cause, ErrLeaseLost) {
 				w.logger.LogAttrs(record, slog.LevelWarn, "handler ignored its context; its task keeps running because its queue has a MaxRunning limit",
@@ -219,6 +243,9 @@ func (w *Worker) watch(ctx, record context.Context, ts []*liveAttempt, start tim
 		once.Do(func() {
 			stopAfter()
 			close(returned)
+			if state.Swap(finished) == stuck {
+				q.stuck.Add(-1)
+			}
 		})
 	}
 }
@@ -233,6 +260,7 @@ func (w *Worker) abandon(record context.Context, t *liveAttempt, cause error, st
 		return
 	}
 
+	w.counts.abandoned.Add(1)
 	w.logger.LogAttrs(record, slog.LevelWarn, "handler ignored its context; abandoning its attempt",
 		slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, cause))
 	err := fmt.Errorf("the handler did not return %s after its context ended: %w", w.timing.shutdownGrace, cause)
@@ -348,7 +376,7 @@ func classify(t *liveAttempt, err, cause error) outcome {
 		return outcome{kind: outcomeDiscard}
 	case err == nil:
 		return outcome{kind: outcomeComplete}
-	case t.cancelRequested.Load():
+	case t.att.cancelRequested.Load():
 		return outcome{kind: outcomeCancel}
 	case errors.Is(cause, ErrShutdown):
 		return outcome{kind: outcomeRelease}
@@ -396,7 +424,7 @@ func classify(t *liveAttempt, err, cause error) outcome {
 // canceled while it waited. After any of these, the next worker without a
 // handler starts a new wait.
 func (w *Worker) unknownKind(ctx context.Context, t *liveAttempt) outcome {
-	limit := w.timing.noHandlerWait
+	limit := w.cfg.NoHandlerWait
 	var since time.Time
 	for _, e := range slices.Backward(t.info.Errors) {
 		if e.Code != CodeNoHandler {
@@ -523,6 +551,7 @@ func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 	defer w.untrack(t)
 
 	if o.kind == outcomeDiscard && t.att.completedInTx.Load() {
+		w.counts.succeeded.Add(1)
 		w.tally.add(t.info.Queue, 1, 0) // the handler's transaction completed it
 	}
 	if o.kind == outcomeDiscard || o.kind == outcomeComplete {
@@ -533,33 +562,11 @@ func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 		w.released.Add(1)
 	}
 
-	// Only a grouped task's outcome takes several statements that must
-	// commit together. Their transaction waits for a row that another
-	// transaction holds, such as the group's while a transaction enqueues
-	// into it, for lockWait at most. Meanwhile it holds the task's row,
-	// which the renewal of the lease skips: a longer wait could outlast the
-	// lease, and the rescue would record a lost lease in place of this
-	// outcome. So the transaction gives up, and tries again, for as long as
-	// the row is held and the lease renewed in between.
 	var ended attemptEnd
 	try := func(ctx context.Context) error {
 		var err error
-		if t.info.GroupKey == "" {
-			ended, err = w.recordTx(ctx, pgxExecutor{q: w.client.pool}, t, o)
-			return err
-		}
-		return w.client.inTx(ctx, func(q querier) error {
-			if _, err := q.exec(ctx, lockTimeoutSQL, w.timing.lockTimeout()); err != nil {
-				return err
-			}
-			if ended, err = w.recordTx(ctx, q, t, o); err != nil {
-				return err
-			}
-			// The timeout was for the rows. At the commit, a notification
-			// waits its turn, as every other one does: see liftLockTimeout.
-			_, err = q.exec(ctx, liftLockTimeout)
-			return err
-		})
+		ended, err = w.recordOnce(ctx, t, o)
+		return err
 	}
 	err := w.whileLeased(ctx, []*liveAttempt{t}, try)
 	for delay := blockedRetryDelay; pgCode(err) == codeLockNotAvailable; delay = min(2*delay, blockedRetryMax) {
@@ -571,14 +578,51 @@ func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 	}
 	switch {
 	case err == nil && ended == endedFailed:
+		w.counts.failed.Add(1)
 		w.tally.add(t.info.Queue, 0, 1)
 	case err == nil && ended == endedCompleted:
+		w.counts.succeeded.Add(1)
 		w.tally.add(t.info.Queue, 1, 0)
 	}
 	if err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "record attempt failed; the task is rescued when its lease runs out",
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, err))
 	}
+}
+
+// recordOnce makes one try of record. Only a grouped task's outcome takes
+// several statements that must commit together. Their transaction waits for
+// a row that another transaction holds, such as the group's while a
+// transaction enqueues into it, for lockWait at most. Meanwhile it holds the
+// task's row, which the renewal of the lease skips: a longer wait could
+// outlast the lease, and the rescue would record a lost lease in place of
+// this outcome. So the transaction gives up, and record tries again, for as
+// long as the row is held and the lease renewed in between.
+func (w *Worker) recordOnce(ctx context.Context, t *liveAttempt, o outcome) (attemptEnd, error) {
+	conn, err := w.acquire(ctx)
+	if err != nil {
+		return endedOther, err
+	}
+	defer conn.Release()
+
+	if t.info.GroupKey == "" {
+		return w.recordTx(ctx, pgxExecutor{q: conn}, t, o)
+	}
+	ended := endedOther
+	err = pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+		q := pgxExecutor{q: tx}
+		if _, err := q.exec(ctx, lockTimeoutSQL, w.timing.lockTimeout()); err != nil {
+			return err
+		}
+		if ended, err = w.recordTx(ctx, q, t, o); err != nil {
+			return err
+		}
+		// The timeout was for the rows. At the commit, a notification waits
+		// its turn, as every other one does: see liftLockTimeout.
+		_, err = q.exec(ctx, liftLockTimeout)
+		return err
+	})
+	return ended, err
 }
 
 // attemptEnd is how recording an outcome ended an attempt, for the activity.

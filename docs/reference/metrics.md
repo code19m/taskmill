@@ -91,6 +91,31 @@ seconds, and the gauges show its latest count.
   report nothing for that collection, and the error goes to OpenTelemetry's
   error handler, `otel.Handle`.
 
+## Worker counters
+
+`Instrumentation.ObserveWorker` reports these, read from the worker's memory
+at each collection, with `Worker.Stats`. They count since the worker was
+created. Each task of a batch counts as one attempt.
+
+| Metric | Type | Unit | What it counts |
+|---|---|---|---|
+| `taskmill.worker.attempts.started`<br/>`taskmill_worker_attempts_started_total` | Counter | `{attempt}` | Attempts whose handler the worker started |
+| `taskmill.worker.attempts.succeeded`<br/>`taskmill_worker_attempts_succeeded_total` | Counter | `{attempt}` | Attempts whose success the worker recorded |
+| `taskmill.worker.attempts.failed`<br/>`taskmill_worker_attempts_failed_total` | Counter | `{attempt}` | Attempts whose failure the worker recorded: their tasks wait to retry, or are dead |
+| `taskmill.worker.leases.lost`<br/>`taskmill_worker_leases_lost_total` | Counter | `{attempt}` | Attempts that lost their [lease](../concepts/glossary.md#lease). Their tasks may run twice |
+| `taskmill.worker.handlers.abandoned`<br/>`taskmill_worker_handlers_abandoned_total` | Counter | `{attempt}` | Attempts whose handler did not return 5 seconds after its context ended, by its `Timeout`, a cancel, a lost lease, or the worker's stop |
+| `taskmill.worker.completions.blocked`<br/>`taskmill_worker_completions_blocked_total` | Counter | `{completion}` | Completions that waited longer than the lease for a row that another transaction held |
+| `taskmill.worker.pool.waits`<br/>`taskmill_worker_pool_waits_total` | Counter | `{wait}` | Fetches and records of failed attempts that found every connection of the pool in use |
+| `taskmill.worker.slots`<br/>`taskmill_worker_slots` | UpDownCounter | `{slot}` | The slots of the worker's queues, one per unit of `Concurrency`, by `taskmill.slot.state`: `free`, `running`, or `stuck`, held by a handler that did not return 5 seconds after its context ended |
+
+- **They have no other attributes.** The workers of one process add up. A
+  worker counts from 0, so replacing it with a new one looks like a reset
+  of the counters, which `rate` and `increase` allow for.
+- **A collection costs nothing** but a read of the worker's memory.
+- **An attempt that is still running** counts in `started`, and in neither
+  `succeeded` nor `failed`. Nor does an attempt that snoozed, was
+  canceled, went back to its queue, or lost its lease.
+
 ## Aggregate the gauges with `max`
 
 The queue gauges describe the whole
@@ -99,7 +124,8 @@ Every process reads the same stored count, so every process reports the
 same values. If 5 pods report them, `sum` shows 5 times the real number. Use
 `max` to merge the pods, then `sum` across queues if you need a total.
 
-The counters and histograms are per process, so `sum` is right for them.
+The counters, histograms, and worker slots are per process, so `sum` is
+right for them.
 
 ## Dashboard queries
 
@@ -143,10 +169,17 @@ max by (messaging_destination_name) (taskmill_queue_lag_seconds{job="shop-worker
 
 # Seconds since the maintainer last counted
 max(taskmill_stats_age_seconds{job="shop-worker"})
+
+# Share of the workers' slots in use
+sum(taskmill_worker_slots{job="shop-worker", taskmill_slot_state!="free"})
+  / sum(taskmill_worker_slots{job="shop-worker"})
+
+# Lost leases per second
+sum(rate(taskmill_worker_leases_lost_total{job="shop-worker"}[5m]))
 ```
 
 `shop-api` stands for the service that enqueues, and `shop-worker` for the
-one that runs the workers and calls `ObserveQueues`.
+one that runs the workers and calls `ObserveQueues` and `ObserveWorker`.
 
 ## Prometheus names
 

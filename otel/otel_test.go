@@ -558,6 +558,58 @@ func TestObserveQueuesReportsStuckWork(t *testing.T) {
 		[]string{relay + ": 0", orders + ": 0", other + ": 0"})
 }
 
+func TestObserveWorkerRefusesANilWorker(t *testing.T) {
+	t.Parallel()
+	in := tmotel.New(&tmotel.Config{MeterProvider: sdkmetric.NewMeterProvider()})
+	if _, err := in.ObserveWorker(nil); !errors.Is(err, taskmill.ErrInvalidArgument) {
+		t.Fatalf("got %v, want ErrInvalidArgument", err)
+	}
+}
+
+func TestObserveWorkerReportsItsCounters(t *testing.T) {
+	t.Parallel()
+	e := setup(t)
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[sendEmail](func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+		if task.Args.To == "nobody" {
+			return errors.New("no such address")
+		}
+		return nil
+	}), nil)
+	w := e.worker(t, &hs)
+	reg, err := e.in.ObserveWorker(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reg.Unregister() })
+
+	for _, to := range []string{"someone", "nobody"} {
+		res, err := e.client.Enqueue(t.Context(), sendEmail{To: to}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.RunTask(t.Context(), res.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for name, want := range map[string]string{
+		"taskmill.worker.attempts.started":    ": 2",
+		"taskmill.worker.attempts.succeeded":  ": 1",
+		"taskmill.worker.attempts.failed":     ": 1",
+		"taskmill.worker.leases.lost":         ": 0",
+		"taskmill.worker.handlers.abandoned":  ": 0",
+		"taskmill.worker.completions.blocked": ": 0",
+		"taskmill.worker.pool.waits":          ": 0",
+	} {
+		wantPoints(t, name, e.points(t, name), []string{want})
+	}
+	// The worker serves the default queue, with 10 slots, and does not run.
+	wantPoints(t, "taskmill.worker.slots", e.points(t, "taskmill.worker.slots"), []string{
+		"taskmill.slot.state=free: 10", "taskmill.slot.state=running: 0", "taskmill.slot.state=stuck: 0",
+	})
+}
+
 // run runs a worker of client with cfg until the test ends, or until the
 // returned function stops it.
 func run(t *testing.T, client *taskmill.Client, cfg *taskmill.WorkerConfig) (stop func()) {
@@ -756,6 +808,35 @@ func TestPublisherThatPanicsEndsItsSpans(t *testing.T) {
 
 // With no span to store, as under a no-op tracer, the trace context that the
 // metadata or the headers brought is still removed: it is another trace's.
+// An enqueue middleware may set a task's metadata to nil. The span's context
+// still reaches the task.
+func TestEnqueueMiddlewareAfterOneThatClearedTheMetadata(t *testing.T) {
+	t.Parallel()
+	in := tmotel.New(&tmotel.Config{
+		TracerProvider: sdktrace.NewTracerProvider(),
+		MeterProvider:  sdkmetric.NewMeterProvider(),
+		Propagator:     propagation.TraceContext{},
+	})
+	removeMetadata := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		for _, task := range tasks {
+			task.Metadata = nil
+		}
+		return next(ctx)
+	}
+	client := taskmilltest.NewClient(t, testPool(t), &taskmill.ClientConfig{
+		EnqueueMiddleware: []taskmill.EnqueueMiddleware{removeMetadata, in.EnqueueMiddleware},
+	})
+
+	res, err := client.Enqueue(t.Context(), sendEmail{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := client.Get(t.Context(), res.ID)
+	if err != nil || info.Metadata["traceparent"] == "" {
+		t.Errorf("got the metadata %q, %v, want the span's traceparent", info.Metadata, err)
+	}
+}
+
 func TestWithoutASpanAnOldTraceContextIsRemoved(t *testing.T) {
 	t.Parallel()
 	in := tmotel.New(&tmotel.Config{

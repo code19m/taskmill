@@ -457,7 +457,6 @@ func TestDefaultTiming(t *testing.T) {
 		{"settings", d.settings, 10 * time.Second},
 		{"shutdownGrace", d.shutdownGrace, 5 * time.Second},
 		{"noHandlerSnooze", d.noHandlerSnooze, time.Minute},
-		{"noHandlerWait", d.noHandlerWait, time.Hour},
 		{"reconnectMin", d.reconnectMin, time.Second},
 		{"reconnectMax", d.reconnectMax, 30 * time.Second},
 		{"failureReport", d.failureReport, time.Minute},

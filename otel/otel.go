@@ -14,8 +14,9 @@
 // Both record metrics: messaging.client.sent.messages and
 // messaging.client.operation.duration for enqueues, and
 // messaging.process.duration for attempts. [Instrumentation.ObserveQueues]
-// adds gauges of the installation's queues, and [Instrumentation.Publisher]
-// traces what the outbox publishes to a broker.
+// adds gauges of the installation's queues, [Instrumentation.ObserveWorker]
+// counters of a worker, such as its lost leases, and
+// [Instrumentation.Publisher] traces what the outbox publishes to a broker.
 //
 // Attributes are those of the conventions, with messaging.system "taskmill"
 // and the queue as messaging.destination.name, plus taskmill.task.kind and,
@@ -132,11 +133,12 @@ func New(cfg *Config) *Instrumentation {
 
 // EnqueueMiddleware is a [taskmill.EnqueueMiddleware] that traces each
 // enqueue with a producer span, "send {queue}", and stores the span's context
-// in the metadata of every task it enqueues, replacing any already there. A
-// batch has one span: its messaging.batch.message_count says how many tasks
-// it held, and its name and attributes leave out the queue or kind when its
-// tasks differ in them. Inside the caller's transaction, the span ends
-// before the transaction commits.
+// in the metadata of every task it enqueues, replacing any already there,
+// also when an earlier middleware set the metadata to nil. A batch has one
+// span: its messaging.batch.message_count says how many tasks it held, and
+// its name and attributes leave out the queue or kind when its tasks differ
+// in them. Inside the caller's transaction, the span ends before the
+// transaction commits.
 func (in *Instrumentation) EnqueueMiddleware(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
 	queue, kind := tasks[0].Queue, tasks[0].Kind
 	for _, t := range tasks[1:] {
@@ -172,6 +174,9 @@ func (in *Instrumentation) EnqueueMiddleware(ctx context.Context, tasks []*taskm
 
 	fields := in.propagator.Fields()
 	for _, t := range tasks {
+		if t.Metadata == nil { // an earlier middleware removed it
+			t.Metadata = make(map[string]string, len(fields))
+		}
 		deleteFields(t.Metadata, fields)
 		in.propagator.Inject(ctx, propagation.MapCarrier(t.Metadata))
 	}

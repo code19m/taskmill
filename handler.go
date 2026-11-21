@@ -57,10 +57,11 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 //
 // ctx is canceled when the batch times out or the worker shuts down, with
 // the cause [ErrAttemptTimeout] or [ErrShutdown], but not when one of its
-// tasks is canceled or loses its lease: the batch runs to the end. Then a
-// canceled task becomes completed if the batch returned nil for it, because
-// the work was done, and canceled otherwise; the result of a task that lost
-// its lease is discarded.
+// tasks is canceled or loses its lease: the batch runs to the end. A task's
+// [Task.CancelRequested] reports a cancel request, so that the batch can
+// skip that task's work. A canceled task becomes completed if the batch
+// returned nil for it, because the work was done, and canceled otherwise;
+// the result of a task that lost its lease is discarded.
 //
 // Register a batch handler with [AddBatchHandler]. The [batch guide] shows
 // one, and says when a batch is worth it.
@@ -95,8 +96,9 @@ type HandlerOptions struct {
 	Timeout time.Duration
 
 	// Retry decides the delay before each retry. A task whose worker lost its
-	// lease is retried with the default instead, because the maintainer that
-	// rescues it knows no handler's options. Default: [ExponentialBackoff]{}.
+	// lease is rescued by the maintainer, the worker that leads maintenance:
+	// it is retried with this policy if that worker has a handler for the
+	// kind, and with the default otherwise. Default: [ExponentialBackoff]{}.
 	Retry RetryPolicy
 
 	// BatchSize is the most tasks a [BatchHandler] receives in one call. It
@@ -365,7 +367,9 @@ func (hs *Handlers) fail(err error) {
 // [ExponentialBackoff].
 //
 // The worker calls the policy each time a failed attempt leads to a retry,
-// before it records the failure. So Backoff must return fast, with no I/O.
+// before it records the failure. The maintainer calls it too, in the
+// transaction that rescues the tasks whose workers lost their leases. So
+// Backoff must return fast, with no I/O.
 //
 // The [guide to retries] shows how to change the wait, and what happens to a
 // task with no attempts left.

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -314,7 +315,7 @@ func TestHeldTaskDoesNotHoldUpOtherCompletions(t *testing.T) {
 	e := newEnv(t).withLogger(t, slog.New(logs))
 	release := make(chan struct{})
 	started := make(chan struct{}, 10)
-	runWorker(t, e, &taskmill.WorkerConfig{
+	w := newWorker(t, e, &taskmill.WorkerConfig{
 		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
 			started <- struct{}{}
 			<-release
@@ -324,6 +325,7 @@ func TestHeldTaskDoesNotHoldUpOtherCompletions(t *testing.T) {
 		LeaseDuration: time.Second,
 		NoMaintainer:  true,
 	})
+	startWorker(t, w)
 
 	var ids []int64
 	for range 5 {
@@ -356,6 +358,9 @@ func TestHeldTaskDoesNotHoldUpOtherCompletions(t *testing.T) {
 	if n := logs.count(waits); n != 1 {
 		t.Errorf("the held completion was logged %d times, want once", n)
 	}
+	if n := w.Stats().CompletionsBlocked; n != 1 {
+		t.Errorf("the worker counted %d blocked completions, want 1", n)
+	}
 }
 
 // The failure of a grouped task's last attempt halts its group, so it waits
@@ -386,11 +391,13 @@ func TestFailureOfAGroupedTaskWaitsForItsGroupWithItsLease(t *testing.T) {
 	startWorker(t, w)
 	recv(t, failed, "the attempt to fail")
 
-	// Longer than the lease.
-	time.Sleep(3 * lease)
-	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND lease_expires_at > now()", id); n != 1 {
-		t.Fatal("the lease ran out while the failure waited for the group")
+	var since time.Time
+	if err := e.pool.QueryRow(t.Context(), "SELECT now()").Scan(&since); err != nil {
+		t.Fatal(err)
 	}
+	waitFor(t, "the lease to be renewed for longer than a lease while the failure waits", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND lease_expires_at > $2", id, since.Add(3*lease)) == 1
+	})
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -400,6 +407,43 @@ func TestFailureOfAGroupedTaskWaitsForItsGroupWithItsLease(t *testing.T) {
 		t.Fatalf("the task's last error is %q, want the handler's", last.Message)
 	}
 }
+
+// A completion that the database takes long for, longer than a third of
+// the lease, still goes through: the task runs once.
+func TestSlowCompletionCompletesTheTaskOnce(t *testing.T) {
+	t.Parallel()
+	e := newTracedEnv(t, &slowStatement{fragment: "SELECT DISTINCT id, lease_token FROM unnest", delay: 1500 * time.Millisecond})
+	var runs atomic.Int32
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			runs.Add(1)
+			return nil
+		}, nil),
+		Queues:        defaultQueue(1),
+		LeaseDuration: 3 * time.Second,
+	})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 || runs.Load() != 1 {
+		t.Fatalf("completed on attempt %d after %d runs, want one", info.Attempt, runs.Load())
+	}
+}
+
+// slowStatement makes each statement that contains fragment take delay
+// longer, as a busy database would.
+type slowStatement struct {
+	fragment string
+	delay    time.Duration
+}
+
+func (s *slowStatement) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, s.fragment) {
+		time.Sleep(s.delay)
+	}
+	return ctx
+}
+
+func (*slowStatement) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 	t.Parallel()

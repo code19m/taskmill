@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"slices"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // completer records successful attempts in batches, on record, until ctx
@@ -69,6 +71,7 @@ func (w *Worker) warnBlocked(ctx context.Context, blocked []*liveAttempt) {
 			t.blockedSince = now
 		case !t.blockedWarned && now.Sub(t.blockedSince) > w.cfg.LeaseDuration:
 			t.blockedWarned = true
+			w.counts.blocked.Add(1)
 			w.logger.LogAttrs(ctx, slog.LevelWarn, "completion waits for a row that another transaction holds",
 				slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind),
 				slog.Duration(logKeyDuration, now.Sub(t.blockedSince)))
@@ -152,8 +155,12 @@ func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (block
 		var done []completedTask
 		var held map[int64]bool
 		err := w.whileLeased(ctx, plain, func(ctx context.Context) error {
-			var err error
-			done, held, err = w.client.completeSkipping(ctx, w.logger, pgxExecutor{q: w.client.pool}, completionsOf(plain))
+			conn, err := w.acquire(ctx)
+			if err != nil {
+				return err
+			}
+			defer conn.Release()
+			done, held, err = w.client.completeSkipping(ctx, w.logger, pgxExecutor{q: conn}, completionsOf(plain))
 			return err
 		})
 		if err == nil {
@@ -169,9 +176,14 @@ func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (block
 	var done []completedTask
 	var heldGroups []*liveAttempt
 	err := w.whileLeased(ctx, grouped, func(ctx context.Context) error {
-		return w.client.inTx(ctx, func(q querier) error {
+		conn, err := w.acquire(ctx)
+		if err != nil {
+			return err
+		}
+		defer conn.Release()
+		return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 			var err error
-			heldGroups, done, err = w.completeLocked(ctx, q, grouped)
+			heldGroups, done, err = w.completeLocked(ctx, pgxExecutor{q: tx}, grouped)
 			return err
 		})
 	})
@@ -287,6 +299,7 @@ func (w *Worker) afterComplete(ctx context.Context, ts []*liveAttempt, done []co
 	}
 
 	if err == nil {
+		w.counts.succeeded.Add(int64(len(done)))
 		w.countCompleted(done)
 		w.madeRoom(done)
 	}

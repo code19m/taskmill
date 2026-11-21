@@ -471,6 +471,57 @@ func TestRescueCapsTheBackoffOfManyAttempts(t *testing.T) {
 	}
 }
 
+// The rescue runs once per maintenance interval, as the election does.
+func TestRescueRunsEveryInterval(t *testing.T) {
+	t.Parallel()
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	runWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+
+	const rescue, election = "'code', 'lease_lost'", "leader AS l (name, worker_id"
+	sent.reset()
+	waitFor(t, "20 renewals of the maintainer's lease", func() bool { return sent.count(election) >= 20 })
+	if rescues, elections := sent.count(rescue), sent.count(election); 4*rescues < 3*elections {
+		t.Errorf("%d rescues in the time of %d renewals, want about as many", rescues, elections)
+	}
+}
+
+// The maintainer that rescues a task retries it after the backoff of the
+// kind's retry policy, if it has a handler for the kind, and after the
+// default backoff otherwise.
+func TestRescueRetriesAfterTheKindsBackoff(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	slow := taskmill.ExponentialBackoff{Base: 5 * time.Hour, Max: 5 * time.Hour}
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+		return nil
+	}, &taskmill.HandlerOptions{Retry: slow})})
+
+	crashed := func(kind string) int64 {
+		return int64(e.count(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+		                                               lease_expires_at, attempted_at, attempted_by)
+		                         VALUES ('default', $1, 'running', now(), '{}', 5, 1, 1,
+		                                 now() - interval '1 second', now(), 'crashed')
+		                         RETURNING id`, kind))
+	}
+	handled, unknown := crashed("email.send"), crashed("report.build")
+	taskmill.Rescue(t.Context(), w)
+
+	for _, c := range []struct {
+		id       int64
+		min, max time.Duration
+	}{
+		{handled, 4 * time.Hour, 6 * time.Hour},
+		{unknown, 0, 2 * time.Second}, // the default after a first attempt: 1 second
+	} {
+		info := e.get(t, c.id)
+		if d := time.Until(info.RunAt); info.State != taskmill.StateRetryable || d < c.min || d > c.max {
+			t.Errorf("task of %s: %s, retry in %s; want retryable in %s to %s", info.Kind, info.State, d, c.min, c.max)
+		}
+	}
+}
+
 func TestPromotionStaysOnItsIndexBesideABacklog(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -1316,6 +1367,36 @@ func TestSlowRetentionDelaysNeitherPromotionNorStatistics(t *testing.T) {
 	if err := reader.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// The maintainer renews its lease apart from its work: a rescue or a pass
+// over the schedules that takes longer than the lease does not let the role
+// change hands.
+func TestSlowRescueKeepsTheMaintainersLease(t *testing.T) {
+	t.Parallel()
+	slow := &beforeStatement{fragment: "'code', 'lease_lost'"} // the rescue
+	e := newTracedEnv(t, slow)
+	held, release := make(chan struct{}), make(chan struct{})
+	hold := func() {
+		close(held)
+		<-release
+	}
+	slow.call.Store(&hold)
+
+	const lease = 500 * time.Millisecond
+	w := newWorker(t, e, &taskmill.WorkerConfig{})
+	taskmill.SetTiming(w, taskmill.Timing{LeaderLease: lease})
+	startWorker(t, w)
+	t.Cleanup(sync.OnceFunc(func() { close(release) })) // before the worker stops
+
+	recv(t, held, "the maintainer's first rescue")
+	var since time.Time
+	if err := e.pool.QueryRow(t.Context(), "SELECT now()").Scan(&since); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the lease to be renewed while the rescue is held", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.leader WHERE name = 'maintainer' AND expires_at > $1", since.Add(3*lease)) == 1
+	})
 }
 
 // A failover can drop the packets of the old server's connections without

@@ -198,6 +198,28 @@ func TestFetchThatFillsABatchSaysThatMoreMayWait(t *testing.T) {
 	}
 }
 
+// A fetch takes at most 1,000 tasks. A queue whose limit allows more, with
+// more slots free, has more tasks to fetch once it took 1,000: they must not
+// wait for the next poll.
+func TestFetchAtItsMostSaysThatMoreMayWait(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	e.limitDefaultQueue(t, 5000)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(2000), NoMaintainer: true})
+	params := make([]taskmill.EnqueueParams, 1100)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{}}
+	}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
+	}
+
+	n, more, atLimit, err := taskmill.Fetch(t.Context(), w, taskmill.DefaultQueue, 2000, 5000)
+	if err != nil || n != 1000 || !more || atLimit {
+		t.Errorf("took %d tasks, more %v, at the limit %v, %v; want 1,000, and more", n, more, atLimit, err)
+	}
+}
+
 // A wait for a row before a task is taken must not be taken off the task's
 // lease: the task would start with a lease that is almost over, and be
 // rescued while it runs.

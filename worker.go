@@ -26,9 +26,13 @@ const (
 	defaultLeaseDuration = 30 * time.Second
 	defaultPollInterval  = time.Second
 	defaultDrainTimeout  = 20 * time.Second
+	defaultNoHandlerWait = time.Hour
 	defaultConcurrency   = 10
+	poolSpare            = 5 // connections of the pool for the worker's own statements, beyond its Concurrency
 
 	minLeaseDuration  = 100 * time.Millisecond
+	minNoHandlerWait  = time.Minute
+	maxNoHandlerWait  = 7 * 24 * time.Hour
 	recordTimeout     = 30 * time.Second       // bound on one try to record a result
 	recordRetryFirst  = 100 * time.Millisecond // first wait before trying to record a result again
 	recordRetryMax    = 2 * time.Second        // longest wait between those tries
@@ -55,7 +59,6 @@ type timing struct {
 	settings        time.Duration // how often queue settings are reloaded
 	shutdownGrace   time.Duration // how long canceled attempts get to return before release
 	noHandlerSnooze time.Duration // how long a task of an unknown kind is snoozed at a time
-	noHandlerWait   time.Duration // how long it waits for a handler before it becomes dead
 	reconnectMin    time.Duration // first wait before reconnecting the listener
 	reconnectMax    time.Duration // longest wait before reconnecting the listener
 	failureReport   time.Duration // how often an operation that keeps failing logs, at most
@@ -79,7 +82,6 @@ var defaultTiming = timing{
 	settings:        10 * time.Second,
 	shutdownGrace:   5 * time.Second,
 	noHandlerSnooze: time.Minute,
-	noHandlerWait:   time.Hour,
 	reconnectMin:    time.Second,
 	reconnectMax:    30 * time.Second,
 	failureReport:   time.Minute,
@@ -105,9 +107,13 @@ var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with
 // typical; it also takes part in electing the maintainer, which promotes due
 // tasks, rescues expired leases, runs schedules, and applies retention.
 //
-// A worker uses the pool of its [Client], plus one connection of its own for
-// notifications. Run may be called again after it returned, but not while it
-// runs.
+// A worker uses the pool of its [Client]. While Run runs, if the pool has at
+// least the worker's total Concurrency plus 5 connections, the worker keeps
+// one of them idle in reserve: a renewal of leases that finds every other
+// connection in use, as when handlers that share the pool hold them, runs
+// on it, so that leases do not run out. The worker also has one connection
+// of its own for notifications.
+// Run may be called again after it returned, but not while it runs.
 //
 // The [guide to workers and queues] shows how to choose the queues, limit
 // how many tasks run, and stop a worker cleanly.
@@ -154,7 +160,9 @@ type Worker struct {
 	completions   chan *liveAttempt // successful attempts of Run, for the completer
 	completerDone chan struct{}     // closed when the current Run's completer returns
 
-	poolWarned atomic.Int64 // when renewing leases last warned that the pool was full, in Unix nanoseconds
+	counts     counters     // what Stats reports
+	reserve    reserve      // the connection that Run keeps for renewals and check-ins that find the pool full
+	poolWarned atomic.Int64 // when the worker last warned that it waited for a full pool, in Unix nanoseconds
 	noHandler  kindWarnings // the kinds without a handler whose tasks the worker met
 
 	// The failures of operations that the worker repeats, which it logs
@@ -229,14 +237,26 @@ type WorkerConfig struct {
 
 	// DrainTimeout is how long Run waits for running tasks after its context
 	// is canceled, before canceling their contexts and, 5 seconds later,
-	// releasing them. Run then has 5 seconds more to record the results that
-	// are left, release those tasks, and unregister. What it cannot record by
-	// then, as when the database does not answer, is rescued once its lease
-	// runs out, and the task runs again. So Run returns at most about
-	// DrainTimeout plus 10 seconds after its context is canceled. Keep
+	// releasing them. Run then has 5 seconds more at most to record the
+	// results that are left, release those tasks, give up the maintainer's
+	// role, and unregister. What it cannot record by then, as when the
+	// database does not answer, is rescued once its lease runs out, and the
+	// task runs again. So Run returns at most about DrainTimeout plus 10
+	// seconds after its context is canceled. Keep
 	// DrainTimeout at least 10 seconds below the time the platform gives a
 	// stopping process. It must not be negative. Default: 20 seconds.
 	DrainTimeout time.Duration
+
+	// NoHandlerWait is how long a task of a kind that this worker has no
+	// handler for waits for a worker that has one, before this worker makes
+	// it dead with [CodeUnknownKind]. Meanwhile the worker snoozes the task 1
+	// minute at a time, without using its attempts. The wait counts from
+	// the first time a worker met the task without a handler: see
+	// [CodeNoHandler]. In a rolling deploy that adds a kind, the workers of
+	// the old release meet its tasks, so their wait is the one that counts:
+	// give them, a release ahead, a wait longer than the whole rollout,
+	// canary included. Minimum: 1 minute. Maximum: 7 days. Default: 1 hour.
+	NoHandlerWait time.Duration
 
 	// Middleware wraps every attempt, in order: the first is the outermost.
 	// A nil entry is an error that wraps [ErrInvalidArgument]. Default: none.
@@ -326,6 +346,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		queueHints:  make(chan struct{}, 1),
 		completions: make(chan *liveAttempt, completionBatch),
 	}
+	w.reserve = reserve{w: w, turn: make(chan struct{}, 1)}
 
 	if c.Handlers != nil {
 		for kind, reg := range c.Handlers.byKind {
@@ -403,10 +424,13 @@ func resolveWorkerConfig(c *WorkerConfig) error {
 		return invalidArgument("PollInterval must not be negative")
 	case c.DrainTimeout < 0:
 		return invalidArgument("DrainTimeout must not be negative")
+	case c.NoHandlerWait != 0 && (c.NoHandlerWait < minNoHandlerWait || c.NoHandlerWait > maxNoHandlerWait):
+		return invalidArgument("NoHandlerWait must be between %s and %s", minNoHandlerWait, maxNoHandlerWait)
 	}
 	c.LeaseDuration = cmp.Or(c.LeaseDuration, defaultLeaseDuration)
 	c.PollInterval = cmp.Or(c.PollInterval, defaultPollInterval)
 	c.DrainTimeout = cmp.Or(c.DrainTimeout, defaultDrainTimeout)
+	c.NoHandlerWait = cmp.Or(c.NoHandlerWait, defaultNoHandlerWait)
 	return nil
 }
 
@@ -428,6 +452,28 @@ func (w *Worker) warnUnservedKinds(ctx context.Context) {
 		"the worker does not read the default queue of these registered kinds", slog.Any(logKeyKinds, kinds))
 }
 
+// sizedPool reports whether the pool has at least the worker's total
+// Concurrency plus poolSpare connections, the size that the docs ask for,
+// and warns if not: handlers that share the pool can then take every
+// connection, and the worker's own statements wait for them. pgx's default
+// size, the larger of 4 and the number of CPUs, is below the default
+// Concurrency. It only warns: the pool is the application's to size.
+func (w *Worker) sizedPool(ctx context.Context) bool {
+	concurrency := 0
+	for _, q := range w.queues {
+		concurrency += cap(q.slots)
+	}
+
+	conns := int(w.client.pool.Stat().MaxConns())
+	if conns >= concurrency+poolSpare {
+		return true
+	}
+	w.logger.LogAttrs(ctx, slog.LevelWarn, "the pool has fewer connections than the worker's total Concurrency plus 5; "+
+		"see https://github.com/code19m/taskmill/blob/main/docs/production/database.md#size-the-connection-pool",
+		slog.Int(logKeyMaxConns, conns), slog.Int(logKeyConcurrency, concurrency))
+	return false
+}
+
 // queueState is one queue that the worker serves.
 type queueState struct {
 	name       string
@@ -436,6 +482,7 @@ type queueState struct {
 	freed      chan struct{} // nudges the fetch loop: a slot was freed, or a recorded completion made room
 	paused     atomic.Bool   // the queue is paused, or Run has not read its settings yet
 	maxRunning atomic.Int32  // installation-wide limit; 0 means none
+	stuck      atomic.Int32  // slots whose handlers did not return shutdownGrace after their context ended
 }
 
 func (q *queueState) nudge() {
@@ -467,9 +514,8 @@ type liveAttempt struct {
 	state     attemptState
 	renewedAt time.Time // last confirmation that the lease is held
 
-	lost            atomic.Bool // the lease is gone: the result must be discarded
-	cancelRequested atomic.Bool // the task's row said that its cancellation was requested
-	hinted          atomic.Bool // a notification said so, and the row is not read yet
+	lost   atomic.Bool // the lease is gone: the result must be discarded
+	hinted atomic.Bool // a notification said that the task's cancellation was requested, and the row is not read yet
 }
 
 type attemptState int
@@ -575,6 +621,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	w.listenFailures = newIncidentLog(w, "listen for notifications")
 
 	w.prepareHistory(ctx)
+	sized := w.sizedPool(ctx)
 	w.logger.LogAttrs(ctx, slog.LevelInfo, "worker started", slog.Any(logKeyQueues, names))
 	w.warnUnservedKinds(ctx)
 
@@ -582,6 +629,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	// by cleanupTimeout.
 	recordCtx, stopRecording := context.WithCancel(base)
 	defer stopRecording()
+
+	// A pool of that size spares the worker a reserve, which it takes before
+	// any handler can take the pool's, and gives back once nothing more uses
+	// it. A smaller pool cannot spare one: workers that share it could hold
+	// all of it, and then none could fetch.
+	if sized {
+		w.reserve.keep(ctx)
+		defer w.reserve.release()
+	}
 
 	w.released.Store(0)
 	w.completerDone = make(chan struct{})
@@ -599,7 +655,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	if !w.cfg.NoMaintainer {
 		// The maintainer stops with ctx, as the fetches do: a worker that
 		// drains resigns, so that one that stays leads meanwhile.
-		loops.Go(func() { newMaintainer(w).run(ctx) })
+		loops.Go(func() { newMaintainer(w).run(ctx, recordCtx) })
 	}
 
 	attemptCtx, stopAttempts := context.WithCancelCause(base)
@@ -609,14 +665,20 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	<-ctx.Done()
+	stopped := time.Now()
 	abandoned := w.drain(base, r, stopAttempts)
 
 	// What follows has one deadline, so that Run returns soon also when the
 	// database does not answer: the release of the tasks whose handlers did
 	// not return, the results that attempts that ended before are still
-	// recording, also through the completer, the activity, and the worker's
-	// row. What is not recorded by then is rescued when its lease runs out.
-	stop := time.AfterFunc(cleanupTimeout, stopRecording)
+	// recording, also through the completer, the maintainer's resignation,
+	// the activity, and the worker's row. What is not recorded by then is
+	// rescued when its lease runs out. The deadline comes cleanupTimeout
+	// after the drain, but no later than the bound that DrainTimeout's doc
+	// gives: a fetch under way can hold the drain up until cleanupTimeout
+	// after ctx ended.
+	latest := time.Until(stopped.Add(w.cfg.DrainTimeout + w.timing.shutdownGrace + cleanupTimeout))
+	stop := time.AfterFunc(min(cleanupTimeout, latest), stopRecording)
 	defer stop.Stop()
 	w.release(recordCtx, abandoned)
 	w.recording.Wait()
@@ -684,6 +746,7 @@ func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.Ca
 	}
 	w.mu.Unlock()
 
+	w.counts.abandoned.Add(int64(len(abandoned)))
 	for _, t := range abandoned {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler ignored shutdown; releasing its task",
 			slog.Int64(logKeyTaskID, t.att.id), slog.String(logKeyKind, t.info.Kind))
@@ -777,6 +840,99 @@ func (w *Worker) runDirect(ctx context.Context, t *liveAttempt) {
 	} else {
 		w.runOne(attemptCtx, record, t)
 	}
+}
+
+// WorkerStats are counts of what a [Worker] did since [NewWorker] created it,
+// and how busy its slots are now: [Worker.Stats] returns them. The counts
+// only grow, so a metrics system reads them as counters, and their rates
+// say how often each thing happens. Each task of a batch counts as one
+// attempt.
+//
+// The [monitoring page] says which of them to alert on.
+//
+// [monitoring page]: https://github.com/code19m/taskmill/blob/main/docs/production/monitoring.md
+type WorkerStats struct {
+	// AttemptsStarted counts the attempts whose handler the worker started,
+	// in Run and in RunTask. A task that the worker ends without a handler,
+	// as one of a kind that it has no handler for, does not count.
+	AttemptsStarted int64
+
+	// AttemptsSucceeded counts the attempts whose success was recorded: their
+	// tasks completed, also those that the handler completed with
+	// [Task.CompleteTx].
+	AttemptsSucceeded int64
+
+	// AttemptsFailed counts the attempts whose failure was recorded: their
+	// tasks wait to be retried, or are dead. An attempt whose task the
+	// maintainer rescued after its worker lost the lease counts in
+	// LeasesLost, on that worker, if it still runs.
+	AttemptsFailed int64
+
+	// LeasesLost counts the attempts that lost their leases: the worker
+	// could not renew a lease in time, or fetched a task again whose older
+	// attempt still ran. Their results are discarded, and their tasks may
+	// run twice.
+	LeasesLost int64
+
+	// HandlersAbandoned counts the attempts whose handler did not return 5
+	// seconds after its context ended, by its Timeout, a cancel, a lost
+	// lease, or Run's shutdown, so that the worker abandoned it: see
+	// [HandlerOptions.Timeout]. The handler's goroutine keeps its slot until
+	// it returns.
+	HandlersAbandoned int64
+
+	// CompletionsBlocked counts the successful attempts whose completion
+	// waited longer than LeaseDuration for a row that another transaction
+	// held: the task's, or its FIFO group's.
+	CompletionsBlocked int64
+
+	// PoolWaits counts the statements of the worker that found every
+	// connection of the pool in use, and waited for one: fetches,
+	// completions, the records of failed attempts, renewals of leases, and
+	// check-ins. Handlers that share the pool hold them, or the pool is too
+	// small. A renewal waits a thirtieth of the lease at most, and then uses
+	// the worker's reserve: see [Worker].
+	PoolWaits int64
+
+	// Slots is the sum of the Concurrency of the worker's queues.
+	Slots int
+
+	// SlotsBusy is how many slots running attempts and batches hold now.
+	SlotsBusy int
+
+	// SlotsStuck is how many of those are held by handlers that did not
+	// return 5 seconds after their context ended. While they hold every
+	// slot, [Worker.Health] fails.
+	SlotsStuck int
+}
+
+// counters hold what WorkerStats counts. The worker adds to them as it
+// works, without a lock.
+type counters struct {
+	started, succeeded, failed, leasesLost, abandoned, blocked, poolWaits atomic.Int64
+}
+
+// Stats returns what the worker did since [NewWorker] created it, and how
+// busy its slots are now. It reads only memory, so a metrics system may call
+// it at every collection. The otel module exports it with
+// Instrumentation.ObserveWorker.
+func (w *Worker) Stats() WorkerStats {
+	s := WorkerStats{
+		AttemptsStarted:    w.counts.started.Load(),
+		AttemptsSucceeded:  w.counts.succeeded.Load(),
+		AttemptsFailed:     w.counts.failed.Load(),
+		LeasesLost:         w.counts.leasesLost.Load(),
+		HandlersAbandoned:  w.counts.abandoned.Load(),
+		CompletionsBlocked: w.counts.blocked.Load(),
+		PoolWaits:          w.counts.poolWaits.Load(),
+	}
+	for _, q := range w.queues {
+		s.Slots += cap(q.slots)
+		s.SlotsBusy += len(q.slots)
+		s.SlotsStuck += int(q.stuck.Load())
+	}
+	s.SlotsStuck = min(s.SlotsStuck, s.SlotsBusy) // a stuck handler that just returned may still count
+	return s
 }
 
 // leaseTask leases one task for RunTask, or explains why it cannot.

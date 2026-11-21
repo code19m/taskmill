@@ -202,8 +202,8 @@ const (
 	CodeInvalidPayload ErrorCode = "invalid_payload"
 
 	// CodeUnknownKind means no worker with a handler for the kind took the
-	// task within an hour of its [CodeNoHandler] note, so the task became
-	// dead.
+	// task within [WorkerConfig.NoHandlerWait] of its [CodeNoHandler] note,
+	// an hour by default, so the task became dead.
 	CodeUnknownKind ErrorCode = "unknown_kind"
 
 	// CodeInvalidRow means the task's row holds a value that taskmill never
@@ -219,9 +219,10 @@ const (
 	// CodeNoHandler marks a note, not a failure: a worker fetched the task
 	// without a handler for its kind, and the task began to wait for one,
 	// without using attempts. Such a worker snoozes the task 1 minute at a
-	// time. If no worker with a handler takes it within 1 hour, the task
-	// becomes dead, with the code [CodeUnknownKind]. The hour counts only
-	// while this note is the last entry of the task's errors. A worker with
+	// time. If no worker with a handler takes it within the worker's
+	// [WorkerConfig.NoHandlerWait], 1 hour by default, the task becomes
+	// dead, with the code [CodeUnknownKind]. The wait counts only while this
+	// note is the last entry of the task's errors. A worker with
 	// a handler that then snoozes the task, or gives it back when it stops,
 	// removes the note, and so does a retry of the task.
 	CodeNoHandler ErrorCode = "no_handler"
@@ -247,6 +248,23 @@ type attempt struct {
 	// completedInTx is set once the handler completed the task in its own
 	// transaction, so the worker must not record a result.
 	completedInTx atomic.Bool
+
+	// cancelRequested is set once the worker read in the task's row that its
+	// cancellation was requested.
+	cancelRequested atomic.Bool
+}
+
+// CancelRequested reports whether the task's cancellation was requested
+// while its attempt runs, as with [Client.Cancel]. A [Handler] also learns it
+// from its context, which ends with the cause [ErrTaskCanceled]. A
+// [BatchHandler], whose context a cancel does not end, learns it only here,
+// and can skip the task's work: an error returned for the task then cancels
+// it, and nil completes it. The worker learns of a request from a
+// notification, within moments, or else at its next check-in, every third
+// of [WorkerConfig.LeaseDuration]. It is false for a task that no worker
+// runs, such as one that a test builds.
+func (t *Task[A]) CancelRequested() bool {
+	return t.attempt != nil && t.attempt.cancelRequested.Load()
 }
 
 // CompleteTx completes the task inside the caller's transaction, so that the

@@ -20,12 +20,13 @@ const (
 )
 
 // maintainer does the installation-wide work of one elected worker. Its main
-// loop elects the leader, then rescues expired leases and enqueues schedules
-// once per interval. Queues whose tasks wait are woken in a loop of their
-// own, which also sends the heartbeat that workers count on, and due tasks
-// are promoted in another, as they come due. Statistics, retention, and the
-// comparison of the workers' schedules have a loop each too, so that slow
-// work in one never delays the others.
+// loop only takes or renews the leader's lease, so that no work delays the
+// renewal and lets the role change hands. Expired leases are rescued, and
+// due schedules enqueued, once per interval in a loop of their own. Queues
+// whose tasks wait are woken in another, which also sends the heartbeat
+// that workers count on, and due tasks are promoted in another, as they come
+// due. Statistics, retention, and the comparison of the workers' schedules
+// have a loop each too, so that slow work in one never delays the others.
 type maintainer struct {
 	w      *Worker
 	c      *Client
@@ -63,10 +64,18 @@ func newMaintainer(w *Worker) *maintainer {
 	}
 }
 
-func (m *maintainer) run(ctx context.Context) {
+// run does the maintainer's work until ctx ends, and then resigns, until
+// stop ends at the latest: the deadline of the worker's shutdown.
+func (m *maintainer) run(ctx, stop context.Context) {
 	var loops sync.WaitGroup
 	loops.Go(func() { m.wakeLoop(ctx) })
 	loops.Go(func() { m.promoteLoop(ctx) })
+	loops.Go(func() {
+		m.every(ctx, m.w.timing.maintainer, func(ctx context.Context) {
+			m.rescue(ctx)
+			m.runSchedules(ctx)
+		})
+	})
 	loops.Go(func() { m.every(ctx, m.w.timing.stats, m.refreshStats) })
 	loops.Go(func() { m.every(ctx, m.w.timing.scheduleCheck, m.compareSchedules) })
 	loops.Go(func() {
@@ -83,7 +92,7 @@ func (m *maintainer) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			m.resign(context.WithoutCancel(ctx))
+			m.resign(stop)
 			return
 		case <-m.w.resigned:
 			m.takeOver(ctx)
@@ -108,19 +117,14 @@ func (m *maintainer) takeOver(ctx context.Context) {
 	m.cycle(ctx)
 }
 
-// cycle renews or tries to take the leadership, and if this worker leads,
-// rescues expired leases and enqueues due schedules.
+// cycle renews the leadership, or tries to take it once per election
+// interval.
 func (m *maintainer) cycle(ctx context.Context) {
 	if !m.leader.Load() && time.Since(m.lastElection) < m.w.timing.election {
 		return
 	}
 	m.lastElection = time.Now()
-	if !m.elect(ctx) {
-		return
-	}
-
-	m.rescue(ctx)
-	m.runSchedules(ctx)
+	m.elect(ctx)
 }
 
 // wakeLoop wakes the queues whose tasks wait once per interval while this
@@ -174,26 +178,31 @@ func (m *maintainer) promoteLoop(ctx context.Context) {
 }
 
 // every calls work once per interval while this worker leads, until ctx
-// ends. Statistics, retention, and the comparison of schedules each run in
-// such a loop of their own: retention can take long, when a detach waits
-// for a transaction that reads the history, or a backlog of old tasks takes
-// many batches, and the statistics, which lag is read from, must stay fresh
-// meanwhile. The comparison waits for neither.
+// ends. The rescue with the schedules, statistics, retention, and the
+// comparison of schedules each run in such a loop of their own: retention
+// can take long, when a detach waits for a transaction that reads the
+// history, or a backlog of old tasks takes many batches, and the
+// statistics, which lag is read from, must stay fresh meanwhile. The
+// comparison waits for neither, and the election for none.
 func (m *maintainer) every(ctx context.Context, interval time.Duration, work func(context.Context)) {
 	tick := time.NewTicker(m.w.timing.maintainer)
 	defer tick.Stop()
 	var last time.Time
 
 	for {
+		var now time.Time
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case now = <-tick.C:
 		}
 
-		if m.leader.Load() && time.Since(last) >= interval {
+		// The interval counts from tick to tick, with half a tick to spare:
+		// counted from the end of the work, an interval of one tick would
+		// pass only at every other tick.
+		if m.leader.Load() && now.Sub(last) >= interval-m.w.timing.maintainer/2 {
+			last = now
 			work(ctx)
-			last = time.Now()
 		}
 	}
 }
@@ -383,6 +392,11 @@ func (m *maintainer) rescueBatch(ctx context.Context) (batch []rescuedTask, err 
 		if batch, err = collectRescued(r); err != nil {
 			return err
 		}
+		if ids, delays := m.backoffs(batch); len(ids) > 0 {
+			if _, err := q.exec(ctx, m.c.sql.rescueBackoff, ids, delays); err != nil {
+				return err
+			}
+		}
 
 		var left []groupLeave
 		for _, x := range batch {
@@ -399,6 +413,34 @@ func (m *maintainer) rescueBatch(ctx context.Context) (batch []rescuedTask, err 
 		return m.c.leaveGroups(ctx, m.w.logger, q, left)
 	})
 	return batch, err
+}
+
+// backoffs returns the retryable tasks of a rescue batch whose kinds this
+// worker has a handler for, with a retry policy other than the default,
+// which the rescue statement applied, and the delays in microseconds that
+// those policies choose. A policy that panics leaves its task with the
+// default, as outcomeOf does.
+func (m *maintainer) backoffs(batch []rescuedTask) (ids, delays []int64) {
+	for _, x := range batch {
+		reg := m.w.handlers[x.kind]
+		if State(x.state) != StateRetryable || reg == nil || reg.opts.Retry == RetryPolicy(ExponentialBackoff{}) {
+			continue
+		}
+		if d, ok := safeBackoff(reg.opts.Retry, x.attempt); ok {
+			ids, delays = append(ids, x.id), append(delays, d.Microseconds())
+		}
+	}
+	return ids, delays
+}
+
+// safeBackoff calls a retry policy, and reports false if it panicked.
+func safeBackoff(p RetryPolicy, attempt int) (d time.Duration, ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	return p.Backoff(attempt), true
 }
 
 // rescued counts and logs the failed attempts of a committed rescue batch.

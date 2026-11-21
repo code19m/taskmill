@@ -10,6 +10,22 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+### Added
+
+- `Instrumentation.ObserveWorker` reports counters of a worker: the
+  attempts that it started, and those whose success or failure it recorded,
+  its lost leases, abandoned handlers, blocked completions, and waits for a
+  full pool, and its slots by state: free, running, or stuck. Until now,
+  most of these showed only in the logs.
+  [Metrics and traces](../docs/reference/metrics.md#worker-counters) lists
+  them. Requires taskmill v0.15.0, whose `Worker.Stats` it reads.
+
+### Fixed
+
+- `EnqueueMiddleware` panicked when an enqueue middleware before it had set
+  a task's `Metadata` to nil. It now gives the task new metadata for the
+  span's context.
+
 ## [0.4.3] - 2026-11-18
 
 ### Fixed

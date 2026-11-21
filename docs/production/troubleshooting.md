@@ -21,7 +21,7 @@ shows many available tasks.
 |---|---|---|
 | The queue is paused | The queues on the dashboard's Overview, or `QueueInfo.Paused` | Resume it |
 | No worker reads the queue | `QueueInfo.Workers` is 0, or a worker logs `the worker does not read the default queue of these registered kinds` | Add the queue to `WorkerConfig.Queues`, or run a worker for it |
-| The workers are full | Running tasks are about replicas × `Concurrency` | Add replicas, or raise `Concurrency` and the pool with it |
+| The workers are full, or handlers hold the pool's connections | Running tasks are about replicas × `Concurrency`, or the warning `the pool was full, so the worker waited for a connection` | Add replicas, or raise `Concurrency` and the pool with it. Or give handlers a pool of their own |
 | A queue limit (`MaxRunning`) blocks tasks | `QueueInfo.Settings.MaxRunning` is set, and running tasks equal it | Raise or remove it with `Client.UpdateQueue` |
 | The workers crash | Pod restarts | See [Worker pods restart again and again](#worker-pods-restart-again-and-again) |
 | New workers cannot read the queues' pauses and limits, so they take no task | `operation failed` or `operation still failing` for `load queue settings`, since the worker started | Fix what the error names: the database, or the role's right to read `queues` |
@@ -106,7 +106,7 @@ are expected ([Guarantees](../concepts/guarantees.md)), so
 
 | Likely cause | Check | Do |
 |---|---|---|
-| Handlers use up the pool's connections | The warning `the pool was full, so renewing leases waited` | [Size the pool](database.md#size-the-connection-pool) |
+| Handlers use up a pool smaller than `Concurrency` plus 5, so the worker keeps no connection for its leases | The warning `the pool has fewer connections than the worker's total Concurrency plus 5` at start | [Size the pool](database.md#size-the-connection-pool) |
 | A pod was killed before it drained | `terminationGracePeriodSeconds` below the [grace period that workers need](deploys.md#stop-workers-without-losing-work), or pods killed because they used too much memory (`OOMKilled`) | Raise the grace period, or the memory limit |
 | A handler ignores its context | The log `handler ignored shutdown; releasing its task` | Make the handler return when `ctx` ends |
 | A failover or network outage of more than about 20 s | `operation still failing` during the incident | Expected: [When the database fails](database.md#when-the-database-fails) |
@@ -225,7 +225,7 @@ worker has not read the settings of its queues`, or `the worker is not running`.
 | Likely cause | Check | Do |
 |---|---|---|
 | The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases`, or for `load queue settings` in a new worker | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
-| Handlers hold every connection of the pool | The warning `the pool was full, so renewing leases waited` | Raise `pool_max_conns`, or give handlers their own pool |
+| Handlers that ignore their context hold every slot | `/healthz` says `all N slots of the worker are held by handlers that …`, and the log `handler ignored its context; abandoning its attempt` | Make handlers return when `ctx` ends. A restart frees the slots |
 | `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix that error: see [the errors at start](#errors-at-start-and-in-calls) |
 
 ### Counts in the dashboard stop at 10,000

@@ -7,7 +7,8 @@ import "reflect"
 //
 // Implement Kind on a value receiver and return a constant: producers and
 // consumers agree on the kind. If a kind is renamed, tasks enqueued under the
-// old name find no handler, and become dead after an hour.
+// old name find no handler, and become dead after [WorkerConfig.NoHandlerWait],
+// an hour by default.
 //
 // An enqueue returns an error that wraps [ErrInvalidArgument] for nil Args,
 // also a nil pointer of an Args type, and for a payload that PostgreSQL

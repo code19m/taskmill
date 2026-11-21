@@ -91,13 +91,19 @@ Give each worker's pool its **total `Concurrency` plus 5** connections. Add up
 postgres://shop@db.internal:5432/shop?pool_max_conns=15
 ```
 
-Why: a running task holds no connection of its own. But if your handlers use
-the same pool, they can take every connection. Then the worker cannot renew
-its tasks' [leases](../concepts/glossary.md#lease) in time, and tasks run twice.
+Why: a running task holds no connection of its own, but handlers that use the
+same pool can take every connection. In a pool of this size, the worker keeps
+one in reserve while `Run` runs, so its tasks'
+[leases](../concepts/glossary.md#lease) still renew, while fetches wait. For
+that, the idle limit of taskmill's role, such as `idle_session_timeout` or a
+proxy's, must be longer than a third of the lease. A smaller pool spares no
+reserve: renewals wait too, leases can run out, and tasks run twice.
 
-The 5 extra connections are for the worker's own work. If the pool is full
-and a lease renewal has to wait for a connection, the worker logs the warning
-`the pool was full, so renewing leases waited`, at most once a minute.
+The 5 extra connections are for the worker's own work. `Run` warns at start
+if the pool is smaller: `the pool has fewer connections than the worker's
+total Concurrency plus 5`. A wait for a connection later is logged as `the
+pool was full, so the worker waited for a connection`, and counted in
+`taskmill_worker_pool_waits_total`.
 
 | Process | `pool_max_conns` | Connections it opens, at most |
 |---|---|---|
@@ -116,8 +122,8 @@ To add up the connections of all your pods, see
 
 | Situation | What to use | Why |
 |---|---|---|
-| Handlers use the database for short queries | **One pool** for taskmill and your handlers, sized as above | Simple. The worker logs a warning if the pool is too small |
-| Handlers hold connections for a long time | A pool of their own for the handlers | taskmill's work never waits for them. taskmill's pool can then be smaller than `Concurrency` plus 5, and the warning tells you if it is too small |
+| Handlers use the database for short queries | **One pool** for taskmill and your handlers, sized as above | Simple. The worker warns if the pool is too small |
+| Handlers hold connections for a long time | A pool of their own for the handlers | taskmill's work never waits for them. Keep taskmill's pool at `Concurrency` plus 5 anyway: `pool_max_conns` is only a cap, since pgx opens only the connections that it uses |
 
 ## Keep long transactions from slowing the queue
 

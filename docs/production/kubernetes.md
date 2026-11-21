@@ -87,8 +87,9 @@ go func() { log.Print(server.ListenAndServe()) }()
 `Health` fails while `Run` does not run, and when the worker has not reached
 the database for longer than `LeaseDuration` (30 s). It also fails until a
 new worker has read the pauses and limits of its queues: before that, the
-worker takes no task. It reads only memory, so the probe costs the database
-nothing. It does not see a stuck handler.
+worker takes no task. It also fails while handlers that did not return 5
+seconds after their context ended hold every slot: such a worker can run
+nothing. It reads only memory, so the probe costs the database nothing.
 
 With this probe, a worker turns unready within about a minute of losing the
 database, and ready again about 20 seconds after it returns. An unready

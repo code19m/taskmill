@@ -117,10 +117,10 @@ func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUn
 // batches of batch kinds among them with more tasks of those kinds, so that
 // every fetched task starts right away. A queue with an installation-wide
 // MaxRunning limit fetches only up to its remaining capacity. more reports
-// that the first lease took all it asked for, so more tasks may be waiting,
-// and atLimit that the limit kept it from asking for as many as slots, or
-// that it gave up waiting for the row of a queue with a limit (see
-// errQueueHeld).
+// that the first lease took all it could, so more tasks may be waiting, and
+// atLimit that the limit kept it from taking as many as slots, up to
+// maxFetch, or that it gave up waiting for the row of a queue with a limit
+// (see errQueueHeld).
 // If filling the batches fails outside a transaction, it returns the tasks
 // leased before the error with the error: they must run.
 func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*liveAttempt, more, atLimit bool, err error) {
@@ -183,19 +183,20 @@ func (w *Worker) fetchFree(ctx context.Context, q *queueState, slots int) (tasks
 // count's answer only tells the worker how far the limit held it back. It
 // returns errQueueHeld if it gave up waiting for the row.
 func (w *Worker) fetchLimited(ctx context.Context, q *queueState, slots int) (tasks []*liveAttempt, more, atLimit bool, err error) {
-	conn, err := w.client.pool.Acquire(ctx)
+	conn, err := w.acquire(ctx)
 	if err != nil {
 		return nil, false, false, err
 	}
 	defer conn.Release()
 
 	committed := !w.batchKinds
+	asked := min(slots, maxFetch)
 	b := &pgx.Batch{}
 	b.Queue("BEGIN")
 	b.Queue(limitedSettings)
 	b.Queue(w.client.sql.lockQueue, q.name)
 	b.Queue(w.client.sql.countRunning, q.name)
-	b.Queue(w.client.sql.fetchLimited, w.leaseArgs(q, min(slots, maxFetch), nil)...)
+	b.Queue(w.client.sql.fetchLimited, w.leaseArgs(q, asked, nil)...)
 	if committed {
 		b.Queue("COMMIT")
 	}
@@ -204,7 +205,7 @@ func (w *Worker) fetchLimited(ctx context.Context, q *queueState, slots int) (ta
 	fetched := len(out) // by the first lease, before the batches fill
 	if err == nil && !committed {
 		var extra []*liveAttempt
-		if extra, err = w.fillBatches(ctx, q, w.leaseIn(conn), out, allowed-len(out)); err == nil {
+		if extra, err = w.fillBatches(ctx, q, w.leaseIn(conn), out, min(allowed, maxFetch)-len(out)); err == nil {
 			out = append(out, extra...)
 			_, err = conn.Exec(ctx, "COMMIT")
 		}
@@ -221,8 +222,10 @@ func (w *Worker) fetchLimited(ctx context.Context, q *queueState, slots int) (ta
 		return nil, false, false, err
 	}
 
-	limit := min(slots, allowed)
-	return out, limit > 0 && fetched == limit, allowed < slots && fetched == limit, nil
+	// The fetch took up to what it asked for, and what the limit allows: a
+	// limit above 1,000 may let it take its most, with more tasks waiting.
+	limit := min(asked, allowed)
+	return out, limit > 0 && fetched == limit, allowed < asked && fetched == limit, nil
 }
 
 // readLimited reads the results of fetchLimited's batch, and closes it. It
@@ -340,7 +343,12 @@ func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limi
 	b.Queue(sql, w.leaseArgs(q, limit, extra)...)
 	b.Queue("COMMIT")
 
-	br := w.client.pool.SendBatch(ctx, b)
+	conn, err := w.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Release()
+	br := conn.SendBatch(ctx, b)
 	defer func() { _ = br.Close() }()
 
 	for range 2 {

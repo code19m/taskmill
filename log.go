@@ -11,6 +11,7 @@ import (
 // Log attribute keys, shared so that logs are consistent and searchable.
 const (
 	logKeyAttempt            = "attempt"
+	logKeyConcurrency        = "concurrency"
 	logKeyDefinedDifferently = "defined_differently"
 	logKeyDuration           = "duration"
 	logKeyError              = "error"

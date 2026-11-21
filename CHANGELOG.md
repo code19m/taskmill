@@ -16,6 +16,31 @@ All notable changes to taskmill are recorded here. The format follows
   lists the signs that you outgrow taskmill, and how to move to a broker one
   kind at a time. [How taskmill is built](docs/design/README.md#decisions)
   indexes the design decisions, with what would reopen each.
+- `Worker.Run` warns when the pool has fewer connections than the worker's
+  total `Concurrency` plus 5, the size that
+  [Database](docs/production/database.md#size-the-connection-pool) asks
+  for. pgx's default size, the larger of 4 and the number of CPUs, is below
+  the default `Concurrency` of 10, so handlers that share the pool could
+  take every connection, and nothing said so until something waited. Such a
+  pool also leaves the worker no reserve for its renewals.
+- `Worker.Stats` returns a worker's counts, in a `WorkerStats`: the attempts
+  that it started, and those whose success or failure it recorded, its lost
+  leases, abandoned handlers, blocked completions, and waits for a full
+  pool, and how many of its slots are busy, or stuck with handlers that
+  ignore their context. Most of these showed only in the logs. The `otel`
+  module exports them with `Instrumentation.ObserveWorker`, and
+  [Monitoring](docs/production/monitoring.md) says which to alert on.
+- `WorkerConfig.NoHandlerWait` sets how long a task of a kind that the
+  worker has no handler for waits for one, before it becomes dead with
+  `unknown_kind`: from 1 minute to 7 days, 1 hour by default, as before.
+  The hour was fixed, so a canary or a rollout longer than that killed the
+  tasks of a kind that it added.
+  [Deploys](docs/production/deploys.md#add-a-new-kind-during-a-rollout) says
+  how to set it.
+- `Task.CancelRequested` reports that the task's cancellation was
+  requested while it runs. A batch handler, whose context a cancel does not
+  end, could not see the request, and ran the canceled task's work all the
+  same. It can now skip it.
 - Migrations build and drop indexes online, with `CREATE INDEX
   CONCURRENTLY`, so that enqueues, fetches, and completions continue. Such
   an *online step* runs outside a transaction, while `Migrate` keeps its
@@ -47,6 +72,10 @@ All notable changes to taskmill are recorded here. The format follows
   least every second, instead of waiting in the lock's queue, where it
   would block an online build. The deploy docs now run `Migrate` as a
   job of its own, before the rollout.
+- `Worker.Health` fails while handlers that did not return 5 seconds after
+  their context ended hold every slot of the worker's queues. Such a worker
+  can start no task, but its probe passed. The error says how many slots
+  are stuck.
 
 ### Fixed
 
@@ -59,6 +88,30 @@ All notable changes to taskmill are recorded here. The format follows
   for each other's commits, and the design pages say why a notification
   wakes every worker of its queue. The pool size and a stopping worker's
   grace period each have one page, which the others link to.
+- When handlers that share the pool held every connection for longer than
+  a lease, the worker's lease renewals waited for a connection: leases ran
+  out, and tasks ran twice. While `Run` runs, the worker now keeps one
+  connection of its pool idle in reserve, if the pool has its total
+  `Concurrency` plus 5 connections: a smaller pool cannot spare one. A
+  renewal or a check-in that finds no connection of the pool within a
+  thirtieth of the lease runs on the reserve. Through a pooler in
+  transaction mode, the reserve does not hold a server connection of the
+  pooler. The warning of a full pool, now `the pool was full, so the worker
+  waited for a connection`, is about the worker's other statements.
+- The maintainer renewed its lease only after it had rescued expired
+  leases and run the due schedules. When those took longer than the lease,
+  10 seconds, the role changed hands for no reason. The renewal now has a
+  loop of its own, and the rescue and the schedules another.
+- A task whose worker lost its lease was retried after the default backoff,
+  not after its kind's `HandlerOptions.Retry`. The maintainer now uses the
+  kind's policy when it has a handler for the kind, as it does when every
+  worker runs one binary, at the cost of one statement per rescued batch
+  that holds such tasks. Otherwise it keeps the default.
+- A queue with a `MaxRunning` limit above 1,000, and more than 1,000 free
+  slots, such as `Concurrency` 2,000 with `MaxRunning` 5,000, left up to
+  1,000 slots idle for a second or two: a fetch took its most, 1,000 tasks,
+  but measured "more may wait" against the limit, and said nothing more
+  waited. It now fetches again right away.
 - A duplicate enqueue no longer reports the task ID 0 when the task that
   holds its dedupe key committed while the enqueue ran. The enqueue finds
   that task, also after the caller's context ended; if the task was

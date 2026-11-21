@@ -87,15 +87,29 @@ normal handler.
 ## Cancel a task that runs in a batch
 
 The batch's context ends only when the batch times out, or the worker
-stops. A batch handler can't see a cancel request for one of its tasks.
-The result it returns for that task decides:
+stops. A cancel request for one of its tasks shows on that task instead:
+`task.CancelRequested()` turns true, soon after the cancel. Check it before
+the task's work, and return an error for the task to skip it:
+
+```go
+for i, task := range tasks {
+    if task.CancelRequested() {
+        errs[i] = taskmill.ErrTaskCanceled
+        continue
+    }
+    // add the task's work to the bulk call
+}
+```
+
+The result that the batch returns for the task decides:
 
 | The batch returns for the canceled task | The task becomes |
 |---|---|
 | nil | `completed`, because the work was done |
 | An error | `canceled` |
 
-If a cancel must stop the work, use `AddHandler`.
+A bulk call that already started can't drop one task. If a cancel must stop
+the work as it runs, use `AddHandler`.
 
 ## See also
 

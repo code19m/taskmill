@@ -17,6 +17,10 @@ and counters, from taskmill's logs, and from PostgreSQL.
 | Failed enqueues: `messaging_client_sent_messages_total` with an `error_type` | More than 5% of the tasks, for 5 minutes | [Enqueue calls fail](troubleshooting.md#enqueue-calls-fail) |
 | An Error line in taskmill's logs | Any, except [the three that can be expected](#logs-which-levels-matter) | Each one needs a person: [Log messages](../reference/log-messages.md) |
 | The Warn line `rescued tasks whose workers lost their leases`: the maintainer [rescued](../concepts/glossary.md#rescue) the tasks of a lost worker | When no crash, outage, or killed pod explains it | [A task ran twice](troubleshooting.md#a-task-ran-twice) |
+| Lost leases: `taskmill_worker_leases_lost_total` | Any increase that no database outage explains | [A task ran twice](troubleshooting.md#a-task-ran-twice) |
+| Stuck slots: `taskmill_worker_slots` with `taskmill_slot_state="stuck"`, and abandoned handlers: `taskmill_worker_handlers_abandoned_total` | Above 0, for 5 minutes | A handler ignores its context: [Why did my context end?](../guides/handle-tasks.md#why-did-my-context-end). Once stuck handlers hold every slot, `Worker.Health` fails |
+| Waits for the pool: `taskmill_worker_pool_waits_total` | Any increase, for 15 minutes | Handlers hold the pool's connections: [Size the connection pool](database.md#size-the-connection-pool) |
+| Blocked completions: `taskmill_worker_completions_blocked_total` | Any increase | A transaction holds tasks' rows for longer than a lease: find it in `pg_stat_activity`, and end it |
 | A transaction that blocks vacuum: the queries in [Database](database.md#keep-long-transactions-from-slowing-the-queue) | Open for 10 minutes, or a slot's age that keeps growing | [Throughput falls over hours](troubleshooting.md#throughput-falls-over-hours) |
 | Worker pods not ready | For 5 minutes | [Kubernetes marks workers as not ready](troubleshooting.md#kubernetes-marks-workers-as-not-ready) |
 
@@ -88,6 +92,26 @@ groups:
         annotations:
           summary: More than 5% of the tasks that the shop enqueues fail to enqueue
           runbook_url: https://github.com/code19m/taskmill/blob/main/docs/production/troubleshooting.md#enqueue-calls-fail
+      - alert: TaskmillLeasesLost
+        expr: sum by (job) (increase(taskmill_worker_leases_lost_total{job="shop-worker"}[5m])) > 0
+        labels: {severity: ticket}
+        annotations:
+          summary: '{{ $value }} attempts lost their leases; their tasks may run twice'
+          runbook_url: https://github.com/code19m/taskmill/blob/main/docs/production/troubleshooting.md#a-task-ran-twice
+      - alert: TaskmillStuckHandlers
+        expr: sum by (job) (taskmill_worker_slots{job="shop-worker", taskmill_slot_state="stuck"}) > 0
+        for: 5m
+        labels: {severity: ticket}
+        annotations:
+          summary: '{{ $value }} slots are held by handlers that ignore their context'
+          runbook_url: https://github.com/code19m/taskmill/blob/main/docs/guides/handle-tasks.md#why-did-my-context-end
+      - alert: TaskmillPoolWaits
+        expr: sum by (job) (rate(taskmill_worker_pool_waits_total{job="shop-worker"}[5m])) > 0
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: The workers wait for connections of a full pool, so tasks start late
+          runbook_url: https://github.com/code19m/taskmill/blob/main/docs/production/database.md#size-the-connection-pool
       - alert: TaskmillWorkersNotReady # needs kube-state-metrics
         expr: kube_deployment_status_replicas_unavailable{namespace="shop", deployment="worker"} > 0
         for: 5m
@@ -149,6 +173,10 @@ groups:
   Without that, the alert turns on and off.
 - **A halted group's alert stays on until someone acts.** That is on
   purpose: the group's tasks wait until you retry or delete its dead task.
+- **The worker counters exist only where `ObserveWorker` runs,** one
+  process at a time: a restart starts them at 0 again, which `rate` and
+  `increase` take in their stride. A worker that loses the database loses
+  its leases too: expect lost leases after an outage.
 - **Failed enqueues are counted only where the `otel` module's
   `EnqueueMiddleware` runs.** taskmill logs nothing for a failed enqueue:
   the call returns the error to your code. The counter counts tasks, not
@@ -187,6 +215,6 @@ It exports no metrics: the queue gauges come from your apps
 - [Log messages](../reference/log-messages.md): every line, and what to do
 - [Metrics and traces](../reference/metrics.md): every span, metric, and gauge
 - [Logs, traces, and metrics](../guides/observability.md): how to set up logs, traces, and metrics
-- [`otel.Instrumentation.ObserveQueues`](https://pkg.go.dev/github.com/code19m/taskmill/otel#Instrumentation.ObserveQueues) on pkg.go.dev
+- [`otel.Instrumentation.ObserveQueues`](https://pkg.go.dev/github.com/code19m/taskmill/otel#Instrumentation.ObserveQueues) and [`ObserveWorker`](https://pkg.go.dev/github.com/code19m/taskmill/otel#Instrumentation.ObserveWorker) on pkg.go.dev
 
 **Next:** [Security](security.md)
