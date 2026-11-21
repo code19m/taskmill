@@ -1,7 +1,9 @@
 name: Fuzz
 
 # Every test run replays the fuzz targets' seeds. This runs the fuzzers
-# themselves, each for a few minutes, to find new failing input.
+# themselves, each for a few minutes in a job of its own, to find new failing
+# input. So each target keeps its time however many there are, and a new
+# target gets its job without a change here.
 on:
   schedule:
     - cron: "0 4 * * *" # Daily.
@@ -11,10 +13,34 @@ permissions:
   contents: read
 
 jobs:
-  fuzz:
-    name: Fuzz
+  targets:
+    name: Find the fuzz targets
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    outputs:
+      targets: ${{ steps.list.outputs.targets }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - id: list
+        run: |
+          targets=$(make -s fuzz-targets | jq -Rcn '[inputs | split(" ") | {pkg: .[0], name: .[1]}]')
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: ${{ matrix.target.name }}
+    needs: targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.targets) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,10 +51,12 @@ jobs:
           cache-dependency-path: go.sum
       - run: make db
       - run: make fuzz FUZZTIME=3m
+        env:
+          FUZZ: ${{ matrix.target.pkg }} ${{ matrix.target.name }}
       # A failing input is written to testdata/fuzz in its package. Commit it
       # with the fix, or add it to the target's seeds.
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: fuzz-failures
+          name: fuzz-failures-${{ strategy.job-index }}-${{ matrix.target.name }}
           path: "**/testdata/fuzz/"

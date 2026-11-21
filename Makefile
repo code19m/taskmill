@@ -39,8 +39,10 @@ RELEASE := $(shell awk '$$1 == "github.com/code19m/taskmill" { print $$2 }' inte
 # the current code through a developer's go.work.
 COMPAT := cd internal/compat && GOWORK=off
 
-# How long `make fuzz` runs each fuzz target.
+# How long `make fuzz` runs each fuzz target, and which one: every target by
+# default, or the one in FUZZ, as `make fuzz-targets` prints it.
 FUZZTIME ?= 10s
+FUZZ     ?=
 
 BIN           := $(CURDIR)/bin
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
@@ -118,11 +120,15 @@ cover-report: ## Print the coverage of the last `make test` per package, in Mark
 	awk '{ printf "| `%s` | %.1f%% |\n", $$1, 100 * $$3 / $$2; all += $$2; cov += $$3 } \
 		END { printf "| **Total** | **%.1f%%** |\n", 100 * cov / all }'
 
+.PHONY: fuzz-targets
+fuzz-targets: ## Print each fuzz target as "<package> <name>", one per line.
+	@targets=$$(go test -list '^Fuzz' ./...) || { echo "$$targets" >&2; exit 1; }; \
+	echo "$$targets" | awk '/^Fuzz/ { names[++n] = $$1 } /^ok/ { for (i = 1; i <= n; i++) print $$2, names[i]; n = 0 }'
+
 .PHONY: fuzz
-fuzz: ## Run each fuzz target for FUZZTIME (needs `make db`).
-	@targets=$$(go test -list '^Fuzz' ./...) || { echo "$$targets"; exit 1; }; \
-	echo "$$targets" | awk '/^Fuzz/ { names[++n] = $$1 } /^ok/ { for (i = 1; i <= n; i++) print $$2, names[i]; n = 0 }' | \
-	while read -r pkg name; do \
+fuzz: ## Run each fuzz target, or only FUZZ, for FUZZTIME (needs `make db`).
+	@targets='$(FUZZ)'; [ -n "$$targets" ] || targets=$$($(MAKE) -s --no-print-directory fuzz-targets) || exit 1; \
+	echo "$$targets" | while read -r pkg name; do \
 		echo "$$pkg $$name"; \
 		TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -run='^$$' -fuzz="^$$name\$$" -fuzztime=$(FUZZTIME) $$pkg || exit 1; \
 	done
