@@ -13,6 +13,20 @@ All notable changes to taskmill are recorded here. The format follows
   come first. A test now runs its code, and its pictures show the current
   dashboard. It links to [Packages](docs/reference/packages.md) instead of
   listing the packages.
+- The dashboard serves its static files at `/static/{version}/{name}`, in
+  place of `/static/{name}?v=...`, and its script as native ES modules
+  that the page preloads, with no build step. The pages work as before,
+  except in a frame that is sandboxed without `allow-same-origin`, where
+  they work without their script: the browser fetches modules there with
+  CORS, which the dashboard does not allow. A proxy that allows the
+  dashboard's paths one by one must allow the new form, which
+  [Dashboard routes](docs/reference/taskmill-ui.md#dashboard-routes) lists.
+  During a rolling upgrade to this version, a page may show without its
+  styles or its script until the reader loads it again: a server of each
+  version answers 404 for the paths of the other. A page of this version
+  whose script did not load works as it does with script turned off; a
+  page of 0.15 shows the controls that need its script, which do nothing,
+  until it is loaded again.
 
 ## [0.15.0] - 2026-11-21
 

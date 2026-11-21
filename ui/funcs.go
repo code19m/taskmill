@@ -21,6 +21,7 @@ func (s *server) funcs() template.FuncMap {
 	return template.FuncMap{
 		"path":        s.path,
 		"asset":       s.asset,
+		"modules":     func() []string { return s.statics.modules },
 		"ago":         ago,
 		"agoMinutes":  agoMinutes,
 		"timestamp":   timestamp,
@@ -68,7 +69,7 @@ func query(pairs ...string) string {
 // ago words how long before now t was, or how long after it: "8s ago", or
 // "in 3m". It reads both times to the second, as a clock shows them, so
 // every relative time of a page changes on the second, with the others. The
-// script counts from there in the same words: see ago in app.js.
+// script counts from there in the same words: see ago in times.js.
 func ago(now, t time.Time) string {
 	if t.IsZero() {
 		return "—"
@@ -115,7 +116,7 @@ func agoMinutes(now, t time.Time) string {
 // Each part is cut down, never rounded up, as ago does, and a whole number
 // of seconds has no tenths. Below a millisecond it is "<1ms", where "0ms"
 // would read as no time; no time is "0s". A gap that counts is whole
-// seconds, and the script counts it in the same words: see span in app.js.
+// seconds, and the script counts it in the same words: see span in times.js.
 func span(d time.Duration) string {
 	switch {
 	case d <= 0:

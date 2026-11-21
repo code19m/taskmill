@@ -121,7 +121,7 @@ func TestPagesDefineTheIconsTheyUse(t *testing.T) {
 // it defines is used, so that no name of an old design stays behind.
 func TestStylesDefineThePropertiesTheyUse(t *testing.T) {
 	t.Parallel()
-	code, sheet, _ := get(t, handler(t, setup(t), nil), "/static/style.css")
+	code, sheet, _ := get(t, handler(t, setup(t), nil), "/static/any/style.css")
 	if code != http.StatusOK {
 		t.Fatalf("stylesheet: %d", code)
 	}
@@ -218,7 +218,7 @@ func TestPagesRender(t *testing.T) {
 		},
 		{"an unknown state", "/admin/tasks/tasks?state=bogus", http.StatusBadRequest, nil, nil},
 		{"an unknown task", "/admin/tasks/tasks/999999", http.StatusNotFound, nil, nil},
-		{"the stylesheet", "/admin/tasks/static/style.css", http.StatusOK, nil, nil},
+		{"the stylesheet", "/admin/tasks/static/any/style.css", http.StatusOK, nil, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()

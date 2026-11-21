@@ -24,8 +24,8 @@
 // with [http.CrossOriginProtection], and [Config.ReadOnly] disables them
 // entirely.
 //
-// The dashboard is rendered on the server with the standard library. Two
-// small scripts, served with it, keep pages live, show another page or the
+// The dashboard is rendered on the server with the standard library. Its
+// scripts, served with it, keep pages live, show another page or the
 // result of an action without loading the page anew, apply filters as they
 // change, show times in the reader's time zone, confirm actions in dialogs,
 // and apply the chosen theme. Every page also works without them, with its
@@ -145,7 +145,7 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 		readOnly: cfg.ReadOnly,
 		logger:   cfg.Logger,
 	}
-	s.files, s.versions = loadStatic()
+	s.statics = loadStatic()
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
 	}
@@ -153,7 +153,7 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	s.pages = template.Must(template.New("").Funcs(s.funcs()).ParseFS(assets, "templates/*.html"))
 
 	mux := http.NewServeMux()
-	mux.Handle("GET /static/{name}", s.static())
+	mux.Handle("GET /static/{version}/{name}", s.static())
 	mux.HandleFunc("GET /{$}", s.overview)
 	mux.HandleFunc("GET /tasks", s.taskList)
 	mux.HandleFunc("GET /tasks/{id}", s.task)
@@ -215,8 +215,7 @@ type server struct {
 	prefix   string
 	readOnly bool
 	logger   *slog.Logger
-	versions map[string]string // static file name to a hash of its content
-	files    map[string]staticFile
+	statics  statics
 	choices  choiceCache
 	charts   activityCache
 }

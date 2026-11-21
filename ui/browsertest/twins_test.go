@@ -1,6 +1,7 @@
 package browsertest
 
 import (
+	"io/fs"
 	"os"
 	"strings"
 	"testing"
@@ -11,20 +12,27 @@ import (
 	"github.com/code19m/taskmill/ui/internal/twins"
 )
 
-// twin returns the source of a word function of the script: from its
-// declaration, which starts with decl, to the blank line after it. The
-// script keeps its functions to itself, so the test reads them from it.
-func twin(t *testing.T, script, decl string) string {
+// twin returns the source of a word function of the script, from the
+// module that declares it: from its declaration, which starts with decl, to
+// the blank line after it. The modules keep these functions to themselves,
+// so the test reads them from the source.
+func twin(t *testing.T, module, decl string) string {
 	t.Helper()
-	start := strings.Index(script, "\n  "+decl)
+	source, err := fs.ReadFile(os.DirFS("../static"), module)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	script := string(source)
+	start := strings.Index(script, "\n"+decl)
 	if start < 0 {
-		t.Fatalf("the script declares no %q", decl)
+		t.Fatalf("%s declares no %q", module, decl)
 	}
-	end := strings.Index(script[start:], "\n\n")
+	end := strings.Index(script[start+1:], "\n\n")
 	if end < 0 {
-		t.Fatalf("the script's %q has no end", decl)
+		t.Fatalf("%s's %q has no end", module, decl)
 	}
-	return script[start : start+end]
+	return script[start+1 : start+1+end]
 }
 
 // The script words a relative time, a length of time that counts, and a
@@ -34,12 +42,6 @@ func twin(t *testing.T, script, decl string) string {
 // seconds between two times read to the second, and span with whole
 // seconds.
 func TestScriptWordsAsTheServerDoes(t *testing.T) {
-	source, err := os.ReadFile("../static/app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := string(source)
-
 	var agoIn, spanIn []int64
 	var visibleIn, agoWant, spanWant, visibleWant []string
 	for _, c := range twins.Ago {
@@ -59,9 +61,9 @@ func TestScriptWordsAsTheServerDoes(t *testing.T) {
 	p := newTab(t)
 	p.do(chromedp.Navigate("about:blank"))
 	got := eval[struct{ Ago, Span, Visible []string }](p, `(() => {
-		`+twin(t, script, "function ago(")+`
-		`+twin(t, script, "function span(")+`
-		`+twin(t, script, "const visible = ")+`
+		`+twin(t, "times.js", "function ago(")+`
+		`+twin(t, "times.js", "function span(")+`
+		`+twin(t, "menus.js", "const visible = ")+`
 		return {
 			Ago: `+js(agoIn)+`.map((s) => ago(s)),
 			Span: `+js(spanIn)+`.map((s) => span(s)),

@@ -95,7 +95,7 @@ allow-list, or to link to a page from an alert.
 | `POST /queues/{action}` | Pauses or resumes a queue. `{action}` is `pause` or `resume` | `name`: the queue. `range`: the period of the overview that the answer leads back to, as for `GET /` |
 | `POST /schedules/{action}` | Pauses, resumes, or runs a schedule. `{action}` is `pause`, `resume`, or `run` | `name`: the schedule |
 | `GET /choices/groups` | A JSON list of up to 100 FIFO group keys, for the group filter | `search`: text that the keys contain |
-| `GET /static/{name}` | The scripts, the styles, and the icon | `v`: the file's version |
+| `GET /static/{version}/{name}` | The scripts, the styles, and the icon. `{version}` is a hash of every static file. A page links the current one, which may be cached for a year. Another version gets the current file, which the browser must check again | — |
 
 For example, `/tasks?state=dead&queue=emails` lists the dead tasks of the
 queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.

@@ -9,7 +9,7 @@ import (
 
 // The words of a relative time: the script keeps the times of a page
 // counting in the same words, from the same two instants (ago in
-// static/app.js), so the cases are the twins' to share.
+// static/times.js), so the cases are the twins' to share.
 func TestAgoWordsATimeToTheSecond(t *testing.T) {
 	t.Parallel()
 	for _, c := range twins.Ago {
@@ -29,7 +29,7 @@ func TestAgoWordsATimeToTheSecond(t *testing.T) {
 }
 
 // The words of a length of time: the script counts a gap in whole seconds,
-// in the same words (span in static/app.js).
+// in the same words (span in static/times.js).
 func TestSpanWordsALengthOfTime(t *testing.T) {
 	t.Parallel()
 	for _, c := range twins.Span {
@@ -40,7 +40,7 @@ func TestSpanWordsALengthOfTime(t *testing.T) {
 }
 
 // A name shows the characters that no one could see, as the script shows a
-// name that it adds to a page (visible in static/app.js).
+// name that it adds to a page (visible in static/menus.js).
 func TestVisibleShowsTheCharactersThatNoOneCouldSee(t *testing.T) {
 	t.Parallel()
 	for _, c := range twins.Visible {

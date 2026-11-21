@@ -139,6 +139,29 @@ func TestNavigationAndHistoryShowPagesInPlace(t *testing.T) {
 	}
 }
 
+// A preset of the range of time, a link in the range's menu, is a filter:
+// its list shows in place, in the same entry of the history, and the menu
+// closes and gives the focus back to its button. navigation.js follows the
+// link, and closes the menu with menus.js.
+func TestRangePresetShowsItsListInPlace(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/tasks")
+	p.run(`window.loaded = true`)
+	entries := eval[int](p, `history.length`)
+
+	p.click(".sel-range > summary")
+	p.waitFor(`document.querySelector(".sel-range").open`, "the range's menu opening")
+	p.click(".range-presets > a")
+	p.waitFor(`new URLSearchParams(location.search).has("since") && !document.querySelector(".range-presets > a[aria-current]")`,
+		"the list of the preset showing")
+	if !eval[bool](p, `!document.querySelector(".sel-range").open && document.activeElement === document.querySelector(".sel-range > summary")`) {
+		t.Error("the range's menu stays open, or its button lost the focus")
+	}
+	if !eval[bool](p, `window.loaded === true && history.length === `+strconv.Itoa(entries)) {
+		t.Error("the preset loaded the page anew, or added an entry to the history")
+	}
+}
+
 // An action asks first, in a dialog. Escape closes the dialog, sends
 // nothing, and gives the focus back to the button that opened it. Confirm
 // sends the action, and the page that answers shows in place, with its
