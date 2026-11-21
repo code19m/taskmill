@@ -52,9 +52,11 @@ const defaultMaxBlockingIndexRows = 1_000_000
 //
 // A migration that builds an index does so online, without blocking writes,
 // which can take minutes on a large table. Meanwhile Migrate keeps a second
-// connection of the pool, so the pool needs at least 2. An older migration
-// that blocks writes while it builds an index is applied only on tables
-// that [MigrateConfig.MaxBlockingIndexRows] allows.
+// connection of the pool, so the pool needs at least 2, and its connections
+// may have no lock_timeout, statement_timeout, or transaction_timeout,
+// which would cancel the build. An older migration that blocks writes while
+// it builds an index is applied only on tables that
+// [MigrateConfig.MaxBlockingIndexRows] allows.
 //
 // The [setup guide] says when to call Migrate, and with which role.
 //
@@ -395,6 +397,7 @@ func (m *migrator) applyOnline(ctx context.Context, tx pgx.Tx, mig migrations.Mi
 	if _, err := tx.Exec(ctx, keepOpenSQL); err != nil {
 		return err
 	}
+
 	start := time.Now()
 	for _, st := range mig.Statements {
 		if err := m.runOnline(ctx, tx, mig, st); err != nil {
@@ -496,7 +499,7 @@ func (m *migrator) awaitIndex(ctx context.Context, mig migrations.Migration, st 
 
 		switch {
 		case version >= mig.Version:
-			return 0, fmt.Errorf("another process applied it meanwhile: this one lost the lock of the migrations table")
+			return 0, errors.New("another process applied it meanwhile: this one lost the lock of the migrations table")
 		case !busy && valid == nil:
 			return indexMissing, nil
 		case !busy && *valid:

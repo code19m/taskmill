@@ -43,29 +43,43 @@ which build or drop an index while writes continue. PostgreSQL runs each
 only outside a transaction, alone.
 
 - **The lock stays held during the build.** The step's transaction holds
-  the lock and nothing else, and runs `SET LOCAL
-  idle_in_transaction_session_timeout = 0`, since a build takes minutes and
-  many databases end idle transactions. Each statement runs on another
-  connection of the pool, so the pool needs 2. Then the step records the
-  version, and commits. An idle transaction at READ COMMITTED keeps no
-  snapshot, so the build does not wait for it: measured.
+  the lock and nothing else. It sets `idle_in_transaction_session_timeout`,
+  and from PostgreSQL 17 `transaction_timeout`, to 0 for itself, since a
+  build takes minutes. Each statement runs on another connection of the
+  pool, so the pool needs 2. Then the step records the version, and
+  commits. An idle transaction at READ COMMITTED keeps no snapshot, so the
+  build does not wait for it: measured.
 - **It needs no session.** Through PgBouncer in transaction mode, the
-  transaction keeps one server connection, and each statement gets another.
+  transaction keeps one server connection, and each statement gets
+  another. PgBouncer's own pool must allow both.
+- **No timeout may cancel a build.** A `lock_timeout` cancels it too: a
+  build waits for every older transaction in the database. A canceled build
+  leaves an invalid index at each try, so the step fails before it starts
+  while the pool's connections have one of these timeouts. We rejected
+  setting them to 0 for the build's session: through PgBouncer, that
+  setting would reach other clients, and the build might not get it.
 - **Before each statement, it waits for builds of the table.** A `Migrate`
   whose process stopped can leave its build running: the server notices a
   client that is gone only when it answers. A second build of the same
   table, waiting for the table's `SHARE UPDATE EXCLUSIVE` lock, would keep a
   snapshot that the first waits for, and PostgreSQL ends one of the two as
   a deadlock. Measured: it ended the first, after it had read the table. So
-  the step tries that lock with `NOWAIT`, in a short transaction, and looks
-  again after a pause. Autovacuum takes the same lock, so the step waits for
-  it too.
-- **An invalid index is dropped and built again.** With that lock, the step
-  reads the index. A valid one is done, and a missing one is built. An
-  invalid one is left by a build that failed or was canceled: the step
-  drops it with `DROP INDEX CONCURRENTLY`, then builds it. No session builds
-  it meanwhile: other processes wait for the lock of `migrations`, and the
-  check excluded the builds of stopped ones.
+  the step looks in `pg_locks` for a session that holds a lock of the table
+  that a build waits for, and looks again after a pause, and logs once that
+  it waits. It does not wait for autovacuum, which ends its work when a
+  build waits for it.
+- **An invalid index is dropped and built again.** Once no such session is
+  left, the step reads the index. A valid one is done, and a missing one is
+  built. An invalid one is left by a build that failed or was canceled: the
+  step drops it with `DROP INDEX CONCURRENTLY`, then builds it. No session
+  builds it meanwhile: other processes wait for the lock of `migrations`,
+  and stopped ones run no new statement.
+- **A step whose lock ended stops.** A proxy or an operator can end the
+  lock's session during a build, and another process then takes the lock.
+  So before each build or drop, the step pings the lock's connection: a
+  ping takes no snapshot, which a build could wait for. Each look at the
+  index also reads the version, and fails if another process recorded the
+  step.
 - **A build never has `IF NOT EXISTS`.** It would skip an invalid index,
   and succeed. Measured: of two builds with it at the same time, the first
   was ended as a deadlock, and the second skipped its invalid index.
@@ -91,9 +105,12 @@ fails if a migration would read more than `MaxBlockingIndexRows`.
 - **What blocks.** When it loads the files, the code marks each `CREATE
   INDEX`, and each unique or primary key constraint without `USING INDEX`,
   except on a table that the same migration creates: that table is empty.
-- **The estimate.** It is `pg_class.reltuples`, which VACUUM and ANALYZE
-  keep, summed over the partitions. A table that neither has seen yet
+- **The estimate.** As the planner does, it takes the rows for each page
+  that VACUUM and ANALYZE last counted, times the pages that the table has
+  now, summed over the partitions. A table that neither has seen yet
   counts as rows of 100 bytes, fewer than a task takes.
+- **The error is `ErrBlockingMigration`,** so that a deploy job can tell a
+  refusal, which needs a person, from a failure that a retry fixes.
 - **The default is 1,000,000 rows.** Migration 7 then makes writes wait
   about half a second: well under the 5 seconds for which every other
   migration may wait for a lock, and far under a lease of 30 seconds. A

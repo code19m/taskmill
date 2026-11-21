@@ -191,6 +191,8 @@ the others: [Run tasks on a schedule](../guides/schedules.md).
 |---|---|---|---|
 | `task history has no partition for today; completed tasks skip history` | Error | Neither the workers, when they started, nor the maintainer could create today's history partition. Tasks still complete, but without history. | Make the role that runs workers own the taskmill tables. See [Database](../production/database.md). |
 | `applied migration` | Info | `Migrate` applied migration `version` (`name`) in `duration`. | Nothing. |
+| `waiting for another process to migrate` | Info | Another process holds the lock of the `migrations` table. `Migrate` tries it again at least every second, until its context ends. | Nothing. If it lasts, see [`Migrate` fails, or never returns](../production/troubleshooting.md#migrate-fails-or-never-returns). |
+| `waiting for an index build` | Info | The online step of migration `version` (`name`) waits for a build of an index of the same table, often by a `Migrate` whose process stopped. It looks again at least every second. | Nothing. The build shows in `pg_stat_progress_create_index`. |
 | `prepare history partitions failed` | Warn | `Migrate` found the schema up to date, or a worker started, but could not create the missing history partitions. `error` says why. The worker still starts, and the maintainer tries again. | If `task history has no partition` follows, fix the table owner. |
 
 ### Dashboard

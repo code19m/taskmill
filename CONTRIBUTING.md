@@ -188,10 +188,11 @@ docs: explain at-least-once delivery
   migration whose first line is `-- online`, with only
   `CREATE INDEX CONCURRENTLY name ON schema.table …` and
   `DROP INDEX CONCURRENTLY schema.name` statements, without
-  `IF NOT EXISTS`. A test fails for a migration after version 9 that builds
-  an index otherwise, unless the migration creates the table too. For a
-  unique constraint, build its index online, then add the constraint with
-  `USING INDEX` in a later migration. The history is partitioned, and has
+  `IF NOT EXISTS`. After version 9, a test fails for any other statement
+  that names an index, a key, or `REINDEX`, unless it uses `USING INDEX`,
+  is a comment, or works on a table that the same migration creates without
+  `IF NOT EXISTS`. For a unique constraint, build its index online, then add
+  the constraint with `USING INDEX` in a later migration. The history is partitioned, and has
   no online step yet: open an issue first.
   [Schema migrations](docs/design/schema-migrations.md) says why.
 

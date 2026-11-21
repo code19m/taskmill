@@ -131,29 +131,36 @@ completions continue while the index builds.
   transactions that write the table, and then for every older transaction
   in the database: a long transaction anywhere delays it.
 - `Migrate` uses a second connection of the pool meanwhile, so the pool
-  needs at least 2. It works through PgBouncer in transaction mode.
-- A `statement_timeout` of the role that runs `Migrate` must leave time
-  for the build.
+  needs at least 2. It works through PgBouncer in transaction mode, whose
+  own pool must then let it use 2 server connections.
+- A `lock_timeout`, `statement_timeout`, or `transaction_timeout` would
+  cancel the build, so `Migrate` refuses the step while the pool's
+  connections have one. Run it as a role without them, as after
+  `ALTER ROLE shop_migrate SET statement_timeout = 0`.
+- If you end the session of a `Migrate` that builds, its build continues in
+  the database. That `Migrate` stops, and the next one waits for the build.
 - A build that fails, or whose `Migrate` stops, leaves an *invalid index*:
   PostgreSQL updates it on every write, and no query uses it. The next
   `Migrate` drops it, and builds it again.
 
 ### Migrations that block writes
 
-Migrations 7 and 9 build their indexes inside a transaction. Enqueues,
-fetches, and completions wait while they read `tasks`, and the history for
-migration 7. Reads continue. A schema from before v0.14.0 has migration 9
-pending, and one from before v0.12.0 has migration 7 pending too.
+Migrations 3, 7, and 9 build their indexes inside a transaction. Writes to
+the table wait while they read it. Reads continue. A schema from before
+v0.14.0 has migration 9 pending, and one from before v0.12.0 has migration
+7 pending too.
 
-| Migration | Writes wait, for each million rows |
-|---|---|
-| 7: indexes of creation time, on `tasks` and the history | About 0.5 seconds |
-| 9: an index of the heads of FIFO groups, on `tasks` | About 0.1 seconds |
+| Migration | Table | Writes wait, for each million rows |
+|---|---|---|
+| 3: an index of halted FIFO groups | `groups` | Too few rows to matter |
+| 7: indexes of creation time | `tasks` and the history | About 0.5 seconds |
+| 9: an index of the heads of FIFO groups | `tasks` | About 0.1 seconds |
 
 So `Migrate` checks first. If such a migration would read more rows than
 `MaxBlockingIndexRows` allows (1,000,000 by default, by PostgreSQL's
-estimate), `Migrate` changes nothing, and fails with an error that names
-the migration and the rows. Then:
+estimate), `Migrate` changes nothing. It fails with an error that wraps
+`ErrBlockingMigration`, and names the migration and the rows. A retry does
+not help. Then:
 
 1. Choose a quiet time, when a pause of writes does no harm. Find it with
    the table above.
