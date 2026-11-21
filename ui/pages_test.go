@@ -1169,6 +1169,61 @@ func TestTaskPagesSayHowTheTaskStandsInItsGroup(t *testing.T) {
 	}
 }
 
+// The page of a dead task finds the FIFO group that the task halts among the
+// halted groups of its queue whose keys contain the task's key, in one read
+// of up to 1,000 of them, as many round trips as for a key that no other
+// contains: an open page reads it at every update. Past those, the page says
+// that the task's place in its group could not be read.
+func TestTaskPageReadsBoundedHaltedGroups(t *testing.T) {
+	t.Parallel()
+	client, pool, schema, _, trips := setupCounting(t)
+	ctx := t.Context()
+	res, err := client.EnqueueMany(ctx, []taskmill.EnqueueParams{
+		{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{GroupKey: "solo"}},
+		{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{GroupKey: "k"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The two tasks die and halt their groups, after 1,000 groups, each
+	// halted by its one dead task, whose keys contain "k" and come first.
+	if _, err := pool.Exec(ctx, `WITH dead AS (
+	        INSERT INTO `+schema+`.tasks (run_at, state, max_attempts, queue, kind, group_key, payload, finalized_at)
+	        SELECT now(), 'dead', 1, 'default', 'greet', 'ak' || lpad(n::text, 4, '0'), '{}', now() FROM generate_series(1, 1000) n
+	        RETURNING id, queue, group_key)
+	    INSERT INTO `+schema+`.groups (queue, group_key, tasks, halted_task_id, halted_at) SELECT queue, group_key, 1, id, now() FROM dead`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = ANY($1)`,
+		[]int64{res[0].ID, res[1].ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.groups g SET halted_task_id = t.id, halted_at = now()
+	    FROM `+schema+`.tasks t WHERE t.id = ANY($1) AND g.queue = t.queue AND g.group_key = t.group_key`, []int64{res[0].ID, res[1].ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &actionLog{}
+	h := handler(t, client, &ui.Config{Logger: slog.New(logs)})
+	solo, k := "/tasks/"+strconv.FormatInt(res[0].ID, 10), "/tasks/"+strconv.FormatInt(res[1].ID, 10)
+	if found, past := roundTripsOf(t, h, trips, solo), roundTripsOf(t, h, trips, k); past != found {
+		t.Errorf("the page of a task behind 1,000 halted groups made %d round trips, want %d, as for a key that no other contains", past, found)
+	}
+
+	for target, want := range map[string]string{solo: "This task halts its FIFO group.", k: "Its place in its FIFO group could not be read."} {
+		if _, body, _ := get(t, h, target); !strings.Contains(body, want) {
+			t.Errorf("%s: want %q on the page", target, want)
+		}
+	}
+
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	if !slices.Contains(logs.messages, "read FIFO group failed") {
+		t.Errorf("logged %q, want why the group could not be read", logs.messages)
+	}
+}
+
 // The task list shows no payload and no metadata, and one line of each
 // task's last error. So a page must not read them from the database: a
 // payload can take 1 MiB, and an open page asks again every 5 seconds. The

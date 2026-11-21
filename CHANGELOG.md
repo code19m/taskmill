@@ -82,6 +82,20 @@ All notable changes to taskmill are recorded here. The format follows
   1,000 slots idle for a second or two: a fetch took its most, 1,000 tasks,
   but measured "more may wait" against the limit, and said nothing more
   waited. It now fetches again right away.
+- The dashboard's live updates get 304 Not Modified again for a page that
+  did not change. A page with relative times, such as "Counted 4s ago" on
+  the overview, or the times of workers, schedules, and tasks, changed
+  every second, so nearly every update downloaded the whole page. The
+  overview's Schedules card now says a next run less than a minute away as
+  "within a minute".
+- The page of a dead task reads at most 1,000 halted FIFO groups to find the
+  one that the task halts. It read them page by page until it found the
+  group or the request's time ran out. Past those, the page says that the
+  task's place in its group could not be read.
+- An action confirmed in the dashboard's dialog is sent also when the
+  dialog opened again right after it closed, within a few milliseconds, as
+  a browser test can. The late event of the first closing cleared the
+  action of the second, and the confirm sent nothing.
 
 ## [0.14.0] - 2026-11-21
 

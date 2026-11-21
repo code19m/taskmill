@@ -57,7 +57,7 @@ func timeline(now time.Time, t, head *taskmill.TaskInfo) []entry {
 		due := s.created()
 		s.gap("Waited", due, s.started, "")
 		if s.start("run") {
-			s.tl = append(s.tl, entry{Gap: "Running for", Took: s.lasting(s.started), Work: true, Since: s.started, Tone: "run"})
+			s.tl = append(s.tl, entry{Gap: "Running for", Took: lasting(s.now, s.started), Work: true, Since: s.started, Tone: "run"})
 		}
 	case taskmill.StateRetryable:
 		s.retrying()
@@ -108,9 +108,10 @@ func (s *steps) gap(words string, from, to time.Time, tone string) {
 }
 
 // lasting words the time from since until now, in whole seconds of the
-// clock, as ago reads them.
-func (s *steps) lasting(since time.Time) string {
-	return span(max(0, s.now.Truncate(time.Second).Sub(since.Truncate(time.Second))))
+// clock, as ago reads them. The script counts it on in the same words: see
+// span in app.js.
+func lasting(now, since time.Time) string {
+	return span(max(0, now.Truncate(time.Second).Sub(since.Truncate(time.Second))))
 }
 
 // created adds the step Created and, unless the task was due at once, the
@@ -156,7 +157,7 @@ func (s *steps) failed() time.Time {
 func (s *steps) waiting(head *taskmill.TaskInfo) {
 	wait := entry{Behind: head}
 	if due := s.created(); !due.After(s.now) {
-		wait.Gap, wait.Took, wait.Since = "Waiting", s.lasting(due), due
+		wait.Gap, wait.Took, wait.Since = "Waiting", lasting(s.now, due), due
 	}
 	if head != nil {
 		wait.Tone = "warn"

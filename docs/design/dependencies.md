@@ -1,7 +1,8 @@
 # Dependencies and modules
 
 taskmill's core module has one dependency, pgx. Its OpenTelemetry
-integration, and the examples for GORM and ent, are modules of their own.
+integration, the examples for GORM and ent, and the browser tests of the
+dashboard are modules of their own.
 This page says why, which options we rejected, and what a pull request that
 adds a dependency must do.
 
@@ -17,9 +18,9 @@ most of what a task queue needs: `database/sql`, `log/slog`, `context`,
 | Rule | How it works |
 |---|---|
 | The standard library first | A third-party module comes in only when the standard library cannot do the job well, and this page says why |
-| The allowlist is enforced | The `depguard` linter runs in strict mode on the list in [.golangci.yml](../../.golangci.yml): the standard library, this module, and pgx. The `otel` module has [lists of its own](#the-opentelemetry-module) there, and so has the module of the [ORM examples](#the-module-of-the-orm-examples) |
+| The allowlist is enforced | The `depguard` linter runs in strict mode on the list in [.golangci.yml](../../.golangci.yml): the standard library, this module, and pgx. The `otel` module has [lists of its own](#the-opentelemetry-module) there, and so have the modules of the [ORM examples](#the-module-of-the-orm-examples) and of the [browser tests](#the-module-of-the-browser-tests) |
 | An integration that needs a third-party module is a Go module of its own | Users who do not need it never download it. The core offers plain extension points, such as middleware, that such modules build on |
-| Tests use only the standard library | No assertion frameworks and no container libraries. The tests connect to the PostgreSQL server that an environment variable names, and CI provides one for each supported version |
+| Tests use only the standard library | No assertion frameworks and no container libraries. The tests connect to the PostgreSQL server that an environment variable names, and CI provides one for each supported version. The one exception drives a browser, which the standard library cannot: the [browser tests](#the-module-of-the-browser-tests) |
 | Development tools stay out of `go.mod` | Linters and scanners are pinned in the [Makefile](../../Makefile) and installed into `./bin`. A `tool` directive in `go.mod` would add their requirements to every user's module graph, where they can raise the versions of modules that users share with them |
 
 Users get a small module graph that is quick to audit. The rule has two
@@ -185,6 +186,34 @@ Nobody imports it, and it is never released.
 
 The cost: about 3,300 lines of generated code in the repository, and one
 more module for CI to download and check.
+
+## The module of the browser tests
+
+The dashboard's script, `ui/static/app.js`, changes pages in place: it
+updates a page to a newer copy, shows other pages and keeps them for the
+back button, confirms actions in a dialog, and shows tooltips. Only a
+browser runs it, so its tests drive one. They are a module of their own,
+`ui/browsertest`, which requires chromedp. Nobody imports it, and it is
+never released.
+
+| Option | Why, or why not |
+|---|---|
+| **chromedp** | Chosen. Pure Go. It drives the Chrome or Chromium that is installed, as on GitHub's Ubuntu runners, through the Chrome DevTools Protocol, and downloads nothing when it runs. It sends real input, such as the Escape key that closes a dialog, which a page's own script cannot fake. It brings two modules: `cdproto`, the protocol's types, and on Go 1.26 `go-json-experiment/json` |
+| Rod | Pure Go too, but it downloads a browser of its own unless told not to, and brings more modules |
+| Playwright for Go | Needs Node.js and a driver, and downloads its browsers |
+| WebDriver, through chromedriver | Needs a driver of the same version as the browser |
+| Tests in JavaScript on a page of their own | No dependency, but no real input either: a dialog's Escape and the tooltip under the pointer are out of reach |
+| Tests in Node.js with jsdom | No layout, dialogs, or popovers, and a JavaScript toolchain, which the dashboard is built to need none of |
+
+| Decision | Why |
+|---|---|
+| A module of its own | The core's users never download chromedp |
+| Its tests run only with `make test-browser`, and in a CI job of their own | They need Chrome. `make check` runs them when Chrome is installed. The other targets lint, scan, and build the module as they do every module, and `make test` skips its tests |
+| The tests run the real dashboard on PostgreSQL | The script works on the pages that the server renders. A test changes the database, as an application would, and watches the page follow |
+| The script's word functions get the cases of their Go twins | The words of a relative time, or of a hidden character, must match the server's. The cases are in `ui/internal/twins`, which both tests read |
+| A `depguard` list of its own | It may import chromedp, and pgx for its database |
+
+The cost: one more module to keep tidy, and a browser for its tests.
 
 ## See also
 

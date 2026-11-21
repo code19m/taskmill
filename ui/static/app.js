@@ -884,7 +884,10 @@
     send(form);
   });
 
+  // The close event comes a moment after the dialog closed. If the dialog
+  // opened again meanwhile, the event is of the closing before.
   dialog?.addEventListener("close", () => {
+    if (dialog.open) return;
     const form = confirming;
     confirming = null;
     if (dialog.returnValue === "confirm" && form?.isConnected) send(form);
