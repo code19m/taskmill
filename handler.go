@@ -95,8 +95,9 @@ type HandlerOptions struct {
 	Timeout time.Duration
 
 	// Retry decides the delay before each retry. A task whose worker lost its
-	// lease is retried with the default instead, because the maintainer that
-	// rescues it knows no handler's options. Default: [ExponentialBackoff]{}.
+	// lease is rescued by the maintainer, the worker that leads maintenance:
+	// it is retried with this policy if that worker has a handler for the
+	// kind, and with the default otherwise. Default: [ExponentialBackoff]{}.
 	Retry RetryPolicy
 
 	// BatchSize is the most tasks a [BatchHandler] receives in one call. It

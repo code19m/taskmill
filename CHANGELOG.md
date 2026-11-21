@@ -61,6 +61,16 @@ All notable changes to taskmill are recorded here. The format follows
   leases and run the due schedules. When those took longer than the lease,
   10 seconds, the role changed hands for no reason. The renewal now has a
   loop of its own, and the rescue and the schedules another.
+- A task whose worker lost its lease was retried after the default backoff,
+  not after its kind's `HandlerOptions.Retry`. The maintainer now uses the
+  kind's policy when it has a handler for the kind, as it does when every
+  worker runs one binary, at the cost of one statement per rescued batch
+  that holds such tasks. Otherwise it keeps the default.
+- A queue with a `MaxRunning` limit above 1,000, and more than 1,000 free
+  slots, such as `Concurrency` 2,000 with `MaxRunning` 5,000, left up to
+  1,000 slots idle for a second or two: a fetch took its most, 1,000 tasks,
+  but measured "more may wait" against the limit, and said nothing more
+  waited. It now fetches again right away.
 
 ## [0.14.0] - 2026-11-21
 

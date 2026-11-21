@@ -471,6 +471,41 @@ func TestRescueCapsTheBackoffOfManyAttempts(t *testing.T) {
 	}
 }
 
+// The maintainer that rescues a task retries it after the backoff of the
+// kind's retry policy, if it has a handler for the kind, and after the
+// default backoff otherwise.
+func TestRescueRetriesAfterTheKindsBackoff(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	slow := taskmill.ExponentialBackoff{Base: 5 * time.Hour, Max: 5 * time.Hour}
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+		return nil
+	}, &taskmill.HandlerOptions{Retry: slow})})
+
+	crashed := func(kind string) int64 {
+		return int64(e.count(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+		                                               lease_expires_at, attempted_at, attempted_by)
+		                         VALUES ('default', $1, 'running', now(), '{}', 5, 1, 1,
+		                                 now() - interval '1 second', now(), 'crashed')
+		                         RETURNING id`, kind))
+	}
+	handled, unknown := crashed("email.send"), crashed("report.build")
+	taskmill.Rescue(t.Context(), w)
+
+	for _, c := range []struct {
+		id       int64
+		min, max time.Duration
+	}{
+		{handled, 4 * time.Hour, 6 * time.Hour},
+		{unknown, 0, 2 * time.Second}, // the default after a first attempt: 1 second
+	} {
+		info := e.get(t, c.id)
+		if d := time.Until(info.RunAt); info.State != taskmill.StateRetryable || d < c.min || d > c.max {
+			t.Errorf("task of %s: %s, retry in %s; want retryable in %s to %s", info.Kind, info.State, d, c.min, c.max)
+		}
+	}
+}
+
 func TestPromotionStaysOnItsIndexBesideABacklog(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

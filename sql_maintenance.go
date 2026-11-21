@@ -128,7 +128,8 @@ SELECT CASE WHEN $3 THEN pg_notify($1, '{heartbeat}') END FROM woken`
 // rescueSQL fails the attempts whose leases expired: their workers
 // crashed or lost the database. $1 and $2 are the default backoff's
 // base and maximum in seconds; the exponent is capped so that tasks
-// with thousands of attempts cannot overflow it. It locks a grouped
+// with thousands of attempts cannot overflow it. Tasks of kinds with
+// another retry policy get their delays from rescueBackoffSQL. It locks a grouped
 // task's group first, skipping groups that other transactions hold,
 // such as one that enqueues into the group: it never waits for them,
 // and a later run rescues those tasks.
@@ -157,6 +158,16 @@ SET state = CASE
 FROM expired
 WHERE t.id = expired.id
 RETURNING t.id, t.queue, coalesce(t.group_key, ''), t.state::text, t.kind, t.attempt`
+
+// $1 task IDs, $2 delays in microseconds.
+//
+// rescueBackoffSQL sets the run time of tasks that a rescue made
+// retryable, in its transaction, to the delays that their kinds' retry
+// policies chose, from now.
+const rescueBackoffSQL = `
+UPDATE {s}.tasks t SET run_at = now() + d.delay * interval '1 microsecond'
+FROM unnest($1::bigint[], $2::bigint[]) AS d(id, delay)
+WHERE t.id = d.id AND t.state = 'retryable'`
 
 // deleteFinishedSQL deletes dead and canceled tasks older than the dead
 // retention, except the dead heads that keep their groups halted. It

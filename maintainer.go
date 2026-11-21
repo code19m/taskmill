@@ -386,6 +386,11 @@ func (m *maintainer) rescueBatch(ctx context.Context) (batch []rescuedTask, err 
 		if batch, err = collectRescued(r); err != nil {
 			return err
 		}
+		if ids, delays := m.backoffs(batch); len(ids) > 0 {
+			if _, err := q.exec(ctx, m.c.sql.rescueBackoff, ids, delays); err != nil {
+				return err
+			}
+		}
 
 		var left []groupLeave
 		for _, x := range batch {
@@ -402,6 +407,34 @@ func (m *maintainer) rescueBatch(ctx context.Context) (batch []rescuedTask, err 
 		return m.c.leaveGroups(ctx, m.w.logger, q, left)
 	})
 	return batch, err
+}
+
+// backoffs returns the retryable tasks of a rescue batch whose kinds this
+// worker has a handler for, with a retry policy other than the default,
+// which the rescue statement applied, and the delays in microseconds that
+// those policies choose. A policy that panics leaves its task with the
+// default, as outcomeOf does.
+func (m *maintainer) backoffs(batch []rescuedTask) (ids, delays []int64) {
+	for _, x := range batch {
+		reg := m.w.handlers[x.kind]
+		if State(x.state) != StateRetryable || reg == nil || reg.opts.Retry == RetryPolicy(ExponentialBackoff{}) {
+			continue
+		}
+		if d, ok := safeBackoff(reg.opts.Retry, x.attempt); ok {
+			ids, delays = append(ids, x.id), append(delays, d.Microseconds())
+		}
+	}
+	return ids, delays
+}
+
+// safeBackoff calls a retry policy, and reports false if it panicked.
+func safeBackoff(p RetryPolicy, attempt int) (d time.Duration, ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
+	return p.Backoff(attempt), true
 }
 
 // rescued counts and logs the failed attempts of a committed rescue batch.
