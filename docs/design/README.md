@@ -22,7 +22,7 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | 9 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
 | 10 | [Rows that taskmill did not write](schema-rows.md) | Which values the tables refuse, and how the code survives the others |
 | 11 | [The API's shape](api-shape.md) | Why each point of the API has its shape, and when we look at it again |
-| 12 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry and the ORM examples have modules of their own, and how to add a dependency |
+| 12 | [Dependencies and modules](dependencies.md) | Why pgx is the only dependency, why OpenTelemetry, the ORM examples, and the browser tests have modules of their own, and how to add a dependency |
 | 13 | [Benchmarks](benchmarks.md) | The performance targets, how we measure them, and the latest results |
 | 14 | [Releasing](releasing.md) | How the project team publishes a version |
 | 15 | [Writing docs](writing-docs.md) | The style guide and the page templates |
@@ -141,6 +141,14 @@ What follows:
   show, such as a login page, the browser loads as a full page. We rejected
   a client-side framework: it needs a JSON API, a second set of templates,
   and a build step, for a dashboard of five pages.
+- **A live update gets 304 Not Modified while only the time moved on.**
+  The script counts the relative times of the page on screen, such as "4s
+  ago", from the page's time of rendering. So the page's ETag leaves out
+  that time and those words, and keeps the instants that they count from.
+  A tooltip, which the script does not count, says a time to the minute.
+  We rejected a second rendering at a fixed time, for the ETag: it costs
+  a rendering at every update, and words that depend on the time but that
+  the script does not count would stay on screen unchanged.
 - **A time is an instant, and each side words it in the zone it knows.**
   The server knows no reader's time zone, so it words a time in UTC, and
   puts the instant beside the words. The script words it again in the zone

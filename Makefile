@@ -11,9 +11,10 @@ SYFT_VERSION          := v1.57.2
 GORELEASE_VERSION     := v0.0.0-20261014143641-f0251eb4aa3e
 
 # The repository's modules: the core, the integrations that need modules of
-# their own, and the examples that use other libraries
-# (docs/design/dependencies.md). Targets that check code run in each.
-MODULES := . otel examples/orms
+# their own, the examples that use other libraries, and the browser tests of
+# the dashboard (docs/design/dependencies.md). Targets that check code run in
+# each. The browser tests run only in `make test-browser`, which finds Chrome.
+MODULES := . otel examples/orms ui/browsertest
 
 # The core version that otel/go.mod requires. Its replace line builds the
 # module against the core next to it; `make otel-release-check` builds it
@@ -60,7 +61,7 @@ help: ## Show this help.
 	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: check
-check: tidy-check lint test test-pgbouncer vuln otel-release-check compat ## Run every check that CI runs, except `make release-check` and `make api`.
+check: tidy-check lint test test-pgbouncer test-browser vuln otel-release-check compat ##Run every check that CI runs, except `make release-check` and `make api`.
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format all Go files.
@@ -99,6 +100,22 @@ test-pgbouncer: ## Run all tests through PgBouncer in transaction mode (needs `m
 		(cd $$m && TASKMILL_TEST_DATABASE_URL='$(PGBOUNCER_URL)' TASKMILL_TEST_LISTEN_URL='$(TEST_DATABASE_URL)' \
 			go test -race -shuffle=on -count=1 ./...) || { status=1; break; }; \
 	done; docker rm -f taskmill-test-pgbouncer >/dev/null; exit $$status
+
+# The browser tests run the dashboard's script in Chrome or Chromium: CHROME,
+# or the first one installed. Without one they are skipped, but not in CI,
+# which sets CI and must test the script.
+.PHONY: test-browser
+test-browser: ## Run the dashboard's script in Chrome (needs `make db`; skips without Chrome).
+	@chrome="$$CHROME"; \
+	for c in google-chrome google-chrome-stable chromium chromium-browser \
+		"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" "/Applications/Chromium.app/Contents/MacOS/Chromium"; do \
+		[ -n "$$chrome" ] || chrome=$$(command -v "$$c"); \
+	done; \
+	if [ -z "$$chrome" ]; then \
+		echo "Chrome is not installed, so the browser tests are skipped. Install Chrome or Chromium, or set CHROME to its path." >&2; \
+		[ -z "$$CI" ] || exit 1; exit 0; \
+	fi; \
+	cd ui/browsertest && TASKMILL_TEST_CHROME="$$chrome" TASKMILL_TEST_DATABASE_URL='$(TEST_DATABASE_URL)' go test -race -count=1 ./...
 
 .PHONY: cover
 cover: test ## Run all tests and open the core's coverage report in a browser (needs `make db`).
