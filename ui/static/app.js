@@ -252,6 +252,7 @@
   function apply(result, fresh = false) {
     // The page changes with its titles on it. Then the tooltip shows again.
     const about = tipFor;
+    const focused = document.activeElement;
     undescribe();
     localise(result.main);
     count(result.main);
@@ -268,6 +269,9 @@
       if (mine) morph(mine, part);
     }
 
+    // The change may remove what had the focus, as the last "Load more"
+    // removes its link, or an update a row: the page takes it, not the body.
+    if (focused?.isConnected === false) main.focus({ preventScroll: true });
     if (result.doc.title) document.title = result.doc.title;
     shownETag = result.etag;
     highlight(main);
@@ -304,13 +308,16 @@
   // leave keeps the page on screen, before another one takes its place:
   // its title, its content, and the parts around it that an update changes.
   // What the script put there stays out: a chart's guide, and a hint's
-  // place, in its style attribute.
+  // place, in its style attribute. A page that does not update itself, such
+  // as one at the address of the page whose action it refused, is not kept:
+  // the browser loads the address again.
   function leave() {
     untrace();
     undescribe(); // the page is kept with its titles
+    pages.delete(entry);
+    if (!livePage()) return;
     for (const pop of document.querySelectorAll(".hint-pop[style]")) pop.removeAttribute("style");
     const parts = [document.getElementById("main"), ...document.querySelectorAll("[data-live-part]")];
-    pages.delete(entry);
     pages.set(entry, { title: document.title, html: parts.map((part) => part.outerHTML).join(""), y: scrollY });
     if (pages.size > KEEP_PAGES) pages.delete(pages.keys().next().value);
   }
@@ -385,7 +392,6 @@
   // change, so a browser that paints late, or not at all, has the page.
   function render(result, { moved, n, y = 0, notice = null }) {
     inflight?.abort(); // an update of the page that this one replaces
-    const focused = document.activeElement;
     apply(result, moved);
     entry = n;
     onScreen = here();
@@ -393,20 +399,19 @@
     if (notice) notify(notice);
     const main = document.getElementById("main");
     const announcer = document.querySelector("[data-announce]");
+    // A screen reader hears it in a live region that was there before the
+    // words: a notice that comes with its words may go unread.
     if (!moved) {
-      // The change may remove what had the focus, as the last "Load more"
-      // removes its link: the page takes it, not the body. A list that is
-      // longer, or has other filters, tells a screen reader how many tasks
-      // it shows now, or that it shows none; an action says what it did.
-      if (focused?.isConnected === false) main.focus({ preventScroll: true });
-      if (!notice && announcer) announcer.textContent = main.querySelector("[data-shown], .empty-title")?.textContent ?? "";
+      // A list that is longer, or has other filters, says how many tasks it
+      // shows now, or that it shows none; an action says what it did.
+      if (announcer) announcer.textContent = notice?.textContent ?? main.querySelector("[data-shown], .empty-title")?.textContent ?? "";
       return;
     }
 
     scrollTo(0, y);
     main.focus({ preventScroll: true });
     if (!reducedMotion.matches) main.animate?.([{ opacity: 0.4 }, { opacity: 1 }], { duration: FADE_MS, easing: "ease-out" });
-    if (announcer) announcer.textContent = document.title;
+    if (announcer) announcer.textContent = notice ? `${document.title}. ${notice.textContent}` : document.title;
   }
 
   // The back and forward buttons. A page that is kept shows right away, as
@@ -814,14 +819,17 @@
   async function act() {
     if (submitting) return; // a second press sends nothing
     const said = dialog.querySelector("[data-confirm-status]");
+    const button = dialog.querySelector("[data-confirm-button]");
     const turn = nextTurn();
     submitting = true;
-    dialog.ariaBusy = "true";
+    // The button is unavailable meanwhile, and keeps the focus. The dialog is
+    // not marked busy: a screen reader would not read the status line then.
+    button.ariaDisabled = "true";
     said.textContent = said.dataset.busy;
     const offline = navigator.onLine === false;
     const result = await request(confirming.action, { body: new URLSearchParams(new FormData(confirming)) });
     submitting = false;
-    dialog.ariaBusy = null;
+    button.ariaDisabled = null;
     if (result.kind !== "page") {
       const text = unanswered(result, offline);
       if (dialog.open) said.textContent = text;
@@ -942,14 +950,17 @@
     summary.setAttribute("aria-label", `${sel.querySelector(".pop").getAttribute("aria-label")}: ${text.textContent}`);
   }
 
-  // visible shows control characters as the server does.
-  const visible = (text) => text.replace(/[\u0000-\u001f]/g, (c) => String.fromCharCode(0x2400 + c.charCodeAt(0)));
+  // visible shows the characters of a name that no one could see as the
+  // server does: a control character as its picture, if it has one, and any
+  // other, or a format character, as its code point.
+  const visible = (text) => text.replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c < " " ? String.fromCharCode(0x2400 + c.charCodeAt(0))
+    : c === "\x7f" ? "\u2421" : `<U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}>`));
 
   // group shows a FIFO group key as the server's "group" does: a key that
   // the outbox made as its topic and its message key, and any other as it is.
   function group(key) {
-    const parts = /^([^\u0000-\u001f]+)\u001f([^\u0000-\u001f]+)$/.exec(key);
-    if (!parts) return visible(key);
+    const parts = /^([^\u001f]+)\u001f([^\u001f]+)$/.exec(key);
+    if (!parts || visible(parts[1] + parts[2]) !== parts[1] + parts[2]) return visible(key);
     const newSpan = (name, text) => Object.assign(document.createElement("span"), { className: name, textContent: text });
     const shown = document.createElement("span");
     const sep = newSpan("topic-sep", "›");
@@ -1556,6 +1567,7 @@
   // The tooltip holds the titles, which the browser would show too; a screen
   // reader hears them as before, in aria-description.
 
+  const TIP_GAP = 6; // between the tooltip and its element
   const tooltip = document.createElement("div");
   tooltip.className = "tooltip";
   tooltip.popover = "manual"; // above everything, an open hint too
@@ -1563,6 +1575,7 @@
   let tipFor = null; // what the tooltip was last asked about
   let described = null; // the element that it is about
   let held = []; // the titles that it took, [element, title], the nearest first
+  let resting = false; // the pointer is on the tooltip, away from its element
 
   const nearest = (el, test) => {
     while (el && !test(el)) el = el.parentElement;
@@ -1611,19 +1624,37 @@
     // Its text starts where the element's does, after the padding of each.
     const x = Math.min(at.left + parseFloat(getComputedStyle(described).paddingLeft) - 9,
       root.clientWidth - tooltip.offsetWidth - 8);
-    const y = at.top - tooltip.offsetHeight - 6;
-    tooltip.style.transform = `translate(${Math.round(Math.max(8, x))}px, ${Math.round(y < 8 ? at.bottom + 6 : y)}px)`;
+    const y = at.top - tooltip.offsetHeight - TIP_GAP;
+    tooltip.style.transform = `translate(${Math.round(Math.max(8, x))}px, ${Math.round(y < 8 ? at.bottom + TIP_GAP : y)}px)`;
   }
 
   // The tooltip goes with a press, a key, a scroll, and the focus, and when
   // the pointer leaves the window.
   const undescribe = () => {
+    resting = false;
     if (tipFor) describe(null);
   };
   for (const type of ["pointerdown", "keydown", "focusout", "scroll"]) on(type, undescribe, true);
   root.addEventListener("pointerleave", undescribe);
+
+  // The pointer may cross to the tooltip and rest on it, to read it: over the
+  // tooltip, or the gap to its element, the tooltip stays. A press goes
+  // through it to what lies under it, so the page asks where the pointer is,
+  // and only while it is there does it ask at each move.
+  const onTip = ({ clientX: x, clientY: y }) => {
+    const box = tooltip.isConnected && tooltip.getBoundingClientRect();
+    return box && x >= box.left && x <= box.right && y >= box.top - TIP_GAP - 1 && y <= box.bottom + TIP_GAP + 1;
+  };
   on("pointerover", (event) => {
-    if (event.pointerType !== "touch" && !event.buttons) describe(event.target);
+    if (event.pointerType === "touch" || event.buttons) return;
+    resting = onTip(event);
+    if (!resting) describe(event.target);
+  });
+  on("pointermove", (event) => {
+    if (resting && !onTip(event)) {
+      resting = false;
+      describe(event.target);
+    }
   });
   // The focus may scroll the page to its element, which hides the tooltip:
   // it shows after that, in the same frame.

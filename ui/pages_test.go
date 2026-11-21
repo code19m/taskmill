@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -892,6 +893,52 @@ func TestGroupKeysOfTheOutboxShowAsTopicAndKey(t *testing.T) {
 	// The filter still selects by the key itself.
 	if _, tasks := listTasks(t, h, "/tasks?group=orders%1Forder-13"); !slices.Equal(tasks, []string{strconv.FormatInt(id, 10)}) {
 		t.Errorf("the list of the group shows the tasks %v, want %d", tasks, id)
+	}
+}
+
+// sneaky is a kind whose name holds a character of no width.
+type sneaky struct{}
+
+func (sneaky) Kind() string { return "pay\u200bment" }
+
+// A name can hold characters that no one could see: control characters, and
+// format characters, which can reverse the direction of the text after them
+// or have no width. Every page shows them, in queue names, kinds, FIFO group
+// keys, metadata, schedules, and workers, as code points or control
+// pictures, so that a name cannot hide or reorder a part of itself. Only the
+// attributes that carry a name to the server, or to the script, keep it as
+// it is.
+func TestNamesShowTheCharactersThatNoOneCouldSee(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	const queue, group = "mail\u202eliam", "orders\u202e\x1fkey\u2066"
+	res, err := client.Enqueue(t.Context(), sneaky{}, &taskmill.EnqueueOptions{
+		Queue: queue, GroupKey: group, Metadata: map[string]string{"trace\ufeff": "id\x7f\u0085"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.schedules (name, queue, kind, cron, timezone, next_run_at)
+	    VALUES ('night`+"\u202e"+`ly', $1, $2, '0 3 * * *', 'UTC', now())`, queue, sneaky{}.Kind()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO `+schema+`.workers (id, queues, kinds, hostname, version)
+	    VALUES ($1, $2, $3, $4, 'v')`, "web\u200f-1-ab12", []string{queue}, []string{sneaky{}.Kind()}, "web\u200f"); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handler(t, client, nil)
+	carried := regexp.MustCompile(` (?:data-key|value|id|popovertarget)="[^"]*"`)
+	for _, target := range []string{"/", "/tasks", "/tasks/" + strconv.FormatInt(res.ID, 10), "/schedules", "/workers"} {
+		code, body, _ := get(t, h, target)
+		if code != http.StatusOK || !strings.Contains(body, "&lt;U&#43;202E&gt;") {
+			t.Errorf("%s (%d): no name shows its U+202E", target, code)
+		}
+		shown := carried.ReplaceAllString(body, "")
+		if at := strings.IndexFunc(shown, func(r rune) bool { return unicode.In(r, unicode.Cf) || r == 0x7f || r == 0x85 }); at >= 0 {
+			t.Errorf("%s: a character that no one could see is on the page\n%s", target, shown[max(0, at-200):min(len(shown), at+200)])
+		}
 	}
 }
 

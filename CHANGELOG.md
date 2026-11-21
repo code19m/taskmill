@@ -110,6 +110,15 @@ All notable changes to taskmill are recorded here. The format follows
   attempt becomes dead, and the failover checklist looks for it. A new
   page, [Dashboard pages](docs/reference/dashboard-pages.md), says what each
   part of a dashboard page shows.
+- The dashboard works better with a keyboard, a screen reader, and a
+  magnifier. A live update that removes what had the focus gives it to the
+  page, not to the body. The Live button keeps its name on a small screen. A
+  notice is read aloud, and so is "Working on it…" in a dialog. The tooltip
+  stays while the pointer rests on it. Faint text in the dark theme has a
+  contrast of 4.5:1 on a selected option of a menu.
+- The Back button no longer shows, frozen, the page that said why an action
+  did not apply, in place of the page that sent it: the browser loads that
+  page again.
 
 ### Security
 
@@ -119,6 +128,12 @@ All notable changes to taskmill are recorded here. The format follows
   anything. The error now names the field, with `[key]` in place of a
   map's key, and the types, the place of a syntax error, or only the `Args`
   type, with the code `invalid_payload` as before.
+- The dashboard shows the characters of a name that no one could see. A
+  queue, kind, FIFO group key, metadata, schedule, or worker whose name holds
+  a control character, or a format character, such as one that reverses the
+  text after it or one of no width, shows it as its code point, such as
+  `<U+202E>`. So a name can no longer hide or reorder a part of itself, or
+  pass for another.
 
 ## [0.13.0] - 2026-11-21
 

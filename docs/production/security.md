@@ -27,7 +27,9 @@ payload. `ui.New` has **no login** of its own.
   and no lockout or rate limit. Use a long, random password.
 
 The dashboard already protects its forms against cross-site request forgery,
-and other sites cannot show it in a frame.
+and other sites cannot show it in a frame. A name that holds characters that
+no one could see, such as one that reverses the text after it, shows them as
+their code points, such as `<U+202E>`, so it cannot pass for another name.
 [Protect it](../guides/dashboard.md#protect-it) lists every setting.
 
 ## Know who can reach the database

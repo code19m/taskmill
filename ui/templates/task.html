@@ -1,7 +1,7 @@
 {{define "task.html"}}{{template "head" .}}
 {{$t := .Data.Task}}{{$g := .Data.Group}}
 <header class="topbar">
-  <a class="crumb" href="{{path "/tasks"}}{{query "queue" $t.Queue}}">{{$t.Queue}}</a>
+  <a class="crumb" href="{{path "/tasks"}}{{query "queue" $t.Queue}}">{{visible $t.Queue}}</a>
   <span class="crumb-sep" aria-hidden="true">/</span>
   <h1 class="task-heading"><span>#{{$t.ID}}</span>{{template "task-state" $t.State}}</h1>
   {{if not .ReadOnly}}
@@ -41,7 +41,7 @@
     {{with $t.Metadata}}
     <section class="card flush">
       <div class="card-head"><h2>Metadata</h2></div>
-      <dl class="props props-wide">{{range $k, $v := .}}<dt class="mono">{{$k}}</dt><dd class="mono">{{$v}}</dd>{{end}}</dl>
+      <dl class="props props-wide">{{range $k, $v := .}}<dt class="mono">{{visible $k}}</dt><dd class="mono">{{visible $v}}</dd>{{end}}</dl>
     </section>
     {{end}}
     <section class="card flush">
@@ -67,8 +67,8 @@
   <aside class="card flush details">
     <div class="card-head"><h2>Details</h2></div>
     <dl class="props">
-      <dt>Kind</dt><dd class="mono">{{$t.Kind}}</dd>
-      <dt>Queue</dt><dd><a href="{{path "/tasks"}}{{query "queue" $t.Queue}}">{{$t.Queue}}</a></dd>
+      <dt>Kind</dt><dd class="mono">{{visible $t.Kind}}</dd>
+      <dt>Queue</dt><dd><a href="{{path "/tasks"}}{{query "queue" $t.Queue}}">{{visible $t.Queue}}</a></dd>
       {{with $t.GroupKey}}<dt>FIFO group</dt><dd><a class="mono" href="{{path "/tasks"}}{{query "queue" $t.Queue "group" .}}"{{with outbox .}} title="{{.}}"{{end}}>{{template "group" .}}</a></dd>{{end}}
       <dt>Priority</dt><dd>{{$t.Priority}}</dd>
       <dt>Attempts</dt>

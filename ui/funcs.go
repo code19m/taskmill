@@ -3,11 +3,13 @@ package ui
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"html/template"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/code19m/taskmill"
@@ -211,16 +213,37 @@ func dict(pairs ...any) map[string]any {
 	return m
 }
 
-// visible shows the control characters of a name, such as the separator
-// that the outbox puts between a topic and a key, as Unicode control
-// pictures.
+// visible shows the characters of a name that no one could see: control
+// characters, such as the separator that the outbox puts between a topic and
+// a key, as their Unicode control pictures where they have one, and the rest
+// of them, with the format characters, such as those that reverse the
+// direction of text or have no width, as their code points, "<U+202E>". So a
+// name cannot hide or reorder a part of itself, and two names that differ
+// never look alike. The script's "visible" shows a name in the same way.
 func visible(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r < 0x20 {
-			return 0x2400 + r
+	if !strings.ContainsFunc(s, hidden) {
+		return s
+	}
+
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r < 0x20:
+			b.WriteRune(0x2400 + r)
+		case r == 0x7f:
+			b.WriteRune('\u2421')
+		case hidden(r):
+			fmt.Fprintf(&b, "<U+%04X>", r)
+		default:
+			b.WriteRune(r)
 		}
-		return r
-	}, s)
+	}
+	return b.String()
+}
+
+// hidden reports whether visible shows r in place of itself.
+func hidden(r rune) bool {
+	return unicode.In(r, unicode.Cc, unicode.Cf)
 }
 
 // outboxKey is a FIFO group key that the outbox made, in its two parts.
@@ -232,10 +255,11 @@ func (k outboxKey) String() string { return "Outbox topic " + k.Topic + ", key "
 // outbox returns the parts of a FIFO group key that the outbox made, and nil
 // for any other key. The outbox joins a message's topic and key with the
 // unit separator, which no font draws (groupKey in package outbox): its key
-// has one separator between two parts, and no other control character.
+// has one separator between two parts, and no other character that visible
+// shows.
 func outbox(group string) *outboxKey {
 	topic, key, ok := strings.Cut(group, "\x1f")
-	if !ok || topic == "" || key == "" || visible(topic+key) != topic+key {
+	if !ok || topic == "" || key == "" || strings.ContainsFunc(topic, hidden) || strings.ContainsFunc(key, hidden) {
 		return nil
 	}
 	return &outboxKey{topic, key}
@@ -267,33 +291,36 @@ type fitted struct {
 	More int    // how many names follow them
 }
 
-// fit returns the queues that a row of the Workers page shows: all of them
-// if the row has room, or else the first ones that leave room for the count
-// of the rest, and the first one at least. The row is one line tall, however
-// many queues a worker reads, and the page lists them all on demand.
+// fit returns the queues that a row of the Workers page shows, each as
+// visible shows it: all of them if the row has room, or else the first ones
+// that leave room for the count of the rest, and the first one at least. The
+// row is one line tall, however many queues a worker reads, and the page
+// lists them all on demand.
 func fit(names []string) fitted {
 	if len(names) == 0 {
 		return fitted{}
 	}
 
 	const comma = ", "
+	shown := make([]string, len(names))
 	total := (len(names) - 1) * len(comma)
-	for _, name := range names {
-		total += utf8.RuneCountInString(name)
+	for i, name := range names {
+		shown[i] = visible(name)
+		total += utf8.RuneCountInString(shown[i])
 	}
 
 	if total <= queuesRoom {
-		return fitted{Line: strings.Join(names, comma)}
+		return fitted{Line: strings.Join(shown, comma)}
 	}
 
-	n, used := 1, utf8.RuneCountInString(names[0])
-	for ; n < len(names); n++ {
-		used += len(comma) + utf8.RuneCountInString(names[n])
+	n, used := 1, utf8.RuneCountInString(shown[0])
+	for ; n < len(shown); n++ {
+		used += len(comma) + utf8.RuneCountInString(shown[n])
 		if used > queuesRoom-moreRoom {
 			break
 		}
 	}
-	return fitted{Line: strings.Join(names[:n], comma), More: len(names) - n}
+	return fitted{Line: strings.Join(shown[:n], comma), More: len(shown) - n}
 }
 
 // lastError returns the most recent attempt error, or nil.

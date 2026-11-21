@@ -50,8 +50,8 @@
     <tbody>
     {{range $q := $d.Queues}}
       <tr data-key="{{$q.Name}}">
-        <td title="{{$q.Name}}">
-          <a class="strong" href="{{path "/tasks"}}{{query "queue" $q.Name}}">{{$q.Name}}</a>
+        <td title="{{visible $q.Name}}">
+          <a class="strong" href="{{path "/tasks"}}{{query "queue" $q.Name}}">{{visible $q.Name}}</a>
           {{if $q.Paused}}<span class="chip warn">paused</span>{{end}}
           {{with $q.Settings.MaxRunning}}<span class="chip" title="At most {{.}} running across all workers">max {{.}}</span>{{end}}
         </td>
@@ -61,7 +61,7 @@
         <td class="num{{if not $q.Workers}} zero{{end}}">{{$q.Workers}}</td>
         {{if not $ro}}<td class="actions-col">
           {{if $q.Paused}}<form method="post" action="{{path "/queues/resume"}}{{query "name" $q.Name "range" $d.Period}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
-          {{else}}<form method="post" action="{{path "/queues/pause"}}{{query "name" $q.Name "range" $d.Period}}" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{$q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
+          {{else}}<form method="post" action="{{path "/queues/pause"}}{{query "name" $q.Name "range" $d.Period}}" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{visible $q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
         </td>{{end}}
       </tr>
     {{end}}
