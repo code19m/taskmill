@@ -18,6 +18,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib" // registers the "pgx" database/sql driver
 
 	"github.com/code19m/taskmill"
@@ -1065,63 +1066,93 @@ func plainAndKeyed(opts *taskmill.EnqueueOptions) []taskmill.EnqueueParams {
 	}
 }
 
-// The second read of a dedupe key only fills in the ID of the task that took
-// the key. Outside a transaction the enqueue has committed by then: on the
-// client's pool, and on a connection of the caller's. So if the read finds
-// no ID, the enqueue still returns its results: an error would say that
-// nothing was stored, and the caller's next try would store the task
-// without a key again.
-func TestEnqueueReturnsItsTasksWithoutTheIDOfADuplicate(t *testing.T) {
+// Outside a transaction, an enqueue has committed its tasks when it reads
+// again a dedupe key that another transaction took while its statement ran,
+// on the client's pool and on a connection of the caller's. So the end of
+// the caller's context does not stop that read, and a duplicate never gets
+// the ID 0: it gets the task that took the key, or, if that task was
+// deleted meanwhile, a task of its own. Only a database that fails makes the
+// enqueue return an error, once it stored the task without a key.
+func TestEnqueueFindsTheTaskOfADuplicateAfterItCommitted(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
 		name   string
-		gone   bool // the task that took the key is deleted before the read; otherwise the read fails
-		conn   bool // the enqueue runs on a connection outside a transaction; otherwise on the client's pool
-		logged int  // warnings of a failed read
+		conn   bool   // the enqueue runs on a connection outside a transaction; otherwise on the client's pool
+		before string // what happens before the second read: "cancel", "delete", or "break"
+		want   func(t *testing.T, r keyRead)
 	}{
-		{name: "the read fails", logged: 1},
-		{name: "the read fails on a connection", conn: true, logged: 1},
-		{name: "the task that took the key is deleted", gone: true},
+		{name: "the caller's context ends", before: "cancel", want: wantDuplicateOfFirst},
+		{name: "the caller's context ends, on a connection", conn: true, before: "cancel", want: wantDuplicateOfFirst},
+		{name: "the task that took the key is deleted", before: "delete", want: func(t *testing.T, r keyRead) {
+			t.Helper()
+			if r.err != nil || len(r.res) != 2 || r.res[1].ID == 0 || r.res[1].ID == r.first || r.res[1].Duplicate {
+				t.Fatalf("got %+v, %v; want a task of its own", r.res, r.err)
+			}
+			if n := r.e.count(t, "SELECT count(*) FROM {s}.dedupe_keys WHERE task_id = $1", r.res[1].ID); n != 1 {
+				t.Fatalf("the new task holds %d keys, want the freed one", n)
+			}
+		}},
+		{name: "the connection breaks", conn: true, before: "break", want: func(t *testing.T, r keyRead) {
+			t.Helper()
+			if r.err == nil || r.res != nil {
+				t.Fatalf("got %+v, %v; want the error of the broken connection", r.res, r.err)
+			}
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			read, logs := beforeKeyRead(), &logRecorder{}
-			e := newTracedEnv(t, read).withLogger(t, slog.New(logs))
+			read := beforeKeyRead()
+			e := newTracedEnv(t, read)
 			opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
 			holder, first := e.holdKey(t, opts)
 
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			before := func() { cancel() } // the read fails: its context has ended
-			if c.gone {
-				before = func() {
+			enqueue, conn := e.enqueueMany(ctx, t, c.conn, plainAndKeyed(opts))
+			before := map[string]func(){
+				"cancel": cancel,
+				"delete": func() {
 					if err := e.client.Delete(t.Context(), first); err != nil {
 						t.Errorf("delete the task that took the key: %v", err)
 					}
-				}
-			}
+				},
+				"break": func() { _ = conn.Conn().PgConn().Conn().Close() },
+			}[c.before]
 			read.call.Store(&before)
 
-			res, err := behind(t, e, holder, e.enqueueMany(ctx, t, c.conn, plainAndKeyed(opts)))
-			if err != nil || len(res) != 2 || res[0].ID == 0 || res[0].Duplicate || res[1] != (taskmill.EnqueueResult{Duplicate: true}) {
-				t.Fatalf("got %+v, %v; want a new task, and a duplicate without an ID", res, err)
-			}
+			res, err := behind(t, e, holder, enqueue)
 			if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE queue = 'plain'"); n != 1 {
 				t.Errorf("the task without a key is stored %d times, want once", n)
 			}
-			if n := logs.count("find duplicates failed after the enqueue committed; the duplicates have no ID"); n != c.logged {
-				t.Errorf("a failed read was logged %d times, want %d", n, c.logged)
-			}
+			c.want(t, keyRead{e: e, first: first, res: res, err: err})
 		})
 	}
 }
 
+// keyRead is what an enqueue returned that read a dedupe key again.
+type keyRead struct {
+	e     *env
+	first int64 // the task that took the key
+	res   []taskmill.EnqueueResult
+	err   error
+}
+
+// wantDuplicateOfFirst fails the test unless the second task of r is a
+// duplicate of the task that took the key.
+func wantDuplicateOfFirst(t *testing.T, r keyRead) {
+	t.Helper()
+	if r.err != nil || len(r.res) != 2 || r.res[1] != (taskmill.EnqueueResult{ID: r.first, Duplicate: true}) {
+		t.Fatalf("got %+v, %v; want a duplicate of task %d", r.res, r.err, r.first)
+	}
+}
+
 // enqueueMany returns a call that enqueues params on ctx: on the client's
-// pool, or, if conn, on a connection of e's pool outside a transaction.
-func (e *env) enqueueMany(ctx context.Context, t *testing.T, conn bool, params []taskmill.EnqueueParams) func() ([]taskmill.EnqueueResult, error) {
+// pool, or, if conn, on a connection of e's pool outside a transaction,
+// which it returns too.
+func (e *env) enqueueMany(ctx context.Context, t *testing.T, conn bool, params []taskmill.EnqueueParams) (enqueue func() ([]taskmill.EnqueueResult, error), c *pgxpool.Conn) {
 	t.Helper()
 	if !conn {
-		return func() ([]taskmill.EnqueueResult, error) { return e.client.EnqueueMany(ctx, params) }
+		return func() ([]taskmill.EnqueueResult, error) { return e.client.EnqueueMany(ctx, params) }, nil
 	}
 
 	c, err := e.pool.Acquire(ctx)
@@ -1131,6 +1162,32 @@ func (e *env) enqueueMany(ctx context.Context, t *testing.T, conn bool, params [
 	t.Cleanup(c.Release)
 	return func() ([]taskmill.EnqueueResult, error) {
 		return e.client.EnqueueManyTx(ctx, taskmill.Pgx(c.Conn()), params)
+	}, c
+}
+
+// At REPEATABLE READ or SERIALIZABLE, a transaction cannot see a task that
+// took a dedupe key after the transaction began. An enqueue in it then fails
+// with PostgreSQL's serialization failure, which the caller matches and
+// handles by running the transaction again, as for any write at those
+// levels.
+func TestEnqueueTxAtRepeatableReadFailsOnAKeyTakenSinceItBegan(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	opts := &taskmill.EnqueueOptions{DedupeKey: "order-7"}
+	holder, _ := e.holdKey(t, opts)
+
+	tx, err := e.pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(t.Context()) }()
+	e.txExec(t, tx, "SELECT 1") // the transaction's snapshot
+
+	_, err = behind(t, e, holder, func() (taskmill.EnqueueResult, error) {
+		return e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{To: "second"}, opts)
+	})
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "40001" { // serialization_failure
+		t.Fatalf("EnqueueTx: got %v, want a serialization failure", err)
 	}
 }
 

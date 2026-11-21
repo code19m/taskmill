@@ -52,6 +52,13 @@ All notable changes to taskmill are recorded here. The format follows
   for each other's commits, and the design pages say why a notification
   wakes every worker of its queue. The pool size and a stopping worker's
   grace period each have one page, which the others link to.
+- A duplicate enqueue no longer reports the task ID 0 when the task that
+  holds its dedupe key committed while the enqueue ran. The enqueue finds
+  that task, also after the caller's context ended; if the task was
+  canceled or deleted meanwhile, it enqueues the duplicate as a task of its
+  own. If the database fails before the enqueue finds the task, it returns
+  an error, and no longer logs `find duplicates failed after the enqueue
+  committed; the duplicates have no ID`.
 
 ## [0.14.0] - 2026-11-21
 
