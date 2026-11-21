@@ -1072,7 +1072,8 @@ func plainAndKeyed(opts *taskmill.EnqueueOptions) []taskmill.EnqueueParams {
 // the caller's context does not stop that read, and a duplicate never gets
 // the ID 0: it gets the task that took the key, or, if that task was
 // deleted meanwhile, a task of its own. Only a database that fails makes the
-// enqueue return an error, once it stored the task without a key.
+// enqueue return an error, once it stored the task without a key: an error
+// that says so, so that the caller does not store it again.
 func TestEnqueueFindsTheTaskOfADuplicateAfterItCommitted(t *testing.T) {
 	t.Parallel()
 	for _, c := range []struct {
@@ -1094,8 +1095,8 @@ func TestEnqueueFindsTheTaskOfADuplicateAfterItCommitted(t *testing.T) {
 		}},
 		{name: "the connection breaks", conn: true, before: "break", want: func(t *testing.T, r keyRead) {
 			t.Helper()
-			if r.err == nil || r.res != nil {
-				t.Fatalf("got %+v, %v; want the error of the broken connection", r.res, r.err)
+			if !errors.Is(r.err, taskmill.ErrStoredWithoutIDs) || r.res != nil {
+				t.Fatalf("got %+v, %v; want an error that says that the tasks are stored", r.res, r.err)
 			}
 		}},
 	} {

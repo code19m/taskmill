@@ -1029,26 +1029,30 @@ func TestMigrateRefusesAnOnlineStepThatATimeoutWouldCancel(t *testing.T) {
 // read it, about half a second for each million tasks. Teams that upgrade
 // from a release before them have them pending. Migrate applies them only on
 // tables whose rows MigrateConfig.MaxBlockingIndexRows allows, and changes
-// nothing otherwise.
+// nothing otherwise. It counts the rows as the planner does, from the
+// statistics and the table's size now: tasks grew since ANALYZE counted
+// them.
 func TestMigrateRefusesABlockingIndexOnALargeTable(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Pool(t)
 	e := &env{pool: pool, schema: testdb.Schema(t, pool)}
 	applyUpTo(t, pool, e.schema, 5)
-	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
-	           SELECT 'q', 'k', 'available', now(), '{}', 1 FROM generate_series(1, 100)`)
+	const insert = `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	                SELECT 'q', 'k', 'available', now(), '{}', 1 FROM generate_series(1, $1)`
+	e.exec(t, insert, 100)
 	e.exec(t, "ANALYZE {s}.tasks")
+	e.exec(t, insert, 2000)
 
-	err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema, MaxBlockingIndexRows: 99})
-	if err == nil || !strings.Contains(err.Error(), "0007_created_order builds an index that blocks writes") ||
+	err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema, MaxBlockingIndexRows: 1000})
+	if !errors.Is(err, taskmill.ErrBlockingMigration) || !strings.Contains(err.Error(), "0007_created_order builds an index that blocks writes") ||
 		!strings.Contains(err.Error(), "MaxBlockingIndexRows") {
-		t.Fatalf("got %v, want an error that names migration 7 and the limit", err)
+		t.Fatalf("got %v, want ErrBlockingMigration, with migration 7 and the limit", err)
 	}
 	if v := e.count(t, "SELECT max(version) FROM {s}.migrations"); v != 5 {
 		t.Fatalf("a refused Migrate left version %d, want 5", v)
 	}
 
-	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema, MaxBlockingIndexRows: 100}); err != nil {
+	if err := taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: e.schema, MaxBlockingIndexRows: 10_000}); err != nil {
 		t.Fatalf("migrate within the limit: %v", err)
 	}
 }

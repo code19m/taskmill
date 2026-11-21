@@ -28,14 +28,15 @@ type MigrateConfig struct {
 
 	// MaxBlockingIndexRows is the most rows, by PostgreSQL's estimate, that
 	// a pending migration may read while it builds an index that blocks
-	// writes to the table, as migrations 7 and 9 do to tasks and the
-	// history. Writes wait about half a second for each million rows that
-	// migration 7 reads. Over the limit, Migrate fails before it changes
-	// anything: run it as a job of its own, at a quiet time, with the limit
-	// raised. A negative value removes the limit. Default: 1,000,000, which
-	// keeps the wait well under the 5 seconds for which a migration may
-	// wait for a lock. Later migrations build their indexes online, which
-	// blocks no writes.
+	// writes to the table: migration 3 on groups, 7 on tasks and the
+	// history, and 9 on tasks. Writes wait about half a second for each
+	// million rows that migration 7 reads. Over the limit, Migrate fails
+	// before it changes anything, with an error that wraps
+	// [ErrBlockingMigration]: run it as a job of its own, at a quiet time,
+	// with the limit raised. A negative value removes the limit. Default:
+	// 1,000,000, which keeps the wait well under the 5 seconds for which a
+	// migration may wait for a lock. Later migrations build their indexes
+	// online, which blocks no writes.
 	MaxBlockingIndexRows int64
 }
 
@@ -298,10 +299,13 @@ func sleep(ctx context.Context, d time.Duration) error {
 }
 
 // estimateRowsSQL estimates the rows of the tables $1, and of their
-// partitions, from the statistics that VACUUM and ANALYZE keep. A table that
+// partitions, as the planner does: the rows for each page that VACUUM and
+// ANALYZE last counted, times the pages that the table has now. A table that
 // neither has seen yet counts as rows of 100 bytes, fewer than a task takes.
 const estimateRowsSQL = `
-SELECT coalesce(sum(CASE WHEN c.reltuples >= 0 THEN c.reltuples ELSE pg_relation_size(c.oid) / 100 END), 0)::bigint
+SELECT coalesce(sum(CASE WHEN c.reltuples >= 0 AND c.relpages > 0
+                         THEN c.reltuples / c.relpages * (pg_relation_size(c.oid) / current_setting('block_size')::integer)
+                         ELSE pg_relation_size(c.oid) / 100 END), 0)::bigint
 FROM pg_class c
 WHERE c.relkind = 'r'
   AND (c.oid IN (SELECT to_regclass(t) FROM unnest($1::text[]) AS t)
@@ -324,10 +328,10 @@ func (m *migrator) guard(ctx context.Context, tx pgx.Tx, pending []migrations.Mi
 			return err
 		}
 		if rows > m.maxRows {
-			return fmt.Errorf("migration %04d_%s builds an index that blocks writes to %s while it reads about %d rows, "+
+			return fmt.Errorf("%w: migration %04d_%s builds an index that blocks writes to %s while it reads about %d rows, "+
 				"more than MigrateConfig.MaxBlockingIndexRows (%d): run Migrate as a job of its own, at a quiet time, "+
 				"with that limit raised above the rows; see %s",
-				mig.Version, mig.Name, strings.Join(mig.Blocking, " and "), rows, m.maxRows, blockingDocs)
+				ErrBlockingMigration, mig.Version, mig.Name, strings.Join(mig.Blocking, " and "), rows, m.maxRows, blockingDocs)
 		}
 	}
 	return nil

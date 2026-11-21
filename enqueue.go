@@ -107,13 +107,14 @@ type EnqueueResult struct {
 	// commit after the enqueue's statement began, which then cannot see the
 	// task. At READ COMMITTED, the enqueue reads the key again in a second
 	// statement. If that task was canceled or deleted meanwhile, the key is
-	// free, and the enqueue stores the task after all. An enqueue outside a
-	// transaction has committed its other tasks by then, so the end of its
-	// context does not stop this. If the database fails first, it returns
-	// an error although those tasks were stored, as when the answer to a
-	// commit is lost. At REPEATABLE READ or SERIALIZABLE, the enqueue fails
-	// with PostgreSQL's serialization failure (SQLSTATE 40001) instead: run
-	// the caller's transaction again.
+	// free, and the enqueue stores the task after all, in a statement of its
+	// own: in a FIFO group, it then comes after the call's other tasks. An
+	// enqueue outside a transaction has committed its other tasks by then,
+	// so the end of its context does not stop this. If the database fails
+	// first, it returns an error that wraps [ErrStoredWithoutIDs]. At
+	// REPEATABLE READ or SERIALIZABLE, the enqueue fails with PostgreSQL's
+	// serialization failure (SQLSTATE 40001) instead: run the caller's
+	// transaction again.
 	ID int64
 
 	// Duplicate reports that the DedupeKey was already taken, so no task was
@@ -210,9 +211,12 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 	return res[0], nil
 }
 
-// EnqueueMany enqueues several tasks in one round trip and one transaction:
-// all of them, or none if it returns an error. Results are in the same order
-// as params. One call takes at most 10,000 tasks, with at most 64 MiB of
+// EnqueueMany enqueues several tasks with one statement, in one round trip:
+// all of them, or none if it returns an error. Only when another
+// transaction takes a dedupe key of the call at the same moment does the
+// call run more statements, and an error that wraps [ErrStoredWithoutIDs]
+// then means that its tasks are stored: see [EnqueueResult.ID]. Results are
+// in the same order as params. One call takes at most 10,000 tasks, with at most 64 MiB of
 // payload and metadata in all.
 //
 // A call over these limits, or with a task that is not valid, is an error
@@ -412,7 +416,10 @@ func (c *Client) insertWithRetry(ctx context.Context, q querier, own bool, b *en
 		defer cancel()
 	}
 	if err := c.resolveDuplicates(ctx, q, own, b, results, missing); err != nil {
-		return nil, err
+		if !q.inTx() {
+			return nil, fmt.Errorf("%w: %w", ErrStoredWithoutIDs, err)
+		}
+		return nil, err // the caller rolls back
 	}
 	return results, nil
 }
@@ -524,7 +531,7 @@ func (c *Client) resolveDuplicates(ctx context.Context, q querier, own bool, b *
 				duplicateTries)
 		}
 
-		again, more, err := c.insertBatch(ctx, q, own, b.rows(free))
+		again, more, err := c.insertBatch(ctx, q, own, b.subset(free))
 		if err != nil {
 			return err
 		}
@@ -693,11 +700,11 @@ func (t *resolvedTask) validate() error {
 	return checkTime("run time", t.runAt)
 }
 
-// rows returns a batch of the given rows of b.
-func (b *enqueueBatch) rows(rows []int) *enqueueBatch {
+// subset returns a batch of the rows picked of b.
+func (b *enqueueBatch) subset(picked []int) *enqueueBatch {
 	out := &enqueueBatch{due: make(map[string]bool), plain: b.plain}
 	now := time.Now()
-	for _, i := range rows {
+	for _, i := range picked {
 		out.queues = append(out.queues, b.queues[i])
 		out.kinds = append(out.kinds, b.kinds[i])
 		out.groups = append(out.groups, b.groups[i])
