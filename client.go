@@ -18,10 +18,10 @@ import (
 
 const defaultSchema = "taskmill"
 
-// Client enqueues and manages tasks. Create one with [NewClient]. It is safe
-// for concurrent use, and an application typically creates one per
-// installation and shares it. It uses the pool it was given and never closes
-// it.
+// Client enqueues and manages tasks. Create one with [NewClient], and
+// [Client.Close] it when it is no longer needed. It is safe for concurrent
+// use, and an application typically creates one per installation and shares
+// it. It uses the pool it was given and never closes it.
 //
 // Its methods, by what the caller wants to do:
 //
@@ -116,6 +116,18 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 		return nil, err
 	}
 	return c, nil
+}
+
+// Close stops the client's background work: it drops the notifications
+// that the client held back to wake workers less often, and waits for one
+// that is being sent. A worker starts the task of a dropped notification
+// when it next polls its queue, instead of within milliseconds. Close does
+// not close the pool, so call it before the pool's Close. The client's
+// methods still work after Close, but hold back no notification any more:
+// each enqueue notifies at once or not at all. Close may be called more
+// than once.
+func (c *Client) Close() {
+	c.notifier.close()
 }
 
 // checkSchema verifies that the schema is migrated to at least the version

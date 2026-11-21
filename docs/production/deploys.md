@@ -26,6 +26,7 @@ func run(ctx context.Context, role string) error {
     if err != nil {
         return err
     }
+    defer client.Close()
 
     switch role {
     case "web": // enqueues tasks, and runs no worker

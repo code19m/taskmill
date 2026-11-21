@@ -19,6 +19,7 @@ client, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Logger: logg
 if err != nil {
     return err
 }
+defer client.Close() // before the pool closes
 ```
 
 - taskmill keeps its tables in one PostgreSQL
@@ -26,7 +27,8 @@ if err != nil {
 - `Migrate` creates the schema, or updates it to your taskmill version. Many
   processes can run it at the same time: one applies the changes, and the
   others wait.
-- Create one `Client` per process, and share it between goroutines.
+- Create one `Client` per process, and share it between goroutines. When
+  the process ends, close it before the pool.
 
 > [!TIP]
 > Always pass a `Logger`. Without one, taskmill writes no logs, not even

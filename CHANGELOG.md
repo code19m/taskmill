@@ -24,6 +24,10 @@ All notable changes to taskmill are recorded here. The format follows
   left invalid. A test keeps the indexes of every new migration online, and
   `Migration.Online` tells a team with its own migration tool to apply such
   a migration outside a transaction.
+- `Client.Close` stops the client's background work: the notifications
+  that it held back to wake workers less often were sent from a timer, also
+  after the application had closed its pool. `taskmilltest.NewClient`
+  closes its client when the test ends.
 
 ### Changed
 

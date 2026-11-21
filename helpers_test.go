@@ -68,6 +68,7 @@ func (e *env) withLogger(t *testing.T, logger *slog.Logger) *env {
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
+	t.Cleanup(client.Close)
 	c := *e
 	c.client = client
 	return &c
@@ -93,6 +94,7 @@ func newEnvWith(tb testing.TB, pool *pgxpool.Pool, cfg *taskmill.ClientConfig) *
 	if err != nil {
 		tb.Fatalf("new client: %v", err)
 	}
+	tb.Cleanup(client.Close)
 	e := &env{pool: pool, schema: schema, client: client}
 
 	// Cleanups run last first, so this check runs after the test's workers

@@ -194,6 +194,7 @@ func serve(ctx context.Context, getenv func(string) string, logger *slog.Logger)
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 
 	h, err := handler(pool, client, cfg, logger)
 	if err != nil {

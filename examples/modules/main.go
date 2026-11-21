@@ -64,6 +64,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	defer client.Close()
 
 	ordersModule := orders.New(pool, client, logger)
 	if err := ordersModule.CreateTables(ctx); err != nil {

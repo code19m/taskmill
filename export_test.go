@@ -37,6 +37,10 @@ func MigrateWith(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig, fi
 	return m.run(ctx)
 }
 
+// NotifyWindow is the shortest gap between two notifications for one queue
+// from one client.
+const NotifyWindow = notifyWindow
+
 // HistoryDrops is the most history partitions that one retention pass drops.
 const HistoryDrops = historyDrops
 
