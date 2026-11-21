@@ -137,69 +137,18 @@ theme, and the next pages follow the device.
 |---|---|---|
 | **Overview** | Task counts per queue and state, a dial of the attempts a minute, charts of tasks and attempts over the last 1, 6, or 24 hours, the number of workers, and the retention periods | Pause and resume a queue |
 | **Tasks** | Tasks filtered by state, queue, kind, FIFO group, and time: when they were created, or for dead and canceled tasks when they finished | Retry, cancel, or delete every task that matches the filters |
-| **A task** | Its payload, metadata, error history, and details, with a timeline: when it was created, due, started, and finished, and how long it waited and ran, which counts each second while it waits or runs. A banner says when it halts its [FIFO group](ordering.md), or waits in one | Retry, cancel, or delete it. Open its group |
+| **A task** | Its payload, metadata, error history, and details, with a timeline: when it was created, due, started, and finished, and how long it waited and ran, which counts each second while it waits or runs. A banner says when tasks of its [FIFO group](ordering.md) wait behind it, or when it waits in one | Retry, cancel, or delete it. Open its group |
 | **Schedules** | Each schedule, with its timetable in words and its next and last run | Pause, resume, or run it now |
-| **Workers** | Each worker, with its host, version, queues, kinds, and schedules, and which one is the [maintainer](../concepts/glossary.md#maintainer). *schedules differ* marks a worker whose schedule names differ from the maintainer's: press it to see which | Nothing: this page is for looking |
+| **Workers** | Each worker, with its host, version, queues, kinds, and schedules, which one is the [maintainer](../concepts/glossary.md#maintainer), and which ones define other schedules than the maintainer | Nothing: this page is for looking |
 
-On the **Overview**, the **Activity** card shows the last 1, 6, or 24 hours,
-in steps of 1, 5, or 15 minutes. To read the values of one step, point at a
-chart, or press and drag on a touch screen: a note shows them, with the
-step's time on your clock. From the keyboard, a chart is a slider that a
-screen reader reads step by step: the arrow keys, Home, and End move it, and
-Escape hides the values. While a chart has the focus, the page waits with
-its updates. The **Throughput** dial reads like this:
-
-| Part of the dial | What it shows |
-|---|---|
-| The needle and the number | The attempts a minute, completed and failed together, in the newest step whose count is complete. In the longer periods, that is the mean of 5 or 15 minutes |
-| The scale | From 0 to the smallest round number that holds the highest rate of the period: 1, 2, or 5 times a power of ten, and at least 10 |
-| A dash in place of the number | No worker recorded anything in that step |
-
-So the needle reads against the busiest step of the period that you chose:
-near the top of the scale, the workers are as busy as at their peak. Workers
-write their counts every 10 seconds, so the dial reads a step 15 seconds
-after it ends, not sooner, and the **Attempts** chart draws it then.
-
-On the **Schedules** page, the **Cron** column says each timetable in
-words, such as "Weekdays at 09:00", above the cron expression. The times are
-in the schedule's time zone, which stands beside the expression. The words
-are there only when they say exactly what the expression does, in a few
-words: an expression with both day fields set, or with more than three
-times, shows alone. [Write the timetable](schedules.md#write-the-timetable)
-says how an expression is read, and what happens when the clocks change.
-
-On the **Workers** page, the **Worker** column shows a worker's ID without its
-host name, which the **Host** column has: the tooltip has the whole ID. A row
-shows a worker's first queues, and counts the rest and its kinds. Press a count
-to list them all, each a link to its tasks: that needs a browser with popovers.
-**Checked in** is the worker's last [check-in](../concepts/glossary.md#check-in):
-a yellow dot and the word "stale" mark a worker that made none for longer
-than its `LeaseDuration`, because it has stopped or cannot reach the database.
-
-At the end of the **Overview**'s top bar, "Counted 4s ago" says when the
-maintainer last counted the tasks, which it does every 10 seconds. After a
-minute, it turns amber: check that a worker runs as the maintainer
-([Monitoring](../production/monitoring.md) has an alert). Such times keep
-counting each second, by the server's clock. A count that ends in "+"
-stopped at its cap, as its tooltip says. A chart with nothing to draw says
-why behind a hint, an "i" button: without popovers, its text is on the page.
+[Dashboard pages](../reference/dashboard-pages.md) says what each part of
+these pages shows: the charts and the dial, the icons of the task list, and
+the columns of the workers.
 
 Before an action on many tasks, a dialog shows the filters and how many
 tasks will change, and you confirm. With very many tasks, it works in steps,
 and offers to continue where it stopped. If some tasks were busy at that
 moment, it says how many, and offers to try them again.
-
-A task list shows the newest tasks first, and a list of only dead tasks,
-only canceled tasks, or both shows the tasks that finished last first, with
-the time of each: the task that died a minute ago is at the top of the
-**Dead** page. An arrow in the header marks the column that orders the
-list: **ID**, **Finished**, or **Created** while a range of creation times
-is set. The row under a list shows more of it: click anywhere in it. A list
-that starts after other tasks has a row at its top that leads to its start.
-Every state has an icon in its color, and the two states that need you also
-have their name in color: `dead` in red, and `retryable` in amber. A badge
-beside the state marks a priority that is not normal, without a state color:
-`high` is bolder than `low`, and `critical` is filled.
 
 Every task list has a filter by time: **Finished** on a list of only dead
 or canceled tasks, and **Created** on any other. It shows a range of time:
@@ -220,16 +169,11 @@ has the forms of a time). While a range is set, the list hides **Retry all**,
 filters match, also outside the range. The range is of the time that the
 button names: change the states, and it can become one of the other time.
 
-A task list has 5 seconds to read its tasks. A list of dead or canceled
-tasks never reads tasks of other states. But with no queue in the filters,
-as on the **Dead** page, it reads up to as many tasks as it shows from each
-queue that has such tasks: with hundreds of queues, choose a queue. A list
-with a range of creation times reads from each queue in the same way. Other
-lists can read many tasks that they do not show, such as the available
-tasks of all queues in a very large table. If a list runs out of time, the
+A task list has 5 seconds to read its tasks. If it runs out of time, the
 page says "Taking too long", and what may help: a queue and a state in the
-filters, or fewer filters ([Manage tasks from code](operations-api.md#find-tasks)
-says which lists are fast).
+filters, or fewer filters. The doc comment of
+[`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List)
+says which lists read more than they show.
 
 A retry of a canceled task takes the task's
 [dedupe key](../concepts/glossary.md#dedupe-key) back. If another task holds

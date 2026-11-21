@@ -100,6 +100,7 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Configuration](docs/reference/configuration.md): you look for the type that holds a setting
 - [Errors](docs/reference/errors.md): you see an error, an `error.type`, or a code in a task's history, and want the identifier that explains it
 - [The `taskmill-ui` command](docs/reference/taskmill-ui.md): you set up the dashboard command or a proxy in front of it, or you link to a dashboard page
+- [Dashboard pages](docs/reference/dashboard-pages.md): you wonder what a part of a dashboard page shows, such as the dial, an icon, or a column
 - [Log messages](docs/reference/log-messages.md): you see a log line and want to know what it means and what to do
 - [Metrics and traces](docs/reference/metrics.md): you build a dashboard on taskmill's spans, metrics, and gauges
 - [Fixed timings and limits](docs/reference/defaults-and-limits.md): you need a timing of the workers, the maintainer, or the dashboard that no setting changes

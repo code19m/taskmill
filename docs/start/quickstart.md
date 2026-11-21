@@ -13,7 +13,12 @@ docker run --name taskmill-pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 -d post
 
 Wait until `docker exec taskmill-pg pg_isready -h 127.0.0.1` prints
 `accepting connections`. If port 5432 is taken, publish another one, such
-as `-p 5433:5432`, and set `DATABASE_URL` in step 4.
+as `-p 5433:5432`. Then, in step 4, run the shop with the same port in
+`DATABASE_URL`:
+
+```sh
+DATABASE_URL='postgres://postgres:postgres@localhost:5433/postgres?sslmode=disable' go run ./examples/quickstart
+```
 
 ## Step 2. Get the code
 
@@ -113,10 +118,19 @@ return worker.Run(ctx)
 go run ./examples/quickstart
 ```
 
+> [!NOTE]
+> If your Go is older than the version in the `toolchain` line of
+> [go.mod](../../go.mod), `go` downloads that version first, once. To build
+> with your own Go, 1.26 or newer, run
+> `GOTOOLCHAIN=local go run ./examples/quickstart` instead.
+
 The log shows `worker started`, then `elected maintainer`: this worker
 also does the shared work, such as retries
-([maintainer](../concepts/glossary.md#maintainer)). The first start also
-logs one `applied migration` line for each migration.
+([maintainer](../concepts/glossary.md#maintainer)). Then it shows
+`maintainer heartbeats arrive; idle queues poll once a minute`: the
+maintainer's signals reach the worker, so notifications work, and a new
+task starts right away. The first start also logs one `applied migration`
+line for each migration.
 
 | The program stops with | Why | Do |
 |---|---|---|
@@ -145,7 +159,7 @@ time=… level=INFO msg="receipt sent" task_id=7 to=user7@example.com
 Open <http://localhost:8080/taskmill/>. **Overview** shows your queue and
 two charts. Its counts are of tasks that wait, run, or are dead, so they can
 all be 0 now: completed tasks are not counted. The chart of attempts shows
-your orders when the current minute ends.
+your orders about 15 seconds after the current minute ends.
 
 **Tasks** lists every task with its state. Click a task to see its data,
 its attempts, and the error of each failed attempt. **Workers** shows your

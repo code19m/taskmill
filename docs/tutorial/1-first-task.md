@@ -204,10 +204,13 @@ time=… level=INFO msg="worker started" worker_id=… queues=[default]
 time=… level=INFO msg="receipt sent" task_id=2 to=user1@example.com
 time=… level=INFO msg="receipt sent" task_id=1 to=user1@example.com
 time=… level=INFO msg="elected maintainer" worker_id=…
+time=… level=INFO msg="maintainer heartbeats arrive; idle queues poll once a minute" worker_id=…
 ```
 
 `elected maintainer` means that this worker also does the shared work, such
 as retries: it is the [maintainer](../concepts/glossary.md#maintainer).
+`maintainer heartbeats arrive` means that the maintainer's signals reach
+the worker, so notifications work, and a new task starts right away.
 [Log messages](../reference/log-messages.md#messages) explains every other
 line that taskmill writes.
 

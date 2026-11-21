@@ -58,40 +58,14 @@ for {
 }
 ```
 
-The states that you list, and a range of creation times, choose the order.
-The doc comment of [`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List)
-has the exact rules:
-
-| You list | The first task is | What a page reads |
-|---|---|---|
-| Any tasks, in a range of creation times | The one that was created last. Tasks created at the same time come by ID, highest first | About the tasks it shows, if you name the queue. See below |
-| Only dead tasks, only canceled tasks, or both | The one that finished last. Tasks that finished at the same time come by ID, highest first | About the tasks it shows, however many other tasks wait |
-| All tasks, the completed tasks of one queue or of all, or the pending tasks of one queue's FIFO group | The newest: the highest ID | About the tasks it shows |
-| Anything else, such as one unfinished state, or dead tasks with other states | The newest: the highest ID | The newer tasks of every queue and state first, unless its tasks are among the newest |
-
+- **The states that you list, and a range of creation times, choose the
+  order,** and what a page reads besides the tasks it shows. The doc
+  comment of [`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List)
+  has the rules, and says how to read what died since your last look.
 - A filter can name queues, states, kinds, and FIFO group keys. A task
   matches when it matches every field you set. An empty field matches all.
 - Pass `Next` back with the same filter and range. A cursor from a list in
   another order returns an error that wraps `ErrInvalidArgument`.
-- Each page's query stops after 5 seconds, so a list never loads the
-  database for longer. A list that needs more returns an error. On a very
-  large table, a list of the table's last row can need more.
-- **A list of dead or canceled tasks reads more than its page in two cases:**
-  - **You name no queue.** A page then reads up to a page from each queue
-    that has such tasks. With hundreds of queues, name the queue.
-  - **Many tasks finished at the same time.** A page reads all tasks that
-    share a finish time with the task where it starts, or with the task
-    where it ends. One batch of `CancelMatching` gives up to 1,000 tasks
-    one finish time, so a page can read two such batches. All `CancelTx`
-    calls in one transaction of yours give their tasks one finish time
-    too, with no limit.
-- **A list of dead or canceled tasks is not a log.** A task's finish time
-  is the start of the transaction that finished it, so a task can show up
-  below tasks that you have already read. To read what died since your
-  last look, read from the first page to a little before the latest finish
-  time that you saw, and drop the IDs that you already have.
-- With a kind or a FIFO group in the filter, such a list reads the dead
-  or canceled tasks of each queue until the page is full.
 - Set `Summary: true` in `ListParams` when you show one line per task. A
   page then comes without payloads and metadata, and with only the newest
   error of each task. So it stays small, whatever the tasks hold: a full
@@ -111,7 +85,7 @@ params.CreatedSince, params.CreatedBefore = night, night.Add(8*time.Hour)
   instants: a time zone changes nothing. Set one bound or both. A page reads
   only tasks of the range, also with a kind or a FIFO group in the filter.
 - **Any list takes `CreatedSince` and `CreatedBefore`,** and is then in
-  creation order. Without a queue, a page reads up to a page of each queue.
+  creation order.
 - **A list of only dead tasks, canceled tasks, or both takes
   `FinishedSince` and `FinishedBefore`,** and no other list does. Set one
   of the two ranges: both together are an `ErrInvalidArgument`.

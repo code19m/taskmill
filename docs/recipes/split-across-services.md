@@ -134,6 +134,12 @@ billing's workers first.
     sequence has passed them. The grant needs the column: an enqueue
     reserves each ID before it inserts the task, so that its result and a
     dedupe key can name the task.
+  - **Read the rows of `groups` and `dedupe_keys`,** of every service that
+    enqueues into billing. It sees each FIFO group's queue, key, and count of
+    tasks, and the task that halts it. It sees each dedupe key as a SHA-256
+    hash, with no secret, and its task's ID: so it can test a guessed key,
+    such as an email address. Keep personal data out of these keys, or
+    trust the role with it.
   - **Change the rows of `groups` and `dedupe_keys`.** A wrong count stops
     that FIFO group, or breaks its order: the other groups run as before. A
     changed key blocks a dedupe key, or admits a duplicate.

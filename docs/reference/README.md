@@ -22,6 +22,7 @@ Your editor and `go doc` show the same doc comments as pkg.go.dev.
 | Page | Read this when… |
 |---|---|
 | [The `taskmill-ui` command](taskmill-ui.md) | you set up the dashboard command or a proxy in front of it, or you link to a dashboard page |
+| [Dashboard pages](dashboard-pages.md) | you wonder what a part of a dashboard page shows, such as the dial, an icon, or a column |
 | [Log messages](log-messages.md) | you see a log line and want to know what it means and what to do |
 | [Metrics and traces](metrics.md) | you build a dashboard on taskmill's spans, metrics, and gauges |
 | [Fixed timings and limits](defaults-and-limits.md) | you need a timing of the workers, the maintainer, or the dashboard that no setting changes |

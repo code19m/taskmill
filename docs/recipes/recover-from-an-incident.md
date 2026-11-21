@@ -1,8 +1,8 @@
 # Recover from an incident
 
 **Situation.** "A bug in last night's release made 5,000 receipt tasks fail
-until they were dead. We have deployed a fix. Now we want to run them again,
-without hurting the new work."
+until they were dead. We have deployed a fix. Now we want to run each of
+them again once, when we are ready for the load."
 
 ## The recommended way
 
@@ -26,7 +26,8 @@ flowchart LR
    kind if other kinds died for other reasons. Choose **Retry all**, and
    confirm. If the dashboard says that other work held some tasks, they
    were busy in another transaction: try again for those.
-4. Choose **Resume** for the queue when you are ready for the load.
+4. Choose **Resume** for the queue when you are ready for the load. The
+   retried tasks run before the tasks that arrived after them.
 
 **From code,** for example in an admin command:
 
@@ -65,9 +66,11 @@ Find the cause. Then run the function again, or call `ResumeQueue`.
 
 ## Why
 
-- **A retried task is ready to run right away,** with a fresh set of
-  attempts. Thousands of them would compete with new work. The pause lets
-  you choose when they run.
+- **Retried tasks go first.** A retry gives a task a fresh set of
+  attempts, and sets its run time to now. So the retried tasks run before
+  the tasks of their priority that arrive after the retry.
+- **The pause lets you choose when the load starts,** for example once a
+  service that the tasks call has recovered, or at a quiet hour.
 - **While the queue is paused, a retried task can't die again.** So running
   `RetryMatching` again for the skipped tasks never retries a task twice.
 - **FIFO groups stay in order.** Retrying the dead task that halts a
@@ -81,8 +84,8 @@ Find the cause. Then run the function again, or call `ResumeQueue`.
 
 | Option | When it fits | The cost |
 |---|---|---|
-| Retry without a pause | There are few tasks, or the queue is quiet | The retried tasks compete with new ones |
-| A low `MaxRunning` instead of the pause, removed later | New work must keep running during the recovery | Everything in the queue runs slower meanwhile |
+| Retry without a pause | There are few tasks, or the queue is quiet | The retried tasks start right away, before the new work |
+| A low `MaxRunning` instead of the pause, removed later | A service that the tasks call can't take the full load yet | The retried tasks still go first, so the new work waits longer |
 | `DeleteMatching` | The dead tasks' work is no longer needed | No record is kept, and you can't undo it |
 | Leave the dead tasks | The work is no longer useful | They stay until the dead-task retention ends: 30 days by default |
 
@@ -91,9 +94,10 @@ Find the cause. Then run the function again, or call `ResumeQueue`.
 - **Filter by the state `dead`.** `RetryMatching` retries dead and canceled
   tasks. Without the state, it also runs tasks that someone canceled on
   purpose.
-- **A pause stops new work in the queue too.** Its
+- **New work waits.** The pause stops new work in the queue too, and after
+  the resume, new work waits behind the retried tasks. The queue's
   [lag](../concepts/glossary.md#lag) grows, and lag alerts can fire. Keep
-  the pause short.
+  the pause short, and add workers if the new work can't wait.
 - **Check that the fix works first.** Retry one task, and check that it
   completes. Tasks that fail again for the same reason get a fresh set of
   attempts: by default, about 13 more hours of retries.

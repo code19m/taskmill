@@ -58,8 +58,8 @@ writes one gets the error, with the constraint's name:
   back by a lease, or by a retention period, have no guard of their own.
 - **The migration repairs first.** It locks each table, repairs the rows
   that break the rule, and adds the constraint, which reads the table once:
-  a few pages. [Upgrading](../production/upgrading.md#what-a-migration-repairs)
-  says what becomes of each row.
+  a few pages. The [changelog](../../CHANGELOG.md) of 0.8.0 says what
+  becomes of each row.
 
 ## The election ignores a lease that no worker writes
 

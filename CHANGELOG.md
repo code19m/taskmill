@@ -7,6 +7,17 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Docs that were wrong or unclear. Retried tasks run before new work, as
+  [Recover from an incident](docs/recipes/recover-from-an-incident.md) now
+  says. The order of a list and what a page reads are in the doc comment of
+  `Client.List` alone. A task takes about 420 bytes while it waits and 390
+  in history, with a small payload. A task that loses its lease on its last
+  attempt becomes dead, and the failover checklist looks for it. A new
+  page, [Dashboard pages](docs/reference/dashboard-pages.md), says what each
+  part of a dashboard page shows.
+
 ## [0.13.0] - 2026-11-21
 
 ### Added
@@ -755,14 +766,32 @@ All notable changes to taskmill are recorded here. The format follows
   are internal: see [Compatibility](docs/reference/compatibility.md).
 - The migration first repairs the rows that break the new rules, which
   only SQL by hand can have written. It deletes such a row of `workers`,
-  and a worker that still runs registers again at its next check-in. It
+  and a worker that still runs registers again at its next check-in, with
+  the Warn line `worker was removed as stale; registering again`. It
   pauses a schedule whose next run time is infinite: resume it on the
-  dashboard. It changes a retention period outside the range to the
+  dashboard, and it runs right away, once for the time of the upgrade, and
+  once more if it missed a regular run since. It forgets a last run time
+  that is infinite. It changes a retention period outside the range to the
   nearest one inside, so a period that you set below 1 hour with SQL
-  becomes 1 hour. [Upgrading](docs/production/upgrading.md#what-a-migration-repairs)
-  has the list, and a query that shows what an upgrade repaired. The
-  migration locks each of the three tables for a moment, waits at most 5
-  seconds for each lock, and reads a few pages. The previous release's
+  becomes 1 hour, and writes a period with a negative field without one:
+  `7 days -1 hour` becomes `6 days 23:00:00`. A repaired schedule or
+  settings row has the time of the migration as its `updated_at`, until
+  something changes the row again: the maintainer does that to each
+  schedule that it defines after an hour. So this query, with your
+  schema's name, shows what the upgrade repaired, right after it:
+
+  ```sql
+  SELECT 'schedule ' || s.name AS repaired
+  FROM taskmill.schedules s, taskmill.migrations m
+  WHERE m.version = 6 AND s.updated_at = m.applied_at
+  UNION ALL
+  SELECT 'settings'
+  FROM taskmill.settings s, taskmill.migrations m
+  WHERE m.version = 6 AND s.updated_at = m.applied_at;
+  ```
+
+  The migration locks each of the three tables for a moment, waits at most
+  5 seconds for each lock, and reads a few pages. The previous release's
   code keeps working on the new schema.
 - **Breaking:** `Client.List` returns a list of only dead tasks, only
   canceled tasks, or both in a new order: by when the tasks finished, the

@@ -121,6 +121,7 @@ that, open a [guide](guides/README.md) when you need a feature.
 - [Configuration](reference/configuration.md)
 - [Errors](reference/errors.md)
 - [The `taskmill-ui` command](reference/taskmill-ui.md)
+- [Dashboard pages](reference/dashboard-pages.md)
 - [Log messages](reference/log-messages.md)
 - [Metrics and traces](reference/metrics.md)
 - [Fixed timings and limits](reference/defaults-and-limits.md)

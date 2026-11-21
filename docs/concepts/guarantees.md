@@ -47,7 +47,7 @@ your handlers must follow.
 | What happens | Why the task runs again | How to make it rare |
 |---|---|---|
 | A worker crashes after the work, before it saves the result | The lease runs out, and another worker runs the task | You cannot prevent it: make the handler safe to run twice |
-| A worker loses the database for more than about 20 seconds | The worker cannot renew its leases, so it stops its tasks, and they run again | If your database's failover takes longer than that, [Database](../production/database.md#when-the-database-fails) shows what to change, and what it costs |
+| A worker loses the database for more than about 20 seconds | The worker cannot renew its leases, so it stops its tasks. They run again, or become dead if that was their last attempt | If your database's failover takes longer than that, [Database](../production/database.md#when-the-database-fails) shows what to change, and what it costs |
 | Handlers use every connection of the pool | The worker cannot renew its leases in time | Give the pool your total concurrency plus 5 connections, or give handlers a pool of their own |
 | A handler ignores the end of its context at shutdown | The worker gives the task back ([release](glossary.md#release)), and it starts again on another worker | Return quickly when `ctx` ends |
 | The platform kills the worker before it [drains](glossary.md#drain) | The same as a crash | Give the process at least `DrainTimeout` plus 10 seconds to stop ([Deploys](../production/deploys.md)) |

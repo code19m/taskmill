@@ -107,6 +107,9 @@ postgres://shop@db-1.internal,db-2.internal/shop?target_session_attrs=read-write
 - [ ] You know which tasks ran twice. The lines `attempt lost its lease;
   canceling it` and `rescued tasks whose workers lost their leases` name
   them. They are expected after an outage of more than about 20 seconds.
+- [ ] No task died of the outage. A task that was on its last attempt is
+  now dead, with the code `lease_lost`: on Dashboard › Dead, its last error
+  says that the worker lost its lease. Retry those tasks.
 - [ ] With asynchronous replication, the last commits can be lost. Treat
   that as a small restore: tasks enqueued in those commits are gone, and
   their IDs can repeat. Move the ID sequence forward, as in step 3 above.

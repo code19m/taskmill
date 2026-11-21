@@ -127,14 +127,33 @@ type ListResult struct {
 // of their finish times: a walk through the pages of a list in either order
 // can miss a task that is enqueued, or finishes, meanwhile. A walk in finish
 // order can return a task twice, if the task is retried and finishes again
-// meanwhile.
+// meanwhile. So a list of dead tasks is not a log: to read the tasks that
+// died since your last look, read from the first page to a little before
+// the latest finish time that you saw, and drop the IDs that you have.
 //
 // Each page's query is canceled after 5 seconds, so listing cannot load the
 // database for longer: a list that needs more returns an error. A page reads
-// about the tasks that it returns in most lists. With no queue named, a page
-// in creation or finish order reads up to a page of each queue that holds
-// such tasks: with hundreds of queues, name the queue. What else makes a
-// page read more, in each order, is in
+// about the tasks that it returns, except in these lists:
+//
+//   - A list in ID order whose tasks no index holds in that order reads
+//     every newer task, of any queue and state, until its page is full.
+//     Indexes hold every task, the completed tasks of one queue or of all,
+//     and the pending tasks of one queue's FIFO group, in ID order. They do
+//     not hold, for example, one unfinished state, or dead tasks mixed with
+//     other states.
+//   - A list in creation or finish order with no queue named reads up to a
+//     page of each queue that holds such tasks: with hundreds of queues,
+//     name the queue.
+//   - A list in finish order reads every task that shares a finish time
+//     with the first or the last task of its page. The tasks that one
+//     transaction finished share one: up to 1,000 for a batch of a bulk
+//     action, and with no limit for the [Client.CancelTx] calls of one
+//     transaction.
+//   - A list in finish order with a kind or a FIFO group in its filter
+//     reads the dead or canceled tasks of each queue until its page is
+//     full.
+//
+// The reasons are in
 // https://github.com/code19m/taskmill/blob/main/docs/design/schema-lists.md.
 func (c *Client) List(ctx context.Context, params *ListParams) (*ListResult, error) {
 	if params == nil {

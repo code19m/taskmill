@@ -160,7 +160,7 @@ reports, prepared transactions that nobody commits, replicas with
 | What happens | What taskmill does | What you do |
 |---|---|---|
 | A failover or outage of a few seconds | Workers reconnect at their next try. Running tasks continue, and their results are saved. Nothing runs twice. | Nothing |
-| A failover or outage of more than about 20 seconds | Workers cannot renew their leases, so they cancel their running tasks. The tasks run again once the database is back. | Make handlers safe to run twice. Or raise `LeaseDuration`: see below |
+| A failover or outage of more than about 20 seconds | Workers cannot renew their leases, so they cancel their running tasks. The tasks run again once the database is back, or become dead if that was their last attempt. | Make handlers safe to run twice. Or raise `LeaseDuration`: see below |
 | The database is down when a process starts | `Migrate` and `NewClient` return an error, so your process exits. Kubernetes restarts it until the database is back. | Fix the database. The pods recover by themselves |
 | A failover with asynchronous replication | The last commits can be lost, and with them tasks enqueued in them, like any other row | Use synchronous replication if that matters. Then [check these points](backups-and-failover.md#check-these-points-after-a-failover) |
 | You restore a backup | Tasks go back to their state at that time, and task IDs repeat | Follow [Restore a backup](backups-and-failover.md#restore-a-backup) |
@@ -232,7 +232,7 @@ you like: taskmill works the same in each. Every time that it stores is a
 | A day of history, and a day of a retention period | UTC, and always 24 hours |
 | The expression of a [schedule](../guides/schedules.md) | The schedule's `Location`: UTC unless you set it |
 | A time that the Go API returns | A moment: compare two with `Equal`, and choose a zone with `In` to show one |
-| The dashboard | UTC |
+| The dashboard | The reader's, named beside each exact time. UTC without JavaScript |
 
 ## See also
 

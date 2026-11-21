@@ -65,7 +65,7 @@ by election, that does the shared work.
 | Drop old history partitions | At most 10 in a pass of retention, so 10 a minute: a much shorter `HistoryRetention` takes a while to free its disk space. A pass waits up to 30 seconds for transactions that use the history, and tries again a minute later |
 | Other workers try to take over | Every 2 to 3 seconds, with a statement that writes nothing while the maintainer's lease lasts |
 | A new maintainer after a crash | Within about 12 seconds (the maintainer's lease is 10 seconds) |
-| A new maintainer after a clean stop | Right away, when the old one starts to stop. It gives the role up before it waits for its running tasks, and after the election that it had sent has an answer, for which it waits up to 5 seconds |
+| A new maintainer after a clean stop | Right away. The old maintainer gives the role up as soon as it starts to stop, before it waits for its running tasks. If an election of its own still waits for an answer, it first waits for that, up to 5 seconds |
 | Remove a worker that stopped checking in | After 5 minutes without a [check-in](../concepts/glossary.md#check-in), or after twice its `LeaseDuration` if that is longer |
 
 ## Dashboard
