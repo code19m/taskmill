@@ -10,6 +10,14 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-22
+
+### Changed
+
+- Requires taskmill v0.16.0, whose relay retries the deliveries of a
+  publisher that returns more results than deliveries, as the spans below
+  now say.
+
 ### Fixed
 
 - `Instrumentation.Publisher` ends every span when a result of the
@@ -155,7 +163,8 @@ Initial release, for taskmill v0.2.0 or newer.
 - A wrapper for the outbox's publisher, which traces each delivery and carries
   the trace to the broker in the message's headers.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/otel/v0.5.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/otel/v0.5.1...HEAD
+[0.5.1]: https://github.com/code19m/taskmill/compare/otel/v0.5.0...otel/v0.5.1
 [0.5.0]: https://github.com/code19m/taskmill/compare/otel/v0.4.3...otel/v0.5.0
 [0.4.3]: https://github.com/code19m/taskmill/compare/otel/v0.4.2...otel/v0.4.3
 [0.4.2]: https://github.com/code19m/taskmill/compare/otel/v0.4.1...otel/v0.4.2
