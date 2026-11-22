@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-23
+
 ### Fixed
 
 - `Count`, `RetryMatching`, `CancelMatching`, and `DeleteMatching` with a
@@ -2441,7 +2443,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/code19m/taskmill/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/code19m/taskmill/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/code19m/taskmill/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/code19m/taskmill/compare/v0.13.0...v0.14.0
