@@ -75,14 +75,14 @@ func runWeb(ctx context.Context, logger *slog.Logger) error {
 		return err
 	}
 
-	// Serve until Ctrl-C or SIGTERM. Set ADDR if port 8080 is taken.
+	// Set ADDR if port 8080 is taken, and to :8080 in a container.
 	addr := cmp.Or(os.Getenv("ADDR"), defaultAddr)
 	stop, err := serve(ctx, addr, handler)
 	if err != nil {
 		return err
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "open the dashboard", slog.String(logKeyURL, "http://"+addr+"/taskmill/"))
-	<-ctx.Done()
+	<-ctx.Done() // serve until Ctrl-C or SIGTERM
 	stop()
 	return nil
 }
@@ -132,7 +132,7 @@ func runWorker(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	// A platform such as Kubernetes asks this server if the worker is ready.
-	// Set HEALTH_ADDR if port 8081 is taken.
+	// Set HEALTH_ADDR if port 8081 is taken, and to :8081 in a container.
 	stop, err := serve(ctx, cmp.Or(os.Getenv("HEALTH_ADDR"), "localhost:8081"), health(worker))
 	if err != nil {
 		return err
@@ -243,8 +243,8 @@ time=… level=INFO msg="worker stopped" worker_id=… released=0
 
 ## Go deeper
 
-- [Deploys](../production/deploys.md): stop workers without losing work, and run two versions side by side
-- [Kubernetes](../production/kubernetes.md): manifests for the two roles, and the probe
+- [Deploys](../production/deploys.md): run `Migrate` in a Job before the rollout, stop workers without losing work, and run two versions side by side
+- [Kubernetes](../production/kubernetes.md): the worker's manifest, and its readiness probe
 - [Production checklist](../production/checklist.md): every point to check before you go live
 
 **Next:** [Concepts](../concepts/README.md)

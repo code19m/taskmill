@@ -115,10 +115,13 @@ unless you add that yourself. If your `Backoff` panics, the attempt fails
 with the code `panic`, and the task waits by the default backoff.
 
 > [!NOTE]
-> If a task's worker crashes or loses its
-> [lease](../concepts/glossary.md#lease), the task waits by the default
-> backoff, not by your policy. The maintainer retries such a task, and it
-> doesn't know your handler's options.
+> When a task's worker crashes or loses its
+> [lease](../concepts/glossary.md#lease), the maintainer retries the task.
+> The task waits by your policy if the maintainer has a handler for its
+> kind, and by the default backoff otherwise: about 1 second after a first
+> attempt. So with a maintainer that has no handlers, as in
+> [Scale to zero](../production/autoscaling.md#scale-to-zero), a kind that
+> must not retry fast needs its own guard in the handler.
 
 ## What is a dead task?
 

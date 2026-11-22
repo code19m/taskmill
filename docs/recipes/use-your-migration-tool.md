@@ -3,8 +3,9 @@
 **Situation.** "Every schema change in our company goes through goose. Apps
 must not change the schema when they start."
 
-If your apps may change their own schema, call `Migrate` at the start of
-every process instead ([Deploys](../production/deploys.md)).
+If your apps may change their own schema, run `Migrate` instead: in
+production, in a Job before the rollout
+([Run migrations](../production/deploys.md#run-migrations)).
 
 ## The recommended way
 
@@ -73,8 +74,8 @@ step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
 
 | Option | When it fits | The cost |
 |---|---|---|
-| `Migrate` at the start of every process | Apps may change their own schema | None. It is safe from many processes at the same time |
-| `Migrate` in a Job before each deploy | The schema changes in a step before the rollout | One more step ([Kubernetes](../production/kubernetes.md)) |
+| `Migrate` at the start of every process | Development, or a small schema | An index build delays the start of every process |
+| `Migrate` in a Job before each deploy | Production | One more step ([Kubernetes](../production/kubernetes.md)) |
 | Copy the SQL into your tool's files by hand | You upgrade taskmill rarely | It's easy to miss a version, or the `INSERT` that records it |
 
 ## Watch out

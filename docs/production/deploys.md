@@ -45,9 +45,10 @@ func run(ctx context.Context, role string) error {
 ```
 
 `serveHTTP`, `handlers`, and `serveHealth` are your own functions.
-[Ready to ship](../tutorial/7-ready-to-ship.md) builds this binary step by
-step, and [Kubernetes](kubernetes.md) has the manifests for the `worker` and
-`migrate` roles.
+[Kubernetes](kubernetes.md) has the manifests for the `worker` and `migrate`
+roles. [Ready to ship](../tutorial/7-ready-to-ship.md) builds a smaller
+binary step by step, with no `migrate` role: each of its roles migrates
+when it starts.
 
 ## Stop workers without losing work
 
