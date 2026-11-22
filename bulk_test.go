@@ -449,11 +449,7 @@ func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			e := setup(t)
-			var want []int64
-			if err := e.pool.QueryRow(t.Context(), replaceSchema(`SELECT array_agg(id) FROM {s}.tasks WHERE state = 'dead' AND `+c.inRange, e.schema),
-				since).Scan(&want); err != nil {
-				t.Fatal(err)
-			}
+			want := idsOf(t, e, `SELECT array_agg(id) FROM {s}.tasks WHERE state = 'dead' AND `+c.inRange, since)
 
 			var res taskmill.BulkResult
 			sent := &bulkStatements{}
@@ -474,7 +470,7 @@ func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
 			case strings.Contains(statements, "w"):
 				t.Logf("a batch ran out of time on this busy machine, and the action went on in windows (%q), reading %d rows", statements, n)
 			case n > c.most:
-				t.Errorf("the action read %d rows of tasks, want at most %d", n, c.most)
+				t.Errorf("the action read %d rows of tasks, want at most %d; its batches read %q (q: by queue, p: in ID order)", n, c.most, statements)
 			}
 		})
 	}
@@ -511,6 +507,31 @@ func TestARangeBatchThatRunsOutOfTimeGoesOnInWindows(t *testing.T) {
 	if statements := sent.reset(); !strings.HasPrefix(statements, "qwp") {
 		t.Errorf("the retry sent %q, want a pick by queue, and then windows", statements)
 	}
+}
+
+// idsOf returns the IDs that sql selects, read on a connection of its own
+// that has ended when it returns. The database adds a connection's reads to
+// the table's statistics only from time to time, or when it ends: a read on
+// a connection that lives on could be counted in what rowsReadBy measures
+// next, such as the scan of every task that finds a range's IDs.
+func idsOf(t *testing.T, e *env, sql string, args ...any) []int64 {
+	t.Helper()
+	conn, err := pgx.Connect(t.Context(), testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := int64(conn.PgConn().PID())
+
+	var ids []int64
+	err = conn.QueryRow(t.Context(), replaceSchema(sql, e.schema), args...).Scan(&ids)
+	_ = conn.Close(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the connection that read the IDs to end", func() bool {
+		return e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE pid = $1", pid) == 0
+	})
+	return ids
 }
 
 // rowsReadBy runs do with a client of its own, on a pool of its own that
