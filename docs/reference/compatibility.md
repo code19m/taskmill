@@ -34,8 +34,9 @@ From v1.0.0 on, this is the promise:
   enqueue. New features come as new optional interfaces, the way
   `ArgsWithDefaults` extends `Args`.
 - **`Executor` is sealed:** only taskmill implements it.
-- **Function types keep their signatures:** `HandlerFunc`, `Middleware`,
-  `EnqueueMiddleware`, and `outbox.PublisherFunc`.
+- **Function types keep their signatures:** `HandlerFunc`,
+  `BatchHandlerFunc`, `Middleware`, `EnqueueMiddleware`, and
+  `outbox.PublisherFunc`.
 - **Config structs only get new fields whose zero value keeps the old
   behavior.**
 - **The types that taskmill hands to your code have no JSON tags and no

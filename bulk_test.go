@@ -222,6 +222,155 @@ func TestDeleteMatchingTakesOneBatchOfBothTables(t *testing.T) {
 	}
 }
 
+// Count and the bulk actions take the ranges of times of ListParams, under
+// its rules, and count and change only the tasks of the range: an operator
+// retries what died in an incident, and not the older dead tasks of the same
+// kind.
+func TestCountAndBulkActionsTakeARangeOfTimes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+
+	// The range is from second 10 to second 20. Tasks 2, 3, and 4 died in it;
+	// 1 died before it, and 5 at its end, outside it. Of the tasks that wait,
+	// 7 was created in it, and of the completed tasks, 10.
+	start := time.Date(2026, time.March, 14, 14, 0, 0, 0, time.UTC)
+	e.exec(t, `INSERT INTO {s}.tasks (id, queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
+	           OVERRIDING SYSTEM VALUE
+	           SELECT v.id, 'q', 'charge', v.state::{s}.task_state, $1::timestamptz + v.created * interval '1 second',
+	                  $1::timestamptz + v.finished * interval '1 second', now(), '{}', 3
+	           FROM (VALUES (1, 'dead', 0, 5), (2, 'dead', 0, 10), (3, 'canceled', 0, 15), (4, 'dead', 0, 19), (5, 'dead', 0, 20),
+	                        (6, 'available', 5, NULL), (7, 'available', 10, NULL), (8, 'scheduled', 20, NULL)
+	                ) AS v(id, state, created, finished)`, start)
+	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+	                                         priority, attempt, max_attempts, payload, metadata, errors)
+	           SELECT v.id, now(), 'q', $1::timestamptz + v.created * interval '1 second', 'charge', now(), 'w', now(),
+	                  2, 1, 3, '{}', '{}', '[]'
+	           FROM (VALUES (9, 5), (10, 15), (11, 25)) AS v(id, created)`, start)
+	since, before := start.Add(10*time.Second), start.Add(20*time.Second)
+	finished := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}}
+	queue := taskmill.TaskFilter{Queues: []string{"q"}}
+
+	counts, err := e.client.Count(ctx, &taskmill.CountParams{Filter: finished, FinishedSince: since, FinishedBefore: before})
+	if err != nil || counts.Retry != (taskmill.TaskCount{N: 3}) || counts.States[taskmill.StateDead].N != 2 {
+		t.Fatalf("count of the tasks that finished in the range: %+v, %v; want 3 to retry, 2 of them dead", counts, err)
+	}
+	counts, err = e.client.Count(ctx, &taskmill.CountParams{Filter: queue, CreatedSince: since, CreatedBefore: before})
+	if err != nil || counts.Cancel.N != 1 || counts.Delete.N != 2 {
+		t.Fatalf("count of the tasks created in the range: %+v, %v; want 1 to cancel and 2 to delete", counts, err)
+	}
+
+	res, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: finished, FinishedSince: since, FinishedBefore: before})
+	if err != nil || res.Changed != 3 {
+		t.Fatalf("retry of the tasks that finished in the range: %+v, %v; want 3", res, err)
+	}
+	res, err = e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: queue, CreatedSince: since, CreatedBefore: before})
+	if err != nil || res.Changed != 1 {
+		t.Fatalf("cancel of the tasks created in the range: %+v, %v; want 1", res, err)
+	}
+	completed := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}}
+	res, err = e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: completed, CreatedSince: since, CreatedBefore: before})
+	if err != nil || res.Changed != 1 {
+		t.Fatalf("delete of the completed tasks created in the range: %+v, %v; want 1", res, err)
+	}
+	wantStates(t, e, map[int64]taskmill.State{
+		1: taskmill.StateDead, 2: taskmill.StateAvailable, 3: taskmill.StateAvailable, 4: taskmill.StateAvailable, 5: taskmill.StateDead,
+		6: taskmill.StateAvailable, 7: taskmill.StateCanceled, 8: taskmill.StateScheduled, 9: taskmill.StateCompleted, 11: taskmill.StateCompleted,
+	})
+	if _, err := e.client.Get(ctx, 10); !errors.Is(err, taskmill.ErrNotFound) {
+		t.Fatalf("task 10: got %v, want ErrNotFound", err)
+	}
+
+	// The rules of ListParams: one of the two ranges, a range of finish times
+	// only for a filter of only dead and canceled tasks, as Count takes it,
+	// and bounds that are a range.
+	for name, err := range map[string]error{
+		"retry in both ranges":                            errOf(e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: finished, CreatedSince: since, FinishedSince: since})),
+		"retry by finish time, of every state":            errOf(e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: queue, FinishedSince: since})),
+		"cancel by finish time":                           errOf(e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: queue, FinishedSince: since})),
+		"delete by finish time, completed tasks too":      errOf(e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: queue, FinishedBefore: before})),
+		"count by finish time, of every task":             errOf(e.client.Count(ctx, &taskmill.CountParams{FinishedSince: since})),
+		"count in a range that ends before it starts":     errOf(e.client.Count(ctx, &taskmill.CountParams{CreatedSince: before, CreatedBefore: since})),
+		"retry after a time that PostgreSQL cannot store": errOf(e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: finished, FinishedSince: lastTimestamp.AddDate(1, 0, 0)})),
+	} {
+		if !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Errorf("%s: got %v, want ErrInvalidArgument", name, err)
+		}
+	}
+}
+
+// A range of times narrows what Count and a batch of a bulk action read to
+// about the tasks of the range, through the index that holds those times:
+// the dead and canceled tasks by finish time, and the others by creation
+// time. A batch reads each task of the range once to pick it, and those it
+// picks once more to lock them. Both indexes hold tasks by queue first, and
+// PostgreSQL skips through an index's first column only from version 18. So
+// without a queue, a batch with a range of creation times can read in ID
+// order on any version, and before PostgreSQL 18 a count reads every task
+// of its states, and a range of finish times all of its index. The rows
+// read are rows of the tables: they leave out the index entries that a scan
+// passes over.
+func TestRangesOfCountAndBulkActionsReadOnlyTheirRows(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	skipScan := e.count(t, "SELECT current_setting('server_version_num')::integer") >= 180000
+
+	// 60,000 dead tasks over 30 days, a third of them of the kind charge,
+	// and 20,000 available tasks in 50 other queues. The range is a day 3
+	// days back, which holds 2,000 dead tasks.
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
+	           SELECT 'q', CASE WHEN i % 3 = 0 THEN 'charge' ELSE 'mail' END, 'dead',
+	                  now() - i * interval '43200 milliseconds', now() - i * interval '43200 milliseconds', now(), '{}', 3
+	           FROM generate_series(1, 60000) i`)
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'other' || (i % 50), 'mail', 'available', now(), '{}', 3 FROM generate_series(1, 20000) i`)
+	e.exec(t, "ANALYZE {s}.tasks")
+	since := time.Now().Add(-4 * 24 * time.Hour)
+	before := since.Add(24 * time.Hour)
+	dead := []taskmill.State{taskmill.StateDead}
+
+	for _, c := range []struct {
+		action       string
+		params       taskmill.BulkParams
+		batch, count bool // the range always narrows what the batch and the count read
+	}{
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead, Kinds: []string{"charge"}}, FinishedSince: since, FinishedBefore: before}, true, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"charge"}}, CreatedSince: since, CreatedBefore: before}, true, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead}, CreatedSince: since, CreatedBefore: before}, false, skipScan},
+		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, States: dead}, FinishedSince: since, FinishedBefore: before}, true, true},
+		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}}, CreatedSince: since, CreatedBefore: before}, true, true},
+		{"cancel", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"mail"}}, CreatedSince: since, CreatedBefore: before}, true, true},
+	} {
+		if c.batch {
+			n, err := taskmill.BulkRowsRead(t.Context(), e.client, c.action, &c.params, 0, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n > 4000 {
+				t.Errorf("%s %+v: a batch read %d rows for the 2,000 dead tasks of the range", c.action, c.params, n)
+			}
+		}
+		if !c.count {
+			continue
+		}
+
+		count := taskmill.CountParams{
+			Filter: c.params.Filter, CreatedSince: c.params.CreatedSince, CreatedBefore: c.params.CreatedBefore,
+			FinishedSince: c.params.FinishedSince, FinishedBefore: c.params.FinishedBefore,
+		}
+		n, err := taskmill.CountRowsRead(t.Context(), e.client, &count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n > 4000 {
+			t.Errorf("count %+v: read %d rows for the 2,000 dead tasks of the range", count, n)
+		}
+	}
+}
+
+// errOf returns the error of a call that returns a value and an error.
+func errOf[T any](_ T, err error) error { return err }
+
 // History is split in a partition per day. A batch of a delete of completed
 // tasks reads only the partitions from the first day on which its tasks
 // finished to the last, when it locks them and when it deletes them:
@@ -988,7 +1137,7 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 		{"delete", &taskmill.TaskFilter{Kinds: []string{"k3"}}, 28000, 4000},
 		{"history", &taskmill.TaskFilter{Queues: []string{"q1"}}, 1090000, 15000},
 	} {
-		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, c.filter, c.after, false)
+		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, bulk(c.filter), c.after, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1140,7 +1289,7 @@ func TestBulkActionsWithAnIndexReadOnlyTheirTasks(t *testing.T) {
 	} {
 		// A batch reads each task that matches once to pick it, and once to
 		// lock it.
-		read, err := taskmill.BulkRowsRead(ctx, e.client, c.pick, &c.filter, 0, false)
+		read, err := taskmill.BulkRowsRead(ctx, e.client, c.pick, bulk(&c.filter), 0, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1207,7 +1356,7 @@ func TestBulkActionsGetPastASlowBatchInWindows(t *testing.T) {
 		{"delete", q},
 		{"delete", rare},
 	} {
-		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, &c.filter, 0, true)
+		n, err := taskmill.BulkRowsRead(ctx, e.client, c.action, bulk(&c.filter), 0, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1430,8 +1579,8 @@ func TestCountReadsEachStatesIndex(t *testing.T) {
 	           FROM generate_series(1, 35000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
 
-	for _, filter := range []*taskmill.TaskFilter{nil, {Queues: []string{taskmill.DefaultQueue}}} {
-		n, err := taskmill.CountRowsRead(t.Context(), e.client, filter)
+	for _, filter := range []taskmill.TaskFilter{{}, {Queues: []string{taskmill.DefaultQueue}}} {
+		n, err := taskmill.CountRowsRead(t.Context(), e.client, &taskmill.CountParams{Filter: filter})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -738,7 +738,7 @@ func TestBatchHandlerSeesACancelRequest(t *testing.T) {
 
 	started := make(chan struct{}, 1)
 	var hs taskmill.Handlers
-	taskmill.AddBatchHandler(&hs, emailBatch(func(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+	taskmill.AddBatchHandler(&hs, taskmill.BatchHandlerFunc[sendEmail](func(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error {
 		started <- struct{}{}
 		errs := make([]error, len(tasks))
 		for i, task := range tasks {
@@ -759,13 +759,6 @@ func TestBatchHandlerSeesACancelRequest(t *testing.T) {
 	}
 	e.waitState(t, res[1].ID, taskmill.StateCanceled)
 	e.waitState(t, res[0].ID, taskmill.StateCompleted)
-}
-
-// emailBatch adapts a function to taskmill.BatchHandler.
-type emailBatch func(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error
-
-func (f emailBatch) HandleBatch(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error {
-	return f(ctx, tasks)
 }
 
 func TestCancelRequestWinsOverOtherOutcomes(t *testing.T) {

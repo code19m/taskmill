@@ -421,7 +421,7 @@ var completingHandlers = map[string]func(t *testing.T, hs *taskmill.Handlers, ru
 		}), nil)
 	},
 	"batch": func(_ *testing.T, hs *taskmill.Handlers, run func(id int64)) {
-		taskmill.AddBatchHandler(hs, emailBatch(func(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+		taskmill.AddBatchHandler(hs, taskmill.BatchHandlerFunc[sendEmail](func(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
 			for _, task := range tasks {
 				run(task.ID)
 			}

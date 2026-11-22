@@ -89,8 +89,8 @@ allow-list, or to link to a page from an alert.
 | `GET /tasks/{id}` | One task | — |
 | `GET /schedules` | The schedules | — |
 | `GET /workers` | The workers | — |
-| `GET /tasks/bulk/{action}` | The page that confirms a bulk action: with JavaScript, the task list shows it in a dialog. It counts the tasks first | The filters of `/tasks`, at least one |
-| `POST /tasks/bulk/{action}` | Retries, cancels, or deletes every task that the filters select. `{action}` is `retry`, `cancel`, or `delete` | The filters of `/tasks`, at least one |
+| `GET /tasks/bulk/{action}` | The page that confirms a bulk action: with JavaScript, the task list shows it in a dialog. It counts the tasks first | The filters of `/tasks`, at least one, and its `since` and `before` |
+| `POST /tasks/bulk/{action}` | Retries, cancels, or deletes every task that the filters select, in the range. `{action}` is `retry`, `cancel`, or `delete` | The filters of `/tasks`, at least one, and its `since` and `before` |
 | `POST /tasks/{id}/{action}` | Retries, cancels, or deletes one task | — |
 | `POST /queues/{action}` | Pauses or resumes a queue. `{action}` is `pause` or `resume` | `name`: the queue. `range`: the period of the overview that the answer leads back to, as for `GET /` |
 | `POST /schedules/{action}` | Pauses, resumes, or runs a schedule. `{action}` is `pause`, `resume`, or `run` | `name`: the schedule |
@@ -142,7 +142,7 @@ lines if you need a record of what was done.
 | `retry task`, `cancel task`, `delete task` | The task ID | — |
 | `pause queue`, `resume queue` | The queue name | — |
 | `pause schedule`, `resume schedule`, `run schedule` | The schedule name | — |
-| `retry tasks`, `cancel tasks`, `delete tasks` | The filters, as a query string such as `queue=emails&state=dead` | `tasks`: how many tasks it changed. `skipped`: how many it left, because another transaction held them |
+| `retry tasks`, `cancel tasks`, `delete tasks` | The filters and the range, as a query string such as `queue=emails&state=dead` | `tasks`: how many tasks it changed. `skipped`: how many it left, because another transaction held them |
 
 The line does not say who did it: the command knows one user only. To log
 the person, see

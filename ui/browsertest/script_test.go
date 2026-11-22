@@ -4,6 +4,7 @@ import (
 	"errors"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,6 +232,24 @@ func TestDialogOpenedAgainAtOnceSendsItsAction(t *testing.T) {
 		"the task list, with the notice of the action")
 	if _, err := s.client.Get(t.Context(), id); !errors.Is(err, taskmill.ErrNotFound) {
 		t.Errorf("the task is still there after the action: %v", err)
+	}
+}
+
+// The dialog of a bulk action on a list with a range names the range in the
+// reader's time zone, in the words of the range's button, and not in the
+// server's UTC: the reader confirms the range that the list shows.
+func TestBulkDialogNamesTheRangeAsTheListDoes(t *testing.T) {
+	s := newSite(t)
+	s.die(t, s.enqueue(t, 1)[0], 30)
+	since := time.Now().Add(-time.Hour).Truncate(time.Minute).UTC().Format(time.RFC3339)
+	p := s.open(t, "/tasks?state=dead&since="+since)
+
+	p.click(`a[data-dialog][href*="/retry"]`)
+	p.waitFor(`document.getElementById("confirm-dialog").open`, "the dialog")
+	got := eval[[]string](p, `[document.querySelector("#confirm-dialog dd:last-of-type").textContent,
+		document.querySelector(".sel-range > summary").title]`)
+	if got[0] != got[1] || !strings.HasSuffix(got[0], "UTC+5:45") {
+		t.Errorf("the dialog names the range %q, and the list's button %q; want the same, in the reader's zone", got[0], got[1])
 	}
 }
 

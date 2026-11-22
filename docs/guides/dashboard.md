@@ -145,8 +145,8 @@ theme, and the next pages follow the device.
 these pages shows: the charts and the dial, the icons of the task list, and
 the columns of the workers.
 
-Before an action on many tasks, a dialog shows the filters and how many
-tasks will change, and you confirm. With very many tasks, it works in steps,
+Before an action on many tasks, a dialog shows the filters, the range, and
+how many tasks will change, and you confirm. With very many tasks, it works in steps,
 and offers to continue where it stopped. If some tasks were busy at that
 moment, it says how many, and offers to try them again.
 
@@ -164,10 +164,11 @@ on the button, the calendar's fields, and the exact time in a tooltip.
 Without JavaScript, the browser's own fields take the range, in UTC. The
 address holds instants, `since` and `before`, so a link shows the same tasks
 to everyone ([Dashboard routes](../reference/taskmill-ui.md#dashboard-routes)
-has the forms of a time). While a range is set, the list hides **Retry all**,
-**Cancel all**, and **Delete all**: they act on every task that the other
-filters match, also outside the range. The range is of the time that the
-button names: change the states, and it can become one of the other time.
+has the forms of a time). With a range, **Retry all**, **Cancel all**, and
+**Delete all** act on the tasks of the range only, and the dialog names it:
+filter by *dead* and the hours of an incident, and **Retry all** leaves the
+tasks that died before it. The range is of the time that the button names:
+change the states, and it can become one of the other time.
 
 A task list has 5 seconds to read its tasks. If it runs out of time, the
 page says "Taking too long", and what may help: a queue and a state in the

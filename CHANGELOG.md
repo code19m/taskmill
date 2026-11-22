@@ -9,6 +9,17 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Added
 
+- `CountParams` and `BulkParams` take the range of creation times or of
+  finish times of `ListParams`, under its rules: `CreatedSince`,
+  `CreatedBefore`, `FinishedSince`, and `FinishedBefore`. So
+  `RetryMatching` can retry only the tasks that died in an incident, and
+  not the older dead tasks of the same kind. If the filter names a queue, a
+  batch reads the tasks of the range through the index of that time. The
+  dashboard offers **Retry all**, **Cancel all**, and **Delete all** on a
+  list with a range, and they count and change the tasks of the range only:
+  it hid them there.
+- `BatchHandlerFunc` adapts a function to `BatchHandler`, as `HandlerFunc`
+  does for `Handler` and `outbox.PublisherFunc` for `outbox.Publisher`.
 - `Migration.Statements` returns the statements of an online migration,
   which `Migration.Online` tells a runner to apply one at a time. Its SQL
   alone fails as one query with more than one statement, and splitting it

@@ -78,13 +78,37 @@ type TaskCounts struct {
 
 // BulkParams selects the tasks of a bulk action, such as
 // [Client.RetryMatching]. Nil params, an empty filter, and a cursor that is
-// not valid are errors that wrap [ErrInvalidArgument].
+// not valid are errors that wrap [ErrInvalidArgument], as is a range of
+// times that breaks the rules of [ListParams].
 type BulkParams struct {
 	// Filter selects the tasks. Required: it must set at least one field.
 	Filter TaskFilter
 
+	// CreatedSince limits the action to the tasks created at this time or
+	// later, as [ListParams.CreatedSince] limits a list, under its rules.
+	// The action still goes through the tasks in ID order. Name a queue in
+	// the filter too: without one, a batch can read the tasks in ID order,
+	// and pass over those outside the range. Zero means no lower bound.
+	CreatedSince time.Time
+
+	// CreatedBefore limits the action to the tasks created before this
+	// time, as [ListParams.CreatedBefore] does. Zero means no upper bound.
+	CreatedBefore time.Time
+
+	// FinishedSince limits the action to the tasks that finished at this
+	// time or later, as [ListParams.FinishedSince] does: it needs a filter
+	// of only dead tasks, only canceled tasks, or both. Zero means no lower
+	// bound.
+	FinishedSince time.Time
+
+	// FinishedBefore limits the action to the tasks that finished before
+	// this time, under the rules of FinishedSince. Zero means no upper
+	// bound.
+	FinishedBefore time.Time
+
 	// Cursor continues an action that stopped early, from its
-	// [BulkResult.Next]. Empty means from the oldest task.
+	// [BulkResult.Next], with the filter and the range that it came from.
+	// Empty means from the oldest task.
 	Cursor string
 }
 
@@ -128,9 +152,17 @@ type filterArgs struct {
 	history               bool     // completed tasks are selected
 }
 
-// bulkRun is a bulk action's filter, and how far the action got.
+// onlyFinished reports whether f selects only dead tasks, only canceled
+// tasks, or both.
+func (f *filterArgs) onlyFinished() bool {
+	unfinished := func(state string) bool { return state != string(StateDead) && state != string(StateCanceled) }
+	return !f.history && !slices.ContainsFunc(f.states, unfinished)
+}
+
+// bulkRun is a bulk action's filter and range, and how far the action got.
 type bulkRun struct {
 	filterArgs
+	ranges      timeRanges
 	after, last int64    // the action continues after task after, up to task last
 	windowed    bool     // the batches read in windows: one without a window ran out of time
 	until       int64    // the batches read up to task until: last, or where their window ends
@@ -177,38 +209,52 @@ func match(filter *TaskFilter, states []State) (*filterArgs, error) {
 	return &f, nil
 }
 
-// CountParams selects the tasks that [Client.Count] counts.
+// CountParams selects the tasks that [Client.Count] counts. A field outside
+// its limits is an error that wraps [ErrInvalidArgument].
 type CountParams struct {
 	// Filter selects the tasks. Empty means every task.
 	Filter TaskFilter
+
+	// CreatedSince limits the count to the tasks created at this time or
+	// later, as [ListParams.CreatedSince] limits a list, under its rules.
+	// With the range of a bulk action, the counts say what that action
+	// would change. Zero means no lower bound.
+	CreatedSince time.Time
+
+	// CreatedBefore limits the count to the tasks created before this time,
+	// as [ListParams.CreatedBefore] does. Zero means no upper bound.
+	CreatedBefore time.Time
+
+	// FinishedSince limits the count to the tasks that finished at this
+	// time or later, as [ListParams.FinishedSince] does: it needs a filter
+	// of only dead tasks, only canceled tasks, or both. Zero means no lower
+	// bound.
+	FinishedSince time.Time
+
+	// FinishedBefore limits the count to the tasks that finished before
+	// this time, under the rules of FinishedSince. Zero means no upper
+	// bound.
+	FinishedBefore time.Time
 }
 
 // Count counts the tasks that params select. params may be nil, which
 // counts every task. It counts at most 10,000 tasks per state. Like
 // [Client.List], the query is canceled after 5 seconds.
 func (c *Client) Count(ctx context.Context, params *CountParams) (*TaskCounts, error) {
-	var filter *TaskFilter
-	if params != nil {
-		filter = &params.Filter
+	if params == nil {
+		params = &CountParams{}
 	}
-	f, err := match(filter, allStates)
+	f, err := match(&params.Filter, allStates)
+	if err != nil {
+		return nil, err
+	}
+	r, err := checkRanges(f, params.CreatedSince, params.CreatedBefore, params.FinishedSince, params.FinishedBefore)
 	if err != nil {
 		return nil, err
 	}
 
-	states := f.states
-	if f.history {
-		states = append(states, string(StateCompleted))
-	}
-
-	out := &TaskCounts{States: make(map[State]TaskCount, len(states))}
-	args := []any{
-		f.queues, // $1
-		f.kinds,  // $2
-		f.groups, // $3
-		states,   // $4
-	}
-	err = c.readAlone(ctx, countSettings, c.sql.countTasks, args, func(r pgx.Rows) error {
+	out := &TaskCounts{States: make(map[State]TaskCount, len(f.states)+1)}
+	err = c.readAlone(ctx, countSettings, c.sql.countTasks, countArgs(f, r), func(r pgx.Rows) error {
 		var state string
 		var n, unflagged int64
 		if err := r.Scan(&state, &n, &unflagged); err != nil {
@@ -221,6 +267,21 @@ func (c *Client) Count(ctx context.Context, params *CountParams) (*TaskCounts, e
 		return nil, fmt.Errorf("taskmill: count tasks: %w", err)
 	}
 	return out, nil
+}
+
+// countArgs returns the arguments of countTasks for the tasks f in the
+// ranges r.
+func countArgs(f *filterArgs, r timeRanges) []any {
+	states := f.states
+	if f.history {
+		states = append(slices.Clone(states), string(StateCompleted))
+	}
+	return append([]any{
+		f.queues, // $1
+		f.kinds,  // $2
+		f.groups, // $3
+		states,   // $4
+	}, r.args()...) // $5 to $8
 }
 
 // add counts the n tasks read in state s, of which unflagged were not asked
@@ -248,9 +309,10 @@ func (c *TaskCount) plus(other TaskCount) {
 	c.Capped = c.Capped || other.Capped
 }
 
-// RetryMatching retries the dead and canceled tasks that match the filter of
-// params, as [Client.Retry] retries each one. The filter must not be empty:
-// to retry every dead task, set its States.
+// RetryMatching retries the dead and canceled tasks that params select, as
+// [Client.Retry] retries each one: those that match its filter, in its range
+// of times if it has one. The filter must not be empty: to retry every dead
+// task, set its States.
 //
 // It goes through the tasks enqueued before it started, oldest first, in
 // batches of 1,000, each in a short transaction of its own. It reads each
@@ -285,8 +347,8 @@ func (c *Client) RetryMatching(ctx context.Context, params *BulkParams) (BulkRes
 	return res, nil
 }
 
-// CancelMatching cancels the unfinished tasks that match the filter of
-// params, as [Client.Cancel] cancels each one, counting running tasks, which
+// CancelMatching cancels the unfinished tasks that params select, as
+// [Client.Cancel] cancels each one, counting running tasks, which
 // become canceled when their attempts end. It skips running tasks already
 // asked to stop, and otherwise works like [Client.RetryMatching].
 func (c *Client) CancelMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
@@ -302,9 +364,9 @@ func (c *Client) CancelMatching(ctx context.Context, params *BulkParams) (BulkRe
 	return res, nil
 }
 
-// DeleteMatching deletes the tasks that match the filter of params, except
-// running ones, as [Client.Delete] deletes each one, completed tasks in
-// history included. It works like [Client.RetryMatching].
+// DeleteMatching deletes the tasks that params select, except running ones,
+// as [Client.Delete] deletes each one, completed tasks in history included.
+// It works like [Client.RetryMatching].
 func (c *Client) DeleteMatching(ctx context.Context, params *BulkParams) (BulkResult, error) {
 	run, err := checkBulk(params, deleteStates)
 	if err != nil {
@@ -323,12 +385,24 @@ func checkBulk(params *BulkParams, states []State) (*bulkRun, error) {
 	if params == nil || params.Filter.empty() {
 		return nil, invalidArgument("the filter must not be empty")
 	}
+
+	// The ranges follow the rules of a list of the filter's tasks, so that
+	// Count and List take the same params: a range of finish times needs a
+	// filter of only dead and canceled tasks, not only an action on them.
+	selected, err := match(&params.Filter, allStates)
+	if err != nil {
+		return nil, err
+	}
+	r, err := checkRanges(selected, params.CreatedSince, params.CreatedBefore, params.FinishedSince, params.FinishedBefore)
+	if err != nil {
+		return nil, err
+	}
 	f, err := match(&params.Filter, states)
 	if err != nil {
 		return nil, err
 	}
 
-	run := &bulkRun{filterArgs: *f, left: groupSet{queues: []string{}, groups: []string{}}}
+	run := &bulkRun{filterArgs: *f, ranges: r, left: groupSet{queues: []string{}, groups: []string{}}}
 	if params.Cursor != "" {
 		if run.after, err = decodeCursor(params.Cursor); err != nil || run.after < 0 {
 			return nil, invalidArgument("invalid cursor")
@@ -493,16 +567,7 @@ type bulkTask struct {
 // pick reads the next batch of the tasks that run matches, with one of the pick
 // statements, and locks those it can.
 func pick(ctx context.Context, q querier, sql string, run *bulkRun) ([]bulkTask, error) {
-	r, err := q.query(ctx, sql,
-		run.queues,      // $1
-		run.kinds,       // $2
-		run.groups,      // $3
-		run.states,      // $4
-		run.after,       // $5
-		run.until,       // $6
-		run.left.queues, // $7
-		run.left.groups, // $8
-	)
+	r, err := q.query(ctx, sql, run.pickArgs()...)
 	if err != nil {
 		return nil, err
 	}
@@ -519,6 +584,33 @@ func pick(ctx context.Context, q querier, sql string, run *bulkRun) ([]bulkTask,
 		out = append(out, t)
 	}
 	return out, r.Err()
+}
+
+// pickArgs returns the arguments of the pick statements of pickSQL.
+func (run *bulkRun) pickArgs() []any {
+	return append([]any{
+		run.queues,      // $1
+		run.kinds,       // $2
+		run.groups,      // $3
+		run.states,      // $4
+		run.after,       // $5
+		run.until,       // $6
+		run.left.queues, // $7
+		run.left.groups, // $8
+	}, run.ranges.args()...) // $9 to $12
+}
+
+// historyArgs returns the arguments of pickCompleted.
+func (run *bulkRun) historyArgs() []any {
+	return []any{
+		run.queues,               // $1
+		run.kinds,                // $2
+		run.groups,               // $3
+		run.after,                // $4
+		run.until,                // $5
+		run.ranges.created.since, // $6
+		run.ranges.created.until, // $7
+	}
 }
 
 // end returns the last task that a batch with ids goes through: the last one
@@ -808,13 +900,7 @@ func (c *Client) deleteBatch(ctx context.Context, q querier, run *bulkRun) (step
 
 // pickCompleted is pick for the completed tasks in history.
 func (c *Client) pickCompleted(ctx context.Context, q querier, run *bulkRun) ([]bulkTask, error) {
-	r, err := q.query(ctx, c.sql.pickCompleted,
-		run.queues, // $1
-		run.kinds,  // $2
-		run.groups, // $3
-		run.after,  // $4
-		run.until,  // $5
-	)
+	r, err := q.query(ctx, c.sql.pickCompleted, run.historyArgs()...)
 	if err != nil {
 		return nil, err
 	}

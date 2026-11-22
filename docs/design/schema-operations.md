@@ -105,6 +105,26 @@ transaction of its own.
   at the first skipped task keeps no state between calls, and still brings a
   group that the action left back in order: the tasks that the action
   changed since no longer match, so reading past them again is cheap.
+- **A range of times narrows the batches, with a queue.** A bulk action
+  takes the range of a list, of creation or of finish times, as a condition
+  of its pick, which runs with a custom plan. The condition says which
+  states hold such times: only dead and canceled tasks for a range of
+  finish times, and for a range of creation times the tasks that are not
+  running and the running ones apart. Both indexes hold tasks by queue
+  first. With a queue in the filter, the planner reads the tasks of the
+  range through the index of that time, and sorts them by ID. Without one,
+  only PostgreSQL 18 can skip through the queues of an index. A range of
+  finish times then still reads its index, all of it before 18. A batch
+  with a range of creation times can read in ID order, as a filter by kind
+  does, on any version: the planner takes the range's tasks to be spread
+  over the IDs, but a recent range lies at their end. `Count` takes the
+  range the same way, and before PostgreSQL 18 reads every task of its
+  states for a range of creation times without a queue. Measured with
+  600,000 tasks in 20 queues over 30 days, half of them dead, and a range
+  of the last day, on PostgreSQL 15, 16, and 18: a batch of a retry of the
+  dead tasks reads 583,000 rows without a queue, and 2,000 with one. A
+  count of the dead tasks without a queue reads 300,000 rows on 15 and 16,
+  and 20,000 on 18.
 - **Delete goes through two tables.** It reads the next batch of both tasks
   and history, and goes up to the end of the shorter one, so that one
   position covers both. History has a partition per day. A search by the

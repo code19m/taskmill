@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -222,17 +221,11 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 	if err != nil {
 		return nil, err
 	}
-	created, err := rangeOf("CreatedSince", p.CreatedSince, "CreatedBefore", p.CreatedBefore)
+	r, err := checkRanges(f, p.CreatedSince, p.CreatedBefore, p.FinishedSince, p.FinishedBefore)
 	if err != nil {
 		return nil, err
 	}
-	finished, err := rangeOf("FinishedSince", p.FinishedSince, "FinishedBefore", p.FinishedBefore)
-	if err != nil {
-		return nil, err
-	}
-	if page.order, err = orderOf(f, created.set, finished.set); err != nil {
-		return nil, err
-	}
+	page.order = orderOf(f, r)
 
 	if page.order == byID {
 		before := int64(math.MaxInt64)
@@ -261,19 +254,19 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 	if page.order == byFinish {
 		page.sql = c.sql.listFinished
 		page.args = append(listArgs(f, page.limit, p.Summary, before),
-			at,             // $8
-			finished.since, // $9
-			finished.until, // $10
+			at,               // $8
+			r.finished.since, // $9
+			r.finished.until, // $10
 		)
 		return &page, nil
 	}
 
-	at, before = created.below(at, before)
+	at, before = r.created.below(at, before)
 	page.settings, page.sql = createdSettings, c.sql.listCreated
 	page.args = append(listArgs(f, page.limit, p.Summary, before),
-		at,             // $8
-		created.from(), // $9
-		f.history,      // $10
+		at,               // $8
+		r.created.from(), // $9
+		f.history,        // $10
 	)
 	return &page, nil
 }
@@ -294,25 +287,52 @@ func listArgs(f *filterArgs, limit int, summary bool, before int64) []any {
 	}
 }
 
-// orderOf returns the order of a list of the tasks f, with a range of
-// creation times or of finish times, if it has one. A list with a range of
-// creation times is in creation order, a list of only dead and canceled
-// tasks in finish order, and every other list in ID order. A list has one
-// order, so it takes one of the two ranges, and a range of finish times in
-// finish order only.
-func orderOf(f *filterArgs, created, finished bool) (listOrder, error) {
-	unfinished := func(state string) bool { return state != string(StateDead) && state != string(StateCanceled) }
+// orderOf returns the order of a list of the tasks f in the ranges r. A list
+// with a range of creation times is in creation order, a list of only dead
+// and canceled tasks in finish order, and every other list in ID order.
+func orderOf(f *filterArgs, r timeRanges) listOrder {
 	switch {
-	case created && finished:
-		return byID, invalidArgument("a list takes a range of creation times or a range of finish times, not both")
-	case created:
-		return byCreation, nil
-	case !f.history && !slices.ContainsFunc(f.states, unfinished):
-		return byFinish, nil
-	case finished:
-		return byID, invalidArgument("FinishedSince and FinishedBefore need a list of only dead tasks, only canceled tasks, or both")
+	case r.created.set:
+		return byCreation
+	case f.onlyFinished():
+		return byFinish
 	}
-	return byID, nil
+	return byID
+}
+
+// timeRanges are the checked ranges of the creation times and of the finish
+// times of the tasks that a list, a count, or a bulk action selects.
+type timeRanges struct {
+	created, finished timeRange
+}
+
+// checkRanges checks the ranges of times that a selection of the tasks f
+// takes, with the names of the fields of [ListParams], and returns them. A
+// selection takes one of the two ranges: a list has one order. And it takes
+// a range of finish times only if it has only dead tasks, only canceled
+// tasks, or both: the order of their index of finish times.
+func checkRanges(f *filterArgs, createdSince, createdBefore, finishedSince, finishedBefore time.Time) (r timeRanges, err error) {
+	if r.created, err = rangeOf("CreatedSince", createdSince, "CreatedBefore", createdBefore); err != nil {
+		return r, err
+	}
+	if r.finished, err = rangeOf("FinishedSince", finishedSince, "FinishedBefore", finishedBefore); err != nil {
+		return r, err
+	}
+
+	switch {
+	case r.created.set && r.finished.set:
+		return r, invalidArgument("a range of creation times or a range of finish times may be set, not both")
+	case r.finished.set && !f.onlyFinished():
+		return r, invalidArgument("FinishedSince and FinishedBefore need only dead tasks, only canceled tasks, or both")
+	}
+	return r, nil
+}
+
+// args returns the bounds of r as the statements take them, in this order:
+// created since, created before, finished since, finished before. See
+// timeRangesSQL.
+func (r timeRanges) args() []any {
+	return []any{r.created.since, r.created.until, r.finished.since, r.finished.until}
 }
 
 // timeRange is a checked range of creation times or of finish times, with

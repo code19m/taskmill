@@ -141,17 +141,12 @@ function changed(sel, day) {
   move(day ?? cal.at);
 }
 
-// localiseRange words the range of the filter by time in scope as the
-// server words it, in the device's time zone, as localise does a time: in
-// short on the button, and in full, with the years and the zones, in its
-// tooltip and for a screen reader. Its end is the last minute before
-// "before", or the last second, as the fields have it. An open calendar is
-// drawn in scope too, as draw says.
-export function localiseRange(scope) {
-  const sel = scope.querySelector(".sel-range");
-  if (!sel) return;
-  const [since, before] = [...sel.querySelectorAll("input[data-time]")]
-    .map((field) => field.dataset.time && new Date(field.dataset.time));
+// rangeWords words the range from since to before, either of which may be
+// missing, as the server words it, in the device's time zone: in short, and
+// in full, with the years and the zones. Its end is until, the last minute
+// before "before", or the last second, as the fields have it, and clock
+// reads the time of a bound as the words do.
+function rangeWords(since, before) {
   const whole = before && !before.getSeconds();
   const until = before && new Date(before - (whole ? 60000 : 1000));
   const clock = (at) => `${clockOf(at)}${at === until && !whole && !at.getSeconds() ? ":00" : ""}`;
@@ -162,10 +157,27 @@ export function localiseRange(scope) {
   const long = (at) => `${day(at, true)} ${clock(at)} ${zoneOf(at)}`;
   const words = (from, to) => (since && before ? `${from(since)} to ${to(until)}`
     : since ? `Since ${from(since)}` : before ? `Until ${from(until)}` : "Any time");
+  const short = words(brief, (at) => (dateOf(at) === dateOf(since) ? clock(at) : brief(at)));
+  return { short, full: words(long, long), until, clock };
+}
+
+// localiseRange words the ranges of time in scope as the server words them,
+// in the device's time zone, as localise does a time. The filter by time
+// has its range in short on the button, and in full in its tooltip and for
+// a screen reader; the page of a bulk action names its range in full. An
+// open calendar is drawn in scope too, as draw says.
+export function localiseRange(scope) {
+  const timeOf = (instant) => instant && new Date(instant);
+  for (const el of scope.querySelectorAll("[data-range-since]")) {
+    el.textContent = rangeWords(timeOf(el.dataset.rangeSince), timeOf(el.dataset.rangeBefore)).full;
+  }
+
+  const sel = scope.querySelector(".sel-range");
+  if (!sel) return;
+  const [since, before] = [...sel.querySelectorAll("input[data-time]")].map((field) => timeOf(field.dataset.time));
+  const { short, full, until, clock } = rangeWords(since, before);
   const summary = sel.querySelector("summary");
-  const full = words(long, long);
-  summary.querySelector(".sel-label").textContent =
-    words(brief, (at) => (dateOf(at) === dateOf(since) ? clock(at) : brief(at)));
+  summary.querySelector(".sel-label").textContent = short;
   summary.setAttribute("aria-label", `${sel.querySelector(".pop").getAttribute("aria-label")}: ${full}`);
   if (since || before) summary.title = full;
   sel.querySelector("[data-zone]").textContent = ZONE;
