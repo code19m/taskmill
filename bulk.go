@@ -86,9 +86,8 @@ type BulkParams struct {
 
 	// CreatedSince limits the action to the tasks created at this time or
 	// later, as [ListParams.CreatedSince] limits a list, under its rules.
-	// The action still goes through the tasks in ID order. Name a queue in
-	// the filter too: without one, a batch can read the tasks in ID order,
-	// and pass over those outside the range. Zero means no lower bound.
+	// The action still goes through the tasks in ID order. Zero means no
+	// lower bound.
 	CreatedSince time.Time
 
 	// CreatedBefore limits the action to the tasks created before this
@@ -167,6 +166,74 @@ type bulkRun struct {
 	windowed    bool     // the batches read in windows: one without a window ran out of time
 	until       int64    // the batches read up to task until: last, or where their window ends
 	left        groupSet // the groups that a retry left, and whose later tasks it leaves
+
+	// How the batches read the range of times of each table, if the filter
+	// names no queue: see rangeWalk.
+	tasksWalk, historyWalk rangeWalk
+}
+
+// rangeWithoutQueue reports whether a statement reads the tasks f in the
+// ranges r queue by queue: if r has a range, and f names no queue. The
+// indexes that hold times lead with the queue. Before PostgreSQL 18, which
+// can skip from one queue to the next, a read without a queue can use them
+// only whole, so the planner reads the tasks in ID order instead, past every
+// task outside the range, or every task of their state. Queue by queue, a
+// statement first finds the queues that hold tasks of its states, with one
+// index probe each, and names them. The planner can then read each queue's
+// part of the index of the range's time, as for the queues of a filter.
+func rangeWithoutQueue(f *filterArgs, r timeRanges) bool {
+	return len(f.queues) == 0 && (r.created.set || r.finished.set)
+}
+
+// rangeWalk is how the batches of an action with a range of times, and no
+// queue in its filter, read one table: queue by queue, or in ID order.
+// Queue by queue, a batch reads the range in the index of its time, to find
+// the first tasks in ID order, and counts the tasks that it finds. In ID
+// order, it reads every task after the position until it has a batch, in
+// the range or not. See bulkRun.readsQueues for when a batch reads which way.
+type rangeWalk struct {
+	counted bool  // a batch read the range queue by queue, and counted its tasks
+	rest    int64 // if counted: the tasks of the range after the position
+}
+
+// next returns w after a batch that went through the tasks ids. found is
+// how many tasks of the range the batch found after the position, if it
+// read them queue by queue, or -1.
+func (w rangeWalk) next(ids []int64, found int64) rangeWalk {
+	if found < 0 {
+		w.rest = max(0, w.rest-int64(len(ids)))
+		return w
+	}
+	w.counted, w.rest = true, found-int64(len(ids))
+	return w
+}
+
+// readsQueues reports whether the next batch of run reads the table of w
+// queue by queue: see rangeWalk. Two batches do:
+//
+//   - The first, which so skips the tasks before the range.
+//   - The last of a range with an end, once the rest of it fits in a batch,
+//     which so stops with the range. In ID order, it would read every task
+//     after the range, up to the action's last.
+//
+// The other batches read in ID order, which reads the heap in order and
+// stops with a batch. Where the tasks of the range lie together, as tasks
+// created close in time do, that reads about a batch. Where they lie far
+// apart, as tasks that died in an incident but were created over weeks,
+// each batch reads the tasks between them, up to the window that bounds a
+// batch that runs out of its time. Queue by queue, each batch would read the
+// rest of the range again, with a page of the heap for each task, and probe
+// every queue: for a range of 200,000 tasks, 40 times the rows, and with
+// 1,000 queues, slower than ID order where the tasks lie far apart. A batch
+// in a window reads in ID order too: a window bounds such a read, and not
+// one by queue.
+func (run *bulkRun) readsQueues(w rangeWalk) bool {
+	if run.windowed || !rangeWithoutQueue(&run.filterArgs, run.ranges) {
+		return false
+	}
+	r := run.ranges
+	ends := r.created.until.Valid || r.finished.until.Valid
+	return !w.counted || ends && w.rest <= maintenanceBatch
 }
 
 // match checks filter, and selects those of states that it allows. A nil
@@ -254,7 +321,8 @@ func (c *Client) Count(ctx context.Context, params *CountParams) (*TaskCounts, e
 	}
 
 	out := &TaskCounts{States: make(map[State]TaskCount, len(f.states)+1)}
-	err = c.readAlone(ctx, countSettings, c.sql.countTasks, countArgs(f, r), func(r pgx.Rows) error {
+	sql := c.sql.countTasks.choose(rangeWithoutQueue(f, r))
+	err = c.readAlone(ctx, countSettings, sql, countArgs(f, r), func(r pgx.Rows) error {
 		var state string
 		var n, unflagged int64
 		if err := r.Scan(&state, &n, &unflagged); err != nil {
@@ -418,6 +486,8 @@ type step struct {
 	conflicts        int      // tasks that a retry left because other tasks hold their dedupe keys
 	firstSkipped     int64    // the first task it skipped, or 0
 	left             groupSet // groups that a retry left
+
+	tasksWalk, historyWalk rangeWalk // the walks of the run after the batch
 }
 
 // batchFunc does the work of one batch of a bulk action on the tasks that
@@ -457,7 +527,7 @@ func (c *Client) inBatches(ctx context.Context, run *bulkRun, batch batchFunc) (
 			return stop(err)
 		}
 
-		run.after = s.end
+		run.after, run.tasksWalk, run.historyWalk = s.end, s.tasksWalk, s.historyWalk
 		run.left.queues, run.left.groups = append(run.left.queues, s.left.queues...), append(run.left.groups, s.left.groups...)
 		res.Changed += int64(s.changed)
 		res.Skipped += int64(s.skipped)
@@ -564,12 +634,18 @@ type bulkTask struct {
 	finalized    time.Time // if completed: when it was
 }
 
-// pick reads the next batch of the tasks that run matches, with one of the pick
-// statements, and locks those it can.
-func pick(ctx context.Context, q querier, sql string, run *bulkRun) ([]bulkTask, error) {
-	r, err := q.query(ctx, sql, run.pickArgs()...)
+// pick reads the next batch of the tasks that run matches, with the pick
+// statement p, and locks those it can. If it reads them queue by queue, it
+// also returns how many tasks of the range it found after the position; if
+// not, -1.
+func pick(ctx context.Context, q querier, p forms, run *bulkRun) ([]bulkTask, int64, error) {
+	fromQueues, found := run.readsQueues(run.tasksWalk), int64(-1)
+	if fromQueues {
+		found = 0
+	}
+	r, err := q.query(ctx, p.choose(fromQueues), run.pickArgs()...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer r.Close()
 
@@ -577,13 +653,17 @@ func pick(ctx context.Context, q querier, sql string, run *bulkRun) ([]bulkTask,
 	for r.Next() {
 		var t bulkTask
 		var state string
-		if err := r.Scan(&t.id, &t.queue, &t.group, &t.locked, &state, &t.inGroup, &t.keyed); err != nil {
-			return nil, err
+		dest := []any{&t.id, &t.queue, &t.group, &t.locked, &state, &t.inGroup, &t.keyed}
+		if fromQueues {
+			dest = append(dest, &found)
+		}
+		if err := r.Scan(dest...); err != nil {
+			return nil, 0, err
 		}
 		t.state = State(state)
 		out = append(out, t)
 	}
-	return out, r.Err()
+	return out, found, r.Err()
 }
 
 // pickArgs returns the arguments of the pick statements of pickSQL.
@@ -667,12 +747,13 @@ func (c *Client) retryBatch(ctx context.Context, q querier, run *bulkRun) (step,
 		return step{end: run.last}, nil
 	}
 
-	ts, err := pick(ctx, q, c.sql.pickRetry, run)
+	ts, found, err := pick(ctx, q, c.sql.pickRetry, run)
 	if err != nil {
 		return step{}, err
 	}
 
-	s := step{end: run.end(idsOf(ts))}
+	s := step{end: run.end(idsOf(ts)), historyWalk: run.historyWalk}
+	s.tasksWalk = run.tasksWalk.next(idsOf(ts), found)
 	left := make(map[groupID]bool)
 	for i := range run.left.queues {
 		left[groupID{run.left.queues[i], run.left.groups[i]}] = true
@@ -818,12 +899,13 @@ func (c *Client) cancelBatch(ctx context.Context, q querier, run *bulkRun) (step
 		return step{end: run.last}, nil
 	}
 
-	ts, err := pick(ctx, q, c.sql.pickCancel, run)
+	ts, found, err := pick(ctx, q, c.sql.pickCancel, run)
 	if err != nil {
 		return step{}, err
 	}
 
-	s := step{end: run.end(idsOf(ts))}
+	s := step{end: run.end(idsOf(ts)), historyWalk: run.historyWalk}
+	s.tasksWalk = run.tasksWalk.next(idsOf(ts), found)
 	locked := s.locked(ts)
 	if len(locked) == 0 {
 		return s, nil
@@ -844,14 +926,15 @@ func (c *Client) cancelBatch(ctx context.Context, q querier, run *bulkRun) (step
 // head that halts its group, which resumes it.
 func (c *Client) deleteBatch(ctx context.Context, q querier, run *bulkRun) (step, error) {
 	var ts, completed []bulkTask
+	tasksFound, historyFound := int64(-1), int64(-1)
 	var err error
 	if len(run.states) > 0 {
-		if ts, err = pick(ctx, q, c.sql.pickDelete, run); err != nil {
+		if ts, tasksFound, err = pick(ctx, q, c.sql.pickDelete, run); err != nil {
 			return step{}, err
 		}
 	}
 	if run.history {
-		if completed, err = c.pickCompleted(ctx, q, run); err != nil {
+		if completed, historyFound, err = c.pickCompleted(ctx, q, run); err != nil {
 			return step{}, err
 		}
 	}
@@ -872,6 +955,8 @@ func (c *Client) deleteBatch(ctx context.Context, q querier, run *bulkRun) (step
 		s.end = slices.Sorted(slices.Values(append(idsOf(ts), idsOf(completed)...)))[maintenanceBatch-1]
 		ts, completed = slices.DeleteFunc(ts, beyond), slices.DeleteFunc(completed, beyond)
 	}
+	s.tasksWalk = run.tasksWalk.next(idsOf(ts), tasksFound)
+	s.historyWalk = run.historyWalk.next(idsOf(completed), historyFound)
 	ts, completed = s.locked(ts), s.locked(completed)
 
 	if len(completed) > 0 {
@@ -899,22 +984,30 @@ func (c *Client) deleteBatch(ctx context.Context, q querier, run *bulkRun) (step
 }
 
 // pickCompleted is pick for the completed tasks in history.
-func (c *Client) pickCompleted(ctx context.Context, q querier, run *bulkRun) ([]bulkTask, error) {
-	r, err := q.query(ctx, c.sql.pickCompleted, run.historyArgs()...)
+func (c *Client) pickCompleted(ctx context.Context, q querier, run *bulkRun) ([]bulkTask, int64, error) {
+	fromQueues, found := run.readsQueues(run.historyWalk), int64(-1)
+	if fromQueues {
+		found = 0
+	}
+	r, err := q.query(ctx, c.sql.pickCompleted.choose(fromQueues), run.historyArgs()...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer r.Close()
 
 	var out []bulkTask
 	for r.Next() {
 		t := bulkTask{state: StateCompleted}
-		if err := r.Scan(&t.id, &t.finalized, &t.locked); err != nil {
-			return nil, err
+		dest := []any{&t.id, &t.finalized, &t.locked}
+		if fromQueues {
+			dest = append(dest, &found)
+		}
+		if err := r.Scan(dest...); err != nil {
+			return nil, 0, err
 		}
 		out = append(out, t)
 	}
-	return out, r.Err()
+	return out, found, r.Err()
 }
 
 // finalizedRange returns the first and the last time that the completed

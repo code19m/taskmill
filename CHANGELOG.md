@@ -7,6 +7,18 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `Count`, `RetryMatching`, `CancelMatching`, and `DeleteMatching` with a
+  range of times and no queue in the filter find the queues of the range,
+  and read each queue's part of the index of that time, on every supported
+  PostgreSQL version. They read every task before the range, and an action
+  on a range that ended in the past read every task after it too. With
+  646,000 tasks, a retry of the 11,700 dead tasks created on a day four
+  weeks back read 669,000 rows, and now reads 68,000. After its first
+  batch, a range of finish times still reads in ID order: where its tasks
+  were created far apart, name a queue too.
+
 ## [0.16.0] - 2026-11-22
 
 ### Added

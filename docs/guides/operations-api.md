@@ -184,10 +184,8 @@ log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
 > [!TIP]
 > Call `Count` with the same filter and range first: `TaskCounts.Retry`,
 > `Cancel`, and `Delete` say how many tasks each action would change. And
-> add a queue or a state to the filter: a filter by kind or group alone
-> reads many more rows. With a range of creation times, add a queue: without
-> one, the action can read the tasks outside the range too, and so does
-> `Count` before PostgreSQL 18.
+> add a queue or a state to the filter, or a range of times: a filter by
+> kind or group alone reads many more rows.
 
 After an incident, follow
 [Recover from an incident](../recipes/recover-from-an-incident.md): pause,

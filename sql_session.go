@@ -87,8 +87,12 @@ func (c *Client) readAlone(ctx context.Context, settings, sql string, args []any
 // lock timeout bounds each wait of the batch's statements for a row, far
 // below the deadlock timeout, so that a batch never holds other transactions
 // up for long, and never takes part in a deadlock. It ends before the
-// commit: see liftLockTimeout.
-const bulkSettings = `SELECT set_config('plan_cache_mode', 'force_custom_plan', true), set_config('lock_timeout', '100ms', true)`
+// commit: see liftLockTimeout. JIT is off: on a table of a few million
+// tasks, the planner prices a pick that reads a wide range whole, as
+// bulkRun.readsQueues says, above the cost at which the database compiles
+// a statement, and compiling it took 800 ms, several times the read.
+const bulkSettings = `SELECT set_config('plan_cache_mode', 'force_custom_plan', true), set_config('lock_timeout', '100ms', true),
+       set_config('jit', 'off', true)`
 
 // openSettings are bulkSettings for a batch that reads without a window. The
 // database ends a statement of such a batch after openTimeout, so that a
