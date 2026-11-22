@@ -5,6 +5,47 @@ package taskmill
 // settings that workers follow. The reasons are in
 // https://github.com/code19m/taskmill/blob/main/docs/design/schema-operations.md.
 
+import "strconv"
+
+// timeRangesSQL matches the tasks t created and finished in the ranges whose
+// bounds are the parameters from $first on: created since, created before,
+// finished since, and finished before, as timeRanges.args gives them. A bound
+// is NULL where its range has none. The statements that take it run with
+// custom plans, so a range that is set is a condition that an index can
+// serve, and one that is not costs nothing.
+//
+// The conditions on the states that come with a range let the planner use
+// the indexes that hold such times: a range of finish times selects only
+// dead and canceled tasks, which their index holds, and a range of creation
+// times reads the tasks that are not running in their index of creation
+// times, and the running ones in theirs.
+func timeRangesSQL(first int) string {
+	created, finished := param(first), param(first+2)
+	return `(` + created(0) + ` IS NULL AND ` + created(1) + ` IS NULL
+           OR (t.state <> 'running' OR t.state = 'running') AND ` + bounds(`t.created_at`, created) + `)
+      AND (` + finished(0) + ` IS NULL AND ` + finished(1) + ` IS NULL
+           OR t.state IN ('dead', 'canceled') AND ` + bounds(`t.finalized_at`, finished) + `)`
+}
+
+// historyRangeSQL is timeRangesSQL for the completed tasks t in history,
+// which a range of finish times never selects: it takes the range of
+// creation times alone, $first and the one after.
+func historyRangeSQL(first int) string {
+	return bounds(`t.created_at`, param(first))
+}
+
+// bounds matches the rows whose column is in the range that starts at p(0)
+// and ends before p(1), either of which may be NULL.
+func bounds(column string, p func(int) string) string {
+	return `(` + p(0) + ` IS NULL OR ` + column + ` >= ` + p(0) + `) AND (` + p(1) + ` IS NULL OR ` + column + ` < ` + p(1) + `)`
+}
+
+// param returns the parameters from $first on, by their offset from it, as
+// times.
+func param(first int) func(int) string {
+	return func(i int) string { return "$" + strconv.Itoa(first+i) + "::timestamptz" }
+}
+
 // keyedSQL matches the tasks t that must take a dedupe key back when they
 // are retried: they are canceled, their cancel freed a key, and stored it
 // with them, and the key's window still lasts. Only a canceled task gave its
@@ -123,23 +164,25 @@ SELECT least($2::bigint,
     (SELECT id FROM {s}.task_history WHERE $4 AND id > $1 AND id <= $2 ORDER BY id OFFSET {window} - 1 LIMIT 1))`
 
 // $1 queues, $2 kinds, $3 group keys, $4 states, $5 after task ID, $6 up to task ID,
-// $7 and $8 queues and group keys of the groups that the action left.
+// $7 and $8 queues and group keys of the groups that the action left,
+// $9 to $12 the ranges of times.
 //
 // pickSQL returns a pick statement, whose tasks t meet cond, and whose
 // locked tasks meet gates too. The pick statements read the next batch of
 // the tasks that a bulk action changes, in ID order after $5 up to $6, the
 // action's last task or the end of the batch's window: those of states $4
-// that match the filters. They return each of them, whether they hold its
-// lock, whether its group had a row, which they then hold, and whether it
-// must take a dedupe key back if it is retried. They skip what other
-// transactions hold, and the groups ($7, $8) that the action left before:
-// the page on operator actions says why.
+// that match the filters and the ranges. They return each of them, whether
+// they hold its lock, whether its group had a row, which they then hold,
+// and whether it must take a dedupe key back if it is retried. They skip
+// what other transactions hold, and the groups ($7, $8) that the action
+// left before: the page on operator actions says why.
 func pickSQL(cond, gates string) string {
 	return `
 WITH candidates AS (
     SELECT t.id, t.queue, coalesce(t.group_key, '') AS group_key FROM {s}.tasks t
     WHERE ` + cond + ` AND t.id > $5 AND t.id <= $6
       AND t.state = ANY($4::text[]::{s}.task_state[]) AND ` + taskFilterSQL + `
+      AND ` + timeRangesSQL(9) + `
     ORDER BY t.id
     LIMIT {batch}
 ), picked AS (
@@ -148,7 +191,7 @@ WITH candidates AS (
            coalesce(` + keyedSQL + `, false) AS keyed
     FROM {s}.tasks t
     WHERE t.id = ANY(ARRAY(SELECT id FROM candidates)) AND ` + cond + `
-      AND t.state = ANY($4::text[]::{s}.task_state[])
+      AND t.state = ANY($4::text[]::{s}.task_state[]) AND ` + timeRangesSQL(9) + `
       AND NOT EXISTS (SELECT FROM unnest($7::text[], $8::text[]) AS u(queue, group_key)
                       WHERE u.queue = t.queue AND u.group_key = t.group_key)
       AND ` + groupFreeSQL + gates + `
@@ -226,32 +269,44 @@ WITH released AS (
 )
 DELETE FROM {s}.tasks WHERE id = ANY($1::bigint[])`
 
-// $1 queues, $2 kinds, $3 group keys, $4 after task ID, $5 up to task ID.
+// $1 queues, $2 kinds, $3 group keys, $4 after task ID, $5 up to task ID,
+// $6 created since, $7 created before.
 //
 // pickCompletedSQL is a pick statement for the completed tasks in history,
-// after $4 up to $5.
-const pickCompletedSQL = `
+// after $4 up to $5, with the time each was finalized.
+//
+// History has a partition per day of finalized_at. A search by the IDs
+// alone would read every partition's index with all of them, which
+// PostgreSQL 15 and 16 do one ID at a time. So the batch locks its tasks
+// by the range of IDs and of finalized_at that the candidates span: in one
+// snapshot, that range with the filters holds exactly the candidates, and
+// picked reads only the partitions from their first day to their last.
+var pickCompletedSQL = `
 WITH candidates AS (
-    SELECT t.id FROM {s}.task_history t
-    WHERE t.id > $4 AND t.id <= $5 AND ` + taskFilterSQL + `
+    SELECT t.id, t.finalized_at FROM {s}.task_history t
+    WHERE t.id > $4 AND t.id <= $5 AND ` + taskFilterSQL + ` AND ` + historyRangeSQL(6) + `
     ORDER BY t.id
     LIMIT {batch}
 ), picked AS (
     SELECT t.id FROM {s}.task_history t
-    WHERE t.id = ANY(ARRAY(SELECT id FROM candidates)) AND ` + keyFreeSQL + `
+    WHERE t.id > $4 AND t.id <= (SELECT max(id) FROM candidates)
+      AND t.finalized_at BETWEEN (SELECT min(finalized_at) FROM candidates) AND (SELECT max(finalized_at) FROM candidates)
+      AND ` + taskFilterSQL + ` AND ` + historyRangeSQL(6) + ` AND ` + keyFreeSQL + `
     FOR UPDATE SKIP LOCKED
 )
-SELECT c.id, p.id IS NOT NULL FROM candidates c LEFT JOIN picked p ON p.id = c.id ORDER BY c.id`
+SELECT c.id, c.finalized_at, p.id IS NOT NULL FROM candidates c LEFT JOIN picked p ON p.id = c.id ORDER BY c.id`
 
-// $1 task IDs.
+// $1 task IDs, $2 and $3 the first and the last time that they were
+// finalized.
 //
 // deleteCompletedSQL deletes the picked completed tasks $1, and releases
-// their dedupe keys.
+// their dedupe keys. The times keep the delete to the history partitions
+// from their first day to their last, as in pickCompleted.
 const deleteCompletedSQL = `
 WITH released AS (
     DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])
 )
-DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[])`
+DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[]) AND finalized_at BETWEEN $2 AND $3`
 
 // $1 queues.
 //
@@ -268,17 +323,23 @@ const readQueueSQL = `SELECT (SELECT max_running FROM {s}.queues WHERE name = $1
 // $1 queue, $2 old MaxRunning, $3 new MaxRunning, $4 channel, $5 payload.
 //
 // swapQueueSQL writes queue $1's settings $3 only if they are still $2,
-// as readQueue read them, creating its row if it has none, and tells
-// the workers on channel $4 with payload $5. It returns 1 if it
-// wrote, 0 if the settings changed meanwhile.
+// as readQueue read them, and tells the workers on channel $4 with
+// payload $5. It returns 1 if it wrote, 0 if the settings changed
+// meanwhile. Only a caller that read no limit may create the row: one
+// that read a limit finds no row if a concurrent update deleted it,
+// and must read again.
 const swapQueueSQL = `
-WITH swapped AS (
-    INSERT INTO {s}.queues AS q (name, max_running) VALUES ($1, $3)
+WITH inserted AS (
+    INSERT INTO {s}.queues AS q (name, max_running) SELECT $1::text, $3::integer WHERE $2::integer IS NULL
     ON CONFLICT (name) DO UPDATE SET max_running = $3, updated_at = now()
-    WHERE q.max_running IS NOT DISTINCT FROM $2
+    WHERE q.max_running IS NULL
+    RETURNING 1
+), updated AS (
+    UPDATE {s}.queues SET max_running = $3, updated_at = now()
+    WHERE name = $1 AND max_running = $2
     RETURNING 1
 )
-SELECT count(pg_notify($4, $5)) FROM swapped`
+SELECT count(pg_notify($4, $5)) FROM (TABLE inserted UNION ALL TABLE updated) swapped`
 
 // $1 queue, $2 paused.
 //

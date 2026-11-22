@@ -78,7 +78,7 @@ func TestMigrationsLockATableBeforeTheyChangeItsRowsAndAlterIt(t *testing.T) {
 	for _, m := range all[1:] {
 		locked := make(map[string]bool)  // tables that the migration holds in ACCESS EXCLUSIVE mode
 		changed := make(map[string]bool) // tables whose rows it changed without that lock
-		for _, stmt := range statements(m.SQL) {
+		for _, stmt := range Split(m.SQL) {
 			words := strings.Fields(stmt)
 			switch sql := strings.Join(words, " "); {
 			case strings.HasPrefix(sql, "LOCK TABLE ") && strings.HasSuffix(sql, " IN ACCESS EXCLUSIVE MODE"):
@@ -140,7 +140,7 @@ func mayBlock(m Migration) []string {
 
 	var out []string
 	created := make(map[string]bool)
-	for _, stmt := range statements(m.SQL) {
+	for _, stmt := range Split(m.SQL) {
 		words := wordsOf(stmt)
 		table := ""
 		if match := createIndex.FindStringSubmatch(words); match != nil {

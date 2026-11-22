@@ -334,6 +334,102 @@ func TestCancelAndDeleteFreeTheDedupeKey(t *testing.T) {
 	}
 }
 
+// A task that its handler completes after a cancel was requested did its
+// work, so it takes back the dedupe key that the cancel freed: an enqueue of
+// the key is a duplicate again. A task that took the key during the run
+// keeps it, since it stands for the work too. CompleteTx takes the key back
+// in the handler's transaction.
+func TestACompletionAfterACancelTakesTheDedupeKeyBack(t *testing.T) {
+	t.Parallel()
+	for name, add := range completingHandlers {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			started := make(chan int64, 1)
+			proceed := make(chan struct{})
+			var hs taskmill.Handlers
+			add(t, &hs, func(id int64) {
+				started <- id
+				<-proceed
+			})
+			runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+
+			// runCanceled enqueues a task with key, cancels it while it runs,
+			// calls during, and lets the handler complete it.
+			runCanceled := func(key string, during func()) int64 {
+				first := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: key})
+				if id := recv(t, started, "the task to start"); id != first.ID {
+					t.Fatalf("task %d started, want %d", id, first.ID)
+				}
+				e.cancel(t, first.ID)
+				during()
+				proceed <- struct{}{}
+				e.waitState(t, first.ID, taskmill.StateCompleted)
+				return first.ID
+			}
+
+			first := runCanceled("order-1", func() {})
+			// A worker takes the key back once the completion committed.
+			waitFor(t, "the task to take its key back", func() bool {
+				return e.count(t, "SELECT count(*) FROM {s}.dedupe_keys WHERE task_id = $1", first) == 1
+			})
+			if dup := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "order-1"}); !dup.Duplicate || dup.ID != first {
+				t.Fatalf("after the completion: got %+v, want a duplicate of task %d", dup, first)
+			}
+
+			var other taskmill.EnqueueResult
+			runCanceled("order-2", func() {
+				later := &taskmill.EnqueueOptions{DedupeKey: "order-2", RunAt: time.Now().Add(time.Hour)}
+				if other = e.keyed(t, later); other.Duplicate {
+					t.Fatalf("the running task asked to stop still holds its key: %+v", other)
+				}
+			})
+			if dup := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "order-2"}); !dup.Duplicate || dup.ID != other.ID {
+				t.Fatalf("a key taken during the run: got %+v, want a duplicate of task %d", dup, other.ID)
+			}
+		})
+	}
+}
+
+// completingHandlers are the ways in which a handler completes a task: each
+// adds to hs a handler that calls run with the ID of each task it runs, and
+// then completes the task.
+var completingHandlers = map[string]func(t *testing.T, hs *taskmill.Handlers, run func(id int64)){
+	"handler": func(_ *testing.T, hs *taskmill.Handlers, run func(id int64)) {
+		taskmill.AddHandler(hs, taskmill.HandlerFunc[sendEmail](func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			run(task.ID)
+			return nil
+		}), nil)
+	},
+	"CompleteTx": func(t *testing.T, hs *taskmill.Handlers, run func(id int64)) {
+		t.Helper()
+		db := openSQL(t)
+		taskmill.AddHandler(hs, taskmill.HandlerFunc[sendEmail](func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
+			run(task.ID)
+			// The cancel ended ctx; the handler completes the task all the same.
+			ctx = context.WithoutCancel(ctx)
+			tx, err := db.BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = tx.Rollback() }()
+
+			if err := task.CompleteTx(ctx, taskmill.SQL(tx)); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}), nil)
+	},
+	"batch": func(_ *testing.T, hs *taskmill.Handlers, run func(id int64)) {
+		taskmill.AddBatchHandler(hs, taskmill.BatchHandlerFunc[sendEmail](func(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+			for _, task := range tasks {
+				run(task.ID)
+			}
+			return make([]error, len(tasks))
+		}), nil)
+	},
+}
+
 // keyed enqueues a task with a dedupe key, and returns the result.
 func (e *env) keyed(t *testing.T, opts *taskmill.EnqueueOptions) taskmill.EnqueueResult {
 	t.Helper()

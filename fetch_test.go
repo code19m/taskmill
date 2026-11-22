@@ -1012,12 +1012,13 @@ func throttle(client net.Conn, target string, rate int) {
 	}
 }
 
-// batchFunc is a batch handler for reports that completes them all.
-type batchFunc func(tasks []*taskmill.Task[report])
-
-func (f batchFunc) HandleBatch(_ context.Context, tasks []*taskmill.Task[report]) []error {
-	f(tasks)
-	return make([]error, len(tasks))
+// batchFunc returns a batch handler for reports that calls f, and then
+// completes them all.
+func batchFunc(f func(tasks []*taskmill.Task[report])) taskmill.BatchHandlerFunc[report] {
+	return func(_ context.Context, tasks []*taskmill.Task[report]) []error {
+		f(tasks)
+		return make([]error, len(tasks))
+	}
 }
 
 func TestFetchStaysOnItsIndexWithStaleStatistics(t *testing.T) {

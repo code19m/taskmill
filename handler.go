@@ -76,6 +76,14 @@ type BatchHandler[A Args] interface {
 	HandleBatch(ctx context.Context, tasks []*Task[A]) []error
 }
 
+// BatchHandlerFunc adapts a function to the [BatchHandler] interface.
+type BatchHandlerFunc[A Args] func(ctx context.Context, tasks []*Task[A]) []error
+
+// HandleBatch calls f(ctx, tasks).
+func (f BatchHandlerFunc[A]) HandleBatch(ctx context.Context, tasks []*Task[A]) []error {
+	return f(ctx, tasks)
+}
+
 // HandlerOptions configure how a worker runs one kind. Pass them to
 // [AddHandler] or [AddBatchHandler]. The zero value keeps the defaults.
 // [NewWorker] reports a value outside its limits, as an error that wraps

@@ -156,7 +156,6 @@ type taskListData struct {
 
 func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := taskFilter(q)
 	first := maps.Clone(q) // the list's first page
 	for _, key := range []string{"cursor", "limit", "done", "count", "conflicts"} {
 		first.Del(key)
@@ -168,25 +167,21 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	since, before, err := listRange(q)
+	sel, err := selectionOf(q)
 	if err != nil {
 		s.refuse(w, r, http.StatusBadRequest, "Invalid request", reason(err),
 			link{listPath(withRange(first, time.Time{}, time.Time{})), "Clear the range", "clear"})
 		return
 	}
 
+	f, since, before, order := sel.filter, sel.since, sel.before, sel.order
 	ranged := !since.IsZero() || !before.IsZero()
-	order := orderOf(f, ranged)
 	first = withRange(first, since, before)
 
 	// The list shows no payload, no metadata, and only each task's last
 	// error. Its range is of the time that orders it.
 	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: limit, Summary: true}
-	if order.ByFinish {
-		params.FinishedSince, params.FinishedBefore = since, before
-	} else {
-		params.CreatedSince, params.CreatedBefore = since, before
-	}
+	params.CreatedSince, params.CreatedBefore, params.FinishedSince, params.FinishedBefore = sel.ranges()
 
 	res, err := s.client.List(r.Context(), params)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -237,11 +232,11 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 		groupFilter.Source = s.path("/choices/groups")
 	}
 
-	// A bulk action acts on every task that the filters select, also outside
-	// a range of time: a list with a range does not offer it.
+	// A bulk action acts on the tasks of the list, in its range: it needs
+	// filters, as the client does.
 	var bulk *bulkLinks
-	if filtered && !ranged && !s.readOnly {
-		bulk = s.bulkLinks(f)
+	if sel.filtered() && !s.readOnly {
+		bulk = s.bulkLinks(sel)
 	}
 
 	d := taskListData{

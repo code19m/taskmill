@@ -23,9 +23,11 @@ flowchart LR
 2. On the overview, choose **Pause** for the queue. Running tasks finish,
    and no new ones start.
 3. Open the task list. Filter by the queue and the state *dead*, and by the
-   kind if other kinds died for other reasons. Choose **Retry all**, and
-   confirm. If the dashboard says that other work held some tasks, they
-   were busy in another transaction: try again for those.
+   kind if other kinds died for other reasons. Set the range of finish
+   times to the incident's hours if older dead tasks must not run again.
+   Choose **Retry all**, and confirm. If the dashboard says that other work
+   held some tasks, they were busy in another transaction: try again for
+   those.
 4. Choose **Resume** for the queue when you are ready for the load. The
    retried tasks run before the tasks that arrived after them.
 
@@ -94,6 +96,9 @@ Find the cause. Then run the function again, or call `ResumeQueue`.
 - **Filter by the state `dead`.** `RetryMatching` retries dead and canceled
   tasks. Without the state, it also runs tasks that someone canceled on
   purpose.
+- **Older dead tasks run again too,** unless you set `FinishedSince` and
+  `FinishedBefore` of `BulkParams` to the incident's hours. Dead tasks stay
+  30 days by default, and some may have died for another reason.
 - **New work waits.** The pause stops new work in the queue too, and after
   the resume, new work waits behind the retried tasks. The queue's
   [lag](../concepts/glossary.md#lag) grows, and lag alerts can fire. Keep

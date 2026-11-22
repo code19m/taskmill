@@ -178,6 +178,39 @@ func TestUpdateQueue(t *testing.T) {
 	want(0, true)
 }
 
+// An update that removes the last setting deletes the queue's row. A
+// concurrent update that read the old limit must not write a value computed
+// from it: it runs again on the defaults.
+func TestUpdateQueueRunsAgainAfterTheQueueLostItsRow(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	if err := e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { s.MaxRunning = 5 }); err != nil {
+		t.Fatal(err)
+	}
+
+	removeLimit := sync.OnceValue(func() error {
+		return e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) { s.MaxRunning = 0 })
+	})
+	var seen []int
+	err := e.client.UpdateQueue(ctx, "partner", func(s *taskmill.QueueSettings) {
+		if err := removeLimit(); err != nil {
+			t.Error(err)
+		}
+		seen = append(seen, s.MaxRunning)
+		s.MaxRunning *= 2
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(seen, []int{5, 0}) {
+		t.Fatalf("update saw %v, want [5 0]", seen)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.queues WHERE name = 'partner'"); n != 0 {
+		t.Fatal("the queue keeps a row, which holds the doubled old limit")
+	}
+}
+
 func TestManyConcurrentUpdatesLand(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

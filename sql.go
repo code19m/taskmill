@@ -44,6 +44,7 @@ type statements struct {
 	cancelRequest    string
 	complete         string
 	completeSkipping string
+	regainKeys       string
 	lockLeased       string
 	fail             string
 	snooze           string
@@ -164,6 +165,7 @@ func newStatements(schema string) *statements {
 		cancelRequest:    q(cancelRequestSQL),
 		complete:         q(completeSQL),
 		completeSkipping: q(completeSkippingSQL),
+		regainKeys:       q(regainKeysSQL),
 		lockLeased:       q(lockLeasedSQL),
 		fail:             q(failSQL),
 		snooze:           q(snoozeSQL),

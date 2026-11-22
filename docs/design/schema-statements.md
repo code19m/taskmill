@@ -191,7 +191,10 @@ One statement completes a batch: it deletes the tasks whose attempts still
 hold their lease tokens, and inserts them into history, except those of kinds
 that discard completed tasks. A task missing from the result had lost its
 lease, and its result is discarded. The same statement, run inside the
-handler's transaction, is transactional completion.
+handler's transaction, is transactional completion. It also returns the
+dedupe key that a cancel freed while a task ran, which the task then takes
+back in a statement of its own (see
+[Operator actions](schema-operations.md#a-retry-takes-its-dedupe-key-back)).
 
 The statement first locks its tasks in ID order, and then deletes the tasks
 it holds. A delete alone takes the rows as its plan meets them, which is not

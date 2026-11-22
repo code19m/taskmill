@@ -26,7 +26,8 @@ taskmill.AddBatchHandler[IndexProduct](&handlers, &ProductIndexer{search: search
 ```
 
 Return one result per task, in the same order as `tasks`. Here, every task
-gets the result of the one request.
+gets the result of the one request. To use a plain function, wrap it:
+`taskmill.BatchHandlerFunc[IndexProduct](indexProducts)`.
 
 ## Return a result per task
 
