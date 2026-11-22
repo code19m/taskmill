@@ -36,6 +36,7 @@ spec:
           env:
             - name: DATABASE_URL # ends in ?pool_max_conns=15: Concurrency 10 plus 5
               valueFrom: {secretKeyRef: {name: shop-db, key: url}}
+            - {name: HEALTH_ADDR, value: ":8081"}
           ports:
             - {name: health, containerPort: 8081}
           readinessProbe:
@@ -49,6 +50,9 @@ spec:
 - `args: [worker]` assumes that your binary picks its role from its first
   argument, such as `shop worker` or `shop migrate`:
   [One binary, two roles](deploys.md#one-binary-two-roles) shows the code.
+- `HEALTH_ADDR=:8081` is read by the binary of
+  [Ready to ship](../tutorial/7-ready-to-ship.md), not by taskmill. Its
+  default, `localhost:8081`, cannot be reached by the kubelet.
 - Workers get no traffic, so they need no Service and no `preStop` hook.
 - A worker itself needs little memory
   ([Performance](../reference/performance.md#resource-use)). Size the
@@ -83,6 +87,9 @@ mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 server := &http.Server{Addr: ":8081", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 go func() { log.Print(server.ListenAndServe()) }()
 ```
+
+Listen on every address, as `:8081` does. The kubelet calls the pod's IP
+address, so a server on `localhost` never answers it.
 
 `Health` fails while `Run` does not run, and when the worker has not reached
 the database for longer than `LeaseDuration` (30 s). It also fails until a
@@ -209,8 +216,8 @@ spec:
 
 ## Migrate in a Job
 
-You need this only when your deploys change the schema before new code
-starts ([Run migrations](deploys.md#run-migrations)).
+In production, run `Migrate` in this Job before the rollout
+([Run migrations](deploys.md#run-migrations)).
 
 ```yaml
 apiVersion: batch/v1

@@ -28,6 +28,17 @@ All notable changes to taskmill are recorded here. The format follows
   page of 0.15 shows the controls that need its script, which do nothing,
   until it is loaded again.
 
+### Fixed
+
+- Docs that were wrong. A task whose worker lost its lease is retried by
+  the kind's `Retry` policy when the maintainer has its handler, as
+  [Retries and errors](docs/guides/retries-and-errors.md#change-the-wait-between-retries)
+  now says. The production checklist asks for a pool of the total
+  `Concurrency` plus 5. Production runs `Migrate` in a Job before the
+  rollout on every page. The worker manifest of
+  [Kubernetes](docs/production/kubernetes.md) sets `HEALTH_ADDR`, so its
+  readiness probe reaches the tutorial's worker.
+
 ## [0.15.0] - 2026-11-21
 
 ### Added

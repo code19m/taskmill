@@ -180,13 +180,6 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 	e := &env{pool: pool, schema: schema}
 	version := e.count(t, "SELECT max(version) FROM {s}.migrations")
 
-	// A transaction that writes the tables of the tasks stays open.
-	busy := e.begin(t)
-	var holder int
-	if err := busy.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&holder); err != nil {
-		t.Fatal(err)
-	}
-
 	r, err := pool.Query(t.Context(), "SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename <> 'migrations'", schema)
 	if err != nil {
 		t.Fatal(err)
@@ -195,14 +188,22 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// A transaction that writes the tables of the tasks stays open.
+	busy := e.begin(t)
 	for _, table := range tables {
 		e.txExec(t, busy, "LOCK TABLE {s}."+table+" IN ROW EXCLUSIVE MODE")
 	}
 
+	// Only the migration waits for a table of this schema. Other tests'
+	// statements can wait for busy too, such as an online index build that
+	// waits for every older transaction to end, so they must not match.
+	const cancelWaiting = `SELECT count(pg_cancel_backend(l.pid)) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+	                       WHERE NOT l.granted AND c.relnamespace = $1::regnamespace`
 	gaveUp := make(chan error, 1)
 	go func() { gaveUp <- taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}) }()
 	waitFor(t, "the migration to wait for a busy table", func() bool {
-		return e.count(t, "SELECT count(pg_cancel_backend(pid)) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", holder) > 0
+		return e.count(t, cancelWaiting, schema) > 0
 	})
 
 	err = recv(t, gaveUp, "Migrate to give up")
