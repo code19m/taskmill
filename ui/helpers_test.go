@@ -184,19 +184,31 @@ func pausedQueues(t *testing.T, client *taskmill.Client) []string {
 }
 
 var (
-	tableRow  = regexp.MustCompile(`(?s)<tr data-key="([^"]*)">(.*?)</tr>`)
-	rowButton = regexp.MustCompile(`(?s)<form method="post" action="([^"]*)"[^>]*><button[^>]*><svg.*?</svg>([^<]*)</button></form>`)
+	tableRow   = regexp.MustCompile(`(?s)<tr data-key="([^"]*)">(.*?)</tr>`)
+	rowButton  = regexp.MustCompile(`(?s)<form method="post" action="([^"]*)"[^>]*><button[^>]*><svg.*?</svg>([^<]*)</button></form>`)
+	rowAsks    = regexp.MustCompile(`(?s)<a class="btn[^"]*" href="([^"]*)" data-dialog><svg.*?</svg>([^<]*)</a>`)
+	askingForm = regexp.MustCompile(`<form class="bulk-actions" method="post" action="([^"]*)">`)
 )
 
 // rowForms returns where each button in the table row of name sends its
-// form, on the page at target, by the button's text. It reads the form's
-// action from the page, and resolves it against the page's address, as a
-// browser does.
+// action, on the page at target, by the button's text. A button that asks
+// first is a link to the page that asks, whose form sends the action. It
+// reads each address from the page that holds it, and resolves it against
+// that page's address, as a browser does. It reads the pages that ask, and
+// they change nothing.
 func rowForms(t *testing.T, h http.Handler, target, name string) map[string]string {
 	t.Helper()
-	page, err := url.Parse(target)
-	if err != nil {
-		t.Fatal(err)
+	resolve := func(page, ref string) *url.URL {
+		t.Helper()
+		base, err := url.Parse(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, err := base.Parse(html.UnescapeString(ref))
+		if err != nil {
+			t.Fatalf("%s: the address %q in the row of %q: %v", page, ref, name, err)
+		}
+		return u
 	}
 
 	_, body, _ := get(t, h, target)
@@ -206,11 +218,16 @@ func rowForms(t *testing.T, h http.Handler, target, name string) map[string]stri
 			continue
 		}
 		for _, form := range rowButton.FindAllStringSubmatch(row[2], -1) {
-			action, err := page.Parse(html.UnescapeString(form[1]))
-			if err != nil {
-				t.Fatalf("%s: the action %q in the row of %q: %v", target, form[1], name, err)
+			found[form[2]] = resolve(target, form[1]).RequestURI()
+		}
+		for _, link := range rowAsks.FindAllStringSubmatch(row[2], -1) {
+			asking := resolve(target, link[1]).RequestURI()
+			code, page, _ := get(t, h, asking)
+			form := askingForm.FindStringSubmatch(page)
+			if code != http.StatusOK || form == nil {
+				t.Fatalf("%s, the page that asks before %s on %q: status %d, and no form\n%s", asking, link[2], name, code, page)
 			}
-			found[form[2]] = action.RequestURI()
+			found[link[2]] = resolve(asking, form[1]).RequestURI()
 		}
 	}
 	return found

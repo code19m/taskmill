@@ -1,6 +1,7 @@
 package browsertest
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/chromedp/chromedp"
 
+	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/ui"
 )
 
@@ -78,6 +80,80 @@ func TestPageWhoseModuleFailsWorksWithoutItsScript(t *testing.T) {
 	})()`)
 	if !shown["apply"] || !shown["field"] || shown["live"] {
 		t.Errorf("without its script, the page shows %v; want the Apply button and the fields, and no Live button", shown)
+	}
+}
+
+// Without its script, as when a module does not load, an action that asks
+// first still asks: its button leads to the page that asks, and only the
+// button of that page acts. The delete leads to the list of the task's
+// queue and state, where the notice of the action stands at the top of the
+// page, and hides nothing.
+func TestActionAsksFirstWithoutTheScript(t *testing.T) {
+	s := newSite(t)
+	id := s.enqueue(t, 1)[0]
+	s.missing.Store("tips.js")
+	// Not newTab, which fails the test when a static file does not load.
+	ctx, cancel := chromedp.NewContext(browser)
+	t.Cleanup(cancel)
+	p := &page{t, ctx}
+	p.do(chromedp.Navigate(s.url + "/tasks/" + key(id)))
+	loaded := func(expr, what string) {
+		t.Helper()
+		// The browser loads each page anew: until it has, an expression may
+		// meet the page that leaves.
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+			if ok, err := chromedp.Run(p.ctx, chromedp.Evaluate[bool](`document.readyState === "complete" && `+expr)); err == nil && ok {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("within 10 seconds, %s did not happen", what)
+			}
+		}
+	}
+	loaded(`!document.documentElement.classList.contains("js")`, "the page without its script")
+
+	p.click(`a[href$="/delete"]`)
+	loaded(`location.pathname === "/tasks/`+key(id)+`/delete"`, "the page that asks")
+	if _, err := s.client.Get(t.Context(), id); err != nil {
+		t.Fatalf("the page that asks deleted the task: %v", err)
+	}
+
+	p.click(`form.bulk-actions button`)
+	loaded(`location.pathname === "/tasks" && !!document.querySelector(".toast")`, "the list, with the notice of the action")
+	if _, err := s.client.Get(t.Context(), id); !errors.Is(err, taskmill.ErrNotFound) {
+		t.Errorf("the task is still there after the action: %v", err)
+	}
+	if got := eval[string](p, `location.search + " " + getComputedStyle(document.querySelector(".toast")).position`); got != "?queue=default&state=available&done=delete static" {
+		t.Errorf("after the action, the address and the notice's position are %q, want the task's list, and a notice in the page", got)
+	}
+}
+
+// A short page, such as that of a task that is not there, fills the window
+// under the header, and does not scroll: at the width of a phone, where the
+// header has two rows, as on a desktop.
+func TestShortPageFillsTheWindow(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/tasks/999999")
+	for _, size := range [][2]int64{{375, 600}, {1280, 800}} {
+		p.do(chromedp.EmulateViewport(size[0], size[1]))
+		if got := eval[[]float64](p, `[document.documentElement.scrollHeight, innerHeight]`); got[0] != got[1] {
+			t.Errorf("at %dx%d, the page is %v pixels tall, in a window of %v", size[0], size[1], got[0], got[1])
+		}
+	}
+}
+
+// On a phone, the notice of an action spans the window but for a margin of
+// 16 pixels on each side, as the page's content does.
+func TestNoticeSpansAPhone(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/?done=queue-resume")
+	p.do(chromedp.EmulateViewport(414, 800))
+	p.waitFor(started+` && document.querySelector(".toast").getAnimations().length === 0`, "the notice, standing still")
+	if got := eval[[]float64](p, `(() => {
+		const box = document.querySelector(".toast").getBoundingClientRect();
+		return [box.left, innerWidth - box.right];
+	})()`); !slices.Equal(got, []float64{16, 16}) {
+		t.Errorf("at 414 pixels wide, the notice stands %v pixels from the left and the right, want 16 each", got)
 	}
 }
 

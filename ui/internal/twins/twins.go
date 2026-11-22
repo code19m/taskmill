@@ -76,9 +76,11 @@ var Span = []struct {
 	{400 * 24 * time.Hour, "400d"},
 }
 
-// Visible are names with characters that no one could see, as a page shows
-// them: a control character as its Unicode control picture where it has
-// one, and any other, or a format character, as its code point.
+// Visible are names with characters that no one could see, or tell from a
+// space, as a page shows them: a control character, or a space that HTML
+// would fold away or that ends the name, as its Unicode control picture
+// where it has one, and any other, a format or default-ignorable character,
+// or another space, as its code point.
 var Visible = []struct {
 	Name, Want string
 }{
@@ -90,6 +92,20 @@ var Visible = []struct {
 	{"mail\u202eliam", "mail<U+202E>liam"}, // reverses the text after it
 	{"pay\u200bment", "pay<U+200B>ment"},   // has no width
 	{"\ufeffbom", "<U+FEFF>bom"},
-	{"tag\U000E0041", "tag<U+E0041>"},                                // a format character outside the first plane
+	{"tag\U000E0041", "tag<U+E0041>"},        // a format character outside the first plane
+	{"\u0600sign", "<U+0600>sign"},           // a format character that is not default-ignorable
+	{"pay\u034fments", "pay<U+034F>ments"},   // default-ignorable, and no format character
+	{"\u3164filler", "<U+3164>filler"},       // a letter that a font draws as nothing
+	{"blank\u2800", "blank<U+2800>"},         // a symbol that a font draws as nothing
+	{"heart\ufe0f", "heart<U+FE0F>"},         // a variation selector
+	{"ivs\U000E0100", "ivs<U+E0100>"},        // a variation selector outside the first plane
+	{"no\u00a0break", "no<U+00A0>break"},     // a space other than U+0020
+	{"ideo\u3000space", "ideo<U+3000>space"}, // another
+	{"line\u2028end", "line<U+2028>end"},     // a line separator
+	{" lead", "␠lead"},                       // a space at the start, which HTML folds away
+	{"trail ", "trail␠"},                     // and at the end
+	{"two  spaces", "two␠␠spaces"},           // two spaces, which HTML folds into one
+	{" ", "␠"},
+	{"one space", "one space"},
 	{"cafe\u0301 \U0001F600 \u2603", "cafe\u0301 \U0001F600 \u2603"}, // a combining mark, an emoji, and a symbol show as they are
 }

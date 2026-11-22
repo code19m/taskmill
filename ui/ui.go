@@ -30,12 +30,13 @@
 // change, show times in the reader's time zone, confirm actions in dialogs,
 // and apply the chosen theme. Every page also works without them, with its
 // times in UTC, and nothing needs a JavaScript build step. The
-// dashboard reads only through the bounded queries of [taskmill.Client], so
-// it is safe to point at a busy production database.
+// dashboard reads only through the queries of [taskmill.Client]. Those over
+// tasks, groups, and activity stop after 5 seconds, and the others read
+// small tables or single rows.
 //
-// The [dashboard guide] shows how to run and protect it. The [manual] of the
-// command lists the dashboard's routes and status codes, for the allow-list
-// of a proxy.
+// The [dashboard guide] shows how to run and protect it, and what its task
+// lists read. The [manual] of the command lists the dashboard's routes and
+// status codes, for the allow-list of a proxy.
 //
 // [dashboard guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/dashboard.md
 // [manual]: https://github.com/code19m/taskmill/blob/main/docs/reference/taskmill-ui.md
@@ -160,10 +161,13 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	mux.HandleFunc("GET /choices/groups", s.groupChoicesJSON)
 	mux.HandleFunc("GET /schedules", s.schedules)
 	mux.HandleFunc("GET /workers", s.workers)
+	mux.HandleFunc("GET /tasks/{id}/{action}", s.askTask)
 	mux.HandleFunc("POST /tasks/{id}/{action}", s.taskAction)
 	mux.HandleFunc("GET /tasks/bulk/{action}", s.bulkPage)
 	mux.HandleFunc("POST /tasks/bulk/{action}", s.bulkAction)
+	mux.HandleFunc("GET /queues/{action}", s.askQueue)
 	mux.HandleFunc("POST /queues/{action}", s.queueAction)
+	mux.HandleFunc("GET /schedules/{action}", s.askSchedule)
 	mux.HandleFunc("POST /schedules/{action}", s.scheduleAction)
 	mux.HandleFunc("GET /", s.notFound)
 

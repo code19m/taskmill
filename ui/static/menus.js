@@ -29,17 +29,23 @@ function label(sel) {
   summary.setAttribute("aria-label", `${sel.querySelector(".pop").getAttribute("aria-label")}: ${text.textContent}`);
 }
 
-// visible shows the characters of a name that no one could see as the
-// server does: a control character as its picture, if it has one, and any
-// other, or a format character, as its code point.
-const visible = (text) => text.replace(/[\p{Cc}\p{Cf}]/gu, (c) => (c < " " ? String.fromCharCode(0x2400 + c.charCodeAt(0))
-  : c === "\x7f" ? "\u2421" : `<U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}>`));
+// visible shows the characters of a name that no one could see, or tell
+// from a space, as the server does: a control character, or a space that
+// HTML would fold away or that ends the name, as its picture, and a format
+// or default-ignorable character, the braille blank, or another space, as
+// its code point. The pattern has no lookbehind, which Safari before 16.4
+// refuses, with every module of the page.
+const visible = (text) => text.replace(/[\p{Cc}\p{Cf}\p{DI}\u2800]|[^\S ]|^ +| +$| {2,}/gu, (match) => [...match]
+  .map((c) => (c <= " "
+    ? String.fromCharCode(0x2400 + c.charCodeAt(0))
+    : c === "\x7f" ? "\u2421" : `<U+${c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}>`))
+  .join(""));
 
 // group shows a FIFO group key as the server's "group" does: a key that
 // the outbox made as its topic and its message key, and any other as it is.
 function group(key) {
   const parts = /^([^\u001f]+)\u001f([^\u001f]+)$/.exec(key);
-  if (!parts || visible(parts[1] + parts[2]) !== parts[1] + parts[2]) return visible(key);
+  if (!parts || visible(parts[1]) !== parts[1] || visible(parts[2]) !== parts[2]) return visible(key);
   const newSpan = (name, text) => Object.assign(document.createElement("span"), { className: name, textContent: text });
   const shown = document.createElement("span");
   const sep = newSpan("topic-sep", "›");

@@ -48,6 +48,7 @@ export function apply(result, fresh = false) {
   // The page changes with its titles on it. Then the tooltip shows again.
   const about = tipFor;
   const focused = document.activeElement;
+  const place = placeOf(focused);
   undescribe();
   localise(result.main);
   localiseRange(result.main);
@@ -67,7 +68,8 @@ export function apply(result, fresh = false) {
 
   // The change may remove what had the focus, as the last "Load more"
   // removes its link, or an update a row: the page takes it, not the body.
-  if (focused?.isConnected === false) main.focus({ preventScroll: true });
+  // In a row that stays, the control in its place takes it.
+  if (focused?.isConnected === false) (inPlace(main, place) ?? main).focus({ preventScroll: true });
   if (result.doc.title) document.title = result.doc.title;
   shownETag = result.etag;
   highlight(main);
@@ -79,6 +81,26 @@ export function apply(result, fresh = false) {
   // found on the server: an open menu shows its search again.
   for (const sel of openMenus()) refine(sel);
   if (about?.isConnected) describe(about);
+}
+
+// placeOf returns the place of a control in a row of a table: the row's key,
+// the cell, and the control's place in the cell, counted from its end. A
+// toggle such as Pause ends its cell, and the controls before it come and
+// go, as Run now does while a schedule is paused.
+function placeOf(control) {
+  const cell = control?.closest?.("tr[data-key] > td");
+  if (!cell) return null;
+  const controls = [...cell.querySelectorAll("a[href], button")];
+  return { key: cell.parentElement.dataset.key, cell: cell.cellIndex, fromEnd: controls.length - 1 - controls.indexOf(control) };
+}
+
+// inPlace returns the control at place in main, or the one nearest to it in
+// the same cell, as Resume takes the place of Pause.
+function inPlace(main, place) {
+  if (!place) return null;
+  const row = main.querySelector(`tr[data-key="${CSS.escape(place.key)}"]`);
+  const controls = [...(row?.cells[place.cell]?.querySelectorAll("a[href], button") ?? [])];
+  return controls[Math.max(controls.length - 1 - place.fromEnd, 0)];
 }
 
 // leave keeps the page on screen, before another one takes its place:
@@ -124,7 +146,7 @@ export function address(url, mode) {
 // failed, or that no answer came, shows in place too, and tries again by
 // itself; one that is not the dashboard's, or of a newer version, the
 // browser loads. In the mode "ask", the dialog shows the page, which asks
-// before an action on many tasks.
+// before an action.
 export async function navigate(url, mode) {
   const turn = nextTurn();
   const slow = setTimeout(() => progress(true), SLOW_MS);
@@ -266,10 +288,10 @@ export function followLink(event) {
   const more = hit?.matches("a[data-more]");
   if (more) url.hash = "";
 
-  // A link in a menu is a filter too, a preset of the range of time: the
-  // one choice closes the menu.
+  // A link in a menu, a preset of the range of time, is a filter too, as
+  // is a period of the charts. The one choice closes the menu.
   const sel = hit?.closest("details.sel");
   if (sel) shut(sel);
   const asks = hit?.matches("a[data-dialog]") && typeof dialog?.showModal === "function";
-  navigate(url, more || sel ? "replace" : asks ? "ask" : "push");
+  navigate(url, more || sel || hit?.closest("[data-filter]") ? "replace" : asks ? "ask" : "push");
 }

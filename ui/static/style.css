@@ -181,6 +181,9 @@ body {
   font-synthesis-weight: none;
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
+  /* A column that fills the window: the content takes the room under the
+     header, however tall the header is. */
+  display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh;
 }
 
 a { color: var(--ink); text-decoration: none; }
@@ -300,7 +303,7 @@ button, input { font-weight: inherit; } /* not the browser's 400 */
 
 /* The content fills the window under the header, so that a status page can
    stand in its middle. */
-.main { display: flex; flex-direction: column; min-height: calc(100vh - 56px); min-height: calc(100dvh - 56px); }
+.main { display: flex; flex-direction: column; flex: 1 0 auto; }
 .content { flex: 1 0 auto; }
 .content:focus { outline: none; }
 .topbar {
@@ -371,8 +374,8 @@ button, input { font-weight: inherit; } /* not the browser's 400 */
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .btn:hover { text-decoration: none; }
-@media (hover: hover) { .btn:hover:not(:disabled) { background: var(--btn-hover); } }
-.btn:active:not(:disabled) { background: var(--btn-pressed); }
+@media (hover: hover) { .btn:hover:not([aria-disabled="true"]) { background: var(--btn-hover); } }
+.btn:active:not([aria-disabled="true"]) { background: var(--btn-pressed); }
 .btn.quiet {
   --btn-bg: transparent; --btn-hover: var(--fill-hover); --btn-pressed: var(--fill-selected);
   --btn-ink: var(--ink-soft); --btn-line: transparent; box-shadow: none;
@@ -396,8 +399,8 @@ button, input { font-weight: inherit; } /* not the browser's 400 */
 /* An icon looks farther from the edge than text does: pull it in a little. */
 .btn > .icon:first-child { margin-left: -2px; }
 .btn > .icon:last-child { margin-right: -2px; }
-.btn:disabled { opacity: 0.55; cursor: default; }
-[data-js-pending] .btn:disabled { cursor: progress; }
+/* A button whose action is on its way: it keeps the focus, and does nothing. */
+.btn[aria-disabled="true"] { opacity: 0.55; cursor: progress; }
 form { display: inline; margin: 0; }
 
 .seg {
@@ -1130,21 +1133,26 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .modal-status:empty { display: none; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .modal-actions [hidden] { display: none; }
-[data-confirm-button][aria-disabled="true"] { opacity: 0.55; cursor: progress; }
 
+/* A notice floats over the page with the script, which takes it away after
+   a while. Without the script, it stands at the top of the page, where it
+   hides nothing. */
 .toast {
-  position: fixed; z-index: 120; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));
-  width: min(360px, calc(100vw - 32px)); display: flex; align-items: flex-start; gap: 10px; padding: 14px;
+  width: min(360px, calc(100vw - 32px)); margin: 16px auto 0; display: flex; align-items: flex-start; gap: 10px; padding: 14px;
   background: var(--surface-glass); border: 1px solid var(--line-strong); border-radius: var(--radius-card);
   box-shadow: 0 6px 24px #00000018, 0 2px 6px #0000000d; backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
-  color: var(--ink); animation: modal-in var(--motion-normal) var(--ease-out);
+  color: var(--ink);
+}
+:root.js .toast {
+  position: fixed; z-index: 120; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));
+  margin: 0; animation: modal-in var(--motion-normal) var(--ease-out);
 }
 .toast-icon { flex-shrink: 0; margin-top: 1px; color: var(--ok); }
 .toast-message { flex: 1; min-width: 0; font-size: var(--text-label); line-height: 1.5; overflow-wrap: anywhere; }
 .toast.failed { border-color: var(--err); }
 .toast.failed .toast-icon { color: var(--err); }
 .toast.leaving { opacity: 0; transition: opacity var(--motion-normal) var(--ease-out); }
-@media (max-width: 600px) { .toast { right: 16px; width: calc(100vw - 32px); } }
+@media (max-width: 600px) { .toast { width: calc(100vw - 32px); } :root.js .toast { right: 16px; } }
 
 /* ---------- tooltip ---------- */
 

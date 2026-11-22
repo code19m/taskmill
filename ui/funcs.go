@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/code19m/taskmill"
@@ -32,6 +33,7 @@ func (s *server) funcs() template.FuncMap {
 		"newestFirst": newestFirst,
 		"timeline":    timeline,
 		"visible":     visible,
+		"visibleText": visibleText,
 		"outbox":      outbox,
 		"count":       count,
 		"atLeast":     atLeast,
@@ -41,9 +43,9 @@ func (s *server) funcs() template.FuncMap {
 		"cronWords":   cronWords,
 		"afterHost":   afterHost,
 		"fit":         fit,
-		"join":        strings.Join,
 		"dict":        dict,
 		"query":       query,
+		"notDone":     notDone,
 		"unreachable": unreachable,
 		"lower":       strings.ToLower,
 	}
@@ -53,17 +55,39 @@ func (s *server) funcs() template.FuncMap {
 // value that is empty is left out, and so is the whole query if every
 // value is.
 func query(pairs ...string) string {
+	v := queryValues(pairs)
+	if len(v) == 0 {
+		return ""
+	}
+	return "?" + v.Encode()
+}
+
+// notDone returns the query of a task list, from pairs as query takes them,
+// that selects the unfinished and the dead tasks: every state but completed
+// and canceled. The links to the tasks of a FIFO group or of a kind select
+// them. No index holds a kind's tasks, nor a group's completed or canceled
+// ones, so a list of all their states would read the queue's canceled tasks
+// and its whole history, at every update.
+func notDone(pairs ...string) string {
+	v := queryValues(pairs)
+	for _, st := range listedStates {
+		if st != taskmill.StateCompleted && st != taskmill.StateCanceled {
+			v.Add("state", string(st))
+		}
+	}
+	return "?" + v.Encode()
+}
+
+// queryValues returns the pairs of names and values whose value is not
+// empty.
+func queryValues(pairs []string) url.Values {
 	v := url.Values{}
 	for i := 0; i+1 < len(pairs); i += 2 {
 		if pairs[i+1] != "" {
 			v.Set(pairs[i], pairs[i+1])
 		}
 	}
-
-	if len(v) == 0 {
-		return ""
-	}
-	return "?" + v.Encode()
+	return v
 }
 
 // ago words how long before now t was, or how long after it: "8s ago", or
@@ -227,37 +251,71 @@ func dict(pairs ...any) map[string]any {
 	return m
 }
 
-// visible shows the characters of a name that no one could see: control
-// characters, such as the separator that the outbox puts between a topic and
-// a key, as their Unicode control pictures where they have one, and the rest
-// of them, with the format characters, such as those that reverse the
-// direction of text or have no width, as their code points, "<U+202E>". So a
-// name cannot hide or reorder a part of itself, and two names that differ
-// never look alike. The script's "visible" shows a name in the same way.
+// visible shows the characters of a name that no one could see, or tell
+// from a space: control characters, such as the separator that the outbox
+// puts between a topic and a key, as their Unicode control pictures where
+// they have one, and the rest as their code points, "<U+202E>". These are
+// the format characters, such as those that reverse the direction of text
+// or have no width, the characters that a font draws as nothing, and every
+// space but U+0020 (see hidden). A space that HTML would fold away, or that
+// ends a name, shows as a picture too: one at the start or the end, or next
+// to another. So none of these can hide, or reorder a part of a name. The
+// script's "visible" shows a name in the same way.
 func visible(s string) string {
-	if !strings.ContainsFunc(s, hidden) {
+	return reveal(s, func(i int, r rune) bool {
+		if r == ' ' {
+			return i == 0 || i == len(s)-1 || s[i-1] == ' ' || s[i+1] == ' '
+		}
+		return hidden(r)
+	})
+}
+
+// visibleText shows a text that has lines, such as an error message with a
+// stack trace, as visible shows a name, but keeps its line breaks, tabs,
+// and spaces as they are.
+func visibleText(s string) string {
+	return reveal(s, func(_ int, r rune) bool { return hidden(r) && r != '\n' && r != '\t' && r != '\r' })
+}
+
+// reveal returns s with each character that shows says to show, at its
+// index, as its control picture or its code point.
+func reveal(s string, shows func(i int, r rune) bool) string {
+	start := -1
+	for i, r := range s {
+		if shows(i, r) {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
 		return s
 	}
 
 	var b strings.Builder
-	for _, r := range s {
+	b.WriteString(s[:start])
+	for i, r := range s[start:] {
 		switch {
-		case r < 0x20:
+		case !shows(start+i, r):
+			b.WriteRune(r)
+		case r <= ' ':
 			b.WriteRune(0x2400 + r)
 		case r == 0x7f:
 			b.WriteRune('\u2421')
-		case hidden(r):
-			fmt.Fprintf(&b, "<U+%04X>", r)
 		default:
-			b.WriteRune(r)
+			fmt.Fprintf(&b, "<U+%04X>", r)
 		}
 	}
 	return b.String()
 }
 
-// hidden reports whether visible shows r in place of itself.
+// hidden reports whether r is a character that no one could see, or tell
+// from a space: a control or format character, a character that a font
+// draws as nothing (with the format characters, Unicode's default-ignorable
+// code points, and the braille blank U+2800, a symbol that names are often
+// faked with), or a space other than U+0020.
 func hidden(r rune) bool {
-	return unicode.In(r, unicode.Cc, unicode.Cf)
+	return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector) ||
+		r == '\u2800' || r != ' ' && unicode.IsSpace(r)
 }
 
 // outboxKey is a FIFO group key that the outbox made, in its two parts.
@@ -270,10 +328,10 @@ func (k outboxKey) String() string { return "Outbox topic " + k.Topic + ", key "
 // for any other key. The outbox joins a message's topic and key with the
 // unit separator, which no font draws (groupKey in package outbox): its key
 // has one separator between two parts, and no other character that visible
-// shows.
+// shows in either.
 func outbox(group string) *outboxKey {
 	topic, key, ok := strings.Cut(group, "\x1f")
-	if !ok || topic == "" || key == "" || strings.ContainsFunc(topic, hidden) || strings.ContainsFunc(key, hidden) {
+	if !ok || topic == "" || key == "" || visible(topic) != topic || visible(key) != key {
 		return nil
 	}
 	return &outboxKey{topic, key}
@@ -303,6 +361,7 @@ const (
 type fitted struct {
 	Line string // the first names, with commas between them
 	More int    // how many names follow them
+	All  string // every name, with commas between them, for a tooltip
 }
 
 // fit returns the queues that a row of the Workers page shows, each as
@@ -323,8 +382,9 @@ func fit(names []string) fitted {
 		total += utf8.RuneCountInString(shown[i])
 	}
 
+	all := strings.Join(shown, comma)
 	if total <= queuesRoom {
-		return fitted{Line: strings.Join(shown, comma)}
+		return fitted{Line: all, All: all}
 	}
 
 	n, used := 1, utf8.RuneCountInString(shown[0])
@@ -334,7 +394,7 @@ func fit(names []string) fitted {
 			break
 		}
 	}
-	return fitted{Line: strings.Join(shown[:n], comma), More: len(shown) - n}
+	return fitted{Line: strings.Join(shown[:n], comma), More: len(shown) - n, All: all}
 }
 
 // lastError returns the most recent attempt error, or nil.
@@ -370,13 +430,36 @@ func newestFirst(errs []taskmill.AttemptError) []errorLine {
 
 // prettyJSON indents a payload for reading. It keeps the text as stored, so
 // large integers stay exact, and characters such as "<" stay as they are: the
-// template escapes them for HTML.
+// template escapes them for HTML. Each character that visible would show
+// is written as its JSON escape, such as \u202e: the value stays the same,
+// and none of them can hide, or reorder the text after it. After Indent,
+// only the strings hold such characters, but for the line breaks between
+// the values.
 func prettyJSON(raw json.RawMessage) string {
 	var b bytes.Buffer
 	if err := json.Indent(&b, raw, "", "  "); err != nil {
-		return string(raw)
+		return visibleText(string(raw))
 	}
-	return b.String()
+
+	escaped := func(r rune) bool { return hidden(r) && r != '\n' }
+	text := b.String()
+	if !strings.ContainsFunc(text, escaped) {
+		return text
+	}
+
+	var out strings.Builder
+	for _, r := range text {
+		switch {
+		case !escaped(r):
+			out.WriteRune(r)
+		case r > 0xffff:
+			high, low := utf16.EncodeRune(r)
+			fmt.Fprintf(&out, `\u%04x\u%04x`, high, low)
+		default:
+			fmt.Fprintf(&out, `\u%04x`, r)
+		}
+	}
+	return out.String()
 }
 
 // tasks says how many tasks n is: "1 task", "1,234 tasks", or "10,000+

@@ -175,6 +175,47 @@ All notable changes to taskmill are recorded here. The format follows
   reads of PostgreSQL 18 with 30 days of history. A batch with a task that
   finished days later, as a retried one can, still reads every partition in
   between.
+- A task list of the dashboard that names a queue, and no FIFO group, reads
+  only that queue's tasks: it is in creation order, unless it holds only
+  dead or canceled tasks, which stay in finish order. Before, the overview's
+  links to a queue, and to its tasks in the other states, could read the
+  newer tasks of every queue at each live update, as during a backlog in
+  another queue. During a backlog in the same queue, a list of its few
+  pending, scheduled, or retryable tasks now reads the whole backlog, which
+  the index of the state could serve before. The links to a FIFO group, and
+  to the tasks of a schedule's or a worker's kind, select the unfinished and
+  the dead tasks, every state but completed and canceled, and read no
+  history: before, each update read the queue's whole history.
+- Without JavaScript, or when a module did not load, Retry, Cancel, Delete,
+  Pause, and Run now acted on one click. Each now leads to a page that asks
+  first, as a bulk action does, which the dialog shows with the script:
+  `GET /tasks/{id}/{action}`, `GET /queues/pause`, and
+  `GET /schedules/{action}`. A proxy that allows the dashboard's routes one
+  by one must allow them. During a rolling upgrade, a server of 0.15
+  answers 404 for these pages, and the action works again once a server of
+  this version answers. A deleted task leads to the list of its queue and
+  state, in place of its page in the history: before, it led to every task.
+- The dashboard keeps the reader's place. After an action sent from a
+  button, such as Resume, the keyboard focus stays on it, or on the control
+  that takes its place in its row: before, it fell to the page's body. A
+  period of the overview's charts shows in place, without scrolling to the
+  top or adding to the history, and a screen reader hears which it is.
+- Without JavaScript, the notice of an action stands at the top of the
+  page: before, it covered the bottom of the page for as long as it was
+  open. A short page, such as "Task not found", no longer scrolls on a
+  phone.
+
+### Security
+
+- The dashboard shows the characters that no one could see, or tell from
+  a space. A name also shows the default-ignorable characters, such as
+  U+034F, U+3164, and the variation selectors, the braille blank U+2800,
+  every space but U+0020, and a space at its start or end, or next to
+  another, as `␠`: before, two names that differ could look alike. A
+  payload shows such characters as JSON escapes, such as `\u202e`, with the
+  same value, and an error message as control pictures or code points,
+  with its lines kept: before, a character that reverses the text could
+  make a payload show a value that it does not hold.
 
 ## [0.15.0] - 2026-11-21
 

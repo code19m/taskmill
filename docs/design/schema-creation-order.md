@@ -145,6 +145,47 @@ bounds, with a custom plan and with a generic one.
   `CREATE INDEX CONCURRENTLY` cannot run in a transaction, and needs a step
   outside `Migrate`, which taskmill does not have yet.
 
+## The dashboard's lists of a queue
+
+The dashboard asks for the creation order on each list that names a queue
+and no FIFO group, unless the list holds only dead or canceled tasks: those
+[page by finish time](schema-lists.md#dead-and-canceled-tasks-page-by-finish-time).
+Without a range from the reader, the range starts at the earliest time that
+PostgreSQL stores. So the list reads only the tasks of its queues, whatever
+the statistics say. In ID order, the statistics of the whole table choose
+the plan:
+
+- **Where they expect few tasks of the list's states,** a page reads the
+  index of its state, and sorts.
+- **Where they expect many,** a page walks the primary key, through the
+  newer tasks of every queue, until it is full.
+
+The creation order has a price. During a backlog in a queue, a list of its
+few pending, scheduled, or retryable tasks reads the whole backlog: about
+75 ms for a million tasks. In ID order, the index of the state could serve
+it. The 5-second limit bounds the read.
+
+Measured on PostgreSQL 18 with 2,400,400 tasks, for a page of 50. The queue
+`q` has 200 pending and 200 retryable tasks, older than a backlog of
+1,000,000 available tasks of its own. `r` has 50,000 retryable tasks. `m`
+has 50,000 retryable tasks, older than a backlog of 300,000 of its own. The
+1,000,000 available tasks of `other` are the newest.
+
+| List | In ID order | In creation order |
+|---|---|---|
+| `q`, every state | 1,000,051 rows, 18,135 buffers | 51 rows, 20 buffers |
+| `q`, pending | 200 rows, 5 buffers | 1,000,251 rows, 24,244 buffers |
+| `q`, retryable | 2,400,051 rows, 43,486 buffers | 1,000,051 rows, 24,239 buffers |
+| `q`, scheduled, of which it has none | 100,200 rows, 2,047 buffers | 1,000,400 rows, 24,247 buffers |
+| `r`, retryable | 2,350,051 rows, 42,580 buffers | 51 rows, 5 buffers |
+| `m`, retryable | 2,300,051 rows, 41,673 buffers | 300,051 rows, 7,275 buffers |
+
+The ID order read the pending tasks of `q` from their index, because no
+other queue has pending tasks. For its retryable tasks, it walked the
+primary key, because `r` and `m` have 100,000 more.
+`TestLinksToTaskListsReadWhatTheyShow` guards that a queue's list reads no
+task of another queue.
+
 ## Options we rejected
 
 | Option | Why not |
@@ -155,6 +196,7 @@ bounds, with a custom plan and with a generic one.
 | Both pairs of indexes | Twice the entries of the chosen pair. The second pair would only make the list of all queues cheaper, which the first pair already bounds |
 | `tasks_created_idx` with the running tasks | One list fewer to merge, and no running task read from outside the range. But each fetch then writes an index entry: 28% more WAL records for a task, not 18% |
 | The stored creation time as the time of the insert, which follows the IDs more closely | Still not exact: two transactions get their IDs and their times in different orders. And `created_at` would change its meaning for every reader |
+| ID order for the dashboard's lists of a queue's pending, scheduled, or retryable tasks | Cheaper where the statistics expect few tasks of those states in the whole table: 200 rows for the pending tasks of `q`, measured above. But where they expect many, as while another queue fails, a page walks the primary key through every queue: 2,400,051 rows for the 200 retryable tasks of `q`. In creation order, a queue's list costs at most what its own queue holds |
 | Every list that is not in finish order in creation order | One order fewer in the API. But the lists that read an index in ID order today would each need an index in creation order, and `List` would change its order for every caller |
 
 ## See also

@@ -2,6 +2,7 @@ package ui_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -680,6 +682,8 @@ func TestWorkersShowTheirQueuesAndKinds(t *testing.T) {
 	    ('fits', '{default,orders,orders-priority}', '{email.send}', 'h', 'v'),
 	    ('long', '{a-queue-with-a-name-longer-than-its-column,b}', '{}', 'h', 'v'),
 	    ('words', '{почта,заказы,отчёты,склад}', '{}', 'h', 'v'),
+	    ('ends', '{"payments ",x}', '{}', 'h', 'v'),
+	    ('starts', '{a," b"}', '{}', 'h', 'v'),
 	    ('lead', '{}', '{}', 'h', 'v')`); err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +704,7 @@ func TestWorkersShowTheirQueuesAndKinds(t *testing.T) {
 			`popovertarget="lists-many">2 kinds<`,
 			`id="lists-many" popover`,
 			`<h2>Queues <span class="subtle">6</span></h2>`, `<a href="/tasks?queue=partner-api">partner-api</a>`,
-			`<h2>Kinds <span class="subtle">2</span></h2>`, `<a href="/tasks?kind=orders%26refunds">orders&amp;refunds</a>`,
+			`<h2>Kinds <span class="subtle">2</span></h2>`, `<a href="/tasks?kind=orders%26refunds&amp;` + notDone + `">orders&amp;refunds</a>`,
 		}, nil},
 		// A count takes room, so the queues that fit without one show whole.
 		{"fits", []string{`>default, orders, orders-priority</span></div>`, `popovertarget="lists-fits">1 kind<`}, []string{">+"}},
@@ -712,6 +716,10 @@ func TestWorkersShowTheirQueuesAndKinds(t *testing.T) {
 		}, []string{"<h2>Kinds"}},
 		// The room is in characters, not bytes.
 		{"words", []string{`>почта, заказы, отчёты, склад</span></div>`}, []string{"popover"}},
+		// Each name shows its own spaces, in the tooltip too, and the
+		// space after a comma is not one of them.
+		{"ends", []string{`<span title="payments␠, x">payments␠, x</span>`}, nil},
+		{"starts", []string{`<span title="a, ␠b">a, ␠b</span>`}, nil},
 		{"lead", []string{`<span class="tone-ghost">maintenance only</span>`, `<span class="tone-ghost">none</span></td>`}, []string{"popover"}},
 	} {
 		for _, want := range c.want {
@@ -923,7 +931,7 @@ func TestGroupKeysOfTheOutboxShowAsTopicAndKey(t *testing.T) {
 		},
 		"/tasks?group=a%1Fb%1Fc": {`aria-label="FIFO group: a␟b␟c"><span class="sel-label">a␟b␟c</span>`},
 		// The task's page, and the page of an action on the group's tasks.
-		"/tasks/" + strconv.FormatInt(id, 10):        {`<a class="mono" href="/tasks?group=orders%1Forder-13&amp;queue=mail" title="Outbox topic orders, key order-13">` + parts + `</a>`},
+		"/tasks/" + strconv.FormatInt(id, 10):        {`<a class="mono" href="/tasks?group=orders%1Forder-13&amp;queue=mail&amp;` + notDone + `" title="Outbox topic orders, key order-13">` + parts + `</a>`},
 		"/tasks/bulk/cancel?group=orders%1Forder-13": {`<dt>FIFO group</dt><dd class="mono">` + parts + `</dd>`},
 		"/tasks/bulk/cancel?group=a%1Fb%1Fc":         {`<dt>FIFO group</dt><dd class="mono">a␟b␟c</dd>`},
 	} {
@@ -946,19 +954,24 @@ type sneaky struct{}
 
 func (sneaky) Kind() string { return "pay\u200bment" }
 
-// A name can hold characters that no one could see: control characters, and
-// format characters, which can reverse the direction of the text after them
-// or have no width. Every page shows them, in queue names, kinds, FIFO group
-// keys, metadata, schedules, and workers, as code points or control
-// pictures, so that a name cannot hide or reorder a part of itself. Only the
-// attributes that carry a name to the server, or to the script, keep it as
-// it is.
+// A name can hold characters that no one could see, or tell from a space:
+// control characters; format characters, which can reverse the direction of
+// the text after them or have no width; characters that a font draws as
+// nothing; and spaces other than U+0020. Every page shows them, in queue
+// names, kinds, FIFO group keys, metadata, schedules, and workers, as code
+// points or control pictures, so that a name cannot hide or reorder a part
+// of itself. So does a space that HTML folds away, or that ends a name. Only
+// the attributes that carry a name to the server, or to the script, keep it
+// as it is.
 func TestNamesShowTheCharactersThatNoOneCouldSee(t *testing.T) {
 	t.Parallel()
 	client, pool, schema := setupDB(t)
 	const queue, group = "mail\u202eliam", "orders\u202e\x1fkey\u2066"
 	res, err := client.Enqueue(t.Context(), sneaky{}, &taskmill.EnqueueOptions{
-		Queue: queue, GroupKey: group, Metadata: map[string]string{"trace\ufeff": "id\x7f\u0085"},
+		Queue: queue, GroupKey: group, Metadata: map[string]string{
+			"trace\ufeff": "id\x7f\u0085",
+			"note\u034f":  "\u3164 two  spaces\u00a0\ufe0f ",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -981,8 +994,65 @@ func TestNamesShowTheCharactersThatNoOneCouldSee(t *testing.T) {
 			t.Errorf("%s (%d): no name shows its U+202E", target, code)
 		}
 		shown := carried.ReplaceAllString(body, "")
-		if at := strings.IndexFunc(shown, func(r rune) bool { return unicode.In(r, unicode.Cf) || r == 0x7f || r == 0x85 }); at >= 0 {
+		if at := strings.IndexFunc(shown, func(r rune) bool {
+			return unicode.In(r, unicode.Cf, unicode.Other_Default_Ignorable_Code_Point, unicode.Variation_Selector) || r == 0x7f || r == 0x85 || r == 0xa0
+		}); at >= 0 {
 			t.Errorf("%s: a character that no one could see is on the page\n%s", target, shown[max(0, at-200):min(len(shown), at+200)])
+		}
+	}
+
+	if _, body, _ := get(t, h, "/tasks/"+strconv.FormatInt(res.ID, 10)); !strings.Contains(body, "&lt;U&#43;3164&gt; two␠␠spaces&lt;U&#43;00A0&gt;&lt;U&#43;FE0F&gt;␠") {
+		t.Errorf("the task's metadata does not show its spaces, and the characters that a font draws as nothing\n%s", body)
+	}
+}
+
+// A payload and an error message can hold such characters too, often from
+// outside input, such as a file's name. The task's page shows each in a
+// payload's strings as its JSON escape, so the payload shows the value that
+// it holds, and its copy is equal JSON. An error message shows them as a
+// name does, and keeps its lines, as a stack trace has them. So does the
+// last error in the task list, and its tooltip.
+func TestPayloadsAndErrorsShowTheCharactersThatNoOneCouldSee(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	const payload = "{\"amount\": \"100\u202e00.0001\u202c USD\", \"note\": \"zero\u200bwidth\", \"tag\": \"a\U000E0041b\", \"line\": \"x\u2028y\", \"n\": 12345678901234567890}"
+	const message = "bad recipient: \u202etxt.exe\u202c\npanic: boom\n\tat foo.go:1"
+	var id int64
+	if err := pool.QueryRow(t.Context(), `INSERT INTO `+schema+`.tasks (queue, kind, state, payload, attempt, max_attempts, run_at, attempted_at, finalized_at, errors)
+	    VALUES ('mail', 'greet', 'dead', $1, 1, 1, now() - interval '1 minute', now() - interval '1 second', now(),
+	        jsonb_build_array(jsonb_build_object('attempt', 1, 'at', now(), 'message', $2::text)))
+	    RETURNING id`, payload, message).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handler(t, client, nil)
+	_, task, _ := get(t, h, "/tasks/"+strconv.FormatInt(id, 10))
+	pre := regexp.MustCompile(`(?s)<pre class="code" id="payload" data-json>(.*?)</pre>`).FindStringSubmatch(task)
+	if pre == nil {
+		t.Fatalf("the task's page has no payload\n%s", task)
+	}
+	var shown, stored any
+	if err := json.Unmarshal([]byte(html.UnescapeString(pre[1])), &shown); err != nil {
+		t.Fatalf("the payload on the page is not JSON: %v\n%s", err, pre[1])
+	}
+	if err := json.Unmarshal([]byte(payload), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(shown, stored) || !strings.Contains(pre[1], `100\u202e00.0001\u202c USD`) || !strings.Contains(pre[1], `a\udb40\udc41b`) ||
+		!strings.Contains(pre[1], "12345678901234567890") {
+		t.Errorf("the payload shows as %s, want the stored value, with its characters that no one could see as escapes", pre[1])
+	}
+	if want := "bad recipient: &lt;U&#43;202E&gt;txt.exe&lt;U&#43;202C&gt;\npanic: boom\n\tat foo.go:1</pre>"; !strings.Contains(task, want) {
+		t.Errorf("the task's error does not show as %q\n%s", want, task)
+	}
+
+	_, list, _ := get(t, h, "/tasks")
+	if want := "bad recipient: &lt;U&#43;202E&gt;txt.exe"; strings.Count(list, want) != 2 {
+		t.Errorf("the task list does not show the last error as %q, in its cell and its tooltip\n%s", want, list)
+	}
+	for page, body := range map[string]string{"task": task, "list": list} {
+		if at := strings.IndexFunc(body, func(r rune) bool { return unicode.In(r, unicode.Cf) }); at >= 0 {
+			t.Errorf("the %s page shows a format character\n%s", page, body[max(0, at-200):min(len(body), at+200)])
 		}
 	}
 }
