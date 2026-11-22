@@ -93,9 +93,9 @@ postgres://shop@db.internal:5432/shop?pool_max_conns=15
 
 Why: a running task holds no connection of its own, but handlers that use the
 same pool can take every connection. In a pool of this size, the worker keeps
-one in reserve while `Run` runs, so its tasks'
-[leases](../concepts/glossary.md#lease) still renew, while fetches wait. For
-that, the idle limit of taskmill's role, such as `idle_session_timeout` or a
+one in reserve while `Run` runs, so its tasks' [leases](../concepts/glossary.md#lease)
+still renew, while fetches wait. Through a pooler, [size its pool](connection-poolers.md#size-the-poolers-pool)
+too. The idle limit of taskmill's role, such as `idle_session_timeout` or a
 proxy's, must be longer than a third of the lease. A smaller pool spares no
 reserve: renewals wait too, leases can run out, and tasks run twice.
 
@@ -123,7 +123,7 @@ To add up the connections of all your pods, see
 | Situation | What to use | Why |
 |---|---|---|
 | Handlers use the database for short queries | **One pool** for taskmill and your handlers, sized as above | Simple. The worker warns if the pool is too small |
-| Handlers hold connections for a long time | A pool of their own for the handlers | taskmill's work never waits for them. Keep taskmill's pool at `Concurrency` plus 5 anyway: `pool_max_conns` is only a cap, since pgx opens only the connections that it uses |
+| Handlers hold connections for a long time | A pool of their own for the handlers | taskmill's work never waits for them, unless both pools go through one pooler pool: see [Connection poolers](connection-poolers.md#size-the-poolers-pool). Keep taskmill's pool at `Concurrency` plus 5 anyway: `pool_max_conns` is only a cap, since pgx opens only the connections that it uses |
 
 ## Keep long transactions from slowing the queue
 

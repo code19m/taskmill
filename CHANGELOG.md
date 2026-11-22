@@ -32,6 +32,24 @@ All notable changes to taskmill are recorded here. The format follows
   topic could share the stream of another topic and key, so that a dead
   message of one halted the other. To migrate, use another character in
   the topic.
+- The warning `the pool was full, so the worker waited for a connection`
+  ends with `handlers that share it, or statements that wait for the
+  database or a pooler, hold its connections`, in place of `raise MaxConns,
+  or give handlers a pool of their own`. That advice does not help behind a
+  pooler, nor while the database does not answer, and the worker cannot
+  tell those apart:
+  [Log messages](docs/reference/log-messages.md#tasks-and-attempts) gives the fix for
+  each. A log filter that matches the whole old message must match the new
+  one.
+- [Connection poolers](docs/production/connection-poolers.md#size-the-poolers-pool)
+  says how to size a pooler's pool. Through a pooler in transaction mode,
+  the worker's reserve is only a connection to the pooler, so handler
+  transactions that take every server connection make leases run out. The
+  docs promised that the reserve keeps leases renewing, without this limit.
+- The descriptions of `taskmill.worker.pool.waits` and
+  `WorkerStats.PoolWaits` name every statement that counts, renewals,
+  check-ins, and completions included, and so does the doc of the pool
+  warning.
 - The log lines `complete tasks failed; they are rescued when their leases
   run out` and `rescued tasks whose workers lost their leases` name up to 20
   of their tasks in `task_ids`, so that after a failover you can find the
@@ -66,6 +84,9 @@ All notable changes to taskmill are recorded here. The format follows
 - The maintainer no longer sends its promotion 20 times a second while
   another transaction holds a due task, as an open `CancelTx` does: it
   tries again at its interval. Each pass also takes one statement, not two.
+- A worker no longer counts a pool wait, nor warns of a full pool, while
+  connections that cannot finish opening fill the pool, as when the
+  database does not answer. It warned that handlers held the connections.
 - A publisher, or a batch handler, that returns more results than
   deliveries or tasks fails them all. The worker used the first results:
   after the slip of `make` and `append`, those were the nils, so messages

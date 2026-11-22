@@ -142,7 +142,8 @@ With short tasks, the peak is closer to the replicas plus `maxSurge`.
 | **Total** | **98** | **196** |
 
 So this app needs `max_connections` of about 200, or a pooler in front: see
-[Connection poolers](connection-poolers.md).
+[Connection poolers](connection-poolers.md), and size the
+[pooler's pool](connection-poolers.md#size-the-poolers-pool) too.
 
 ## Run the dashboard
 

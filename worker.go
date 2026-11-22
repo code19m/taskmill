@@ -112,14 +112,17 @@ var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with
 // least the worker's total Concurrency plus 5 connections, the worker keeps
 // one of them idle in reserve: a renewal of leases that finds every other
 // connection in use, as when handlers that share the pool hold them, runs
-// on it, so that leases do not run out. The worker also has one connection
-// of its own for notifications.
+// on it, so that leases do not run out. Through a pooler in transaction
+// mode, the reserve is only a connection to the pooler, whose own pool
+// must leave room for it: see the [docs on connection poolers]. The worker
+// also has one connection of its own for notifications.
 // Run may be called again after it returned, but not while it runs.
 //
 // The [guide to workers and queues] shows how to choose the queues, limit
 // how many tasks run, and stop a worker cleanly.
 //
 // [guide to workers and queues]: https://github.com/code19m/taskmill/blob/main/docs/guides/workers-and-queues.md
+// [docs on connection poolers]: https://github.com/code19m/taskmill/blob/main/docs/production/connection-poolers.md
 type Worker struct {
 	client   *Client
 	cfg      WorkerConfig

@@ -362,7 +362,8 @@ func TestHandlersThatHoldThePoolDoNotCostLeases(t *testing.T) {
 	waitFor(t, "every task to complete", func() bool {
 		return watch.count(t, "SELECT count(*) FROM {s}.task_history WHERE id = ANY($1)", ids) == len(ids)
 	})
-	const poolWarning = "the pool was full, so the worker waited for a connection; raise MaxConns, or give handlers a pool of their own"
+	const poolWarning = "the pool was full, so the worker waited for a connection; " +
+		"handlers that share it, or statements that wait for the database or a pooler, hold its connections"
 	waitFor(t, "the warning that the fetch waited", func() bool { return logs.count(poolWarning) > 0 })
 	for _, r := range logs.all() {
 		if r.Message == poolWarning && (r.Level != slog.LevelWarn || attr(r, "max_conns") != "10") {
@@ -588,6 +589,51 @@ func TestWorkerDoesNotWarnWhenHandlersHaveTheirOwnPool(t *testing.T) {
 	for _, r := range logs.all() {
 		if r.Level >= slog.LevelWarn && strings.Contains(r.Message, "pool") {
 			t.Errorf("got %s, want no warning about the pool", recordText(r))
+		}
+	}
+}
+
+// While the database does not answer, as in a network outage, the pool
+// fills with connections that cannot finish opening. They are not in use,
+// so the worker counts no pool wait, and does not warn of a full pool: its
+// failing operations say what is wrong.
+func TestOutageIsNoFullPool(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	pool := proxiedPool(t, db, 6, nil)
+	logs := &logRecorder{}
+	e := newEnvWith(t, pool, &taskmill.ClientConfig{Logger: slog.New(logs)})
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: noopHandlers(), Queues: defaultQueue(1), LeaseDuration: 600 * time.Millisecond, NoMaintainer: true,
+	})
+	timing := testTiming
+	timing.FailureReport = 200 * time.Millisecond
+	taskmill.SetTiming(w, timing)
+	startWorker(t, w)
+	// The database answers again for the worker to stop: cleanups run last
+	// first.
+	t.Cleanup(func() {
+		db.frozen.Store(false)
+		db.cut(true)
+		pool.Reset()
+		db.cut(false)
+	})
+	waitFor(t, "the worker to be healthy", func() bool { return w.Health() == nil })
+
+	db.frozen.Store(true)
+	waitFor(t, "the pool to fill with connections that cannot open", func() bool {
+		s := pool.Stat()
+		return s.TotalConns() == s.MaxConns() && s.ConstructingConns() > 0
+	})
+	failing := logs.count("operation still failing")
+	waitFor(t, "more failed check-ins", func() bool { return logs.count("operation still failing") >= failing+3 })
+
+	if n := w.Stats().PoolWaits; n != 0 {
+		t.Errorf("the worker counted %d pool waits, want none", n)
+	}
+	for _, r := range logs.all() {
+		if strings.HasPrefix(r.Message, "the pool was full") {
+			t.Errorf("got %s, want no warning of a full pool", recordText(r))
 		}
 	}
 }

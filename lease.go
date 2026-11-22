@@ -447,14 +447,14 @@ func (r *reserve) drop() {
 
 // acquire takes a connection of the pool for a statement of the worker. If
 // every connection was in use, it counts a pool wait, and if it then waited
-// for a while, it warns, at most once per failureReport: handlers that share
-// the pool may hold all its connections, and the worker's fetches and
-// records wait for them. It judges by what happened, not by the pool's size,
-// because it cannot see which pool the handlers use. A wait for a new
-// connection to open, or a short wait, is normal.
+// for a while, it warns, at most once per failureReport. It judges by what
+// happened, not by the pool's size, because it cannot see which pool the
+// handlers use. A connection that is still opening is not in use: a wait
+// for one is normal, also when the database does not answer, and the
+// worker's failing operations say so then.
 func (w *Worker) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	s := w.client.pool.Stat()
-	full := s.IdleConns() == 0 && s.TotalConns() >= s.MaxConns()
+	full := s.AcquiredConns() >= s.MaxConns()
 
 	if full {
 		w.counts.poolWaits.Add(1)
@@ -468,12 +468,18 @@ func (w *Worker) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	}
 	now, last := time.Now().UnixNano(), w.poolWarned.Load()
 	if now-last >= int64(w.timing.failureReport) && w.poolWarned.CompareAndSwap(last, now) {
-		w.logger.LogAttrs(ctx, slog.LevelWarn,
-			"the pool was full, so the worker waited for a connection; raise MaxConns, or give handlers a pool of their own",
+		w.logger.LogAttrs(ctx, slog.LevelWarn, poolFull,
 			slog.Duration(logKeyDuration, waited), slog.Int(logKeyMaxConns, int(s.MaxConns())))
 	}
 	return conn, err
 }
+
+// poolFull is the warning of a statement of the worker that waited for a
+// full pool. It names what can hold the connections, not what to do: that
+// differs between the causes, which the worker cannot tell apart, and the
+// docs of the message give it for each.
+const poolFull = "the pool was full, so the worker waited for a connection; " +
+	"handlers that share it, or statements that wait for the database or a pooler, hold its connections"
 
 // take takes a connection of the pool. The pool pings a connection that
 // was idle for more than a second before it hands it out, and with the
