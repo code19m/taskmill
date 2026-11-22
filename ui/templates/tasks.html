@@ -48,7 +48,7 @@
         <td class="tone-faint"{{template "time-attrs" .CreatedAt}}>{{ago $.Now .CreatedAt}}</td>
         {{if $d.Order.ByFinish}}<td class="tone-faint"{{template "time-attrs" .FinishedAt}}>{{ago $.Now .FinishedAt}}</td>
         {{else}}<td class="tone-faint"{{template "time-attrs" .RunAt}}>{{ago $.Now .RunAt}}</td>{{end}}
-        <td class="error-cell">{{with lastError .Errors}}<span title="{{printf "%.300s" .Message}}">{{printf "%.140s" .Message}}</span>{{end}}</td>
+        <td class="error-cell">{{with lastError .Errors}}<span title="{{visibleText (printf "%.300s" .Message)}}">{{visibleText (printf "%.140s" .Message)}}</span>{{end}}</td>
       </tr>
     {{end}}</tbody>
   </table>

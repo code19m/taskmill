@@ -3,8 +3,9 @@
 **Situation.** "Every schema change in our company goes through goose. Apps
 must not change the schema when they start."
 
-If your apps may change their own schema, call `Migrate` at the start of
-every process instead ([Deploys](../production/deploys.md)).
+If your apps may change their own schema, run `Migrate` instead: in
+production, in a Job before the rollout
+([Run migrations](../production/deploys.md#run-migrations)).
 
 ## The recommended way
 
@@ -73,8 +74,8 @@ step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
 
 | Option | When it fits | The cost |
 |---|---|---|
-| `Migrate` at the start of every process | Apps may change their own schema | None. It is safe from many processes at the same time |
-| `Migrate` in a Job before each deploy | The schema changes in a step before the rollout | One more step ([Kubernetes](../production/kubernetes.md)) |
+| `Migrate` at the start of every process | Development, or a small schema | An index build delays the start of every process |
+| `Migrate` in a Job before each deploy | Production | One more step ([Kubernetes](../production/kubernetes.md)) |
 | Copy the SQL into your tool's files by hand | You upgrade taskmill rarely | It's easy to miss a version, or the `INSERT` that records it |
 
 ## Watch out
@@ -87,6 +88,11 @@ step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
   owner. Run your tool as that role, or change the owner afterwards.
 - **A failed online migration leaves an invalid index.** Drop it with
   `DROP INDEX CONCURRENTLY`, then apply the migration again.
+- **Some tools send a file as one query,** such as golang-migrate and
+  dbmate. PostgreSQL runs a query that holds several statements in one
+  transaction, and refuses `CONCURRENTLY` there. For such a tool, or a
+  runner of your own, write each of an online migration's `Statements` in
+  a file of its own, and the `INSERT` that records its version in one more.
 - **Workers create the history partitions, not your tool.** Each worker
   creates the partitions of the next 7 days when it starts, before it runs
   a task. So the first completed tasks keep their history too. If the

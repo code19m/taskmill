@@ -25,8 +25,12 @@ import (
 // continue the trace. system names the broker as the conventions do for
 // messaging.system, such as "kafka" or "rabbitmq". If pub panics, the spans
 // of its deliveries end with the panic as their error, of the error.type
-// "panic", and the panic continues to the worker, which records it. A nil
-// pub returns nil: pass it to [outbox.Outbox.AddRelay], and
+// "panic", and the panic continues to the worker, which records it. The
+// spans of deliveries that the relay retries for want of a result, as when
+// pub returned fewer or more errors than deliveries, end with that error,
+// and so do those whose error panics when it is read: the worker then
+// fails only those deliveries, as it does without this wrapper. A nil pub
+// returns nil: pass it to [outbox.Outbox.AddRelay], and
 // [taskmill.NewWorker] reports it.
 func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox.Publisher { //nolint:ireturn // it wraps the interface it returns
 	if pub == nil {
@@ -59,7 +63,9 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 		}
 
 		// The spans end when the publisher returns, and also when it panics:
-		// the panic then fails every delivery, and continues.
+		// the panic then fails every delivery, and continues. Results that
+		// outnumber the deliveries fail every delivery too, as the relay
+		// does.
 		defer func() {
 			panicked := recover()
 			for i, span := range spans {
@@ -68,14 +74,16 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 				switch {
 				case panicked != nil:
 					err = panicError{value: panicked}
+				case len(errs) > len(deliveries):
+					err = fmt.Errorf("the publisher returned %d results for %d deliveries", len(errs), len(deliveries))
 				case i < len(errs):
 					err = errs[i]
 				}
 
 				if err != nil {
-					errType := semconv.ErrorType(err)
+					errType, text := describe(err)
 					span.SetAttributes(errType)
-					span.SetStatus(codes.Error, err.Error())
+					span.SetStatus(codes.Error, text)
 					attrs = append(attrs, errType)
 				}
 
@@ -95,6 +103,22 @@ func (in *Instrumentation) Publisher(system string, pub outbox.Publisher) outbox
 // errMissingResult fails a delivery for which the publisher returned no
 // result, as the relay does.
 var errMissingResult = errors.New("the publisher returned no result for this delivery")
+
+// describe returns err's class and text. Both run the methods of the
+// publisher's error, which can panic, as the Error method of a nil pointer
+// in an error does. Then they name err's type, so that every span still
+// ends, and the worker fails only that delivery, as it does without this
+// wrapper.
+func describe(err error) (class attribute.KeyValue, text string) {
+	defer func() {
+		if recover() != nil {
+			class = semconv.ErrorTypeKey.String(fmt.Sprintf("%T", err))
+			text = fmt.Sprintf("a %T that panics when it is formatted", err)
+		}
+	}()
+
+	return semconv.ErrorType(err), err.Error()
+}
 
 // panicError is the error of the deliveries of a publisher that panicked.
 // Its class is "panic", as that of taskmill's error for a handler that

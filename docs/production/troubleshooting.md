@@ -101,15 +101,15 @@ zero, because each task waits for its next retry, not for a worker.
 **You see:** a handler ran twice for one task. The logs show `attempt lost
 its lease; canceling it`, or `rescued tasks whose workers lost their leases`:
 the maintainer [rescued](../concepts/glossary.md#rescue) them. Some repeats
-are expected ([Guarantees](../concepts/guarantees.md)), so
-[make handlers safe to run twice](../recipes/do-work-once.md).
+are expected ([Guarantees](../concepts/guarantees.md)), so [make handlers safe to run twice](../recipes/do-work-once.md).
 
 | Likely cause | Check | Do |
 |---|---|---|
 | Handlers use up a pool smaller than `Concurrency` plus 5, so the worker keeps no connection for its leases | The warning `the pool has fewer connections than the worker's total Concurrency plus 5` at start | [Size the pool](database.md#size-the-connection-pool) |
 | A pod was killed before it drained | `terminationGracePeriodSeconds` below the [grace period that workers need](deploys.md#stop-workers-without-losing-work), or pods killed because they used too much memory (`OOMKilled`) | Raise the grace period, or the memory limit |
 | A handler ignores its context | The log `handler ignored shutdown; releasing its task` | Make the handler return when `ctx` ends |
-| A failover or network outage of more than about 20 s | `operation still failing` during the incident | Expected: [When the database fails](database.md#when-the-database-fails) |
+| Handler transactions take every server connection of a pooler in transaction mode | The pooler's `SHOW POOLS`: `cl_waiting` above 0, while workers log `operation failed` for `renew leases`, and PostgreSQL itself answers | [Size the pooler's pool](connection-poolers.md#size-the-poolers-pool) |
+| A failover or network outage of more than about 17 s | `operation still failing` during the incident | Expected: [When the database fails](database.md#when-the-database-fails) |
 | The handler finished, but its result was not saved | The log `complete tasks failed; they are rescued when their leases run out` | Expected after a database outage |
 
 ### Worker pods restart again and again
@@ -174,7 +174,7 @@ it continues from there ([Deploys](deploys.md#run-migrations)).
 |---|---|---|
 | `canceling statement due to lock timeout` | A long transaction held a lock on a taskmill table for more than 5 seconds. A `pg_dump` backup does that until it ends | Let a pod restart or the Job's next try run it again. If it keeps failing, find the long transaction in `pg_stat_activity` |
 | The process hangs when it starts | Another process migrates, and holds the lock on the `migrations` table. The others try it again every second, with no time limit. That migration is slow, such as an index of many tasks that it builds, or its client is gone and its transaction stays open | Find that session with the query below. A build shows in `pg_stat_progress_create_index`: let it end. If the session is stuck, end it with `pg_terminate_backend`: a migration in its transaction rolls back, but a build continues in a session of its own, and a waiting process waits for it, then migrates. Pass `Migrate` a context with a deadline, so that the wait ends with an error |
-| `a migration would block writes to a large table` (`ErrBlockingMigration`) | An old migration would make writes wait while it reads a large table | Follow [Migrations that block writes](deploys.md#migrations-that-block-writes) |
+| `a migration would block writes to a large table` (`ErrBlockingMigration`), or `it builds an index online` (`ErrInvalidArgument`) | `Migrate` refused a pending migration, so trying again does not help. An old migration would make writes wait while it reads a large table: `Migrate` refused it before it changed anything. Or an online step would build an index with a pool of one connection, or with a timeout that would cancel the build: `Migrate` refused it before the build, and the migrations before it are applied | Follow [Migrations that block writes](deploys.md#migrations-that-block-writes), or [Indexes are built online](deploys.md#indexes-are-built-online) |
 
 ```sql
 -- The session that holds the lock of the migrations table
@@ -224,7 +224,7 @@ worker has not read the settings of its queues`, or `the worker is not running`.
 
 | Likely cause | Check | Do |
 |---|---|---|
-| The database is out of reach: an outage, a failover, a network policy, or a changed password | `operation still failing` for `record check-in` or `renew leases`, or for `load queue settings` in a new worker | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
+| The database is out of reach: an outage, a failover, a network policy, or a changed password. Or a pooler's pool is full: see [A task ran twice](#a-task-ran-twice) | `operation still failing` for `record check-in` or `renew leases`, or for `load queue settings` in a new worker | Fix the database or the network. Don't restart the workers: that does not help. Pods are ready again about 20 s after the database is back |
 | Handlers that ignore their context hold every slot | `/healthz` says `all N slots of the worker are held by handlers that …`, and the log `handler ignored its context; abandoning its attempt` | Make handlers return when `ctx` ends. A restart frees the slots |
 | `Run` returned, or never started | `the worker is not running`, and the error that `Run` returned | Fix that error: see [the errors at start](#errors-at-start-and-in-calls) |
 

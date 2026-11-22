@@ -65,7 +65,7 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Call a rate-limited API](docs/recipes/call-a-rate-limited-api.md): Respect a partner's limit: 4 calls at the same time, or 600 a minute. Its own queue with `MaxRunning`, one row that spaces the calls, and `Snooze` on HTTP 429
 - [Keep order per key](docs/recipes/keep-order-per-key.md): Apply one account's events in order. A `GroupKey` per account
 - [Share a queue fairly between customers or tenants](docs/recipes/share-a-queue-between-customers.md): Stop one customer's big batch from delaying all the others, or serve many tenants. A queue for batch work, a `GroupKey` per customer, and one schema for all tenants
-- [Keep at most one waiting task per key](docs/recipes/one-waiting-task-per-key.md): Run one refresh for 50 changes to the same product. A flag in your own row, set in the transaction that enqueues
+- [Keep at most one waiting task per key](docs/recipes/one-waiting-task-per-key.md): Run one refresh for 50 changes to the same product. The waiting task's ID in your own row, set in the transaction that enqueues
 - [Cancel or replace a delayed task](docs/recipes/cancel-a-delayed-task.md): Stop a reminder when the customer pays, or move it to another day. `CancelTx` in the transaction that changes your data, and a check in the handler
 - [Run a task at each customer's local time](docs/recipes/run-at-each-customers-local-time.md): Send each customer a summary at 09:00 local time. A due time per customer in your own table, and one schedule that enqueues what is due
 - [Move a cron job to a schedule](docs/recipes/move-a-cron-job-to-a-schedule.md): Replace a crontab line. A `Schedule` with the same five fields, and a `Location`

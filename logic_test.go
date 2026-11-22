@@ -590,6 +590,48 @@ func TestWhileLeased(t *testing.T) {
 	})
 }
 
+// The first try has the time left on the lease, and at least a third of
+// it. A try without an answer met a slow database, or a connection that no
+// longer answers. While renewals keep the lease, the tries continue, each
+// with twice the time, up to recordTimeout: tries that never answer end too.
+func TestWhileLeasedGivesTriesWithoutAnAnswerMoreTime(t *testing.T) {
+	t.Parallel()
+	const s = time.Second
+	tests := []struct {
+		left    time.Duration // on the 12-second lease when the tries begin
+		answers int           // the try that answers, or 0 for none
+		want    []time.Duration
+	}{
+		{left: 10 * s, answers: 3, want: []time.Duration{10 * s, 20 * s}},
+		{left: 10 * s, want: []time.Duration{10 * s, 20 * s, recordTimeout}},
+		{left: s, want: []time.Duration{4 * s, 8 * s, 16 * s, recordTimeout}},
+	}
+	for _, tt := range tests {
+		synctest.Test(t, func(t *testing.T) {
+			w := &Worker{cfg: WorkerConfig{LeaseDuration: 12 * s}, logger: slog.New(slog.DiscardHandler)}
+			w.resultFailures = newIncidentLog(w, "record results")
+			var limits []time.Duration
+			ts := []*liveAttempt{{renewedAt: time.Now().Add(tt.left - w.cfg.LeaseDuration)}}
+			err := w.whileLeased(t.Context(), ts, func(ctx context.Context) error {
+				if len(limits) == tt.answers-1 {
+					return nil
+				}
+				start := time.Now()
+				<-ctx.Done()
+				limits = append(limits, time.Since(start))
+				ts[0].mu.Lock()
+				ts[0].renewedAt = time.Now()
+				ts[0].mu.Unlock()
+				return ctx.Err()
+			})
+
+			if (err == nil) != (tt.answers > 0) || !slices.Equal(limits, tt.want) {
+				t.Errorf("with %s left: got %v after tries of %v, want tries of %v", tt.left, err, limits, tt.want)
+			}
+		})
+	}
+}
+
 func TestFailuresEndAnIncidentAfterAQuietInterval(t *testing.T) {
 	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {

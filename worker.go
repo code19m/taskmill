@@ -33,10 +33,11 @@ const (
 	minLeaseDuration  = 100 * time.Millisecond
 	minNoHandlerWait  = time.Minute
 	maxNoHandlerWait  = 7 * 24 * time.Hour
-	recordTimeout     = 30 * time.Second       // bound on one try to record a result
+	recordTimeout     = 30 * time.Second       // longest try to record a result
 	recordRetryFirst  = 100 * time.Millisecond // first wait before trying to record a result again
 	recordRetryMax    = 2 * time.Second        // longest wait between those tries
 	cleanupTimeout    = 5 * time.Second        // bound on best-effort cleanup, such as closing a connection
+	minFetchTimeout   = 5 * time.Second        // shortest bound on a fetch: see fetchTimeout
 	maxFetch          = 1000                   // most tasks one fetch leases
 	completionBatch   = 500                    // most completions recorded in one statement
 	completionLinger  = 2 * time.Millisecond   // wait for more completions to batch with
@@ -111,14 +112,17 @@ var errListenConfig = errors.New("taskmill: invalid ListenConfig; create it with
 // least the worker's total Concurrency plus 5 connections, the worker keeps
 // one of them idle in reserve: a renewal of leases that finds every other
 // connection in use, as when handlers that share the pool hold them, runs
-// on it, so that leases do not run out. The worker also has one connection
-// of its own for notifications.
+// on it, so that leases do not run out. Through a pooler in transaction
+// mode, the reserve is only a connection to the pooler, whose own pool
+// must leave room for it: see the [docs on connection poolers]. The worker
+// also has one connection of its own for notifications.
 // Run may be called again after it returned, but not while it runs.
 //
 // The [guide to workers and queues] shows how to choose the queues, limit
 // how many tasks run, and stop a worker cleanly.
 //
 // [guide to workers and queues]: https://github.com/code19m/taskmill/blob/main/docs/guides/workers-and-queues.md
+// [docs on connection poolers]: https://github.com/code19m/taskmill/blob/main/docs/production/connection-poolers.md
 type Worker struct {
 	client   *Client
 	cfg      WorkerConfig
@@ -156,6 +160,8 @@ type Worker struct {
 	// them: the listener only signals here, and a loop of its own reads.
 	cancelHints chan struct{} // cancellations of attempts' tasks were requested: see liveAttempt.hinted
 	queueHints  chan struct{} // settings of the worker's queues changed
+
+	renewFailed chan struct{} // a renewal of leases failed: renewAgain tries again
 
 	completions   chan *liveAttempt // successful attempts of Run, for the completer
 	completerDone chan struct{}     // closed when the current Run's completer returns
@@ -198,9 +204,17 @@ type WorkerConfig struct {
 
 	// LeaseDuration is how long a fetched task stays owned without a
 	// renewal. The worker checks in every third of it, 10 seconds by
-	// default, and renews the leases of its running tasks then. A lease
+	// default, and renews the leases of its running tasks then. While
+	// renewals fail, it tries them again every thirtieth of it. A lease
 	// starts when the task is taken, by the database's clock, not when the
-	// fetch began. Minimum: 100 milliseconds. Default: 30 seconds.
+	// fetch began, so the time that its row takes to reach the worker counts
+	// against it. If no renewal of a task's lease succeeds for a whole
+	// LeaseDuration, as when the worker cannot reach the database, the
+	// worker cancels the task's handler with [ErrLeaseLost]: from then on,
+	// the maintainer may rescue the task, and another worker run it. Keep
+	// it above 30 round trips to the database: a thirtieth of it bounds the
+	// ping of an idle connection. Minimum: 100 milliseconds. Default: 30
+	// seconds.
 	//
 	// The worker stores it when it registers, and the installation judges
 	// by it how long the worker may make no check-in. After one
@@ -344,6 +358,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		resigned:    make(chan struct{}, 1),
 		cancelHints: make(chan struct{}, 1),
 		queueHints:  make(chan struct{}, 1),
+		renewFailed: make(chan struct{}, 1),
 		completions: make(chan *liveAttempt, completionBatch),
 	}
 	w.reserve = reserve{w: w, turn: make(chan struct{}, 1)}
@@ -363,10 +378,11 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 
 	for name, o := range c.Queues {
 		w.queues[name] = &queueState{
-			name:  name,
-			slots: make(chan struct{}, o.Concurrency),
-			wake:  make(chan struct{}, 1),
-			freed: make(chan struct{}, 1),
+			name:      name,
+			slots:     make(chan struct{}, o.Concurrency),
+			wake:      make(chan struct{}, 1),
+			freed:     make(chan struct{}, 1),
+			fetchMost: maxFetch,
 		}
 	}
 
@@ -483,6 +499,7 @@ type queueState struct {
 	paused     atomic.Bool   // the queue is paused, or Run has not read its settings yet
 	maxRunning atomic.Int32  // installation-wide limit; 0 means none
 	stuck      atomic.Int32  // slots whose handlers did not return shutdownGrace after their context ended
+	fetchMost  int           // most tasks that the next fetch takes, up to maxFetch: see fetch. Only the queue's fetch loop uses it
 }
 
 func (q *queueState) nudge() {
@@ -509,10 +526,11 @@ type liveAttempt struct {
 	blockedSince  time.Time
 	blockedWarned bool
 
-	mu        sync.Mutex
-	cancel    context.CancelCauseFunc // set once a single attempt starts
-	state     attemptState
-	renewedAt time.Time // last confirmation that the lease is held
+	mu         sync.Mutex
+	cancel     context.CancelCauseFunc // set once a single attempt starts
+	state      attemptState
+	renewedAt  time.Time   // when the last confirmation that the lease is held was asked for
+	leaseTimer *time.Timer // fires when the lease may end: see track
 
 	lost   atomic.Bool // the lease is gone: the result must be discarded
 	hinted atomic.Bool // a notification said that the task's cancellation was requested, and the row is not read yet
@@ -650,6 +668,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	loops.Go(func() { followHints(loopsCtx, w.cancelHints, w.cancelHinted) })
 	loops.Go(func() { followHints(loopsCtx, w.queueHints, w.refreshQueueSettings) })
 	loops.Go(func() { w.checkInLoop(loopsCtx) })
+	loops.Go(func() { w.renewAgain(loopsCtx, w.renewFailed, w.tracked) })
 	loops.Go(func() { w.activityLoop(loopsCtx) })
 	loops.Go(func() { w.settingsLoop(loopsCtx) })
 	if !w.cfg.NoMaintainer {

@@ -17,7 +17,7 @@ are set.
 
 | The list holds | Its order | A page reads |
 |---|---|---|
-| Any tasks, in a range of creation times | By creation time, latest first, then by `id` | The two indexes of creation time: see [Lists by creation time](schema-creation-order.md) |
+| Any tasks, in a range of creation times, which the dashboard sets on a list of a queue and no FIFO group, unless the list holds only dead or canceled tasks | By creation time, latest first, then by `id` | The two indexes of creation time: see [Lists by creation time](schema-creation-order.md) |
 | Only dead tasks, only canceled tasks, or both | By finish time, latest first, then by `id` | `tasks_finished_idx`, and no other task |
 | Anything else | By `id`, newest first | The index that holds its tasks in ID order. Without one, the primary key |
 
@@ -173,7 +173,8 @@ Without a range, the hour measured below starts 225 pages down.
   [creation order](schema-creation-order.md), with indexes and a cursor of
   its own. No index holds tasks by when they were last attempted.
 - **The range is not part of `TaskFilter`.** `Count` and the bulk actions
-  take that filter, and a bulk action reads in ID order.
+  take it beside the filter, under the same rules. A bulk action still
+  reads in ID order ([Operator actions](schema-operations.md)).
 
 Measured on PostgreSQL 18 with 420,000 tasks, 300,000 of them dead over 30
 days: 100,000 in the queue `emails`, and 1,000 in each of 200 other queues.

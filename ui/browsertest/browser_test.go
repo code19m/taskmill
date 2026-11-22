@@ -4,16 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/log"
 	cdppage "github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
@@ -73,8 +78,16 @@ type site struct {
 	pool   *pgxpool.Pool
 	schema string
 
-	mu   sync.Mutex
-	live []liveRequest // the requests of the script for a page, in the order of their answers
+	// old has the site serve its pages as a server of another version
+	// rendered them: with their static files in the folder of that version.
+	old atomic.Bool
+	// missing names a static file that the site answers 404 for, as a
+	// server of 0.15 does for every module during a rolling deploy.
+	missing atomic.Value // string
+
+	mu    sync.Mutex
+	live  []liveRequest // the requests of the script for a page, in the order of their answers
+	files []string      // the paths of the static files that the browser asked for
 }
 
 // liveRequest is a request of the script for a page: a live update, or a
@@ -97,6 +110,13 @@ func needChrome(t *testing.T) {
 // Chrome.
 func newSite(t *testing.T) *site {
 	t.Helper()
+	return newSiteWith(t, nil)
+}
+
+// newSiteWith serves the dashboard of a fresh schema, configured by cfg. It
+// skips the test without Chrome.
+func newSiteWith(t *testing.T, cfg *ui.Config) *site {
+	t.Helper()
 	needChrome(t)
 	pool := testdb.Pool(t)
 	schema := testdb.Schema(t, pool)
@@ -107,13 +127,26 @@ func newSite(t *testing.T) *site {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := ui.New(client, nil)
+	h, err := ui.New(client, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	s := &site{client: client, pool: pool, schema: schema}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/static/") {
+			s.mu.Lock()
+			s.files = append(s.files, r.URL.Path)
+			s.mu.Unlock()
+			if name, _ := s.missing.Load().(string); name != "" && strings.HasSuffix(r.URL.Path, "/"+name) {
+				http.NotFound(w, r)
+				return
+			}
+		} else if s.old.Load() && r.Header.Get("X-Taskmill-Live") == "" {
+			serveOld(h, w, r)
+			return
+		}
+
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		h.ServeHTTP(rec, r)
 		if r.Method == http.MethodGet && r.Header.Get("X-Taskmill-Live") != "" {
@@ -125,6 +158,34 @@ func newSite(t *testing.T) *site {
 	t.Cleanup(srv.Close)
 	s.url = srv.URL
 	return s
+}
+
+// oldVersion is the version of the static files of the site's pages while
+// it serves them as a server of another version rendered them.
+const oldVersion = "00000000"
+
+// staticFolder is the folder of a version of the static files, in a page.
+var staticFolder = regexp.MustCompile(`/static/[0-9a-f]+/`)
+
+// serveOld serves the page that h answers r with, as a server of another
+// version rendered it: its static files are in the folder of oldVersion.
+func serveOld(h http.Handler, w http.ResponseWriter, r *http.Request) {
+	r.Header.Del("Accept-Encoding") // the page is rewritten as text
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	page := staticFolder.ReplaceAll(rec.Body.Bytes(), []byte("/static/"+oldVersion+"/"))
+	maps.Copy(w.Header(), rec.Header())
+	w.Header().Set("Content-Length", strconv.Itoa(len(page)))
+	w.WriteHeader(rec.Code)
+	_, _ = w.Write(page)
+}
+
+// staticFiles returns the paths of the static files that the browser asked
+// for, so far.
+func (s *site) staticFiles() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.files)
 }
 
 // exec runs a statement on the site's schema, in which {s} stands for the
@@ -177,16 +238,37 @@ type page struct {
 }
 
 // newTab opens a tab, closed when the test ends. It fails the test if a
-// script threw an exception in the tab, and skips it without Chrome.
+// script threw an exception in the tab or logged an error, if a static file
+// did not load, or if the content security policy refused something. A
+// request of the script for a page may fail, as a test may want it to. It
+// skips the test without Chrome.
 func newTab(t *testing.T) *page {
 	t.Helper()
 	needChrome(t)
 	var mu sync.Mutex
-	var thrown []string
+	var errs []string
 	ctx, cancel := chromedp.NewContext(browser, chromedp.WithListener(func(ev any) {
-		if e, ok := ev.(*runtime.EventExceptionThrown); ok {
+		var msg string
+		switch e := ev.(type) {
+		case *runtime.EventExceptionThrown:
+			msg = "a script threw: " + (&chromedp.ExceptionError{ExceptionDetails: e.ExceptionDetails}).Error()
+		case *runtime.EventConsoleAPICalled:
+			if e.Type == runtime.ConsoleAPICalledTypeError || e.Type == runtime.ConsoleAPICalledTypeAssert {
+				msg = fmt.Sprintf("a script logged a %s", e.Type)
+			}
+		case *log.EventEntryAdded:
+			// Chrome logs every failed request, such as a page that a test
+			// makes the server answer with 503. Only a static file that
+			// does not load, by its URL, or a refusal of the content
+			// security policy, by its source, is an error of the page.
+			if e.Entry.Level == log.EntryLevelError &&
+				(e.Entry.Source == log.EntrySourceSecurity || strings.Contains(e.Entry.URL, "/static/")) {
+				msg = fmt.Sprintf("the browser logged an error: %s (%s)", e.Entry.Text, e.Entry.URL)
+			}
+		}
+		if msg != "" {
 			mu.Lock()
-			thrown = append(thrown, (&chromedp.ExceptionError{ExceptionDetails: e.ExceptionDetails}).Error())
+			errs = append(errs, msg)
 			mu.Unlock()
 		}
 	}))
@@ -194,8 +276,8 @@ func newTab(t *testing.T) *page {
 		cancel()
 		mu.Lock()
 		defer mu.Unlock()
-		for _, e := range thrown {
-			t.Errorf("a script threw: %s", e)
+		for _, e := range errs {
+			t.Error(e)
 		}
 	})
 	return &page{t, ctx}

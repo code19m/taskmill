@@ -67,7 +67,7 @@ worker, err := taskmill.NewWorker(client, &taskmill.WorkerConfig{
 - With `Queues`, the worker reads only those queues. If it leaves out the
   queue of a kind it handles, `Run` logs a warning.
 - A batch counts as one task toward `Concurrency`.
-- Size the pool for the sum of all `Concurrency` values: see
+- Give the pool the sum of all `Concurrency` values plus 5 connections: see
   [Size the connection pool](../production/database.md#size-the-connection-pool).
 
 > [!WARNING]

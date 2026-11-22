@@ -89,13 +89,16 @@ allow-list, or to link to a page from an alert.
 | `GET /tasks/{id}` | One task | — |
 | `GET /schedules` | The schedules | — |
 | `GET /workers` | The workers | — |
-| `GET /tasks/bulk/{action}` | The page that confirms a bulk action: with JavaScript, the task list shows it in a dialog. It counts the tasks first | The filters of `/tasks`, at least one |
-| `POST /tasks/bulk/{action}` | Retries, cancels, or deletes every task that the filters select. `{action}` is `retry`, `cancel`, or `delete` | The filters of `/tasks`, at least one |
-| `POST /tasks/{id}/{action}` | Retries, cancels, or deletes one task | — |
+| `GET /tasks/bulk/{action}` | The page that confirms a bulk action: with JavaScript, the task list shows it in a dialog. It counts the tasks first | The filters of `/tasks`, at least one, and its `since` and `before` |
+| `POST /tasks/bulk/{action}` | Retries, cancels, or deletes every task that the filters select, in the range. `{action}` is `retry`, `cancel`, or `delete` | The filters of `/tasks`, at least one, and its `since` and `before` |
+| `GET /tasks/{id}/{action}` | The page that confirms an action on one task: with JavaScript, the task's page shows it in a dialog | — |
+| `POST /tasks/{id}/{action}` | Retries, cancels, or deletes one task. A delete leads to the list of the task's queue and state, which its page puts in the query | `queue`, `state`: for a delete |
+| `GET /queues/pause` | The page that confirms a pause: with JavaScript, the overview shows it in a dialog. A resume does not ask | `name`, `range`: as for the `POST` |
 | `POST /queues/{action}` | Pauses or resumes a queue. `{action}` is `pause` or `resume` | `name`: the queue. `range`: the period of the overview that the answer leads back to, as for `GET /` |
+| `GET /schedules/{action}` | The page that confirms a run or a pause: with JavaScript, the schedules page shows it in a dialog. `{action}` is `run` or `pause`. A resume does not ask | `name`: the schedule |
 | `POST /schedules/{action}` | Pauses, resumes, or runs a schedule. `{action}` is `pause`, `resume`, or `run` | `name`: the schedule |
 | `GET /choices/groups` | A JSON list of up to 100 FIFO group keys, for the group filter | `search`: text that the keys contain |
-| `GET /static/{name}` | The scripts, the styles, and the icon | `v`: the file's version |
+| `GET /static/{version}/{name}` | The scripts, the styles, and the icon. `{version}` is a hash of every static file. A page links the current one, which may be cached for a year. Another version gets the current file, which the browser must check again | — |
 
 For example, `/tasks?state=dead&queue=emails` lists the dead tasks of the
 queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.
@@ -118,10 +121,10 @@ queue `emails`, and `POST /queues/pause?name=emails` pauses that queue.
 | 303 | An action worked. The redirect leads to a page that says so |
 | 304 | A live update: the page did not change since the copy that the browser shows, but for the relative times, such as "4s ago", that its script keeps counting |
 | 307 | With a prefix: the prefix without its last slash, such as `/admin/tasks`, or a path that is not clean, such as one with a double slash. The redirect leads to the clean path under the prefix |
-| 400 | A filter value is not valid, such as an unknown state. Or the `cursor` is not one that this list made, as in a bookmark from before an upgrade. Or the `limit` is not a number from 1 to 250. Or `since` or `before` is not a time in one of their forms, or `since` is not before `before`. Or a bulk action, or its page, got no filter. Or an action on a queue or a schedule got no valid `name` |
+| 400 | A filter value is not valid, such as an unknown state. Or the `cursor` is not one that this list made, as in a bookmark from before an upgrade. Or the `limit` is not a number from 1 to 250. Or `since` or `before` is not a time in one of their forms, or `since` is not before `before`. Or a bulk action, or its page, got no filter. Or an action on a queue or a schedule got no valid `name`, or the page that confirms it got no `name` |
 | 401 | The login is missing or wrong, when basic authentication is on |
-| 403 | An action in read-only mode, or a `POST` from another site |
-| 404 | No such page, task, or schedule, also for a `GET` of an action's path. With a prefix, also a path that only starts like it, such as `/admin/tasksx` |
+| 403 | An action, or the page that confirms it, in read-only mode, or a `POST` from another site |
+| 404 | No such page, task, or schedule, also for a `GET` of an action that does not ask first, such as a resume. With a prefix, also a path that only starts like it, such as `/admin/tasksx` |
 | 405 | A method that the path does not take, such as a `POST` to a page |
 | 409 | The action does not fit, such as a retry of a running task. Or a retry of a canceled task whose dedupe key another task holds: the page names that task |
 | 500 | A read or an action failed for another reason. The page says "Something went wrong", and the log has `dashboard request failed` |
@@ -142,7 +145,7 @@ lines if you need a record of what was done.
 | `retry task`, `cancel task`, `delete task` | The task ID | — |
 | `pause queue`, `resume queue` | The queue name | — |
 | `pause schedule`, `resume schedule`, `run schedule` | The schedule name | — |
-| `retry tasks`, `cancel tasks`, `delete tasks` | The filters, as a query string such as `queue=emails&state=dead` | `tasks`: how many tasks it changed. `skipped`: how many it left, because another transaction held them |
+| `retry tasks`, `cancel tasks`, `delete tasks` | The filters and the range, as a query string such as `queue=emails&state=dead` | `tasks`: how many tasks it changed. `skipped`: how many it left, because another transaction held them |
 
 The line does not say who did it: the command knows one user only. To log
 the person, see

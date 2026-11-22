@@ -238,14 +238,14 @@ func runWeb(ctx context.Context, logger *slog.Logger) error {
 		return err
 	}
 
-	// Serve until Ctrl-C or SIGTERM. Set ADDR if port 8080 is taken.
+	// Set ADDR if port 8080 is taken, and to :8080 in a container.
 	addr := cmp.Or(os.Getenv("ADDR"), defaultAddr)
 	stop, err := serve(ctx, addr, handler)
 	if err != nil {
 		return err
 	}
 	logger.LogAttrs(ctx, slog.LevelInfo, "open the dashboard", slog.String(logKeyURL, "http://"+addr+"/taskmill/"))
-	<-ctx.Done()
+	<-ctx.Done() // serve until Ctrl-C or SIGTERM
 	stop()
 	return nil
 }
@@ -286,7 +286,7 @@ func runWorker(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	// A platform such as Kubernetes asks this server if the worker is ready.
-	// Set HEALTH_ADDR if port 8081 is taken.
+	// Set HEALTH_ADDR if port 8081 is taken, and to :8081 in a container.
 	stop, err := serve(ctx, cmp.Or(os.Getenv("HEALTH_ADDR"), "localhost:8081"), health(worker))
 	if err != nil {
 		return err

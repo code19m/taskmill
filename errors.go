@@ -88,7 +88,11 @@ var (
 	// its tasks, and then failed while it looked for the tasks that hold the
 	// dedupe keys of its duplicates: see [EnqueueResult.ID]. The tasks
 	// without a dedupe key are stored, so do not enqueue them again. Those
-	// with a dedupe key may be enqueued again, to learn their IDs.
+	// with a dedupe key may be enqueued again, to learn their IDs. On an
+	// executor that runs in a transaction that taskmill cannot see as one,
+	// as [Executor] lists, stored means stored in that transaction, which
+	// can rarely commit after this error: roll it back, and the call stored
+	// nothing.
 	ErrStoredWithoutIDs = classError("taskmill: the tasks are stored, but the IDs of their duplicates are unknown", "stored_without_ids")
 
 	// ErrTaskCanceled is the cause of a handler's context when the task was

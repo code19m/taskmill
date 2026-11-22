@@ -50,7 +50,7 @@ So on the **Dead** page, the task that died last is at the top.
 
 | Part of the list | What it shows |
 |---|---|
-| An arrow in the header | The column that orders the list: **ID**, **Finished**, or **Created** while a range of creation times is set |
+| An arrow in the header | The column that orders the list: **Finished** on a list of only dead or canceled tasks, **Created** on a list that names a queue and no FIFO group or that has a range of creation times, and **ID** on any other |
 | The row under the list | More of the list: click anywhere in it |
 | A row at the top | The way to the list's start, on a list that starts after other tasks |
 | The state | An icon in the state's color. The two states that need you also have their name in color: `dead` in red, and `retryable` in amber |
@@ -63,7 +63,7 @@ A banner at the top of a task's page says how the task stands in its
 
 | The task | The banner |
 |---|---|
-| Dead, and its group waits for it | "This task halts its FIFO group", with how many tasks wait behind it, or that a task added to the group waits, and a **View group** button |
+| Dead, and its group waits for it | "This task halts its FIFO group", with how many tasks wait behind it, or that a task added to the group waits, and a **View group** button, which lists the group's [unfinished](../concepts/glossary.md#finished) and dead tasks |
 | Pending | "Waits behind" the task that its group runs first, with that task's state |
 | Its group could not be read | That it could not be read. The page shows the task, and its next update tries again |
 

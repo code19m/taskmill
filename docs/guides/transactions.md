@@ -156,15 +156,15 @@ saved from `EnqueueResult.ID` when the reminder was enqueued:
 
 ```go
 err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-    var reminderID int64
+    var reminderID int64 // 0 if the order has no reminder
     err := tx.QueryRow(ctx,
-        "UPDATE orders SET paid = true WHERE id = $1 RETURNING reminder_task_id", orderID).Scan(&reminderID)
+        "UPDATE orders SET paid = true WHERE id = $1 RETURNING coalesce(reminder_task_id, 0)", orderID).Scan(&reminderID)
     if err != nil {
         return err
     }
     err = client.CancelTx(ctx, taskmill.Pgx(tx), reminderID)
     if errors.Is(err, taskmill.ErrInvalidState) || errors.Is(err, taskmill.ErrNotFound) {
-        return nil // the reminder already finished, or was deleted: nothing to cancel
+        return nil // the reminder already finished, was deleted, or never was: nothing to cancel
     }
     return err
 })

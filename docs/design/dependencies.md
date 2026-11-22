@@ -189,7 +189,7 @@ more module for CI to download and check.
 
 ## The module of the browser tests
 
-The dashboard's script, `ui/static/app.js`, changes pages in place: it
+The dashboard's script, the modules in `ui/static`, changes pages in place: it
 updates a page to a newer copy, shows other pages and keeps them for the
 back button, confirms actions in a dialog, and shows tooltips. Only a
 browser runs it, so its tests drive one. They are a module of their own,

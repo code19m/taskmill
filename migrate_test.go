@@ -82,6 +82,21 @@ func TestMigrateWithARoleThatOnlyOwnsItsSchema(t *testing.T) {
 	}
 }
 
+// The migrations that a team's tool applies work for the same role, the
+// bootstrap included.
+func TestMigrationsApplyWithARoleThatOnlyOwnsItsSchema(t *testing.T) {
+	t.Parallel()
+	admin := testdb.Pool(t)
+	schema := testdb.Schema(t, admin)
+	role := schema + "_owner"
+	pool := newRole(t, admin, role, "CREATE SCHEMA "+schema+" AUTHORIZATION "+role)
+
+	applyWithoutMigrate(t, pool, schema, 0)
+	if _, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema}); err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+}
+
 func TestConcurrentMigratesOnWarmConnections(t *testing.T) {
 	t.Parallel()
 	const processes = 8
@@ -180,13 +195,6 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 	e := &env{pool: pool, schema: schema}
 	version := e.count(t, "SELECT max(version) FROM {s}.migrations")
 
-	// A transaction that writes the tables of the tasks stays open.
-	busy := e.begin(t)
-	var holder int
-	if err := busy.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&holder); err != nil {
-		t.Fatal(err)
-	}
-
 	r, err := pool.Query(t.Context(), "SELECT tablename FROM pg_tables WHERE schemaname = $1 AND tablename <> 'migrations'", schema)
 	if err != nil {
 		t.Fatal(err)
@@ -195,14 +203,22 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	// A transaction that writes the tables of the tasks stays open.
+	busy := e.begin(t)
 	for _, table := range tables {
 		e.txExec(t, busy, "LOCK TABLE {s}."+table+" IN ROW EXCLUSIVE MODE")
 	}
 
+	// Only the migration waits for a table of this schema. Other tests'
+	// statements can wait for busy too, such as an online index build that
+	// waits for every older transaction to end, so they must not match.
+	const cancelWaiting = `SELECT count(pg_cancel_backend(l.pid)) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+	                       WHERE NOT l.granted AND c.relnamespace = $1::regnamespace`
 	gaveUp := make(chan error, 1)
 	go func() { gaveUp <- taskmill.Migrate(t.Context(), pool, &taskmill.MigrateConfig{Schema: schema}) }()
 	waitFor(t, "the migration to wait for a busy table", func() bool {
-		return e.count(t, "SELECT count(pg_cancel_backend(pid)) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))", holder) > 0
+		return e.count(t, cancelWaiting, schema) > 0
 	})
 
 	err = recv(t, gaveUp, "Migrate to give up")
@@ -690,23 +706,71 @@ func applyWithoutMigrate(t *testing.T, pool *pgxpool.Pool, schema string, pendin
 	if err != nil {
 		t.Fatal(err)
 	}
+	apply(t, pool, schema, ms[:len(ms)-pending])
+}
 
-	for _, m := range ms[:len(ms)-pending] {
-		sql := m.SQL
-		if m.Version > 0 {
-			sql += fmt.Sprintf("\nINSERT INTO %s.migrations (version, name) VALUES (%d, '%s');", schema, m.Version, m.Name)
+// apply applies ms as a team's own runner does. The statements of a string
+// run in one transaction, which holds a migration and the record of its
+// version. An online migration runs its statements one at a time, and then
+// the record, as goose's NO TRANSACTION does.
+func apply(t *testing.T, pool *pgxpool.Pool, schema string, ms []taskmill.Migration) {
+	t.Helper()
+	for _, m := range ms {
+		record := fmt.Sprintf("INSERT INTO %s.migrations (version, name) VALUES (%d, '%s');", schema, m.Version, m.Name)
+		var stmts []string
+		switch {
+		case m.Version == 0:
+			stmts = []string{m.SQL}
+		case m.Online:
+			stmts = append(m.Statements(), record)
+		default:
+			stmts = []string{m.SQL + "\n" + record}
 		}
-		// Statements of a string run in one transaction: an online
-		// migration runs them one at a time, as goose's NO TRANSACTION does.
-		stmts := []string{sql}
-		if m.Online {
-			stmts = strings.Split(sql, ";")
-		}
+
 		for _, stmt := range stmts {
 			if _, err := pool.Exec(t.Context(), stmt); err != nil {
 				t.Fatalf("apply migration %d: %v", m.Version, err)
 			}
 		}
+	}
+}
+
+// A team's own runner applies an online migration one statement at a time,
+// as Migration.Online says, without parsing its SQL: PostgreSQL refuses
+// CONCURRENTLY in the one transaction of a query that holds several
+// statements.
+func TestMigrationsGiveTheStatementsOfAnOnlineStep(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	schema := testdb.Schema(t, pool)
+	released, err := taskmill.Migrations(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms, err := taskmill.MigrationsWith(schema, fmt.Sprintf("%04d_build.sql", len(released)), `-- online
+-- Two indexes; this comment has a semicolon.
+CREATE INDEX CONCURRENTLY tasks_by_kind_idx ON __SCHEMA__.tasks (kind);
+CREATE INDEX CONCURRENTLY tasks_by_queue_idx ON __SCHEMA__.tasks (queue);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply(t, pool, schema, released)
+
+	step := ms[len(ms)-1]
+	_, err = pool.Exec(t.Context(), step.SQL)
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "25001" { // active_sql_transaction
+		t.Fatalf("the online step's SQL in one query: got %v, want SQLSTATE 25001", err)
+	}
+
+	apply(t, pool, schema, []taskmill.Migration{step})
+	e := &env{pool: pool, schema: schema}
+	valid := `SELECT count(*) FROM pg_index WHERE indisvalid
+	          AND indexrelid IN (to_regclass('{s}.tasks_by_kind_idx'), to_regclass('{s}.tasks_by_queue_idx'))`
+	if n := e.count(t, valid); n != 2 {
+		t.Fatalf("%d valid indexes, want 2", n)
+	}
+	if _, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: schema}); err != nil {
+		t.Fatalf("new client: %v", err)
 	}
 }
 
@@ -994,8 +1058,8 @@ func TestMigrateNeedsTwoConnectionsForAnOnlineStep(t *testing.T) {
 	t.Parallel()
 	e, files := onlineEnv(t, testdb.PoolSize(t, 1))
 	err := recv(t, e.migrateWith(t.Context(), files), "Migrate")
-	if err == nil || !strings.Contains(err.Error(), "at least 2") {
-		t.Fatalf("got %v, want an error that asks for 2 connections", err)
+	if !errors.Is(err, taskmill.ErrInvalidArgument) || !strings.Contains(err.Error(), "at least 2") {
+		t.Fatalf("got %v, want ErrInvalidArgument that asks for 2 connections", err)
 	}
 }
 
@@ -1017,8 +1081,8 @@ func TestMigrateRefusesAnOnlineStepThatATimeoutWouldCancel(t *testing.T) {
 	e, files := onlineEnv(t, pool)
 
 	err = recv(t, e.migrateWith(t.Context(), files), "Migrate")
-	if err == nil || !strings.Contains(err.Error(), "statement_timeout = 30s") {
-		t.Fatalf("got %v, want an error that names the timeout", err)
+	if !errors.Is(err, taskmill.ErrInvalidArgument) || !strings.Contains(err.Error(), "statement_timeout = 30s") {
+		t.Fatalf("got %v, want ErrInvalidArgument that names the timeout", err)
 	}
 	if n := e.count(t, "SELECT count(*) FROM pg_class WHERE oid = to_regclass('{s}.tasks_slow_idx')"); n != 0 {
 		t.Fatal("Migrate began the build")

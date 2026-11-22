@@ -24,7 +24,9 @@
 <section class="card flush activity" aria-labelledby="activity-title">
   <div class="card-head">
     <h2 id="activity-title">Activity</h2>
-    <nav class="seg seg-sm" aria-label="Period">{{range $d.Periods}}<a href="{{path "/"}}?range={{.Name}}"{{if eq .Name $d.Period}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
+    {{/* A period is a filter of the charts: with the script, its page shows in place, and says what it shows. */ -}}
+    <nav class="seg seg-sm" aria-label="Period" data-filter>{{range $d.Periods}}<a href="{{path "/"}}?range={{.Name}}"{{if eq .Name $d.Period}} aria-current="true"{{end}}>{{.Name}}</a>{{end}}</nav>
+    <p class="visually-hidden" data-shown>Activity of the last {{$d.Period}}</p>
   </div>
   <div class="charts">
     {{template "dial" $d.Dial}}
@@ -61,7 +63,7 @@
         <td class="num{{if not $q.Workers}} zero{{end}}">{{$q.Workers}}</td>
         {{if not $ro}}<td class="actions-col">
           {{if $q.Paused}}<form method="post" action="{{path "/queues/resume"}}{{query "name" $q.Name "range" $d.Period}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
-          {{else}}<form method="post" action="{{path "/queues/pause"}}{{query "name" $q.Name "range" $d.Period}}" data-confirm="Running tasks finish, and no new ones start until you resume it." data-confirm-title="Pause queue {{visible $q.Name}}?" data-confirm-label="Pause queue"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>{{end}}
+          {{else}}<a class="btn sm quiet" href="{{path "/queues/pause"}}{{query "name" $q.Name "range" $d.Period}}" data-dialog>{{template "icon" "pause"}}Pause</a>{{end}}
         </td>{{end}}
       </tr>
     {{end}}

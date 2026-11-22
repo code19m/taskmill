@@ -37,8 +37,12 @@ func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 	if t.att.cancelRequested.Load() {
 		cancel(ErrTaskCanceled)
 	}
-	if t.lost.Load() {
-		cancel(ErrLeaseLost)
+	if w.leaseOver(parent, t) {
+		// The task may run on another worker already, as after a slow fetch:
+		// no code of the application starts on it here. A loss after this
+		// check cancels ctx, as t.cancel is set.
+		w.finish(record, t, outcome{kind: outcomeDiscard}, time.Time{})
+		return
 	}
 
 	if t.invalid != nil {
@@ -69,6 +73,20 @@ func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 // runs in its own goroutine, and the batch starts once every chain has
 // either reached the handler or returned early.
 func (w *Worker) runBatch(parent, record context.Context, tasks []*liveAttempt) {
+	// As in runOne: a task whose lease ended before the batch starts does
+	// not reach the handler, so that a relay does not publish its message
+	// again.
+	tasks = slices.DeleteFunc(tasks, func(t *liveAttempt) bool {
+		if !w.leaseOver(parent, t) {
+			return false
+		}
+		w.finish(record, t, outcome{kind: outcomeDiscard}, time.Time{})
+		return true
+	})
+	if len(tasks) == 0 {
+		return
+	}
+
 	w.counts.started.Add(int64(len(tasks)))
 	reg := tasks[0].reg
 	ctx, cancel := context.WithCancelCause(parent)

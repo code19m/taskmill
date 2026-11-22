@@ -4,8 +4,15 @@
 // system. The choice is remembered where the browser allows storage, and
 // holds for this page where it does not.
 (() => {
-  // Controls that need the scripts show from the first paint.
+  // Controls that need the script show from the first paint. The script
+  // marks the page once it started, before DOMContentLoaded. Without the
+  // mark, as when one of its files did not load during a rolling deploy,
+  // the page shows the controls of a page without the script.
   document.documentElement.classList.add("js");
+  document.addEventListener("DOMContentLoaded", () => {
+    const { classList } = document.documentElement;
+    if (!classList.contains("js-started")) classList.remove("js");
+  });
 
   const key = "taskmill-theme";
   const valid = (value) => value === "light" || value === "dark";

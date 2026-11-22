@@ -11,7 +11,7 @@
 <section class="card flush bulk-card" data-dialog-title="{{if $d.N}}{{$d.Verb}} {{$d.Tasks}}?{{else}}{{.Title}}{{end}}">
   <div class="card-head"><h2>Tasks that match</h2><span>{{$d.Tasks}}</span></div>
   <dl class="props">
-    {{range $row := $d.Filters}}<dt>{{.Title}}</dt><dd{{if .Mono}} class="mono"{{end}}>{{range $i, $v := .Values}}{{if $i}}, {{end}}{{if $row.Group}}{{template "group" $v}}{{else}}{{visible $v}}{{end}}{{end}}</dd>{{end}}
+    {{range $row := $d.Filters}}<dt>{{.Title}}</dt><dd{{if .Mono}} class="mono"{{end}}{{if or (instant .Since) (instant .Before)}} data-range-since="{{instant .Since}}" data-range-before="{{instant .Before}}"{{end}}>{{range $i, $v := .Values}}{{if $i}}, {{end}}{{if $row.Group}}{{template "group" $v}}{{else}}{{visible $v}}{{end}}{{end}}</dd>{{end}}
   </dl>
   <div class="card-body">
     {{if $d.N}}

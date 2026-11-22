@@ -14,7 +14,7 @@ Each row is one recipe, in reading order:
 | Respect a partner's limit: 4 calls at the same time, or 600 a minute | Its own queue with `MaxRunning`, one row that spaces the calls, and `Snooze` on HTTP 429 | [Call a rate-limited API](call-a-rate-limited-api.md) |
 | Apply one account's events in order | A `GroupKey` per account | [Keep order per key](keep-order-per-key.md) |
 | Stop one customer's big batch from delaying all the others, or serve many tenants | A queue for batch work, a `GroupKey` per customer, and one schema for all tenants | [Share a queue fairly between customers or tenants](share-a-queue-between-customers.md) |
-| Run one refresh for 50 changes to the same product | A flag in your own row, set in the transaction that enqueues | [Keep at most one waiting task per key](one-waiting-task-per-key.md) |
+| Run one refresh for 50 changes to the same product | The waiting task's ID in your own row, set in the transaction that enqueues | [Keep at most one waiting task per key](one-waiting-task-per-key.md) |
 | Stop a reminder when the customer pays, or move it to another day | `CancelTx` in the transaction that changes your data, and a check in the handler | [Cancel or replace a delayed task](cancel-a-delayed-task.md) |
 | Send each customer a summary at 09:00 local time | A due time per customer in your own table, and one schedule that enqueues what is due | [Run a task at each customer's local time](run-at-each-customers-local-time.md) |
 | Replace a crontab line | A `Schedule` with the same five fields, and a `Location` | [Move a cron job to a schedule](move-a-cron-job-to-a-schedule.md) |
@@ -65,8 +65,8 @@ Each row is one recipe, in reading order:
 | I want to… | Recommended way | Read |
 |---|---|---|
 | Run workers in production | A worker deployment of its own, from the same image | [Deploys](../production/deploys.md) |
-| Run migrations | `Migrate` at the start of every process | [Deploys](../production/deploys.md) |
-| Size the connection pool | One pool for the worker and its handlers, sized for its total `Concurrency` | [Database](../production/database.md#size-the-connection-pool) |
+| Run migrations | `Migrate` in a Job of its own, before the rollout | [Deploys](../production/deploys.md) |
+| Size the connection pool | One pool for the worker and its handlers, with its total `Concurrency` plus 5 connections | [Database](../production/database.md#size-the-connection-pool) |
 | Use PgBouncer | A direct connection in `ListenConfig` | [Connection poolers](../production/connection-poolers.md) |
 | Add the dashboard to my app | `ui.New`, behind your own login | [The dashboard](../guides/dashboard.md) |
 | Scale workers with the load | KEDA, on the queue's available plus running tasks | [Autoscaling](../production/autoscaling.md) |

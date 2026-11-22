@@ -61,7 +61,7 @@ help: ## Show this help.
 	@awk 'BEGIN { FS = ":.*## " } /^[a-z-]+:.*## / { printf "  %-20s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 .PHONY: check
-check: tidy-check lint test test-pgbouncer test-browser vuln otel-release-check compat ##Run every check that CI runs, except `make release-check` and `make api`.
+check: tidy-check lint test test-pgbouncer test-browser vuln otel-release-check compat ## Run every check that CI runs, except `make release-check` and `make api`.
 
 .PHONY: fmt
 fmt: $(GOLANGCI_LINT) ## Format all Go files.

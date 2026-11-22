@@ -266,7 +266,10 @@ func (t *Task[A]) CancelRequested() bool {
 // CompleteTx completes the task inside the caller's transaction, so that the
 // handler's own writes and the completion commit together or not at all. It
 // returns [ErrLeaseLost] if another attempt took the task over; return that
-// error, so that the transaction rolls back.
+// error, so that the transaction rolls back. If a cancel of the task was
+// requested while it ran, CompleteTx also takes back the dedupe key that the
+// cancel freed, unless another task took it, and like an enqueue of the key,
+// it waits for a transaction that claims it.
 //
 // After CompleteTx, the handler should commit and return nil. If the handler
 // returns an error after its transaction committed, the task stays completed
@@ -297,6 +300,9 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	}
 	if len(done) == 0 {
 		return fmt.Errorf("%w: task %d", ErrLeaseLost, a.id)
+	}
+	if err := a.client.regainKeys(ctx, q, done); err != nil {
+		return fmt.Errorf("taskmill: complete: %w", err)
 	}
 
 	a.completedInTx.Store(true)

@@ -91,6 +91,13 @@ _, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), RemindCustomer{OrderID: id}, &
 `CancelTx` waits in an open transaction, the task still holds the key, and
 an enqueue of the key is a duplicate.
 
+A running task that is asked to stop frees its key right away too. If its
+handler completes it all the same, the work was done, so the task takes its
+key back for the rest of the window, unless another task took the key
+during the run: that task keeps it. If a transaction that claimed the key
+stays open for more than 100 ms, the worker gives up and logs a warning, and
+the task stays without its key.
+
 ## Retry a canceled task that has a key
 
 A retry gives the canceled task its key back, for the rest of the window.

@@ -43,7 +43,7 @@ var workerCounters = []struct {
 		func(s taskmill.WorkerStats) int64 { return s.CompletionsBlocked },
 	},
 	{
-		"taskmill.worker.pool.waits", "{wait}", "Fetches and records of failed attempts that waited for a connection of a full pool.",
+		"taskmill.worker.pool.waits", "{wait}", "Times that a statement of the worker found every connection of the pool in use, and waited for one.",
 		func(s taskmill.WorkerStats) int64 { return s.PoolWaits },
 	},
 }
@@ -60,8 +60,9 @@ var workerCounters = []struct {
 //     return 5 seconds after its context ended, which the worker abandoned.
 //   - taskmill.worker.completions.blocked: the completions that waited
 //     longer than the lease for a row that another transaction held.
-//   - taskmill.worker.pool.waits: the fetches and records of failed attempts
-//     that found every connection of the pool in use, and waited for one.
+//   - taskmill.worker.pool.waits: the times that a statement of the worker
+//     found every connection of the pool in use, and waited for one, as
+//     [taskmill.WorkerStats].PoolWaits says.
 //   - taskmill.worker.slots: the slots of the worker's queues, by
 //     taskmill.slot.state: free, running, or stuck, held by a handler that
 //     did not return 5 seconds after its context ended.

@@ -156,9 +156,8 @@ type taskListData struct {
 
 func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := taskFilter(q)
 	first := maps.Clone(q) // the list's first page
-	for _, key := range []string{"cursor", "limit", "done", "count", "conflicts"} {
+	for _, key := range []string{"cursor", "limit", "done", "count", "skipped", "conflicts"} {
 		first.Del(key)
 	}
 
@@ -168,24 +167,25 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	since, before, err := listRange(q)
+	sel, err := selectionOf(q)
 	if err != nil {
 		s.refuse(w, r, http.StatusBadRequest, "Invalid request", reason(err),
 			link{listPath(withRange(first, time.Time{}, time.Time{})), "Clear the range", "clear"})
 		return
 	}
 
+	f, since, before, order := sel.filter, sel.since, sel.before, sel.order
 	ranged := !since.IsZero() || !before.IsZero()
-	order := orderOf(f, ranged)
 	first = withRange(first, since, before)
 
 	// The list shows no payload, no metadata, and only each task's last
-	// error. Its range is of the time that orders it.
+	// error. Its range is of the time that orders it. A list in creation
+	// order without a start starts at the earliest time, which puts it in
+	// that order for the client too.
 	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: limit, Summary: true}
-	if order.ByFinish {
-		params.FinishedSince, params.FinishedBefore = since, before
-	} else {
-		params.CreatedSince, params.CreatedBefore = since, before
+	params.CreatedSince, params.CreatedBefore, params.FinishedSince, params.FinishedBefore = sel.ranges()
+	if order.Column == "created" && since.IsZero() {
+		params.CreatedSince = earliest
 	}
 
 	res, err := s.client.List(r.Context(), params)
@@ -237,11 +237,11 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 		groupFilter.Source = s.path("/choices/groups")
 	}
 
-	// A bulk action acts on every task that the filters select, also outside
-	// a range of time: a list with a range does not offer it.
+	// A bulk action acts on the tasks of the list, in its range: it needs
+	// filters, as the client does.
 	var bulk *bulkLinks
-	if filtered && !ranged && !s.readOnly {
-		bulk = s.bulkLinks(f)
+	if sel.filtered() && !s.readOnly {
+		bulk = s.bulkLinks(sel)
 	}
 
 	d := taskListData{
@@ -344,12 +344,20 @@ type listOrder struct {
 	ByFinish          bool   // the list is in the order of when its tasks finished, and shows that time
 }
 
-// orderOf returns the order in which Client.List returns the tasks of f. A
-// list of only dead tasks, only canceled tasks, or both comes by when the
-// tasks finished, the latest first, and a range on it is one of finish
-// times. On every other list, a range is one of creation times: with one,
-// the list comes by when the tasks were created, the newest first, and
-// without one by ID.
+// orderOf returns the order of the task list of f. A list of only dead
+// tasks, only canceled tasks, or both comes by when the tasks finished, the
+// latest first, and a range on it is one of finish times. On every other
+// list, a range is one of creation times, and the list comes by when the
+// tasks were created, the newest first, if it has a range, or names a queue
+// and no FIFO group. Otherwise it comes by ID.
+//
+// Client.List reads a list by creation time from each named queue's
+// indexes, so it reads only that queue's tasks: for a state with few of
+// them, all of a backlog in the queue. By ID, the statistics of the whole
+// table choose the plan, which may read the newer tasks of every queue. A
+// list of a FIFO group stays by ID, which the indexes of groups serve, and
+// so does a list of no queue, which by creation time would read a page of
+// each queue.
 func orderOf(f taskmill.TaskFilter, ranged bool) listOrder {
 	unfinished := func(s taskmill.State) bool { return s != taskmill.StateDead && s != taskmill.StateCanceled }
 	if len(f.States) > 0 && !slices.ContainsFunc(f.States, unfinished) {
@@ -357,11 +365,15 @@ func orderOf(f taskmill.TaskFilter, ranged bool) listOrder {
 	}
 
 	order := listOrder{Column: "id", Name: "Newest first", First: "Newest", Next: "Older", Time: "Created"}
-	if ranged {
+	if ranged || len(f.Queues) > 0 && len(f.GroupKeys) == 0 {
 		order.Column = "created"
 	}
 	return order
 }
+
+// earliest is the earliest time that PostgreSQL stores: a range of creation
+// times that starts there leaves out no task.
+var earliest = time.Date(-4713, time.November, 24, 0, 0, 0, 0, time.UTC)
 
 // group describes a task's place in its FIFO group.
 type group struct {

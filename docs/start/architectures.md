@@ -29,7 +29,7 @@ Build one binary with two roles: a `web` role that enqueues, and a `worker`
 role that runs the handlers. Each role gets its own deployment, so workers
 scale with the queue, not with web traffic. [Deploys](../production/deploys.md)
 shows the binary, and [Ready to ship](../tutorial/7-ready-to-ship.md) builds
-it step by step.
+a smaller one step by step, with a web and a worker role.
 
 ## A modular monolith
 

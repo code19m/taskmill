@@ -191,8 +191,90 @@ func TestActionsWorkForAnyName(t *testing.T) {
 	}
 }
 
+// An action that cannot be undone, or that does more than its button says,
+// asks first, with or without the script: its button is a link to the page
+// that asks, which changes nothing, and whose form sends the action. With
+// the script, the dialog shows that page, under the question that it
+// names. Resume asks nothing. A deleted task's page is gone, so the delete
+// leads to the list of the task's queue and state.
+func TestActionsAskFirst(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	storeSchedules(t, client, []taskmill.Schedule{{Name: "nightly", Cron: "@daily", Args: greet{}}})
+	if err := keepQueue(t.Context(), client, "mail"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := client.EnqueueMany(t.Context(), []taskmill.EnqueueParams{
+		{Args: greet{}, Options: &taskmill.EnqueueOptions{Queue: "mail"}},
+		{Args: greet{}, Options: &taskmill.EnqueueOptions{Queue: "mail"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead, running := strconv.FormatInt(res[0].ID, 10), strconv.FormatInt(res[1].ID, 10)
+	if _, err := pool.Exec(t.Context(), `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = now() WHERE id = $1`, res[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `UPDATE `+schema+`.tasks SET state = 'running', attempt = 1, attempted_at = now(),
+	    attempted_by = 'w', lease_expires_at = now() + interval '1 minute' WHERE id = $1`, res[1].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	h := handler(t, client, nil)
+	for _, c := range []struct {
+		page, button, question, explain, sends string
+	}{
+		{"/tasks/" + dead, "Retry", "Retry task #" + dead + "?", "It runs again with a fresh set of attempts.", "/tasks/" + dead + "/retry"},
+		{"/tasks/" + dead, "Delete", "Delete task #" + dead + "?", "This cannot be undone.", "/tasks/" + dead + "/delete?queue=mail&state=dead"},
+		{"/tasks/" + running, "Cancel", "Cancel task #" + running + "?", "Its handler&#39;s context is canceled", "/tasks/" + running + "/cancel"},
+		{"/?range=6h", "Pause", "Pause queue mail?", "Running tasks finish", "/queues/pause?name=mail&range=6h"},
+		{"/schedules", "Run now", "Run nightly now?", "Its regular timetable stays as it is.", "/schedules/run?name=nightly"},
+		{"/schedules", "Pause", "Pause nightly?", "Runs missed while paused collapse", "/schedules/pause?name=nightly"},
+	} {
+		_, page, _ := get(t, h, c.page)
+		link := regexp.MustCompile(`<a class="btn[^"]*" href="([^"]*)" data-dialog><svg.*?</svg>` + c.button + `</a>`).FindStringSubmatch(page)
+		if link == nil {
+			t.Errorf("%s: %s is no link to the page that asks first\n%s", c.page, c.button, page)
+			continue
+		}
+
+		code, asks, _ := get(t, h, html.UnescapeString(link[1]))
+		form := askingForm.FindStringSubmatch(asks)
+		if code != http.StatusOK || form == nil || html.UnescapeString(form[1]) != c.sends ||
+			!strings.Contains(asks, `data-dialog-title="`+html.EscapeString(c.question)+`"`) || !strings.Contains(asks, "<p>"+c.explain) {
+			t.Errorf("%s, %s: status %d, want a page that asks %q, says %q, and sends %s\n%s", c.page, link[1], code, c.question, c.explain, c.sends, asks)
+		}
+	}
+
+	// Asking changed nothing.
+	if info, err := client.Get(t.Context(), res[0].ID); err != nil || info.State != taskmill.StateDead {
+		t.Fatalf("after the pages that ask, the dead task is %v, %v", info, err)
+	}
+	if paused := pausedQueues(t, client); len(paused) != 0 {
+		t.Fatalf("after the page that asks, the queues %q are paused", paused)
+	}
+
+	rec := post(t, h, "/tasks/"+dead+"/delete?queue=mail&state=dead", "same-origin")
+	if got := rec.Header().Get("Location"); rec.Code != http.StatusSeeOther || got != "/tasks?queue=mail&state=dead&done=delete" {
+		t.Errorf("delete: status %d to %q, want 303 to the list of the task's queue and state", rec.Code, got)
+	}
+
+	for _, page := range []string{"/tasks/" + running + "/archive", "/queues/resume?name=mail", "/schedules/resume?name=nightly", "/tasks/x/delete"} {
+		if code, _, _ := get(t, h, page); code != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404: no action there asks first", page, code)
+		}
+	}
+	if code, _, _ := get(t, h, "/tasks/"+dead+"/delete"); code != http.StatusNotFound {
+		t.Errorf("the page that asks before deleting a deleted task: status %d, want 404", code)
+	}
+	if code, _, _ := get(t, h, "/schedules/run?name=gone"); code != http.StatusNotFound {
+		t.Errorf("the page that asks before running a schedule that is not there: status %d, want 404", code)
+	}
+}
+
 // An action with a value that is not valid is a bad request, as a page with
-// the same value is. Only an action that does not fit the task as it is now
+// the same value is, and so is the page that asks before an action on no
+// queue or schedule. Only an action that does not fit the task as it is now
 // is a conflict.
 func TestActionsRefuseValuesThatAreNotValid(t *testing.T) {
 	t.Parallel()
@@ -204,6 +286,11 @@ func TestActionsRefuseValuesThatAreNotValid(t *testing.T) {
 		rec := post(t, h, target, "same-origin")
 		if body := rec.Body.String(); rec.Code != http.StatusBadRequest || !strings.Contains(body, "<h1>Invalid request</h1>") {
 			t.Errorf("POST %s: status %d, want 400 and a page that says so\n%s", target, rec.Code, body)
+		}
+	}
+	for _, page := range []string{"/queues/pause", "/schedules/run", "/schedules/pause?name="} {
+		if code, body, _ := get(t, h, page); code != http.StatusBadRequest || !strings.Contains(body, "<h1>Invalid request</h1>") {
+			t.Errorf("GET %s: status %d, want 400 and a page that says so\n%s", page, code, body)
 		}
 	}
 }
@@ -244,14 +331,29 @@ func TestReadOnly(t *testing.T) {
 	h := handler(t, client, &ui.Config{ReadOnly: true})
 	id := strconv.FormatInt(res.ID, 10)
 
-	// The pages that offer actions offer none, and say why.
+	// The pages that offer actions offer none, and say why. An action is a
+	// form, or a link to the page that asks before it.
 	operate := handler(t, client, nil)
+	offers := func(body string) bool {
+		return strings.Contains(body, `method="post"`) || strings.Contains(body, " data-dialog>")
+	}
 	for _, page := range []string{"/", "/schedules", "/tasks/" + id} {
-		if _, body, _ := get(t, operate, page); !strings.Contains(body, `method="post"`) {
+		if _, body, _ := get(t, operate, page); !offers(body) {
 			t.Fatalf("%s offers no action that a read-only dashboard could hide\n%s", page, body)
 		}
-		if _, body, _ := get(t, h, page); strings.Contains(body, `method="post"`) || !strings.Contains(body, "read-only") {
+		if _, body, _ := get(t, h, page); offers(body) || !strings.Contains(body, "read-only") {
 			t.Errorf("read-only %s offers an action, or does not say that it is read-only\n%s", page, body)
+		}
+	}
+
+	for _, page := range []string{"/tasks/" + id + "/delete", "/queues/pause?name=default", "/schedules/run?name=nightly"} {
+		if code, _, _ := get(t, h, page); code != http.StatusForbidden {
+			t.Errorf("read-only %s, the page that asks before an action: %d", page, code)
+		}
+	}
+	for _, page := range []string{"/tasks/" + id + "/archive", "/queues/resume?name=default", "/schedules/resume?name=nightly"} {
+		if code, _, _ := get(t, h, page); code != http.StatusNotFound {
+			t.Errorf("read-only %s, where no action asks first: %d, want 404", page, code)
 		}
 	}
 
@@ -387,10 +489,9 @@ func TestBulkActions(t *testing.T) {
 }
 
 // The task list offers the bulk actions that the selected states allow,
-// without counting the tasks. A list with a range, of finish times or of
-// creation times, offers none: a bulk action acts on the filters alone, also
-// on the tasks outside the range. Each is a link to the page that asks,
-// marked for the script, which asks in its dialog.
+// without counting the tasks, on the tasks of its range: of finish times, or
+// of creation times. A range alone is no filter. Each is a link to the page
+// that asks, marked for the script, which asks in its dialog.
 func TestTaskListOffersBulkActions(t *testing.T) {
 	t.Parallel()
 	h := handler(t, setup(t), nil)
@@ -401,12 +502,16 @@ func TestTaskListOffersBulkActions(t *testing.T) {
 		"/tasks?state=dead":                 {"/tasks/bulk/retry?state=dead", "/tasks/bulk/delete?state=dead"},
 		"/tasks?state=running&kind=greet":   {"/tasks/bulk/cancel?kind=greet&amp;state=running"},
 		// With a range of finish times.
-		"/tasks?state=dead&since=2021-03-04T11:00Z":                 nil,
-		"/tasks?state=canceled&queue=mail&before=2021-03-04T11:00Z": nil,
+		"/tasks?state=dead&since=2021-03-04T11:00Z": {
+			"/tasks/bulk/retry?since=2021-03-04T11%3A00%3A00Z&amp;state=dead", "/tasks/bulk/delete?since=2021-03-04T11%3A00%3A00Z&amp;state=dead",
+		},
+		"/tasks?state=canceled&queue=mail&before=2021-03-04T11:00Z": {"/tasks/bulk/retry?before=2021-03-04T11%3A00%3A00Z&amp;queue=mail&amp;state=canceled", "/tasks/bulk/delete?"},
 		// With a range of creation times.
-		"/tasks?queue=mail&since=2021-03-04T11:00Z":                                         nil,
-		"/tasks?queue=mail&state=available&since=2021-03-04T11:00Z&before=2021-03-05T00:00": nil,
-		"/tasks?state=dead&state=running&before=2021-03-04T11:00Z":                          nil,
+		"/tasks?queue=mail&since=2021-03-04T11:00Z":                                         {"/tasks/bulk/retry?", "/tasks/bulk/cancel?", "/tasks/bulk/delete?queue=mail&amp;since=2021-03-04T11%3A00%3A00Z"},
+		"/tasks?queue=mail&state=available&since=2021-03-04T11:00Z&before=2021-03-05T00:00": {"/tasks/bulk/cancel?", "/tasks/bulk/delete?"},
+		"/tasks?state=dead&state=running&before=2021-03-04T11:00Z":                          {"/tasks/bulk/retry?", "/tasks/bulk/cancel?", "/tasks/bulk/delete?"},
+		// A range alone is no filter.
+		"/tasks?since=2021-03-04T11:00Z": nil,
 	} {
 		_, body, _ := get(t, h, path)
 		if got := strings.Count(body, `href="/tasks/bulk/`); got != len(want) {
@@ -524,7 +629,7 @@ func (c *countedStates) TraceBatchStart(ctx context.Context, _ *pgx.Conn, d pgx.
 		if !strings.Contains(q.SQL, "unflagged") {
 			continue
 		}
-		if states, ok := q.Arguments[len(q.Arguments)-1].([]string); ok {
+		if states, ok := q.Arguments[3].([]string); ok { // $4, after the queues, kinds, and groups
 			c.mu.Lock()
 			c.counts = append(c.counts, slices.Sorted(slices.Values(states)))
 			c.mu.Unlock()
@@ -576,6 +681,74 @@ func TestBulkPagesCountOnlyWhatTheActionChanges(t *testing.T) {
 		if tc.want == nil && !strings.Contains(body, "No task matches.") {
 			t.Errorf("%s: the page does not say that no task matches", tc.target)
 		}
+	}
+}
+
+// A bulk action on a list with a range counts and changes exactly the tasks
+// of that range, and leads back to the same list: here, the retry of what
+// died in an incident leaves the tasks that died before it. Its page names
+// the range, in UTC and by its instants for the script, and refuses one that
+// is not a range, as its form does.
+func TestBulkActionActsOnTheRangeOfTheList(t *testing.T) {
+	t.Parallel()
+	client, pool, schema := setupDB(t)
+	ctx := t.Context()
+	var ids []int64
+	for range 4 {
+		res, err := client.Enqueue(ctx, greet{Name: "x"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, res.ID)
+	}
+
+	// Tasks 1 and 2 died in the incident, from 14:00 to 14:40 UTC, task 0
+	// before it, and task 3 waits.
+	if _, err := pool.Exec(ctx, `UPDATE `+schema+`.tasks SET state = 'dead', finalized_at = v.at
+	    FROM (VALUES ($1::bigint, '2026-03-14T13:00Z'::timestamptz), ($2, '2026-03-14T14:05Z'), ($3, '2026-03-14T14:39Z')) AS v(id, at)
+	    WHERE tasks.id = v.id`, ids[0], ids[1], ids[2]); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &actionLog{}
+	h := handler(t, client, &ui.Config{Logger: slog.New(logs)})
+	incident := "since=2026-03-14T14%3A00%3A00Z&before=2026-03-14T14%3A40%3A00Z"
+	code, body, _ := get(t, h, "/tasks/bulk/retry?state=dead&"+incident)
+	if code != http.StatusOK || !strings.Contains(body, "Retry 2 tasks</button>") ||
+		!strings.Contains(body, `<dt>Finished</dt><dd data-range-since="2026-03-14T14:00:00Z" data-range-before="2026-03-14T14:40:00Z">14 Mar 2026 14:00 UTC to 14 Mar 2026 14:40 UTC</dd>`) ||
+		!strings.Contains(body, `action="/tasks/bulk/retry?before=2026-03-14T14%3A40%3A00Z&amp;since=2026-03-14T14%3A00%3A00Z&amp;state=dead"`) ||
+		!strings.Contains(body, `href="/tasks?before=2026-03-14T14%3A40%3A00Z&amp;since=2026-03-14T14%3A00%3A00Z&amp;state=dead"`) {
+		t.Fatalf("retry page of a range: %d\n%s", code, body)
+	}
+
+	rec := post(t, h, "/tasks/bulk/retry?state=dead&"+incident, "same-origin")
+	want := "/tasks?before=2026-03-14T14%3A40%3A00Z&count=2&done=retry-all&since=2026-03-14T14%3A00%3A00Z&state=dead"
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != want {
+		t.Fatalf("retry of a range: %d to %q, want %q", rec.Code, rec.Header().Get("Location"), want)
+	}
+	for i, state := range []taskmill.State{taskmill.StateDead, taskmill.StateAvailable, taskmill.StateAvailable, taskmill.StateAvailable} {
+		if info, err := client.Get(ctx, ids[i]); err != nil || info.State != state {
+			t.Fatalf("task %d after the retry: %v, %v; want %s", i, info, err, state)
+		}
+	}
+
+	// A range of creation times, on a list of any other states.
+	code, body, _ = get(t, h, "/tasks/bulk/cancel?queue=default&before=2000-01-01T00:00Z")
+	if code != http.StatusOK || !strings.Contains(body, "No task matches.") || !strings.Contains(body, `<dt>Created</dt><dd data-range-since="" data-range-before="2000-01-01T00:00:00Z">Before 1 Jan 2000 00:00 UTC</dd>`) {
+		t.Fatalf("cancel page of a range that holds no task: %d\n%s", code, body)
+	}
+
+	for _, target := range []string{"/tasks/bulk/retry?state=dead&since=yesterday", "/tasks/bulk/retry?state=dead&since=2026-03-14T15:00Z&before=2026-03-14T14:00Z"} {
+		if code, _, _ := get(t, h, target); code != http.StatusBadRequest {
+			t.Errorf("GET %s: %d, want 400", target, code)
+		}
+		if rec := post(t, h, target, "same-origin"); rec.Code != http.StatusBadRequest {
+			t.Errorf("POST %s: %d, want 400", target, rec.Code)
+		}
+	}
+
+	if want := []string{"retry tasks before=2026-03-14T14%3A40%3A00Z&since=2026-03-14T14%3A00%3A00Z&state=dead"}; !slices.Equal(logs.actions, want) {
+		t.Fatalf("logged actions %v, want %v", logs.actions, want)
 	}
 }
 

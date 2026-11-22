@@ -17,19 +17,57 @@ import (
 // errBudget is why a bulk action stopped before it was done.
 var errBudget = errors.New("the bulk action used its time")
 
+// selection is what a task list shows, and what a bulk action on it acts
+// on: the tasks that its filters select, in its range of the time that
+// orders it.
+type selection struct {
+	filter        taskmill.TaskFilter
+	since, before time.Time // the bounds of the range; zero for none
+	order         listOrder
+}
+
+// selectionOf reads the selection in the query of a task list.
+func selectionOf(q url.Values) (selection, error) {
+	since, before, err := listRange(q)
+	f := taskFilter(q)
+	return selection{filter: f, since: since, before: before, order: orderOf(f, !since.IsZero() || !before.IsZero())}, err
+}
+
+// filtered reports whether the selection's filters select tasks by what they
+// are, as a bulk action needs: a range alone is no filter.
+func (sel selection) filtered() bool {
+	f := sel.filter
+	return len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) > 0
+}
+
+// query returns the query of the selection, for links and redirects.
+func (sel selection) query() url.Values {
+	return withRange(filterQuery(sel.filter), sel.since, sel.before)
+}
+
+// ranges returns the range of the selection as the client takes it: of
+// finish times on a list in finish order, and of creation times on every
+// other.
+func (sel selection) ranges() (createdSince, createdBefore, finishedSince, finishedBefore time.Time) {
+	if sel.order.ByFinish {
+		return time.Time{}, time.Time{}, sel.since, sel.before
+	}
+	return sel.since, sel.before, time.Time{}, time.Time{}
+}
+
 // bulkLinks lead to the pages of the bulk actions on the tasks that the
 // filters select; empty for an action that no selected state allows.
 type bulkLinks struct {
 	Retry, Cancel, Delete string
 }
 
-func (s *server) bulkLinks(f taskmill.TaskFilter) *bulkLinks {
-	states := f.States
+func (s *server) bulkLinks(sel selection) *bulkLinks {
+	states := sel.filter.States
 	if len(states) == 0 {
 		states = listedStates
 	}
 
-	q := filterQuery(f).Encode()
+	q := sel.query().Encode()
 	href := func(name string) string {
 		a := bulkActions[name]
 		if !slices.ContainsFunc(states, a.allows) {
@@ -53,24 +91,26 @@ type bulkAction struct {
 	count   func(*taskmill.TaskCounts) taskmill.TaskCount
 }
 
-// changes counts the tasks that the filter selects and the action would
-// change. It counts only the states that the action changes: the others can
-// hold many more tasks, such as every completed task of a kind, which the
-// count would read for nothing. With none of those states left, it counts
+// changes counts the tasks of the selection that the action would change.
+// It counts only the states that the action changes: the others can hold
+// many more tasks, such as every completed task of a kind, which the count
+// would read for nothing. With none of those states left, it counts
 // nothing. A state that is not one stays, for the client to refuse.
-func (a bulkAction) changes(ctx context.Context, client *taskmill.Client, f taskmill.TaskFilter) (taskmill.TaskCount, error) {
-	states := f.States
+func (a bulkAction) changes(ctx context.Context, client *taskmill.Client, sel selection) (taskmill.TaskCount, error) {
+	p := &taskmill.CountParams{Filter: sel.filter}
+	states := p.Filter.States
 	if len(states) == 0 {
 		states = listedStates
 	}
-	f.States = slices.DeleteFunc(slices.Clone(states), func(st taskmill.State) bool {
+	p.Filter.States = slices.DeleteFunc(slices.Clone(states), func(st taskmill.State) bool {
 		return slices.Contains(listedStates, st) && !a.allows(st)
 	})
-	if len(f.States) == 0 {
+	if len(p.Filter.States) == 0 {
 		return taskmill.TaskCount{}, nil
 	}
 
-	counts, err := client.Count(ctx, &taskmill.CountParams{Filter: f})
+	p.CreatedSince, p.CreatedBefore, p.FinishedSince, p.FinishedBefore = sel.ranges()
+	counts, err := client.Count(ctx, p)
 	if err != nil {
 		return taskmill.TaskCount{}, err
 	}
@@ -109,10 +149,11 @@ var bulkActions = map[string]bulkAction{
 
 // filterRow is one filter that a bulk action's page shows.
 type filterRow struct {
-	Title  string
-	Values []string
-	Mono   bool
-	Group  bool // the values are FIFO group keys
+	Title         string
+	Values        []string
+	Mono          bool
+	Group         bool      // the values are FIFO group keys
+	Since, Before time.Time // the bounds of a row of a range, which the script words in the reader's time zone
 }
 
 // bulkData is what a bulk action's page shows.
@@ -140,14 +181,18 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f := taskFilter(r.URL.Query())
-	if len(f.States)+len(f.Queues)+len(f.Kinds)+len(f.GroupKeys) == 0 {
+	sel, err := selectionOf(r.URL.Query())
+	if err != nil {
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", reason(err), backTo("/tasks?"+filterQuery(sel.filter).Encode()))
+		return
+	}
+	if !sel.filtered() {
 		s.refuse(w, r, http.StatusBadRequest, "Choose filters first",
 			"A bulk action acts on the tasks that the task list's filters select.", link{"/tasks", "Back to the tasks", "back"})
 		return
 	}
 
-	n, err := a.changes(r.Context(), s.client, f)
+	n, err := a.changes(r.Context(), s.client, sel)
 	if errors.Is(err, taskmill.ErrInvalidArgument) {
 		s.refuse(w, r, http.StatusBadRequest, "Invalid filter", reason(err), link{"/tasks", "Clear the filters", "clear"})
 		return
@@ -157,9 +202,14 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var states []string
+	f := sel.filter
+	var states, period []string
 	for _, st := range f.States {
 		states = append(states, string(st))
+	}
+	if !sel.since.IsZero() || !sel.before.IsZero() {
+		_, full := rangeWords(sel.since, sel.before, time.Now())
+		period = []string{full}
 	}
 	var rows []filterRow
 	for _, row := range []filterRow{
@@ -167,6 +217,7 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		{Title: "Queue", Values: f.Queues},
 		{Title: "Kind", Values: f.Kinds, Mono: true},
 		{Title: "FIFO group", Values: f.GroupKeys, Mono: true, Group: true},
+		{Title: sel.order.Time, Values: period, Since: sel.since, Before: sel.before},
 	} {
 		if len(row.Values) > 0 {
 			rows = append(rows, row)
@@ -174,15 +225,149 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The form carries where a run that stopped early continues.
-	action := filterQuery(f)
+	action := sel.query()
 	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
 		action.Set("cursor", cursor)
 	}
 
 	s.render(w, r, http.StatusOK, "bulk.html", page{Title: a.Verb + " tasks", Nav: "tasks", Static: true, Dead: s.deadCount(r), Data: bulkData{
 		bulkAction: a, Filters: rows, N: n.N, Tasks: tasks(n),
-		Path: s.path(a.path + "?" + action.Encode()), Back: s.path("/tasks?" + filterQuery(f).Encode()),
+		Path: s.path(a.path + "?" + action.Encode()), Back: s.path(listPath(sel.query())),
 	}})
+}
+
+// confirmation is what the page that asks before an action on one task,
+// queue, or schedule shows, as bulkPage asks before an action on many. The
+// action's button is a link to it: without the script it is a page, and
+// with it, the dialog shows it over the page of the button. The address of
+// an action that does not ask, such as a resume, is not found, also on a
+// read-only dashboard.
+type confirmation struct {
+	Question string // what the dialog's title asks
+	Explain  string // what the action does
+	Verb     string // what its button says
+	Icon     string
+	Danger   bool
+	Path     string // where its form sends the action
+	Back     link   // the page of the action's button
+}
+
+// confirm answers with the page that asks c, in the section nav. It asks
+// only: the action is its form's.
+func (s *server) confirm(w http.ResponseWriter, r *http.Request, nav string, c confirmation, back string) {
+	c.Back = backTo(back)
+	s.render(w, r, http.StatusOK, "confirm.html", page{
+		Title: strings.TrimSuffix(c.Question, "?"), Nav: nav, Static: true, Dead: s.deadCount(r), Data: c,
+	})
+}
+
+// askTask asks before an action on one task. It reads the task: a cancel
+// does not do the same to a running task.
+func (s *server) askTask(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		s.notFound(w, r)
+		return
+	}
+
+	n, action := strconv.FormatInt(id, 10), r.PathValue("action")
+	var c confirmation
+	switch action {
+	case "retry":
+		c = confirmation{Question: "Retry task #" + n + "?", Explain: "It runs again with a fresh set of attempts.", Verb: "Retry", Icon: "retry"}
+	case "cancel":
+		c = confirmation{Question: "Cancel task #" + n + "?", Explain: "It will not run.", Verb: "Cancel task", Icon: "cancel"}
+	case "delete":
+		c = confirmation{Question: "Delete task #" + n + "?", Explain: "This cannot be undone.", Verb: "Delete", Icon: "trash", Danger: true}
+	default:
+		s.notFound(w, r)
+		return
+	}
+
+	if s.refuseIfReadOnly(w, r) {
+		return
+	}
+
+	info, err := s.client.Get(r.Context(), id)
+	if errors.Is(err, taskmill.ErrNotFound) {
+		s.taskNotFound(w, r, id)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	c.Path = "/tasks/" + n + "/" + action
+	switch {
+	case action == "cancel" && info.State == taskmill.StateRunning:
+		c.Explain = "Its handler's context is canceled, and the task becomes canceled when the handler returns."
+	case action == "delete":
+		c.Path += query("queue", info.Queue, "state", string(info.State))
+	}
+	s.confirm(w, r, "tasks", c, "/tasks/"+n)
+}
+
+// askQueue asks before a queue is paused; a queue resumes without asking.
+// The query names the queue and the period of the overview, as for
+// queueAction.
+func (s *server) askQueue(w http.ResponseWriter, r *http.Request) {
+	if r.PathValue("action") != "pause" {
+		s.notFound(w, r)
+		return
+	}
+	if s.refuseIfReadOnly(w, r) {
+		return
+	}
+
+	q := r.URL.Query()
+	name, period := q.Get("name"), periodOf(q.Get("range")).Name
+	if name == "" {
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", "The address names no queue.", backTo(overviewOf(q)))
+		return
+	}
+	s.confirm(w, r, "overview", confirmation{
+		Question: "Pause queue " + visible(name) + "?", Explain: "Running tasks finish, and no new ones start until you resume it.",
+		Verb: "Pause queue", Icon: "pause", Path: "/queues/pause" + query("name", name, "range", period),
+	}, overviewOf(q))
+}
+
+// askSchedule asks before a schedule runs now, or is paused; a schedule
+// resumes without asking. The query names the schedule, which it reads: a
+// schedule that is not there gets the answer of its action.
+func (s *server) askSchedule(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	var c confirmation
+	switch r.PathValue("action") {
+	case "run":
+		c = confirmation{Question: "Run " + visible(name) + " now?", Explain: "Its regular timetable stays as it is.", Verb: "Run now", Icon: "bolt"}
+	case "pause":
+		c = confirmation{Question: "Pause " + visible(name) + "?", Explain: "Runs missed while paused collapse into one when you resume it.", Verb: "Pause schedule", Icon: "pause"}
+	default:
+		s.notFound(w, r)
+		return
+	}
+
+	if s.refuseIfReadOnly(w, r) {
+		return
+	}
+	if name == "" {
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", "The address names no schedule.", backTo("/schedules"))
+		return
+	}
+
+	schedules, err := s.client.Schedules(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if !slices.ContainsFunc(schedules, func(info taskmill.ScheduleInfo) bool { return info.Name == name }) {
+		s.actionFailed(w, r, taskmill.ErrNotFound, "/schedules")
+		return
+	}
+
+	c.Path = "/schedules/" + r.PathValue("action") + query("name", name)
+	s.confirm(w, r, "schedules", c, "/schedules")
 }
 
 // notices are the messages shown after an action, by the code in the
@@ -259,7 +444,10 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 	case "cancel":
 		err, done = s.client.Cancel(ctx, id), "cancel"
 	case "delete":
-		err, done, target = s.client.Delete(ctx, id), "delete", "/tasks"
+		// The task's page is gone: the action leads to the list of its queue
+		// and state, which the page that asked put in the query.
+		q := r.URL.Query()
+		err, done, target = s.client.Delete(ctx, id), "delete", "/tasks"+query("queue", q.Get("queue"), "state", q.Get("state"))
 	default:
 		s.notFound(w, r)
 		return
@@ -282,11 +470,6 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 	var err error
 	var done, action string
 	name := r.URL.Query().Get("name")
-	back := "/"
-	if p := periodOf(r.URL.Query().Get("range")); p != chartPeriods[0] {
-		back = "/?range=" + p.Name
-	}
-
 	switch r.PathValue("action") {
 	case "pause":
 		err, done, action = s.client.PauseQueue(r.Context(), name), "queue-pause", "pause queue"
@@ -297,7 +480,17 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.finishAction(w, r, err, back, done, action, name)
+	s.finishAction(w, r, err, overviewOf(r.URL.Query()), done, action, name)
+}
+
+// overviewOf returns the address of the overview of the period that the
+// query's "range" names: its plain address for the first period, or for a
+// name that is no period's.
+func overviewOf(q url.Values) string {
+	if p := periodOf(q.Get("range")); p != chartPeriods[0] {
+		return "/?range=" + p.Name
+	}
+	return "/"
 }
 
 // scheduleAction pauses, resumes, or runs the schedule that the query names,
@@ -341,7 +534,7 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 	if strings.Contains(target, "?") {
 		sep = "&"
 	}
-	http.Redirect(w, r, s.path(target+sep+"done="+done), http.StatusSeeOther)
+	http.Redirect(w, r, s.path(target+sep+"done="+done), http.StatusSeeOther) //nolint:gosec // a path of the dashboard, whose query the request adds to only through url.Values
 }
 
 // actionFailed explains why an action did not apply: the error says it, as
@@ -368,15 +561,16 @@ func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error,
 	}
 }
 
-// bulkAction retries, cancels, or deletes every task that the filters in
-// the query select. It works for half the time left before the request's
-// deadline, so that it answers in time. If more tasks remain, it leads back
-// to its page, whose form continues where it stopped. If it left tasks that
-// other work held, it leads back to its page, which offers to try those
-// again. Otherwise it leads to the task list, and says how many tasks a
-// retry left because other tasks hold their dedupe keys: trying again does
-// not help those. Only its page carries where a run continues: the task
-// list always shows every task that the filters select.
+// bulkAction retries, cancels, or deletes every task of the selection in
+// the query: the tasks that its filters select, in its range. It works for
+// half the time left before the request's deadline, so that it answers in
+// time. If more tasks remain, it leads back to its page, whose form
+// continues where it stopped. If it left tasks that other work held, it
+// leads back to its page, which offers to try those again. Otherwise it
+// leads to the task list, and says how many tasks a retry left because
+// other tasks hold their dedupe keys: trying again does not help those.
+// Only its page carries where a run continues: the task list always shows
+// every task of the selection.
 func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w, r) {
 		return
@@ -389,24 +583,31 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f := taskFilter(r.URL.Query())
+	sel, err := selectionOf(r.URL.Query())
+	if err != nil {
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", reason(err), backTo("/tasks?"+filterQuery(sel.filter).Encode()))
+		return
+	}
+
 	end, _ := r.Context().Deadline() // the deadline handler sets one
 	ctx, cancel := context.WithDeadlineCause(r.Context(), time.Now().Add(time.Until(end)/2), errBudget)
 	defer cancel()
 
-	res, err := a.do(s.client, ctx, &taskmill.BulkParams{Filter: f, Cursor: r.URL.Query().Get("cursor")})
+	p := &taskmill.BulkParams{Filter: sel.filter, Cursor: r.URL.Query().Get("cursor")}
+	p.CreatedSince, p.CreatedBefore, p.FinishedSince, p.FinishedBefore = sel.ranges()
+	res, err := a.do(s.client, ctx, p)
 	more := err != nil && errors.Is(context.Cause(ctx), errBudget)
 	if err == nil || more || res.Changed > 0 {
 		s.logger.LogAttrs(r.Context(), slog.LevelInfo, "dashboard action",
-			slog.String(logKeyAction, name+" tasks"), slog.String(logKeyTarget, filterQuery(f).Encode()),
+			slog.String(logKeyAction, name+" tasks"), slog.String(logKeyTarget, sel.query().Encode()),
 			slog.Int64(logKeyTasks, res.Changed), slog.Int64(logKeySkip, res.Skipped))
 	}
 	if err != nil && !more {
-		s.actionFailed(w, r, err, "/tasks?"+filterQuery(f).Encode())
+		s.actionFailed(w, r, err, listPath(sel.query()))
 		return
 	}
 
-	q := filterQuery(f)
+	q := sel.query()
 	q.Set("count", strconv.FormatInt(res.Changed, 10))
 	target := "/tasks?"
 	switch {
@@ -425,7 +626,7 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		q.Set("done", name+"-all")
 	}
 
-	http.Redirect(w, r, s.path(target+q.Encode()), http.StatusSeeOther)
+	http.Redirect(w, r, s.path(target+q.Encode()), http.StatusSeeOther) //nolint:gosec // the request adds only a query to a fixed path
 }
 
 // refuseIfReadOnly refuses an action of a read-only dashboard, and says so.

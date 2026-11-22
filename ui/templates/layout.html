@@ -9,7 +9,10 @@
 <link rel="icon" href="{{asset "favicon.svg"}}" type="image/svg+xml">
 <link rel="stylesheet" href="{{asset "style.css"}}">
 <script src="{{asset "theme.js"}}"></script>
-<script src="{{asset "app.js"}}" defer></script>
+<script type="module" src="{{asset "app.js"}}"></script>
+{{- range modules}}
+<link rel="modulepreload" href="{{asset .}}">
+{{- end}}
 </head>
 <body>
 {{template "sprite"}}
@@ -50,11 +53,10 @@
 <template data-failure><div class="toast failed" role="alert">{{template "icon-alert"}}<span class="toast-message"></span></div></template>
 {{/* The page that the script shows in place of one that got no answer. */}}
 <template data-unreachable>{{template "status" unreachable}}</template>
-{{/* The dialog that asks before an action. It asks what a form on the page
-   says in its data-confirm attributes. For an action on many tasks, it
-   shows what the action's own page says, in the part of that page that
-   names the dialog's title, and stays for each answer: its status line
-   says what the last step did. */}}
+{{/* The dialog that asks before an action. It shows what the action's own
+   page says, in the part of that page that names the dialog's title, and
+   stays for each answer: its status line says what the last step did, of
+   an action on many tasks. */}}
 <dialog class="modal" id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-text">
   <form method="dialog">
     <h2 id="confirm-title">Are you sure?</h2>

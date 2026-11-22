@@ -109,7 +109,7 @@ func (s *steps) gap(words string, from, to time.Time, tone string) {
 
 // lasting words the time from since until now, in whole seconds of the
 // clock, as ago reads them. The script counts it on in the same words: see
-// span in app.js.
+// span in times.js.
 func lasting(now, since time.Time) string {
 	return span(max(0, now.Truncate(time.Second).Sub(since.Truncate(time.Second))))
 }

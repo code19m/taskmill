@@ -145,6 +145,20 @@ log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
 ```
 
 - **The filter must not be empty.** To retry every dead task, set `States`.
+- **A range of times narrows them,** as it narrows a list. So you can retry
+  only what died in an incident, and not the older dead tasks of the same
+  kind:
+
+  ```go
+  incident := time.Date(2026, time.March, 14, 14, 0, 0, 0, time.UTC)
+  params := &taskmill.BulkParams{
+      Filter:        taskmill.TaskFilter{Queues: []string{"payments"}, States: []taskmill.State{taskmill.StateDead}},
+      FinishedSince: incident, FinishedBefore: incident.Add(40 * time.Minute),
+  }
+  ```
+
+  `FinishedSince` and `FinishedBefore` need a filter of only dead tasks,
+  canceled tasks, or both, as in a list. Pass a cursor with the same range.
 - **They change only tasks in a state that allows the action.** For
   example, `DeleteMatching` leaves running tasks as they are.
 - **They work in small steps:** batches of 1,000 tasks, each in a short
@@ -168,10 +182,12 @@ log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
   the action again is safe: the tasks that it changed no longer match.
 
 > [!TIP]
-> Call `Count` with the same filter first: `TaskCounts.Retry`, `Cancel`,
-> and `Delete` say how many tasks each action would change. And add a queue
-> or a state to the filter: a filter by kind or group alone reads many more
-> rows.
+> Call `Count` with the same filter and range first: `TaskCounts.Retry`,
+> `Cancel`, and `Delete` say how many tasks each action would change. And
+> add a queue or a state to the filter: a filter by kind or group alone
+> reads many more rows. With a range of creation times, add a queue: without
+> one, the action can read the tasks outside the range too, and so does
+> `Count` before PostgreSQL 18.
 
 After an incident, follow
 [Recover from an incident](../recipes/recover-from-an-incident.md): pause,

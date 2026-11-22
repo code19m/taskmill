@@ -132,12 +132,50 @@ What follows:
 
 - **Server-rendered** with `html/template`, `embed`, and `net/http`. The
   charts and the dial are SVG, drawn on the server.
-- **Two small scripts of our own,** `app.js` and `theme.js`, under a strict
-  content security policy. They keep pages live, apply filters as they
-  change, confirm actions in dialogs, show a chart's values under the
-  pointer and a tooltip without a wait, show times in the reader's time
-  zone, and apply the chosen theme. Every page also works without them.
-  Nothing needs a JavaScript build step or third-party code.
+- **Scripts of our own,** under a strict content security policy:
+  `theme.js`, which applies the chosen theme before the page paints, and
+  the dashboard's script, the native ES modules that `app.js` imports. They
+  keep pages live, apply filters as they change, confirm actions in
+  dialogs, show a chart's values under the pointer and a tooltip without a
+  wait, and show times in the reader's time zone. Every page also works
+  without them. Nothing needs a JavaScript build step or third-party code.
+- **The script is native ES modules: about a dozen files of up to 280
+  lines.** We rejected one file: about 1,850 lines in one scope, with about
+  30 shared variables, were hard to change safely. A module adds no
+  listener as it loads. `app.js` starts every module, so one file shows the
+  order in which the listeners of an event run. It adds the listener that
+  follows links last, so that a listener before it can take a click by
+  preventing its default. Two pairs import each other, as their code calls
+  both ways: `navigation.js` with `live.js`, and with `menus.js`. That is
+  safe, as each calls the other only once every module has loaded.
+- **The modules load from a folder named after their version,**
+  `/static/{version}/`, where the version is a hash of every static file.
+  So an import such as `./morph.js` stays in its version without
+  rewriting, and the browser may cache each file for a year. The page
+  preloads every module, so the browser fetches them at the same time, not
+  each after the module that imports it. A page from another version gets
+  the current files, which the browser must check again, and loads anew at
+  its first live update; a rare rollout across three versions may mix the
+  modules of two newer ones until then, which beats a 404 without script. We rejected an import map: it needs an inline
+  script, which the content security policy refuses.
+- **A page whose script does not start works as a page without script.**
+  `theme.js` shows the controls that need the script before the page
+  paints. Once the page has loaded, it hides them again if the script did
+  not start. That happens when a module does not load, as when a server of
+  0.15 answers 404 for it during a rolling deploy, or when the modules of
+  two versions do not fit together. The next page that the browser loads,
+  such as the page of a link, tries again. In a frame that is sandboxed
+  without `allow-same-origin`, the script never starts: the page has no
+  origin there, so the browser fetches the modules with CORS, which the
+  dashboard does not allow. We rejected loading the page again by itself:
+  a page that answers a form, such as that of a failed action, would send
+  the action again.
+- **The modules cost a little more to load, once for each version:** about
+  7 KB more to download, after gzip, as each file is compressed alone, and
+  12 scripts to fetch in place of one. Over HTTP/1.1, with six connections
+  to a host, they add one or two round trips before the script starts. The
+  page paints without waiting for them. A browser with script turned off
+  fetches none of them, not even the preloads.
 - **The server renders every page, and the script only shows it in place.**
   For a link, the back button, or an action, the script fetches the page
   that the server would send to a browser, and swaps its content in. So
@@ -188,11 +226,11 @@ What follows:
 - **Two ways to run it:** mounted on an application's own router, behind
   the application's own authentication, or on its own with basic
   authentication, through the `taskmill-ui` command.
-- **Safe on a busy database.** It reads only through the operations API and
-  the statistics that the maintainer keeps. Its queries over tasks, groups,
-  and activity stop after 5 seconds. The other pages read small tables or
-  single rows. So it is safe to point at a busy database, even with pages
-  that refresh every 5 seconds.
+- **Made for a busy database.** It reads through the operations API and the
+  maintainer's statistics. Its queries over tasks, groups, and activity stop
+  after 5 seconds, and its other reads are of small tables or single rows. A
+  list of a queue and no FIFO group reads only that queue's tasks, by
+  [creation or finish time](schema-creation-order.md#the-dashboards-lists-of-a-queue).
 
 ## Out of scope
 

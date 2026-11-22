@@ -35,14 +35,14 @@ type Args interface {
 	Kind() string
 }
 
-// noArgs reports whether a is nil, or a nil pointer, whose Kind may
-// dereference it.
-func noArgs(a Args) bool {
-	if a == nil {
+// isNil reports whether v is nil, or a nil pointer, whose methods may
+// dereference it: an Args, or what an Executor wraps.
+func isNil(v any) bool {
+	if v == nil {
 		return true
 	}
-	v := reflect.ValueOf(a)
-	return v.Kind() == reflect.Pointer && v.IsNil()
+	rv := reflect.ValueOf(v)
+	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
 
 // ArgsWithDefaults is implemented by Args that set default enqueue options

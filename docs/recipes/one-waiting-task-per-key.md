@@ -9,7 +9,7 @@ times. One rebuild that sees the last change is enough."
 | Situation | What to use | Why |
 |---|---|---|
 | The same request or message can arrive twice | A `DedupeKey` | [Avoid duplicate tasks](../guides/deduplication.md) shows how |
-| Many changes to one thing need one run, soon, that sees the last change | **A flag in your own row** | It is exact, and the run starts right away |
+| Many changes to one thing need one run, soon, that sees the last change | **The waiting task's ID in your own row** | It is exact, and the run starts right away |
 | The run may wait a minute, and the changes come in bursts | [A delayed task with a `DedupeKey`](#wait-for-a-burst-to-end) | No new column |
 
 A [dedupe key](../concepts/glossary.md#dedupe-key) alone can't do this. The
@@ -19,10 +19,11 @@ the search entry stays old.
 
 ## The recommended way
 
-Add a flag to your own table. It says that a refresh waits:
+Add a column to your own table. It holds the ID of the refresh that waits,
+if one does:
 
 ```sql
-ALTER TABLE products ADD COLUMN refresh_queued boolean NOT NULL DEFAULT false;
+ALTER TABLE products ADD COLUMN refresh_task_id bigint;
 ```
 
 In the transaction that changes the product, enqueue a refresh only if none
@@ -31,27 +32,31 @@ waits:
 ```go
 // queueRefresh enqueues a refresh of the product, unless one already waits.
 func queueRefresh(ctx context.Context, tx pgx.Tx, client *taskmill.Client, productID int64) error {
-    var queued bool // FOR UPDATE: the handler waits for this transaction before it reads
-    err := tx.QueryRow(ctx, "SELECT refresh_queued FROM products WHERE id = $1 FOR UPDATE", productID).Scan(&queued)
-    if err != nil || queued {
+    var waiting *int64 // FOR UPDATE: the handler waits for this transaction before it reads
+    err := tx.QueryRow(ctx, "SELECT refresh_task_id FROM products WHERE id = $1 FOR UPDATE", productID).Scan(&waiting)
+    if err != nil || waiting != nil {
         return err // a refresh already waits: it will see this change
     }
-    if _, err := tx.Exec(ctx, "UPDATE products SET refresh_queued = true WHERE id = $1", productID); err != nil {
-        return err
-    }
-    _, err = client.EnqueueTx(ctx, taskmill.Pgx(tx), RefreshProduct{ProductID: productID}, &taskmill.EnqueueOptions{
+    res, err := client.EnqueueTx(ctx, taskmill.Pgx(tx), RefreshProduct{ProductID: productID}, &taskmill.EnqueueOptions{
         GroupKey: "product-" + strconv.FormatInt(productID, 10), // one refresh of a product at a time
     })
+    if err != nil {
+        return err
+    }
+    _, err = tx.Exec(ctx, "UPDATE products SET refresh_task_id = $2 WHERE id = $1", productID, res.ID)
     return err
 }
 ```
 
-The handler clears the flag first, and then reads the product:
+The handler clears its own ID first, and then reads the product:
 
 ```go
 func (r *Refresher) Handle(ctx context.Context, t *taskmill.Task[RefreshProduct]) error {
-    // From here on, a change enqueues a new refresh.
-    _, err := r.pool.Exec(ctx, "UPDATE products SET refresh_queued = false WHERE id = $1", t.Args.ProductID)
+    // From here on, a change enqueues a new refresh. A task that runs again,
+    // as after a failed attempt, finds the ID of the refresh behind it, and
+    // leaves it.
+    _, err := r.pool.Exec(ctx, "UPDATE products SET refresh_task_id = NULL WHERE id = $1 AND refresh_task_id = $2",
+        t.Args.ProductID, t.ID)
     if err != nil {
         return err
     }
@@ -61,11 +66,15 @@ func (r *Refresher) Handle(ctx context.Context, t *taskmill.Task[RefreshProduct]
 
 ## Why
 
-- **The flag and the task commit with your change.** So a set flag always
-  has a waiting task behind it, and a rollback leaves neither.
+- **The ID and the task commit with your change.** So a set ID always names
+  a task that waits or runs, and a rollback leaves neither.
 - **No change is lost.** A change that commits before the handler clears
-  the flag is in the data that the handler reads. A change after that finds
-  the flag cleared, and enqueues the next refresh.
+  the ID is in the data that the handler reads. A change after that finds
+  the ID cleared, and enqueues the next refresh.
+- **A task clears only its own ID.** A refresh runs again after a failed
+  attempt, or after its worker stopped or crashed. A flag that every run
+  cleared would then clear the mark of the refresh that already waits
+  behind it, and the next change would enqueue one more.
 - **The `GroupKey` keeps refreshes of one product apart.** They form a
   [FIFO group](../concepts/glossary.md#fifo-group), and run one at a time.
   Without it, a slow old refresh could finish after a newer one, and write
@@ -78,7 +87,7 @@ That made about 20 tasks, and the search entry had the last change.
 
 ## Wait for a burst to end
 
-If the run may wait, you need no flag. Enqueue a delayed task with a
+If the run may wait, you need no column. Enqueue a delayed task with a
 `DedupeKey`, and make the key's window a little shorter than the delay:
 
 ```go
@@ -105,9 +114,10 @@ your app's clock and the database's clock.
 
 ## Watch out
 
-- **Keep the flag and the task together.** If you cancel or delete a
-  waiting refresh, also set `refresh_queued` back to false. Otherwise no
-  change enqueues a refresh for that product again.
+- **Keep the ID and the task together.** If you cancel or delete a waiting
+  refresh, also run `UPDATE products SET refresh_task_id = NULL WHERE
+  refresh_task_id = $1` with its ID, in the same transaction (`CancelTx`).
+  Otherwise no change enqueues a refresh for that product again.
 - **A dead refresh [halts](../concepts/glossary.md#halted-group) its
   product's group.** Later refreshes of that product wait behind it until
   you retry it ([Keep order per key](keep-order-per-key.md#fix-a-halted-group)).

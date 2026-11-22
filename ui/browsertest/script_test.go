@@ -4,6 +4,7 @@ import (
 	"errors"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,16 +140,45 @@ func TestNavigationAndHistoryShowPagesInPlace(t *testing.T) {
 	}
 }
 
-// An action asks first, in a dialog. Escape closes the dialog, sends
-// nothing, and gives the focus back to the button that opened it. Confirm
-// sends the action, and the page that answers shows in place, with its
-// notice.
+// A preset of the range of time, a link in the range's menu, is a filter:
+// its list shows in place, in the same entry of the history, and the menu
+// closes and gives the focus back to its button. navigation.js follows the
+// link, and closes the menu with menus.js.
+func TestRangePresetShowsItsListInPlace(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/tasks")
+	p.run(`window.loaded = true`)
+	entries := eval[int](p, `history.length`)
+
+	p.click(".sel-range > summary")
+	p.waitFor(`document.querySelector(".sel-range").open`, "the range's menu opening")
+	p.click(".range-presets > a")
+	p.waitFor(`new URLSearchParams(location.search).has("since") && !document.querySelector(".range-presets > a[aria-current]")`,
+		"the list of the preset showing")
+	if !eval[bool](p, `!document.querySelector(".sel-range").open && document.activeElement === document.querySelector(".sel-range > summary")`) {
+		t.Error("the range's menu stays open, or its button lost the focus")
+	}
+	if !eval[bool](p, `window.loaded === true && history.length === `+strconv.Itoa(entries)) {
+		t.Error("the preset loaded the page anew, or added an entry to the history")
+	}
+}
+
+// An action that asks first asks in a dialog, which shows the page that
+// asks. Escape closes the dialog, sends nothing, and gives the focus back to
+// the button that opened it. Confirm sends the action, and the page that
+// answers shows in place, with its notice. A deleted task's page is gone:
+// the list of its queue and state takes its place in the history, so the
+// back button leads to the list that the reader opened the task from.
 func TestDialogConfirmsAnAction(t *testing.T) {
 	s := newSite(t)
 	id := s.enqueue(t, 1)[0]
-	p := s.open(t, "/tasks/"+key(id))
+	s.die(t, id, 1)
+	p := s.open(t, "/tasks?state=dead")
 	p.run(`window.loaded = true`)
-	const button = `form[action$="/delete"] button`
+	p.click(`tbody tr`)
+	p.waitFor(`location.pathname === "/tasks/`+key(id)+`"`, "the task's page")
+	entries := eval[int](p, `history.length`)
+	const button = `a[href$="/delete"]`
 
 	p.click(button)
 	p.waitFor(`document.getElementById("confirm-dialog").open`, "the dialog")
@@ -161,11 +191,8 @@ func TestDialogConfirmsAnAction(t *testing.T) {
 		t.Errorf("the dialog says %q", got)
 	}
 
-	// The dialog fires its close event a moment after it closes. The test
-	// waits for it, as a person who opens the dialog again does.
-	p.run(`document.getElementById("confirm-dialog").addEventListener("close", () => { window.dialogClosed = true; }, { once: true })`)
 	p.do(chromedp.KeyEvent(kb.Escape))
-	p.waitFor(`window.dialogClosed && !document.getElementById("confirm-dialog").open`, "Escape")
+	p.waitFor(`!document.getElementById("confirm-dialog").open`, "Escape")
 	p.waitFor(`document.activeElement === document.querySelector(`+js(button)+`)`, "the focus going back to the button")
 	if _, err := s.client.Get(t.Context(), id); err != nil {
 		t.Fatalf("Escape sent the action: %v", err)
@@ -174,40 +201,103 @@ func TestDialogConfirmsAnAction(t *testing.T) {
 	p.click(button)
 	p.waitFor(`document.getElementById("confirm-dialog").open`, "the dialog, again")
 	p.click(`[data-confirm-button]`)
-	p.waitFor(`location.pathname === "/tasks" && location.search === "" && document.querySelector(".toast")?.textContent === "Task deleted."`,
-		"the task list, with the notice of the action")
+	p.waitFor(`location.pathname === "/tasks" && location.search === "?queue=default&state=dead" && document.querySelector(".toast")?.textContent === "Task deleted."`,
+		"the list of the task's queue and state, with the notice of the action")
 	if _, err := s.client.Get(t.Context(), id); !errors.Is(err, taskmill.ErrNotFound) {
 		t.Errorf("the task is still there after the action: %v", err)
 	}
-	if !eval[bool](p, `window.loaded === true`) {
-		t.Error("the browser loaded the page that answered the action anew")
+	if !eval[bool](p, `window.loaded === true && history.length === `+strconv.Itoa(entries)) {
+		t.Error("the browser loaded the page that answered the action anew, or the history kept the deleted task's page")
+	}
+
+	p.history(-1)
+	p.waitFor(`location.pathname === "/tasks" && location.search === "?state=dead"`, "the back button leading to the list of dead tasks")
+}
+
+// An action keeps the focus on the button that sent it, so the next Tab
+// goes on from there. While the action is on its way, the button is
+// unavailable, and keeps the focus: the page's body never takes it. The
+// answer puts Pause in place of Resume, which takes the focus. In a
+// schedule's row, Run now comes and goes before Pause: Pause, confirmed in
+// its dialog, leaves the focus on Resume, and Resume on Pause.
+func TestActionKeepsTheFocusInItsRow(t *testing.T) {
+	s := newSite(t)
+	// A queue with settings stays on the overview once it resumes.
+	if err := s.client.UpdateQueue(t.Context(), "mail", func(q *taskmill.QueueSettings) { q.MaxRunning = 10 }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.client.PauseQueue(t.Context(), "mail"); err != nil {
+		t.Fatal(err)
+	}
+	s.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at) VALUES ('nightly', 'default', 'report', '0 3 * * *', now() + interval '1 hour')`)
+	act := func(p *page, notice, row, want string) {
+		t.Helper()
+		p.do(chromedp.KeyEvent(kb.Enter))
+		p.waitFor(`document.querySelector(".toast")?.textContent === `+js(notice), "the notice of the action")
+		p.waitFor(`!document.querySelector("[data-js-pending]")`, "the end of the action")
+		if got := eval[string](p, `document.activeElement.matches('tr[data-key=`+js(row)+`] .actions-col :is(a, button)') ? document.activeElement.textContent : document.activeElement.localName`); got != want {
+			t.Errorf("after %q, the %s has the focus, want %s", notice, got, want)
+		}
+	}
+
+	p := s.open(t, "/")
+	p.run(`
+		window.lost = false;
+		document.addEventListener("focusout", (event) => { if (!event.relatedTarget && document.querySelector("[data-js-pending]")) window.lost = true; });
+		document.querySelector('tr[data-key="mail"] form button').focus();`)
+	act(p, "Queue resumed.", "mail", "Pause")
+	if eval[bool](p, `window.lost`) {
+		t.Error("the focus went to the page's body while the action was on its way")
+	}
+
+	p = s.open(t, "/schedules")
+	p.run(`document.querySelector('tr[data-key="nightly"] a[href*="/pause"]').focus()`)
+	p.do(chromedp.KeyEvent(kb.Enter))
+	p.waitFor(`document.getElementById("confirm-dialog").open`, "the dialog")
+	p.run(`document.querySelector("[data-confirm-button]").focus()`)
+	act(p, "Schedule paused.", "nightly", "Resume")
+	act(p, "Schedule resumed.", "nightly", "Pause")
+}
+
+// A period of the overview's charts is a filter of the page: its charts
+// show in place, in the same entry of the history, where the reader is,
+// with the focus on the period, and a screen reader hears which period
+// they show.
+func TestPeriodShowsItsChartsInPlace(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/")
+	p.do(chromedp.EmulateViewport(375, 600))
+	p.run(`window.loaded = true; document.querySelector(".activity").scrollIntoView()`)
+	entries, y := eval[int](p, `history.length`), eval[float64](p, `scrollY`)
+	if y == 0 {
+		t.Fatal("the overview does not scroll at phone width")
+	}
+
+	p.click(`.activity a[href$="range=6h"]`)
+	p.waitFor(`location.search === "?range=6h" && document.querySelector('.activity a[aria-current]')?.textContent === "6h"`, "the charts of 6 hours")
+	if got := eval[[]any](p, `[window.loaded === true, history.length, scrollY, document.activeElement.textContent,
+		document.querySelector("[data-announce]").textContent]`); got[0] != true || got[1] != float64(entries) || got[2] != y ||
+		got[3] != "6h" || got[4] != "Activity of the last 6h" {
+		t.Errorf("after the period, the page is %v; want it as it was, in the same entry of the history, scrolled to %v, "+
+			"with the focus on the period, and the period announced", got, y)
 	}
 }
 
-// A dialog that opens again at once, before the close event of its last
-// closing, still sends the action that it then confirms: that late event is
-// of the closing before. The test closes the dialog and opens it again in
-// one turn of the page, so the event comes after, and confirms once the
-// script has had it: the test's listener comes after the script's.
-func TestDialogOpenedAgainAtOnceSendsItsAction(t *testing.T) {
+// The dialog of a bulk action on a list with a range names the range in the
+// reader's time zone, in the words of the range's button, and not in the
+// server's UTC: the reader confirms the range that the list shows.
+func TestBulkDialogNamesTheRangeAsTheListDoes(t *testing.T) {
 	s := newSite(t)
-	id := s.enqueue(t, 1)[0]
-	p := s.open(t, "/tasks/"+key(id))
-	const button = `form[action$="/delete"] button`
+	s.die(t, s.enqueue(t, 1)[0], 30)
+	since := time.Now().Add(-time.Hour).Truncate(time.Minute).UTC().Format(time.RFC3339)
+	p := s.open(t, "/tasks?state=dead&since="+since)
 
-	p.click(button)
+	p.click(`a[data-dialog][href*="/retry"]`)
 	p.waitFor(`document.getElementById("confirm-dialog").open`, "the dialog")
-	p.run(`
-		const dialog = document.getElementById("confirm-dialog");
-		dialog.addEventListener("close", () => { window.lateClose = true; }, { once: true });
-		dialog.querySelector('[value="cancel"]').click();
-		document.querySelector(` + js(button) + `).click();`)
-	p.waitFor(`window.lateClose && document.getElementById("confirm-dialog").open`, "the dialog, open again after the late close event")
-	p.click(`[data-confirm-button]`)
-	p.waitFor(`location.pathname === "/tasks" && document.querySelector(".toast")?.textContent === "Task deleted."`,
-		"the task list, with the notice of the action")
-	if _, err := s.client.Get(t.Context(), id); !errors.Is(err, taskmill.ErrNotFound) {
-		t.Errorf("the task is still there after the action: %v", err)
+	got := eval[[]string](p, `[document.querySelector("#confirm-dialog dd:last-of-type").textContent,
+		document.querySelector(".sel-range > summary").title]`)
+	if got[0] != got[1] || !strings.HasSuffix(got[0], "UTC+5:45") {
+		t.Errorf("the dialog names the range %q, and the list's button %q; want the same, in the reader's zone", got[0], got[1])
 	}
 }
 

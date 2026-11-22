@@ -44,6 +44,7 @@ type statements struct {
 	cancelRequest    string
 	complete         string
 	completeSkipping string
+	regainKeys       string
 	lockLeased       string
 	fail             string
 	snooze           string
@@ -96,7 +97,6 @@ type statements struct {
 	electMaintainer  string
 	resignMaintainer string
 	promoteDue       string
-	nextDue          string
 	wakeQueues       string
 	rescue           string
 	rescueBackoff    string
@@ -165,6 +165,7 @@ func newStatements(schema string) *statements {
 		cancelRequest:    q(cancelRequestSQL),
 		complete:         q(completeSQL),
 		completeSkipping: q(completeSkippingSQL),
+		regainKeys:       q(regainKeysSQL),
 		lockLeased:       q(lockLeasedSQL),
 		fail:             q(failSQL),
 		snooze:           q(snoozeSQL),
@@ -214,7 +215,6 @@ func newStatements(schema string) *statements {
 		electMaintainer:  q(electMaintainerSQL),
 		resignMaintainer: q(resignMaintainerSQL),
 		promoteDue:       q(promoteDueSQL),
-		nextDue:          q(nextDueSQL),
 		wakeQueues:       q(wakeQueuesSQL),
 		rescue:           q(rescueSQL),
 		rescueBackoff:    q(rescueBackoffSQL),

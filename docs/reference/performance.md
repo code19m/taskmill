@@ -49,6 +49,7 @@ Read them as rough sizes, not as a promise for your hardware.
 | WAL written per task, from fetch to history | About 1 KiB |
 | Size of the `tasks` table during an hour at 10,000 tasks a second | At the end, at most 6% bigger than after 15 minutes, in a laptop run of older code |
 | Worker memory | About 15 MiB idle, plus about 12 KiB per running task, of which 8 KiB is the stack of a handler that called the database |
+| Worker memory for a batch kind | Each task of a running batch also holds its payload twice: as stored, and decoded. That is about 2 times the stored payload, and 2.5 times the `Value` of an [outbox](../guides/outbox.md) message. A worker runs up to `Concurrency` batches of `BatchSize` tasks each, so the default relay can hold 1,000 messages at the same time: about 250 MiB for messages of 100 KB |
 | Database connections | A client uses its pool. A worker uses its pool, plus 1 connection for notifications |
 | An idle worker | About one fetch per queue per minute, plus a few small queries |
 | Many schemas in one database | 100 schemas with 500 workers cost the database about 0.15 of a CPU, for the [heartbeats](../concepts/glossary.md#heartbeat) of the [maintainers](../concepts/glossary.md#maintainer) |

@@ -45,9 +45,10 @@ func run(ctx context.Context, role string) error {
 ```
 
 `serveHTTP`, `handlers`, and `serveHealth` are your own functions.
-[Ready to ship](../tutorial/7-ready-to-ship.md) builds this binary step by
-step, and [Kubernetes](kubernetes.md) has the manifests for the `worker` and
-`migrate` roles.
+[Kubernetes](kubernetes.md) has the manifests for the `worker` and `migrate`
+roles. [Ready to ship](../tutorial/7-ready-to-ship.md) builds a smaller
+binary step by step, with no `migrate` role: each of its roles migrates
+when it starts.
 
 ## Stop workers without losing work
 
@@ -137,6 +138,9 @@ completions continue while the index builds.
   cancel the build, so `Migrate` refuses the step while the pool's
   connections have one. Run it as a role without them, as after
   `ALTER ROLE shop_migrate SET statement_timeout = 0`.
+- Both refusals come before the build, with an error that wraps
+  `ErrInvalidArgument`: a deploy job should not try again until you change
+  the pool or the role.
 - If you end the session of a `Migrate` that builds, its build continues in
   the database. That `Migrate` stops, and the next one waits for the build.
 - A build that fails, or whose `Migrate` stops, leaves an *invalid index*:
