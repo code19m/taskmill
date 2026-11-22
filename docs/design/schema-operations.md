@@ -105,26 +105,9 @@ transaction of its own.
   at the first skipped task keeps no state between calls, and still brings a
   group that the action left back in order: the tasks that the action
   changed since no longer match, so reading past them again is cheap.
-- **A range of times narrows the batches, with a queue.** A bulk action
-  takes the range of a list, of creation or of finish times, as a condition
-  of its pick, which runs with a custom plan. The condition says which
-  states hold such times: only dead and canceled tasks for a range of
-  finish times, and for a range of creation times the tasks that are not
-  running and the running ones apart. Both indexes hold tasks by queue
-  first. With a queue in the filter, the planner reads the tasks of the
-  range through the index of that time, and sorts them by ID. Without one,
-  only PostgreSQL 18 can skip through the queues of an index. A range of
-  finish times then still reads its index, all of it before 18. A batch
-  with a range of creation times can read in ID order, as a filter by kind
-  does, on any version: the planner takes the range's tasks to be spread
-  over the IDs, but a recent range lies at their end. `Count` takes the
-  range the same way, and before PostgreSQL 18 reads every task of its
-  states for a range of creation times without a queue. Measured with
-  600,000 tasks in 20 queues over 30 days, half of them dead, and a range
-  of the last day, on PostgreSQL 15, 16, and 18: a batch of a retry of the
-  dead tasks reads 583,000 rows without a queue, and 2,000 with one. A
-  count of the dead tasks without a queue reads 300,000 rows on 15 and 16,
-  and 20,000 on 18.
+- **A range of times narrows the batches.** With a queue named, the planner
+  reads the range in the index of that time, or in ID order, as statistics
+  choose: for none, see [below](#a-range-of-times-without-a-queue).
 - **Delete goes through two tables.** It reads the next batch of both tasks
   and history, and goes up to the end of the shorter one, so that one
   position covers both. History has a partition per day. A search by the
@@ -144,6 +127,42 @@ transaction of its own.
   index. A retry with one reads the dead and canceled entries of
   `tasks_finished_idx` after its position in each batch, and where a batch
   needs more than the second, a window bounds what it reads.
+
+## A range of times without a queue
+
+The indexes of creation and of finish times hold tasks by queue first.
+Without a queue, PostgreSQL 15 and 16 use them only whole: a batch read in
+ID order, past every task outside the range, and a count every task of its
+states. PostgreSQL 18 can skip from queue to queue, but often did the same.
+So with a range and no queue, `Count` and some batches find the queues of
+their states, one index probe each, and name them to the planner.
+
+- **A batch by queue reads the rest of the range whole,** and counts it:
+  `OFFSET 0` keeps the planner from reading in ID order. On a very wide
+  range, it can pass its 1 s limit, and the action continues in windows.
+- **Two batches read by queue** (`readsQueues` in `bulk.go`): the first,
+  which skips the tasks before the range, and the last of a range with an
+  end, which stops with it. The others read in ID order, in order on disk.
+- **A range of finish times whose tasks were created far apart** reads the
+  tasks between them in ID order after its first batch, within a window if
+  a batch runs out of time. Name a queue to read only that queue's range.
+- **History probes each queue in each daily partition** of the range: with
+  1,000 queues, a delete of 2 days read 62,000 index pages, not 34,000. Of
+  750,000 completed tasks, a first batch for an hour read 78,000, not 799,000.
+
+| Whole action, 646,000 tasks, no queue | Before, on 15 / 18 | After |
+|---|---|---|
+| Retry the 11,700 dead tasks created on a day 4 weeks back | 669,000 rows, 217 / 196 ms | 68,000 rows, 165 / 144 ms |
+| Retry the 7,800 created on a day 3 days back | 661,000 rows, 193 / 171 ms | 45,000 / 66,000 rows, 127 / 103 ms |
+| Retry the 16,900 that died in the last day, created over 30 days | 679,000 / 615,000 rows, 309 / 255 ms | 625,000 / 561,000 rows, 344 / 291 ms |
+| Count every state created in the last day | 468,000 / 305,000 rows, 180 / 110 ms | 305,000 rows, 58 / 56 ms |
+
+| Option | Why not |
+|---|---|
+| Every batch reads by queue | It reads the rest of the range again each time: 32 million rows for a range of 200,000 tasks, 40 times as many |
+| By queue while the rest of a range of finish times is small | Fewer rows, but a heap page for each task and a probe of each queue in each batch: slower with 1,000 queues |
+| Every batch names the queues, and the planner chooses | It takes the list to hold 10 queues. With 1,000 queues, it read by queue in every batch, and misjudged its joins |
+| Walk a range of finish times in finish order | A cursor is an ID, and a retry keeps each FIFO group in ID order |
 
 ## A retry takes its dedupe key back
 

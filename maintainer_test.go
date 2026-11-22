@@ -101,14 +101,25 @@ func TestMaintenanceDoesNotWaitForHeldGroups(t *testing.T) {
 	}
 	due := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "unserved", RunAt: time.Now().Add(200 * time.Millisecond)})
 
-	e.waitState(t, plain, taskmill.StateRetryable)
+	// A rescued task is retryable for about a second, and then available: a
+	// slow machine can miss the first. So the test waits for the rescue's
+	// error.
+	rescued := func(id int64) {
+		t.Helper()
+		waitFor(t, fmt.Sprintf("the rescue of task %d", id), func() bool {
+			info := e.get(t, id)
+			retried := info.State == taskmill.StateRetryable || info.State == taskmill.StateAvailable
+			return retried && len(info.Errors) == 1 && info.Errors[0].Code == taskmill.CodeLeaseLost
+		})
+	}
+	rescued(plain)
 	e.waitState(t, due, taskmill.StateAvailable)
 	e.wantState(t, grouped, taskmill.StateRunning)
 
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	e.waitState(t, grouped, taskmill.StateRetryable)
+	rescued(grouped)
 }
 
 // A rescue ends the attempts of a lost worker for many groups in one

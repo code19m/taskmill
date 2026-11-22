@@ -79,9 +79,8 @@ other task, with no new index and no migration:
   others, as an invalid argument.
 
 The finish order is also the better order for this list. In ID order, a
-task that died a second ago can be many pages down, behind tasks that were
-enqueued later and died earlier. In finish order, what dies now is on the
-first page.
+task that died a second ago can be many pages down, behind tasks enqueued
+later that died earlier. In finish order, it is on the first page.
 
 Measured on PostgreSQL 18 with 61,500 tasks, 10,000 of them dead and older
 than 10,000 other tasks, for a page of 50:
@@ -213,18 +212,19 @@ task that halts its group, that page counts the tasks behind it with
 `Client.Count` has one branch per state, and custom plans leave out the
 branches of the states not counted. Sequential and bitmap scans are off for
 it, so each branch reads the index of its state and stops at its cap of
-10,000 tasks. A count by kind or FIFO group alone still reads every task of
-each state.
+10,000 tasks. A count by kind or FIFO group alone reads every task of each
+state. With a range and no queue, each branch names the queues of its state,
+and the planner reads the range in each queue's part of an index, or reads
+the state's index ([Operator actions](schema-operations.md#a-range-of-times-without-a-queue)).
 
 A count of what an action would change is capped whenever a state that it
 counts is. `Cancel` leaves out the running tasks already asked to stop, so
 it can count fewer tasks than the cap and still be a lower bound: the tasks
 that were not read may be ones that it would cancel.
 
-The finish order changes neither `Count` nor the bulk actions. A bulk
-action must go through tasks in ID order: its cursor is an ID, and a retry
-keeps each FIFO group in order by ID. Its windows of 100,000 tasks bound
-what it reads: see [Operator actions](schema-operations.md).
+The finish order changes neither `Count` nor the bulk actions, which go
+through tasks in ID order: a cursor is an ID, and a retry keeps each FIFO
+group in order by ID ([Operator actions](schema-operations.md)).
 
 ## Each read is one round trip
 

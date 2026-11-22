@@ -115,19 +115,36 @@ ORDER BY created_at DESC, id DESC LIMIT $5`
 
 // $1 queues, $2 kinds, $3 group keys, $4 states, $5 to $8 the ranges of times.
 //
-// countTasksSQL counts the tasks in each state of $4 that match the
-// filters and the ranges, up to one more than {cap} per state, with how
-// many of them were not asked to stop. Each state has a branch of its own,
-// run only if $4 lists it, so that each reads the index of its state, or
-// the history.
-var countTasksSQL = func() string {
+// countTasksSQL returns the statement that counts the tasks in each state
+// of $4 that match the filters and the ranges, up to one more than {cap}
+// per state, with how many of them were not asked to stop. Each state has a
+// branch of its own, run only if $4 lists it, so that each reads the index
+// of its state, or the history. If fromQueues, each branch of unfinished,
+// dead, or canceled tasks names the queues that hold tasks that are not
+// running, or running tasks, which the statement finds once: see
+// rangeWithoutQueue. The branch of completed tasks names no queue: it reads
+// each history partition's index of creation times, which cost 400 pages
+// with 1,000 queues, where a probe of each queue in each partition cost
+// 64,000.
+func countTasksSQL(fromQueues bool) string {
 	var b strings.Builder
-	for _, s := range allStates {
+	if fromQueues {
+		b.WriteString(`
+WITH RECURSIVE ` + queuesWith(`waiting`, `<> 'running'`) + `, ` + queuesWith(`running`, `= 'running'`))
+	}
+	for i, s := range allStates {
+		found := `waiting`
+		if s == StateRunning {
+			found = `running`
+		}
 		from := `SELECT t.cancel_requested_at FROM {s}.tasks t WHERE t.state = '` + string(s) + `' AND ` + timeRangesSQL(5) + ` AND `
+		if fromQueues {
+			from += inQueues(`SELECT queue FROM `+found+` WHERE queue IS NOT NULL`) + ` AND `
+		}
 		if s == StateCompleted {
 			from = `SELECT NULL AS cancel_requested_at FROM {s}.task_history t WHERE ` + historyRangeSQL(5) + ` AND `
 		}
-		if b.Len() > 0 {
+		if i > 0 {
 			b.WriteString("\nUNION ALL")
 		}
 		b.WriteString(`
@@ -137,7 +154,7 @@ SELECT '` + string(s) + `', n, unflagged FROM (
 WHERE '` + string(s) + `' = ANY($4::text[])`)
 	}
 	return b.String()
-}()
+}
 
 // $1 search, $2 limit, $3 halted only, $4 after queue, $5 after group key.
 //

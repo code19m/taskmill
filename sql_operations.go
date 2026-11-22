@@ -171,19 +171,29 @@ SELECT least($2::bigint,
 // locked tasks meet gates too. The pick statements read the next batch of
 // the tasks that a bulk action changes, in ID order after $5 up to $6, the
 // action's last task or the end of the batch's window: those of states $4
-// that match the filters and the ranges. They return each of them, whether
-// they hold its lock, whether its group had a row, which they then hold,
-// and whether it must take a dedupe key back if it is retried. They skip
-// what other transactions hold, and the groups ($7, $8) that the action
-// left before: the page on operator actions says why.
-func pickSQL(cond, gates string) string {
-	return `
-WITH candidates AS (
-    SELECT t.id, t.queue, coalesce(t.group_key, '') AS group_key FROM {s}.tasks t
+// that match the filters and the ranges. If fromQueues, the statement
+// reads them queue by queue, from the queues that hold tasks of states $4,
+// and returns with each task how many of them it found: see rangeWalk. The
+// pick statements return each task, whether they hold its lock, whether its
+// group had a row, which they then hold, and whether it must take a dedupe
+// key back if it is retried. They skip what other transactions hold, and
+// the groups ($7, $8) that the action left before: the page on operator
+// actions says why.
+func pickSQL(cond, gates string, fromQueues bool) string {
+	read := `SELECT t.id, t.queue, coalesce(t.group_key, '') AS group_key FROM {s}.tasks t
     WHERE ` + cond + ` AND t.id > $5 AND t.id <= $6
       AND t.state = ANY($4::text[]::{s}.task_state[]) AND ` + taskFilterSQL + `
-      AND ` + timeRangesSQL(9) + `
-    ORDER BY t.id
+      AND ` + timeRangesSQL(9)
+	candidates, found := read+`
+    ORDER BY t.id`, ``
+	if fromQueues {
+		candidates, found = `SELECT c.id, c.queue, c.group_key, count(*) OVER () AS found FROM `+
+			wholeIn(read, queuesOfStates(`$4::text[]`))+`
+    ORDER BY c.id`, `, c.found`
+	}
+	return `
+WITH candidates AS (
+    ` + candidates + `
     LIMIT {batch}
 ), picked AS (
     SELECT t.id, t.state::text AS state,
@@ -198,22 +208,30 @@ WITH candidates AS (
     FOR UPDATE OF t SKIP LOCKED
 )
 SELECT c.id, c.queue, c.group_key, p.id IS NOT NULL, coalesce(p.state, ''), coalesce(p.in_group, false),
-       coalesce(p.keyed, false)
+       coalesce(p.keyed, false)` + found + `
 FROM candidates c LEFT JOIN picked p ON p.id = c.id
 ORDER BY c.id`
 }
 
-// pickRetrySQL picks the dead and canceled tasks that a retry changes.
-var pickRetrySQL = pickSQL(`t.state IN ('dead', 'canceled')`, ``)
+// The tasks t that each action picks: a retry the dead and canceled tasks, a
+// cancel the unfinished tasks except running tasks already asked to stop,
+// and a delete all but the running ones.
+const (
+	retryPickSQL  = `t.state IN ('dead', 'canceled')`
+	cancelPickSQL = `t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
+      AND t.cancel_requested_at IS NULL`
+	deletePickSQL = `t.state <> 'running'`
+)
 
-// pickCancelSQL picks the unfinished tasks that a cancel changes, except
-// running tasks already asked to stop.
-var pickCancelSQL = pickSQL(`t.state IN ('scheduled', 'pending', 'available', 'running', 'retryable')
-      AND t.cancel_requested_at IS NULL`, ` AND `+keyFreeSQL)
-
-// pickDeleteSQL picks the tasks that a delete changes: all but the running
-// ones.
-var pickDeleteSQL = pickSQL(`t.state <> 'running'`, ` AND `+keyFreeSQL)
+// The pick statements of each action, in their two forms.
+var (
+	pickRetrySQL        = pickSQL(retryPickSQL, ``, false)
+	pickRetryQueuesSQL  = pickSQL(retryPickSQL, ``, true)
+	pickCancelSQL       = pickSQL(cancelPickSQL, ` AND `+keyFreeSQL, false)
+	pickCancelQueuesSQL = pickSQL(cancelPickSQL, ` AND `+keyFreeSQL, true)
+	pickDeleteSQL       = pickSQL(deletePickSQL, ` AND `+keyFreeSQL, false)
+	pickDeleteQueuesSQL = pickSQL(deletePickSQL, ` AND `+keyFreeSQL, true)
+)
 
 // $1 task IDs, $2 task IDs that become pending, $3 channel, $4 queues to notify.
 //
@@ -272,8 +290,11 @@ DELETE FROM {s}.tasks WHERE id = ANY($1::bigint[])`
 // $1 queues, $2 kinds, $3 group keys, $4 after task ID, $5 up to task ID,
 // $6 created since, $7 created before.
 //
-// pickCompletedSQL is a pick statement for the completed tasks in history,
-// after $4 up to $5, with the time each was finalized.
+// pickCompletedSQL returns the pick statement for the completed tasks in
+// history, after $4 up to $5, with the time each was finalized. If
+// fromQueues, it reads them queue by queue, from the queues that history
+// holds, in the partitions that the range of creation times can reach, and
+// returns with each task how many it found.
 //
 // History has a partition per day of finalized_at. A search by the IDs
 // alone would read every partition's index with all of them, which
@@ -281,20 +302,30 @@ DELETE FROM {s}.tasks WHERE id = ANY($1::bigint[])`
 // by the range of IDs and of finalized_at that the candidates span: in one
 // snapshot, that range with the filters holds exactly the candidates, and
 // picked reads only the partitions from their first day to their last.
-var pickCompletedSQL = `
+func pickCompletedSQL(fromQueues bool) string {
+	read := `SELECT t.id, t.finalized_at FROM {s}.task_history t
+    WHERE t.id > $4 AND t.id <= $5 AND ` + taskFilterSQL + ` AND ` + historyRangeSQL(6)
+	candidates, found := read+`
+    ORDER BY t.id`, ``
+	if fromQueues {
+		since := `$6::timestamptz`
+		candidates, found = `SELECT c.id, c.finalized_at, count(*) OVER () AS found FROM `+
+			wholeIn(read+` AND `+finishedSinceSQL(`t.finalized_at`, since), historyQueues(since))+`
+    ORDER BY c.id`, `, c.found`
+	}
+	return `
 WITH candidates AS (
-    SELECT t.id, t.finalized_at FROM {s}.task_history t
-    WHERE t.id > $4 AND t.id <= $5 AND ` + taskFilterSQL + ` AND ` + historyRangeSQL(6) + `
-    ORDER BY t.id
+    ` + candidates + `
     LIMIT {batch}
 ), picked AS (
     SELECT t.id FROM {s}.task_history t
-    WHERE t.id > $4 AND t.id <= (SELECT max(id) FROM candidates)
+    WHERE t.id BETWEEN (SELECT min(id) FROM candidates) AND (SELECT max(id) FROM candidates)
       AND t.finalized_at BETWEEN (SELECT min(finalized_at) FROM candidates) AND (SELECT max(finalized_at) FROM candidates)
       AND ` + taskFilterSQL + ` AND ` + historyRangeSQL(6) + ` AND ` + keyFreeSQL + `
     FOR UPDATE SKIP LOCKED
 )
-SELECT c.id, c.finalized_at, p.id IS NOT NULL FROM candidates c LEFT JOIN picked p ON p.id = c.id ORDER BY c.id`
+SELECT c.id, c.finalized_at, p.id IS NOT NULL` + found + ` FROM candidates c LEFT JOIN picked p ON p.id = c.id ORDER BY c.id`
+}
 
 // $1 task IDs, $2 and $3 the first and the last time that they were
 // finalized.

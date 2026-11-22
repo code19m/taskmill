@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
+	"github.com/code19m/taskmill/internal/testdb"
 )
 
 // bulk returns the params of a bulk action on the tasks that f selects.
@@ -233,7 +235,9 @@ func TestCountAndBulkActionsTakeARangeOfTimes(t *testing.T) {
 
 	// The range is from second 10 to second 20. Tasks 2, 3, and 4 died in it;
 	// 1 died before it, and 5 at its end, outside it. Of the tasks that wait,
-	// 7 was created in it, and of the completed tasks, 10.
+	// 7 was created in it, as was 12, which runs, and of the completed tasks,
+	// 10. With no queue named, the statements find the queue q twice, of the
+	// running tasks and of the others, and must read its tasks once.
 	start := time.Date(2026, time.March, 14, 14, 0, 0, 0, time.UTC)
 	e.exec(t, `INSERT INTO {s}.tasks (id, queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
 	           OVERRIDING SYSTEM VALUE
@@ -247,26 +251,32 @@ func TestCountAndBulkActionsTakeARangeOfTimes(t *testing.T) {
 	           SELECT v.id, now(), 'q', $1::timestamptz + v.created * interval '1 second', 'charge', now(), 'w', now(),
 	                  2, 1, 3, '{}', '{}', '[]'
 	           FROM (VALUES (9, 5), (10, 15), (11, 25)) AS v(id, created)`, start)
+	e.exec(t, `INSERT INTO {s}.tasks (id, queue, kind, state, created_at, run_at, payload, max_attempts, attempt,
+	                                 lease_expires_at, attempted_at, attempted_by)
+	           OVERRIDING SYSTEM VALUE
+	           VALUES (12, 'q', 'charge', 'running', $1::timestamptz + interval '12 seconds', now(), '{}', 3, 1,
+	                   now() + interval '1 hour', now(), 'w')`, start)
 	since, before := start.Add(10*time.Second), start.Add(20*time.Second)
 	finished := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead, taskmill.StateCanceled}}
+	charges := taskmill.TaskFilter{Kinds: []string{"charge"}}
 	queue := taskmill.TaskFilter{Queues: []string{"q"}}
 
 	counts, err := e.client.Count(ctx, &taskmill.CountParams{Filter: finished, FinishedSince: since, FinishedBefore: before})
 	if err != nil || counts.Retry != (taskmill.TaskCount{N: 3}) || counts.States[taskmill.StateDead].N != 2 {
 		t.Fatalf("count of the tasks that finished in the range: %+v, %v; want 3 to retry, 2 of them dead", counts, err)
 	}
-	counts, err = e.client.Count(ctx, &taskmill.CountParams{Filter: queue, CreatedSince: since, CreatedBefore: before})
-	if err != nil || counts.Cancel.N != 1 || counts.Delete.N != 2 {
-		t.Fatalf("count of the tasks created in the range: %+v, %v; want 1 to cancel and 2 to delete", counts, err)
+	counts, err = e.client.Count(ctx, &taskmill.CountParams{Filter: charges, CreatedSince: since, CreatedBefore: before})
+	if err != nil || counts.Cancel.N != 2 || counts.Delete.N != 2 {
+		t.Fatalf("count of the tasks created in the range: %+v, %v; want 2 to cancel and 2 to delete", counts, err)
 	}
 
 	res, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: finished, FinishedSince: since, FinishedBefore: before})
 	if err != nil || res.Changed != 3 {
 		t.Fatalf("retry of the tasks that finished in the range: %+v, %v; want 3", res, err)
 	}
-	res, err = e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: queue, CreatedSince: since, CreatedBefore: before})
-	if err != nil || res.Changed != 1 {
-		t.Fatalf("cancel of the tasks created in the range: %+v, %v; want 1", res, err)
+	res, err = e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: charges, CreatedSince: since, CreatedBefore: before})
+	if err != nil || res.Changed != 2 {
+		t.Fatalf("cancel of the tasks created in the range: %+v, %v; want 2", res, err)
 	}
 	completed := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}}
 	res, err = e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: completed, CreatedSince: since, CreatedBefore: before})
@@ -276,7 +286,11 @@ func TestCountAndBulkActionsTakeARangeOfTimes(t *testing.T) {
 	wantStates(t, e, map[int64]taskmill.State{
 		1: taskmill.StateDead, 2: taskmill.StateAvailable, 3: taskmill.StateAvailable, 4: taskmill.StateAvailable, 5: taskmill.StateDead,
 		6: taskmill.StateAvailable, 7: taskmill.StateCanceled, 8: taskmill.StateScheduled, 9: taskmill.StateCompleted, 11: taskmill.StateCompleted,
+		12: taskmill.StateRunning,
 	})
+	if n := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = 12 AND cancel_requested_at IS NOT NULL"); n != 1 {
+		t.Error("the running task created in the range was not asked to stop")
+	}
 	if _, err := e.client.Get(ctx, 10); !errors.Is(err, taskmill.ErrNotFound) {
 		t.Fatalf("task 10: got %v, want ErrNotFound", err)
 	}
@@ -299,56 +313,63 @@ func TestCountAndBulkActionsTakeARangeOfTimes(t *testing.T) {
 	}
 }
 
-// A range of times narrows what Count and a batch of a bulk action read to
-// about the tasks of the range, through the index that holds those times:
-// the dead and canceled tasks by finish time, and the others by creation
-// time. A batch reads each task of the range once to pick it, and those it
-// picks once more to lock them. Both indexes hold tasks by queue first, and
-// PostgreSQL skips through an index's first column only from version 18. So
-// without a queue, a batch with a range of creation times can read in ID
-// order on any version, and before PostgreSQL 18 a count reads every task
-// of its states, and a range of finish times all of its index. The rows
-// read are rows of the tables: they leave out the index entries that a scan
-// passes over.
+// A range of times narrows what Count and the first batch of a bulk action
+// read to about the tasks of the range, through the index that holds those
+// times: the dead and canceled tasks by finish time, and the others,
+// completed tasks included, by creation time. A batch reads each task of
+// the range once to pick it, and those it picks once more to lock them. The
+// indexes hold tasks by queue first, and PostgreSQL skips through an index's
+// first column only from version 18: with no queue named, the statements
+// find the queues first, so that every version reads each queue's part of
+// the index. The rows read are rows of the tables: they leave out the index
+// entries that a scan passes over.
 func TestRangesOfCountAndBulkActionsReadOnlyTheirRows(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	skipScan := e.count(t, "SELECT current_setting('server_version_num')::integer") >= 180000
 
-	// 60,000 dead tasks over 30 days, a third of them of the kind charge,
-	// and 20,000 available tasks in 50 other queues. The range is a day 3
-	// days back, which holds 2,000 dead tasks.
+	// 60,000 dead tasks over 30 days, the newest last, a third of them of
+	// the kind charge, 20,000 available tasks in 50 other queues, and 60,000
+	// completed tasks in those queues, created over 30 days. The range is a
+	// day 3 days back, which holds 2,000 dead tasks and 2,000 completed ones.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
 	           SELECT 'q', CASE WHEN i % 3 = 0 THEN 'charge' ELSE 'mail' END, 'dead',
 	                  now() - i * interval '43200 milliseconds', now() - i * interval '43200 milliseconds', now(), '{}', 3
-	           FROM generate_series(1, 60000) i`)
+	           FROM generate_series(60000, 1, -1) i`)
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 	           SELECT 'other' || (i % 50), 'mail', 'available', now(), '{}', 3 FROM generate_series(1, 20000) i`)
+	e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+	                                         priority, attempt, max_attempts, payload, metadata, errors)
+	           SELECT 200000 - i, now(), 'other' || (i % 50), now() - i * interval '43200 milliseconds', 'mail', now(), 'w', now(),
+	                  2, 1, 3, '{}', '{}', '[]'
+	           FROM generate_series(1, 60000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
+	e.exec(t, "ANALYZE {s}.task_history")
 	since := time.Now().Add(-4 * 24 * time.Hour)
 	before := since.Add(24 * time.Hour)
 	dead := []taskmill.State{taskmill.StateDead}
 
 	for _, c := range []struct {
-		action       string
-		params       taskmill.BulkParams
-		batch, count bool // the range always narrows what the batch and the count read
+		action string // the pick: of retry, cancel, delete, or of a delete in history
+		params taskmill.BulkParams
+		count  bool // the count of the filter holds about the 2,000 tasks too
 	}{
-		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead, Kinds: []string{"charge"}}, FinishedSince: since, FinishedBefore: before}, true, true},
-		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"charge"}}, CreatedSince: since, CreatedBefore: before}, true, true},
-		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead}, CreatedSince: since, CreatedBefore: before}, false, skipScan},
-		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, States: dead}, FinishedSince: since, FinishedBefore: before}, true, true},
-		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}}, CreatedSince: since, CreatedBefore: before}, true, true},
-		{"cancel", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"mail"}}, CreatedSince: since, CreatedBefore: before}, true, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead, Kinds: []string{"charge"}}, FinishedSince: since, FinishedBefore: before}, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"charge"}}, CreatedSince: since, CreatedBefore: before}, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead}, FinishedSince: since, FinishedBefore: before}, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead}, CreatedSince: since, CreatedBefore: before}, true},
+		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, States: dead}, FinishedSince: since, FinishedBefore: before}, true},
+		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}}, CreatedSince: since, CreatedBefore: before}, true},
+		{"history", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}}, CreatedSince: since, CreatedBefore: before}, true},
+		{"cancel", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"mail"}}, CreatedSince: since, CreatedBefore: before}, true},
+		// Its count also counts the 2,000 completed tasks of the range.
+		{"cancel", taskmill.BulkParams{Filter: taskmill.TaskFilter{Kinds: []string{"mail"}}, CreatedSince: since, CreatedBefore: before}, false},
 	} {
-		if c.batch {
-			n, err := taskmill.BulkRowsRead(t.Context(), e.client, c.action, &c.params, 0, false)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if n > 4000 {
-				t.Errorf("%s %+v: a batch read %d rows for the 2,000 dead tasks of the range", c.action, c.params, n)
-			}
+		n, err := taskmill.BulkRowsRead(t.Context(), e.client, c.action, &c.params, 0, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n > 4000 {
+			t.Errorf("%s %+v: a batch read %d rows for the 2,000 tasks of the range", c.action, c.params, n)
 		}
 		if !c.count {
 			continue
@@ -358,14 +379,175 @@ func TestRangesOfCountAndBulkActionsReadOnlyTheirRows(t *testing.T) {
 			Filter: c.params.Filter, CreatedSince: c.params.CreatedSince, CreatedBefore: c.params.CreatedBefore,
 			FinishedSince: c.params.FinishedSince, FinishedBefore: c.params.FinishedBefore,
 		}
-		n, err := taskmill.CountRowsRead(t.Context(), e.client, &count)
+		n, err = taskmill.CountRowsRead(t.Context(), e.client, &count)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if n > 4000 {
-			t.Errorf("count %+v: read %d rows for the 2,000 dead tasks of the range", count, n)
+			t.Errorf("count %+v: read %d rows for the 2,000 tasks of the range", count, n)
 		}
 	}
+}
+
+// A whole action with a range of times and no queue reads about the tasks of
+// the range when they lie together, also when the range ends in the past and
+// spans several batches. The first batch reads the range queue by queue,
+// which skips the tasks before it, and so does the last batch of a range
+// with an end, which stops with it. Each changed task is read about three
+// times: to pick it, to lock it, and to change it. Where the tasks of a
+// range of finish times lie far apart, the batches after the first read in
+// ID order, each task of the table at most once. However the batches read,
+// the action changes each task of the range once, and no other task.
+//
+// The bound is on the plan. On a busy machine a batch's statements can take
+// longer than openTimeout, and the action then goes on in windows, which
+// read the whole table by design (TestARangeBatchThatRunsOutOfTimeGoesOnInWindows):
+// the bound holds only for an action that did not.
+func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
+	t.Parallel()
+
+	// 60,000 dead tasks in 10 queues, created over 30 days until 2 days ago,
+	// the newest last, and 20,000 available tasks after them. Most died a
+	// minute after they were created; every 30th, 2,000 in all, died in the
+	// last day.
+	setup := func(t *testing.T) *env {
+		t.Helper()
+		e := newEnv(t)
+		e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
+		           SELECT 'q' || (i % 10), 'email.send', 'dead', c,
+		                  CASE WHEN i % 30 = 0 THEN now() - (i % 80000) * interval '1 second' ELSE c + interval '1 minute' END,
+		                  now(), '{}', 3
+		           FROM generate_series(60000, 1, -1) i,
+		                LATERAL (SELECT now() - interval '2 days' - i * interval '43200 milliseconds' AS c) x`)
+		e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+		           SELECT 'other' || (i % 10), 'email.send', 'available', now(), '{}', 3 FROM generate_series(1, 20000) i`)
+		e.exec(t, "ANALYZE {s}.tasks")
+		return e
+	}
+	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
+	day := 24 * time.Hour
+	since := time.Now().Add(-11 * day)
+	created := &taskmill.BulkParams{Filter: dead, CreatedSince: since, CreatedBefore: since.Add(day)}
+
+	for name, c := range map[string]struct {
+		action  func(context.Context, *taskmill.Client) (taskmill.BulkResult, error)
+		inRange string // the tasks of the range, before the action, from time $1
+		most    int64  // rows of tasks that the action may read
+	}{
+		// 2,000 tasks created on a day 10 days back, with 36,000 after them.
+		"retry created in the past": {func(ctx context.Context, c *taskmill.Client) (taskmill.BulkResult, error) {
+			return c.RetryMatching(ctx, created)
+		}, "created_at >= $1 AND created_at < $1 + interval '1 day'", 5 * 2000},
+		"delete created in the past": {func(ctx context.Context, c *taskmill.Client) (taskmill.BulkResult, error) {
+			return c.DeleteMatching(ctx, created)
+		}, "created_at >= $1 AND created_at < $1 + interval '1 day'", 5 * 2000},
+		// 2,000 tasks among all 80,000.
+		"retry died far apart": {func(ctx context.Context, c *taskmill.Client) (taskmill.BulkResult, error) {
+			return c.RetryMatching(ctx, &taskmill.BulkParams{Filter: dead, FinishedSince: since.Add(10 * day)})
+		}, "finalized_at >= $1::timestamptz + interval '10 days'", 80000 + 5*2000},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := setup(t)
+			var want []int64
+			if err := e.pool.QueryRow(t.Context(), replaceSchema(`SELECT array_agg(id) FROM {s}.tasks WHERE state = 'dead' AND `+c.inRange, e.schema),
+				since).Scan(&want); err != nil {
+				t.Fatal(err)
+			}
+
+			var res taskmill.BulkResult
+			sent := &bulkStatements{}
+			n := rowsReadBy(t, e, sent, func(client *taskmill.Client) (err error) {
+				res, err = c.action(t.Context(), client)
+				return err
+			})
+			if res.Changed != 2000 || len(want) != 2000 {
+				t.Fatalf("the action changed %d tasks, want the %d of the range", res.Changed, len(want))
+			}
+			left := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = ANY($1) AND state = 'dead'", want)
+			others := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE NOT id = ANY($1) AND queue LIKE 'q%' AND state <> 'dead'", want)
+			all := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE NOT id = ANY($1)", want)
+			if left != 0 || others != 0 || all != 78000 {
+				t.Errorf("%d tasks of the range are left, %d others changed, and %d others are kept; want 0, 0, and 78,000", left, others, all)
+			}
+			switch statements := sent.reset(); {
+			case strings.Contains(statements, "w"):
+				t.Logf("a batch ran out of time on this busy machine, and the action went on in windows (%q), reading %d rows", statements, n)
+			case n > c.most:
+				t.Errorf("the action read %d rows of tasks, want at most %d", n, c.most)
+			}
+		})
+	}
+}
+
+// A first batch that reads a wide range queue by queue reads all of it, and
+// may run out of the time of a batch without a window. The action then
+// goes on in windows, in ID order, as it does after any such batch.
+func TestARangeBatchThatRunsOutOfTimeGoesOnInWindows(t *testing.T) {
+	t.Parallel()
+	sent := &bulkStatements{}
+	e := newTracedEnv(t, sent)
+
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
+	           SELECT 'q' || (i % 3), 'email.send', 'dead', now() - interval '1 hour', now() - interval '1 minute', now(), '{}', 3
+	           FROM generate_series(1, 3000) i`)
+	e.exec(t, "ANALYZE {s}.tasks")
+
+	// Where a statement has a time limit, which only a batch without a
+	// window sets, the retry of a task does not end before it.
+	e.exec(t, `CREATE FUNCTION {s}.hold() RETURNS trigger LANGUAGE plpgsql AS '
+	           BEGIN
+	               IF current_setting(''statement_timeout'') <> ''0'' THEN PERFORM pg_sleep(600); END IF;
+	               RETURN NEW;
+	           END'`)
+	e.exec(t, `CREATE TRIGGER hold_retry BEFORE UPDATE ON {s}.tasks FOR EACH ROW
+	           WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.hold()`)
+
+	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
+	got, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: dead, CreatedSince: time.Now().Add(-2 * time.Hour)})
+	if err != nil || got != (taskmill.BulkResult{Changed: 3000}) {
+		t.Fatalf("retry: %+v, %v; want each of the 3,000 dead tasks retried once", got, err)
+	}
+	if statements := sent.reset(); !strings.HasPrefix(statements, "qwp") {
+		t.Errorf("the retry sent %q, want a pick by queue, and then windows", statements)
+	}
+}
+
+// rowsReadBy runs do with a client of its own, on a pool of its own that
+// reaches the database directly and traces its statements with tracer, and
+// returns how many rows of the tasks table the database read for it: the
+// rows that its scans fetched, which the database counts once the pool's
+// connections end.
+func rowsReadBy(t *testing.T, e *env, tracer pgx.QueryTracer, do func(*taskmill.Client) error) int64 {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Tracer = tracer
+	app := e.schema + "_reads"
+	cfg.ConnConfig.RuntimeParams["application_name"] = app
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const read = `SELECT idx_tup_fetch + seq_tup_read FROM pg_stat_user_tables WHERE schemaname = $1 AND relname = 'tasks'`
+	before := e.count(t, read, e.schema)
+	err = do(client)
+	client.Close()
+	pool.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the connections of the action to end", func() bool {
+		return e.count(t, "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1", app) == 0
+	})
+	return int64(e.count(t, read, e.schema) - before)
 }
 
 // errOf returns the error of a call that returns a value and an error.
@@ -1150,8 +1332,9 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 }
 
 // bulkStatements keeps the statements of bulk actions that a pool's
-// connections send, in their order: a p for the pick of a batch, and a w for
-// the search for a window.
+// connections send, in their order: a p for the pick of a batch, a q for a
+// pick that reads a range queue by queue, and a w for the search for a
+// window.
 type bulkStatements struct {
 	mu   sync.Mutex
 	sent []byte
@@ -1167,7 +1350,11 @@ func (s *bulkStatements) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx
 	on := &s.onBegin
 	switch {
 	case strings.Contains(d.SQL, "WITH candidates AS"):
-		s.add('p')
+		mark := byte('p')
+		if strings.Contains(d.SQL, "count(*) OVER ()") {
+			mark = 'q' // a pick that reads a range queue by queue
+		}
+		s.add(mark)
 		if s.again.Swap(false) {
 			return ctx
 		}

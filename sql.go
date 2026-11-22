@@ -72,13 +72,13 @@ type statements struct {
 	taskExists       string
 	lastTask         string
 	windowEnd        string
-	pickRetry        string
-	pickCancel       string
-	pickDelete       string
+	pickRetry        forms
+	pickCancel       forms
+	pickDelete       forms
 	retryTasks       string
 	cancelTasks      string
 	deleteTasks      string
-	pickCompleted    string
+	pickCompleted    forms
 	deleteCompleted  string
 	readQueue        string
 	swapQueue        string
@@ -116,7 +116,7 @@ type statements struct {
 	listTasks       string
 	listFinished    string
 	listCreated     string
-	countTasks      string
+	countTasks      forms
 	listGroups      string
 	listQueueGroups string
 	listQueues      string
@@ -132,6 +132,20 @@ type statements struct {
 	storeActivity string
 	addActivity   string
 	activity      string
+}
+
+// forms are the two forms of a statement that reads tasks of a range of
+// times: one that reads them as it would without a range, and one that
+// reads the range queue by queue. See rangeWithoutQueue.
+type forms struct{ plain, queues string }
+
+// choose returns the form that reads queue by queue if fromQueues holds,
+// and the plain one if not.
+func (f forms) choose(fromQueues bool) string {
+	if fromQueues {
+		return f.queues
+	}
+	return f.plain
 }
 
 func newStatements(schema string) *statements {
@@ -191,13 +205,13 @@ func newStatements(schema string) *statements {
 		taskExists:       q(taskExistsSQL),
 		lastTask:         q(lastTaskSQL),
 		windowEnd:        q(windowEndSQL),
-		pickRetry:        q(pickRetrySQL),
-		pickCancel:       q(pickCancelSQL),
-		pickDelete:       q(pickDeleteSQL),
+		pickRetry:        forms{q(pickRetrySQL), q(pickRetryQueuesSQL)},
+		pickCancel:       forms{q(pickCancelSQL), q(pickCancelQueuesSQL)},
+		pickDelete:       forms{q(pickDeleteSQL), q(pickDeleteQueuesSQL)},
 		retryTasks:       q(retryTasksSQL),
 		cancelTasks:      q(cancelTasksSQL),
 		deleteTasks:      q(deleteTasksSQL),
-		pickCompleted:    q(pickCompletedSQL),
+		pickCompleted:    forms{q(pickCompletedSQL(false)), q(pickCompletedSQL(true))},
 		deleteCompleted:  q(deleteCompletedSQL),
 		readQueue:        q(readQueueSQL),
 		swapQueue:        q(swapQueueSQL),
@@ -233,7 +247,7 @@ func newStatements(schema string) *statements {
 		listTasks:       q(listTasksSQL),
 		listFinished:    q(listFinishedSQL),
 		listCreated:     q(listCreatedSQL),
-		countTasks:      q(countTasksSQL),
+		countTasks:      forms{q(countTasksSQL(false)), q(countTasksSQL(true))},
 		listGroups:      q(listGroupsSQL),
 		listQueueGroups: q(listQueueGroupsSQL),
 		listQueues:      q(listQueuesSQL),
@@ -325,4 +339,51 @@ func queuesIn(name, table, where string) string {
     SELECT (SELECT t.queue FROM ` + table + ` t WHERE ` + where + ` AND t.queue > x.queue ORDER BY t.queue LIMIT 1)
     FROM ` + name + ` x WHERE x.queue IS NOT NULL
 )`
+}
+
+// queuesOfStates is a query of the queues that have a task in one of the
+// states of the text array states, with queuesWith, each queue once: those
+// that have a task that is not running, if states names such a state, and
+// those that have a running task, if it names running.
+func queuesOfStates(states string) string {
+	return `WITH RECURSIVE ` + queuesWith(`waiting`, `<> 'running'`) + `, ` + queuesWith(`running`, `= 'running'`) + `
+        SELECT queue FROM waiting WHERE queue IS NOT NULL AND cardinality(array_remove(` + states + `, 'running')) > 0
+        UNION
+        SELECT queue FROM running WHERE queue IS NOT NULL AND 'running' = ANY(` + states + `)`
+}
+
+// historyQueues is a query of the queues of the completed tasks in history
+// that finished at or after a day before since, a time or NULL, with
+// queuesIn. See finishedSinceSQL.
+func historyQueues(since string) string {
+	return `WITH RECURSIVE ` + queuesIn(`kept`, `{s}.task_history`, finishedSinceSQL(`finalized_at`, since)) + `
+        SELECT queue FROM kept WHERE queue IS NOT NULL`
+}
+
+// finishedSinceSQL matches the completed tasks whose finish time, column,
+// is at or after a day before since, a time or NULL: those that a range of
+// creation times from since can hold. A task finishes after it was created,
+// and the day covers a clock that moved back, as after a failover to a
+// server whose clock was behind. Partitions of history that end earlier are
+// left out of the plan: without it, a statement that reads history queue
+// by queue reads each partition once for each queue.
+func finishedSinceSQL(column, since string) string {
+	return `(` + since + ` IS NULL OR ` + column + ` >= ` + since + ` - interval '1 day')`
+}
+
+// inQueues matches the tasks t of the queues that the query queues returns.
+// Named, the queues let the planner read each one's part of an index that
+// leads with the queue. See rangeWithoutQueue.
+func inQueues(queues string) string {
+	return `t.queue = ANY(ARRAY(` + queues + `))`
+}
+
+// wholeIn is a FROM clause that reads the rows c of read, a query of the
+// tasks t, whole, in the queues that the query queues returns. OFFSET 0
+// keeps the planner from reading the rows in the order of another index, to
+// stop early, as it would for an ORDER BY and a LIMIT around the query: it
+// takes matching rows to be spread over that order.
+func wholeIn(read, queues string) string {
+	return `(` + read + ` AND ` + inQueues(queues) + `
+    OFFSET 0) c`
 }
