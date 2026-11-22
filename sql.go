@@ -97,7 +97,6 @@ type statements struct {
 	electMaintainer  string
 	resignMaintainer string
 	promoteDue       string
-	nextDue          string
 	wakeQueues       string
 	rescue           string
 	rescueBackoff    string
@@ -216,7 +215,6 @@ func newStatements(schema string) *statements {
 		electMaintainer:  q(electMaintainerSQL),
 		resignMaintainer: q(resignMaintainerSQL),
 		promoteDue:       q(promoteDueSQL),
-		nextDue:          q(nextDueSQL),
 		wakeQueues:       q(wakeQueuesSQL),
 		rescue:           q(rescueSQL),
 		rescueBackoff:    q(rescueBackoffSQL),

@@ -136,6 +136,19 @@ running and renews it at the next check-in. An attempt that completed its
 task with `CompleteTx` is never canceled as lost: its own transaction holds
 the row until it commits.
 
+A worker cancels an attempt once its lease may have ended. So after a
+renewal fails, the next check-in can come too late: as the lease ends, if
+an outage began just before the failed one. The worker tries a failed
+renewal again every thirtieth of the lease, until one succeeds. A try that
+gets no answer in its time is followed by one with twice as long, up to a
+third of the lease: on a slow database, each try that runs out of time
+costs a connection, which pgx holds in the pool while it closes it.
+
+The check-ins continue meanwhile with a third of the lease, which a slow
+database may need. So two renewals of a lease can overlap, and the one that
+started first can commit last: the statement never moves a lease's end
+back, and neither does the worker.
+
 Handlers that share the worker's pool can hold every connection for
 longer than a lease, and renewals that waited for one would let leases run
 out: tasks would run twice. So while `Run` runs, the worker keeps one
@@ -147,17 +160,19 @@ because a server or a firewall may have ended its session meanwhile. At
 each check-in it is pinged, and replaced once older than the pool's
 `MaxConnLifetime`, while the pool has connections to spare. When it broke,
 the pool closes it, and the statement runs again, once, on a new
-connection, if one comes within the renewal's time, a third of the lease.
-The pool gives the broken one's place to whoever waited first, often a
-handler, so while handlers hold the pool a broken reserve may not be
-replaced. A server or a proxy that ends sessions idle for less than a third
+connection, if one comes within the renewal's time: at a check-in, a third
+of the lease. The pool gives the broken one's place to whoever waited
+first, often a handler, so while handlers hold the pool a broken reserve
+may not be replaced. A server or a proxy that ends sessions idle for less than a third
 of the lease, as `idle_session_timeout` can, ends the reserve between
 check-ins every time, and leaves the worker none when it is needed.
 
 Completions, fetches, and the records of failed attempts use the pool
 alone. A completion that waits for a connection keeps its lease, because
-renewals continue, and it tries until the lease that it began with could
-have run out.
+renewals continue. It tries until the lease that it began with could have
+run out. A try without an answer, as on a connection that a failover left
+behind, moves that end to the lease as renewed by then, for a few tries
+([Defaults and limits](../reference/defaults-and-limits.md#workers)).
 
 The worker keeps a reserve only if the pool has its total `Concurrency`
 plus 5 connections, the size that

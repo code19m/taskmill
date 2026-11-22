@@ -75,16 +75,20 @@ SELECT pg_notify($2, '{resigned}') FROM resigned`
 //
 // promoteDueSQL makes a batch of due scheduled and retryable tasks
 // available, notifies their queues on channel $1, and returns how
-// many it promoted. It reads the notified CTE, so that it runs. Batch
-// limits are part of the text, so that a generic plan stays bounded
-// too. Other maintenance statements have no ORDER BY: they repeat
-// until they handle less than a batch, so order does not matter, and
-// without one the planner never sorts. This one orders by run time,
-// the order of its index, to keep the planner on that index: past run
-// times belong to available tasks too, so the statistics, which see
-// state and run time apart, can suggest that many tasks are due, and a
-// scan of the whole table looks cheaper. Like the fetch, it updates
-// the tasks through an array of their IDs.
+// many it promoted, and the seconds until the next of those tasks that
+// is not due yet, or NULL if there is none. A due task that it skips,
+// as another transaction holds its row, thus does not count as the
+// next: the maintainer waits its interval, and does not try it again
+// and again. It reads the notified CTE, so that it runs. Batch limits
+// are part of the text, so that a generic plan stays bounded too.
+// Other maintenance statements have no ORDER BY: they repeat until
+// they handle less than a batch, so order does not matter, and without
+// one the planner never sorts. This one orders by run time, the order
+// of its index, to keep the planner on that index: past run times
+// belong to available tasks too, so the statistics, which see state
+// and run time apart, can suggest that many tasks are due, and a scan
+// of the whole table looks cheaper. Like the fetch, it updates the
+// tasks through an array of their IDs.
 const promoteDueSQL = `
 WITH due AS (
     SELECT id FROM {s}.tasks
@@ -96,13 +100,11 @@ WITH due AS (
     UPDATE {s}.tasks t SET state = 'available' WHERE t.id = ANY(ARRAY(SELECT id FROM due)) RETURNING t.queue
 ), notified AS (
     SELECT count(pg_notify($1, '{available}' || queue)) AS n FROM (SELECT DISTINCT queue FROM promoted) q
+), next AS (
+    SELECT extract(epoch FROM min(run_at) - now()) AS secs FROM {s}.tasks
+    WHERE state IN ('scheduled', 'retryable') AND run_at > now()
 )
-SELECT (SELECT count(*) FROM promoted) FROM notified`
-
-// nextDueSQL returns the seconds until the next scheduled or retryable task
-// is due, negative if one is due, or NULL if there is none.
-const nextDueSQL = `
-SELECT extract(epoch FROM min(run_at) - now()) FROM {s}.tasks WHERE state IN ('scheduled', 'retryable')`
+SELECT (SELECT count(*) FROM promoted), (SELECT secs FROM next) FROM notified`
 
 // $1 channel, $2 longest wait in microseconds, $3 send the heartbeat.
 //

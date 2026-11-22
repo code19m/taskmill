@@ -105,7 +105,7 @@ created. Each task of a batch counts as one attempt.
 | `taskmill.worker.leases.lost`<br/>`taskmill_worker_leases_lost_total` | Counter | `{attempt}` | Attempts that lost their [lease](../concepts/glossary.md#lease). Their tasks may run twice |
 | `taskmill.worker.handlers.abandoned`<br/>`taskmill_worker_handlers_abandoned_total` | Counter | `{attempt}` | Attempts whose handler did not return 5 seconds after its context ended, by its `Timeout`, a cancel, a lost lease, or the worker's stop |
 | `taskmill.worker.completions.blocked`<br/>`taskmill_worker_completions_blocked_total` | Counter | `{completion}` | Completions that waited longer than the lease for a row that another transaction held |
-| `taskmill.worker.pool.waits`<br/>`taskmill_worker_pool_waits_total` | Counter | `{wait}` | Fetches and records of failed attempts that found every connection of the pool in use |
+| `taskmill.worker.pool.waits`<br/>`taskmill_worker_pool_waits_total` | Counter | `{wait}` | Times that a statement of the worker found every connection of the pool in use, and waited for one. [`WorkerStats.PoolWaits`](https://pkg.go.dev/github.com/code19m/taskmill#WorkerStats) lists those statements |
 | `taskmill.worker.slots`<br/>`taskmill_worker_slots` | UpDownCounter | `{slot}` | The slots of the worker's queues, one per unit of `Concurrency`, by `taskmill.slot.state`: `free`, `running`, or `stuck`, held by a handler that did not return 5 seconds after its context ended |
 
 - **They have no other attributes.** The workers of one process add up. A

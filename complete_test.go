@@ -455,7 +455,8 @@ func TestFailureOfAGroupedTaskWaitsForItsGroupWithItsLease(t *testing.T) {
 }
 
 // A completion that the database takes long for, longer than a third of
-// the lease, still goes through: the task runs once.
+// the lease, still goes through: the task runs once. Renewals are as slow,
+// so they fail, and the completion has the lease that the task began with.
 func TestSlowCompletionCompletesTheTaskOnce(t *testing.T) {
 	t.Parallel()
 	e := newTracedEnv(t, &slowStatement{fragment: "SELECT DISTINCT id, lease_token FROM unnest", delay: 1500 * time.Millisecond})
@@ -472,6 +473,40 @@ func TestSlowCompletionCompletesTheTaskOnce(t *testing.T) {
 	id := e.enqueue(t, sendEmail{}, nil)
 	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 || runs.Load() != 1 {
 		t.Fatalf("completed on attempt %d after %d runs, want one", info.Attempt, runs.Load())
+	}
+}
+
+// A completion that the worker cannot record names its tasks in the log:
+// they run again, and their work may need to be checked.
+func TestFailedCompletionNamesItsTasks(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	logs := &logRecorder{}
+	e := newEnvWith(t, proxiedPool(t, db, 6, nil), &taskmill.ClientConfig{Logger: slog.New(logs)})
+	started, release := make(chan struct{}), make(chan struct{})
+	startWorker(t, newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			close(started)
+			<-release
+			return nil
+		}, nil),
+		Queues:        defaultQueue(1),
+		LeaseDuration: 600 * time.Millisecond,
+		NoMaintainer:  true,
+	}))
+	t.Cleanup(func() { db.cut(false) }) // so that the worker stops soon
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	<-started
+	db.cut(true)
+	close(release)
+
+	const failed = "complete tasks failed; they are rescued when their leases run out"
+	waitFor(t, "the completion to be given up", func() bool { return logs.count(failed) > 0 })
+	for _, r := range logs.all() {
+		if r.Message == failed && attr(r, "task_ids") != fmt.Sprint([]int64{id}) {
+			t.Errorf("got %s, want task_ids=[%d]", recordText(r), id)
+		}
 	}
 }
 
