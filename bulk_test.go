@@ -222,6 +222,47 @@ func TestDeleteMatchingTakesOneBatchOfBothTables(t *testing.T) {
 	}
 }
 
+// History is split in a partition per day. A batch of a delete of completed
+// tasks reads only the partitions from the first day on which its tasks
+// finished to the last, when it locks them and when it deletes them:
+// PostgreSQL 15 and 16 search the index of every partition that a statement
+// reads once for each ID of the batch.
+func TestDeleteMatchingReadsOnlyThePartitionsOfItsBatch(t *testing.T) {
+	t.Parallel()
+	// 300 completed tasks in each of the 7 days that have partitions, in the
+	// order of their IDs: a batch of 1,000 holds the tasks of 4 days. If its
+	// first task finished 5 days later, as a retried task can, the batch
+	// spans 6 days.
+	cases := map[string]struct {
+		late int // days that the first task finished after the others of its day
+		want int // the partitions from the batch's first finish day to its last
+	}{
+		"finish days follow the IDs": {0, 4},
+		"one task finished later":    {5, 6},
+	}
+
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			e.exec(t, `INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, run_at, attempted_by, attempted_at,
+			                                         priority, attempt, max_attempts, payload, metadata, errors)
+			           SELECT i, now() + ((i - 1) / 300 + CASE WHEN i = 1 THEN $1 ELSE 0 END) * interval '1 day', 'default', now(),
+			                  'email.send', now(), 'w', now(), 2, 1, 3, '{}', '{}', '[]'
+			           FROM generate_series(1, 2100) i`, c.late)
+			e.exec(t, "ANALYZE {s}.task_history")
+
+			picked, deleted, err := taskmill.HistoryPartitionsRead(t.Context(), e.client, &taskmill.TaskFilter{Kinds: []string{"email.send"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if picked > c.want || deleted > c.want {
+				t.Fatalf("the batch locked its tasks in %d partitions, and deleted them in %d; want at most %d", picked, deleted, c.want)
+			}
+		})
+	}
+}
+
 func TestDeleteMatching(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

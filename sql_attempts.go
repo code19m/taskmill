@@ -166,7 +166,8 @@ WHERE ` + leasedSQL + ` AND t.cancel_requested_at IS NOT NULL`
 //
 // completeSQL finishes running tasks whose attempts still hold their
 // leases: it moves them to history, except tasks $3, which it only
-// deletes. It returns each task it finished, with true.
+// deletes. It returns each task it finished, with true and the dedupe
+// key that its cancel freed, if any: see regainKeysSQL.
 //
 // It waits for a row that another transaction holds, so it first locks
 // the tasks in the order of their IDs, and then deletes them: the page on
@@ -179,7 +180,7 @@ WITH held AS (
     ORDER BY t.id
     FOR UPDATE OF t
 ), ` + completeHeldSQL + `
-SELECT id, queue, coalesce(group_key, ''), true FROM done`
+SELECT id, queue, coalesce(group_key, ''), true, freed_key, freed_key_expires_at FROM done`
 
 // $1 task IDs, $2 lease tokens, $3 task IDs to delete without history.
 //
@@ -197,9 +198,9 @@ WITH attempts AS (
     WHERE ` + leasedSQL + `
     FOR UPDATE OF t SKIP LOCKED
 ), ` + completeHeldSQL + `
-SELECT id, queue, coalesce(group_key, ''), true FROM done
+SELECT id, queue, coalesce(group_key, ''), true, freed_key, freed_key_expires_at FROM done
 UNION ALL
-SELECT t.id, '', '', false FROM attempts a JOIN {s}.tasks t USING (id, lease_token)
+SELECT t.id, '', '', false, NULL, NULL FROM attempts a JOIN {s}.tasks t USING (id, lease_token)
 WHERE NOT EXISTS (SELECT FROM held WHERE held.id = a.id) AND ` + leasedSQL
 
 // completeHeldSQL is the part of completeSQL and completeSkippingSQL
@@ -209,7 +210,7 @@ const completeHeldSQL = `done AS (
     DELETE FROM {s}.tasks
     WHERE id = ANY(ARRAY(SELECT id FROM held))
     RETURNING id, created_at, run_at, attempted_at, priority, attempt, max_attempts,
-              queue, kind, group_key, attempted_by, payload, metadata, errors
+              queue, kind, group_key, attempted_by, payload, metadata, errors, freed_key, freed_key_expires_at
 ), kept AS (
     INSERT INTO {s}.task_history (id, finalized_at, created_at, run_at, attempted_at, priority, attempt,
                                   max_attempts, queue, kind, group_key, attempted_by, payload, metadata, errors)
@@ -218,6 +219,24 @@ const completeHeldSQL = `done AS (
     FROM done
     WHERE done.id <> ALL($3::bigint[])
 )`
+
+// $1 dedupe keys, $2 task IDs, $3 ends of the keys' windows.
+//
+// regainKeysSQL gives the completed tasks $2 the dedupe keys $1 that their
+// cancels freed while they ran: they did their work all the same. It
+// claims a key as takeKeys does for a retry: only if no task holds it, or
+// its holder's window has ended, and only for the rest of its window. A
+// task that took the key during the run keeps it. Like an enqueue, it
+// waits for a transaction that claims or holds the same key, so a worker
+// runs it once the completion has committed: see Worker.regainKeys.
+const regainKeysSQL = `
+INSERT INTO {s}.dedupe_keys AS d (key, task_id, expires_at)
+SELECT DISTINCT ON (key) key, id, expires_at
+FROM unnest($1::bytea[], $2::bigint[], $3::timestamptz[]) AS u(key, id, expires_at)
+WHERE expires_at > now()
+ORDER BY key, id
+ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
+    WHERE d.expires_at <= now()`
 
 // $1 task IDs, $2 lease tokens.
 //

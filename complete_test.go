@@ -363,6 +363,52 @@ func TestHeldTaskDoesNotHoldUpOtherCompletions(t *testing.T) {
 	}
 }
 
+// A task that completes after its cancel was requested takes back the dedupe
+// key that the cancel freed, but a transaction that claimed the key meanwhile
+// holds up neither its completion nor those of the tasks that complete with
+// it: the worker takes the key back once the completion committed, and gives
+// up after a moment. If that transaction then rolls back, the task stays
+// without its key.
+func TestAClaimedKeyDoesNotHoldUpCompletions(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-release
+			return nil
+		}, nil),
+		Queues: defaultQueue(2),
+	})
+
+	key := &taskmill.EnqueueOptions{DedupeKey: "order-1"}
+	keyed := e.keyed(t, key).ID
+	plain := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "a handler to start")
+	recv(t, started, "a handler to start")
+	e.cancel(t, keyed)
+
+	tx := e.begin(t)
+	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, key); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	e.waitState(t, plain, taskmill.StateCompleted)
+	e.waitState(t, keyed, taskmill.StateCompleted)
+	const gaveUp = "completed tasks could not take back the dedupe keys that their cancels freed"
+	waitFor(t, "the warning", func() bool { return logs.count(gaveUp) > 0 })
+
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if res := e.keyed(t, key); res.Duplicate {
+		t.Fatalf("the key went back to task %d, whose claim gave up", res.ID)
+	}
+}
+
 // The failure of a grouped task's last attempt halts its group, so it waits
 // for the group's row, which a transaction that enqueues into the group
 // holds. It waits without holding the task's row for long, which the

@@ -38,6 +38,23 @@ func MigrateWith(ctx context.Context, pool *pgxpool.Pool, cfg *MigrateConfig, fi
 	return m.run(ctx)
 }
 
+// MigrationsWith returns Migrations with more migrations after taskmill's
+// own, which files holds as MigrateWith takes them.
+func MigrationsWith(schema string, files ...string) ([]Migration, error) {
+	all, err := migrations.All(schema)
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i+1 < len(files); i += 2 {
+		mig, err := migrations.Parse(files[i], files[i+1], schema)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, mig)
+	}
+	return publicMigrations(schema, all), nil
+}
+
 // NotifyWindow is the shortest gap between two notifications for one queue
 // from one client.
 const NotifyWindow = notifyWindow
@@ -472,6 +489,69 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, filter *TaskFil
 		args = []any{m.queues, m.kinds, m.groups, m.after, m.until}
 	}
 	return rowsRead(ctx, c, bulkSettings, sql, args, taskTables)
+}
+
+// HistoryPartitionsRead runs the first batch of a delete of the completed
+// tasks that filter matches, as DeleteMatching runs it, in a transaction
+// that it rolls back. It returns how many partitions of the history the
+// part of the pick that locks the batch read, and how many the delete read,
+// from their plans under EXPLAIN ANALYZE.
+func HistoryPartitionsRead(ctx context.Context, c *Client, filter *TaskFilter) (picked, deleted int, err error) {
+	run, err := checkBulk(&BulkParams{Filter: *filter}, []State{StateCompleted})
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := c.pool.QueryRow(ctx, c.sql.lastTask).Scan(&run.last); err != nil {
+		return 0, 0, err
+	}
+	run.until = run.last
+
+	tx, err := c.pool.Begin(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if _, err := tx.Exec(ctx, bulkSettings); err != nil {
+		return 0, 0, err
+	}
+
+	explain := func(cte, sql string, args ...any) (int, error) {
+		var plan []map[string]any
+		if err := tx.QueryRow(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+sql, args...).Scan(&plan); err != nil {
+			return 0, err
+		}
+		root, _ := plan[0]["Plan"].(map[string]any)
+		return partitionsRead(root, cte == ""), nil
+	}
+	if picked, err = explain("picked", c.sql.pickCompleted, run.queues, run.kinds, run.groups, run.after, run.until); err != nil {
+		return 0, 0, err
+	}
+
+	ts, err := c.pickCompleted(ctx, pgxExecutor{q: tx}, run)
+	if err != nil {
+		return 0, 0, err
+	}
+	first, last := finalizedRange(ts)
+	deleted, err = explain("", c.sql.deleteCompleted, idsOf(ts), first, last)
+	return picked, deleted, err
+}
+
+// partitionsRead counts the scans of history partitions that ran in plan:
+// all of them if in, or else only those under the CTE picked.
+func partitionsRead(plan map[string]any, in bool) int {
+	in = in || plan["Subplan Name"] == "CTE picked"
+	n := 0
+	rel, _ := plan["Relation Name"].(string)
+	if loops, _ := plan["Actual Loops"].(float64); in && loops > 0 && strings.HasPrefix(rel, "task_history_") {
+		n++
+	}
+	children, _ := plan["Plans"].([]any)
+	for _, child := range children {
+		if child, ok := child.(map[string]any); ok {
+			n += partitionsRead(child, in)
+		}
+	}
+	return n
 }
 
 // CountRowsRead runs the count of the tasks that match filter, as Count runs

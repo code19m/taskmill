@@ -483,10 +483,11 @@ func (c *Client) runBulkBatch(ctx context.Context, run *bulkRun, batch batchFunc
 type bulkTask struct {
 	id           int64
 	queue, group string
-	locked       bool  // the action holds its lock, and it still matches
-	state        State // if locked
-	inGroup      bool  // if locked: its group has a row, which the action holds
-	keyed        bool  // if locked: its cancel freed a dedupe key whose window still lasts
+	locked       bool      // the action holds its lock, and it still matches
+	state        State     // if locked
+	inGroup      bool      // if locked: its group has a row, which the action holds
+	keyed        bool      // if locked: its cancel freed a dedupe key whose window still lasts
+	finalized    time.Time // if completed: when it was
 }
 
 // pick reads the next batch of the tasks that run matches, with one of the pick
@@ -782,7 +783,8 @@ func (c *Client) deleteBatch(ctx context.Context, q querier, run *bulkRun) (step
 	ts, completed = s.locked(ts), s.locked(completed)
 
 	if len(completed) > 0 {
-		if _, err := q.exec(ctx, c.sql.deleteCompleted, idsOf(completed)); err != nil {
+		first, last := finalizedRange(completed)
+		if _, err := q.exec(ctx, c.sql.deleteCompleted, idsOf(completed), first, last); err != nil {
 			return step{}, err
 		}
 	}
@@ -821,10 +823,25 @@ func (c *Client) pickCompleted(ctx context.Context, q querier, run *bulkRun) ([]
 	var out []bulkTask
 	for r.Next() {
 		t := bulkTask{state: StateCompleted}
-		if err := r.Scan(&t.id, &t.locked); err != nil {
+		if err := r.Scan(&t.id, &t.finalized, &t.locked); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
 	}
 	return out, r.Err()
+}
+
+// finalizedRange returns the first and the last time that the completed
+// tasks ts were finalized. ts is not empty.
+func finalizedRange(ts []bulkTask) (first, last time.Time) {
+	first, last = ts[0].finalized, ts[0].finalized
+	for _, t := range ts[1:] {
+		if t.finalized.Before(first) {
+			first = t.finalized
+		}
+		if t.finalized.After(last) {
+			last = t.finalized
+		}
+	}
+	return first, last
 }

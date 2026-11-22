@@ -7,6 +7,13 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Migration.Statements` returns the statements of an online migration,
+  which `Migration.Online` tells a runner to apply one at a time. Its SQL
+  alone fails as one query with more than one statement, and splitting it
+  needs a parser that knows SQL's comments and quotes.
+
 ### Changed
 
 - The README is easier to scan: what taskmill is, why, and how to start
@@ -38,6 +45,50 @@ All notable changes to taskmill are recorded here. The format follows
   rollout on every page. The worker manifest of
   [Kubernetes](docs/production/kubernetes.md) sets `HEALTH_ADDR`, so its
   readiness probe reaches the tutorial's worker.
+- A running task that its handler completes after a cancel was requested
+  takes back the dedupe key that the cancel freed, unless another task took
+  the key during the run. It stayed without its key, so an enqueue of the
+  same key within its window created a second task, and the work ran
+  twice.
+- Version 0 of `Migrations`, the bootstrap, works for a role that owns its
+  schema but may not create schemas in the database, as `Migrate` does. It
+  failed with `permission denied for database`, so a tool such as goose
+  could not apply taskmill's migrations as the role that
+  [Database](docs/production/database.md) suggests. A file of version 0
+  that your tool already applied needs no change.
+- An executor that wraps a nil pointer, such as `SQL` of a nil `*sql.Tx`
+  left on an error path, is an error that wraps `ErrInvalidArgument` in
+  `EnqueueTx`, `EnqueueManyTx`, `CancelTx`, `CompleteTx`, and
+  `outbox.Store`, as a nil executor is. They panicked.
+- The doc of `Executor` says that an enqueue outside a transaction returns
+  an error that wraps `ErrStoredWithoutIDs` when its second read of a
+  dedupe key fails, as it does since 0.15.0, not that it logs the error.
+  `ErrStoredWithoutIDs` says what it means on a connection after `BEGIN`,
+  or on a wrapper of a transaction: roll back, and nothing is stored.
+- `UpdateQueue` runs its update again when a concurrent update removed the
+  queue's last setting meanwhile, which deletes the queue's row. It wrote a
+  value computed from the old limit, so the other update was lost, against
+  its doc.
+- `Migrate` refuses an online step for a pool of one connection, or for
+  connections with a timeout that would cancel the build, with an error
+  that wraps `ErrInvalidArgument`, as `NewClient` does for a pool setting.
+  A deploy job could not tell these refusals, which need a person, from an
+  error that a retry fixes.
+- The `CancelTx` example in [Transactions](docs/guides/transactions.md)
+  works for an order without a reminder, as the recipe does: it scanned a
+  NULL into an `int64`, which failed, and rolled back the payment.
+- [Keep at most one waiting task per key](docs/recipes/one-waiting-task-per-key.md)
+  stores the ID of the waiting refresh instead of a flag, and its handler
+  clears only its own ID. A refresh that ran again, after a failed attempt
+  or a worker's stop, cleared the flag of the refresh behind it, so more
+  refreshes waited than the page promised.
+- A batch of `DeleteMatching` that deletes completed tasks locks and
+  deletes them only in the history partitions from the first day on which
+  they finished to the last. It searched every partition's index once for
+  each of its 1,000 tasks, which on PostgreSQL 15 and 16 cost 25 times the
+  reads of PostgreSQL 18 with 30 days of history. A batch with a task that
+  finished days later, as a retried one can, still reads every partition in
+  between.
 
 ## [0.15.0] - 2026-11-21
 

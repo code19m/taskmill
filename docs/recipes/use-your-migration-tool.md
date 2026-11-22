@@ -88,6 +88,11 @@ step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
   owner. Run your tool as that role, or change the owner afterwards.
 - **A failed online migration leaves an invalid index.** Drop it with
   `DROP INDEX CONCURRENTLY`, then apply the migration again.
+- **Some tools send a file as one query,** such as golang-migrate and
+  dbmate. PostgreSQL runs a query that holds several statements in one
+  transaction, and refuses `CONCURRENTLY` there. For such a tool, or a
+  runner of your own, write each of an online migration's `Statements` in
+  a file of its own, and the `INSERT` that records its version in one more.
 - **Workers create the history partitions, not your tool.** Each worker
   creates the partitions of the next 7 days when it starts, before it runs
   a task. So the first completed tasks keep their history too. If the

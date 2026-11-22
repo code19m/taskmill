@@ -2,10 +2,13 @@ package taskmill_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -45,4 +48,44 @@ func TestStatementThatFailsAfterItsFirstRowIsReported(t *testing.T) {
 			t.Errorf("on %s: got a row (%t) and the error %v, want SQLSTATE 22012", name, found, err)
 		}
 	}
+}
+
+// A transaction variable left nil on an error path is a caller's mistake,
+// which every call that takes an executor reports as an invalid argument,
+// whatever the executor wraps: it must not panic.
+func TestANilExecutorIsAnInvalidArgument(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	id := e.enqueue(t, sendEmail{}, nil)
+	calls := map[string]func(ex taskmill.Executor) error{
+		"EnqueueTx": func(ex taskmill.Executor) error {
+			_, err := e.client.EnqueueTx(t.Context(), ex, sendEmail{}, nil)
+			return err
+		},
+		"EnqueueManyTx": func(ex taskmill.Executor) error {
+			_, err := e.client.EnqueueManyTx(t.Context(), ex, []taskmill.EnqueueParams{{Args: sendEmail{}}})
+			return err
+		},
+		"CancelTx": func(ex taskmill.Executor) error { return e.client.CancelTx(t.Context(), ex, id) },
+	}
+	executors := map[string]taskmill.Executor{
+		"nil":                    nil,
+		"Pgx(nil)":               taskmill.Pgx(nil),
+		"Pgx(nil pgx.Tx)":        taskmill.Pgx(pgx.Tx(nil)),
+		"Pgx(nil *pgxpool.Tx)":   taskmill.Pgx((*pgxpool.Tx)(nil)),
+		"Pgx(nil *pgxpool.Pool)": taskmill.Pgx((*pgxpool.Pool)(nil)),
+		"Pgx(nil *pgx.Conn)":     taskmill.Pgx((*pgx.Conn)(nil)),
+		"SQL(nil)":               taskmill.SQL(nil),
+		"SQL(nil *sql.Tx)":       taskmill.SQL((*sql.Tx)(nil)),
+		"SQL(nil *sql.DB)":       taskmill.SQL((*sql.DB)(nil)),
+	}
+
+	for callName, call := range calls {
+		for exName, ex := range executors {
+			if err := call(ex); !errors.Is(err, taskmill.ErrInvalidArgument) {
+				t.Errorf("%s on %s: got %v, want ErrInvalidArgument", callName, exName, err)
+			}
+		}
+	}
+	e.wantState(t, id, taskmill.StateAvailable)
 }

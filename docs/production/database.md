@@ -40,7 +40,7 @@ from the first one.
 
 To create the schema, `Migrate` needs the CREATE privilege on the database.
 If your role does not have it, create the schema yourself, owned by that
-role. `Migrate` then only fills it:
+role. Then `Migrate`, or [your own tool](../recipes/use-your-migration-tool.md), only fills it:
 
 ```sql
 CREATE ROLE shop LOGIN PASSWORD '...';

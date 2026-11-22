@@ -16,9 +16,11 @@ import (
 // completes them together, so a busy worker needs far fewer statements,
 // while an idle one adds only that moment. It keeps completions whose rows,
 // or the rows of their FIFO groups, other transactions hold, and tries them
-// again shortly, so that it never waits for another transaction's lock while
-// holding a connection, and the completions of a batch never wait for one
-// such row.
+// again shortly, so that the completions of a batch never wait for one such
+// row. While it runs, only regainKeys, once a batch has committed, waits
+// for another transaction's lock while holding a connection, and for
+// keyLockTimeout at most. At shutdown, completeWaiting waits for the rows of
+// the groups still held, until Run stops recording results.
 func (w *Worker) completer(ctx, record context.Context) {
 	defer close(w.completerDone)
 	var blocked []*liveAttempt // completions whose rows other transactions held
@@ -292,7 +294,8 @@ func lockedRows[K comparable](ctx context.Context, q querier, sql string, scan f
 
 // afterComplete stops tracking completed attempts, counts the tasks that their
 // committed completion finished, wakes the fetches that those tasks kept
-// waiting, and logs a failure to record them.
+// waiting, gives the tasks back the dedupe keys that their cancels freed, and
+// logs a failure to record them.
 func (w *Worker) afterComplete(ctx context.Context, ts []*liveAttempt, done []completedTask, err error) {
 	for _, t := range ts {
 		w.untrack(t)
@@ -302,10 +305,51 @@ func (w *Worker) afterComplete(ctx context.Context, ts []*liveAttempt, done []co
 		w.counts.succeeded.Add(int64(len(done)))
 		w.countCompleted(done)
 		w.madeRoom(done)
+		w.regainKeys(ctx, done)
 	}
 	if err != nil {
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "complete tasks failed; they are rescued when their leases run out",
 			slog.Int(logKeyTasks, len(ts)), slog.Any(logKeyError, err))
+	}
+}
+
+// keyLockTimeout bounds the wait of regainKeys for a dedupe key's row, as
+// bulkSettings bound a bulk action's: long enough for an enqueue of the key
+// to commit, and short enough that the completer barely pauses for a
+// transaction that stays open.
+const keyLockTimeout = "100ms"
+
+// regainKeys gives the tasks of done, whose completion committed, the dedupe
+// keys that their cancels freed while they ran, in a transaction of its own:
+// see regainKeysSQL. A transaction that claims such a key makes the claim
+// wait. The completion's statements must not wait for it: they hold the rows
+// of up to completionBatch tasks and of their groups, which could deadlock
+// with that transaction, and the completer records nothing else meanwhile.
+// So the claim waits keyLockTimeout at most, and then gives up: the task
+// stays without its key, and the worker logs it. The transaction notifies
+// nobody, so the timeout may last until its commit: see liftLockTimeout.
+func (w *Worker) regainKeys(ctx context.Context, done []completedTask) {
+	n := 0
+	for _, t := range done {
+		if t.freed() {
+			n++
+		}
+	}
+	if n == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, recordTimeout)
+	defer cancel()
+	err := w.client.inTx(ctx, func(q querier) error {
+		if _, err := q.exec(ctx, lockTimeoutSQL, keyLockTimeout); err != nil {
+			return err
+		}
+		return w.client.regainKeys(ctx, q, done)
+	})
+	if err != nil {
+		w.logger.LogAttrs(ctx, slog.LevelWarn, "completed tasks could not take back the dedupe keys that their cancels freed",
+			slog.Int(logKeyTasks, n), slog.Any(logKeyError, err))
 	}
 }
 
@@ -349,9 +393,16 @@ type completion struct {
 
 // completedTask is a task that a completion finished.
 type completedTask struct {
-	id    int64
-	queue string
-	group string
+	id         int64
+	queue      string
+	group      string
+	freedKey   []byte     // the dedupe key that a cancel freed while the task ran
+	freedUntil *time.Time // the end of that key's window
+}
+
+// freed reports whether a cancel freed a dedupe key of t while it ran.
+func (t completedTask) freed() bool {
+	return t.freedKey != nil && t.freedUntil != nil
 }
 
 // complete records successful attempts: it moves their tasks to history, or
@@ -414,7 +465,7 @@ func (c *Client) completeTasks(ctx context.Context, logger *slog.Logger, q queri
 	for r.Next() {
 		var t completedTask
 		var completed bool
-		if err := r.Scan(&t.id, &t.queue, &t.group, &completed); err != nil {
+		if err := r.Scan(&t.id, &t.queue, &t.group, &completed, &t.freedKey, &t.freedUntil); err != nil {
 			return nil, nil, err
 		}
 		if completed {
@@ -431,6 +482,28 @@ func (c *Client) completeTasks(ctx context.Context, logger *slog.Logger, q queri
 		return nil, nil, err
 	}
 	return done, held, nil
+}
+
+// regainKeys gives the completed tasks of done the dedupe keys that their
+// cancels freed while they ran, in q's transaction: see regainKeysSQL. It
+// runs no statement if no cancel freed one.
+func (c *Client) regainKeys(ctx context.Context, q querier, done []completedTask) error {
+	var keys [][]byte
+	var ids []int64
+	var ends []time.Time
+	for _, t := range done {
+		if t.freed() {
+			keys = append(keys, t.freedKey)
+			ids = append(ids, t.id)
+			ends = append(ends, *t.freedUntil)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	_, err := q.exec(ctx, c.sql.regainKeys, keys, ids, ends)
+	return err
 }
 
 // sortedByGroup returns the grouped tasks in the order of queue and group in

@@ -229,29 +229,40 @@ DELETE FROM {s}.tasks WHERE id = ANY($1::bigint[])`
 // $1 queues, $2 kinds, $3 group keys, $4 after task ID, $5 up to task ID.
 //
 // pickCompletedSQL is a pick statement for the completed tasks in history,
-// after $4 up to $5.
+// after $4 up to $5, with the time each was finalized.
+//
+// History has a partition per day of finalized_at. A search by the IDs
+// alone would read every partition's index with all of them, which
+// PostgreSQL 15 and 16 do one ID at a time. So the batch locks its tasks
+// by the range of IDs and of finalized_at that the candidates span: in one
+// snapshot, that range with the filters holds exactly the candidates, and
+// picked reads only the partitions from their first day to their last.
 const pickCompletedSQL = `
 WITH candidates AS (
-    SELECT t.id FROM {s}.task_history t
+    SELECT t.id, t.finalized_at FROM {s}.task_history t
     WHERE t.id > $4 AND t.id <= $5 AND ` + taskFilterSQL + `
     ORDER BY t.id
     LIMIT {batch}
 ), picked AS (
     SELECT t.id FROM {s}.task_history t
-    WHERE t.id = ANY(ARRAY(SELECT id FROM candidates)) AND ` + keyFreeSQL + `
+    WHERE t.id > $4 AND t.id <= (SELECT max(id) FROM candidates)
+      AND t.finalized_at BETWEEN (SELECT min(finalized_at) FROM candidates) AND (SELECT max(finalized_at) FROM candidates)
+      AND ` + taskFilterSQL + ` AND ` + keyFreeSQL + `
     FOR UPDATE SKIP LOCKED
 )
-SELECT c.id, p.id IS NOT NULL FROM candidates c LEFT JOIN picked p ON p.id = c.id ORDER BY c.id`
+SELECT c.id, c.finalized_at, p.id IS NOT NULL FROM candidates c LEFT JOIN picked p ON p.id = c.id ORDER BY c.id`
 
-// $1 task IDs.
+// $1 task IDs, $2 and $3 the first and the last time that they were
+// finalized.
 //
 // deleteCompletedSQL deletes the picked completed tasks $1, and releases
-// their dedupe keys.
+// their dedupe keys. The times keep the delete to the history partitions
+// from their first day to their last, as in pickCompleted.
 const deleteCompletedSQL = `
 WITH released AS (
     DELETE FROM {s}.dedupe_keys WHERE task_id = ANY($1::bigint[])
 )
-DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[])`
+DELETE FROM {s}.task_history WHERE id = ANY($1::bigint[]) AND finalized_at BETWEEN $2 AND $3`
 
 // $1 queues.
 //
@@ -268,17 +279,23 @@ const readQueueSQL = `SELECT (SELECT max_running FROM {s}.queues WHERE name = $1
 // $1 queue, $2 old MaxRunning, $3 new MaxRunning, $4 channel, $5 payload.
 //
 // swapQueueSQL writes queue $1's settings $3 only if they are still $2,
-// as readQueue read them, creating its row if it has none, and tells
-// the workers on channel $4 with payload $5. It returns 1 if it
-// wrote, 0 if the settings changed meanwhile.
+// as readQueue read them, and tells the workers on channel $4 with
+// payload $5. It returns 1 if it wrote, 0 if the settings changed
+// meanwhile. Only a caller that read no limit may create the row: one
+// that read a limit finds no row if a concurrent update deleted it,
+// and must read again.
 const swapQueueSQL = `
-WITH swapped AS (
-    INSERT INTO {s}.queues AS q (name, max_running) VALUES ($1, $3)
+WITH inserted AS (
+    INSERT INTO {s}.queues AS q (name, max_running) SELECT $1::text, $3::integer WHERE $2::integer IS NULL
     ON CONFLICT (name) DO UPDATE SET max_running = $3, updated_at = now()
-    WHERE q.max_running IS NOT DISTINCT FROM $2
+    WHERE q.max_running IS NULL
+    RETURNING 1
+), updated AS (
+    UPDATE {s}.queues SET max_running = $3, updated_at = now()
+    WHERE name = $1 AND max_running = $2
     RETURNING 1
 )
-SELECT count(pg_notify($4, $5)) FROM swapped`
+SELECT count(pg_notify($4, $5)) FROM (TABLE inserted UNION ALL TABLE updated) swapped`
 
 // $1 queue, $2 paused.
 //
