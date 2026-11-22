@@ -54,10 +54,9 @@ spec:
   [Ready to ship](../tutorial/7-ready-to-ship.md), not by taskmill. Its
   default, `localhost:8081`, cannot be reached by the kubelet.
 - Workers get no traffic, so they need no Service and no `preStop` hook.
-- A worker itself needs little memory, but the tasks of a running batch,
-  as of the outbox relay, hold their payloads
-  ([Performance](../reference/performance.md#resource-use)). Size the
-  limits for those, and for your handlers.
+- A worker needs little memory, but a running batch, as the outbox
+  relay's, holds its tasks' payloads ([Performance](../reference/performance.md#resource-use)).
+  Size the limits for those, and for your handlers.
 - Run at least 2 replicas. With one, a lost node stops all work, and the
   [maintainer](../concepts/glossary.md#maintainer) with it, until Kubernetes
   starts the pod elsewhere: about 5 minutes by default. A
@@ -141,9 +140,8 @@ With short tasks, the peak is closer to the replicas plus `maxSurge`.
 | 1 `taskmill-ui` with `pool_max_conns=4` | 4 | 8 |
 | **Total** | **98** | **196** |
 
-So this app needs `max_connections` of about 200, or a pooler in front: see
-[Connection poolers](connection-poolers.md), and size the
-[pooler's pool](connection-poolers.md#size-the-poolers-pool) too.
+So this app needs `max_connections` of about 200, or a pooler in front
+whose [pool you size](connection-poolers.md#size-the-poolers-pool) too.
 
 ## Run the dashboard
 
