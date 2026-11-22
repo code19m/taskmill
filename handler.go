@@ -23,7 +23,8 @@ import (
 //
 // Handle must return promptly once ctx is canceled. [context.Cause] says
 // why: [ErrTaskCanceled], [ErrLeaseLost], [ErrAttemptTimeout], or
-// [ErrShutdown].
+// [ErrShutdown]. A task whose lease ended before its attempt began, as on a
+// slow link to the database, reaches neither Handle nor the middleware.
 //
 // Register a handler with [AddHandler]. The [guide to handling tasks] says
 // what a handler should return, and what happens on a panic or a timeout.

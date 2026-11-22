@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/code19m/taskmill"
+	"github.com/code19m/taskmill/internal/testdb"
 )
 
 // These tests cover Worker.RunTask, which runs one task now, in the calling
@@ -221,6 +222,83 @@ func TestRunTaskRefuses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// RunTask counts a lease from before it asks for the task, as Run does: the
+// database starts the lease later. A task whose row took longer than the
+// lease to arrive, as over a slow link, may already run on another worker,
+// so no middleware or handler runs it here: RunTask returns it, running.
+func TestRunTaskRunsNoTaskWhoseLeaseEndedOnItsWay(t *testing.T) {
+	t.Parallel()
+	e := newEnvWith(t, slowPool(t, 1<<20), nil)                           // 1 MiB a second from the database
+	id := e.enqueue(t, report{Name: strings.Repeat("x", 1_000_000)}, nil) // about a second on the way
+
+	var runs atomic.Int32
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: &hs,
+		Middleware: []taskmill.Middleware{func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+			runs.Add(1)
+			return next(ctx)
+		}},
+		LeaseDuration: 500 * time.Millisecond,
+		NoMaintainer:  true,
+	})
+
+	info, err := w.RunTask(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := runs.Load(); n != 0 || info.State != taskmill.StateRunning {
+		t.Errorf("the task ran %d times, and is %s; want none, and running", n, info.State)
+	}
+}
+
+// RunTask tries a renewal that failed again soon, as Run does, also without
+// Run: an outage that begins just before a renewal, and ends before the
+// lease does, costs no task. The next renewal would come as the lease
+// ends, too late.
+func TestRunTaskOutlastsAnOutageShorterThanTheLease(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	renewed := renewalTimes(make(chan time.Time, 100))
+	e := newEnvWith(t, proxiedPool(t, db, 6, renewed), nil)
+
+	const lease = 3 * time.Second
+	started, ended, release := make(chan struct{}, 1), make(chan error, 1), make(chan struct{})
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			select {
+			case <-ctx.Done():
+				ended <- context.Cause(ctx)
+			case <-release:
+				ended <- nil
+			}
+			return nil
+		}, nil),
+		LeaseDuration: lease,
+		NoMaintainer:  true,
+	})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	go func() { _, _ = w.RunTask(t.Context(), id) }()
+	recv(t, started, "the handler to start")
+	last := recv(t, renewed, "a renewal")
+	time.Sleep(time.Until(last.Add(lease/3 - 150*time.Millisecond)))
+	db.cut(true)
+	time.Sleep(4 * lease / 10)
+	db.cut(false)
+
+	// The handler runs on past the end of the lease that the last renewal
+	// before the outage renewed.
+	time.Sleep(time.Until(last.Add(lease + 300*time.Millisecond)))
+	close(release)
+	if err := recv(t, ended, "the handler to return"); err != nil {
+		t.Errorf("the handler was stopped with %v, want it to run until it returned", err)
+	}
+	e.waitState(t, id, taskmill.StateCompleted)
 }
 
 // RunTask runs a task only if the statement that leases it succeeds. Here

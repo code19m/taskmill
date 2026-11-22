@@ -27,6 +27,40 @@ All notable changes to taskmill are recorded here. The format follows
   whose script did not load works as it does with script turned off; a
   page of 0.15 shows the controls that need its script, which do nothing,
   until it is loaded again.
+- The log lines `complete tasks failed; they are rescued when their leases
+  run out` and `rescued tasks whose workers lost their leases` name up to 20
+  of their tasks in `task_ids`, so that after a failover you can find the
+  tasks that may have run twice, as the checklist in
+  [Backups, failover, and replicas](docs/production/backups-and-failover.md#check-these-points-after-a-failover)
+  says.
+
+### Fixed
+
+- A worker that cannot reach the database cancels a handler when no renewal
+  of its lease succeeded for a `LeaseDuration`, as the docs say. It waited
+  for its next check-in, up to a third of the lease more, while the
+  maintainer could already rescue the task and another worker run it. A
+  task whose lease ended before its attempt began reaches neither its
+  middleware nor its handler, which started with a canceled context.
+  `Worker.RunTask` returns such a task, still running, without an error.
+  A renewal that fails is tried again every thirtieth of the lease, so
+  tasks survive an outage of up to about 19 seconds with the default
+  lease, or 29 if it begins just after a check-in: 17 and 25 if
+  connections stop answering instead of failing. To keep them through a
+  longer failover, set `LeaseDuration` to more than 1.8 times its length,
+  in place of 1.5.
+- A failover that leaves the old server's connections open without an
+  answer no longer stops a queue's fetches for 30 seconds, nor runs
+  finished tasks again. A fetch has a third of the lease, and at least 5
+  seconds. A try to record a result that gets no answer in the time left
+  on the lease is followed by one on another connection, with twice the
+  time, while check-ins renew the leases, until a try has had 30 seconds.
+  A try to take an idle connection, which the pool pings first, has a
+  thirtieth of the lease: keep the lease above 30 round trips to the
+  database, as renewals already needed.
+- The maintainer no longer sends its promotion 20 times a second while
+  another transaction holds a due task, as an open `CancelTx` does: it
+  tries again at its interval. Each pass also takes one statement, not two.
 
 ### Fixed
 

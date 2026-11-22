@@ -165,30 +165,30 @@ reports, prepared transactions that nobody commits, replicas with
 
 | What happens | What taskmill does | What you do |
 |---|---|---|
-| A failover or outage of a few seconds | Workers reconnect at their next try. Running tasks continue, and their results are saved. Nothing runs twice. | Nothing |
-| A failover or outage of more than about 20 seconds | Workers cannot renew their leases, so they cancel their running tasks. The tasks run again once the database is back, or become dead if that was their last attempt. | Make handlers safe to run twice. Or raise `LeaseDuration`: see below |
+| A failover or outage of a few seconds | Workers reconnect at their next try. A connection that stops answering holds a step for the lease at most, or for 5 seconds if that is longer ([limits](../reference/defaults-and-limits.md#workers)): then the worker tries another. Running tasks continue, and their results are saved. Nothing runs twice. | Nothing |
+| A failover or outage of more than about 17 seconds | Workers cannot renew their leases, so they cancel their running tasks. The tasks run again once the database is back, or become dead if that was their last attempt. | Make handlers safe to run twice. Or raise `LeaseDuration`: see below |
 | The database is down when a process starts | `Migrate` and `NewClient` return an error, so your process exits. Kubernetes restarts it until the database is back. | Fix the database. The pods recover by themselves |
 | A failover with asynchronous replication | The last commits can be lost, and with them tasks enqueued in them, like any other row | Use synchronous replication if that matters. Then [check these points](backups-and-failover.md#check-these-points-after-a-failover) |
 | You restore a backup | Tasks go back to their state at that time, and task IDs repeat | Follow [Restore a backup](backups-and-failover.md#restore-a-backup) |
 
 ### Raise `LeaseDuration` for a slow failover
 
-`LeaseDuration` is 30 seconds by default, and a worker renews its leases
-every third of it: every 10 seconds. It stops a task's handler once it could
-not renew the lease for a whole `LeaseDuration`. To keep tasks running
-through a longer failover, set `LeaseDuration` to more than 1.5 times your
-provider's failover time.
+`LeaseDuration` is 30 seconds by default. A worker renews its leases every
+10 seconds, and tries again every second while renewals fail. So its tasks
+survive an outage of up to about 19 seconds, or 29 if it begins just after
+a check-in: 17 and 25 if connections stop answering instead of failing. For
+a longer failover, set `LeaseDuration` to more than 1.8 times as long.
 
-A longer lease has costs, because other timings follow it:
+A lease under 30 seconds survives less, down to about a third of it, if
+connections stop answering in a pool of 6 connections: pgx keeps the place
+of each for up to 15 seconds while it closes it. A pool of 15 avoids that.
 
-- When a worker crashes, its tasks wait that long before another worker runs
-  them.
-- `Worker.Health` fails that much later, and the dashboard marks the worker
-  as stale that much later.
-- A crashed worker stays in the list of workers for twice its lease, and for
-  at least 5 minutes.
+A longer lease has costs, so keep it as short as your failover allows:
 
-So keep `LeaseDuration` as short as your failover allows.
+- When a worker crashes, its tasks wait that long for another worker.
+- `Worker.Health` fails, and the dashboard marks the worker stale, that
+  much later.
+- A crashed worker stays listed for twice its lease, and at least 5 minutes.
 
 ## Keep or remove a day of old history
 

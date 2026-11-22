@@ -304,9 +304,24 @@ func (w *Worker) afterComplete(ctx context.Context, ts []*liveAttempt, done []co
 		w.madeRoom(done)
 	}
 	if err != nil {
+		ids := make([]int64, len(ts))
+		for i, t := range ts {
+			ids[i] = t.att.id
+		}
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "complete tasks failed; they are rescued when their leases run out",
-			slog.Int(logKeyTasks, len(ts)), slog.Any(logKeyError, err))
+			slog.Int(logKeyTasks, len(ts)), taskIDs(ids), slog.Any(logKeyError, err))
 	}
+}
+
+// idsLogged is how many task IDs a line about many tasks names at most. Its
+// attribute tasks says how many there are.
+const idsLogged = 20
+
+// taskIDs returns the attribute that names the first idsLogged of ids, so
+// that an operator can find the tasks that a line is about, such as those
+// that run twice.
+func taskIDs(ids []int64) slog.Attr {
+	return slog.Any(logKeyTaskIDs, ids[:min(len(ids), idsLogged)])
 }
 
 // madeRoom wakes the fetch loops of the queues in which the completions

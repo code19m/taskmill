@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -312,8 +313,10 @@ func TestHandlersThatHoldThePoolDoNotCostLeases(t *testing.T) {
 	// Three handlers take up to 4 connections each, every one that the
 	// worker leaves them, and hold them for longer than a lease, as handlers
 	// that share the pool with the worker can. Two others return once the
-	// pool is full: their completions wait for it, and are not lost.
-	const lease = 600 * time.Millisecond
+	// pool is full: their completions wait for it, and are not lost. A lease
+	// ends at its time when renewals fail, so it leaves the reserve's
+	// renewals room for a busy machine.
+	const lease = time.Second
 	full, release := make(chan struct{}), make(chan struct{})
 	hold := holdAll(pool, 4, release)
 	runs := map[int64]*atomic.Int32{}
@@ -694,6 +697,275 @@ func TestFetchingATaskAgainCancelsItsOlderAttempt(t *testing.T) {
 	}
 }
 
+// A worker that cannot reach the database stops a handler when the task's
+// lease ends, as far as it knows: the maintainer rescues the task then, and
+// another worker may run it right away. A handler that ran on until the
+// worker's next check-in would run beside that attempt.
+func TestCutOffWorkerStopsHandlersWhenTheirLeasesEnd(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	e := newEnvWith(t, proxiedPool(t, db, 6, nil), nil)
+	direct := e.direct(t)
+
+	// The task waits when the worker starts, so that its first fetch takes
+	// it just after the check-ins began: of all fetches, this one's lease
+	// ends longest before a check-in.
+	e.enqueue(t, sendEmail{}, nil)
+	const lease = 1500 * time.Millisecond
+	type stop struct {
+		at    time.Time
+		cause error
+	}
+	started, stopped := make(chan struct{}, 1), make(chan stop, 1)
+	cut := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-ctx.Done()
+			stopped <- stop{time.Now(), context.Cause(ctx)}
+			return nil
+		}, nil),
+		Queues:        defaultQueue(1),
+		LeaseDuration: lease,
+		NoMaintainer:  true,
+	})
+	startWorker(t, cut)
+	t.Cleanup(func() { db.cut(false) }) // so that the worker stops soon
+	recv(t, started, "the handler to start")
+	db.cut(true)
+
+	// The other worker leads maintenance, and runs the rescued task with
+	// almost no backoff.
+	again := make(chan time.Time, 1)
+	runWorker(t, direct, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			again <- time.Now()
+			return nil
+		}, &taskmill.HandlerOptions{Retry: taskmill.ExponentialBackoff{Base: time.Millisecond, Max: time.Millisecond}}),
+		Queues:        defaultQueue(1),
+		LeaseDuration: lease,
+	})
+
+	rerun := recv(t, again, "the rescued task to run again")
+	s := recv(t, stopped, "the cut-off handler to stop")
+	if !errors.Is(s.cause, taskmill.ErrLeaseLost) {
+		t.Errorf("the handler was stopped with %v, want ErrLeaseLost", s.cause)
+	}
+	if s.at.After(rerun) {
+		t.Errorf("the cut-off worker stopped its handler %s after the task ran again", s.at.Sub(rerun).Round(time.Millisecond))
+	}
+}
+
+// An outage that ends before the lease does costs no task, also when it
+// begins just before a check-in: that check-in's renewal fails, and the
+// next comes as the lease ends, too late. The worker tries the renewal
+// again soon after it failed, so that the first try after the outage keeps
+// the lease.
+func TestOutageShorterThanTheLeaseKeepsTheTask(t *testing.T) {
+	t.Parallel()
+	for _, part := range []float64{0.4, 0.5} {
+		t.Run(fmt.Sprintf("%.0f%% of the lease", 100*part), func(t *testing.T) {
+			t.Parallel()
+			db := newProxy(t, testdb.URL(t))
+			renewed := renewalTimes(make(chan time.Time, 100))
+			e := newEnvWith(t, proxiedPool(t, db, 6, renewed), nil)
+			direct := e.direct(t)
+
+			const lease = 3 * time.Second
+			var runs atomic.Int32
+			started, ended, release := make(chan struct{}, 2), make(chan error, 2), make(chan struct{})
+			hs := func() *taskmill.Handlers {
+				return handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+					runs.Add(1)
+					started <- struct{}{}
+					select {
+					case <-ctx.Done():
+						ended <- context.Cause(ctx)
+					case <-release:
+						ended <- nil
+					}
+					return nil
+				}, &taskmill.HandlerOptions{Retry: taskmill.ExponentialBackoff{Base: time.Millisecond, Max: time.Millisecond}})
+			}
+			w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: hs(), Queues: defaultQueue(1), LeaseDuration: lease, NoMaintainer: true})
+			startWorker(t, w)
+			t.Cleanup(func() { db.cut(false) }) // so that the worker stops soon
+
+			id := e.enqueue(t, sendEmail{}, nil)
+			recv(t, started, "the handler to start")
+			// The other worker leads maintenance, and runs a rescued task
+			// right away.
+			runWorker(t, direct, &taskmill.WorkerConfig{Handlers: hs(), Queues: defaultQueue(1), LeaseDuration: lease})
+
+			for len(renewed) > 0 {
+				<-renewed
+			}
+			last := recv(t, renewed, "a check-in")
+			time.Sleep(time.Until(last.Add(lease/3 - 150*time.Millisecond)))
+			db.cut(true)
+			time.Sleep(time.Duration(part * float64(lease)))
+			db.cut(false)
+
+			// The handler runs on past the end of the lease that the last
+			// check-in before the outage renewed.
+			time.Sleep(time.Until(last.Add(lease + 300*time.Millisecond)))
+			close(release)
+			direct.waitState(t, id, taskmill.StateCompleted)
+			if err := recv(t, ended, "the handler to return"); err != nil {
+				t.Errorf("the handler was stopped with %v, want it to run until it returned", err)
+			}
+			if n := runs.Load(); n != 1 {
+				t.Errorf("the task ran %d times, want once", n)
+			}
+		})
+	}
+}
+
+// renewalTimes sends when each renewal of leases that succeeded was sent.
+type renewalTimes chan time.Time
+
+type renewalSentKey struct{}
+
+func (renewalTimes) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, "), renewed AS (") {
+		return context.WithValue(ctx, renewalSentKey{}, time.Now())
+	}
+	return ctx
+}
+
+func (r renewalTimes) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryEndData) {
+	if sent, ok := ctx.Value(renewalSentKey{}).(time.Time); ok && d.Err == nil {
+		select {
+		case r <- sent:
+		default:
+		}
+	}
+}
+
+// A failover can leave the old server's connections open without an
+// answer, while new connections reach the new server. A step of the worker
+// then waits on such a connection for a part of the lease, or 5 seconds for
+// a fetch, and tries again on another: the fetches continue, and the
+// results of finished tasks are saved before their leases end, so that none
+// runs twice.
+func TestWorkerOutlastsConnectionsThatStopAnswering(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	// pgx holds the place of a broken connection in the pool for up to 15
+	// seconds while it closes it, so the pool has room beyond the
+	// connections that the proxy freezes.
+	pool := proxiedPool(t, db, 30, nil)
+	e := newEnvWith(t, pool, nil)
+	direct := e.direct(t)
+	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	runs := map[int64]int{}
+	started, release := make(chan time.Time, 10), make(chan struct{})
+	const lease, fetchTime = 3 * time.Second, 5 * time.Second
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			mu.Lock()
+			runs[task.ID]++
+			mu.Unlock()
+			started <- time.Now()
+			if task.Args.UserID == 1 {
+				<-release
+			}
+			return nil
+		}, nil),
+		Queues:        defaultQueue(4),
+		LeaseDuration: lease,
+		NoMaintainer:  true,
+		ListenConfig:  listen, // notifications are not what the test is about
+	})
+	startWorker(t, w)
+	runWorker(t, direct, &taskmill.WorkerConfig{}) // the maintainer, which rescues
+	// Closing the frozen connections lets the worker stop, also when the
+	// test fails: cleanups run last first.
+	t.Cleanup(func() {
+		db.cut(true)
+		pool.Reset()
+		db.cut(false)
+	})
+	unblock := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(unblock)
+
+	var ids []int64
+	for range 4 {
+		ids = append(ids, direct.enqueue(t, sendEmail{UserID: 1}, nil))
+		recv(t, started, "a handler to start")
+	}
+
+	// The pool keeps idle connections, which the proxy freezes with the
+	// others: the next steps of the worker meet them.
+	held := make([]*pgxpool.Conn, 8)
+	for i := range held {
+		if held[i], err = pool.Acquire(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range held {
+		c.Release()
+	}
+	db.freezeOpen()
+	unblock()
+
+	enqueued := time.Now()
+	ids = append(ids, direct.enqueue(t, sendEmail{UserID: 2}, nil))
+	recv(t, started, "the new task to start")
+	if d := time.Since(enqueued); d > fetchTime+time.Second {
+		t.Errorf("the new task started %s after it was enqueued, want about the time of a fetch, %s", d.Round(time.Millisecond), fetchTime)
+	}
+
+	for _, id := range ids {
+		direct.waitState(t, id, taskmill.StateCompleted)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for id, n := range runs {
+		if n != 1 {
+			t.Errorf("task %d ran %d times, want once", id, n)
+		}
+	}
+	if n := w.Stats().LeasesLost; n != 0 {
+		t.Errorf("the worker lost %d leases, want none", n)
+	}
+}
+
+// proxiedPool returns a pool of maxConns connections that reaches the test
+// database through p, and traces its statements with tracer, if not nil.
+func proxiedPool(t *testing.T, p *proxy, maxConns int32, tracer pgx.QueryTracer) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = p.host, p.port, nil
+	cfg.MaxConns, cfg.ConnConfig.Tracer = maxConns, tracer
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// direct returns an env of e's schema whose client reaches the database
+// without the proxy that e's pool may go through.
+func (e *env) direct(t *testing.T) *env {
+	t.Helper()
+	pool := testdb.Pool(t)
+	client, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema, Logger: testLogger(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.Close)
+	return &env{pool: pool, schema: e.schema, client: client, rawGroups: true}
+}
+
 func TestHealthFollowsTheDatabase(t *testing.T) {
 	t.Parallel()
 	db := newProxy(t, testdb.URL(t))
@@ -765,8 +1037,10 @@ func TestHealthFailsWhileStuckHandlersHoldEverySlot(t *testing.T) {
 
 	e.enqueue(t, sendEmail{}, once)
 	recv(t, started, "the second handler to start")
-	waitFor(t, "the worker to be unhealthy", func() bool { return w.Health() != nil })
-	if err := w.Health(); !strings.Contains(err.Error(), "all 2 slots") {
+	// The worker marks a slot stuck just before it counts the abandoned
+	// handler, so once both are counted, both slots are stuck.
+	waitFor(t, "both handlers to be abandoned", func() bool { return w.Stats().HandlersAbandoned == 2 })
+	if err := w.Health(); err == nil || !strings.Contains(err.Error(), "all 2 slots") {
 		t.Errorf("got %q, want an error that says that all 2 slots are stuck", err)
 	}
 	if s := w.Stats(); s.HandlersAbandoned != 2 || s.Slots != 2 || s.SlotsBusy != 2 || s.SlotsStuck != 2 {

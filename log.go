@@ -30,6 +30,7 @@ const (
 	logKeyReleased           = "released"
 	logKeyRetryIn            = "retry_in"
 	logKeyTaskID             = "task_id"
+	logKeyTaskIDs            = "task_ids"
 	logKeyTasks              = "tasks"
 	logKeyTimeout            = "timeout"
 	logKeyVersion            = "version"

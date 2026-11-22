@@ -128,10 +128,13 @@ const countRunningSQL = `SELECT count(*) FROM {s}.tasks WHERE queue = $1 AND sta
 //
 // renewLeasesSQL renews the leases of attempts that still own their
 // tasks. It skips rows that other transactions lock, so that one
-// locked task cannot block the renewal of all the others. It returns
-// each renewed task with true, and each task the attempts still own
-// with false, both with whether its cancellation was requested; a task
-// it does not return lost its lease.
+// locked task cannot block the renewal of all the others. It never
+// moves a lease's end back: of two renewals that overlap, as a
+// check-in's and a try again after one failed, the one that started
+// first can commit last. It returns each renewed task with true, and
+// each task the attempts still own with false, both with whether its
+// cancellation was requested; a task it does not return lost its
+// lease.
 const renewLeasesSQL = `
 WITH attempts AS (
     SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
@@ -141,7 +144,7 @@ WITH attempts AS (
     FOR UPDATE OF t SKIP LOCKED
 ), renewed AS (
     UPDATE {s}.tasks t
-    SET lease_expires_at = now() + $3 * interval '1 microsecond'
+    SET lease_expires_at = greatest(t.lease_expires_at, now() + $3 * interval '1 microsecond')
     FROM locked
     WHERE t.id = locked.id
     RETURNING t.id, t.cancel_requested_at IS NOT NULL AS cancel_requested

@@ -2,8 +2,11 @@ package taskmill_test
 
 import (
 	"context"
+	"io"
 	"log/slog"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/internal/testdb"
@@ -642,6 +646,92 @@ func TestBatchFillsInTheQueuesOrder(t *testing.T) {
 	defer mu.Unlock()
 	if want := [][]int64{{ids[3], ids[4], ids[5], ids[0]}, {ids[1], ids[2]}}; !slices.EqualFunc(batches, want, slices.Equal[[]int64]) {
 		t.Fatalf("got the batches %v, want %v", batches, want)
+	}
+}
+
+// A fetch has at least 5 seconds, also with a short lease. One given up at a
+// third of the lease would have leased its task all the same, and the task
+// would wait for the rescue, at the cost of an attempt, each time the link
+// brought it too late. So a task that the link brings in more than a third
+// of the lease, but well within it, runs at its first attempt.
+func TestSlowFetchOutlastsAThirdOfAShortLease(t *testing.T) {
+	t.Parallel()
+	e := newEnvWith(t, slowPool(t, 1<<20), nil) // 1 MiB a second from the database
+	id := e.enqueue(t, report{Name: strings.Repeat("x", 700_000)}, nil)
+
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+	runWorker(t, e, &taskmill.WorkerConfig{ // it leads maintenance too, and rescues
+		Handlers:      &hs,
+		Queues:        map[string]taskmill.QueueOptions{"reports": {Concurrency: 1}},
+		LeaseDuration: 1500 * time.Millisecond,
+	})
+
+	info := e.waitState(t, id, taskmill.StateCompleted)
+	if info.Attempt != 1 || len(info.Errors) != 0 {
+		t.Errorf("the task completed at attempt %d with errors %+v, want its first attempt", info.Attempt, info.Errors)
+	}
+}
+
+// slowPool returns a pool whose connections receive what the database sends
+// at rate bytes a second at most, as over a slow link.
+func slowPool(t *testing.T, rate int) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := net.JoinHostPort(cfg.ConnConfig.Host, strconv.Itoa(int(cfg.ConnConfig.Port)))
+	ln, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			client, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go throttle(client, target, rate)
+		}
+	}()
+
+	addr, _ := ln.Addr().(*net.TCPAddr)
+	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = addr.IP.String(), uint16(addr.Port), nil //nolint:gosec // a port fits
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// throttle forwards client to the database at target, and passes what the
+// database sends at rate bytes a second at most.
+func throttle(client net.Conn, target string, rate int) {
+	defer func() { _ = client.Close() }()
+	server, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(context.Background(), "tcp", target)
+	if err != nil {
+		return
+	}
+	defer func() { _ = server.Close() }()
+	go func() {
+		_, _ = io.Copy(server, client)
+		_ = server.Close()
+	}()
+
+	buf := make([]byte, 16<<10)
+	for {
+		n, err := server.Read(buf)
+		if err != nil {
+			return
+		}
+		time.Sleep(time.Duration(n) * time.Second / time.Duration(rate))
+		if _, err := client.Write(buf[:n]); err != nil {
+			return
+		}
 	}
 }
 

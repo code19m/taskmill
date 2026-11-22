@@ -170,8 +170,7 @@ func (m *maintainer) promoteLoop(ctx context.Context) {
 
 		next := m.w.timing.maintainer
 		if m.leader.Load() {
-			m.promote(ctx)
-			next = m.untilNextDue(ctx)
+			next = m.promote(ctx)
 		}
 		wait.Reset(next)
 	}
@@ -312,18 +311,28 @@ func (m *maintainer) resign(ctx context.Context) {
 	}
 }
 
-// promote makes due scheduled and retryable tasks available. The statement
+// promote makes due scheduled and retryable tasks available, and returns
+// how long to wait before it looks again: until the next task that is not
+// due yet comes due, but at most one maintenance interval, which is also
+// the wait after a failure. A due task that it could not promote, as
+// another transaction holds its row, waits that interval too. The statement
 // also wakes the workers of their queues.
-func (m *maintainer) promote(ctx context.Context) {
+func (m *maintainer) promote(ctx context.Context) time.Duration {
 	for {
 		var promoted int
+		var secs *float64
 		stmtCtx, cancel := m.bound(ctx)
-		err := m.c.pool.QueryRow(stmtCtx, m.c.sql.promoteDue, m.c.schema).Scan(&promoted)
+		err := m.c.pool.QueryRow(stmtCtx, m.c.sql.promoteDue, m.c.schema).Scan(&promoted, &secs)
 		cancel()
-		if err != nil || promoted < maintenanceBatch {
-			m.promotionFailures.observe(ctx, err)
-			return
+		if err == nil && promoted == maintenanceBatch {
+			continue
 		}
+
+		m.promotionFailures.observe(ctx, err)
+		if err != nil || secs == nil {
+			return m.w.timing.maintainer
+		}
+		return sleepUntilDue(*secs, m.w.timing.maintainer)
 	}
 }
 
@@ -432,10 +441,16 @@ func safeBackoff(p RetryPolicy, attempt int) (d time.Duration, ok bool) {
 }
 
 // rescued counts and logs the failed attempts of a committed rescue batch.
+// The line names the tasks, which may run twice: no other line names those
+// of a worker that crashed.
 func (m *maintainer) rescued(ctx context.Context, batch []rescuedTask) {
 	if len(batch) > 0 {
+		ids := make([]int64, len(batch))
+		for i, x := range batch {
+			ids[i] = x.id
+		}
 		m.w.logger.LogAttrs(ctx, slog.LevelWarn, "rescued tasks whose workers lost their leases",
-			slog.Int(logKeyTasks, len(batch)))
+			slog.Int(logKeyTasks, len(batch)), taskIDs(ids))
 	}
 
 	for _, x := range batch {
@@ -530,18 +545,6 @@ func (m *maintainer) deleteInBatches(ctx context.Context, sql string, args ...an
 			return err
 		}
 	}
-}
-
-// untilNextDue returns how long to sleep: until the next scheduled task is
-// due, but at most one maintenance interval.
-func (m *maintainer) untilNextDue(ctx context.Context) time.Duration {
-	ctx, cancel := m.bound(ctx)
-	defer cancel()
-	var secs *float64
-	if err := m.c.pool.QueryRow(ctx, m.c.sql.nextDue).Scan(&secs); err != nil || secs == nil {
-		return m.w.timing.maintainer
-	}
-	return sleepUntilDue(*secs, m.w.timing.maintainer)
 }
 
 // sleepUntilDue returns the sleep before a task that is due in secs seconds:

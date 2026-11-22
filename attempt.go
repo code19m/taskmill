@@ -37,8 +37,12 @@ func (w *Worker) runOne(parent, record context.Context, t *liveAttempt) {
 	if t.att.cancelRequested.Load() {
 		cancel(ErrTaskCanceled)
 	}
-	if t.lost.Load() {
-		cancel(ErrLeaseLost)
+	if w.leaseOver(parent, t) {
+		// The task may run on another worker already, as after a slow fetch:
+		// no code of the application starts on it here. A loss after this
+		// check cancels ctx, as t.cancel is set.
+		w.finish(record, t, outcome{kind: outcomeDiscard}, time.Time{})
+		return
 	}
 
 	if t.invalid != nil {
