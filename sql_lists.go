@@ -113,18 +113,19 @@ FROM (
 ) page(` + pageColumns + `)
 ORDER BY created_at DESC, id DESC LIMIT $5`
 
-// $1 queues, $2 kinds, $3 group keys, $4 states.
+// $1 queues, $2 kinds, $3 group keys, $4 states, $5 to $8 the ranges of times.
 //
 // countTasksSQL counts the tasks in each state of $4 that match the
-// filters, up to one more than {cap} per state, with how many of them were
-// not asked to stop. Each state has a branch of its own, run only if $4
-// lists it, so that each reads the index of its state, or the history.
+// filters and the ranges, up to one more than {cap} per state, with how
+// many of them were not asked to stop. Each state has a branch of its own,
+// run only if $4 lists it, so that each reads the index of its state, or
+// the history.
 var countTasksSQL = func() string {
 	var b strings.Builder
 	for _, s := range allStates {
-		from := `SELECT t.cancel_requested_at FROM {s}.tasks t WHERE t.state = '` + string(s) + `' AND `
+		from := `SELECT t.cancel_requested_at FROM {s}.tasks t WHERE t.state = '` + string(s) + `' AND ` + timeRangesSQL(5) + ` AND `
 		if s == StateCompleted {
-			from = `SELECT NULL AS cancel_requested_at FROM {s}.task_history t WHERE `
+			from = `SELECT NULL AS cancel_requested_at FROM {s}.task_history t WHERE ` + historyRangeSQL(5) + ` AND `
 		}
 		if b.Len() > 0 {
 			b.WriteString("\nUNION ALL")

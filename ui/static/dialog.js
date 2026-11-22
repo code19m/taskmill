@@ -5,6 +5,7 @@
 // their answers. The pages and the live updates need only this part, so
 // they do not import actions.js, which imports them.
 
+import { localiseRange } from "./calendar.js";
 import { request } from "./core.js";
 
 export const dialog = document.getElementById("confirm-dialog");
@@ -36,6 +37,7 @@ function openDialog(title, text, form, content = [], look = "", said = "") {
 export function showDialogPart(result) {
   const part = result.main.querySelector("[data-dialog-title]");
   if (!part) return false;
+  localiseRange(part); // the range of a bulk action, as the list's button words it
   const form = part.querySelector("form");
   const button = form?.querySelector("button");
   openDialog(part.dataset.dialogTitle, part.querySelectorAll("dl, p"), form, button?.childNodes, button?.className,

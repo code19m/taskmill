@@ -53,6 +53,11 @@ func TestMaintainerRescuesExpiredLeases(t *testing.T) {
 	if len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseLost {
 		t.Fatalf("got errors %+v", info.Errors)
 	}
+	// The line names the task, which may have run twice.
+	rescued := slices.IndexFunc(logs.all(), func(r slog.Record) bool { return r.Message == "rescued tasks whose workers lost their leases" })
+	if rescued < 0 || attr(logs.all()[rescued], "task_ids") != fmt.Sprint([]int64{id}) {
+		t.Errorf("the rescue was not logged with task_ids=[%d]", id)
+	}
 
 	// A task whose crashed attempt was its last dies, and that needs a person.
 	last := e.count(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
@@ -474,6 +479,44 @@ func TestRescueRunsEveryInterval(t *testing.T) {
 	if rescues, elections := sent.count(rescue), sent.count(election); 4*rescues < 3*elections {
 		t.Errorf("%d rescues in the time of %d renewals, want about as many", rescues, elections)
 	}
+}
+
+// A due task that another transaction holds cannot be promoted, as while a
+// CancelTx has not committed. The maintainer then tries again at its
+// interval, and not every 50 milliseconds, its shortest wait for a task
+// that comes due, for as long as the transaction lasts.
+func TestPromotionTriesAHeldTaskAtTheInterval(t *testing.T) {
+	t.Parallel()
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	w := newWorker(t, e, &taskmill.WorkerConfig{}) // maintenance only
+	timing := testTiming
+	timing.Maintainer = 500 * time.Millisecond
+	taskmill.SetTiming(w, timing)
+	startWorker(t, w)
+	waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "unserved", RunAt: time.Now().Add(300 * time.Millisecond)})
+	tx := e.begin(t)
+	if err := e.client.CancelTx(t.Context(), taskmill.Pgx(tx), id); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the task to come due", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id = $1 AND run_at < now()", id) == 1
+	})
+
+	// The rescue runs at the interval too.
+	const promotion, rescue = "SELECT id FROM due", "'code', 'lease_lost'"
+	sent.reset()
+	waitFor(t, "8 rescues", func() bool { return sent.count(rescue) >= 8 })
+	if promotions, rescues := sent.count(promotion), sent.count(rescue); promotions > 2*rescues {
+		t.Errorf("%d promotions in the time of %d rescues, want about as many", promotions, rescues)
+	}
+
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	e.waitState(t, id, taskmill.StateAvailable)
 }
 
 // The maintainer that rescues a task retries it after the backoff of the

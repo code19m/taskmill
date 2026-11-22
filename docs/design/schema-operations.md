@@ -105,9 +105,41 @@ transaction of its own.
   at the first skipped task keeps no state between calls, and still brings a
   group that the action left back in order: the tasks that the action
   changed since no longer match, so reading past them again is cheap.
+- **A range of times narrows the batches, with a queue.** A bulk action
+  takes the range of a list, of creation or of finish times, as a condition
+  of its pick, which runs with a custom plan. The condition says which
+  states hold such times: only dead and canceled tasks for a range of
+  finish times, and for a range of creation times the tasks that are not
+  running and the running ones apart. Both indexes hold tasks by queue
+  first. With a queue in the filter, the planner reads the tasks of the
+  range through the index of that time, and sorts them by ID. Without one,
+  only PostgreSQL 18 can skip through the queues of an index. A range of
+  finish times then still reads its index, all of it before 18. A batch
+  with a range of creation times can read in ID order, as a filter by kind
+  does, on any version: the planner takes the range's tasks to be spread
+  over the IDs, but a recent range lies at their end. `Count` takes the
+  range the same way, and before PostgreSQL 18 reads every task of its
+  states for a range of creation times without a queue. Measured with
+  600,000 tasks in 20 queues over 30 days, half of them dead, and a range
+  of the last day, on PostgreSQL 15, 16, and 18: a batch of a retry of the
+  dead tasks reads 583,000 rows without a queue, and 2,000 with one. A
+  count of the dead tasks without a queue reads 300,000 rows on 15 and 16,
+  and 20,000 on 18.
 - **Delete goes through two tables.** It reads the next batch of both tasks
   and history, and goes up to the end of the shorter one, so that one
-  position covers both.
+  position covers both. History has a partition per day. A search by the
+  batch's IDs alone reads the index of every partition with all of them,
+  which PostgreSQL 15 and 16 do once per ID: with 30 days of history, it
+  cost about 11 s more for each million tasks than on PostgreSQL 18. So the
+  batch locks its completed tasks by the range of IDs and of finish times
+  that they span, and deletes them within those times: it locks and deletes
+  them only in the partitions from its first finish day to its last, often
+  one or two. Finding the batch still takes one short scan of the ID index
+  in each partition, which stops at the batch's end. A task that finished
+  days later than the others, as a retried one can, makes it read every
+  partition in between, each with all the batch's IDs. With a filter that
+  few tasks match, it reads their range of IDs twice: about 6 ms more for
+  each 100,000 tasks it passes.
 - **The remaining limit.** A filter by kind or FIFO group alone has no
   index. A retry with one reads the dead and canceled entries of
   `tasks_finished_idx` after its position in each batch, and where a batch
@@ -127,7 +159,8 @@ then, with the key's release.
 
 **Why it stays,** though few retry a canceled task with a key: without it,
 the dedupe promise breaks silently, and the same work runs twice. It costs
-two columns that only a cancel writes, and one statement in a retry.
+two columns that only a cancel writes, and one statement in a retry, or
+after the completion of a task that stores a key.
 
 A retry claims the stored key as an enqueue does, with the window's old
 end: it gets the key if no row has it, or if the row's window has ended.
@@ -136,19 +169,30 @@ rolls back and returns `ErrConflict`, and a bulk retry leaves the task and
 counts it. A stored key whose window has ended claims nothing: the window
 is fixed at the enqueue, and a task past it has no claim, canceled or not.
 
+A running task that is asked to stop may still complete: its handler did
+the work. It then claims the stored key back in the same way, for the rest
+of its window. If another task took the key during the run, that task keeps
+it, since it stands for the work too. The Complete statement returns the
+stored key. The worker claims it once the completion has committed, in a
+transaction of its own that waits 100 ms at most for the key's row; then it
+logs a warning, and the task stays without its key. `CompleteTx` claims the
+key in the caller's transaction, which may wait, as an enqueue does.
+
 | Decision | Why |
 |---|---|
 | Two columns, not the task's metadata | Producers write metadata, and handlers and tools copy it. A key there could be forged, or travel to another task. Only a role with `UPDATE` on `tasks` writes the columns: the grants of a role that only enqueues leave them out |
 | The retry is refused whatever state the holder is in | A completed or dead holder still stands for the work until its window ends, as it does for an enqueue |
 | The refusal names the holder only if that task exists | A completed task keeps its key for its window, also when no history is kept of it. Nobody can cancel or delete a task that is gone, so the error gives the end of the window |
-| The columns are not copied to the history | A task that completes after its cancel was requested needs no key back |
+| The columns are not copied to the history | A completed task cannot be retried, and took its key back as it completed, if the key was free |
+| A completion takes the key back, and a cancel still frees it right away | Holding the key until the attempt ends would lose work: a transaction that cancels a task and enqueues its replacement with the same key would get a duplicate of the running task, and nothing if that task then ends canceled |
+| A worker claims the key after the commit, and briefly | A claim waits for a transaction that claims the same key. Inside the completion, that wait would block a batch of up to 500 completions, which holds the rows of their tasks and groups, and could deadlock with that transaction. A delete of the task between the commit and the claim leaves the key with a task that is gone, until its window ends |
 
 Two things follow from the claim. A transaction of the caller that enqueues
-a key and then calls `CancelTx` for a task, while a `Retry` of that task
-waits for the key, makes the two wait for each other: the retry runs again,
-or the caller's transaction gets the deadlock error. And while a
-transaction that claimed a key stays open, a bulk retry leaves the tasks of
-a batch that need a key, and counts them as skipped.
+a key and then calls `CancelTx` for a task, while a `Retry` or a `CompleteTx`
+of that task waits for the key, makes the two wait for each other: the
+retry runs again, or a transaction of the caller gets the deadlock error.
+And while a transaction that claimed a key stays open, a bulk retry leaves
+the tasks of a batch that need a key, and counts them as skipped.
 
 The previous release names the columns that it writes, so it works on the
 new schema as before: its cancel stores no key, and a retry of that task
@@ -169,7 +213,10 @@ and was undone, would list that queue for good.
 The delete runs after the change, in its transaction, which holds the row:
 a statement cannot change a row and delete it too. A concurrent change of
 the other setting waits for that transaction. Then it finds no row, and
-inserts one. A later release may add a setting in a column of its own,
+inserts one. A concurrent `UpdateQueue` inserts one only if it read no
+limit: one that read a limit and finds no row runs its update again on the
+defaults, so that it never writes a value computed from a deleted one. A
+later release may add a setting in a column of its own,
 which this release does not know: the delete leaves a row in which any
 column but the known ones holds a value, so that a rolling deploy loses
 no setting.

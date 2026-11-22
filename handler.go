@@ -23,7 +23,8 @@ import (
 //
 // Handle must return promptly once ctx is canceled. [context.Cause] says
 // why: [ErrTaskCanceled], [ErrLeaseLost], [ErrAttemptTimeout], or
-// [ErrShutdown].
+// [ErrShutdown]. A task whose lease ended before its attempt began, as on a
+// slow link to the database, reaches neither Handle nor the middleware.
 //
 // Register a handler with [AddHandler]. The [guide to handling tasks] says
 // what a handler should return, and what happens on a panic or a timeout.
@@ -49,7 +50,9 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 // A task without a result fails, as after an error: HandleBatch returned nil,
 // or fewer errors than tasks. So a handler that returns early completes no
 // task that it did not run, and one that did all its work returns
-// make([]error, len(tasks)), never nil.
+// make([]error, len(tasks)), never nil. More errors than tasks fail every
+// task: no error can be matched to its task, as when append added the
+// errors after the nils that make put in the slice.
 //
 // A batch takes one slot of its queue's concurrency. When a worker fetches a
 // task of a batch kind, it fills that task's batch with more available tasks
@@ -61,7 +64,9 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 // [Task.CancelRequested] reports a cancel request, so that the batch can
 // skip that task's work. A canceled task becomes completed if the batch
 // returned nil for it, because the work was done, and canceled otherwise;
-// the result of a task that lost its lease is discarded.
+// the result of a task that lost its lease is discarded. A task whose lease
+// ended before the batch began, as on a slow link to the database, is left
+// out of it.
 //
 // Register a batch handler with [AddBatchHandler]. The [batch guide] shows
 // one, and says when a batch is worth it.
@@ -69,6 +74,14 @@ func (f HandlerFunc[A]) Handle(ctx context.Context, task *Task[A]) error {
 // [batch guide]: https://github.com/code19m/taskmill/blob/main/docs/guides/batch-handlers.md
 type BatchHandler[A Args] interface {
 	HandleBatch(ctx context.Context, tasks []*Task[A]) []error
+}
+
+// BatchHandlerFunc adapts a function to the [BatchHandler] interface.
+type BatchHandlerFunc[A Args] func(ctx context.Context, tasks []*Task[A]) []error
+
+// HandleBatch calls f(ctx, tasks).
+func (f BatchHandlerFunc[A]) HandleBatch(ctx context.Context, tasks []*Task[A]) []error {
+	return f(ctx, tasks)
 }
 
 // HandlerOptions configure how a worker runs one kind. Pass them to
@@ -104,7 +117,9 @@ type HandlerOptions struct {
 
 	// BatchSize is the most tasks a [BatchHandler] receives in one call. It
 	// must not be negative. Default: 100. Maximum: 1,000. Ignored for other
-	// handlers.
+	// handlers. A worker runs up to its queue's Concurrency batches, and
+	// each task of a batch holds its payload twice in memory: as stored,
+	// and decoded.
 	BatchSize int
 
 	// DiscardCompleted deletes completed tasks of the kind right away,
@@ -184,6 +199,13 @@ func AddBatchHandler[A Args](hs *Handlers, h BatchHandler[A], opts *HandlerOptio
 			return errs
 		}
 		results := h.HandleBatch(ctx, tasks)
+		if len(results) > len(tasks) {
+			err := fmt.Errorf("the batch handler returned %d results for %d tasks", len(results), len(tasks))
+			for _, i := range index {
+				errs[i] = err
+			}
+			return errs
+		}
 		for j, i := range index {
 			if j < len(results) {
 				errs[i] = results[j]

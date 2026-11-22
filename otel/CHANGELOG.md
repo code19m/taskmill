@@ -10,6 +10,20 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+### Fixed
+
+- `Instrumentation.Publisher` ends every span when a result of the
+  publisher is an error whose methods panic, as a nil pointer in an error
+  does. The panic failed every delivery of the call, also those that the
+  broker accepted, and left the spans after it open. Such a result now
+  fails only its delivery, as it does without the wrapper.
+- The description of `taskmill.worker.pool.waits` names every statement
+  of the worker that counts. It named only fetches and records of failed
+  attempts, while renewals, check-ins, and completions count too.
+- `Instrumentation.Publisher` ends the spans with an error when the
+  publisher returns more results than deliveries, which the relay now
+  retries. They showed a successful send.
+
 ## [0.5.0] - 2026-11-21
 
 ### Added

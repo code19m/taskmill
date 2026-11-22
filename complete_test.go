@@ -363,6 +363,52 @@ func TestHeldTaskDoesNotHoldUpOtherCompletions(t *testing.T) {
 	}
 }
 
+// A task that completes after its cancel was requested takes back the dedupe
+// key that the cancel freed, but a transaction that claimed the key meanwhile
+// holds up neither its completion nor those of the tasks that complete with
+// it: the worker takes the key back once the completion committed, and gives
+// up after a moment. If that transaction then rolls back, the task stays
+// without its key.
+func TestAClaimedKeyDoesNotHoldUpCompletions(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-release
+			return nil
+		}, nil),
+		Queues: defaultQueue(2),
+	})
+
+	key := &taskmill.EnqueueOptions{DedupeKey: "order-1"}
+	keyed := e.keyed(t, key).ID
+	plain := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "a handler to start")
+	recv(t, started, "a handler to start")
+	e.cancel(t, keyed)
+
+	tx := e.begin(t)
+	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, key); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	e.waitState(t, plain, taskmill.StateCompleted)
+	e.waitState(t, keyed, taskmill.StateCompleted)
+	const gaveUp = "completed tasks could not take back the dedupe keys that their cancels freed"
+	waitFor(t, "the warning", func() bool { return logs.count(gaveUp) > 0 })
+
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if res := e.keyed(t, key); res.Duplicate {
+		t.Fatalf("the key went back to task %d, whose claim gave up", res.ID)
+	}
+}
+
 // The failure of a grouped task's last attempt halts its group, so it waits
 // for the group's row, which a transaction that enqueues into the group
 // holds. It waits without holding the task's row for long, which the
@@ -409,7 +455,8 @@ func TestFailureOfAGroupedTaskWaitsForItsGroupWithItsLease(t *testing.T) {
 }
 
 // A completion that the database takes long for, longer than a third of
-// the lease, still goes through: the task runs once.
+// the lease, still goes through: the task runs once. Renewals are as slow,
+// so they fail, and the completion has the lease that the task began with.
 func TestSlowCompletionCompletesTheTaskOnce(t *testing.T) {
 	t.Parallel()
 	e := newTracedEnv(t, &slowStatement{fragment: "SELECT DISTINCT id, lease_token FROM unnest", delay: 1500 * time.Millisecond})
@@ -426,6 +473,40 @@ func TestSlowCompletionCompletesTheTaskOnce(t *testing.T) {
 	id := e.enqueue(t, sendEmail{}, nil)
 	if info := e.waitState(t, id, taskmill.StateCompleted); info.Attempt != 1 || runs.Load() != 1 {
 		t.Fatalf("completed on attempt %d after %d runs, want one", info.Attempt, runs.Load())
+	}
+}
+
+// A completion that the worker cannot record names its tasks in the log:
+// they run again, and their work may need to be checked.
+func TestFailedCompletionNamesItsTasks(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	logs := &logRecorder{}
+	e := newEnvWith(t, proxiedPool(t, db, 6, nil), &taskmill.ClientConfig{Logger: slog.New(logs)})
+	started, release := make(chan struct{}), make(chan struct{})
+	startWorker(t, newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			close(started)
+			<-release
+			return nil
+		}, nil),
+		Queues:        defaultQueue(1),
+		LeaseDuration: 600 * time.Millisecond,
+		NoMaintainer:  true,
+	}))
+	t.Cleanup(func() { db.cut(false) }) // so that the worker stops soon
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	<-started
+	db.cut(true)
+	close(release)
+
+	const failed = "complete tasks failed; they are rescued when their leases run out"
+	waitFor(t, "the completion to be given up", func() bool { return logs.count(failed) > 0 })
+	for _, r := range logs.all() {
+		if r.Message == failed && attr(r, "task_ids") != fmt.Sprint([]int64{id}) {
+			t.Errorf("got %s, want task_ids=[%d]", recordText(r), id)
+		}
 	}
 }
 

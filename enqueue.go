@@ -70,9 +70,11 @@ type EnqueueOptions struct {
 	// DedupeKey makes the enqueue idempotent: while the key's window lasts,
 	// enqueueing the same kind with the same key in the same queue creates no
 	// new task, and reports the existing one. Canceling or deleting the task
-	// frees the key right away, and [Client.Retry] of the canceled task
-	// takes it back. The key may have any length: taskmill stores a SHA-256
-	// hash of the queue, the kind, and the key. Default: none.
+	// frees the key right away. [Client.Retry] of the canceled task takes it
+	// back, and so does a running task that completes after its cancel was
+	// requested, if no other task took the key meanwhile. The key may have
+	// any length: taskmill stores a SHA-256 hash of the queue, the kind, and
+	// the key. Default: none.
 	DedupeKey string
 
 	// DedupeWindow is how long DedupeKey blocks duplicates, counted from the
@@ -195,7 +197,8 @@ func (c *Client) Enqueue(ctx context.Context, args Args, opts *EnqueueOptions) (
 // same errors.
 //
 // tx may be a transaction, a connection, or a pool: see [Executor]. A nil
-// executor is an error that wraps [ErrInvalidArgument]. An option or a
+// executor, also one that wraps a nil pointer such as a nil *sql.Tx, is an
+// error that wraps [ErrInvalidArgument]. An option or a
 // payload that fails taskmill's checks fails before any statement runs, so
 // the transaction stays usable.
 func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *EnqueueOptions) (EnqueueResult, error) {
@@ -621,7 +624,7 @@ func (t *resolvedTask) metadataCopy() map[string]string {
 // resolve merges a task's options over its kind's defaults and taskmill's,
 // and validates the result.
 func resolve(p EnqueueParams) (*resolvedTask, error) {
-	if noArgs(p.Args) {
+	if isNil(p.Args) {
 		return nil, invalidArgument("args is nil")
 	}
 	kind := p.Args.Kind()

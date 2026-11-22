@@ -101,7 +101,7 @@ func Parse(file, body, schema string) (Migration, error) {
 	m.Online = strings.TrimSpace(first) == onlineMarker
 
 	created := make(map[string]bool)
-	for _, stmt := range statements(m.SQL) {
+	for _, stmt := range Split(m.SQL) {
 		words := wordsOf(stmt)
 		switch {
 		case m.Online:
@@ -148,10 +148,11 @@ func onlineStatement(stmt, words string) (Statement, bool) {
 	return Statement{}, false
 }
 
-// statements returns the statements of a migration, without its comments.
-// It splits at each semicolon outside quoted text, also inside the body of
-// a DO block or a function: the parts still name what the body does.
-func statements(sql string) []string {
+// Split returns the statements of a migration, without its comments. It
+// splits at each semicolon outside quoted text, also inside the body of a DO
+// block or a function: the parts still name what the body does, but only
+// the statements of an online step run one by one.
+func Split(sql string) []string {
 	var out []string
 	var stmt strings.Builder
 	end := func() {

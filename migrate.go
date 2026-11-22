@@ -54,8 +54,9 @@ const defaultMaxBlockingIndexRows = 1_000_000
 // which can take minutes on a large table. Meanwhile Migrate keeps a second
 // connection of the pool, so the pool needs at least 2, and its connections
 // may have no lock_timeout, statement_timeout, or transaction_timeout,
-// which would cancel the build. An older migration that blocks writes while
-// it builds an index is applied only on tables that
+// which would cancel the build. Otherwise Migrate fails before the build,
+// with an error that wraps [ErrInvalidArgument]. An older migration that
+// blocks writes while it builds an index is applied only on tables that
 // [MigrateConfig.MaxBlockingIndexRows] allows.
 //
 // The [setup guide] says when to call Migrate, and with which role.
@@ -176,20 +177,7 @@ var readCommitted = pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
 // decides: if it exists, another process created it.
 func createMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema string) error {
 	createErr := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
-		// CREATE SCHEMA IF NOT EXISTS would not do. PostgreSQL checks the
-		// CREATE privilege on the database before it checks whether the
-		// schema exists, and a role that owns its schema may lack it.
-		var exists bool
-		if err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT FROM pg_catalog.pg_namespace WHERE nspname = $1)", schema).Scan(&exists); err != nil {
-			return err
-		}
-		if !exists {
-			if _, err := tx.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
-				return err
-			}
-		}
-
-		_, err := tx.Exec(ctx, migrationsTableSQL(schema))
+		_, err := tx.Exec(ctx, bootstrapSQL(schema))
 		return err
 	})
 	if createErr == nil {
@@ -374,7 +362,7 @@ func (m *migrator) record(ctx context.Context, tx pgx.Tx, mig migrations.Migrati
 func (m *migrator) applyOnline(ctx context.Context, tx pgx.Tx, mig migrations.Migration) error {
 	fail := func(err error) error { return fmt.Errorf("migration %04d_%s: %w", mig.Version, mig.Name, err) }
 	if m.pool.Stat().MaxConns() < 2 {
-		return fail(errors.New("it builds an index online, on a second connection, and the pool has only one: let it open at least 2"))
+		return fail(invalidArgument("it builds an index online, on a second connection, and the pool has only one: let it open at least 2"))
 	}
 
 	var timeouts string
@@ -382,7 +370,7 @@ func (m *migrator) applyOnline(ctx context.Context, tx pgx.Tx, mig migrations.Mi
 		return err
 	}
 	if timeouts != "" {
-		return fail(fmt.Errorf("it builds an index online, which can take minutes, and the connections have %s, "+
+		return fail(invalidArgument("it builds an index online, which can take minutes, and the connections have %s, "+
 			"which would cancel the build and leave an invalid index: run Migrate as a role without them, "+
 			"as after ALTER ROLE ... SET statement_timeout = 0", timeouts))
 	}
@@ -511,14 +499,15 @@ func (m *migrator) awaitIndex(ctx context.Context, mig migrations.Migration, st 
 }
 
 // bootstrapSQL creates the schema and the table that records migrations,
-// for tools other than Migrate.
+// unless they exist, for Migrate and for other tools.
+//
+// CREATE SCHEMA IF NOT EXISTS would not do: PostgreSQL checks the CREATE
+// privilege on the database before it checks whether the schema exists, and
+// a role that owns its schema may lack it. The block stays on one line,
+// since goose splits a file at each line that ends in a semicolon.
 func bootstrapSQL(schema string) string {
-	return fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s;\n", schema) + migrationsTableSQL(schema)
-}
-
-// migrationsTableSQL creates the table that records migrations.
-func migrationsTableSQL(schema string) string {
-	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %[1]s.migrations (
+	return fmt.Sprintf(`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_namespace WHERE nspname = '%[1]s') THEN CREATE SCHEMA %[1]s; END IF; END $$;
+CREATE TABLE IF NOT EXISTS %[1]s.migrations (
     version    integer PRIMARY KEY,
     name       text NOT NULL,
     applied_at timestamptz NOT NULL DEFAULT now()
@@ -541,11 +530,25 @@ type Migration struct {
 
 	// Online reports a migration that builds or drops indexes with
 	// CONCURRENTLY, which blocks no writes. PostgreSQL runs such a statement
-	// only outside a transaction, alone. So apply an online migration
-	// outside a transaction, one statement at a time, and record it once
-	// every statement succeeded. A build that fails leaves its index
-	// invalid: drop it with DROP INDEX CONCURRENTLY before you try again.
+	// only outside a transaction, alone: a query that holds several
+	// statements runs them in one transaction, and fails. So apply each of
+	// [Migration.Statements] in a query of its own, outside a transaction,
+	// and record the migration once every statement succeeded. A build that
+	// fails leaves the index that its statement names invalid: drop it with
+	// DROP INDEX CONCURRENTLY before you try again. Tools such as goose,
+	// Atlas, and Flyway split SQL into statements themselves.
 	Online bool
+}
+
+// Statements returns the statements of an Online migration, in order and
+// without comments, for a runner that applies them one at a time. It
+// returns nil for any other migration, whose SQL runs whole, in a
+// transaction.
+func (m Migration) Statements() []string {
+	if !m.Online {
+		return nil
+	}
+	return migrations.Split(m.SQL)
 }
 
 // Migrations returns every migration for schema, in order. Teams that use
@@ -571,11 +574,16 @@ func Migrations(schema string) ([]Migration, error) {
 		return nil, fmt.Errorf("taskmill: %w", err)
 	}
 
-	bootstrap := Migration{Version: 0, Name: "bootstrap", SQL: bootstrapSQL(schema)}
+	return publicMigrations(schema, all), nil
+}
+
+// publicMigrations returns the bootstrap of schema, then the migrations all,
+// as Migrations returns them.
+func publicMigrations(schema string, all []migrations.Migration) []Migration {
 	out := make([]Migration, 0, len(all)+1)
-	out = append(out, bootstrap)
+	out = append(out, Migration{Version: 0, Name: "bootstrap", SQL: bootstrapSQL(schema)})
 	for _, m := range all {
 		out = append(out, Migration{Version: m.Version, Name: m.Name, SQL: m.SQL, Online: m.Online})
 	}
-	return out, nil
+	return out
 }

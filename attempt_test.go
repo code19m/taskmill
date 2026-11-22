@@ -738,7 +738,7 @@ func TestBatchHandlerSeesACancelRequest(t *testing.T) {
 
 	started := make(chan struct{}, 1)
 	var hs taskmill.Handlers
-	taskmill.AddBatchHandler(&hs, emailBatch(func(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+	taskmill.AddBatchHandler(&hs, taskmill.BatchHandlerFunc[sendEmail](func(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error {
 		started <- struct{}{}
 		errs := make([]error, len(tasks))
 		for i, task := range tasks {
@@ -759,13 +759,6 @@ func TestBatchHandlerSeesACancelRequest(t *testing.T) {
 	}
 	e.waitState(t, res[1].ID, taskmill.StateCanceled)
 	e.waitState(t, res[0].ID, taskmill.StateCompleted)
-}
-
-// emailBatch adapts a function to taskmill.BatchHandler.
-type emailBatch func(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error
-
-func (f emailBatch) HandleBatch(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error {
-	return f(ctx, tasks)
 }
 
 func TestCancelRequestWinsOverOtherOutcomes(t *testing.T) {
@@ -832,8 +825,8 @@ func TestWorkerRecordsErrorsWithNULBytes(t *testing.T) {
 
 // failingBatch fails or panics on its first batch.
 type failingBatch struct {
-	panics bool
-	calls  atomic.Int32
+	panics, appends bool
+	calls           atomic.Int32
 }
 
 func (f *failingBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[sendEmail]) []error {
@@ -843,24 +836,32 @@ func (f *failingBatch) HandleBatch(_ context.Context, tasks []*taskmill.Task[sen
 	if f.panics {
 		panic("broker client crashed")
 	}
+	if f.appends { // the slip of make and append, while the broker is down
+		errs := make([]error, len(tasks))
+		for range tasks {
+			errs = append(errs, errors.New("broker down")) //nolint:makezero // the slip that the test is about
+		}
+		return errs
+	}
 	return nil // no result for any task
 }
 
 func TestBatchHandlerFailures(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name, message string
-		code          taskmill.ErrorCode
-		panics        bool
+		name, message   string
+		code            taskmill.ErrorCode
+		panics, appends bool
 	}{
-		{"panic", "panic: broker client crashed", taskmill.CodePanic, true},
-		{"missing results", "the batch handler returned no result for this task", "", false},
+		{"panic", "panic: broker client crashed", taskmill.CodePanic, true, false},
+		{"missing results", "the batch handler returned no result for this task", "", false, false},
+		{"too many results", "the batch handler returned 4 results for 2 tasks", "", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			e := newEnv(t)
 			var hs taskmill.Handlers
-			taskmill.AddBatchHandler[sendEmail](&hs, &failingBatch{panics: tc.panics}, &taskmill.HandlerOptions{Retry: fastRetry})
+			taskmill.AddBatchHandler[sendEmail](&hs, &failingBatch{panics: tc.panics, appends: tc.appends}, &taskmill.HandlerOptions{Retry: fastRetry})
 
 			res, err := e.client.EnqueueMany(t.Context(), []taskmill.EnqueueParams{{Args: sendEmail{}}, {Args: sendEmail{}}})
 			if err != nil {

@@ -5,15 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // This file holds what keeps the leases of a worker's attempts: the
-// check-in that renews them every third of the lease, the attempts it
-// tracks, and the tries to record a result while its lease may still be
-// held.
+// check-in that renews them every third of the lease, the tries again
+// after a renewal failed, the attempts it tracks, and the tries to record a
+// result while its lease may still be held.
 
 // checkInLoop checks the worker in every third of the lease, and keeps its
 // reserve ready, until ctx ends. The reserve has a time of its own, because
@@ -48,16 +50,9 @@ func (w *Worker) everyThirdOfLease(ctx context.Context, fn func(context.Context)
 // tracked attempt, cancels the attempts that lost theirs or whose tasks were
 // canceled, and records in the worker's row that it is alive.
 func (w *Worker) checkIn(ctx context.Context) {
-	w.mu.Lock()
-	ts := make([]*liveAttempt, 0, len(w.attempts))
-	for _, t := range w.attempts {
-		ts = append(ts, t)
-	}
-	w.mu.Unlock()
-
 	// Leases first: on a slow database they need the check-in's time more
 	// than the worker's own row, which only shows that it is alive.
-	w.renewLeases(ctx, ts)
+	w.renewLeases(ctx, w.tracked())
 
 	var listed bool
 	err := w.leaseStatement(ctx, func(ctx context.Context, conn *pgxpool.Conn) error {
@@ -113,11 +108,19 @@ func (w *Worker) Health() error {
 	return nil
 }
 
-// renewLeases renews the leases of ts, and cancels the attempts that lost
-// theirs or whose tasks were canceled.
+// renewLeases renews the leases of ts, as tryRenewLeases does. If the
+// renewal fails, Run's renewAgain tries again soon.
 func (w *Worker) renewLeases(ctx context.Context, ts []*liveAttempt) {
+	if err := w.tryRenewLeases(ctx, ts); err != nil {
+		signal(w.renewFailed)
+	}
+}
+
+// tryRenewLeases renews the leases of ts, and cancels the attempts that
+// lost theirs or whose tasks were canceled.
+func (w *Worker) tryRenewLeases(ctx context.Context, ts []*liveAttempt) error {
 	if len(ts) == 0 {
-		return
+		return nil
 	}
 
 	ids := make([]int64, len(ts))
@@ -132,31 +135,94 @@ func (w *Worker) renewLeases(ctx context.Context, ts []*liveAttempt) {
 
 	for _, t := range ts {
 		r, owned := renewals[t.att.id]
-		switch {
-		case err == nil && !owned:
+		if err == nil && !owned {
 			w.loseLease(ctx, t)
 			continue
-		case r.renewed:
-			t.mu.Lock()
-			t.renewedAt = sent
-			t.mu.Unlock()
-		default:
-			// The renewal failed, or the task's row was locked: until a
-			// renewal succeeds, the attempt cannot know that it still owns
-			// its task once its lease could have expired.
-			t.mu.Lock()
-			expired := time.Since(t.renewedAt) >= w.cfg.LeaseDuration
-			t.mu.Unlock()
-			if expired {
-				w.loseLease(ctx, t)
-				continue
-			}
 		}
-
+		// A renewal that failed, or found the task's row locked, leaves the
+		// lease's end where it was: the attempt is canceled then (see track).
+		// Renewals can overlap (see renewAgain), and the first sent can
+		// answer last: the end moves only forward, as the statement moves it.
+		if r.renewed {
+			t.mu.Lock()
+			if sent.After(t.renewedAt) {
+				t.renewedAt = sent
+			}
+			t.mu.Unlock()
+		}
 		if r.cancelRequested {
 			t.requestCancel()
 		}
 	}
+	return err
+}
+
+// renewAgain tries the renewals of attempts again each time failed says
+// that one failed, until ctx ends: about every thirtieth of the lease,
+// until one succeeds, or no lease is left that a renewal could keep.
+// Check-ins come every third of the lease, and an attempt stops once its
+// lease may have ended (see track): after an outage that began just before
+// a check-in, the check-in that follows it would come as the lease ends,
+// too late. The check-ins go on meanwhile, with all of their time, which a
+// slow database may need.
+//
+// A try has a thirtieth of the lease, and twice the time of the one before
+// if that got no answer, up to a third of the lease. A connection whose
+// statement ran out of time is closed, and pgx holds its place in the pool
+// while it does: on a slow database, tries that all had a thirtieth of the
+// lease would close one connection each, and could fill the pool.
+func (w *Worker) renewAgain(ctx context.Context, failed <-chan struct{}, attempts func() []*liveAttempt) {
+	every := w.cfg.LeaseDuration / 30
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-failed:
+		}
+		limit := every
+		for renewed := false; !renewed; {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+			ts := w.leased(attempts())
+			if len(ts) == 0 {
+				break
+			}
+			tryCtx, cancel := context.WithTimeout(ctx, limit)
+			err := w.tryRenewLeases(tryCtx, ts)
+			if err != nil && tryCtx.Err() != nil {
+				limit = min(2*limit, w.cfg.LeaseDuration/3)
+			}
+			cancel()
+			renewed = err == nil
+		}
+	}
+}
+
+// tracked returns the attempts that the worker tracks.
+func (w *Worker) tracked() []*liveAttempt {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Collect(maps.Values(w.attempts))
+}
+
+// leased returns those of ts whose leases may still be held, as far as the
+// worker knows.
+func (w *Worker) leased(ts []*liveAttempt) []*liveAttempt {
+	var held []*liveAttempt
+	for _, t := range ts {
+		t.mu.Lock()
+		ok := time.Since(t.renewedAt) < w.cfg.LeaseDuration
+		t.mu.Unlock()
+		if ok && !t.lost.Load() {
+			held = append(held, t)
+		}
+	}
+	return held
 }
 
 // renewal is what renewing a lease learned about an attempt that owns its
@@ -381,20 +447,20 @@ func (r *reserve) drop() {
 
 // acquire takes a connection of the pool for a statement of the worker. If
 // every connection was in use, it counts a pool wait, and if it then waited
-// for a while, it warns, at most once per failureReport: handlers that share
-// the pool may hold all its connections, and the worker's fetches and
-// records wait for them. It judges by what happened, not by the pool's size,
-// because it cannot see which pool the handlers use. A wait for a new
-// connection to open, or a short wait, is normal.
+// for a while, it warns, at most once per failureReport. It judges by what
+// happened, not by the pool's size, because it cannot see which pool the
+// handlers use. A connection that is still opening is not in use: a wait
+// for one is normal, also when the database does not answer, and the
+// worker's failing operations say so then.
 func (w *Worker) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	s := w.client.pool.Stat()
-	full := s.IdleConns() == 0 && s.TotalConns() >= s.MaxConns()
+	full := s.AcquiredConns() >= s.MaxConns()
 
 	if full {
 		w.counts.poolWaits.Add(1)
 	}
 	start := time.Now()
-	conn, err := w.client.pool.Acquire(ctx)
+	conn, err := w.take(ctx, s.IdleConns() > 0)
 	waited := time.Since(start)
 
 	if !full || waited < w.cfg.LeaseDuration/30 {
@@ -402,11 +468,53 @@ func (w *Worker) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	}
 	now, last := time.Now().UnixNano(), w.poolWarned.Load()
 	if now-last >= int64(w.timing.failureReport) && w.poolWarned.CompareAndSwap(last, now) {
-		w.logger.LogAttrs(ctx, slog.LevelWarn,
-			"the pool was full, so the worker waited for a connection; raise MaxConns, or give handlers a pool of their own",
+		w.logger.LogAttrs(ctx, slog.LevelWarn, poolFull,
 			slog.Duration(logKeyDuration, waited), slog.Int(logKeyMaxConns, int(s.MaxConns())))
 	}
 	return conn, err
+}
+
+// poolFull is the warning of a statement of the worker that waited for a
+// full pool. It names what can hold the connections, not what to do: that
+// differs between the causes, which the worker cannot tell apart, and the
+// docs of the message give it for each.
+const poolFull = "the pool was full, so the worker waited for a connection; " +
+	"handlers that share it, or statements that wait for the database or a pooler, hold its connections"
+
+// take takes a connection of the pool. The pool pings a connection that
+// was idle for more than a second before it hands it out, and with the
+// caller's deadline. A connection to a server that a failover left behind
+// may never answer, so while the pool has idle connections, each try has a
+// thirtieth of the lease: the pool closes a connection whose ping ran out,
+// and the next try takes another, or opens one. A slow ping of a healthy
+// connection fails too, so LeaseDuration's docs ask for a lease above 30
+// round trips: a floor on the try's time would let stale connections
+// outlast a short lease after a failover instead.
+func (w *Worker) take(ctx context.Context, idle bool) (*pgxpool.Conn, error) {
+	for idle {
+		tryCtx, cancel := context.WithTimeout(ctx, w.cfg.LeaseDuration/30)
+		conn, err := w.client.pool.Acquire(tryCtx)
+		cancel()
+		if err == nil || ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
+			return conn, err
+		}
+		idle = w.client.pool.Stat().IdleConns() > 0
+	}
+	return w.client.pool.Acquire(ctx)
+}
+
+// leaseOver reports whether t lost its lease, or the lease may have ended as
+// far as the worker knows. Then t counts as lost, as it does once
+// leaseEnded runs, which it may not have yet.
+func (w *Worker) leaseOver(ctx context.Context, t *liveAttempt) bool {
+	t.mu.Lock()
+	over := time.Since(t.renewedAt) >= w.cfg.LeaseDuration
+	t.mu.Unlock()
+
+	if over {
+		w.loseLease(ctx, t)
+	}
+	return over || t.lost.Load()
 }
 
 func (w *Worker) loseLease(ctx context.Context, t *liveAttempt) {
@@ -449,21 +557,42 @@ func (t *liveAttempt) cancelAttempt(cause error) {
 // try, for as long as the leases of ts may still be held when it starts: by
 // then the tasks are rescued, and a result recorded later would be refused.
 // A database outage or failover shorter than a lease thus loses no results,
-// while an error that persists ends the tries. Each try gets its own timeout.
+// while an error that persists ends the tries.
+//
+// The first try has the time left on the leases, and at least a third of
+// the lease: a slow database that answers before they end records the
+// result in one try. A try that gets no answer in that time met a slower
+// one, or a connection that no longer answers, as one to a server that a
+// failover left behind. Check-ins renew the leases meanwhile, on other
+// connections, so such a try moves the deadline to the leases' end as it is
+// then, and the next has twice the time, up to recordTimeout. A try that
+// had recordTimeout moves the deadline no more: tries that never answer end
+// too.
 func (w *Worker) whileLeased(ctx context.Context, ts []*liveAttempt, fn func(context.Context) error) error {
-	// The deadline is fixed now: the leases are still renewed while the
-	// tries continue, which would otherwise never let them end.
+	// The deadline is fixed now, and moves only after a try without an
+	// answer: an error that persists would otherwise never end the tries.
 	deadline := w.leaseEnd(ts)
+	limit := min(max(time.Until(deadline), w.cfg.LeaseDuration/3), recordTimeout)
 	delay := recordRetryFirst
 	for {
-		tryCtx, cancel := context.WithTimeout(ctx, recordTimeout)
+		tryCtx, cancel := context.WithTimeout(ctx, limit)
 		err := fn(tryCtx)
+		unanswered := tryCtx.Err() != nil
 		cancel()
 		w.resultFailures.observe(ctx, err)
-		if err == nil || ctx.Err() != nil || time.Now().Add(delay).After(deadline) {
+		if err == nil || ctx.Err() != nil {
 			return err
 		}
 
+		if unanswered && limit < recordTimeout {
+			limit = min(2*limit, recordTimeout)
+			if end := w.leaseEnd(ts); end.After(deadline) {
+				deadline = end
+			}
+		}
+		if time.Now().Add(delay).After(deadline) {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return err
@@ -489,14 +618,22 @@ func (w *Worker) leaseEnd(ts []*liveAttempt) time.Time {
 	return end
 }
 
-// track starts tracking t, so that check-ins renew its lease.
+// track starts tracking t, so that check-ins renew its lease, and cancels t
+// with ErrLeaseLost if its handler still runs when the lease ends, as far as
+// the worker knows: no renewal confirmed it for a LeaseDuration. The
+// maintainer may rescue the task from then on, and another worker may run
+// it, so the handler stops then, and not at a later check-in.
 //
 // The worker may still run an older attempt of t's task: it was out of touch
 // for longer than the lease, and the task was rescued and leased again
-// before a check-in found out. t takes that attempt's place, so no check-in
-// sees it again. The new lease proves that the older attempt lost its own,
-// so track cancels its context with ErrLeaseLost, and its result is ignored.
+// before it found out. t takes that attempt's place, so no check-in sees it
+// again. The new lease proves that the older attempt lost its own, so track
+// cancels its context with ErrLeaseLost, and its result is ignored.
 func (w *Worker) track(ctx context.Context, t *liveAttempt) {
+	t.mu.Lock()
+	t.leaseTimer = time.AfterFunc(time.Until(t.renewedAt.Add(w.cfg.LeaseDuration)), func() { w.leaseEnded(ctx, t) })
+	t.mu.Unlock()
+
 	w.mu.Lock()
 	old := w.attempts[t.att.id]
 	w.attempts[t.att.id] = t
@@ -520,7 +657,26 @@ func (w *Worker) track(ctx context.Context, t *liveAttempt) {
 	}
 }
 
+// leaseEnded runs when t's lease may have ended: it cancels t, unless a
+// renewal moved the lease's end meanwhile, and then waits for that.
+func (w *Worker) leaseEnded(ctx context.Context, t *liveAttempt) {
+	t.mu.Lock()
+	left := time.Until(t.renewedAt.Add(w.cfg.LeaseDuration))
+	if left > 0 {
+		t.leaseTimer.Reset(left)
+	}
+	t.mu.Unlock()
+
+	if left <= 0 {
+		w.loseLease(ctx, t)
+	}
+}
+
 func (w *Worker) untrack(t *liveAttempt) {
+	t.mu.Lock()
+	t.leaseTimer.Stop()
+	t.mu.Unlock()
+
 	w.mu.Lock()
 	if w.attempts[t.att.id] == t {
 		delete(w.attempts, t.att.id)

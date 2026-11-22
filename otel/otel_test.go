@@ -759,6 +759,64 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 	})
 }
 
+// brokerError is an error of a broker's client.
+type brokerError struct{ reason string }
+
+func (e *brokerError) Error() string { return "broker: " + e.reason }
+
+// A publisher can return an error whose methods panic, as a nil pointer in
+// an error does, or more results than deliveries. Every span still ends,
+// with the error that the relay then records, and the results reach the
+// relay unchanged, so that the worker fails what it fails without the
+// wrapper.
+func TestPublisherEndsEverySpanWhateverItReturns(t *testing.T) {
+	t.Parallel()
+	var nilPointer *brokerError
+	tooMany := "the publisher returned 6 results for 3 deliveries"
+	for name, tc := range map[string]struct {
+		results []error
+		want    []string // each span's error, or "" for none
+	}{
+		"an error that panics": {
+			[]error{nil, nilPointer, nil},
+			[]string{"", "a *otel_test.brokerError that panics when it is formatted", ""},
+		},
+		"too many results": {
+			[]error{nil, nil, nil, &brokerError{"down"}, &brokerError{"down"}, &brokerError{"down"}},
+			[]string{tooMany, tooMany, tooMany},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			spans := tracetest.NewSpanRecorder()
+			in := tmotel.New(&tmotel.Config{
+				TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(spans)),
+				MeterProvider:  sdkmetric.NewMeterProvider(),
+			})
+			broker := outbox.PublisherFunc(func(context.Context, []outbox.Delivery) []error { return tc.results })
+
+			ds := make([]outbox.Delivery, 3)
+			for i := range ds {
+				ds[i] = outbox.Delivery{ID: strconv.Itoa(i), Message: outbox.Message{Topic: "orders"}}
+			}
+			if got := in.Publisher("kafka", broker).Publish(t.Context(), ds); !slices.Equal(got, tc.results) {
+				t.Errorf("got the results %v, want the publisher's", got)
+			}
+
+			ended := spans.Ended()
+			if len(ended) != len(ds) {
+				t.Fatalf("%d spans ended, want %d", len(ended), len(ds))
+			}
+			for i, span := range ended {
+				got := span.Status()
+				if (tc.want[i] == "") != (got.Code != codes.Error) || got.Description != tc.want[i] {
+					t.Errorf("span %d ended with %+v, want the error %q", i, got, tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestPublisherThatPanicsEndsItsSpans(t *testing.T) {
 	t.Parallel()
 	e := setup(t)
