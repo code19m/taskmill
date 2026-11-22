@@ -63,7 +63,8 @@ var relayRetry = taskmill.ExponentialBackoff{Base: time.Second, Max: 5 * time.Mi
 type Message struct {
 	// Topic is the broker destination, such as a Kafka topic. Required. It
 	// must be valid UTF-8, without a NUL character, as must the names of
-	// the headers.
+	// the headers. It must not hold the unit separator, U+001F, which
+	// separates it from the key in the stream that orders its messages.
 	Topic string
 
 	// Key orders messages: messages with the same topic and key are
@@ -110,7 +111,17 @@ type Delivery struct {
 // returned nil, or fewer errors than deliveries. Nil never means that all
 // were published. So a publisher that ends in "return nil" after it sent
 // its deliveries sends them all again at each retry, until they are dead.
-// When all were published, return make([]error, len(deliveries)).
+// When all were published, return make([]error, len(deliveries)). More
+// errors than deliveries retry every delivery: no error can be matched to
+// its delivery, as when append added the errors after the nils that make
+// put in the slice.
+//
+// Publish must return when ctx ends. A call that ignores it keeps running:
+// 5 seconds after the timeout, its deliveries are retried while it still
+// runs. A send that it makes late can then reach the broker after later
+// messages of its key, and become the key's last record, which deduplication
+// by ID does not undo. With a broker client that takes no context, give the
+// client a send timeout below Timeout.
 //
 // A failed delivery is retried after 1 second, then after twice as long each
 // time, up to every 5 minutes, with ±10% jitter. After 10,000 tries, about a
@@ -143,7 +154,8 @@ func New(client *taskmill.Client) *Outbox {
 // Store saves msgs in the outbox inside the caller's transaction, so they are
 // published only if the transaction commits. A message without a topic, with
 // a topic or a header name that is not valid UTF-8 or holds a NUL character,
-// or over the payload limit (see [Message.Value]), or a call over the limits
+// with a topic that holds U+001F (see [Message.Topic]), or over the payload
+// limit (see [Message.Value]), or a call over the limits
 // of [taskmill.Client.EnqueueMany], 10,000 messages and 64 MiB, fails with an
 // error that wraps [taskmill.ErrInvalidArgument], and leaves the transaction
 // usable. A call with no messages does nothing.
@@ -173,13 +185,17 @@ func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Messag
 // checkNames returns what is wrong with the topic and the header names of m,
 // or "". They are stored as JSON text, which would turn bytes that are not
 // UTF-8 into U+FFFD: two topics would become one, while the keys that order
-// their messages stay apart. And jsonb cannot hold a NUL character.
+// their messages stay apart. And jsonb cannot hold a NUL character. A topic
+// that held the separator of groupKey could share the group of another
+// topic and key, so that a dead message of one halts the other.
 func checkNames(m Message) string {
 	switch {
 	case m.Topic == "":
 		return "has no topic"
 	case !text(m.Topic):
 		return "has a topic that is not valid UTF-8 or holds a NUL character"
+	case strings.ContainsRune(m.Topic, groupSeparator):
+		return "has a topic that holds the unit separator, U+001F"
 	}
 	for name := range m.Headers {
 		if !text(name) {
@@ -198,10 +214,18 @@ func text(s string) bool {
 type RelayOptions struct {
 	// BatchSize is the most deliveries that one call of the publisher
 	// receives. It must not be negative. Default: 100. Maximum: 1,000.
+	//
+	// A worker makes up to one call per slot of the [Queue]'s
+	// [taskmill.QueueOptions.Concurrency], 10 by default, and each message
+	// in a call holds about 2.5 times its Value in memory. The messages of a
+	// call come in one fetch, while their leases run: on a slow link to the
+	// database, the worker fetches fewer at a time, and a message whose lease
+	// ended on the way is not published, but retried. Lower BatchSize for
+	// large messages, or a slow link.
 	BatchSize int
 
-	// Timeout bounds each call of the publisher. It must not be negative.
-	// Default: 1 minute.
+	// Timeout bounds each call of the publisher: see [Publisher]. It must
+	// not be negative. Default: 1 minute.
 	Timeout time.Duration
 }
 
@@ -255,6 +279,10 @@ func (r relay) HandleBatch(ctx context.Context, tasks []*taskmill.Task[message])
 	// Clipped, so that the errors added here stay out of the publisher's
 	// own slice.
 	errs := slices.Clip(r.pub.Publish(ctx, ds))
+	if len(errs) > len(ds) {
+		err := fmt.Errorf("the publisher returned %d results for %d deliveries", len(errs), len(ds))
+		errs = slices.Repeat([]error{err}, len(ds))
+	}
 	for len(errs) < len(ds) {
 		errs = append(errs, errNoResult)
 	}
@@ -266,14 +294,18 @@ func (r relay) HandleBatch(ctx context.Context, tasks []*taskmill.Task[message])
 // error for a missing result names the batch handler, which is the relay.
 var errNoResult = errors.New("the publisher returned no result for this delivery")
 
+// groupSeparator joins a topic and a key in a group key. A topic cannot
+// hold it, so the first one ends the topic, and no two pairs share a group.
+const groupSeparator = '\x1f'
+
 // groupKey orders the messages of one topic and key. The two are joined by
-// the ASCII unit separator. Keys that are long, binary, or contain a NUL
-// byte, which a group key cannot hold, are hashed.
+// groupSeparator. Keys that are long, binary, or contain a NUL byte, which a
+// group key cannot hold, are hashed.
 func groupKey(topic string, key []byte) string {
 	if len(key) == 0 {
 		return ""
 	}
-	g := topic + "\x1f" + string(key)
+	g := topic + string(groupSeparator) + string(key)
 	if !utf8.ValidString(g) || strings.ContainsRune(g, 0) || utf8.RuneCountInString(g) > maxGroupKeyRunes {
 		sum := sha256.Sum256([]byte(g))
 		return "sha256:" + hex.EncodeToString(sum[:])

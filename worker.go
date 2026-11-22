@@ -204,7 +204,8 @@ type WorkerConfig struct {
 	// default, and renews the leases of its running tasks then. While
 	// renewals fail, it tries them again every thirtieth of it. A lease
 	// starts when the task is taken, by the database's clock, not when the
-	// fetch began. If no renewal of a task's lease succeeds for a whole
+	// fetch began, so the time that its row takes to reach the worker counts
+	// against it. If no renewal of a task's lease succeeds for a whole
 	// LeaseDuration, as when the worker cannot reach the database, the
 	// worker cancels the task's handler with [ErrLeaseLost]: from then on,
 	// the maintainer may rescue the task, and another worker run it. Keep
@@ -374,10 +375,11 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 
 	for name, o := range c.Queues {
 		w.queues[name] = &queueState{
-			name:  name,
-			slots: make(chan struct{}, o.Concurrency),
-			wake:  make(chan struct{}, 1),
-			freed: make(chan struct{}, 1),
+			name:      name,
+			slots:     make(chan struct{}, o.Concurrency),
+			wake:      make(chan struct{}, 1),
+			freed:     make(chan struct{}, 1),
+			fetchMost: maxFetch,
 		}
 	}
 
@@ -494,6 +496,7 @@ type queueState struct {
 	paused     atomic.Bool   // the queue is paused, or Run has not read its settings yet
 	maxRunning atomic.Int32  // installation-wide limit; 0 means none
 	stuck      atomic.Int32  // slots whose handlers did not return shutdownGrace after their context ended
+	fetchMost  int           // most tasks that the next fetch takes, up to maxFetch: see fetch. Only the queue's fetch loop uses it
 }
 
 func (q *queueState) nudge() {

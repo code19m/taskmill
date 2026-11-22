@@ -230,7 +230,7 @@ func TestRunTaskRefuses(t *testing.T) {
 // so no middleware or handler runs it here: RunTask returns it, running.
 func TestRunTaskRunsNoTaskWhoseLeaseEndedOnItsWay(t *testing.T) {
 	t.Parallel()
-	e := newEnvWith(t, slowPool(t, 1<<20), nil)                           // 1 MiB a second from the database
+	e := newEnvWith(t, slowPool(t, 1<<20, nil), nil)                      // 1 MiB a second from the database
 	id := e.enqueue(t, report{Name: strings.Repeat("x", 1_000_000)}, nil) // about a second on the way
 
 	var runs atomic.Int32

@@ -27,6 +27,11 @@ All notable changes to taskmill are recorded here. The format follows
   whose script did not load works as it does with script turned off; a
   page of 0.15 shows the controls that need its script, which do nothing,
   until it is loaded again.
+- **Breaking:** `outbox.Outbox.Store` refuses a topic that holds the unit
+  separator, U+001F, with an error that wraps `ErrInvalidArgument`. Such a
+  topic could share the stream of another topic and key, so that a dead
+  message of one halted the other. To migrate, use another character in
+  the topic.
 - The log lines `complete tasks failed; they are rescued when their leases
   run out` and `rescued tasks whose workers lost their leases` name up to 20
   of their tasks in `task_ids`, so that after a failover you can find the
@@ -50,9 +55,9 @@ All notable changes to taskmill are recorded here. The format follows
   longer failover, set `LeaseDuration` to more than 1.8 times its length,
   in place of 1.5.
 - A failover that leaves the old server's connections open without an
-  answer no longer stops a queue's fetches for 30 seconds, nor runs
-  finished tasks again. A fetch has a third of the lease, and at least 5
-  seconds. A try to record a result that gets no answer in the time left
+  answer no longer runs finished tasks again, and stops a queue's fetches
+  for less time: 20 seconds by default, in place of 30. A fetch has two
+  thirds of the lease, at least 5 seconds and at most 30. A try to record a result that gets no answer in the time left
   on the lease is followed by one on another connection, with twice the
   time, while check-ins renew the leases, until a try has had 30 seconds.
   A try to take an idle connection, which the pool pings first, has a
@@ -61,6 +66,24 @@ All notable changes to taskmill are recorded here. The format follows
 - The maintainer no longer sends its promotion 20 times a second while
   another transaction holds a due task, as an open `CancelTx` does: it
   tries again at its interval. Each pass also takes one statement, not two.
+- A publisher, or a batch handler, that returns more results than
+  deliveries or tasks fails them all. The worker used the first results:
+  after the slip of `make` and `append`, those were the nils, so messages
+  that the broker refused were deleted as published.
+- A relay, or any batch kind, on a slow link to the database no longer
+  publishes the same messages again and again while it completes none. A
+  batch leaves out a task whose lease ended on its way from the database.
+  After a fetch that ran out of its time, or whose tasks took longer than a
+  third of the lease to arrive, not counting a wait for a connection of
+  the pool, the worker renews their leases right away,
+  as the next check-in may come too late, and the next fetch takes at most
+  half as many tasks.
+  A fetch that brought that many within a sixth of the lease doubles it,
+  and one that found fewer keeps it.
+- The outbox docs say what a message costs in memory, about 2.5 times its
+  `Value` while its batch runs ([Performance](docs/reference/performance.md#resource-use)),
+  and that a publisher must return when its context ends: a late send can
+  reach the broker after later messages of its key.
 
 ### Fixed
 

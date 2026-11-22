@@ -74,13 +74,19 @@ normal handler.
   to arrive, so when tasks are few, batches are small.
 - A batch takes one [slot](../concepts/glossary.md#slot) in its queue's
   `Concurrency`. `Timeout` limits the whole batch.
-- A task without a result fails. If the handler panics, every task fails.
+- A worker runs up to `Concurrency` batches, and each task of a running
+  batch holds its payload twice in memory: size the worker for that, as
+  [Performance](../reference/performance.md#resource-use) shows.
+- A task without a result fails. If the handler panics, or returns more
+  results than tasks, every task fails.
   If a task's payload does not decode, that task becomes dead, and the
   rest run.
 - `MaxRunning` counts tasks, not batches. So it also limits how full a batch
   gets: with `MaxRunning: 4`, a batch holds at most 4 tasks.
 - If a task loses its [lease](../concepts/glossary.md#lease) while the batch
   runs, the batch continues, and taskmill ignores its result for that task.
+  A task whose lease ended before the batch began, as on a slow link to
+  the database, is left out of it.
 - [Middleware](middleware.md#middleware-and-batch-handlers) runs once per
   task, not once per batch.
 

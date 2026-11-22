@@ -81,7 +81,7 @@ successes between them.
 | Operation | What it does | How often | If it keeps failing, check |
 |---|---|---|---|
 | `fetch tasks` | Takes tasks of the queue in `queue` | Every poll, and on each [notification](../concepts/glossary.md#notification) | The database |
-| `renew leases` | Renews the [leases](../concepts/glossary.md#lease) of running tasks | Every third of `LeaseDuration`, and every thirtieth of it while renewals fail | The database, and the pool size |
+| `renew leases` | Renews the [leases](../concepts/glossary.md#lease) of running tasks | Every third of `LeaseDuration`, every thirtieth of it while renewals fail, and after a fetch that took longer or ran out of time | The database, and the pool size |
 | `record check-in` | Notes in the database that the worker is alive, at its [check-in](../concepts/glossary.md#check-in) | Every third of `LeaseDuration` | The database |
 | `record results` | Saves the results of finished attempts | After each attempt | The database. If `error` says `lock timeout`, a transaction holds a FIFO group's row for long, such as one that enqueues into the group: the worker tries again until it is free |
 | `load queue settings` | Reads pauses and limits of the queues. A worker fetches no tasks before its first read worked | When the worker starts, then every 10 seconds. While the first read fails, again after 0.1 to 10 seconds | The database, and the role's right to read `queues` |

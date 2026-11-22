@@ -54,9 +54,10 @@ spec:
   [Ready to ship](../tutorial/7-ready-to-ship.md), not by taskmill. Its
   default, `localhost:8081`, cannot be reached by the kubelet.
 - Workers get no traffic, so they need no Service and no `preStop` hook.
-- A worker itself needs little memory
+- A worker itself needs little memory, but the tasks of a running batch,
+  as of the outbox relay, hold their payloads
   ([Performance](../reference/performance.md#resource-use)). Size the
-  limits for your handlers.
+  limits for those, and for your handlers.
 - Run at least 2 replicas. With one, a lost node stops all work, and the
   [maintainer](../concepts/glossary.md#maintainer) with it, until Kubernetes
   starts the pod elsewhere: about 5 minutes by default. A

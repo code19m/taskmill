@@ -649,22 +649,89 @@ func TestBatchFillsInTheQueuesOrder(t *testing.T) {
 	}
 }
 
-// A fetch has at least 5 seconds, also with a short lease. One given up at a
-// third of the lease would have leased its task all the same, and the task
-// would wait for the rescue, at the cost of an attempt, each time the link
-// brought it too late. So a task that the link brings in more than a third
-// of the lease, but well within it, runs at its first attempt.
-func TestSlowFetchOutlastsAThirdOfAShortLease(t *testing.T) {
+// On a slow link to the database, a fetch brings tasks whose leases ran out
+// on the way: a batch would run them while the maintainer rescues them, and
+// the next fetch would bring as many, again and again. The batch leaves
+// them out, and the next fetches take fewer, until their tasks arrive
+// within a third of the lease. A slow fetch renews the leases of the tasks
+// that it brought, which the next check-in may renew too late. Each task
+// runs once.
+func TestSlowFetchRunsEachTaskOnce(t *testing.T) {
 	t.Parallel()
-	e := newEnvWith(t, slowPool(t, 1<<20), nil) // 1 MiB a second from the database
-	id := e.enqueue(t, report{Name: strings.Repeat("x", 700_000)}, nil)
+	e := newEnvWith(t, slowPool(t, 2<<20, nil), nil) // 2 MiB a second from the database
+	direct := e.direct(t)
+	const lease = 1500 * time.Millisecond
+
+	// More than the link brings in a lease. The tasks whose leases ran out
+	// on the way are rescued: each such lease costs its task an attempt, as
+	// it does an outbox message, which has many.
+	params := make([]taskmill.EnqueueParams, 24)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: report{Name: strings.Repeat("x", 200_000)}, Options: &taskmill.EnqueueOptions{MaxAttempts: 100}}
+	}
+	res, err := e.client.EnqueueMany(t.Context(), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	runs := map[int64]int{}
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler[report](&hs, batchFunc(func(tasks []*taskmill.Task[report]) {
+		ids := make([]int64, len(tasks))
+		for i, task := range tasks {
+			ids[i] = task.ID
+		}
+		var left float64
+		if err := direct.pool.QueryRow(context.Background(), replaceSchema(
+			"SELECT extract(epoch FROM min(lease_expires_at) - clock_timestamp()) FROM {s}.tasks WHERE id = ANY($1)", e.schema,
+		), ids).Scan(&left); err != nil {
+			t.Error(err)
+		}
+		if d := time.Duration(left * float64(time.Second)); d < lease/3 {
+			t.Errorf("a batch began with %s of its leases left, want more than a third of the lease", d.Round(time.Millisecond))
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		for _, task := range tasks {
+			runs[task.ID]++
+		}
+	}), &taskmill.HandlerOptions{BatchSize: len(params), Retry: fastRetry})
+	runWorker(t, e, &taskmill.WorkerConfig{ // it leads maintenance too, and rescues
+		Handlers:      &hs,
+		Queues:        map[string]taskmill.QueueOptions{"reports": {Concurrency: 4}},
+		LeaseDuration: lease,
+	})
+
+	for _, r := range res {
+		e.waitState(t, r.ID, taskmill.StateCompleted)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for id, n := range runs {
+		if n != 1 {
+			t.Errorf("task %d ran %d times, want once", id, n)
+		}
+	}
+}
+
+// A fetch has at least 5 seconds, also with a short lease. One given up at
+// two thirds of the lease would have leased its task all the same, and the
+// task would wait for the rescue, at the cost of an attempt, each time the
+// link brought it too late. So a task that the link brings in more than two
+// thirds of the lease, but within it, runs at its first attempt.
+func TestSlowFetchOutlastsTwoThirdsOfAShortLease(t *testing.T) {
+	t.Parallel()
+	e := newEnvWith(t, slowPool(t, 250_000, nil), nil)                    // 250 KB a second from the database
+	id := e.enqueue(t, report{Name: strings.Repeat("x", 1_000_000)}, nil) // about 4 seconds on the way
 
 	var hs taskmill.Handlers
 	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
 	runWorker(t, e, &taskmill.WorkerConfig{ // it leads maintenance too, and rescues
 		Handlers:      &hs,
 		Queues:        map[string]taskmill.QueueOptions{"reports": {Concurrency: 1}},
-		LeaseDuration: 1500 * time.Millisecond,
+		LeaseDuration: 5 * time.Second,
 	})
 
 	info := e.waitState(t, id, taskmill.StateCompleted)
@@ -673,9 +740,218 @@ func TestSlowFetchOutlastsAThirdOfAShortLease(t *testing.T) {
 	}
 }
 
+// A fetch has two thirds of the lease, so one that takes longer than a third
+// still brings its tasks. One cut short would have leased tasks that never
+// arrived: they would wait for the rescue, at the cost of an attempt. The
+// next fetches take half as many tasks, and a queue that waits for work
+// keeps that size, so that the next backlog arrives in fetches that fit too.
+func TestSlowFetchCostsNoAttempt(t *testing.T) {
+	t.Parallel()
+	e := newEnvWith(t, slowPool(t, 1<<20, nil), nil) // 1 MiB a second from the database
+
+	// enqueue adds n tasks of 100 KB: the link brings about 10 a second.
+	enqueue := func(n int) {
+		params := make([]taskmill.EnqueueParams, n)
+		for i := range params {
+			params[i] = taskmill.EnqueueParams{Args: report{Name: strings.Repeat("x", 100_000)}}
+		}
+		if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// completed waits until n tasks completed, and fails once a task lost a
+	// lease on the way.
+	completed := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(45 * time.Second)
+		for {
+			if failed := e.count(t, `SELECT (SELECT count(*) FROM {s}.tasks WHERE errors <> '[]')
+				+ (SELECT count(*) FROM {s}.task_history WHERE errors <> '[]')`); failed > 0 {
+				t.Fatalf("%d tasks failed an attempt, want none", failed)
+			}
+			done := e.count(t, "SELECT count(*) FROM {s}.task_history")
+			if done == n {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%d of %d tasks completed", done, n)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// The first fetch takes 70 tasks, in about 7 seconds: more than a third
+	// of the lease, and less than two thirds.
+	enqueue(70)
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+	runWorker(t, e, &taskmill.WorkerConfig{ // it leads maintenance too, and rescues
+		Handlers:      &hs,
+		Queues:        map[string]taskmill.QueueOptions{"reports": {Concurrency: 150}},
+		LeaseDuration: 15 * time.Second,
+	})
+	completed(70)
+
+	// Fetches that found nothing came meanwhile. One fetch of all 120 would
+	// take longer than two thirds of the lease.
+	enqueue(120)
+	completed(190)
+}
+
+// A fetch has 30 seconds at most, also with a long lease, so that a slow
+// link, or a connection that stops answering, keeps a queue's fetches
+// waiting no longer. A fetch cut then is slow, although a third of such a
+// lease is longer: the next takes at most half as many tasks as arrived,
+// and at least one, so that it is not cut too.
+func TestFetchOfALongLeaseEndsAfter30Seconds(t *testing.T) {
+	t.Parallel()
+	trace := &fetchTrace{}
+	e := newEnvWith(t, slowPool(t, 100_000, trace), nil) // 100 KB a second from the database
+
+	// 32 tasks of 100 KB: a fetch of all of them takes 32 seconds or more.
+	params := make([]taskmill.EnqueueParams, 32)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{To: strings.Repeat("x", 100_000)}}
+	}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
+	}
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers:      noopHandlers(),
+		Queues:        defaultQueue(len(params)),
+		LeaseDuration: 2 * time.Minute,
+		NoMaintainer:  true,
+	})
+
+	time.Sleep(30 * time.Second)
+	waitFor(t, "the fetch after the first", func() bool { return trace.fetches() > 1 })
+	if got := []int{trace.limit(0), trace.limit(1)}; !slices.Equal(got, []int{len(params), 1}) {
+		t.Errorf("the first fetches took up to %v tasks, want %d and then 1: the first ran out of its time", got, len(params))
+	}
+}
+
+// A fetch that waits for a connection, while others hold the pool, is not
+// slow: the leases of its tasks count from its statement, which the
+// database answers at once. Nor is one that runs out of its time while it
+// waits. So the worker renews none of the tasks before they start, and its
+// next fetch still takes a task for each free slot.
+func TestFetchThatWaitedForThePoolIsNotSlow(t *testing.T) {
+	t.Parallel()
+	trace := &fetchTrace{}
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConns = 15 // Concurrency 10, plus 5: the worker keeps a reserve
+	cfg.ConnConfig.Tracer = trace
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	e := newEnvWith(t, pool, nil)
+	direct := e.direct(t)
+
+	const lease = 900 * time.Millisecond
+	var renewedBeforeStart atomic.Int32
+	renewedBeforeStart.Store(-1)
+	var first sync.Once
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			first.Do(func() { renewedBeforeStart.Store(trace.renewals.Load()) })
+			return nil
+		}, nil),
+		Queues:        defaultQueue(10),
+		LeaseDuration: lease,
+		NoMaintainer:  true,
+	})
+	startWorker(t, w)
+	waitFor(t, "the worker to start", func() bool { return w.Health() == nil })
+
+	// The test holds every connection but the reserve, as handlers that
+	// share the pool can, while the tasks wait: longer than a fetch's time,
+	// 5 seconds, so that a fetch runs out of it, and then for twice a third
+	// of the lease, which the next fetch waits.
+	held := make([]*pgxpool.Conn, cfg.MaxConns-1)
+	for i := range held {
+		if held[i], err = pool.Acquire(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var ids []int64
+	for range 4 {
+		ids = append(ids, direct.enqueue(t, sendEmail{}, nil))
+	}
+	time.Sleep(5*time.Second + 2*lease/3)
+	for _, c := range held {
+		c.Release()
+	}
+
+	for _, id := range ids {
+		direct.waitState(t, id, taskmill.StateCompleted)
+	}
+	if n := renewedBeforeStart.Load(); n != 0 {
+		t.Errorf("the worker renewed leases %d times before the tasks started, want none", n)
+	}
+	waitFor(t, "the slots to be free", func() bool { return w.Stats().SlotsBusy == 0 })
+	fetched := trace.fetches()
+	waitFor(t, "the next fetch", func() bool { return trace.fetches() > fetched })
+	if got := trace.limit(fetched); got != 10 {
+		t.Errorf("the next fetch took up to %d tasks, want one for each of the 10 free slots", got)
+	}
+}
+
+// fetchTrace keeps the limit of each fetch from a queue without a
+// MaxRunning limit that a pool's connections send, and counts the renewals
+// of leases.
+type fetchTrace struct {
+	mu       sync.Mutex
+	limits   []int
+	renewals atomic.Int32
+}
+
+func (f *fetchTrace) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if strings.Contains(d.SQL, "), renewed AS (") {
+		f.renewals.Add(1)
+	}
+	return ctx
+}
+
+func (*fetchTrace) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (*fetchTrace) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	return ctx
+}
+
+func (f *fetchTrace) TraceBatchQuery(_ context.Context, _ *pgx.Conn, d pgx.TraceBatchQueryData) {
+	if len(d.Args) != 4 || !strings.Contains(d.SQL, "WHERE state = 'available' AND queue = $1") {
+		return
+	}
+	if limit, ok := d.Args[1].(int); ok {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.limits = append(f.limits, limit)
+	}
+}
+
+func (*fetchTrace) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
+
+func (f *fetchTrace) fetches() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.limits)
+}
+
+func (f *fetchTrace) limit(i int) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.limits[i]
+}
+
 // slowPool returns a pool whose connections receive what the database sends
-// at rate bytes a second at most, as over a slow link.
-func slowPool(t *testing.T, rate int) *pgxpool.Pool {
+// at rate bytes a second at most, as over a slow link, and trace their
+// statements with tracer, if not nil.
+func slowPool(t *testing.T, rate int, tracer pgx.QueryTracer) *pgxpool.Pool {
 	t.Helper()
 	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
 	if err != nil {
@@ -700,6 +976,7 @@ func slowPool(t *testing.T, rate int) *pgxpool.Pool {
 
 	addr, _ := ln.Addr().(*net.TCPAddr)
 	cfg.ConnConfig.Host, cfg.ConnConfig.Port, cfg.ConnConfig.Fallbacks = addr.IP.String(), uint16(addr.Port), nil //nolint:gosec // a port fits
+	cfg.ConnConfig.Tracer = tracer
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {
 		t.Fatal(err)
