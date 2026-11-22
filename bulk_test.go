@@ -398,9 +398,12 @@ func TestRangesOfCountAndBulkActionsReadOnlyTheirRows(t *testing.T) {
 // range of finish times lie far apart, the batches after the first read in
 // ID order, each task of the table at most once. However the batches read,
 // the action changes each task of the range once, and no other task.
+//
+// It runs alone, not in parallel: a batch whose statements take longer than
+// openTimeout goes on in windows, which read the whole table by design, and
+// on a busy runner the other tests of the package can slow a first batch
+// that much. The bound is on the plan, not on the runner's load.
 func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
-	t.Parallel()
-
 	// 60,000 dead tasks in 10 queues, created over 30 days until 2 days ago,
 	// the newest last, and 20,000 available tasks after them. Most died a
 	// minute after they were created; every 30th, 2,000 in all, died in the
@@ -442,7 +445,6 @@ func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
 		}, "finalized_at >= $1::timestamptz + interval '10 days'", 80000 + 5*2000},
 	} {
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 			e := setup(t)
 			var want []int64
 			if err := e.pool.QueryRow(t.Context(), replaceSchema(`SELECT array_agg(id) FROM {s}.tasks WHERE state = 'dead' AND `+c.inRange, e.schema),
