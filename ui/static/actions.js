@@ -1,9 +1,10 @@
-// Actions: a form sends its action, after the dialog asked, and the page
-// that answers shows in place, with its notice. dialog.js holds the dialog
-// and the action on its way.
+// Actions: a form sends its action, and the page that answers shows in
+// place, with its notice. An action that asks first is a link to the page
+// that asks, which the dialog shows: its form sends the action from there.
+// dialog.js holds the dialog and the action on its way.
 
 import { assets, assetsOf, loadWhole, notify, NOTICE_MS, on, progress, SLOW_MS } from "./core.js";
-import { answered, confirming, dialog, openDialog, post, release, setPending, settle, showDialogPart, submitting } from "./dialog.js";
+import { confirming, dialog, post, release, setPending, settle, showDialogPart, submitting } from "./dialog.js";
 import { schedule, signOut, startUpdates } from "./live.js";
 import { applyFilters, shut } from "./menus.js";
 import { address, entry, nextTurn, render, turns } from "./navigation.js";
@@ -34,7 +35,9 @@ function unanswered(result, offline) {
 
 // showActionResult shows the page that answered an action, in place: the
 // page that the action leads to, with its notice, or the page that says
-// why the action did not apply.
+// why the action did not apply. It takes the place of the page of the
+// action in the history, as a deleted task's list does that of its page:
+// the back button leads to the page before.
 function showActionResult(result) {
   const url = result.url ? clean(new URL(result.url)) : new URL(location.href);
   if (assetsOf(result.doc) !== assets) {
@@ -43,7 +46,7 @@ function showActionResult(result) {
   }
 
   const elsewhere = url.pathname !== location.pathname;
-  const n = address(url, elsewhere ? "push" : "replace");
+  const n = address(url, "replace");
   if (n == null) return;
   render(result, { moved: elsewhere || !result.url, n, notice: result.doc.querySelector("[data-toast]") });
   startUpdates(result);
@@ -115,9 +118,9 @@ export function listen() {
       return;
     }
 
-    // The dialog's own form closes it. For a form that came with a page,
-    // the dialog stays, and shows the answer.
-    if (form.method === "dialog" && event.submitter?.value === "confirm" && confirming && confirming.ownerDocument !== document) {
+    // The dialog's main button sends the form of the page that it shows,
+    // and the dialog stays for the answer.
+    if (form.method === "dialog" && event.submitter?.value === "confirm" && confirming) {
       event.preventDefault();
       act();
       return;
@@ -125,24 +128,7 @@ export function listen() {
     if (form.method !== "post") return;
     event.preventDefault();
     if ("jsPending" in form.dataset) return;
-    if (form.dataset.confirm && typeof dialog?.showModal === "function") {
-      const icon = form.querySelector(".icon");
-      openDialog(form.dataset.confirmTitle || "Are you sure?", [form.dataset.confirm], form,
-        [...(icon ? [icon.cloneNode(true)] : []), form.dataset.confirmLabel || "Confirm"],
-        "confirmDanger" in form.dataset ? "btn danger-solid" : "btn primary");
-      return;
-    }
-
-    if (form.dataset.confirm && !window.confirm(`${form.dataset.confirmTitle || ""} ${form.dataset.confirm}`.trim())) return;
     send(form);
-  });
-
-  // The close event comes a moment after the dialog closed. If the dialog
-  // opened again meanwhile, the event is of the closing before.
-  dialog?.addEventListener("close", () => {
-    if (dialog.open) return;
-    const form = answered();
-    if (dialog.returnValue === "confirm" && form?.isConnected) send(form);
   });
 
   // A page restored by the back button is live again.

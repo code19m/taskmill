@@ -158,7 +158,7 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	f := taskFilter(q)
 	first := maps.Clone(q) // the list's first page
-	for _, key := range []string{"cursor", "limit", "done", "count", "conflicts"} {
+	for _, key := range []string{"cursor", "limit", "done", "count", "skipped", "conflicts"} {
 		first.Del(key)
 	}
 

@@ -1,0 +1,19 @@
+{{define "confirm.html"}}{{template "head" .}}
+{{$d := .Data}}
+<header class="topbar">
+  <h1>{{.Title}}</h1>
+</header>
+<div class="page">
+{{/* The dialog shows this card in place of the page, under the question
+   that the card names: its sentence, and its form's button. */}}
+<section class="card flush bulk-card" data-dialog-title="{{$d.Question}}">
+  <div class="card-body">
+    <p>{{$d.Explain}}</p>
+    <form class="bulk-actions" method="post" action="{{path $d.Path}}">
+      <button class="btn {{if $d.Danger}}danger-solid{{else}}primary{{end}}">{{template "icon" $d.Icon}}{{$d.Verb}}</button>
+      <a class="btn quiet" href="{{path $d.Back.Href}}">{{template "icon" $d.Back.Icon}}{{$d.Back.Label}}</a>
+    </form>
+  </div>
+</section>
+</div>
+{{template "foot" .}}{{end}}

@@ -161,10 +161,13 @@ func New(client *taskmill.Client, cfg *Config) (http.Handler, error) {
 	mux.HandleFunc("GET /choices/groups", s.groupChoicesJSON)
 	mux.HandleFunc("GET /schedules", s.schedules)
 	mux.HandleFunc("GET /workers", s.workers)
+	mux.HandleFunc("GET /tasks/{id}/{action}", s.askTask)
 	mux.HandleFunc("POST /tasks/{id}/{action}", s.taskAction)
 	mux.HandleFunc("GET /tasks/bulk/{action}", s.bulkPage)
 	mux.HandleFunc("POST /tasks/bulk/{action}", s.bulkAction)
+	mux.HandleFunc("GET /queues/{action}", s.askQueue)
 	mux.HandleFunc("POST /queues/{action}", s.queueAction)
+	mux.HandleFunc("GET /schedules/{action}", s.askSchedule)
 	mux.HandleFunc("POST /schedules/{action}", s.scheduleAction)
 	mux.HandleFunc("GET /", s.notFound)
 

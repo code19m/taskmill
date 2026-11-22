@@ -147,10 +147,15 @@ theme, and the next pages follow the device.
 these pages shows: the charts and the dial, the icons of the task list, and
 the columns of the workers.
 
-Before an action on many tasks, a dialog shows the filters and how many
-tasks will change, and you confirm. With very many tasks, it works in steps,
-and offers to continue where it stopped. If some tasks were busy at that
-moment, it says how many, and offers to try them again.
+Retry, cancel, delete, pause, and run now ask first, and you confirm: in a
+dialog, or without JavaScript, on a page of their own. Resume does not ask.
+A deleted task leads to the list of its queue and state, such as the dead
+tasks of its queue.
+
+Before an action on many tasks, the dialog shows the filters and how many
+tasks will change. With very many tasks, it works in steps, and offers to
+continue where it stopped. If some tasks were busy at that moment, it says
+how many, and offers to try them again.
 
 Every task list has a filter by time: **Finished** on a list of only dead
 or canceled tasks, and **Created** on any other. It shows a range of time:

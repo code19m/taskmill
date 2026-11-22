@@ -49,8 +49,24 @@ All notable changes to taskmill are recorded here. The format follows
   to the tasks of a schedule's or a worker's kind, select the unfinished and
   the dead tasks, every state but completed and canceled, and read no
   history: before, each update read the queue's whole history.
-- After an action sent from a button of the dashboard, such as Resume, the
-  keyboard focus stays on it: before, it fell to the page's body.
+- Without JavaScript, or when a module did not load, Retry, Cancel, Delete,
+  Pause, and Run now acted on one click. Each now leads to a page that asks
+  first, as a bulk action does, which the dialog shows with the script:
+  `GET /tasks/{id}/{action}`, `GET /queues/pause`, and
+  `GET /schedules/{action}`. A proxy that allows the dashboard's routes one
+  by one must allow them. During a rolling upgrade, a server of 0.15
+  answers 404 for these pages, and the action works again once a server of
+  this version answers. A deleted task leads to the list of its queue and
+  state, in place of its page in the history: before, it led to every task.
+- The dashboard keeps the reader's place. After an action sent from a
+  button, such as Resume, the keyboard focus stays on it, or on the control
+  that takes its place in its row: before, it fell to the page's body. A
+  period of the overview's charts shows in place, without scrolling to the
+  top or adding to the history, and a screen reader hears which it is.
+- Without JavaScript, the notice of an action stands at the top of the
+  page: before, it covered the bottom of the page for as long as it was
+  open. A short page, such as "Task not found", no longer scrolls on a
+  phone.
 
 ### Security
 

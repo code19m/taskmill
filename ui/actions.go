@@ -185,6 +185,140 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
+// confirmation is what the page that asks before an action on one task,
+// queue, or schedule shows, as bulkPage asks before an action on many. The
+// action's button is a link to it: without the script it is a page, and
+// with it, the dialog shows it over the page of the button. The address of
+// an action that does not ask, such as a resume, is not found, also on a
+// read-only dashboard.
+type confirmation struct {
+	Question string // what the dialog's title asks
+	Explain  string // what the action does
+	Verb     string // what its button says
+	Icon     string
+	Danger   bool
+	Path     string // where its form sends the action
+	Back     link   // the page of the action's button
+}
+
+// confirm answers with the page that asks c, in the section nav. It asks
+// only: the action is its form's.
+func (s *server) confirm(w http.ResponseWriter, r *http.Request, nav string, c confirmation, back string) {
+	c.Back = backTo(back)
+	s.render(w, r, http.StatusOK, "confirm.html", page{
+		Title: strings.TrimSuffix(c.Question, "?"), Nav: nav, Static: true, Dead: s.deadCount(r), Data: c,
+	})
+}
+
+// askTask asks before an action on one task. It reads the task: a cancel
+// does not do the same to a running task.
+func (s *server) askTask(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		s.notFound(w, r)
+		return
+	}
+
+	n, action := strconv.FormatInt(id, 10), r.PathValue("action")
+	var c confirmation
+	switch action {
+	case "retry":
+		c = confirmation{Question: "Retry task #" + n + "?", Explain: "It runs again with a fresh set of attempts.", Verb: "Retry", Icon: "retry"}
+	case "cancel":
+		c = confirmation{Question: "Cancel task #" + n + "?", Explain: "It will not run.", Verb: "Cancel task", Icon: "cancel"}
+	case "delete":
+		c = confirmation{Question: "Delete task #" + n + "?", Explain: "This cannot be undone.", Verb: "Delete", Icon: "trash", Danger: true}
+	default:
+		s.notFound(w, r)
+		return
+	}
+
+	if s.refuseIfReadOnly(w, r) {
+		return
+	}
+
+	info, err := s.client.Get(r.Context(), id)
+	if errors.Is(err, taskmill.ErrNotFound) {
+		s.taskNotFound(w, r, id)
+		return
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	c.Path = "/tasks/" + n + "/" + action
+	switch {
+	case action == "cancel" && info.State == taskmill.StateRunning:
+		c.Explain = "Its handler's context is canceled, and the task becomes canceled when the handler returns."
+	case action == "delete":
+		c.Path += query("queue", info.Queue, "state", string(info.State))
+	}
+	s.confirm(w, r, "tasks", c, "/tasks/"+n)
+}
+
+// askQueue asks before a queue is paused; a queue resumes without asking.
+// The query names the queue and the period of the overview, as for
+// queueAction.
+func (s *server) askQueue(w http.ResponseWriter, r *http.Request) {
+	if r.PathValue("action") != "pause" {
+		s.notFound(w, r)
+		return
+	}
+	if s.refuseIfReadOnly(w, r) {
+		return
+	}
+
+	q := r.URL.Query()
+	name, period := q.Get("name"), periodOf(q.Get("range")).Name
+	if name == "" {
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", "The address names no queue.", backTo(overviewOf(q)))
+		return
+	}
+	s.confirm(w, r, "overview", confirmation{
+		Question: "Pause queue " + visible(name) + "?", Explain: "Running tasks finish, and no new ones start until you resume it.",
+		Verb: "Pause queue", Icon: "pause", Path: "/queues/pause" + query("name", name, "range", period),
+	}, overviewOf(q))
+}
+
+// askSchedule asks before a schedule runs now, or is paused; a schedule
+// resumes without asking. The query names the schedule, which it reads: a
+// schedule that is not there gets the answer of its action.
+func (s *server) askSchedule(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	var c confirmation
+	switch r.PathValue("action") {
+	case "run":
+		c = confirmation{Question: "Run " + visible(name) + " now?", Explain: "Its regular timetable stays as it is.", Verb: "Run now", Icon: "bolt"}
+	case "pause":
+		c = confirmation{Question: "Pause " + visible(name) + "?", Explain: "Runs missed while paused collapse into one when you resume it.", Verb: "Pause schedule", Icon: "pause"}
+	default:
+		s.notFound(w, r)
+		return
+	}
+
+	if s.refuseIfReadOnly(w, r) {
+		return
+	}
+	if name == "" {
+		s.refuse(w, r, http.StatusBadRequest, "Invalid request", "The address names no schedule.", backTo("/schedules"))
+		return
+	}
+
+	schedules, err := s.client.Schedules(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if !slices.ContainsFunc(schedules, func(info taskmill.ScheduleInfo) bool { return info.Name == name }) {
+		s.actionFailed(w, r, taskmill.ErrNotFound, "/schedules")
+		return
+	}
+
+	c.Path = "/schedules/" + r.PathValue("action") + query("name", name)
+	s.confirm(w, r, "schedules", c, "/schedules")
+}
+
 // notices are the messages shown after an action, by the code in the
 // redirect's "done" parameter. Only these fixed texts are shown, so a link
 // cannot make the dashboard display text of its choosing.
@@ -259,7 +393,10 @@ func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 	case "cancel":
 		err, done = s.client.Cancel(ctx, id), "cancel"
 	case "delete":
-		err, done, target = s.client.Delete(ctx, id), "delete", "/tasks"
+		// The task's page is gone: the action leads to the list of its queue
+		// and state, which the page that asked put in the query.
+		q := r.URL.Query()
+		err, done, target = s.client.Delete(ctx, id), "delete", "/tasks"+query("queue", q.Get("queue"), "state", q.Get("state"))
 	default:
 		s.notFound(w, r)
 		return
@@ -282,11 +419,6 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 	var err error
 	var done, action string
 	name := r.URL.Query().Get("name")
-	back := "/"
-	if p := periodOf(r.URL.Query().Get("range")); p != chartPeriods[0] {
-		back = "/?range=" + p.Name
-	}
-
 	switch r.PathValue("action") {
 	case "pause":
 		err, done, action = s.client.PauseQueue(r.Context(), name), "queue-pause", "pause queue"
@@ -297,7 +429,17 @@ func (s *server) queueAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.finishAction(w, r, err, back, done, action, name)
+	s.finishAction(w, r, err, overviewOf(r.URL.Query()), done, action, name)
+}
+
+// overviewOf returns the address of the overview of the period that the
+// query's "range" names: its plain address for the first period, or for a
+// name that is no period's.
+func overviewOf(q url.Values) string {
+	if p := periodOf(q.Get("range")); p != chartPeriods[0] {
+		return "/?range=" + p.Name
+	}
+	return "/"
 }
 
 // scheduleAction pauses, resumes, or runs the schedule that the query names,
@@ -341,7 +483,7 @@ func (s *server) finishAction(w http.ResponseWriter, r *http.Request, err error,
 	if strings.Contains(target, "?") {
 		sep = "&"
 	}
-	http.Redirect(w, r, s.path(target+sep+"done="+done), http.StatusSeeOther)
+	http.Redirect(w, r, s.path(target+sep+"done="+done), http.StatusSeeOther) //nolint:gosec // a path of the dashboard, whose query the request adds to only through url.Values
 }
 
 // actionFailed explains why an action did not apply: the error says it, as

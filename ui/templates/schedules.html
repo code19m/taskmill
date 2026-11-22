@@ -26,8 +26,8 @@
           {{if $s.Paused}}
           <form method="post" action="{{path "/schedules/resume"}}{{query "name" $s.Name}}"><button class="btn sm">{{template "icon" "play"}}Resume</button></form>
           {{else}}
-          <form method="post" action="{{path "/schedules/run"}}{{query "name" $s.Name}}" data-confirm="Its regular timetable stays as it is." data-confirm-title="Run {{visible $s.Name}} now?" data-confirm-label="Run now"><button class="btn sm">{{template "icon" "bolt"}}Run now</button></form>
-          <form method="post" action="{{path "/schedules/pause"}}{{query "name" $s.Name}}" data-confirm="Runs missed while paused collapse into one when you resume it." data-confirm-title="Pause {{visible $s.Name}}?" data-confirm-label="Pause schedule"><button class="btn sm quiet">{{template "icon" "pause"}}Pause</button></form>
+          <a class="btn sm" href="{{path "/schedules/run"}}{{query "name" $s.Name}}" data-dialog>{{template "icon" "bolt"}}Run now</a>
+          <a class="btn sm quiet" href="{{path "/schedules/pause"}}{{query "name" $s.Name}}" data-dialog>{{template "icon" "pause"}}Pause</a>
           {{end}}
         </div></td>{{end}}
       </tr>

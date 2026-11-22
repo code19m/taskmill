@@ -110,7 +110,7 @@ address: **Errors** now lists two attempts. In a real shop, you fix the
 cause first, and then retry.
 
 Choose **Delete**, and confirm. The task is gone, and the dashboard shows
-the list of tasks.
+the dead tasks of its queue.
 
 > [!WARNING]
 > A task can also run twice: for example, when a worker crashes after the
