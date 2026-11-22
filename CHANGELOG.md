@@ -27,9 +27,84 @@ All notable changes to taskmill are recorded here. The format follows
   whose script did not load works as it does with script turned off; a
   page of 0.15 shows the controls that need its script, which do nothing,
   until it is loaded again.
+- **Breaking:** `outbox.Outbox.Store` refuses a topic that holds the unit
+  separator, U+001F, with an error that wraps `ErrInvalidArgument`. Such a
+  topic could share the stream of another topic and key, so that a dead
+  message of one halted the other. To migrate, use another character in
+  the topic.
+- The warning `the pool was full, so the worker waited for a connection`
+  ends with `handlers that share it, or statements that wait for the
+  database or a pooler, hold its connections`, in place of `raise MaxConns,
+  or give handlers a pool of their own`. That advice does not help behind a
+  pooler, nor while the database does not answer, and the worker cannot
+  tell those apart:
+  [Log messages](docs/reference/log-messages.md#tasks-and-attempts) gives the fix for
+  each. A log filter that matches the whole old message must match the new
+  one.
+- [Connection poolers](docs/production/connection-poolers.md#size-the-poolers-pool)
+  says how to size a pooler's pool. Through a pooler in transaction mode,
+  the worker's reserve is only a connection to the pooler, so handler
+  transactions that take every server connection make leases run out. The
+  docs promised that the reserve keeps leases renewing, without this limit.
+- The descriptions of `taskmill.worker.pool.waits` and
+  `WorkerStats.PoolWaits` name every statement that counts, renewals,
+  check-ins, and completions included, and so does the doc of the pool
+  warning.
+- The log lines `complete tasks failed; they are rescued when their leases
+  run out` and `rescued tasks whose workers lost their leases` name up to 20
+  of their tasks in `task_ids`, so that after a failover you can find the
+  tasks that may have run twice, as the checklist in
+  [Backups, failover, and replicas](docs/production/backups-and-failover.md#check-these-points-after-a-failover)
+  says.
 
 ### Fixed
 
+- A worker that cannot reach the database cancels a handler when no renewal
+  of its lease succeeded for a `LeaseDuration`, as the docs say. It waited
+  for its next check-in, up to a third of the lease more, while the
+  maintainer could already rescue the task and another worker run it. A
+  task whose lease ended before its attempt began reaches neither its
+  middleware nor its handler, which started with a canceled context.
+  `Worker.RunTask` returns such a task, still running, without an error.
+  A renewal that fails is tried again every thirtieth of the lease, so
+  tasks survive an outage of up to about 19 seconds with the default
+  lease, or 29 if it begins just after a check-in: 17 and 25 if
+  connections stop answering instead of failing. To keep them through a
+  longer failover, set `LeaseDuration` to more than 1.8 times its length,
+  in place of 1.5.
+- A failover that leaves the old server's connections open without an
+  answer no longer runs finished tasks again, and stops a queue's fetches
+  for less time: 20 seconds by default, in place of 30. A fetch has two
+  thirds of the lease, at least 5 seconds and at most 30. A try to record a result that gets no answer in the time left
+  on the lease is followed by one on another connection, with twice the
+  time, while check-ins renew the leases, until a try has had 30 seconds.
+  A try to take an idle connection, which the pool pings first, has a
+  thirtieth of the lease: keep the lease above 30 round trips to the
+  database, as renewals already needed.
+- The maintainer no longer sends its promotion 20 times a second while
+  another transaction holds a due task, as an open `CancelTx` does: it
+  tries again at its interval. Each pass also takes one statement, not two.
+- A worker no longer counts a pool wait, nor warns of a full pool, while
+  connections that cannot finish opening fill the pool, as when the
+  database does not answer. It warned that handlers held the connections.
+- A publisher, or a batch handler, that returns more results than
+  deliveries or tasks fails them all. The worker used the first results:
+  after the slip of `make` and `append`, those were the nils, so messages
+  that the broker refused were deleted as published.
+- A relay, or any batch kind, on a slow link to the database no longer
+  publishes the same messages again and again while it completes none. A
+  batch leaves out a task whose lease ended on its way from the database.
+  After a fetch that ran out of its time, or whose tasks took longer than a
+  third of the lease to arrive, not counting a wait for a connection of
+  the pool, the worker renews their leases right away,
+  as the next check-in may come too late, and the next fetch takes at most
+  half as many tasks.
+  A fetch that brought that many within a sixth of the lease doubles it,
+  and one that found fewer keeps it.
+- The outbox docs say what a message costs in memory, about 2.5 times its
+  `Value` while its batch runs ([Performance](docs/reference/performance.md#resource-use)),
+  and that a publisher must return when its context ends: a late send can
+  reach the broker after later messages of its key.
 - Docs that were wrong. A task whose worker lost its lease is retried by
   the kind's `Retry` policy when the maintainer has its handler, as
   [Retries and errors](docs/guides/retries-and-errors.md#change-the-wait-between-retries)

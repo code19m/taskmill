@@ -227,6 +227,7 @@ func TestStoreRejectsMessagesWithoutAValidTopic(t *testing.T) {
 		"no topic":                        {Value: []byte("x")},
 		"a topic that is not UTF-8":       {Topic: "orders\xff"},
 		"a topic with NUL":                {Topic: "orders\x00"},
+		"a topic with a unit separator":   {Topic: "orders\x1fpaid", Key: []byte("c")}, // would share a stream with "orders" and "paid\x1fc"
 		"a header name that is not UTF-8": {Topic: "orders", Headers: map[string][]byte{"trace\xff": nil}},
 	} {
 		err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
@@ -498,8 +499,9 @@ func TestDeliveryWithoutAResultFails(t *testing.T) {
 	}
 
 	// What the publisher returns at each try: no result at all, then too
-	// few, then one for the delivery.
-	results := [][]error{nil, {}, {nil}}
+	// few, then too many, after the slip of make and append, while the
+	// broker is down, and then one for the delivery.
+	results := [][]error{nil, {}, {nil, errors.New("broker down")}, {nil}}
 	var sent []string // the ID of the delivery of each call
 	var hs taskmill.Handlers
 	ob.AddRelay(&hs, outbox.PublisherFunc(func(_ context.Context, ds []outbox.Delivery) []error {
@@ -524,15 +526,18 @@ func TestDeliveryWithoutAResultFails(t *testing.T) {
 			}
 			continue
 		}
-		const want = "the publisher returned no result for this delivery"
+		want := "the publisher returned no result for this delivery"
+		if len(result) > 1 {
+			want = "the publisher returned 2 results for 1 deliveries"
+		}
 		if n := len(info.Errors); info.State != taskmill.StateRetryable || n != try+1 || info.Errors[n-1].Message != want {
 			t.Fatalf("try %d, without a result: the message is %s with the errors %+v, want it retryable with the error %q",
 				try+1, info.State, info.Errors, want)
 		}
 	}
 
-	if len(sent) != 3 || sent[0] != sent[1] || sent[1] != sent[2] {
-		t.Fatalf("the publisher got the deliveries %q, want the same one at each of 3 tries", sent)
+	if len(sent) != len(results) || len(slices.Compact(slices.Clone(sent))) != 1 {
+		t.Fatalf("the publisher got the deliveries %q, want the same one at each of %d tries", sent, len(results))
 	}
 }
 

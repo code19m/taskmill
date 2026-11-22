@@ -82,6 +82,7 @@ know what taskmill's fault tests cover
 |---|---|
 | PostgreSQL restarts, cleanly or after a crash of 15 seconds | Yes: workers continue, and no task is lost |
 | A worker loses its connection to the database for longer than its lease | Yes: its late results do not count, and every task completes once |
+| The old connections stop answering, while new ones reach the database | Yes, in the test suite: a queue's fetches pause for [the time of one fetch](../reference/defaults-and-limits.md#workers) at most, and every task completes once |
 | The database moves to another server: a promoted standby, a changed DNS name, or a managed service's failover | No. Test a failover of your own setup before you rely on it |
 
 After a failover, the old primary can come back as a replica. So make pgx
@@ -104,9 +105,26 @@ postgres://shop@db-1.internal,db-2.internal/shop?target_session_attrs=read-write
   ready, and lag falls.
 - [ ] No process logs `read-only transaction` (SQLSTATE 25006). One that
   does still uses the old primary: restart it.
-- [ ] You know which tasks ran twice. The lines `attempt lost its lease;
-  canceling it` and `rescued tasks whose workers lost their leases` name
-  them. They are expected after an outage of more than about 20 seconds.
+- [ ] You know which tasks may have run twice. They are expected after an
+  outage of more than about 17 seconds. The lines `complete tasks failed;
+  they are rescued when their leases run out` and `rescued tasks whose
+  workers lost their leases` name up to 20 tasks each, in `task_ids`. Such
+  a task keeps an error with the code `lease_lost`, also once it
+  completed, unless its kind sets `DiscardCompleted`, as the outbox relay
+  does: then it leaves no history, and only those lines name it. The error
+  says that the task may have run twice, not that it did. This lists the
+  tasks that keep history and lost a lease since the outage began. It reads
+  every row of `taskmill.tasks`:
+
+  ```sql
+  SELECT id, kind FROM (
+    SELECT id, kind, errors FROM taskmill.task_history WHERE finalized_at > '2026-11-22 10:00+00'
+    UNION ALL
+    SELECT id, kind, errors FROM taskmill.tasks
+  ) t
+  WHERE EXISTS (SELECT FROM jsonb_array_elements(t.errors) e
+                WHERE e->>'code' = 'lease_lost' AND (e->>'at')::timestamptz > '2026-11-22 10:00+00');
+  ```
 - [ ] No task died of the outage. A task that was on its last attempt is
   now dead, with the code `lease_lost`: on Dashboard › Dead, its last error
   says that the worker lost its lease. Retry those tasks.

@@ -25,6 +25,11 @@ import (
 // A task of a kind that the worker has no handler for is snoozed, with a
 // no_handler note in its errors, as Run does, and returned.
 //
+// A task whose lease ended on its way, as when its row took longer than the
+// lease to arrive, may run on another worker already: RunTask runs nothing
+// then, and returns the task, which stays running until the maintainer
+// rescues it.
+//
 // It returns the task afterwards. It returns [ErrNotFound] if no task has the
 // ID, and [ErrInvalidState] if the task is running, waits behind its FIFO
 // group, or has finished.
@@ -52,17 +57,25 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 
 // runDirect runs the attempt t of RunTask in the calling goroutine, and
 // renews its lease every third of it while the handler runs, and while its
-// result is recorded. The cleanup is deferred: a handler that ends the
-// goroutine with runtime.Goexit, as t.Fatal does in a test, stops the
-// renewals all the same, and its task goes back to its queue (see runOne).
+// result is recorded. It tries a renewal that failed again soon, as Run
+// does, also when Run does not run (see renewAgain). The cleanup is
+// deferred: a handler that ends the goroutine with runtime.Goexit, as
+// t.Fatal does in a test, stops the renewals all the same, and its task
+// goes back to its queue (see runOne).
 func (w *Worker) runDirect(ctx context.Context, t *liveAttempt) {
 	renewCtx, stopRenewing := context.WithCancel(context.WithoutCancel(ctx))
 	var renewing sync.WaitGroup
 	defer renewing.Wait()
 	defer stopRenewing()
+	ts, failed := []*liveAttempt{t}, make(chan struct{}, 1)
 	renewing.Go(func() {
-		w.everyThirdOfLease(renewCtx, func(ctx context.Context) { w.renewLeases(ctx, []*liveAttempt{t}) })
+		w.everyThirdOfLease(renewCtx, func(ctx context.Context) {
+			if w.tryRenewLeases(ctx, ts) != nil {
+				signal(failed)
+			}
+		})
 	})
+	renewing.Go(func() { w.renewAgain(renewCtx, failed, func() []*liveAttempt { return ts }) })
 
 	attemptCtx, stopAttempt := context.WithCancelCause(context.WithoutCancel(ctx))
 	defer stopAttempt(nil)
@@ -78,6 +91,7 @@ func (w *Worker) runDirect(ctx context.Context, t *liveAttempt) {
 // leaseTask leases one task for RunTask, or explains why it cannot.
 func (w *Worker) leaseTask(ctx context.Context, id int64) (*liveAttempt, error) {
 	fail := func(err error) error { return fmt.Errorf("taskmill: run task %d: %w", id, err) }
+	sent := time.Now()
 	r, err := w.client.pool.Query(ctx, w.client.sql.leaseTask, id, w.cfg.LeaseDuration.Microseconds(), w.id)
 	if err != nil {
 		return nil, fail(err)
@@ -85,7 +99,7 @@ func (w *Worker) leaseTask(ctx context.Context, id int64) (*liveAttempt, error) 
 	defer r.Close()
 
 	if r.Next() {
-		t, err := w.scanLeased(r, time.Now())
+		t, err := w.scanLeased(r, sent)
 		// The task is leased only if the statement ends without an error,
 		// which the rows report once they are closed.
 		r.Close()

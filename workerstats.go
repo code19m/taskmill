@@ -49,12 +49,16 @@ type WorkerStats struct {
 	// held: the task's, or its FIFO group's.
 	CompletionsBlocked int64
 
-	// PoolWaits counts the statements of the worker that found every
-	// connection of the pool in use, and waited for one: fetches,
-	// completions, the records of failed attempts, renewals of leases, and
-	// check-ins. Handlers that share the pool hold them, or the pool is too
-	// small. A renewal waits a thirtieth of the lease at most, and then uses
-	// the worker's reserve: see [Worker].
+	// PoolWaits counts the times that a statement of the worker found every
+	// connection of the pool in use, and waited for one. Those statements
+	// are fetches, completions in Run, the records of other outcomes, such
+	// as failures and snoozes, renewals of leases, check-ins, and the takes
+	// of the worker's reserve. A connection that is still opening is not in
+	// use. Handlers that share the pool hold the connections, or the pool
+	// is too small, or statements wait for an answer, as behind a pooler
+	// whose own pool is full. A renewal or a check-in waits a thirtieth of
+	// the lease at most, and then uses the reserve, if the worker keeps
+	// one: see [Worker]. Without one, it counts twice.
 	PoolWaits int64
 
 	// Slots is the sum of the Concurrency of the worker's queues.

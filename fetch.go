@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // fetchLoop fetches tasks for one queue whenever it has free capacity, until
@@ -123,6 +124,22 @@ func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUn
 // (see errQueueHeld).
 // If filling the batches fails outside a transaction, it returns the tasks
 // leased before the error with the error: they must run.
+//
+// A fetch whose tasks take longer than a third of the lease to arrive, as
+// on a slow link to the database, brings tasks whose leases may end before
+// the next check-in renews them, or have ended: it renews them right away,
+// and no task whose lease ended starts (see runOne and runBatch). So the
+// queue's next fetch takes at most half as many tasks as arrived, and at
+// least one. So does a fetch whose statements run out of its time, which
+// comes first for a long lease (see fetchTimeout): the next would run out
+// too. A fetch that brought that many within a sixth of the lease doubles
+// it, up to maxFetch, so that the next should stay within a third.
+// A fetch that finds fewer tasks keeps it: the next backlog then does not
+// start with a fetch that runs out of its time (see fetchTimeout). The time
+// counts from the first statement's send, as the leases do: a wait for a
+// connection before it, while handlers hold the pool, is not slow, also
+// when it runs out of the fetch's time, and fewer tasks would not shorten
+// it.
 func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*liveAttempt, more, atLimit bool, err error) {
 	// A queue with a MaxRunning limit and a backlog is at its limit most of
 	// the time: one statement, without a lock, then saves the transaction.
@@ -136,19 +153,46 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	// The statements run on a context that outlives ctx: once tasks are
 	// leased, they must reach the worker even if it is stopping. But only by
 	// cleanupTimeout, so that a database that does not answer holds the stop
-	// up no longer than it holds the rest of it. Tasks that a statement
-	// leased without an answer are rescued when their leases run out.
-	dbCtx, cancel := outlive(ctx, recordTimeout, cleanupTimeout)
+	// up no longer than it holds the rest of it. They have fetchTimeout in
+	// all. Tasks that a statement leased without an answer are rescued when
+	// their leases run out.
+	dbCtx, cancel := outlive(ctx, w.fetchTimeout(), cleanupTimeout)
 	defer cancel()
+	conn, err := w.acquire(dbCtx)
+	if err != nil {
+		return nil, false, false, err
+	}
+	defer conn.Release()
+	start := time.Now()
 
 	if limited {
-		tasks, more, atLimit, err = w.fetchLimited(dbCtx, q, slots)
+		tasks, more, atLimit, err = w.fetchLimited(dbCtx, conn, q, slots)
 		if errors.Is(err, errQueueHeld) {
 			w.logger.LogAttrs(ctx, slog.LevelDebug, "fetch gave up waiting for the queue's row", slog.String(logKeyQueue, q.name))
 			return nil, false, true, nil
 		}
 	} else {
-		tasks, more, err = w.fetchFree(dbCtx, q, slots)
+		tasks, more, err = w.fetchFree(dbCtx, conn, q, slots)
+	}
+
+	// A fetch cut before any task arrived counts from its first statement's
+	// send, and one that found none is not slow.
+	took := time.Since(start)
+	if len(tasks) > 0 {
+		took = time.Since(w.leaseEnd(tasks).Add(-w.cfg.LeaseDuration))
+	}
+	cut := errors.Is(dbCtx.Err(), context.DeadlineExceeded)
+	slow := (took > w.cfg.LeaseDuration/3 || cut) && (len(tasks) > 0 || err != nil)
+	switch {
+	case slow && ctx.Err() == nil:
+		q.fetchMost = max(len(tasks)/2, 1)
+	case err == nil && len(tasks) >= q.fetchMost && took < w.cfg.LeaseDuration/6:
+		q.fetchMost = min(2*q.fetchMost, maxFetch)
+	}
+	if slow && len(tasks) > 0 {
+		renewCtx, cancelRenew := context.WithTimeout(ctx, w.cfg.LeaseDuration/3)
+		w.renewLeases(renewCtx, tasks)
+		cancelRenew()
 	}
 
 	slices.SortFunc(tasks, func(a, b *liveAttempt) int {
@@ -161,36 +205,31 @@ func (w *Worker) fetch(ctx context.Context, q *queueState, slots int) (tasks []*
 	return tasks, more, atLimit, err
 }
 
-// fetchFree is fetch for a queue without a MaxRunning limit. Each fetch
-// statement runs in a transaction of its own, sent in one round trip.
-func (w *Worker) fetchFree(ctx context.Context, q *queueState, slots int) (tasks []*liveAttempt, more bool, err error) {
-	limit := min(slots, maxFetch)
-	out, err := w.leaseAlone(ctx, q, w.client.sql.fetch, limit)
+// fetchFree is fetch for a queue without a MaxRunning limit, on conn. Each
+// fetch statement runs in a transaction of its own, sent in one round trip.
+func (w *Worker) fetchFree(ctx context.Context, conn *pgxpool.Conn, q *queueState, slots int) (tasks []*liveAttempt, more bool, err error) {
+	limit := min(slots, q.fetchMost)
+	lease := w.leaseAlone(conn)
+	out, err := lease(ctx, q, w.client.sql.fetch, limit)
 	if err != nil {
 		return nil, false, err
 	}
 
-	extra, err := w.fillBatches(ctx, q, w.leaseAlone, out, maxFetch-len(out))
+	extra, err := w.fillBatches(ctx, q, lease, out, q.fetchMost-len(out))
 	return append(out, extra...), len(out) == limit, err
 }
 
-// fetchLimited is fetch for a queue with a MaxRunning limit, in one
-// transaction that locks the queue's row first, so that the fetches of all
-// workers count each other's tasks. The statements up to the fetch, and
-// the commit unless batches are to be filled, go in one round trip: the
-// row is held for that one, not for four. So the fetch cannot wait for the
-// answer of the count of the running tasks: it counts them itself, and the
-// count's answer only tells the worker how far the limit held it back. It
-// returns errQueueHeld if it gave up waiting for the row.
-func (w *Worker) fetchLimited(ctx context.Context, q *queueState, slots int) (tasks []*liveAttempt, more, atLimit bool, err error) {
-	conn, err := w.acquire(ctx)
-	if err != nil {
-		return nil, false, false, err
-	}
-	defer conn.Release()
-
+// fetchLimited is fetch for a queue with a MaxRunning limit, on conn, in
+// one transaction that locks the queue's row first, so that the fetches of
+// all workers count each other's tasks. The statements up to the fetch,
+// and the commit unless batches are to be filled, go in one round trip:
+// the row is held for that one, not for four. So the fetch cannot wait for
+// the answer of the count of the running tasks: it counts them itself, and
+// the count's answer only tells the worker how far the limit held it back.
+// It returns errQueueHeld if it gave up waiting for the row.
+func (w *Worker) fetchLimited(ctx context.Context, conn *pgxpool.Conn, q *queueState, slots int) (tasks []*liveAttempt, more, atLimit bool, err error) {
 	committed := !w.batchKinds
-	asked := min(slots, maxFetch)
+	asked := min(slots, q.fetchMost)
 	b := &pgx.Batch{}
 	b.Queue("BEGIN")
 	b.Queue(limitedSettings)
@@ -201,11 +240,12 @@ func (w *Worker) fetchLimited(ctx context.Context, q *queueState, slots int) (ta
 		b.Queue("COMMIT")
 	}
 
-	allowed, out, err := w.readLimited(conn.SendBatch(ctx, b), committed)
+	sent := time.Now()
+	allowed, out, err := w.readLimited(conn.SendBatch(ctx, b), sent, committed)
 	fetched := len(out) // by the first lease, before the batches fill
 	if err == nil && !committed {
 		var extra []*liveAttempt
-		if extra, err = w.fillBatches(ctx, q, w.leaseIn(conn), out, min(allowed, maxFetch)-len(out)); err == nil {
+		if extra, err = w.fillBatches(ctx, q, w.leaseIn(conn), out, min(allowed, q.fetchMost)-len(out)); err == nil {
 			out = append(out, extra...)
 			_, err = conn.Exec(ctx, "COMMIT")
 		}
@@ -228,11 +268,11 @@ func (w *Worker) fetchLimited(ctx context.Context, q *queueState, slots int) (ta
 	return out, limit > 0 && fetched == limit, allowed < asked && fetched == limit, nil
 }
 
-// readLimited reads the results of fetchLimited's batch, and closes it. It
-// returns how many more tasks of the queue the limit allows, and the tasks
-// that the fetch leased, which are leased once committed is true, or the
-// worker commits later.
-func (w *Worker) readLimited(br pgx.BatchResults, committed bool) (allowed int, out []*liveAttempt, err error) {
+// readLimited reads the results of fetchLimited's batch, sent at sent, and
+// closes it. It returns how many more tasks of the queue the limit allows,
+// and the tasks that the fetch leased, which are leased once committed is
+// true, or the worker commits later.
+func (w *Worker) readLimited(br pgx.BatchResults, sent time.Time, committed bool) (allowed int, out []*liveAttempt, err error) {
 	defer func() { err = cmp.Or(err, br.Close()) }()
 	for range 2 { // BEGIN and the settings
 		if _, err := br.Exec(); err != nil {
@@ -260,7 +300,7 @@ func (w *Worker) readLimited(br pgx.BatchResults, committed bool) (allowed int, 
 	if err != nil {
 		return 0, nil, err
 	}
-	if out, err = w.scanAllLeased(r); err != nil {
+	if out, err = w.scanAllLeased(r, sent); err != nil {
 		return 0, nil, err
 	}
 	if committed {
@@ -299,12 +339,32 @@ func (w *Worker) fillBatches(ctx context.Context, q *queueState, lease leaseFunc
 // as its limit allows. It asks without a lock, so its answer can only save a
 // fetch its transaction, never let a task start: a queue that it finds below
 // its limit is counted again under the lock before anything is leased. As it
-// leases nothing, it ends with ctx, unlike the fetch's other statements.
+// leases nothing, it ends with ctx, unlike the fetch's other statements, and
+// it has fetchTimeout too.
 func (w *Worker) atLimit(ctx context.Context, queue string) (full bool, err error) {
-	ctx, cancel := context.WithTimeout(ctx, recordTimeout)
+	ctx, cancel := context.WithTimeout(ctx, w.fetchTimeout())
 	defer cancel()
-	err = w.client.pool.QueryRow(ctx, w.client.sql.atLimit, queue).Scan(&full)
+	conn, err := w.acquire(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Release()
+	err = conn.QueryRow(ctx, w.client.sql.atLimit, queue).Scan(&full)
 	return full, err
+}
+
+// fetchTimeout bounds a fetch: two thirds of the lease, so that its tasks
+// arrive with a third of their leases left, which the renewal after a slow
+// fetch extends, and a connection that stops answering holds the queue's
+// fetches no longer. But at least minFetchTimeout, for a short lease: a busy
+// database, or the wait for the row of a queue with a limit, can take
+// longer. And at most recordTimeout, for a long lease: such a connection
+// would hold the fetches for minutes. A fetch cut short may have leased
+// tasks whose rows never reached the worker, as the database commits once
+// it has sent them, and the network can hold many: they are rescued when
+// their leases run out, at the cost of an attempt.
+func (w *Worker) fetchTimeout() time.Duration {
+	return min(max(2*w.cfg.LeaseDuration/3, minFetchTimeout), recordTimeout)
 }
 
 // leaseIn returns a leaseFunc that runs fetch statements on q, in the
@@ -314,11 +374,12 @@ func (w *Worker) leaseIn(q PgxQuerier) leaseFunc {
 		if limit <= 0 {
 			return nil, nil
 		}
+		sent := time.Now()
 		r, err := q.Query(ctx, sql, w.leaseArgs(queue, limit, extra)...)
 		if err != nil {
 			return nil, err
 		}
-		return w.scanAllLeased(r)
+		return w.scanAllLeased(r, sent)
 	}
 }
 
@@ -329,48 +390,45 @@ func (w *Worker) leaseIn(q PgxQuerier) leaseFunc {
 // by its limit, and is fetched again when it is next woken or polled.
 var errQueueHeld = errors.New("taskmill: the queue's row is locked")
 
-// leaseAlone runs a fetch statement for up to limit tasks of q, with extra
-// arguments after the standard four, in a transaction of its own with
-// planSettings, all in one round trip. It returns the leased tasks.
-func (w *Worker) leaseAlone(ctx context.Context, q *queueState, sql string, limit int, extra ...any) ([]*liveAttempt, error) {
-	if limit <= 0 {
-		return nil, nil
-	}
+// leaseAlone returns a leaseFunc that runs fetch statements on conn, each in
+// a transaction of its own with planSettings, all in one round trip.
+func (w *Worker) leaseAlone(conn *pgxpool.Conn) leaseFunc {
+	return func(ctx context.Context, q *queueState, sql string, limit int, extra ...any) ([]*liveAttempt, error) {
+		if limit <= 0 {
+			return nil, nil
+		}
 
-	b := &pgx.Batch{}
-	b.Queue("BEGIN")
-	b.Queue(planSettings)
-	b.Queue(sql, w.leaseArgs(q, limit, extra)...)
-	b.Queue("COMMIT")
+		b := &pgx.Batch{}
+		b.Queue("BEGIN")
+		b.Queue(planSettings)
+		b.Queue(sql, w.leaseArgs(q, limit, extra)...)
+		b.Queue("COMMIT")
 
-	conn, err := w.acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Release()
-	br := conn.SendBatch(ctx, b)
-	defer func() { _ = br.Close() }()
+		sent := time.Now()
+		br := conn.SendBatch(ctx, b)
+		defer func() { _ = br.Close() }()
 
-	for range 2 {
+		for range 2 {
+			if _, err := br.Exec(); err != nil {
+				return nil, err
+			}
+		}
+
+		r, err := br.Query()
+		if err != nil {
+			return nil, err
+		}
+		out, err := w.scanAllLeased(r, sent)
+		if err != nil {
+			return nil, err
+		}
+
+		// The tasks are leased once the transaction commits.
 		if _, err := br.Exec(); err != nil {
 			return nil, err
 		}
+		return out, nil
 	}
-
-	r, err := br.Query()
-	if err != nil {
-		return nil, err
-	}
-	out, err := w.scanAllLeased(r)
-	if err != nil {
-		return nil, err
-	}
-
-	// The tasks are leased once the transaction commits.
-	if _, err := br.Exec(); err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // leaseArgs returns a fetch statement's arguments.
@@ -384,13 +442,14 @@ func (w *Worker) leaseArgs(q *queueState, limit int, extra []any) []any {
 	return append(args, extra...)
 }
 
-// scanAllLeased reads the tasks that a fetch statement leased.
-func (w *Worker) scanAllLeased(r pgx.Rows) ([]*liveAttempt, error) {
+// scanAllLeased reads the tasks that a fetch statement, sent at sent,
+// leased. Their leases count from before that time, as far as the worker
+// knows: the database starts them later, when the statement takes the rows.
+func (w *Worker) scanAllLeased(r pgx.Rows, sent time.Time) ([]*liveAttempt, error) {
 	defer r.Close()
-	now := time.Now()
 	var out []*liveAttempt
 	for r.Next() {
-		t, err := w.scanLeased(r, now)
+		t, err := w.scanLeased(r, sent)
 		if err != nil {
 			return nil, err
 		}
@@ -413,10 +472,11 @@ func batchCounts(ts []*liveAttempt) map[string]int {
 	return counts
 }
 
-// scanLeased reads one row of leasedColumns. A row that taskmill did not
-// write is no error, which would lose every task leased with it: the task is
-// tracked as invalid, without a handler, and runOne makes it dead, alone.
-func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*liveAttempt, error) {
+// scanLeased reads one row of leasedColumns, from a statement sent at sent.
+// A row that taskmill did not write is no error, which would lose every task
+// leased with it: the task is tracked as invalid, without a handler, and
+// runOne makes it dead, alone.
+func (w *Worker) scanLeased(r pgx.Rows, sent time.Time) (*liveAttempt, error) {
 	var (
 		info                    TaskInfo
 		priority, att, maxAtt   int16
@@ -463,7 +523,7 @@ func (w *Worker) scanLeased(r pgx.Rows, now time.Time) (*liveAttempt, error) {
 		info:      &info,
 		reg:       reg,
 		invalid:   invalid,
-		renewedAt: now,
+		renewedAt: sent,
 	}, nil
 }
 

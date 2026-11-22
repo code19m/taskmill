@@ -89,13 +89,22 @@ no `Queues` set reads it. If you set `Queues`, add `outbox.Queue`.
 | Your publisher returns for a delivery | What happens |
 |---|---|
 | `nil` | The message is published. taskmill deletes it, and keeps no history of it |
-| An error, or no result | The message is retried later |
+| An error, or no result | The message is retried later. So is every message of the call if it returns more results than deliveries |
 | `taskmill.Permanent(err)` | The message is dead right away. Use it for a message that can never succeed |
 
 `RelayOptions` sets how many deliveries one call gets (`BatchSize`, 100 by
 default), and how long one call may take (`Timeout`, 1 minute by default).
 When the time is up, the call's context is canceled, and every message
-without a `nil` result is retried.
+without a `nil` result is retried. Return when the context ends: a call
+that ignores it keeps running, and a late send can reach the broker after
+later messages of the same key (see
+[`outbox.Publisher`](https://pkg.go.dev/github.com/code19m/taskmill/outbox#Publisher)).
+
+A worker runs up to 10 calls at a time, one per slot of the `outbox` queue,
+so with large messages, size its memory for them:
+[Performance](../reference/performance.md#resource-use) gives the numbers.
+Lower `BatchSize` to need less, or when the link to the database is slow:
+the messages of a call come in one fetch, while their leases run.
 
 To test your publisher, run the relay with a fake broker: see
 [Test your code](testing.md#test-that-everything-gets-done).

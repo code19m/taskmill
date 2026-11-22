@@ -1,8 +1,9 @@
 # Connection poolers
 
 taskmill works through PgBouncer and through the poolers of managed services.
-This page shows the one thing you must set: a direct connection for
-notifications.
+This page shows the two things to set: a direct connection for
+notifications, and server connections that your handlers cannot take from
+taskmill.
 
 ## Which should I use?
 
@@ -56,6 +57,26 @@ Each worker then holds one direct connection. Count it in the database's
 If your role's default isolation level is not READ COMMITTED, set it on the
 role when you use PgBouncer:
 [Keep the isolation level at READ COMMITTED](database.md#keep-the-isolation-level-at-read-committed).
+
+## Size the pooler's pool
+
+In transaction mode, all clients of one database and user share the
+pooler's server connections. A worker keeps a connection of its pool in
+reserve, so that its leases renew while handlers hold the rest
+([Database](database.md#size-the-connection-pool)). Through a pooler, that
+reserve is only a connection to the pooler. So when handler transactions
+hold every server connection, renewals wait in the pooler's queue, leases
+run out, and tasks run twice.
+
+| Setup | What to do |
+|---|---|
+| Handlers hold transactions open for long, as for seconds | **Give taskmill's pool server connections of its own.** In PgBouncer, add a second `[databases]` entry for the same database, with about 5 server connections for each worker process, and point taskmill's pool at it. Or point taskmill's pool straight at PostgreSQL, as `ListenConfig` is |
+| Handlers and taskmill share one pooler pool | Size it for all of them at the same time: the `pool_max_conns` of every worker process that uses it, each its total `Concurrency` plus 5, plus what your other clients hold. In PgBouncer, that is `default_pool_size`, or the `pool_size` of the database entry |
+
+The signs of a pooler pool that is too small: the pooler's `SHOW POOLS`
+shows `cl_waiting` above 0, while workers log `operation failed` for `renew
+leases`, and PostgreSQL itself answers. A larger `pool_max_conns` does not
+help then: its connections only wait in the same queue.
 
 ## What happens without a direct connection
 
