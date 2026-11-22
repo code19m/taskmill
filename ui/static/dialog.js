@@ -69,11 +69,13 @@ export function settle() {
   submitting = false;
 }
 
-// setPending marks a form whose action is on its way, and disables its
-// buttons, or ends that.
+// setPending marks a form whose action is on its way, and its buttons as
+// unavailable, or ends that. A button keeps the focus, which a disabled one
+// would give to the page's body; the mark keeps a press from sending the
+// action again (see listen in actions.js).
 export function setPending(form, pending) {
   form.toggleAttribute("data-js-pending", pending);
-  for (const button of form.querySelectorAll("button")) button.disabled = pending;
+  for (const button of form.querySelectorAll("button")) button.ariaDisabled = pending ? "true" : null;
 }
 
 // release ends the pending state of every form. A page that was kept while

@@ -27,9 +27,18 @@ payload. `ui.New` has **no login** of its own.
   and no lockout or rate limit. Use a long, random password.
 
 The dashboard already protects its forms against cross-site request forgery,
-and other sites cannot show it in a frame. A name that holds characters that
-no one could see, such as one that reverses the text after it, shows them as
-their code points, such as `<U+202E>`, so it cannot pass for another name.
+and other sites cannot show it in a frame. It shows the characters that no
+one could see, or tell from a space: the control and format characters, such
+as one that reverses the text after it, those that Unicode lets a font draw
+as nothing, such as one with no width, the braille blank U+2800, and every
+space but the plain one. A name shows each as its control picture, such as
+`␛`, or else as its code point, such as `<U+202E>`. An error message shows
+them in the same way, but keeps its line breaks and tabs, so a stack trace
+keeps its shape. A payload shows them as JSON escapes, such as `\u202e`,
+with the same value. A space at the start or the end of a name, or next to
+another, shows as `␠`. So none of these can hide, or reorder a part of the
+text. Letters of other scripts that look alike, such as a Cyrillic `а`,
+still look alike.
 [Protect it](../guides/dashboard.md#protect-it) lists every setting.
 
 ## Know who can reach the database

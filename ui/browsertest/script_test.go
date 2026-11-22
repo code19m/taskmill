@@ -234,6 +234,36 @@ func TestDialogOpenedAgainAtOnceSendsItsAction(t *testing.T) {
 	}
 }
 
+// An action keeps the focus on the button that sent it, so the next Tab
+// goes on from there. While the action is on its way, the button is
+// unavailable, and keeps the focus: the page's body never takes it. The
+// answer puts Pause in place of Resume, which takes the focus.
+func TestActionKeepsTheFocusInItsRow(t *testing.T) {
+	s := newSite(t)
+	// A queue with settings stays on the overview once it resumes.
+	if err := s.client.UpdateQueue(t.Context(), "mail", func(q *taskmill.QueueSettings) { q.MaxRunning = 10 }); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.client.PauseQueue(t.Context(), "mail"); err != nil {
+		t.Fatal(err)
+	}
+	p := s.open(t, "/")
+	p.run(`
+		window.lost = false;
+		document.addEventListener("focusout", (event) => { if (!event.relatedTarget && document.querySelector("[data-js-pending]")) window.lost = true; });
+		document.querySelector('tr[data-key="mail"] form button').focus();`)
+
+	p.do(chromedp.KeyEvent(kb.Enter))
+	p.waitFor(`document.querySelector(".toast")?.textContent === "Queue resumed."`, "the notice of the action")
+	p.waitFor(`!document.querySelector("[data-js-pending]")`, "the end of the action")
+	if got := eval[string](p, `document.activeElement.matches('tr[data-key="mail"] .actions-col :is(a, button)') ? document.activeElement.textContent : document.activeElement.localName`); got != "Pause" {
+		t.Errorf("after the action, the %s has the focus, want Pause, in the place of Resume", got)
+	}
+	if eval[bool](p, `window.lost`) {
+		t.Error("the focus went to the page's body while the action was on its way")
+	}
+}
+
 // A live update asks for the page that it shows, by its ETag. While only the
 // relative times of the page changed, which the script counts on by itself,
 // it gets 304 Not Modified, and the page stays as it is; then it gets a page

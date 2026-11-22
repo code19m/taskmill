@@ -226,11 +226,11 @@ What follows:
 - **Two ways to run it:** mounted on an application's own router, behind
   the application's own authentication, or on its own with basic
   authentication, through the `taskmill-ui` command.
-- **Safe on a busy database.** It reads only through the operations API and
-  the statistics that the maintainer keeps. Its queries over tasks, groups,
-  and activity stop after 5 seconds. The other pages read small tables or
-  single rows. So it is safe to point at a busy database, even with pages
-  that refresh every 5 seconds.
+- **Made for a busy database.** It reads through the operations API and the
+  maintainer's statistics. Its queries over tasks, groups, and activity stop
+  after 5 seconds, and its other reads are of small tables or single rows. A
+  list of a queue and no FIFO group reads only that queue's tasks, by
+  [creation or finish time](schema-creation-order.md#the-dashboards-lists-of-a-queue).
 
 ## Out of scope
 

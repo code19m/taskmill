@@ -454,15 +454,15 @@ func TestTaskListKeepsItsRangeOfCreationTimes(t *testing.T) {
 		t.Errorf("the last page leads back to %s, want the first page with the range, and clears the filters at %s", newest, cleared)
 	}
 
-	// The cursor of that page is one of the creation order: the same list
-	// without the range, which is in the order of the IDs, refuses it.
+	// The cursor of that page is one of the creation order. The list of
+	// every task, which is in the order of the IDs, refuses it.
 	link, err := url.Parse(older)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if code, body, _ := get(t, h, "/tasks?queue=mail&cursor="+link.Query().Get("cursor")); code != http.StatusBadRequest || !strings.Contains(body, "Back to the first page") {
-		t.Errorf("the list without the range takes the cursor of the list with it: status %d\n%s", code, body)
+	if code, body, _ := get(t, h, "/tasks?cursor="+link.Query().Get("cursor")); code != http.StatusBadRequest || !strings.Contains(body, "Back to the first page") {
+		t.Errorf("the list by ID takes the cursor of the list by creation time: status %d\n%s", code, body)
 	}
 }
 

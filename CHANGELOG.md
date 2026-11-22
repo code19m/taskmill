@@ -38,6 +38,31 @@ All notable changes to taskmill are recorded here. The format follows
   rollout on every page. The worker manifest of
   [Kubernetes](docs/production/kubernetes.md) sets `HEALTH_ADDR`, so its
   readiness probe reaches the tutorial's worker.
+- A task list of the dashboard that names a queue, and no FIFO group, reads
+  only that queue's tasks: it is in creation order, unless it holds only
+  dead or canceled tasks, which stay in finish order. Before, the overview's
+  links to a queue, and to its tasks in the other states, could read the
+  newer tasks of every queue at each live update, as during a backlog in
+  another queue. During a backlog in the same queue, a list of its few
+  pending, scheduled, or retryable tasks now reads the whole backlog, which
+  the index of the state could serve before. The links to a FIFO group, and
+  to the tasks of a schedule's or a worker's kind, select the unfinished and
+  the dead tasks, every state but completed and canceled, and read no
+  history: before, each update read the queue's whole history.
+- After an action sent from a button of the dashboard, such as Resume, the
+  keyboard focus stays on it: before, it fell to the page's body.
+
+### Security
+
+- The dashboard shows the characters that no one could see, or tell from
+  a space. A name also shows the default-ignorable characters, such as
+  U+034F, U+3164, and the variation selectors, the braille blank U+2800,
+  every space but U+0020, and a space at its start or end, or next to
+  another, as `␠`: before, two names that differ could look alike. A
+  payload shows such characters as JSON escapes, such as `\u202e`, with the
+  same value, and an error message as control pictures or code points,
+  with its lines kept: before, a character that reverses the text could
+  make a payload show a value that it does not hold.
 
 ## [0.15.0] - 2026-11-21
 

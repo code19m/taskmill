@@ -17,7 +17,7 @@ are set.
 
 | The list holds | Its order | A page reads |
 |---|---|---|
-| Any tasks, in a range of creation times | By creation time, latest first, then by `id` | The two indexes of creation time: see [Lists by creation time](schema-creation-order.md) |
+| Any tasks, in a range of creation times, which the dashboard sets on a list of a queue and no FIFO group, unless the list holds only dead or canceled tasks | By creation time, latest first, then by `id` | The two indexes of creation time: see [Lists by creation time](schema-creation-order.md) |
 | Only dead tasks, only canceled tasks, or both | By finish time, latest first, then by `id` | `tasks_finished_idx`, and no other task |
 | Anything else | By `id`, newest first | The index that holds its tasks in ID order. Without one, the primary key |
 

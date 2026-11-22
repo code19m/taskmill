@@ -371,8 +371,8 @@ button, input { font-weight: inherit; } /* not the browser's 400 */
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .btn:hover { text-decoration: none; }
-@media (hover: hover) { .btn:hover:not(:disabled) { background: var(--btn-hover); } }
-.btn:active:not(:disabled) { background: var(--btn-pressed); }
+@media (hover: hover) { .btn:hover:not([aria-disabled="true"]) { background: var(--btn-hover); } }
+.btn:active:not([aria-disabled="true"]) { background: var(--btn-pressed); }
 .btn.quiet {
   --btn-bg: transparent; --btn-hover: var(--fill-hover); --btn-pressed: var(--fill-selected);
   --btn-ink: var(--ink-soft); --btn-line: transparent; box-shadow: none;
@@ -396,8 +396,8 @@ button, input { font-weight: inherit; } /* not the browser's 400 */
 /* An icon looks farther from the edge than text does: pull it in a little. */
 .btn > .icon:first-child { margin-left: -2px; }
 .btn > .icon:last-child { margin-right: -2px; }
-.btn:disabled { opacity: 0.55; cursor: default; }
-[data-js-pending] .btn:disabled { cursor: progress; }
+/* A button whose action is on its way: it keeps the focus, and does nothing. */
+.btn[aria-disabled="true"] { opacity: 0.55; cursor: progress; }
 form { display: inline; margin: 0; }
 
 .seg {
@@ -1130,7 +1130,6 @@ a.card:hover { background: var(--surface-control); border-color: var(--line-stro
 .modal-status:empty { display: none; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .modal-actions [hidden] { display: none; }
-[data-confirm-button][aria-disabled="true"] { opacity: 0.55; cursor: progress; }
 
 .toast {
   position: fixed; z-index: 120; right: max(20px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom));

@@ -2,14 +2,20 @@ package ui_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"html"
 	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
 	"github.com/code19m/taskmill/ui"
@@ -317,3 +323,202 @@ func TestTaskListThatRunsOutOfTime(t *testing.T) {
 		}
 	}
 }
+
+// listReads records the last page of tasks that a pool's connections read:
+// its statement, with the settings that start its transaction and its
+// arguments.
+type listReads struct {
+	mu                  sync.Mutex
+	batch               []pgx.TraceBatchQueryData
+	settings, statement string
+	args                []any
+}
+
+func (*listReads) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+
+func (*listReads) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (*listReads) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	return ctx
+}
+
+func (l *listReads) TraceBatchQuery(_ context.Context, _ *pgx.Conn, d pgx.TraceBatchQueryData) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.batch = append(l.batch, d)
+}
+
+func (l *listReads) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if b := l.batch; len(b) == 2 && strings.Contains(b[0].SQL, "statement_timeout") && strings.Contains(b[1].SQL, ") page(") &&
+		!strings.HasPrefix(b[1].SQL, "EXPLAIN") {
+		l.settings, l.statement, l.args = b[0].SQL, b[1].SQL, b[1].Args
+	}
+	l.batch = nil
+}
+
+// rowsRead runs the last page of tasks that reads recorded again, under
+// EXPLAIN ANALYZE, and returns how many rows its scans read from the table
+// of tasks and from the history: those that they returned, and those that
+// their filters dropped.
+func rowsRead(t *testing.T, pool *pgxpool.Pool, reads *listReads) (tasks, history int64) {
+	t.Helper()
+	reads.mu.Lock()
+	b := &pgx.Batch{}
+	b.Queue(reads.settings)
+	b.Queue("EXPLAIN (ANALYZE, FORMAT JSON) "+reads.statement, reads.args...)
+	reads.mu.Unlock()
+
+	results := pool.SendBatch(t.Context(), b)
+	var plan []byte
+	if _, err := results.Exec(); err != nil {
+		t.Fatal(err)
+	}
+	if err := results.QueryRow().Scan(&plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := results.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var root []struct{ Plan map[string]any }
+	if err := json.Unmarshal(plan, &root); err != nil {
+		t.Fatal(err)
+	}
+	var walk func(node map[string]any)
+	walk = func(node map[string]any) {
+		relation, _ := node["Relation Name"].(string)
+		loops, _ := node["Actual Loops"].(float64)
+		rows, _ := node["Actual Rows"].(float64)
+		dropped, _ := node["Rows Removed by Filter"].(float64)
+		rechecked, _ := node["Rows Removed by Index Recheck"].(float64)
+		n := int64(loops * (rows + dropped + rechecked))
+		switch {
+		case relation == "tasks":
+			tasks += n
+		case strings.HasPrefix(relation, "task_history"):
+			history += n
+		}
+		children, _ := node["Plans"].([]any)
+		for _, child := range children {
+			if child, ok := child.(map[string]any); ok {
+				walk(child)
+			}
+		}
+	}
+	walk(root[0].Plan)
+	return tasks, history
+}
+
+// The links of the pages to a task list read the tasks of their own queue
+// or group, however many other tasks the database holds: the overview's
+// links to a queue and to its tasks in a state, the links of a task's page
+// to its FIFO group, and that of a schedule to its kind's tasks. None reads
+// the newer tasks of the busy queue, its canceled tasks, or the history. A
+// queue's link to its few tasks in a state reads the newer tasks of that
+// queue, its own backlog, and no other queue's. No index holds a kind's
+// tasks, so a worker's link to the tasks of a kind reads the table of
+// tasks; it still leaves the history alone.
+func TestLinksToTaskListsReadWhatTheyShow(t *testing.T) {
+	t.Parallel()
+	reads := &listReads{}
+	client, pool, schema := setupTraced(t, reads)
+	ctx := t.Context()
+	if err := errors.Join(keepQueue(ctx, client, "slow"), keepQueue(ctx, client, "backlog")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A queue of tasks to retry, another with 3 of them before its backlog,
+	// a FIFO group whose dead head halts it, and a task of a schedule's kind.
+	if _, err := pool.Exec(ctx, `INSERT INTO `+schema+`.tasks (queue, kind, state, attempt, run_at, payload, max_attempts)
+	    SELECT CASE WHEN i <= 500 THEN 'slow' ELSE 'backlog' END, 'greet', 'retryable', 1, now() + interval '1 hour', '{}', 2
+	    FROM generate_series(1, 503) i`); err != nil {
+		t.Fatal(err)
+	}
+	var params []taskmill.EnqueueParams
+	for range 3 {
+		params = append(params, taskmill.EnqueueParams{Args: greet{}, Options: &taskmill.EnqueueOptions{Queue: "fifo", GroupKey: "acct-1"}})
+	}
+	params = append(params, taskmill.EnqueueParams{Args: report{}, Options: &taskmill.EnqueueOptions{Queue: "sched"}})
+	res, err := client.EnqueueMany(ctx, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	head := res[0].ID
+	for _, sql := range []string{
+		`UPDATE {s}.tasks SET state = 'dead', finalized_at = now() WHERE id = ` + strconv.FormatInt(head, 10),
+		`UPDATE {s}.groups SET halted_task_id = ` + strconv.FormatInt(head, 10) + `, halted_at = now()`,
+		`INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at) VALUES ('nightly', 'sched', 'report', '0 3 * * *', now() + interval '1 hour')`,
+		`INSERT INTO {s}.workers (id, queues, kinds, hostname, version) VALUES ('w', '{sched}', '{report}', 'h', 'v')`,
+		// Newer tasks of a busy queue and of the backlog, canceled tasks of
+		// other groups, and a history of busy, fifo, and sched.
+		`INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+		 SELECT 'busy', 'greet', 'available', now(), '{}', 1 FROM generate_series(1, 5000)`,
+		`INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+		 SELECT 'backlog', 'greet', 'available', now(), '{}', 1 FROM generate_series(1, 2000)`,
+		`INSERT INTO {s}.tasks (queue, kind, group_key, state, run_at, payload, max_attempts, finalized_at)
+		 SELECT 'fifo', 'greet', 'acct-' || (i + 1), 'canceled', now(), '{}', 1, now() FROM generate_series(1, 2000) i`,
+		`INSERT INTO {s}.task_history (id, finalized_at, queue, created_at, kind, group_key, run_at, attempted_by, attempted_at,
+		     priority, attempt, max_attempts, payload, metadata, errors)
+		 SELECT 1000000 + i, now(), (ARRAY['busy', 'fifo', 'sched'])[i % 3 + 1], now(), 'greet', 'acct-' || (i + 1), now(), 'w', now(),
+		     2, 1, 1, '{}', '{}', '[]' FROM generate_series(1, 6000) i`,
+		`ANALYZE {s}.tasks`,
+		`ANALYZE {s}.task_history`,
+	} {
+		if _, err := pool.Exec(ctx, strings.ReplaceAll(sql, "{s}", schema)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h := handler(t, client, nil)
+	_, overview, _ := get(t, h, "/")
+	_, task, _ := get(t, h, "/tasks/"+strconv.FormatInt(head, 10))
+	_, schedules, _ := get(t, h, "/schedules")
+	_, workers, _ := get(t, h, "/workers")
+	href := func(page, before, text string) string {
+		t.Helper()
+		m := regexp.MustCompile(`href="(/tasks\?[^"]*)"[^>]*>`+before).FindAllStringSubmatch(page, -1)
+		for _, link := range m {
+			if strings.Contains(link[0], text) {
+				return html.UnescapeString(link[1])
+			}
+		}
+		t.Fatalf("no link to a task list with %q before %q\n%s", text, before, page)
+		return ""
+	}
+
+	const most = 51 // a page of tasks, and the task after it
+	for _, c := range []struct {
+		name, target string
+		shows        int   // the tasks that the list shows
+		tasks        int64 // the most rows of tasks that the list may read; -1 for any
+	}{
+		{"the overview's link to a queue", href(overview, "slow<", "queue=slow"), 50, most},
+		{"the overview's link to a queue's tasks to retry", href(overview, "0<", "slow&amp;state=retryable"), 50, most},
+		{"the overview's link to a queue's 3 tasks to retry, before its backlog", href(overview, "0<", "backlog&amp;state=retryable"), 3, 2003}, // every task of its queue
+		{"a task's link to its FIFO group", href(task, "View group", "group=acct-1"), 3, most},
+		{"a task's FIFO group", href(task, "acct-1<", "group=acct-1"), 3, most},
+		{"a schedule's link to its kind's tasks", href(schedules, "sched<", "kind=report"), 1, most},
+		{"a worker's link to a kind's tasks", href(workers, "report<", "kind=report"), 1, -1},
+	} {
+		if _, ids := listTasks(t, h, c.target); len(ids) != c.shows {
+			t.Errorf("%s, %s, shows %d tasks, want %d", c.name, c.target, len(ids), c.shows)
+		}
+		tasks, history := rowsRead(t, pool, reads)
+		if (c.tasks >= 0 && tasks > c.tasks) || history > most {
+			t.Errorf("%s, %s, reads %d rows of tasks and %d of the history, want at most %d and %d", c.name, c.target, tasks, history, c.tasks, most)
+		}
+	}
+}
+
+// notDone is the part of a link's query, as a page writes it, that selects
+// the unfinished and the dead tasks: every state but completed and canceled.
+const notDone = "state=scheduled&amp;state=pending&amp;state=available&amp;state=running&amp;state=retryable&amp;state=dead"
+
+type report struct{}
+
+func (report) Kind() string { return "report" }

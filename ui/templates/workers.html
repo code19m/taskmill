@@ -36,13 +36,13 @@
         {{/* A word in place of a version is not code. Go's word for a build from taskmill's own tree, "(devel)", is said plainly. */ -}}
         {{if eq .Version "(devel)"}}<td class="tone-ghost" title="Built from taskmill's source, not from a release">local build</td>
         {{- else}}<td class="{{if eq .Version "unknown"}}tone-ghost{{else}}mono tone-faint{{end}}" title="{{.Version}}">{{.Version}}</td>{{end}}
-        <td>{{if .Queues}}<div class="queues"><span title="{{visible (join .Queues ", ")}}">{{$queues.Line}}</span>{{if $queues.More}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">+{{$queues.More}}<span class="visually-hidden"> more {{plural $queues.More "queue" "queues"}}</span></button>{{end}}</div>{{else}}<span class="tone-ghost">maintenance only</span>{{end}}</td>
+        <td>{{if .Queues}}<div class="queues"><span title="{{$queues.All}}">{{$queues.Line}}</span>{{if $queues.More}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">+{{$queues.More}}<span class="visually-hidden"> more {{plural $queues.More "queue" "queues"}}</span></button>{{end}}</div>{{else}}<span class="tone-ghost">maintenance only</span>{{end}}</td>
         <td>{{if .Kinds}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">{{len .Kinds}} {{plural (len .Kinds) "kind" "kinds"}}{{template "icon-chevron"}}</button>
           {{- else if .Schedules}}<button type="button" class="lists-btn" popovertarget="lists-{{.ID}}">{{len .Schedules}} {{plural (len .Schedules) "schedule" "schedules"}}{{template "icon-chevron"}}</button>
           {{- else}}<span class="tone-ghost">none</span>{{end}}
           {{- if or .Kinds $queues.More .ScheduleList}}<div class="hint-pop lists" id="lists-{{.ID}}" popover role="group" aria-label="Queues, kinds, and schedules of {{visible .ID}}">
             {{- with .Queues}}<h2>Queues <span class="subtle">{{len .}}</span></h2><ul>{{range .}}<li><a href="{{path "/tasks"}}{{query "queue" .}}">{{visible .}}</a></li>{{end}}</ul>{{end}}
-            {{- with .Kinds}}<h2>Kinds <span class="subtle">{{len .}}</span></h2><ul class="mono">{{range .}}<li><a href="{{path "/tasks"}}{{query "kind" .}}">{{visible .}}</a></li>{{end}}</ul>{{end}}
+            {{- with .Kinds}}<h2>Kinds <span class="subtle">{{len .}}</span></h2><ul class="mono">{{range .}}<li><a href="{{path "/tasks"}}{{notDone "kind" .}}">{{visible .}}</a></li>{{end}}</ul>{{end}}
             {{- with .ScheduleList}}<h2 class="wide">Schedules <span class="subtle">{{len .}}</span></h2><ul class="wide">{{range .}}<li class="item">{{visible .Name}}
               {{- if .Missing}} <span class="subtle">missing</span>{{else if .OnlyHere}} <span class="subtle">not on the maintainer</span>{{end}}</li>{{end}}</ul>{{end -}}
           </div>{{end}}</td>

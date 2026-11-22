@@ -34,10 +34,12 @@ mux.Handle("/taskmill/", requireAdmin(dashboard)) // requireAdmin: your own logi
 
 - `Prefix` is the path where you mount it. The dashboard removes it from
   requests itself, so don't wrap it in `http.StripPrefix`.
-- It is safe on a busy production database. It reads only through the
-  [`Client`](operations-api.md)'s queries, which have time limits. An open
-  tab updates every few seconds while it is visible, and less often while
-  the server fails: a page that failed tries again by itself.
+- It reads only through the [`Client`](operations-api.md)'s queries. Those
+  over tasks, groups, and activity stop after 5 seconds, and the others read
+  small tables or single rows: [What people can do in it](#what-people-can-do-in-it)
+  says what its task lists read. An open tab updates every few seconds
+  while it is visible, and less often while the server fails: a page that
+  failed tries again by itself.
 - A request can take 10 seconds when the database is slow. Then the page
   says "Taking too long". So set the `WriteTimeout` of your `http.Server`
   above 10 seconds, or leave it unset: a shorter one closes the connection
@@ -174,6 +176,17 @@ page says "Taking too long", and what may help: a queue and a state in the
 filters, or fewer filters. The doc comment of
 [`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List)
 says which lists read more than they show.
+
+A list that names a queue and no FIFO group reads only that queue's tasks.
+It is in creation order, unless it holds only dead or canceled tasks. In
+creation order, with a state or a kind in the filters, the list reads the
+queue's tasks from the newest until the page is full: for a state with few
+tasks, all of a backlog in that queue.
+
+The links to a FIFO group, and to the tasks of a schedule's or a worker's
+kind, select the [unfinished](../concepts/glossary.md#finished) and the dead
+tasks: every state but completed and canceled. So they read no history;
+choose those states in the filter to see them.
 
 A retry of a canceled task takes the task's
 [dedupe key](../concepts/glossary.md#dedupe-key) back. If another task holds

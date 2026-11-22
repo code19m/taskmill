@@ -19,7 +19,7 @@
         <td title="{{visible $s.Name}}"><span class="strong">{{visible $s.Name}}</span>{{if $s.Paused}} <span class="chip warn">paused</span>{{end}}</td>
         <td class="wrap" title="{{visible $s.Cron}} {{visible $s.Location}}">{{with cronWords $s.Cron}}<div class="cron-words">{{.}}</div>{{end}}<code class="chip mono">{{visible $s.Cron}}</code> <span class="tone-ghost">{{visible $s.Location}}</span></td>
         <td class="mono" title="{{visible $s.Kind}}">{{visible $s.Kind}}</td>
-        <td title="{{visible $s.Queue}}"><a href="{{path "/tasks"}}{{query "queue" $s.Queue "kind" $s.Kind}}">{{visible $s.Queue}}</a></td>
+        <td title="{{visible $s.Queue}}"><a href="{{path "/tasks"}}{{notDone "queue" $s.Queue "kind" $s.Kind}}">{{visible $s.Queue}}</a></td>
         <td class="{{if $s.Paused}}tone-ghost{{end}}"{{template "time-attrs" $s.NextRunAt}}>{{if $s.Paused}}paused{{else}}{{ago $.Now $s.NextRunAt}}{{end}}</td>
         <td class="tone-faint"{{template "time-attrs" $s.LastRunAt}}>{{ago $.Now $s.LastRunAt}}</td>
         {{if not $ro}}<td class="actions-col"><div class="row-actions">
