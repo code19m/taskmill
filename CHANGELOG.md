@@ -105,9 +105,6 @@ All notable changes to taskmill are recorded here. The format follows
   `Value` while its batch runs ([Performance](docs/reference/performance.md#resource-use)),
   and that a publisher must return when its context ends: a late send can
   reach the broker after later messages of its key.
-
-### Fixed
-
 - Docs that were wrong. A task whose worker lost its lease is retried by
   the kind's `Retry` policy when the maintainer has its handler, as
   [Retries and errors](docs/guides/retries-and-errors.md#change-the-wait-between-retries)
