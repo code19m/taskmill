@@ -2,13 +2,14 @@
 # and CI run uses the same versions. They are deliberately kept out of go.mod:
 # see docs/design/dependencies.md. Dependabot does not update them.
 # gorelease, which compares APIs (not GoReleaser), comes from golang.org/x/exp,
-# which has no releases: it is pinned to a commit.
+# which has no releases: it is pinned to a commit. govulncheck stays at v1.9.0:
+# v1.10.0 fails to type-check the standard library of Go 1.27.
 GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION   := v1.9.0
 ACTIONLINT_VERSION    := v1.7.12
 GORELEASER_VERSION    := v2.20.3
 SYFT_VERSION          := v1.57.2
-GORELEASE_VERSION     := v0.0.0-20261014143641-f0251eb4aa3e
+GORELEASE_VERSION     := v0.0.0-20261121134650-e1094eeca1b5
 
 # The repository's modules: the core, the integrations that need modules of
 # their own, the examples that use other libraries, and the browser tests of

@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-23
+
 ### Added
 
 - `WorkerInfo.Candidate` reports that a worker takes part in the
@@ -44,6 +46,8 @@ All notable changes to taskmill are recorded here. The format follows
 - [The API's shape](docs/design/api-shape.md) records why the range is in
   the filter, why every method on the caller's transaction ends in `Tx`,
   which reads take no params, and why `outbox.New` takes no config.
+- The `taskmill-ui` image is built on the current
+  `gcr.io/distroless/static-debian13:nonroot`.
 
 ### Fixed
 
@@ -2499,7 +2503,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.16.1...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/code19m/taskmill/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/code19m/taskmill/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/code19m/taskmill/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/code19m/taskmill/compare/v0.14.0...v0.15.0
