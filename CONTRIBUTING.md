@@ -20,7 +20,9 @@ You need Git, Make, Go, and Docker.
 - **Go:** the `toolchain` line in [go.mod](go.mod) names the exact version.
   With the default `GOTOOLCHAIN=auto`, any recent Go downloads it for you.
 - **Docker:** the integration tests need PostgreSQL, and `make db` starts it
-  in Docker.
+  in Docker. In a Claude Code cloud session,
+  [a hook](.claude/hooks/session-start.sh) starts Docker and runs `make db`
+  as the session starts.
 
 ```sh
 git clone https://github.com/code19m/taskmill.git
