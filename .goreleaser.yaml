@@ -43,7 +43,7 @@ kos:
     bare: true
     # Static, with CA certificates and time zones, and nothing else.
     # Dependabot does not update the digest: see docs/design/releasing.md.
-    base_image: gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
+    base_image: gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
     user: "65532:65532"
     platforms: [linux/amd64, linux/arm64]
     # The release workflow moves latest once the image is attested.
