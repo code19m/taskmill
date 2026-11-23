@@ -158,7 +158,7 @@ func TestReceiptWithoutAddress(t *testing.T) {
 	handler := sendReceipt(sendMail, slog.New(slog.DiscardHandler))
 
 	// Run enqueues one task, and runs the handler on it once, as a worker would.
-	info, err := taskmilltest.Run(t, client, handler, SendReceipt{OrderID: 1})
+	info, err := taskmilltest.Run(t, client, handler, SendReceipt{OrderID: 1}, nil)
 	if err == nil || info.State != taskmill.StateDead {
 		t.Fatalf("got %s, %v; want a dead task", info.State, err)
 	}
@@ -230,7 +230,7 @@ ok  	shop	0.588s
 |---|---|
 | `taskmilltest.NewClient(t, pool, nil)` | a client in a new schema, which is dropped when the test ends |
 | `taskmilltest.Enqueued[SendReceipt](t, client)` | the committed tasks of one kind, oldest first |
-| `taskmilltest.Run(t, client, handler, args)` | one [attempt](../concepts/glossary.md#attempt) of your handler, as a worker runs it |
+| `taskmilltest.Run(t, client, handler, args, nil)` | one [attempt](../concepts/glossary.md#attempt) of your handler, as a worker runs it |
 | `worker.RunTask(ctx, id)` | run one task now, without a running worker and without the backoff |
 
 ## Go deeper

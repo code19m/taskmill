@@ -3,6 +3,9 @@ package taskmilltest_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,21 +55,87 @@ func TestRunRecordsTheOutcome(t *testing.T) {
 	client := taskmilltest.NewClient(t, pool, nil)
 
 	ok := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { return nil })
-	info, err := taskmilltest.Run(t, client, ok, greet{Name: "ada"})
+	info, err := taskmilltest.Run(t, client, ok, greet{Name: "ada"}, nil)
 	if err != nil || info.State != taskmill.StateCompleted {
 		t.Fatalf("got %s, %v", info.State, err)
 	}
 
 	boom := errors.New("boom")
 	failing := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { return boom })
-	info, err = taskmilltest.Run(t, client, failing, greet{})
+	info, err = taskmilltest.Run(t, client, failing, greet{}, nil)
 	if !errors.Is(err, boom) || info.State != taskmill.StateRetryable || info.Errors[0].Message != "boom" {
 		t.Fatalf("got %s with %+v, %v", info.State, info.Errors, err)
 	}
 
 	bad := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { return taskmill.Permanent(boom) })
-	if info, _ = taskmilltest.Run(t, client, bad, greet{}); info.State != taskmill.StateDead {
+	if info, _ = taskmilltest.Run(t, client, bad, greet{}, nil); info.State != taskmill.StateDead {
 		t.Fatalf("got %s, want dead", info.State)
+	}
+}
+
+func TestRunTakesEnqueueOptions(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	client := taskmilltest.NewClient(t, pool, nil)
+
+	night := time.Date(2026, time.November, 12, 3, 0, 0, 0, time.FixedZone("CET", 3600))
+	var got *taskmill.Task[greet]
+	h := taskmill.HandlerFunc[greet](func(_ context.Context, task *taskmill.Task[greet]) error {
+		got = task
+		return nil
+	})
+	opts := &taskmill.EnqueueOptions{
+		Queue: "nightly", GroupKey: "ada",
+		Metadata: map[string]string{taskmill.MetadataScheduledFor: night.Format(time.RFC3339)},
+	}
+
+	info, err := taskmilltest.Run(t, client, h, greet{Name: "ada"}, opts)
+	if err != nil || info.State != taskmill.StateCompleted {
+		t.Fatalf("got %s, %v", info.State, err)
+	}
+	if got.Queue != "nightly" || got.GroupKey != "ada" || !got.ScheduledFor().Equal(night) {
+		t.Errorf("the handler got queue %q, group %q, and a run for %s; want nightly, ada, and %s", got.Queue, got.GroupKey, got.ScheduledFor(), night)
+	}
+}
+
+// fatalTB records the message of a test that a helper fails, and ends the
+// helper's goroutine as Fatal does.
+type fatalTB struct {
+	testing.TB
+	msg string
+}
+
+func (tb *fatalTB) Fatalf(format string, args ...any) {
+	tb.msg = fmt.Sprintf(format, args...)
+	runtime.Goexit()
+}
+
+func TestRunFailsTheTestForADedupeKeyThatIsTaken(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	client := taskmilltest.NewClient(t, pool, nil)
+
+	opts := &taskmill.EnqueueOptions{DedupeKey: "ada"}
+	held, err := client.Enqueue(t.Context(), greet{Name: "ada"}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ran := false
+	h := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error {
+		ran = true
+		return nil
+	})
+	tb := &fatalTB{TB: t}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = taskmilltest.Run(tb, client, h, greet{Name: "ada"}, opts)
+	}()
+	<-done
+
+	if want := "task " + strconv.FormatInt(held.ID, 10) + " holds the dedupe key"; ran || !strings.Contains(tb.msg, want) {
+		t.Fatalf("the handler ran: %t; the test failed with %q, want a message with %q", ran, tb.msg, want)
 	}
 }
 
@@ -84,7 +153,7 @@ func TestRunSupportsCompleteTx(t *testing.T) {
 		})
 	})
 
-	info, err := taskmilltest.Run(t, client, h, greet{Name: "ada"})
+	info, err := taskmilltest.Run(t, client, h, greet{Name: "ada"}, nil)
 	if err != nil || info.State != taskmill.StateCompleted || info.Attempt != 1 {
 		t.Fatalf("got %s on attempt %d, %v", info.State, info.Attempt, err)
 	}
@@ -140,7 +209,7 @@ func TestRunReportsPanics(t *testing.T) {
 		"a value that panics when it is formatted": &stubbornError{},
 	} {
 		h := taskmill.HandlerFunc[greet](func(context.Context, *taskmill.Task[greet]) error { panic(value) })
-		info, err := taskmilltest.Run(t, client, h, greet{})
+		info, err := taskmilltest.Run(t, client, h, greet{}, nil)
 		if err == nil || info.State != taskmill.StateRetryable || info.Errors[0].Code != taskmill.CodePanic {
 			t.Errorf("a handler that panics with %s: got %s with %+v, %v", name, info.State, info.Errors, err)
 		}
@@ -172,7 +241,7 @@ func TestRunReportsAHandlerThatDidNotRun(t *testing.T) {
 		return nil
 	})
 
-	info, err := taskmilltest.Run(t, client, h, measure{Shape: square{Side: 2}})
+	info, err := taskmilltest.Run(t, client, h, measure{Shape: square{Side: 2}}, nil)
 	if ran || info.State != taskmill.StateDead || info.Errors[0].Code != taskmill.CodeInvalidPayload {
 		t.Fatalf("the handler ran (%v), or the task is not dead of its payload: %s with %+v", ran, info.State, info.Errors)
 	}

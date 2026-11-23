@@ -69,7 +69,7 @@ func TestReceiptWithoutAddress(t *testing.T) {
 	handler := sendReceipt(sendMail, slog.New(slog.DiscardHandler))
 
 	// Run enqueues one task, and runs the handler on it once, as a worker would.
-	info, err := taskmilltest.Run(t, client, handler, SendReceipt{OrderID: 1})
+	info, err := taskmilltest.Run(t, client, handler, SendReceipt{OrderID: 1}, nil)
 	if err == nil || info.State != taskmill.StateDead {
 		t.Fatalf("got %s, %v; want a dead task", info.State, err)
 	}

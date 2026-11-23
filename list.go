@@ -28,51 +28,15 @@ type ListParams struct {
 	// Filter selects the tasks. Empty means every task.
 	Filter TaskFilter
 
-	// CreatedSince limits the list to the tasks created at this time or
-	// later: those whose [TaskInfo.CreatedAt] is not before it. Zero means no
-	// lower bound. Any list takes it, whatever its states, and is then in
-	// creation order: see [Client.List]. Together with a range of finish
-	// times it is an error that wraps [ErrInvalidArgument]: a list has one
-	// order.
-	//
-	// The time is an instant: its location does not matter, and neither
-	// does the time zone of the database or of the process. It must be a
-	// time that PostgreSQL can store, from 4713 BC to 294276 AD, and it
-	// must be before CreatedBefore if both are set.
-	CreatedSince time.Time
-
-	// CreatedBefore limits the list to the tasks created before this time,
-	// under the rules of CreatedSince. Zero means no upper bound. A task
-	// created at this very time is left out, so two ranges that meet at a
-	// time share no task.
-	CreatedBefore time.Time
-
-	// FinishedSince limits the list to the tasks that finished at this time
-	// or later: those whose [TaskInfo.FinishedAt] is not before it. Zero
-	// means no lower bound. Only a list in finish order takes it, which is a
-	// list of only dead tasks, only canceled tasks, or both, without a range
-	// of creation times: see [Client.List]. On any other list it is an error
-	// that wraps [ErrInvalidArgument].
-	//
-	// The time is an instant, under the rules of CreatedSince, and it must
-	// be before FinishedBefore if both are set.
-	FinishedSince time.Time
-
-	// FinishedBefore limits the list to the tasks that finished before this
-	// time, under the rules of FinishedSince. Zero means no upper bound. A
-	// task that finished at this very time is left out, so two ranges that
-	// meet at a time share no task.
-	FinishedBefore time.Time
-
 	// Limit is the page size. It must not be negative. Default: 100.
 	// Maximum: 1,000.
 	Limit int
 
 	// Cursor continues from a previous page's [ListResult.Next]. Empty means
-	// the first page. Pass it with the filter and the range that it came
-	// from: each of the three orders of [Client.List] has cursors of its
-	// own, and a cursor of another order, like any text that is not a
-	// cursor, is an error that wraps [ErrInvalidArgument].
+	// the first page. Pass it with the filter that it came from: each of the
+	// three orders of [Client.List] has cursors of its own, and a cursor of
+	// another order, like any text that is not a cursor, is an error that
+	// wraps [ErrInvalidArgument].
 	Cursor string
 
 	// Summary leaves out what makes a task large, for a list that shows one
@@ -100,8 +64,8 @@ type ListResult struct {
 //
 // A list is in one of three orders:
 //
-//   - A list with a range of creation times, [ListParams.CreatedSince] or
-//     [ListParams.CreatedBefore], is ordered by when the tasks were created,
+//   - A list with a range of creation times, [TaskFilter.CreatedSince] or
+//     [TaskFilter.CreatedBefore], is ordered by when the tasks were created,
 //     the latest first: by [TaskInfo.CreatedAt], and by ID, the highest
 //     first, among tasks created at the same time.
 //   - Without such a range, a list of only dead tasks, only canceled tasks,
@@ -221,7 +185,7 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 	if err != nil {
 		return nil, err
 	}
-	r, err := checkRanges(f, p.CreatedSince, p.CreatedBefore, p.FinishedSince, p.FinishedBefore)
+	r, err := checkRanges(f, &p.Filter)
 	if err != nil {
 		return nil, err
 	}
@@ -306,16 +270,15 @@ type timeRanges struct {
 	created, finished timeRange
 }
 
-// checkRanges checks the ranges of times that a selection of the tasks f
-// takes, with the names of the fields of [ListParams], and returns them. A
-// selection takes one of the two ranges: a list has one order. And it takes
-// a range of finish times only if it has only dead tasks, only canceled
-// tasks, or both: the order of their index of finish times.
-func checkRanges(f *filterArgs, createdSince, createdBefore, finishedSince, finishedBefore time.Time) (r timeRanges, err error) {
-	if r.created, err = rangeOf("CreatedSince", createdSince, "CreatedBefore", createdBefore); err != nil {
+// checkRanges checks the ranges of times of filter, whose tasks are f, and
+// returns them. A filter takes one of the two ranges: a list has one order.
+// And it takes a range of finish times only if it has only dead tasks, only
+// canceled tasks, or both: the order of their index of finish times.
+func checkRanges(f *filterArgs, filter *TaskFilter) (r timeRanges, err error) {
+	if r.created, err = rangeOf("CreatedSince", filter.CreatedSince, "CreatedBefore", filter.CreatedBefore); err != nil {
 		return r, err
 	}
-	if r.finished, err = rangeOf("FinishedSince", finishedSince, "FinishedBefore", finishedBefore); err != nil {
+	if r.finished, err = rangeOf("FinishedSince", filter.FinishedSince, "FinishedBefore", filter.FinishedBefore); err != nil {
 		return r, err
 	}
 

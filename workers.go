@@ -18,13 +18,9 @@ type WorkerInfo struct {
 	Queues   []string
 	Kinds    []string // the kinds it has handlers for
 
-	// Schedules are the names of the worker's schedules, sorted: see
-	// [WorkerConfig.Schedules]. It is empty for a worker that defines none.
-	// It is nil for a worker that takes no part in the maintainer election,
-	// which stores none, for one that is stopping, which no longer takes
-	// part, and for a worker of a release that does not store them. The
-	// maintainer logs an error when the schedules of the workers that take
-	// part keep differing: see [Schedule].
+	// Schedules are the names of the worker's schedules, sorted, if it is a
+	// Candidate: see [WorkerConfig.Schedules]. It is empty for any other
+	// worker.
 	Schedules []string
 
 	// StartedAt is when the worker last registered: when its Run started,
@@ -32,6 +28,14 @@ type WorkerInfo struct {
 	StartedAt   time.Time
 	CheckedInAt time.Time // its last check-in, which it makes every third of its LeaseDuration
 	Maintainer  bool      // the worker is the elected maintainer
+
+	// Candidate reports that the worker takes part in the maintainer
+	// election, so its Schedules count: the maintainer logs an error when
+	// the schedules of the candidates keep differing, see [Schedule]. It is
+	// false for a worker with [WorkerConfig.NoMaintainer], for one that is
+	// stopping, which no longer takes part, and for a worker of a release
+	// before v0.13.0, which does not say.
+	Candidate bool
 
 	// Stale reports that the worker made no check-in for its whole
 	// [WorkerConfig.LeaseDuration], by the database's clock. It stopped
@@ -62,7 +66,7 @@ func (c *Client) Workers(ctx context.Context) ([]WorkerInfo, error) {
 	var out []WorkerInfo
 	for r.Next() {
 		var w WorkerInfo
-		err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.Schedules, &w.StartedAt, &w.CheckedInAt, &w.Maintainer, &w.Stale)
+		err := r.Scan(&w.ID, &w.Hostname, &w.Version, &w.Queues, &w.Kinds, &w.Schedules, &w.StartedAt, &w.CheckedInAt, &w.Maintainer, &w.Candidate, &w.Stale)
 		if err != nil {
 			return nil, fail(err)
 		}

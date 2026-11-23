@@ -366,10 +366,11 @@ func placeOrder(pool *pgxpool.Pool, client *taskmill.Client, ob *outbox.Outbox, 
 			}
 			// Store the order's events. Messages with the same key stay in order.
 			key := []byte(strconv.FormatInt(orderID, 10))
-			return ob.Store(ctx, taskmill.Pgx(tx),
+			_, err = ob.StoreTx(ctx, taskmill.Pgx(tx),
 				outbox.Message{Topic: "orders", Key: key, Value: []byte("order.placed")},
 				outbox.Message{Topic: "orders", Key: key, Value: []byte("order.paid")},
 			)
+			return err
 		})
 		if err != nil {
 			logger.LogAttrs(ctx, slog.LevelError, "placing the order failed", slog.Any(logKeyError, err))

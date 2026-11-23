@@ -97,7 +97,7 @@ Find the cause. Then run the function again, or call `ResumeQueue`.
   tasks. Without the state, it also runs tasks that someone canceled on
   purpose.
 - **Older dead tasks run again too,** unless you set `FinishedSince` and
-  `FinishedBefore` of `BulkParams` to the incident's hours. Dead tasks stay
+  `FinishedBefore` of the filter to the incident's hours. Dead tasks stay
   30 days by default, and some may have died for another reason.
 - **New work waits.** The pause stops new work in the queue too, and after
   the resume, new work waits behind the retried tasks. The queue's

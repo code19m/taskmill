@@ -25,11 +25,12 @@ func Example() {
 		if _, err := tx.Exec(ctx, "UPDATE orders SET status = 'paid' WHERE id = 42"); err != nil {
 			return err
 		}
-		return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{
+		_, err := ob.StoreTx(ctx, taskmill.Pgx(tx), outbox.Message{
 			Topic: "orders",
 			Key:   []byte("42"),
 			Value: []byte(`{"type": "order.paid", "order_id": 42}`),
 		})
+		return err
 	})
 	if err != nil {
 		log.Fatal(err)

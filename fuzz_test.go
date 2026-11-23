@@ -109,8 +109,10 @@ func FuzzList(f *testing.F) {
 	f.Fuzz(func(t *testing.T, cursor string, limit int, state, queue, kind, group string, created, createdEnd, finished, finishedEnd int64) {
 		p := &taskmill.ListParams{
 			Cursor: cursor, Limit: limit,
-			CreatedSince: bound(created), CreatedBefore: bound(createdEnd), FinishedSince: bound(finished), FinishedBefore: bound(finishedEnd),
-			Filter: taskmill.TaskFilter{States: only(taskmill.State(state)), Queues: only(queue), Kinds: only(kind), GroupKeys: only(group)},
+			Filter: taskmill.TaskFilter{
+				States: only(taskmill.State(state)), Queues: only(queue), Kinds: only(kind), GroupKeys: only(group),
+				CreatedSince: bound(created), CreatedBefore: bound(createdEnd), FinishedSince: bound(finished), FinishedBefore: bound(finishedEnd),
+			},
 		}
 
 		if _, err := e.client.List(t.Context(), p); errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -148,7 +150,8 @@ func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
 				t.Fatalf("List(%+v): task %d, created at %s and finished at %s, follows task %d, created at %s and finished at %s",
 					p, task.ID, task.CreatedAt, task.FinishedAt, last.ID, last.CreatedAt, last.FinishedAt)
 			}
-			if outsideRange(task.CreatedAt, p.CreatedSince, p.CreatedBefore) || outsideRange(task.FinishedAt, p.FinishedSince, p.FinishedBefore) {
+			f := &p.Filter
+			if outsideRange(task.CreatedAt, f.CreatedSince, f.CreatedBefore) || outsideRange(task.FinishedAt, f.FinishedSince, f.FinishedBefore) {
 				t.Fatalf("List(%+v): task %d, created at %s and finished at %s, is outside the range", p, task.ID, task.CreatedAt, task.FinishedAt)
 			}
 			last = task
@@ -167,7 +170,7 @@ func listPages(t *testing.T, client *taskmill.Client, p *taskmill.ListParams) {
 func orderTime(p *taskmill.ListParams) func(*taskmill.TaskInfo) time.Time {
 	states := p.Filter.States
 	switch {
-	case !p.CreatedSince.IsZero() || !p.CreatedBefore.IsZero():
+	case !p.Filter.CreatedSince.IsZero() || !p.Filter.CreatedBefore.IsZero():
 		return func(task *taskmill.TaskInfo) time.Time { return task.CreatedAt }
 	case slices.Equal(states, only(taskmill.StateDead)) || slices.Equal(states, only(taskmill.StateCanceled)):
 		return func(task *taskmill.TaskInfo) time.Time { return task.FinishedAt }

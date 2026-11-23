@@ -453,7 +453,7 @@ func upgradeWithRows(t *testing.T, from int, retention brokenRetention) {
 	// The tasks from before the upgrade are in the indexes of creation time:
 	// the dead one, and the completed one, whose partition got the index of
 	// the history, as the seven that Migrate prepared did.
-	created, err := e.client.List(ctx, &taskmill.ListParams{CreatedSince: time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)})
+	created, err := e.client.List(ctx, &taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedSince: time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)}})
 	if err != nil || len(created.Tasks) != 2 || created.Tasks[1].ID != 1000 || created.Tasks[1].State != taskmill.StateCompleted {
 		t.Errorf("the tasks from before the upgrade, by creation time: %+v, %v; want the dead one, and then the completed one", created, err)
 	}

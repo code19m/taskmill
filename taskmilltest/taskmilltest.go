@@ -121,19 +121,27 @@ func Enqueued[A taskmill.Args](tb testing.TB, client *taskmill.Client) []*taskmi
 	return out
 }
 
-// Run enqueues a task with args, runs h on it once, the way a worker does,
-// and records the outcome. The attempt holds a real lease, so h may complete
-// the task with [taskmill.Task.CompleteTx]. Run does not retry: a failed task
-// stays retryable or dead. It returns the task afterwards, and the error h
-// returned, or an error describing its panic. If h did not run, because the
-// task's payload does not decode into A, Run returns an error that says so,
-// and the task is dead. To run a task enqueued with other options, or again
-// after a failure, use [taskmill.Worker.RunTask].
-func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Handler[A], args A) (*taskmill.TaskInfo, error) {
+// Run enqueues a task with args and opts, runs h on it once, the way a worker
+// does, and records the outcome. opts may be nil: set them to run h on a task
+// with metadata, such as [taskmill.MetadataScheduledFor] for a scheduled run,
+// in a FIFO group, or in another queue. The attempt holds a real lease, so h
+// may complete the task with [taskmill.Task.CompleteTx]. Run does not retry:
+// a failed task stays retryable or dead. It returns the task afterwards, and
+// the error h returned, or an error describing its panic. If h did not run,
+// because the task's payload does not decode into A, Run returns an error
+// that says so, and the task is dead. To run a task again after a failure,
+// use [taskmill.Worker.RunTask].
+//
+// Run fails the test if the task cannot run now: opts set a DedupeKey that
+// another task holds, or a GroupKey whose group has an unfinished task.
+func Run[A taskmill.Args](tb testing.TB, client *taskmill.Client, h taskmill.Handler[A], args A, opts *taskmill.EnqueueOptions) (*taskmill.TaskInfo, error) {
 	tb.Helper()
-	res, err := client.Enqueue(tb.Context(), args, nil)
+	res, err := client.Enqueue(tb.Context(), args, opts)
 	if err != nil {
 		tb.Fatalf("taskmilltest: %v", err)
+	}
+	if res.Duplicate {
+		tb.Fatalf("taskmilltest: task %d holds the dedupe key, so no task was enqueued to run", res.ID)
 	}
 
 	var handlerErr error

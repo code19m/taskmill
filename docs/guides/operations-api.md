@@ -62,10 +62,11 @@ for {
   order,** and what a page reads besides the tasks it shows. The doc
   comment of [`Client.List`](https://pkg.go.dev/github.com/code19m/taskmill#Client.List)
   has the rules, and says how to read what died since your last look.
-- A filter can name queues, states, kinds, and FIFO group keys. A task
-  matches when it matches every field you set. An empty field matches all.
-- Pass `Next` back with the same filter and range. A cursor from a list in
-  another order returns an error that wraps `ErrInvalidArgument`.
+- A filter can name queues, states, kinds, and FIFO group keys, and a range
+  of times. A task matches when it matches every field you set. An empty
+  field matches all.
+- Pass `Next` back with the same filter. A cursor from a list in another
+  order returns an error that wraps `ErrInvalidArgument`.
 - Set `Summary: true` in `ListParams` when you show one line per task. A
   page then comes without payloads and metadata, and with only the newest
   error of each task. So it stays small, whatever the tasks hold: a full
@@ -73,12 +74,12 @@ for {
 - `Get` returns one task by ID, in full. `Count` counts the matching tasks
   per state, up to 10,000 per state.
 
-To see the tasks of a past period, such as last night, give the `params`
+To see the tasks of a past period, such as last night, give the filter
 above a range of time: of creation times, or of finish times.
 
 ```go
 night := time.Date(2026, time.March, 14, 22, 0, 0, 0, time.Local)
-params.CreatedSince, params.CreatedBefore = night, night.Add(8*time.Hour)
+params.Filter.CreatedSince, params.Filter.CreatedBefore = night, night.Add(8*time.Hour)
 ```
 
 - **A range holds the tasks from `Since` on, and before `Before`,** as
@@ -144,21 +145,23 @@ if err != nil {
 log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
 ```
 
-- **The filter must not be empty.** To retry every dead task, set `States`.
+- **The filter must name queues, states, kinds, or FIFO groups.** A range
+  of times alone is not enough. To retry every dead task, set `States`.
 - **A range of times narrows them,** as it narrows a list. So you can retry
   only what died in an incident, and not the older dead tasks of the same
   kind:
 
   ```go
   incident := time.Date(2026, time.March, 14, 14, 0, 0, 0, time.UTC)
-  params := &taskmill.BulkParams{
-      Filter:        taskmill.TaskFilter{Queues: []string{"payments"}, States: []taskmill.State{taskmill.StateDead}},
+  params := &taskmill.BulkParams{Filter: taskmill.TaskFilter{
+      Queues:        []string{"payments"},
+      States:        []taskmill.State{taskmill.StateDead},
       FinishedSince: incident, FinishedBefore: incident.Add(40 * time.Minute),
-  }
+  }}
   ```
 
   `FinishedSince` and `FinishedBefore` need a filter of only dead tasks,
-  canceled tasks, or both, as in a list. Pass a cursor with the same range.
+  canceled tasks, or both, as in a list. Pass a cursor with the same filter.
 - **They change only tasks in a state that allows the action.** For
   example, `DeleteMatching` leaves running tasks as they are.
 - **They work in small steps:** batches of 1,000 tasks, each in a short
@@ -182,8 +185,8 @@ log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
   the action again is safe: the tasks that it changed no longer match.
 
 > [!TIP]
-> Call `Count` with the same filter and range first: `TaskCounts.Retry`,
-> `Cancel`, and `Delete` say how many tasks each action would change. And
+> Call `Count` with the same filter first: `CountResult.Retry`, `Cancel`,
+> and `Delete` say how many tasks each action would change. And
 > add a queue or a state to the filter, or a range of times: a filter by
 > kind or group alone reads many more rows.
 

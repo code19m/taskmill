@@ -19,7 +19,7 @@ by itself gives you no order per key, no message ID, and fewer retries.
 
 ## Quick example
 
-Create one `Outbox` and share it. Call `Store` in the same transaction as
+Create one `Outbox` and share it. Call `StoreTx` in the same transaction as
 the change that the event is about:
 
 ```go
@@ -29,16 +29,20 @@ err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
     if err := markPaid(ctx, tx, orderID); err != nil {
         return err
     }
-    return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{
+    _, err := ob.StoreTx(ctx, taskmill.Pgx(tx), outbox.Message{
         Topic: "orders",
         Key:   []byte(strconv.FormatInt(orderID, 10)), // messages with the same key stay in order
         Value: event,
     })
+    return err
 })
 ```
 
-- `Store` only writes to PostgreSQL, so your app keeps working while the
+- `StoreTx` only writes to PostgreSQL, so your app keeps working while the
   broker is down.
+- It returns the ID of each message's delivery, the one that consumers
+  deduplicate by. Log it, or pass it on, to follow an event to its
+  consumers.
 - A `Value` can be up to about 750 KiB: see
   [`outbox.Message`](https://pkg.go.dev/github.com/code19m/taskmill/outbox#Message).
 - A [relay](#relay-messages-to-your-broker) on your workers then publishes

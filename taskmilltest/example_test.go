@@ -42,7 +42,7 @@ func testSignUp(t *testing.T, pool *pgxpool.Pool, sendEmail func(userID int64) e
 	handler := taskmill.HandlerFunc[SendWelcome](func(_ context.Context, task *taskmill.Task[SendWelcome]) error {
 		return sendEmail(task.Args.UserID)
 	})
-	info, err := taskmilltest.Run(t, client, handler, SendWelcome{UserID: 42})
+	info, err := taskmilltest.Run(t, client, handler, SendWelcome{UserID: 42}, nil)
 	if err != nil || info.State != taskmill.StateCompleted {
 		t.Fatalf("got %s, %v", info.State, err)
 	}

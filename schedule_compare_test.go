@@ -151,8 +151,9 @@ func TestMaintainerLogsWorkersWhoseSchedulesDiffer(t *testing.T) {
 	for id, want := range map[string][]string{
 		maintainer: {"carts", "nightly"}, same: {"carts", "nightly"}, other: {"digest", "nightly"}, none: nil, old: nil,
 	} {
-		if got := workers[id].Schedules; !slices.Equal(got, want) || (got == nil) != (want == nil) {
-			t.Errorf("the worker %s lists the schedules %#v, want %#v", id, got, want)
+		w := workers[id]
+		if candidate := id != none && id != old; w.Candidate != candidate || !slices.Equal(w.Schedules, want) {
+			t.Errorf("the worker %s is a candidate: %t, with the schedules %v; want %t, with %v", id, w.Candidate, w.Schedules, candidate, want)
 		}
 	}
 
@@ -261,15 +262,15 @@ func TestStoppingWorkerTakesItsSchedulesOutOfTheComparison(t *testing.T) {
 	e.enqueue(t, sendEmail{To: "slow"}, nil)
 	recv(t, started, "the task to start")
 	workers := slices.Collect(maps.Values(e.workers(t)))
-	if len(workers) != 1 || !slices.Equal(workers[0].Schedules, []string{"digest"}) {
-		t.Fatalf("the running worker lists the schedules %v", workers)
+	if len(workers) != 1 || !workers[0].Candidate || !slices.Equal(workers[0].Schedules, []string{"digest"}) {
+		t.Fatalf("the running worker is no candidate with the schedules [digest]: %+v", workers)
 	}
 	id := workers[0].ID
 
 	stop()
-	waitFor(t, "the draining worker to clear its schedules", func() bool {
+	waitFor(t, "the draining worker to stop being a candidate", func() bool {
 		w, ok := e.workers(t)[id]
-		return ok && w.Schedules == nil
+		return ok && !w.Candidate && len(w.Schedules) == 0
 	})
 	if err := finish(); err != nil {
 		t.Fatal(err)

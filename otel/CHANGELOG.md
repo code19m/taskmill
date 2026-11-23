@@ -10,6 +10,12 @@ rename spans, attributes, or metrics to follow them, and says so here.
 
 ## [Unreleased]
 
+### Changed
+
+- Requires taskmill v0.17.0, whose outbox stores messages with
+  `outbox.Outbox.StoreTx`, as the module's tests do. The module's own code
+  is unchanged.
+
 ## [0.5.1] - 2026-11-22
 
 ### Changed

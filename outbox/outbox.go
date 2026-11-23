@@ -4,7 +4,7 @@
 // It takes three steps:
 //
 //   - [New] returns an [Outbox] for a [taskmill.Client].
-//   - [Outbox.Store] saves each [Message] in the same transaction as the
+//   - [Outbox.StoreTx] saves each [Message] in the same transaction as the
 //     business data that produced it, so a message exists if and only if
 //     that data was committed.
 //   - [Outbox.AddRelay] registers a relay on a worker. The relay publishes
@@ -19,6 +19,7 @@
 // Publishing is at least once: a message can be published twice, for example
 // if the worker crashes after the broker accepted it. Every delivery carries
 // an ID that stays the same across retries, so consumers can deduplicate.
+// [Outbox.StoreTx] returns it, so the producer can log it or pass it on.
 // The receiving side needs no package: a consumer that enqueues a task for
 // each message, with the message ID as [taskmill.EnqueueOptions.DedupeKey],
 // creates at most one task per message within the dedupe window.
@@ -59,7 +60,7 @@ const (
 // minutes, so a broker outage of up to a month loses nothing.
 var relayRetry = taskmill.ExponentialBackoff{Base: time.Second, Max: 5 * time.Minute}
 
-// Message is an event to publish. Save it with [Outbox.Store].
+// Message is an event to publish. Save it with [Outbox.StoreTx].
 type Message struct {
 	// Topic is the broker destination, such as a Kafka topic. Required. It
 	// must be valid UTF-8, without a NUL character, as must the names of
@@ -89,7 +90,8 @@ type Delivery struct {
 	Message
 
 	// ID is unique across services and stays the same when a delivery is
-	// retried, so consumers can deduplicate by it. It is a UUIDv7.
+	// retried, so consumers can deduplicate by it. It is a UUIDv7, which
+	// [Outbox.StoreTx] returns when it stores the message.
 	ID string
 
 	// Metadata is the metadata that [taskmill.EnqueueMiddleware] stored with
@@ -145,41 +147,48 @@ type Outbox struct {
 }
 
 // New returns an outbox that keeps its messages in client's database. With a
-// nil client, [Outbox.Store] returns an error that wraps
+// nil client, [Outbox.StoreTx] returns an error that wraps
 // [taskmill.ErrInvalidArgument].
 func New(client *taskmill.Client) *Outbox {
 	return &Outbox{client: client}
 }
 
-// Store saves msgs in the outbox inside the caller's transaction, so they are
-// published only if the transaction commits. A message without a topic, with
-// a topic or a header name that is not valid UTF-8 or holds a NUL character,
-// with a topic that holds U+001F (see [Message.Topic]), or over the payload
-// limit (see [Message.Value]), or a call over the limits
-// of [taskmill.Client.EnqueueMany], 10,000 messages and 64 MiB, fails with an
-// error that wraps [taskmill.ErrInvalidArgument], and leaves the transaction
-// usable. A call with no messages does nothing.
-func (o *Outbox) Store(ctx context.Context, tx taskmill.Executor, msgs ...Message) error {
+// StoreTx saves msgs in the outbox inside the caller's transaction, so they
+// are published only if the transaction commits. It returns the ID of each
+// message's delivery, in the order of msgs: see [Delivery.ID].
+//
+// A message without a topic, with a topic or a header name that is not valid
+// UTF-8 or holds a NUL character, with a topic that holds U+001F (see
+// [Message.Topic]), or over the payload limit (see [Message.Value]), or a
+// call over the limits of [taskmill.Client.EnqueueMany], 10,000 messages and
+// 64 MiB, fails with an error that wraps [taskmill.ErrInvalidArgument], and
+// leaves the transaction usable. A call with no messages does nothing, and
+// returns no IDs.
+func (o *Outbox) StoreTx(ctx context.Context, tx taskmill.Executor, msgs ...Message) ([]string, error) {
 	if o.client == nil {
-		return fmt.Errorf("%w: outbox client is nil", taskmill.ErrInvalidArgument)
+		return nil, fmt.Errorf("%w: outbox client is nil", taskmill.ErrInvalidArgument)
 	}
 	if len(msgs) == 0 {
-		return nil
+		return nil, nil
 	}
 
+	ids := make([]string, len(msgs))
 	params := make([]taskmill.EnqueueParams, len(msgs))
 	for i, m := range msgs {
 		if problem := checkNames(m); problem != "" {
-			return fmt.Errorf("%w: outbox message %d of %d %s", taskmill.ErrInvalidArgument, i+1, len(msgs), problem)
+			return nil, fmt.Errorf("%w: outbox message %d of %d %s", taskmill.ErrInvalidArgument, i+1, len(msgs), problem)
 		}
+		ids[i] = uuid.NewV7()
 		params[i] = taskmill.EnqueueParams{
-			Args:    message{ID: uuid.NewV7(), Topic: m.Topic, Key: m.Key, Value: m.Value, Headers: m.Headers},
+			Args:    message{ID: ids[i], Topic: m.Topic, Key: m.Key, Value: m.Value, Headers: m.Headers},
 			Options: &taskmill.EnqueueOptions{GroupKey: groupKey(m.Topic, m.Key)},
 		}
 	}
 
-	_, err := o.client.EnqueueManyTx(ctx, tx, params)
-	return err
+	if _, err := o.client.EnqueueManyTx(ctx, tx, params); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // checkNames returns what is wrong with the topic and the header names of m,

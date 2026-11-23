@@ -18,19 +18,34 @@ import (
 var errBudget = errors.New("the bulk action used its time")
 
 // selection is what a task list shows, and what a bulk action on it acts
-// on: the tasks that its filters select, in its range of the time that
+// on: the tasks that its filter selects, in its range of the time that
 // orders it.
 type selection struct {
-	filter        taskmill.TaskFilter
-	since, before time.Time // the bounds of the range; zero for none
-	order         listOrder
+	filter taskmill.TaskFilter // with the range in the fields of that time
+	order  listOrder
 }
 
-// selectionOf reads the selection in the query of a task list.
+// selectionOf reads the selection in the query of a task list. Its range is
+// of finish times on a list in finish order, and of creation times on every
+// other.
 func selectionOf(q url.Values) (selection, error) {
 	since, before, err := listRange(q)
 	f := taskFilter(q)
-	return selection{filter: f, since: since, before: before, order: orderOf(f, !since.IsZero() || !before.IsZero())}, err
+	order := orderOf(f, !since.IsZero() || !before.IsZero())
+	if order.ByFinish {
+		f.FinishedSince, f.FinishedBefore = since, before
+	} else {
+		f.CreatedSince, f.CreatedBefore = since, before
+	}
+	return selection{filter: f, order: order}, err
+}
+
+// bounds returns the bounds of the selection's range; zero for none.
+func (sel selection) bounds() (since, before time.Time) {
+	if sel.order.ByFinish {
+		return sel.filter.FinishedSince, sel.filter.FinishedBefore
+	}
+	return sel.filter.CreatedSince, sel.filter.CreatedBefore
 }
 
 // filtered reports whether the selection's filters select tasks by what they
@@ -42,17 +57,8 @@ func (sel selection) filtered() bool {
 
 // query returns the query of the selection, for links and redirects.
 func (sel selection) query() url.Values {
-	return withRange(filterQuery(sel.filter), sel.since, sel.before)
-}
-
-// ranges returns the range of the selection as the client takes it: of
-// finish times on a list in finish order, and of creation times on every
-// other.
-func (sel selection) ranges() (createdSince, createdBefore, finishedSince, finishedBefore time.Time) {
-	if sel.order.ByFinish {
-		return time.Time{}, time.Time{}, sel.since, sel.before
-	}
-	return sel.since, sel.before, time.Time{}, time.Time{}
+	since, before := sel.bounds()
+	return withRange(filterQuery(sel.filter), since, before)
 }
 
 // bulkLinks lead to the pages of the bulk actions on the tasks that the
@@ -88,7 +94,7 @@ type bulkAction struct {
 	path    string
 	allows  func(taskmill.State) bool // the states that it changes
 	do      func(*taskmill.Client, context.Context, *taskmill.BulkParams) (taskmill.BulkResult, error)
-	count   func(*taskmill.TaskCounts) taskmill.TaskCount
+	count   func(*taskmill.CountResult) taskmill.TaskCount
 }
 
 // changes counts the tasks of the selection that the action would change.
@@ -109,7 +115,6 @@ func (a bulkAction) changes(ctx context.Context, client *taskmill.Client, sel se
 		return taskmill.TaskCount{}, nil
 	}
 
-	p.CreatedSince, p.CreatedBefore, p.FinishedSince, p.FinishedBefore = sel.ranges()
 	counts, err := client.Count(ctx, p)
 	if err != nil {
 		return taskmill.TaskCount{}, err
@@ -125,7 +130,7 @@ var bulkActions = map[string]bulkAction{
 		path:    "/tasks/bulk/retry",
 		allows:  taskmill.State.CanRetry,
 		do:      (*taskmill.Client).RetryMatching,
-		count:   func(c *taskmill.TaskCounts) taskmill.TaskCount { return c.Retry },
+		count:   func(c *taskmill.CountResult) taskmill.TaskCount { return c.Retry },
 	},
 	"cancel": {
 		Verb: "Cancel", Icon: "cancel",
@@ -134,7 +139,7 @@ var bulkActions = map[string]bulkAction{
 		path:    "/tasks/bulk/cancel",
 		allows:  taskmill.State.CanCancel,
 		do:      (*taskmill.Client).CancelMatching,
-		count:   func(c *taskmill.TaskCounts) taskmill.TaskCount { return c.Cancel },
+		count:   func(c *taskmill.CountResult) taskmill.TaskCount { return c.Cancel },
 	},
 	"delete": {
 		Verb: "Delete", Icon: "trash", Danger: true,
@@ -143,7 +148,7 @@ var bulkActions = map[string]bulkAction{
 		path:    "/tasks/bulk/delete",
 		allows:  taskmill.State.CanDelete,
 		do:      (*taskmill.Client).DeleteMatching,
-		count:   func(c *taskmill.TaskCounts) taskmill.TaskCount { return c.Delete },
+		count:   func(c *taskmill.CountResult) taskmill.TaskCount { return c.Delete },
 	},
 }
 
@@ -203,12 +208,13 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	f := sel.filter
+	since, before := sel.bounds()
 	var states, period []string
 	for _, st := range f.States {
 		states = append(states, string(st))
 	}
-	if !sel.since.IsZero() || !sel.before.IsZero() {
-		_, full := rangeWords(sel.since, sel.before, time.Now())
+	if !since.IsZero() || !before.IsZero() {
+		_, full := rangeWords(since, before, time.Now())
 		period = []string{full}
 	}
 	var rows []filterRow
@@ -217,7 +223,7 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		{Title: "Queue", Values: f.Queues},
 		{Title: "Kind", Values: f.Kinds, Mono: true},
 		{Title: "FIFO group", Values: f.GroupKeys, Mono: true, Group: true},
-		{Title: sel.order.Time, Values: period, Since: sel.since, Before: sel.before},
+		{Title: sel.order.Time, Values: period, Since: since, Before: before},
 	} {
 		if len(row.Values) > 0 {
 			rows = append(rows, row)
@@ -594,7 +600,6 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	p := &taskmill.BulkParams{Filter: sel.filter, Cursor: r.URL.Query().Get("cursor")}
-	p.CreatedSince, p.CreatedBefore, p.FinishedSince, p.FinishedBefore = sel.ranges()
 	res, err := a.do(s.client, ctx, p)
 	more := err != nil && errors.Is(context.Cause(ctx), errBudget)
 	if err == nil || more || res.Changed > 0 {
