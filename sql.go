@@ -13,10 +13,11 @@ import (
 //
 // A statement's comment starts with its parameters. A placeholder in braces
 // stands for a value: {s} the schema, {batch} maintenanceBatch, {window}
-// bulkWindow, {cap} countCap, {keptErrors} keptErrors, and {available},
-// {cancel}, {heartbeat}, and {resigned} the start of a notification's
-// payload. A fragment that statements share is a constant of its own, and
-// the statements add it to their text.
+// bulkWindow, {keptIDs} keptIDs, {readCost} readCost, {cap} countCap,
+// {keptErrors} keptErrors, and {available}, {cancel}, {heartbeat}, and
+// {resigned} the start of a notification's payload. A fragment that
+// statements share is a constant of its own, and the statements add it to
+// their text.
 
 // statements holds the statements of the task lifecycle and of the
 // operations API, with the values filled in, so each has fixed text and can
@@ -72,9 +73,10 @@ type statements struct {
 	taskExists       string
 	lastTask         string
 	windowEnd        string
-	pickRetry        forms
-	pickCancel       forms
-	pickDelete       forms
+	readAgain        string
+	pickRetry        pickForms
+	pickCancel       pickForms
+	pickDelete       pickForms
 	retryTasks       string
 	cancelTasks      string
 	deleteTasks      string
@@ -148,11 +150,26 @@ func (f forms) choose(fromQueues bool) string {
 	return f.plain
 }
 
+// pickForms are the forms of a pick statement: those of forms, one that
+// reads a range of finish times and keeps its IDs, and one that reads the
+// tasks of those IDs. See pickSQL.
+type pickForms struct {
+	forms
+	reads, kept string
+}
+
+// replace returns p with the values filled in by q.
+func (p pickForms) replace(q func(string) string) pickForms {
+	return pickForms{forms{q(p.plain), q(p.queues)}, q(p.reads), q(p.kept)}
+}
+
 func newStatements(schema string) *statements {
 	q := strings.NewReplacer(
 		"{s}", schema,
 		"{batch}", strconv.Itoa(maintenanceBatch),
 		"{window}", strconv.Itoa(bulkWindow),
+		"{keptIDs}", strconv.Itoa(keptIDs),
+		"{readCost}", strconv.Itoa(readCost),
 		"{cap}", strconv.Itoa(countCap),
 		"{keptErrors}", strconv.Itoa(keptErrors),
 		"{available}", notifyAvailable+"|",
@@ -205,9 +222,10 @@ func newStatements(schema string) *statements {
 		taskExists:       q(taskExistsSQL),
 		lastTask:         q(lastTaskSQL),
 		windowEnd:        q(windowEndSQL),
-		pickRetry:        forms{q(pickRetrySQL), q(pickRetryQueuesSQL)},
-		pickCancel:       forms{q(pickCancelSQL), q(pickCancelQueuesSQL)},
-		pickDelete:       forms{q(pickDeleteSQL), q(pickDeleteQueuesSQL)},
+		readAgain:        q(readAgainSQL),
+		pickRetry:        pickRetrySQL.replace(q),
+		pickCancel:       pickCancelSQL.replace(q),
+		pickDelete:       pickDeleteSQL.replace(q),
 		retryTasks:       q(retryTasksSQL),
 		cancelTasks:      q(cancelTasksSQL),
 		deleteTasks:      q(deleteTasksSQL),

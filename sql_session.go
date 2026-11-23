@@ -88,9 +88,10 @@ func (c *Client) readAlone(ctx context.Context, settings, sql string, args []any
 // below the deadlock timeout, so that a batch never holds other transactions
 // up for long, and never takes part in a deadlock. It ends before the
 // commit: see liftLockTimeout. JIT is off: on a table of a few million
-// tasks, the planner prices a pick that reads a wide range whole, as
-// bulkRun.readsQueues says, above the cost at which the database compiles
-// a statement, and compiling it took 800 ms, several times the read.
+// tasks, the planner prices a statement that reads a wide range whole, as
+// bulkRun.readsQueues and finishWalk say, above the cost at which the
+// database compiles a statement, and compiling it took 800 ms, several
+// times the read.
 const bulkSettings = `SELECT set_config('plan_cache_mode', 'force_custom_plan', true), set_config('lock_timeout', '100ms', true),
        set_config('jit', 'off', true)`
 
@@ -105,6 +106,14 @@ var openSettings = bulkSettings + `, set_config('statement_timeout', '` + strcon
 // a plan that expects few tasks after the position, as a plan made without
 // the position does, reads every one of them and sorts them.
 const windowSettings = `SELECT set_config('enable_sort', 'off', true)`
+
+// weighSettings keep readAgainSQL's look ahead on the primary key, as
+// windowSettings do, and read its range with the custom plans of
+// bulkSettings, without JIT. The database ends the statement after
+// openTimeout, as it ends a read of the range in a batch: see
+// Client.weighRead.
+var weighSettings = windowSettings + `, set_config('plan_cache_mode', 'force_custom_plan', true), set_config('jit', 'off', true),
+       set_config('statement_timeout', '` + strconv.FormatInt(openTimeout.Milliseconds(), 10) + `ms', true)`
 
 // planSettings keep a fetch on its ordered index. A queue's table changes so
 // fast that the planner's statistics are often far off: with too low an

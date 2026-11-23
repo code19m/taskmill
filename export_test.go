@@ -458,12 +458,12 @@ func RunRetention(ctx context.Context, w *Worker) {
 // BulkRowsRead runs the pick of the first batch of a bulk action (retry,
 // cancel, delete, or history) with params after task after, under EXPLAIN
 // ANALYZE in a transaction that it rolls back, and returns how many rows the
-// scans of the task tables read. With window, the batch reads in the window
-// that the action finds there, as it does once a batch could not end in
-// time.
+// scans of the task tables read. With window, the batch reads in the
+// window that the action finds there, as it does once a batch could not end
+// in time.
 func BulkRowsRead(ctx context.Context, c *Client, action string, params *BulkParams, after int64, window bool) (int64, error) {
-	sql, states := map[string]forms{
-		"retry": c.sql.pickRetry, "cancel": c.sql.pickCancel, "delete": c.sql.pickDelete, "history": c.sql.pickCompleted,
+	p, states := map[string]pickForms{
+		"retry": c.sql.pickRetry, "cancel": c.sql.pickCancel, "delete": c.sql.pickDelete, "history": {forms: c.sql.pickCompleted},
 	}[action], map[string][]State{"retry": retryStates, "cancel": cancelStates}[action]
 	if states == nil {
 		states = deleteStates
@@ -486,15 +486,14 @@ func BulkRowsRead(ctx context.Context, c *Client, action string, params *BulkPar
 		}
 	}
 
-	args := m.pickArgs()
 	if action == "history" {
-		args = m.historyArgs()
+		return rowsRead(ctx, c, bulkSettings, p.choose(m.readsQueues(m.historyWalk)), m.historyArgs(), taskTables)
 	}
-	walk := m.tasksWalk
-	if action == "history" {
-		walk = m.historyWalk
+	sql := p.choose(m.readsQueues(m.tasksWalk))
+	if m.keepsIDs() {
+		sql = p.reads
 	}
-	return rowsRead(ctx, c, bulkSettings, sql.choose(m.readsQueues(walk)), args, taskTables)
+	return rowsRead(ctx, c, bulkSettings, sql, m.pickArgs(), taskTables)
 }
 
 // HistoryPartitionsRead runs the first batch of a delete of the completed

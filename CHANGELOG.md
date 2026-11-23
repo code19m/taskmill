@@ -7,6 +7,24 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `RetryMatching` and `DeleteMatching` with a range of finish times are
+  faster where its tasks lie far apart, with a queue in the filter or
+  without. After its first batch, such an action read every task between
+  those of the range in ID order, which was slow where they were created far
+  apart, as tasks that died in an incident often were. A read through the
+  index of finish times now keeps the IDs of the range's next 50,000 tasks,
+  and the batches pick them by primary key, still in ID order. A wider range
+  is read again only where that costs less than continuing in ID order. On
+  PostgreSQL 15 / 18, with 647,000 tasks, a retry of the 17,000 that died in
+  the last day, created over 30 days, took 620 / 515 ms, and now takes 400 /
+  390 ms; of 60,000, 2.5 / 2.1 s, now 1.2 s; and of 100,000 among 2 million
+  tasks, 12.4 / 14.1 s, now 5.7 / 6.2 s. A narrow range, or one that holds a
+  third of the table, takes as long as before. A task that comes into the
+  range while the action runs is changed if the action has not read past it
+  yet: a read of the range looks up to 50,000 of its tasks ahead.
+
 ## [0.16.1] - 2026-11-23
 
 ### Fixed
