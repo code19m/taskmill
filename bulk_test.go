@@ -390,14 +390,17 @@ func TestRangesOfCountAndBulkActionsReadOnlyTheirRows(t *testing.T) {
 }
 
 // A whole action with a range of times and no queue reads about the tasks of
-// the range when they lie together, also when the range ends in the past and
-// spans several batches. The first batch reads the range queue by queue,
-// which skips the tasks before it, and so does the last batch of a range
-// with an end, which stops with it. Each changed task is read about three
-// times: to pick it, to lock it, and to change it. Where the tasks of a
-// range of finish times lie far apart, the batches after the first read in
-// ID order, each task of the table at most once. However the batches read,
-// the action changes each task of the range once, and no other task.
+// the range, also when the range ends in the past and spans several
+// batches. For a range of creation times, whose tasks lie together, the
+// first batch reads the range queue by queue, which skips the tasks before
+// it, and so does the last batch of a range with an end, which stops with
+// it. A range of finish times can hold tasks that lie far apart, as here:
+// the first batch reads it queue by queue, keeps the IDs of its tasks, and
+// picks the first of them, and the next batches pick the others. Each
+// changed task is read about three times: to pick it, to lock it, and to
+// change it, and once more after the first batch of a range of finish
+// times. However the batches read, the action changes each task of the
+// range once, and no other task.
 //
 // The bound is on the plan. On a busy machine a batch's statements can take
 // longer than openTimeout, and the action then goes on in windows, which
@@ -444,7 +447,10 @@ func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
 		// 2,000 tasks among all 80,000.
 		"retry died far apart": {func(ctx context.Context, c *taskmill.Client) (taskmill.BulkResult, error) {
 			return c.RetryMatching(ctx, &taskmill.BulkParams{Filter: dead, FinishedSince: since.Add(10 * day)})
-		}, "finalized_at >= $1::timestamptz + interval '10 days'", 80000 + 5*2000},
+		}, "finalized_at >= $1::timestamptz + interval '10 days'", 5 * 2000},
+		"delete died far apart": {func(ctx context.Context, c *taskmill.Client) (taskmill.BulkResult, error) {
+			return c.DeleteMatching(ctx, &taskmill.BulkParams{Filter: dead, FinishedSince: since.Add(10 * day)})
+		}, "finalized_at >= $1::timestamptz + interval '10 days'", 5 * 2000},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -470,7 +476,7 @@ func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
 			case strings.Contains(statements, "w"):
 				t.Logf("a batch ran out of time on this busy machine, and the action went on in windows (%q), reading %d rows", statements, n)
 			case n > c.most:
-				t.Errorf("the action read %d rows of tasks, want at most %d; its batches read %q (q: by queue, p: in ID order)", n, c.most, statements)
+				t.Errorf("the action read %d rows of tasks, want at most %d; its batches read %q (q: by queue, p: in ID order, r and k: by kept IDs)", n, c.most, statements)
 			}
 		})
 	}
@@ -481,32 +487,175 @@ func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
 // goes on in windows, in ID order, as it does after any such batch.
 func TestARangeBatchThatRunsOutOfTimeGoesOnInWindows(t *testing.T) {
 	t.Parallel()
+	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
+	since := time.Now().Add(-2 * time.Hour)
+
+	for name, c := range map[string]struct {
+		params taskmill.BulkParams
+		first  string // what the first batch sends: q a pick by queue, r one that reads a range of finish times
+	}{
+		"created":  {taskmill.BulkParams{Filter: dead, CreatedSince: since}, "q"},
+		"finished": {taskmill.BulkParams{Filter: dead, FinishedSince: since}, "r"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			sent := &bulkStatements{}
+			e := newTracedEnv(t, sent)
+
+			e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
+			           SELECT 'q' || (i % 3), 'email.send', 'dead', now() - interval '1 hour', now() - interval '1 minute', now(), '{}', 3
+			           FROM generate_series(1, 3000) i`)
+			e.exec(t, "ANALYZE {s}.tasks")
+
+			// Where a statement has a time limit, which only a batch without a
+			// window sets, the retry of a task does not end before it.
+			e.exec(t, `CREATE FUNCTION {s}.hold() RETURNS trigger LANGUAGE plpgsql AS '
+			           BEGIN
+			               IF current_setting(''statement_timeout'') <> ''0'' THEN PERFORM pg_sleep(600); END IF;
+			               RETURN NEW;
+			           END'`)
+			e.exec(t, `CREATE TRIGGER hold_retry BEFORE UPDATE ON {s}.tasks FOR EACH ROW
+			           WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.hold()`)
+
+			got, err := e.client.RetryMatching(t.Context(), &c.params)
+			if err != nil || got != (taskmill.BulkResult{Changed: 3000}) {
+				t.Fatalf("retry: %+v, %v; want each of the 3,000 dead tasks retried once", got, err)
+			}
+			if statements := sent.reset(); !strings.HasPrefix(statements, c.first+"wp") {
+				t.Errorf("the retry sent %q, want %q, and then windows", statements, c.first)
+			}
+		})
+	}
+}
+
+// A range of finish times with more tasks than a read keeps goes on in ID
+// order once the batches went through the IDs that it kept, where reading it
+// again would cost more: here, the rest of the range lies among the next few
+// thousand tasks. The action still changes each task of the range once, and
+// no other task.
+func TestADenseRangeOfFinishTimesGoesOnInIDOrder(t *testing.T) {
+	t.Parallel()
 	sent := &bulkStatements{}
 	e := newTracedEnv(t, sent)
 
+	// 51,000 tasks that died a minute ago, each after one that died a day ago.
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
-	           SELECT 'q' || (i % 3), 'email.send', 'dead', now() - interval '1 hour', now() - interval '1 minute', now(), '{}', 3
-	           FROM generate_series(1, 3000) i`)
+	           SELECT 'q' || (i % 3), 'email.send', 'dead', now() - interval '2 days',
+	                  now() - CASE WHEN i % 2 = 0 THEN interval '1 minute' ELSE interval '1 day' END, now(), '{}', 3
+	           FROM generate_series(1, 102000) i`)
 	e.exec(t, "ANALYZE {s}.tasks")
 
-	// Where a statement has a time limit, which only a batch without a
-	// window sets, the retry of a task does not end before it.
-	e.exec(t, `CREATE FUNCTION {s}.hold() RETURNS trigger LANGUAGE plpgsql AS '
-	           BEGIN
-	               IF current_setting(''statement_timeout'') <> ''0'' THEN PERFORM pg_sleep(600); END IF;
-	               RETURN NEW;
-	           END'`)
-	e.exec(t, `CREATE TRIGGER hold_retry BEFORE UPDATE ON {s}.tasks FOR EACH ROW
-	           WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.hold()`)
-
 	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
-	got, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: dead, CreatedSince: time.Now().Add(-2 * time.Hour)})
-	if err != nil || got != (taskmill.BulkResult{Changed: 3000}) {
-		t.Fatalf("retry: %+v, %v; want each of the 3,000 dead tasks retried once", got, err)
+	got, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: dead, FinishedSince: time.Now().Add(-time.Hour)})
+	if err != nil || got != (taskmill.BulkResult{Changed: 51000}) {
+		t.Fatalf("retry: %+v, %v; want each of the 51,000 tasks of the range retried once", got, err)
 	}
-	if statements := sent.reset(); !strings.HasPrefix(statements, "qwp") {
-		t.Errorf("the retry sent %q, want a pick by queue, and then windows", statements)
+	left := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id % 2 = 0 AND state <> 'available'")
+	others := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE id % 2 = 1 AND state <> 'dead'")
+	if left != 0 || others != 0 {
+		t.Errorf("%d tasks of the range are left, and %d others changed; want 0 and 0", left, others)
 	}
+	statements := sent.reset()
+	read, rest, _ := strings.Cut(statements, "a")
+	switch {
+	case strings.Contains(statements, "w"):
+		t.Logf("a batch ran out of time on this busy machine, and the action went on in windows (%q)", statements)
+	case read != "r"+strings.Repeat("k", 49) || rest == "" || strings.Trim(rest, "p") != "":
+		t.Errorf("the retry sent %q, want a pick that reads the range, 49 picks of the IDs that it kept, the weighing of a read again, and then picks in ID order", statements)
+	}
+}
+
+// A range of finish times with more tasks than a read keeps is read again
+// once the batches went through the IDs that it kept, where that costs less
+// than reading on in ID order. A read costs about the whole range, and the
+// action weighs it once: here, the rest of the range lies among the next
+// 420,000 tasks, where reading 51,000 tasks again pays off for up to 1,234
+// tasks left. A weighing that runs out of its second goes on in ID order.
+// The action still changes each task of the range once, and no other task.
+func TestAWideRangeOfFinishTimesIsReadAgainWhereThatPaysOff(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name  string
+		left  int    // tasks of the range among the 420,000 after the first 50,000
+		held  bool   // another transaction holds the table while the action weighs
+		again string // the pick after the weighing
+	}{
+		{"read again", 1000, false, "r"},
+		{"in ID order", 2000, false, "p"},
+		{"in ID order, as the weighing ran out of time", 1000, true, "p"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			sent := &bulkStatements{}
+			e := newTracedEnv(t, sent)
+			if c.held {
+				holdWhileWeighing(t, e, sent)
+			}
+
+			// 50,000 tasks that died a minute ago, then 420,000 tasks that
+			// died a day ago, but for c.left of them, spread out.
+			e.exec(t, fmt.Sprintf(`INSERT INTO {s}.tasks (queue, kind, state, created_at, finalized_at, run_at, payload, max_attempts)
+			           SELECT 'q' || (i %% 3), 'email.send', 'dead', now() - interval '2 days',
+			                  now() - CASE WHEN i <= 50000 OR (i - 50000) %% %d = 0 THEN interval '1 minute' ELSE interval '1 day' END, now(), '{}', 3
+			           FROM generate_series(1, 470000) i`, 420000/c.left))
+			e.exec(t, "ANALYZE {s}.tasks")
+			inRange := fmt.Sprintf("id <= 50000 OR (id - 50000) %% %d = 0", 420000/c.left)
+
+			dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
+			got, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: dead, FinishedSince: time.Now().Add(-time.Hour)})
+			if want := (taskmill.BulkResult{Changed: int64(50000 + c.left)}); err != nil || got != want {
+				t.Fatalf("retry: %+v, %v; want %+v, each task of the range retried once", got, err, want)
+			}
+			left := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE ("+inRange+") AND state <> 'available'")
+			others := e.count(t, "SELECT count(*) FROM {s}.tasks WHERE NOT ("+inRange+") AND state <> 'dead'")
+			if left != 0 || others != 0 {
+				t.Errorf("%d tasks of the range are left, and %d others changed; want 0 and 0", left, others)
+			}
+			switch statements, want := sent.reset(), "r"+strings.Repeat("k", 49)+"a"+c.again; {
+			case strings.Contains(statements, "w"):
+				t.Logf("a batch ran out of time on this busy machine, and the action went on in windows (%q)", statements)
+			case !strings.HasPrefix(statements, want):
+				t.Errorf("the retry sent %q, want it to start with %q", statements, want)
+			}
+		})
+	}
+}
+
+// holdWhileWeighing locks the index of finish times, on a connection of its
+// own, before the action weighs reading a range of finish times again, and
+// lets it go before the next batch's transaction begins. The weighing plans
+// its statement once its settings ran, and waits for the lock until it runs
+// out of its time. A lock on the table would hold up the statement before
+// its settings, when the connection prepares it.
+func holdWhileWeighing(t *testing.T, e *env, sent *bulkStatements) {
+	t.Helper()
+	conn, err := pgx.Connect(t.Context(), testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() {
+			if _, err := conn.Exec(context.Background(), "ROLLBACK"); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	// t.Context is canceled before cleanups run.
+	t.Cleanup(func() {
+		release()
+		_ = conn.Close(context.Background())
+	})
+
+	hold := func() {
+		if _, err := conn.Exec(t.Context(), replaceSchema("BEGIN; REINDEX INDEX {s}.tasks_finished_idx", e.schema)); err != nil {
+			t.Error(err)
+		}
+		sent.onBegin.Store(&release)
+		// A weighing that waits on has no bound: it goes on, and the test fails.
+		time.AfterFunc(10*time.Second, release)
+	}
+	sent.onWeigh.Store(&hold)
 }
 
 // idsOf returns the IDs that sql selects, read on a connection of its own
@@ -785,6 +934,24 @@ func (e *env) wantHead(t *testing.T, group string, id int) {
 // order.
 func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 	t.Parallel()
+	g := taskmill.TaskFilter{GroupKeys: []string{"g"}}
+	canceled := taskmill.TaskFilter{GroupKeys: []string{"g"}, States: []taskmill.State{taskmill.StateCanceled}}
+
+	for name, params := range map[string]taskmill.BulkParams{
+		"without a range":            {Filter: g},
+		"in a range of finish times": {Filter: canceled, FinishedSince: time.Now().Add(-time.Hour)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			retryKeepsTheOrderOfGroups(t, &params)
+		})
+	}
+}
+
+// retryKeepsTheOrderOfGroups checks that retries with params, which select
+// the canceled tasks of group g, keep the group in order.
+func retryKeepsTheOrderOfGroups(t *testing.T, params *taskmill.BulkParams) {
+	t.Helper()
 	e := newEnv(t)
 	ctx := t.Context()
 
@@ -814,15 +981,14 @@ func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 	for i := len(res) - 1; i >= 500; i-- {
 		e.cancel(t, res[i].ID)
 	}
-	g := &taskmill.TaskFilter{GroupKeys: []string{"g"}}
-	if _, err := e.client.CancelMatching(ctx, bulk(g)); err != nil {
+	if _, err := e.client.CancelMatching(ctx, bulk(&taskmill.TaskFilter{GroupKeys: []string{"g"}})); err != nil {
 		t.Fatal(err)
 	}
 
 	tx := e.begin(t)
 	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", res[0].ID)
 
-	got, err := e.client.RetryMatching(ctx, bulk(g))
+	got, err := e.client.RetryMatching(ctx, params)
 	if err != nil || got.Changed != 0 || got.Skipped != 1500 {
 		t.Fatalf("with the oldest task held: %+v, %v; want the whole group left", got, err)
 	}
@@ -831,7 +997,7 @@ func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err = e.client.RetryMatching(ctx, bulk(g))
+	got, err = e.client.RetryMatching(ctx, params)
 	if err != nil || got.Changed != 1500 || got.Skipped != 0 {
 		t.Fatalf("once released: %+v, %v; want all 1,500", got, err)
 	}
@@ -1250,50 +1416,63 @@ func TestBulkActionsGoOnFromAnyStop(t *testing.T) {
 }
 
 // A run that stops early goes on, in the next run, at the first task it
-// skipped: a FIFO group that it left comes back in order.
+// skipped: a FIFO group that it left comes back in order. A range of finish
+// times keeps the order of IDs, also where the group's later tasks died
+// first.
 func TestRetryGoesOnInGroupOrder(t *testing.T) {
 	t.Parallel()
-	sent := &bulkStatements{}
-	e := newTracedEnv(t, sent)
-
-	canceled := func(n int, group string) {
-		e.exec(t, `INSERT INTO {s}.tasks (queue, run_at, kind, finalized_at, state, cancel_requested_at, payload, max_attempts, group_key)
-		           SELECT 'default', now(), 'email.send', now(), 'canceled', now(), '{}', 3, nullif($1, '')
-		           FROM generate_series(1, $2)`, group, n)
-	}
-
-	// The oldest task of the group, two batches of other tasks, and the rest
-	// of the group, which is more than a batch.
-	canceled(1, "g")
-	oldest := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
-	canceled(2000, "")
-	canceled(1500, "g")
 	all := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}}
 
-	// The first run meets the oldest task held, and leaves the group. Its
-	// context ends when its second batch picks its tasks, as a click that
-	// runs out of time: it stops after that batch, short of the group's rest.
-	tx := e.begin(t)
-	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", oldest)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	sent.atBatch(2, cancel)
-	first, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: all})
-	if !errors.Is(err, context.Canceled) || first.Changed != 1999 || first.Next == "" {
-		t.Fatalf("first run: %+v, %v; want it to stop after two batches, with a cursor", first, err)
-	}
+	for name, params := range map[string]taskmill.BulkParams{
+		"without a range":            {Filter: all},
+		"in a range of finish times": {Filter: all, FinishedSince: time.Now().Add(-time.Hour)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			sent := &bulkStatements{}
+			e := newTracedEnv(t, sent)
 
-	if err := tx.Rollback(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+			canceled := func(n int, group string, ago time.Duration) {
+				e.exec(t, `INSERT INTO {s}.tasks (queue, run_at, kind, finalized_at, state, cancel_requested_at, payload, max_attempts, group_key)
+				           SELECT 'default', now(), 'email.send', now() - $3::interval, 'canceled', now(), '{}', 3, nullif($1, '')
+				           FROM generate_series(1, $2)`, group, n, ago)
+			}
 
-	// The first run's last batch ended before it returned, so the rest
-	// skips none of its rows.
-	rest, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: all, Cursor: first.Next})
-	if err != nil || first.Changed+rest.Changed != 3501 || rest.Skipped != 0 || rest.Next != "" {
-		t.Fatalf("then %+v after %+v, %v; want every task retried", rest, first, err)
+			// The oldest task of the group, two batches of other tasks, and the
+			// rest of the group, which is more than a batch, and died first.
+			canceled(1, "g", time.Minute)
+			oldest := int64(e.count(t, "SELECT max(id) FROM {s}.tasks"))
+			canceled(2000, "", 2*time.Minute)
+			canceled(1500, "g", 3*time.Minute)
+
+			// The first run meets the oldest task held, and leaves the group.
+			// Its context ends when its second batch picks its tasks, as a
+			// click that runs out of time: it stops after that batch, short of
+			// the group's rest.
+			tx := e.begin(t)
+			e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", oldest)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			sent.atBatch(2, cancel)
+			first, err := e.client.RetryMatching(ctx, &params)
+			if !errors.Is(err, context.Canceled) || first.Changed != 1999 || first.Next == "" {
+				t.Fatalf("first run: %+v, %v; want it to stop after two batches, with a cursor", first, err)
+			}
+
+			if err := tx.Rollback(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+
+			// The first run's last batch ended before it returned, so the rest
+			// skips none of its rows.
+			params.Cursor = first.Next
+			rest, err := e.client.RetryMatching(t.Context(), &params)
+			if err != nil || first.Changed+rest.Changed != 3501 || rest.Skipped != 0 || rest.Next != "" {
+				t.Fatalf("then %+v after %+v, %v; want every task retried", rest, first, err)
+			}
+			e.wantHead(t, "g", int(oldest))
+		})
 	}
-	e.wantHead(t, "g", int(oldest))
 }
 
 // Each batch reads about its own tasks only, however many the action went
@@ -1354,14 +1533,16 @@ func TestBulkBatchesReadTheirTasksOnly(t *testing.T) {
 
 // bulkStatements keeps the statements of bulk actions that a pool's
 // connections send, in their order: a p for the pick of a batch, a q for a
-// pick that reads a range queue by queue, and a w for the search for a
-// window.
+// pick that reads a range queue by queue, an r for one that reads a range of
+// finish times and keeps its IDs, a k for a pick of those IDs, an a for the
+// statement that weighs reading such a range again, and a w for the search
+// for a window.
 type bulkStatements struct {
 	mu   sync.Mutex
 	sent []byte
-	// Each is called once: before the next transaction begins, and before
-	// the pick of the next batch.
-	onBegin, onBatch atomic.Pointer[func()]
+	// Each is called once: before the next transaction begins, before the
+	// pick of the next batch, and before the next weighing of a read again.
+	onBegin, onBatch, onWeigh atomic.Pointer[func()]
 	// again is set while the action runs a batch again: its transaction was
 	// rolled back, and its next pick is of the same batch.
 	again atomic.Bool
@@ -1370,10 +1551,15 @@ type bulkStatements struct {
 func (s *bulkStatements) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
 	on := &s.onBegin
 	switch {
-	case strings.Contains(d.SQL, "WITH candidates AS"):
+	case strings.Contains(d.SQL, "candidates AS ("):
 		mark := byte('p')
-		if strings.Contains(d.SQL, "count(*) OVER ()") {
+		switch {
+		case strings.Contains(d.SQL, "count(*) OVER ()"):
 			mark = 'q' // a pick that reads a range queue by queue
+		case strings.Contains(d.SQL, "kept AS MATERIALIZED"):
+			mark = 'r' // a pick that reads a range of finish times
+		case strings.Contains(d.SQL, "= ANY($13::bigint[])"):
+			mark = 'k' // a pick of kept IDs
 		}
 		s.add(mark)
 		if s.again.Swap(false) {
@@ -1395,15 +1581,22 @@ func (s *bulkStatements) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx
 
 func (*bulkStatements) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
-func (*bulkStatements) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+func (s *bulkStatements) TraceBatchStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceBatchStartData) context.Context {
+	for _, q := range d.Batch.QueuedQueries {
+		switch {
+		case strings.Contains(q.SQL, "SELECT least("):
+			s.add('w')
+		case strings.Contains(q.SQL, "AS most"):
+			s.add('a')
+			if f := s.onWeigh.Swap(nil); f != nil {
+				(*f)()
+			}
+		}
+	}
 	return ctx
 }
 
-func (s *bulkStatements) TraceBatchQuery(_ context.Context, _ *pgx.Conn, d pgx.TraceBatchQueryData) {
-	if strings.Contains(d.SQL, "SELECT least(") {
-		s.add('w')
-	}
-}
+func (*bulkStatements) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
 
 func (s *bulkStatements) add(statement byte) {
 	s.mu.Lock()

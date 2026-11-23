@@ -163,40 +163,118 @@ SELECT least($2::bigint,
     (SELECT id FROM {s}.tasks WHERE $3 AND id > $1 AND id <= $2 ORDER BY id OFFSET {window} - 1 LIMIT 1),
     (SELECT id FROM {s}.task_history WHERE $4 AND id > $1 AND id <= $2 ORDER BY id OFFSET {window} - 1 LIMIT 1))`
 
+// bulkMatchSQL matches the tasks t that the next batches of a bulk action
+// may take: those after $5 up to $6, of states $4, that meet cond, the
+// filters ($1 to $3), and the ranges of times from $ranges on.
+func bulkMatchSQL(cond string, ranges int) string {
+	return cond + ` AND t.id > $5 AND t.id <= $6
+      AND t.state = ANY($4::text[]::{s}.task_state[]) AND ` + taskFilterSQL + `
+      AND ` + timeRangesSQL(ranges)
+}
+
+// finishRangeSQL reads the IDs of the tasks t of a range of finish times
+// that meet cond, the filters, and the ranges from $ranges on, after $5 up
+// to $6: the whole range, in the index of finish times, of the named
+// queues ($1), or else of each queue that holds tasks of states $4. OFFSET
+// 0 keeps the planner from reading in ID order to stop early, past every
+// task outside the range. See finishWalk.
+func finishRangeSQL(cond string, ranges int) string {
+	return `SELECT t.id FROM {s}.tasks t
+    WHERE ` + bulkMatchSQL(cond, ranges) + ` AND t.state IN ('dead', 'canceled')
+      AND t.queue = ANY(CASE WHEN cardinality($1::text[]) > 0 THEN $1::text[] ELSE ARRAY(` + queuesOfStates(`$4::text[]`) + `) END)
+    OFFSET 0`
+}
+
+// $1 queues, $2 kinds, $3 group keys, $4 states, $5 after task ID, $6 up to
+// task ID, $7 to $10 the ranges of times.
+//
+// readAgainSQL weighs reading a range of finish times again for its tasks
+// after $5, once the IDs of its first read ran out, against reading on in
+// ID order: see finishWalk. It estimates the tasks of the table after $5 up
+// to $6 from where the next {window} of them end, as windowEndSQL does,
+// returns the most tasks left in the range for which reading it again pays
+// off, and, if that is one or more, counts the tasks left, up to one more:
+// those that a retry or a delete reads, as all are dead or canceled. It
+// reads at most {window} entries of the primary key, and, within
+// weighSettings' time, the range up to the count's end.
+var readAgainSQL = `
+WITH ahead AS (
+    SELECT floor(sqrt({keptIDs}::float8 / {readCost} * {window} * ($6::bigint - $5::bigint)
+        / (least($6, (SELECT id FROM {s}.tasks WHERE id > $5 AND id <= $6 ORDER BY id OFFSET {window} - 1 LIMIT 1)) - $5)
+    ))::bigint - {keptIDs} AS most
+)
+SELECT most, CASE WHEN most > 0 THEN (SELECT count(*) FROM (SELECT FROM (` + finishRangeSQL(retryPickSQL, 7) + `) r LIMIT most + 1) c) END
+FROM ahead`
+
+// pickFrom is where a pick statement finds the tasks of its batch.
+type pickFrom int
+
+const (
+	fromIDOrder pickFrom = iota // after the position, in ID order
+	fromQueues                  // the same, read queue by queue: see rangeWalk
+	fromRange                   // the same, read from a range of finish times, whose IDs it keeps: see finishWalk
+	fromKept                    // among the IDs ($13) that a pick from the range kept
+)
+
 // $1 queues, $2 kinds, $3 group keys, $4 states, $5 after task ID, $6 up to task ID,
 // $7 and $8 queues and group keys of the groups that the action left,
-// $9 to $12 the ranges of times.
+// $9 to $12 the ranges of times, and if from kept IDs, $13 those IDs.
 //
 // pickSQL returns a pick statement, whose tasks t meet cond, and whose
 // locked tasks meet gates too. The pick statements read the next batch of
 // the tasks that a bulk action changes, in ID order after $5 up to $6, the
 // action's last task or the end of the batch's window: those of states $4
-// that match the filters and the ranges. If fromQueues, the statement
-// reads them queue by queue, from the queues that hold tasks of states $4,
-// and returns with each task how many of them it found: see rangeWalk. The
-// pick statements return each task, whether they hold its lock, whether its
-// group had a row, which they then hold, and whether it must take a dedupe
-// key back if it is retried. They skip what other transactions hold, and
-// the groups ($7, $8) that the action left before: the page on operator
-// actions says why.
-func pickSQL(cond, gates string, fromQueues bool) string {
+// that match the filters and the ranges. From queues, the statement reads
+// them queue by queue, from the queues that hold tasks of states $4, and
+// returns with each task how many of them it found: see rangeWalk. From a
+// range of finish times, it reads the whole range, as finishRangeSQL does,
+// sorts the IDs of its first {keptIDs} tasks and of one more, if any, takes
+// the first {batch} of them, and returns the others with the first task:
+// see finishWalk. From kept IDs, it reads the tasks of $13 by their IDs,
+// and checks the rest behind OFFSET 0 too, so that the planner cannot serve
+// the range from its index instead: where statistics expect few tasks
+// there, as during an incident, such a plan would read all of it in every
+// batch.
+// The pick statements return each task, whether they hold its lock,
+// whether its group had a row, which they then hold, and whether it must
+// take a dedupe key back if it is retried. They skip what other
+// transactions hold, and the groups ($7, $8) that the action left before:
+// the page on operator actions says why.
+func pickSQL(cond, gates string, from pickFrom) string {
 	read := `SELECT t.id, t.queue, coalesce(t.group_key, '') AS group_key FROM {s}.tasks t
-    WHERE ` + cond + ` AND t.id > $5 AND t.id <= $6
-      AND t.state = ANY($4::text[]::{s}.task_state[]) AND ` + taskFilterSQL + `
-      AND ` + timeRangesSQL(9)
-	candidates, found := read+`
-    ORDER BY t.id`, ``
-	if fromQueues {
-		candidates, found = `SELECT c.id, c.queue, c.group_key, count(*) OVER () AS found FROM `+
+    WHERE ` + bulkMatchSQL(cond, 9)
+	var kept, candidates, extra string
+	queue, group := `c.queue`, `c.group_key`
+	switch from {
+	case fromIDOrder:
+		candidates = read + `
+    ORDER BY t.id`
+	case fromQueues:
+		candidates, extra = `SELECT c.id, c.queue, c.group_key, count(*) OVER () AS found FROM `+
 			wholeIn(read, queuesOfStates(`$4::text[]`))+`
     ORDER BY c.id`, `, c.found`
+	case fromRange:
+		kept = `kept AS MATERIALIZED (
+    SELECT ARRAY(SELECT c.id FROM (` + finishRangeSQL(cond, 9) + `) c ORDER BY c.id LIMIT {keptIDs} + 1) AS ids
+), `
+		candidates = `SELECT k.id FROM unnest((SELECT ids[:{batch}] FROM kept)::bigint[]) AS k(id)
+    ORDER BY k.id`
+		queue = `coalesce(p.queue, (SELECT t.queue FROM {s}.tasks t WHERE t.id = c.id))`
+		group = `coalesce(p.group_key, (SELECT coalesce(t.group_key, '') FROM {s}.tasks t WHERE t.id = c.id))`
+		extra = `, CASE WHEN c.id = (SELECT min(id) FROM candidates) THEN (SELECT ids[{batch} + 1:] FROM kept) END`
+	case fromKept:
+		candidates = `SELECT c.id, c.queue, c.group_key FROM (
+        SELECT t.id, t.queue, coalesce(t.group_key, '') AS group_key, ` + bulkMatchSQL(cond, 9) + ` AS matches
+        FROM {s}.tasks t WHERE t.id = ANY($13::bigint[]) OFFSET 0) c
+    WHERE c.matches
+    ORDER BY c.id`
 	}
 	return `
-WITH candidates AS (
+WITH ` + kept + `candidates AS (
     ` + candidates + `
     LIMIT {batch}
 ), picked AS (
-    SELECT t.id, t.state::text AS state,
+    SELECT t.id, t.queue, coalesce(t.group_key, '') AS group_key, t.state::text AS state,
            EXISTS (SELECT FROM {s}.groups g WHERE g.queue = t.queue AND g.group_key = t.group_key) AS in_group,
            coalesce(` + keyedSQL + `, false) AS keyed
     FROM {s}.tasks t
@@ -207,8 +285,8 @@ WITH candidates AS (
       AND ` + groupFreeSQL + gates + `
     FOR UPDATE OF t SKIP LOCKED
 )
-SELECT c.id, c.queue, c.group_key, p.id IS NOT NULL, coalesce(p.state, ''), coalesce(p.in_group, false),
-       coalesce(p.keyed, false)` + found + `
+SELECT c.id, ` + queue + `, ` + group + `, p.id IS NOT NULL, coalesce(p.state, ''), coalesce(p.in_group, false),
+       coalesce(p.keyed, false)` + extra + `
 FROM candidates c LEFT JOIN picked p ON p.id = c.id
 ORDER BY c.id`
 }
@@ -223,15 +301,21 @@ const (
 	deletePickSQL = `t.state <> 'running'`
 )
 
-// The pick statements of each action, in their two forms.
+// The pick statements of each action, in their four forms.
 var (
-	pickRetrySQL        = pickSQL(retryPickSQL, ``, false)
-	pickRetryQueuesSQL  = pickSQL(retryPickSQL, ``, true)
-	pickCancelSQL       = pickSQL(cancelPickSQL, ` AND `+keyFreeSQL, false)
-	pickCancelQueuesSQL = pickSQL(cancelPickSQL, ` AND `+keyFreeSQL, true)
-	pickDeleteSQL       = pickSQL(deletePickSQL, ` AND `+keyFreeSQL, false)
-	pickDeleteQueuesSQL = pickSQL(deletePickSQL, ` AND `+keyFreeSQL, true)
+	pickRetrySQL  = pickStatements(retryPickSQL, ``)
+	pickCancelSQL = pickStatements(cancelPickSQL, ` AND `+keyFreeSQL)
+	pickDeleteSQL = pickStatements(deletePickSQL, ` AND `+keyFreeSQL)
 )
+
+// pickStatements returns the four forms of pickSQL for cond and gates.
+func pickStatements(cond, gates string) pickForms {
+	return pickForms{
+		forms: forms{plain: pickSQL(cond, gates, fromIDOrder), queues: pickSQL(cond, gates, fromQueues)},
+		reads: pickSQL(cond, gates, fromRange),
+		kept:  pickSQL(cond, gates, fromKept),
+	}
+}
 
 // $1 task IDs, $2 task IDs that become pending, $3 channel, $4 queues to notify.
 //

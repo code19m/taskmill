@@ -64,9 +64,8 @@ transaction of its own.
   tasks into their groups. It leaves a task whose key another task holds,
   and counts it in `BulkResult.Conflicts`, apart from the skipped tasks: a
   later run leaves it again. Such a task does not make the action leave its
-  group. If the batch then leaves a task after all, because its group has no
-  row yet, it gives that task's key away again: a canceled task holds no
-  key.
+  group. If the batch then leaves a task after all, as its group has no row
+  yet, it gives the task's key away again: a canceled task holds no key.
 - **Three bounded waits.** A retry that takes a key back inserts the key's
   row, or changes it. An enqueue that claims the same key, or a transaction
   that holds its row, makes that statement wait. A retry into a group that
@@ -106,8 +105,8 @@ transaction of its own.
   group that the action left back in order: the tasks that the action
   changed since no longer match, so reading past them again is cheap.
 - **A range of times narrows the batches.** With a queue named, the planner
-  reads the range in the index of that time, or in ID order, as statistics
-  choose: for none, see [below](#a-range-of-times-without-a-queue).
+  reads a range of creation times in its index, or in ID order, as
+  statistics choose: for the rest, see [below](#a-range-of-times-without-a-queue).
 - **Delete goes through two tables.** It reads the next batch of both tasks
   and history, and goes up to the end of the shorter one, so that one
   position covers both. History has a partition per day. A search by the
@@ -140,29 +139,30 @@ their states, one index probe each, and name them to the planner.
 - **A batch by queue reads the rest of the range whole,** and counts it:
   `OFFSET 0` keeps the planner from reading in ID order. On a very wide
   range, it can pass its 1 s limit, and the action continues in windows.
-- **Two batches read by queue** (`readsQueues` in `bulk.go`): the first,
-  which skips the tasks before the range, and the last of a range with an
-  end, which stops with it. The others read in ID order, in order on disk.
-- **A range of finish times whose tasks were created far apart** reads the
-  tasks between them in ID order after its first batch, within a window if
-  a batch runs out of time. Name a queue to read only that queue's range.
+- **Two batches of a range of creation times read by queue** (`readsQueues`
+  in `bulk.go`): the first, which skips the tasks before the range, and the
+  last of a range with an end, which stops with it. The others read in ID order.
+- **A range of finish times is read for its IDs** (`finishWalk`): tasks that
+  died together can lie weeks apart. A read keeps the next 50,000 IDs to pick
+  by primary key, and runs again only where that beats ID order (`weighRead`).
 - **History probes each queue in each daily partition** of the range: with
   1,000 queues, a delete of 2 days read 62,000 index pages, not 34,000. Of
   750,000 completed tasks, a first batch for an hour read 78,000, not 799,000.
 
-| Whole action, 646,000 tasks, no queue | Before, on 15 / 18 | After |
+| Whole action, about 646,000 tasks, no queue | Before, on 15 / 18 | After |
 |---|---|---|
 | Retry the 11,700 dead tasks created on a day 4 weeks back | 669,000 rows, 217 / 196 ms | 68,000 rows, 165 / 144 ms |
 | Retry the 7,800 created on a day 3 days back | 661,000 rows, 193 / 171 ms | 45,000 / 66,000 rows, 127 / 103 ms |
-| Retry the 16,900 that died in the last day, created over 30 days | 679,000 / 615,000 rows, 309 / 255 ms | 625,000 / 561,000 rows, 344 / 291 ms |
+| Retry the 17,000 that died in the last day, created over 30 days | 237,000 / 201,000 rows, 620 / 515 ms | 68,000 rows, 400 / 390 ms |
 | Count every state created in the last day | 468,000 / 305,000 rows, 180 / 110 ms | 305,000 rows, 58 / 56 ms |
 
 | Option | Why not |
 |---|---|
 | Every batch reads by queue | It reads the rest of the range again each time: 32 million rows for a range of 200,000 tasks, 40 times as many |
-| By queue while the rest of a range of finish times is small | Fewer rows, but a heap page for each task and a probe of each queue in each batch: slower with 1,000 queues |
+| Read a range of finish times again for every 50,000 tasks | Each read costs the whole range: 200,000 tasks, a third of the table, took 5 reads and up to 14% longer than ID order, and a range of millions would take hundreds |
+| Pick the kept IDs with the batch's other conditions in `WHERE` | With statistics that expected few tasks in the range, each batch read all of it in the index of finish times: 20,000 pages, not 4,300 on 15 and 430 on 18 |
 | Every batch names the queues, and the planner chooses | It takes the list to hold 10 queues. With 1,000 queues, it read by queue in every batch, and misjudged its joins |
-| Walk a range of finish times in finish order | A cursor is an ID, and a retry keeps each FIFO group in ID order |
+| Walk a range of finish times in finish order | A cursor is an ID, and a retry keeps each FIFO group in ID order. So the batches keep ID order, and only read the range's IDs in its index |
 
 ## A retry takes its dedupe key back
 
