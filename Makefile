@@ -45,13 +45,6 @@ COMPAT := cd internal/compat && GOWORK=off
 FUZZTIME ?= 10s
 FUZZ     ?=
 
-# `go install tool@version` ignores the toolchain line of go.mod: it builds
-# with the local Go, or with the Go that the tool needs if that is newer. The
-# tools that read the code, such as golangci-lint, refuse code for a newer Go
-# than their own, so the tools are installed by the go command that the code
-# selects, and with a newer Go only where a tool needs one.
-GO_INSTALL = GOTOOLCHAIN=auto "$(shell go env GOROOT)/bin/go" install
-
 BIN           := $(CURDIR)/bin
 GOLANGCI_LINT := $(BIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
 GOVULNCHECK   := $(BIN)/govulncheck-$(GOVULNCHECK_VERSION)
@@ -217,14 +210,7 @@ db: ## Start a PostgreSQL container for the tests (TEST_POSTGRES picks the image
 	@docker start taskmill-test-db >/dev/null 2>&1 || docker run -d --name taskmill-test-db -p 54329:5432 \
 		-e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=taskmill $(TEST_POSTGRES) -c max_connections=500 \
 		-c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
-	@tries=0; until docker exec taskmill-test-db pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null; do \
-		tries=$$((tries + 1)); \
-		if [ $$tries -gt 300 ]; then \
-			echo "PostgreSQL is not ready after 60 seconds. The end of its log:" >&2; \
-			docker logs --tail 30 taskmill-test-db >&2; exit 1; \
-		fi; \
-		sleep 0.2; \
-	done
+	@until docker exec taskmill-test-db pg_isready -h 127.0.0.1 -U postgres -q; do sleep 0.2; done
 	@echo "PostgreSQL is ready at $(TEST_DATABASE_URL)"
 
 .PHONY: db-stop
@@ -275,25 +261,25 @@ clean: ## Remove installed tools, generated reports, and built releases.
 	rm -rf $(BIN) $(MODULES:%=%/coverage.out) dist
 
 $(GOLANGCI_LINT):
-	GOBIN=$(BIN) $(GO_INSTALL) github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	GOBIN=$(BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	mv $(BIN)/golangci-lint $@
 
 $(GOVULNCHECK):
-	GOBIN=$(BIN) $(GO_INSTALL) golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+	GOBIN=$(BIN) go install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
 	mv $(BIN)/govulncheck $@
 
 $(ACTIONLINT):
-	GOBIN=$(BIN) $(GO_INSTALL) github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
+	GOBIN=$(BIN) go install github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION)
 	mv $(BIN)/actionlint $@
 
 $(GORELEASER):
-	GOBIN=$(BIN) $(GO_INSTALL) github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
+	GOBIN=$(BIN) go install github.com/goreleaser/goreleaser/v2@$(GORELEASER_VERSION)
 	mv $(BIN)/goreleaser $@
 
 $(GORELEASE):
-	GOBIN=$(BIN) $(GO_INSTALL) golang.org/x/exp/cmd/gorelease@$(GORELEASE_VERSION)
+	GOBIN=$(BIN) go install golang.org/x/exp/cmd/gorelease@$(GORELEASE_VERSION)
 	mv $(BIN)/gorelease $@
 
 # Syft names itself in every SBOM, so it is told its version.
 $(SYFT):
-	GOBIN=$(dir $@) $(GO_INSTALL) -ldflags='-X main.version=$(SYFT_VERSION:v%=%)' github.com/anchore/syft/cmd/syft@$(SYFT_VERSION)
+	GOBIN=$(dir $@) go install -ldflags='-X main.version=$(SYFT_VERSION:v%=%)' github.com/anchore/syft/cmd/syft@$(SYFT_VERSION)
