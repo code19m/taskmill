@@ -245,27 +245,27 @@ func TestListChecksItsParams(t *testing.T) {
 		{Cursor: "%%%"},
 		{Cursor: "eA"}, // "x"
 		{Filter: taskmill.TaskFilter{States: []taskmill.State{"bogus"}}},
-		{FinishedSince: at},
-		{FinishedBefore: at, Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}}},
-		{FinishedBefore: at, Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead, taskmill.StateAvailable}}},
-		{Filter: dead, FinishedSince: at, FinishedBefore: at},
-		{Filter: dead, FinishedSince: at.Add(time.Nanosecond), FinishedBefore: at},
-		{Filter: dead, FinishedSince: firstTimestamp.Add(-time.Microsecond)},
-		{Filter: dead, FinishedSince: lastTimestamp.Add(time.Nanosecond)},
-		{Filter: dead, FinishedBefore: lastTimestamp.Add(time.Microsecond)},
-		{Filter: dead, FinishedBefore: time.Unix(math.MaxInt64, 0)},
-		{CreatedSince: at, CreatedBefore: at},
-		{CreatedSince: at.Add(time.Nanosecond), CreatedBefore: at},
-		{Filter: dead, CreatedSince: at.Add(time.Hour), CreatedBefore: at},
-		{CreatedSince: firstTimestamp.Add(-time.Microsecond)},
-		{CreatedSince: lastTimestamp.Add(time.Nanosecond)},
-		{CreatedBefore: lastTimestamp.Add(time.Microsecond)},
-		{CreatedBefore: time.Unix(math.MaxInt64, 0)},
+		{Filter: taskmill.TaskFilter{FinishedSince: at}},
+		{Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}, FinishedBefore: at}},
+		{Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead, taskmill.StateAvailable}, FinishedBefore: at}},
+		{Filter: inRange(dead, taskmill.TaskFilter{FinishedSince: at, FinishedBefore: at})},
+		{Filter: inRange(dead, taskmill.TaskFilter{FinishedSince: at.Add(time.Nanosecond), FinishedBefore: at})},
+		{Filter: inRange(dead, taskmill.TaskFilter{FinishedSince: firstTimestamp.Add(-time.Microsecond)})},
+		{Filter: inRange(dead, taskmill.TaskFilter{FinishedSince: lastTimestamp.Add(time.Nanosecond)})},
+		{Filter: inRange(dead, taskmill.TaskFilter{FinishedBefore: lastTimestamp.Add(time.Microsecond)})},
+		{Filter: inRange(dead, taskmill.TaskFilter{FinishedBefore: time.Unix(math.MaxInt64, 0)})},
+		{Filter: taskmill.TaskFilter{CreatedSince: at, CreatedBefore: at}},
+		{Filter: taskmill.TaskFilter{CreatedSince: at.Add(time.Nanosecond), CreatedBefore: at}},
+		{Filter: inRange(dead, taskmill.TaskFilter{CreatedSince: at.Add(time.Hour), CreatedBefore: at})},
+		{Filter: taskmill.TaskFilter{CreatedSince: firstTimestamp.Add(-time.Microsecond)}},
+		{Filter: taskmill.TaskFilter{CreatedSince: lastTimestamp.Add(time.Nanosecond)}},
+		{Filter: taskmill.TaskFilter{CreatedBefore: lastTimestamp.Add(time.Microsecond)}},
+		{Filter: taskmill.TaskFilter{CreatedBefore: time.Unix(math.MaxInt64, 0)}},
 		// A list has one order: a range of creation times puts it in creation
 		// order, where it takes no range of finish times.
-		{Filter: dead, CreatedSince: at, FinishedSince: at},
-		{Filter: dead, CreatedBefore: at, FinishedBefore: at},
-		{CreatedSince: at, FinishedBefore: at},
+		{Filter: inRange(dead, taskmill.TaskFilter{CreatedSince: at, FinishedSince: at})},
+		{Filter: inRange(dead, taskmill.TaskFilter{CreatedBefore: at, FinishedBefore: at})},
+		{Filter: taskmill.TaskFilter{CreatedSince: at, FinishedBefore: at}},
 	} {
 		if _, err := e.client.List(t.Context(), &p); !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Errorf("%+v: got %v, want ErrInvalidArgument", p, err)
@@ -434,7 +434,7 @@ func TestListsOfFinishedTasksTakeARangeOfFinishTimes(t *testing.T) {
 			{stJohns.String(), inStJohns, stJohns},
 		} {
 			// The zero time is no bound in any location.
-			params := taskmill.ListParams{Filter: c.filter, FinishedSince: c.since.In(zone.bounds), FinishedBefore: c.before.In(zone.bounds)}
+			params := taskmill.ListParams{Filter: inRange(c.filter, taskmill.TaskFilter{FinishedSince: c.since.In(zone.bounds), FinishedBefore: c.before.In(zone.bounds)})}
 			for _, limit := range []int{1, 2, 100} {
 				params.Limit = limit
 				got, next := listed(t, zone.client, params, len(c.want)+1)
@@ -533,7 +533,7 @@ func TestListsTakeARangeOfCreationTimes(t *testing.T) {
 			{stJohns.String(), inStJohns, stJohns},
 		} {
 			// The zero time is no bound in any location.
-			params := taskmill.ListParams{Filter: c.filter, CreatedSince: c.since.In(zone.bounds), CreatedBefore: c.before.In(zone.bounds)}
+			params := taskmill.ListParams{Filter: inRange(c.filter, taskmill.TaskFilter{CreatedSince: c.since.In(zone.bounds), CreatedBefore: c.before.In(zone.bounds)})}
 			for _, limit := range []int{1, 2, 100} {
 				params.Limit = limit
 				got, next := listed(t, zone.client, params, len(c.want)+1)
@@ -619,9 +619,9 @@ func TestRangeOfCreationTimesHoldsTheTaskOfALongTransaction(t *testing.T) {
 		want   []int64
 	}{
 		{"every task", taskmill.ListParams{}, []int64{late.ID, meanwhile}},
-		{"the range of both", taskmill.ListParams{CreatedSince: began}, []int64{meanwhile, late.ID}},
-		{"the range that ends with the later creation time", taskmill.ListParams{CreatedBefore: first.CreatedAt}, []int64{late.ID}},
-		{"the range that starts with it", taskmill.ListParams{CreatedSince: first.CreatedAt}, []int64{meanwhile}},
+		{"the range of both", taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedSince: began}}, []int64{meanwhile, late.ID}},
+		{"the range that ends with the later creation time", taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedBefore: first.CreatedAt}}, []int64{late.ID}},
+		{"the range that starts with it", taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedSince: first.CreatedAt}}, []int64{meanwhile}},
 	} {
 		for _, limit := range []int{1, 100} {
 			c.params.Limit = limit
@@ -664,7 +664,7 @@ func TestRangeOfCreationTimesFollowsATaskThroughItsLife(t *testing.T) {
 	e.waitState(t, completed, taskmill.StateCompleted)
 	e.waitState(t, running, taskmill.StateRunning)
 
-	page, err := e.client.List(t.Context(), &taskmill.ListParams{CreatedSince: before})
+	page, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedSince: before}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +687,7 @@ func TestRangeOfCreationTimesFollowsATaskThroughItsLife(t *testing.T) {
 		{taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted, taskmill.StateAvailable}}, []int64{waiting, completed}},
 		{taskmill.TaskFilter{Queues: []string{taskmill.DefaultQueue}}, []int64{running, completed}},
 	} {
-		if got, _ := listed(t, e.client, taskmill.ListParams{Filter: c.filter, CreatedSince: before}, 1); !slices.Equal(got, c.want) {
+		if got, _ := listed(t, e.client, taskmill.ListParams{Filter: inRange(c.filter, taskmill.TaskFilter{CreatedSince: before})}, 1); !slices.Equal(got, c.want) {
 			t.Errorf("%+v, created since the test began: got %v, want %v", c.filter, got, c.want)
 		}
 	}
@@ -709,7 +709,7 @@ func TestCursorOfCreationOrderStaysInItsRange(t *testing.T) {
 	           FROM generate_series(1, 6) i`, start)
 	second := func(n int) time.Time { return start.Add(time.Duration(n) * time.Second) }
 
-	page, err := e.client.List(ctx, &taskmill.ListParams{CreatedSince: second(1), Limit: 2})
+	page, err := e.client.List(ctx, &taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedSince: second(1)}, Limit: 2})
 	if err != nil || !slices.Equal(ids(page.Tasks), []int64{6, 5}) || page.Next == "" {
 		t.Fatalf("the first page by creation time: %+v, %v; want the tasks 6 and 5, and a next page", page, err)
 	}
@@ -719,11 +719,11 @@ func TestCursorOfCreationOrderStaysInItsRange(t *testing.T) {
 		params taskmill.ListParams
 		want   []int64
 	}{
-		{"its own range", taskmill.ListParams{CreatedSince: second(1)}, []int64{4, 3, 2, 1}},
-		{"a range that starts later", taskmill.ListParams{CreatedSince: second(3)}, []int64{4, 3}},
-		{"a range that ends above its place", taskmill.ListParams{CreatedBefore: second(6)}, []int64{4, 3, 2, 1}},
-		{"a range that ends below its place", taskmill.ListParams{CreatedBefore: second(3)}, []int64{2, 1}},
-		{"a range that ends at its place", taskmill.ListParams{CreatedSince: second(2), CreatedBefore: second(5)}, []int64{4, 3, 2}},
+		{"its own range", taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedSince: second(1)}}, []int64{4, 3, 2, 1}},
+		{"a range that starts later", taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedSince: second(3)}}, []int64{4, 3}},
+		{"a range that ends above its place", taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedBefore: second(6)}}, []int64{4, 3, 2, 1}},
+		{"a range that ends below its place", taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedBefore: second(3)}}, []int64{2, 1}},
+		{"a range that ends at its place", taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedSince: second(2), CreatedBefore: second(5)}}, []int64{4, 3, 2}},
 	} {
 		c.params.Cursor = page.Next
 		if got, next := listed(t, e.client, c.params, 1); next != "" || !slices.Equal(got, c.want) {
@@ -734,7 +734,7 @@ func TestCursorOfCreationOrderStaysInItsRange(t *testing.T) {
 	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
 	orders := map[string]taskmill.ListParams{
 		"ID order":       {Limit: 2},
-		"creation order": {Limit: 2, CreatedSince: second(1)},
+		"creation order": {Filter: taskmill.TaskFilter{CreatedSince: second(1)}, Limit: 2},
 		"finish order":   {Limit: 2, Filter: dead},
 	}
 
@@ -1120,7 +1120,7 @@ func TestRangesOfFinishedTasksReadOnlyTheirRows(t *testing.T) {
 		{"both states", taskmill.TaskFilter{Queues: busy, States: both}, second(1000), second(1020), 0, 20 + 4},
 		{"all queues, both states", taskmill.TaskFilter{States: both}, second(1000), second(1020), 0, found + 2*20 + 4 + rounded},
 	} {
-		params := taskmill.ListParams{Filter: c.filter, Limit: limit, FinishedSince: c.since, FinishedBefore: c.before}
+		params := taskmill.ListParams{Filter: inRange(c.filter, taskmill.TaskFilter{FinishedSince: c.since, FinishedBefore: c.before}), Limit: limit}
 		if c.after > 0 {
 			params.Limit = c.after
 			before, err := e.client.List(t.Context(), &params)
@@ -1227,7 +1227,7 @@ func TestRangesOfCreationTimesReadOnlyTheirRows(t *testing.T) {
 		{"all queues, completed tasks", taskmill.TaskFilter{States: completed}, second(1000), second(1020), 0, 2 + 2*20 + rounded},
 		{"all queues", taskmill.TaskFilter{}, second(1000), second(1020), 0, 2 + 1 + 2 + 2*20 + 4 + running + 2*20 + rounded},
 	} {
-		params := taskmill.ListParams{Filter: c.filter, Limit: limit, CreatedSince: c.since, CreatedBefore: c.before}
+		params := taskmill.ListParams{Filter: inRange(c.filter, taskmill.TaskFilter{CreatedSince: c.since, CreatedBefore: c.before}), Limit: limit}
 		if c.after > 0 {
 			params.Limit = c.after
 			before, err := e.client.List(t.Context(), &params)
@@ -1246,7 +1246,7 @@ func TestRangesOfCreationTimesReadOnlyTheirRows(t *testing.T) {
 		e.exec(t, "ANALYZE {s}.tasks")
 	}
 
-	compiled, err := taskmill.ListCompiled(t.Context(), e.client, &taskmill.ListParams{CreatedSince: second(1000)})
+	compiled, err := taskmill.ListCompiled(t.Context(), e.client, &taskmill.ListParams{Filter: taskmill.TaskFilter{CreatedSince: second(1000)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1356,6 +1356,13 @@ func TestReadSettingsHoldForTheReadOnly(t *testing.T) {
 	if n := pool.Stat().NewConnsCount() - opened; n != 0 {
 		t.Errorf("the pool opened %d connections after the canceled read, want it to use the same one again", n)
 	}
+}
+
+// inRange returns the filter f with the ranges of times of r.
+func inRange(f, r taskmill.TaskFilter) taskmill.TaskFilter {
+	f.CreatedSince, f.CreatedBefore = r.CreatedSince, r.CreatedBefore
+	f.FinishedSince, f.FinishedBefore = r.FinishedSince, r.FinishedBefore
+	return f
 }
 
 // listed returns the IDs of the tasks that List returns for params, page

@@ -19,7 +19,8 @@ func TestStoredNamesNeverChange(t *testing.T) {
 	ctx := t.Context()
 
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "orders", Value: []byte("placed")})
+		_, err := ob.StoreTx(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "orders", Value: []byte("placed")})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)

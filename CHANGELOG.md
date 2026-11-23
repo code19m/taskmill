@@ -7,6 +7,44 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `WorkerInfo.Candidate` reports that a worker takes part in the
+  maintainer election, so that its schedules count. The dashboard's
+  Workers page compares the schedules of candidates only, as before.
+
+### Changed
+
+- **Breaking:** the range of times is part of the filter.
+  `CreatedSince`, `CreatedBefore`, `FinishedSince`, and `FinishedBefore`
+  move from `ListParams`, `CountParams`, and `BulkParams` into
+  `TaskFilter`, under the same rules. So one filter selects the same tasks
+  in `List`, `Count`, and a bulk action, and a count with an action's filter
+  says what the action would change. A bulk action still needs a filter
+  that names queues, states, kinds, or FIFO groups: a range alone is not
+  enough. To migrate, set the four fields in `Filter`:
+  `params.CreatedSince` becomes `params.Filter.CreatedSince`.
+- **Breaking:** `outbox.Outbox.Store` is now `outbox.Outbox.StoreTx`, like
+  every other method that runs in the caller's transaction, and returns the
+  ID of each message's delivery, in the order of the messages: the
+  `Delivery.ID` that consumers deduplicate by. To migrate, write
+  `_, err := ob.StoreTx(ctx, tx, msgs...)` in place of
+  `err := ob.Store(ctx, tx, msgs...)`.
+- **Breaking:** `TaskCounts` is now `CountResult`, the result of
+  `Client.Count`, named after its method as `ListResult` is. Rename the type
+  where you write it; its fields are the same.
+- **Breaking:** `taskmilltest.Run` takes the task's `EnqueueOptions` as its
+  last argument, so a test can run a handler on a task with metadata, such
+  as the time of a scheduled run, in a FIFO group, or in another queue. It
+  fails the test if the options set a dedupe key that another task holds,
+  rather than run that task. To migrate, add `nil` as the last argument.
+- **Breaking:** `WorkerInfo.Schedules` no longer tells candidates from
+  other workers by nil and empty: read `WorkerInfo.Candidate`. It is still
+  empty for a worker that is no candidate.
+- [The API's shape](docs/design/api-shape.md) records why the range is in
+  the filter, why every method on the caller's transaction ends in `Tx`,
+  which reads take no params, and why `outbox.New` takes no config.
+
 ### Fixed
 
 - `RetryMatching` and `DeleteMatching` with a range of finish times are

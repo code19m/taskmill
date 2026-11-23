@@ -14,6 +14,10 @@ rejected, and when we look at a point again.
 | A nil or short result of a batch | A task without a result fails |
 | `Middleware`, `AttemptError`, the two `Counts`, `GroupParams` | The names stay as they are |
 | `TaskInfo.FinishedAt` | A task's finish has one name |
+| The reads and actions over many tasks | Each takes params |
+| A range of times | It is part of `TaskFilter` |
+| The methods on the caller's transaction | Each name ends in `Tx` |
+| `outbox.New` | It takes no config |
 
 ## The querier interfaces hold what taskmill calls, and no more
 
@@ -84,7 +88,9 @@ break the build of its callers for no change in behavior.
 | `GroupParams`, next to `GroupsResult` | `ListParams` and `ListResult` follow their method's name, and `GroupParams` does not. `GroupsParams` would be regular, but the gain is cosmetic |
 
 `GroupParams` stays the one name of its kind that does not follow its
-method. New pairs follow `ListParams` and `ListResult`.
+method. New pairs follow `ListParams` and `ListResult`. A result type costs
+far less to rename than a params type, since callers rarely write its name:
+so `CountResult` follows `CountParams`, before v1.0.0.
 
 ## A task's finish has one name
 
@@ -103,13 +109,53 @@ The column keeps its name, `finalized_at`: renaming it needs a migration,
 and the workers of the release before would fail on it during a rolling
 deploy.
 
-## Every read and action takes params
+## The reads and actions over many tasks take params
 
 `Client.Count` took a bare `*TaskFilter`, the only read or action that did.
-Then no option, such as a time range, could ever be added to it without
-breaking its callers. So it takes `*CountParams`, whose `Filter` holds the
-filter, as `ListParams` and `BulkParams` do. That broke its callers once,
-while the version is below v1.0.0.
+Then no option could ever be added to it without breaking its callers. So
+it takes `*CountParams`, whose `Filter` holds the filter, as `ListParams`
+and `BulkParams` do. That broke its callers once, while the version is
+below v1.0.0.
+
+The rule is for the calls over a set that can grow large, and gain
+options: `List`, `Count`, `Groups`, `Activity`, and the bulk actions. A
+call on one target takes it as an argument: an ID, or the name of a queue
+or a schedule. `Queues`, `Schedules`, `Workers`, and `Settings` take
+nothing: each reads a small table whole, with a row per queue, schedule,
+or worker, or one row for the schema, which a caller filters in memory.
+
+## A range of times is part of the filter
+
+`TaskFilter` holds `CreatedSince`, `CreatedBefore`, `FinishedSince`, and
+`FinishedBefore`, next to the queues, states, kinds, and groups. So one
+value selects the same tasks in `List`, `Count`, and the bulk actions, and
+a count with an action's filter says what the action would change. A rule
+that ties a range to the states, such as a range of finish times only for
+dead and canceled tasks, is checked in one value. And a new way to select
+tasks is added once, not to three params types.
+
+A range says when, not which tasks, and a bulk action must say which
+tasks it changes. So its filter must name queues, states, kinds, or
+groups: a range alone is refused, as an empty filter is.
+
+## The methods on the caller's transaction end in `Tx`
+
+`EnqueueTx`, `EnqueueManyTx`, `CancelTx`, `Task.CompleteTx`, and
+`outbox.Outbox.StoreTx` take an `Executor`, and their names say so, as the
+pattern in CONTRIBUTING.md asks. The bare name stays free for a call in a
+transaction of its own, as `Enqueue` sits next to `EnqueueTx`.
+
+`StoreTx` returns the ID of each message's delivery, as `EnqueueTx`
+returns the task's. So the producer can log the ID that consumers
+deduplicate by, or pass it on. From v1.0.0 on, a result can no longer be
+added to a function.
+
+## `outbox.New` takes no config
+
+`NewClient`, `NewWorker`, `ui.New`, and `otel.New` take a config, and
+`outbox.New` takes only the client. The outbox's settings have their places
+already: a relay's in `RelayOptions`, and a message's in `Message`. A config
+with no field would be an option for a need that nobody has.
 
 ## Options we rejected
 
@@ -123,6 +169,8 @@ while the version is below v1.0.0.
 | `ui.New` returns a concrete type | It pays now, with code that stops building, for a need that is a guess. And `ui.Handler`, the natural name of that type, was the name of an earlier constructor |
 | "Nil means that all succeeded" | Its mistake is silent: see the table above |
 | Rename `GroupParams` to `GroupsParams`, or add that name as an alias | The rename is allowed until v1.0.0 is tagged, and breaks the build of every caller of `Client.Groups` for a gain that no user feels. The alias gives one thing two names until v2 |
+| The range of times beside the filter, in each params type | Each new way to select tasks would go into three types, and a count would say what an action changes only if the caller copied five fields |
+| `outbox.Outbox.Store`, which returned only an error | The one method on the caller's transaction without `Tx`. And the producer could not learn the ID that consumers deduplicate by |
 
 ## What guards the shape
 
@@ -147,6 +195,7 @@ Only when this happens:
 | The JSON form | taskmill itself sends results to another program, such as a JSON API of the dashboard | Types of its own for that API, with tags. The result types still get none |
 | `ui.New` | The dashboard owns something that the caller must close | A second constructor that returns a concrete type. `New` stays, and calls it |
 | A missing result | Users make this mistake often | An error code of its own for it, which any minor release may add. The rule stays for all of v1 |
+| `outbox.New` | The outbox needs a setting that neither a message nor a relay can hold | A second constructor that takes a config. `New` stays, and calls it |
 | The names | v2 | Rename them together |
 
 ## See also

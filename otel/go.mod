@@ -5,7 +5,7 @@ go 1.26.0
 toolchain go1.27.4
 
 require (
-	github.com/code19m/taskmill v0.16.0
+	github.com/code19m/taskmill v0.17.0
 	github.com/jackc/pgx/v5 v5.13.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/metric v1.47.0

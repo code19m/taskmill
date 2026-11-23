@@ -699,12 +699,13 @@ func TestPublisherContinuesTheTraceToTheBroker(t *testing.T) {
 
 	ctx, request := e.tracer.Start(t.Context(), "request")
 	err := pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
-		return ob.Store(ctx, taskmill.Pgx(tx),
+		_, err := ob.StoreTx(ctx, taskmill.Pgx(tx),
 			outbox.Message{Topic: "orders", Value: []byte("accepted"), Headers: map[string][]byte{
 				"origin": []byte("shop"), "tracestate": []byte("vendor=old"), "baggage": []byte("user=old"), // of another trace
 			}},
 			outbox.Message{Topic: "orders", Value: []byte("rejected")},
 			outbox.Message{Topic: "orders", Value: []byte("unanswered")})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -831,7 +832,8 @@ func TestPublisherThatPanicsEndsItsSpans(t *testing.T) {
 	w := e.worker(t, &hs)
 
 	err := pgx.BeginFunc(t.Context(), e.pool, func(tx pgx.Tx) error {
-		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Topic: "orders", Value: []byte("order 7")})
+		_, err := ob.StoreTx(t.Context(), taskmill.Pgx(tx), outbox.Message{Topic: "orders", Value: []byte("order 7")})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)

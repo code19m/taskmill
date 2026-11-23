@@ -59,7 +59,8 @@ maintainer counts the queues.
   has the times. A rolling deploy that changes a schedule makes one for a
   few minutes, which needs no person. A new term counts again from its
   first comparison. The dashboard compares the names alone, which
-  `WorkerInfo` lists: the hashes are no API. We rejected one hash for all
+  `WorkerInfo` lists with `Candidate`, which says if they count: the
+  hashes are no API. We rejected one hash for all
   the schedules, which cannot say which one differs, and a mark on the
   dashboard alone, which nobody watches.
 - **The database's clock decides the history's days:** which days need a

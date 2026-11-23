@@ -145,7 +145,7 @@ The numbers in this table were measured on 336,500 tasks with 50,000 dead.
 
 ### A range of finish times
 
-`ListParams.FinishedSince` and `FinishedBefore` limit a list in finish order
+`TaskFilter.FinishedSince` and `FinishedBefore` limit a list in finish order
 to the tasks that finished from one time up to, but not including, another.
 An operator reaches a past period, such as last night, in one request.
 Without a range, the hour measured below starts 225 pages down.
@@ -171,9 +171,9 @@ Without a range, the hour measured below starts 225 pages down.
   a range of creation times puts any list in
   [creation order](schema-creation-order.md), with indexes and a cursor of
   its own. No index holds tasks by when they were last attempted.
-- **The range is not part of `TaskFilter`.** `Count` and the bulk actions
-  take it beside the filter, under the same rules. A bulk action still
-  reads in ID order ([Operator actions](schema-operations.md)).
+- **The range is part of `TaskFilter`,** so `Count` and the bulk actions
+  take it as a list does, under the same rules. A bulk action still reads
+  in ID order ([Operator actions](schema-operations.md)).
 
 Measured on PostgreSQL 18 with 420,000 tasks, 300,000 of them dead over 30
 days: 100,000 in the queue `emails`, and 1,000 in each of 200 other queues.

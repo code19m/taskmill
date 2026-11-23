@@ -324,7 +324,10 @@ func benchFIFO(ctx context.Context, pool *pgxpool.Pool, n int) {
 		for i := range msgs {
 			msgs[i] = outbox.Message{Topic: "orders", Key: strconv.AppendInt(nil, int64((done+i)%keys), 10), Value: []byte(`{}`)}
 		}
-		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return ob.Store(ctx, taskmill.Pgx(tx), msgs...) })
+		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			_, err := ob.StoreTx(ctx, taskmill.Pgx(tx), msgs...)
+			return err
+		})
 		if err != nil {
 			fail(err)
 		}

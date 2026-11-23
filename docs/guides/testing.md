@@ -36,7 +36,7 @@ func TestPlaceOrder(t *testing.T) {
     }
 
     // Enqueue a task and run the handler on it once, as a worker would.
-    info, err := taskmilltest.Run(t, client, &ReceiptSender{mailer: fakeMailer{}}, tasks[0].Args)
+    info, err := taskmilltest.Run(t, client, &ReceiptSender{mailer: fakeMailer{}}, tasks[0].Args, nil)
     if err != nil || info.State != taskmill.StateCompleted {
         t.Fatalf("got %s, %v", info.State, err)
     }
@@ -67,8 +67,8 @@ func testPool(t *testing.T) *pgxpool.Pool {
 | You want to test that… | Use | Good to know |
 |---|---|---|
 | Your code enqueued the right task, or none after a rollback | `taskmilltest.Enqueued` | It returns the committed tasks of one kind, with their payloads decoded |
-| Your handler does the right work, once | `taskmilltest.Run` | It holds a real [lease](../concepts/glossary.md#lease), so `CompleteTx` works. It doesn't retry: a failed task stays `retryable` or `dead`. It returns the handler's error. If the handler did not run, because the payload does not decode into its `Args` type, it returns an error that says so |
-| A task succeeds after it failed, or a task with special options works | `Worker.RunTask` | It runs the task right away, without waiting for its [backoff](../concepts/glossary.md#backoff) |
+| Your handler does the right work, once | `taskmilltest.Run` | It holds a real [lease](../concepts/glossary.md#lease), so `CompleteTx` works. It doesn't retry: a failed task stays `retryable` or `dead`. It returns the handler's error. If the handler did not run, because the payload does not decode into its `Args` type, it returns an error that says so. Its last argument takes `EnqueueOptions`, for a task with metadata, a FIFO group, or a queue of its own |
+| A task succeeds after it failed | `Worker.RunTask` | It runs the task right away, without waiting for its [backoff](../concepts/glossary.md#backoff) |
 | Everything your code enqueued gets done | `taskmilltest.Work` | It runs a worker until no task is left to run: see [below](#test-that-everything-gets-done) |
 | Several workers work together, with real timing | `Worker.Run`, started by your test | Set a short `PollInterval` |
 

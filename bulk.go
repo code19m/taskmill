@@ -39,12 +39,14 @@ const (
 	readCost = 8
 )
 
-// TaskFilter selects tasks by queue, state, kind, and FIFO group, for
-// [Client.List], [Client.Count], and the bulk actions: a task matches if it
-// matches every filter that is set. Each filter takes at most 100 values. A
-// queue name or kind has at most 128 characters, and a group key at most
-// 256. An unknown state, like a value that is empty or too long, or a filter
-// with too many values, is an error that wraps [ErrInvalidArgument].
+// TaskFilter selects tasks by what they are, by queue, state, kind, and FIFO
+// group, and by when they were created or finished, for [Client.List],
+// [Client.Count], and the bulk actions: a task matches if it matches every
+// field that is set. Each filter takes at most 100 values. A queue name or
+// kind has at most 128 characters, and a group key at most 256. An unknown
+// state, like a value that is empty or too long, a filter with too many
+// values, or a range of times that breaks its rules, is an error that wraps
+// [ErrInvalidArgument].
 type TaskFilter struct {
 	// Queues limits the tasks to these queues. Empty means all queues.
 	Queues []string
@@ -58,6 +60,42 @@ type TaskFilter struct {
 	// GroupKeys limits the tasks to those of these FIFO groups. Empty means
 	// all tasks.
 	GroupKeys []string
+
+	// CreatedSince limits the tasks to those created at this time or later:
+	// those whose [TaskInfo.CreatedAt] is not before it. Zero means no lower
+	// bound. Any filter takes it, whatever its states, and it puts a list in
+	// creation order: see [Client.List]. A bulk action still goes through
+	// its tasks in ID order. Together with a range of finish times it is an
+	// error that wraps [ErrInvalidArgument]: a list has one order.
+	//
+	// The time is an instant: its location does not matter, and neither
+	// does the time zone of the database or of the process. It must be a
+	// time that PostgreSQL can store, from 4713 BC to 294276 AD, and it
+	// must be before CreatedBefore if both are set.
+	CreatedSince time.Time
+
+	// CreatedBefore limits the tasks to those created before this time,
+	// under the rules of CreatedSince. Zero means no upper bound. A task
+	// created at this very time is left out, so two ranges that meet at a
+	// time share no task.
+	CreatedBefore time.Time
+
+	// FinishedSince limits the tasks to those that finished at this time or
+	// later: those whose [TaskInfo.FinishedAt] is not before it. Zero means
+	// no lower bound. Only a filter of only dead tasks, only canceled tasks,
+	// or both takes it, without a range of creation times: it lists them in
+	// finish order, see [Client.List]. With any other filter it is an error
+	// that wraps [ErrInvalidArgument].
+	//
+	// The time is an instant, under the rules of CreatedSince, and it must
+	// be before FinishedBefore if both are set.
+	FinishedSince time.Time
+
+	// FinishedBefore limits the tasks to those that finished before this
+	// time, under the rules of FinishedSince. Zero means no upper bound. A
+	// task that finished at this very time is left out, so two ranges that
+	// meet at a time share no task.
+	FinishedBefore time.Time
 }
 
 // empty reports whether f sets none of the filters that select tasks by
@@ -75,8 +113,8 @@ type TaskCount struct {
 	Capped bool
 }
 
-// TaskCounts counts the tasks that match a filter.
-type TaskCounts struct {
+// CountResult counts the tasks that match a filter.
+type CountResult struct {
 	// States holds how many of them are in each state that the filter
 	// selects.
 	States map[State]TaskCount
@@ -87,37 +125,19 @@ type TaskCounts struct {
 }
 
 // BulkParams selects the tasks of a bulk action, such as
-// [Client.RetryMatching]. Nil params, an empty filter, and a cursor that is
-// not valid are errors that wrap [ErrInvalidArgument], as is a range of
-// times that breaks the rules of [ListParams].
+// [Client.RetryMatching]. Nil params, a filter that sets none of Queues,
+// States, Kinds, and GroupKeys, and a cursor that is not valid are errors
+// that wrap [ErrInvalidArgument].
 type BulkParams struct {
-	// Filter selects the tasks. Required: it must set at least one field.
+	// Filter selects the tasks. Required: it must set Queues, States, Kinds,
+	// or GroupKeys, since a range of times alone does not say which tasks
+	// to change. The action goes through the tasks in ID order, also in a
+	// range of times.
 	Filter TaskFilter
 
-	// CreatedSince limits the action to the tasks created at this time or
-	// later, as [ListParams.CreatedSince] limits a list, under its rules.
-	// The action still goes through the tasks in ID order. Zero means no
-	// lower bound.
-	CreatedSince time.Time
-
-	// CreatedBefore limits the action to the tasks created before this
-	// time, as [ListParams.CreatedBefore] does. Zero means no upper bound.
-	CreatedBefore time.Time
-
-	// FinishedSince limits the action to the tasks that finished at this
-	// time or later, as [ListParams.FinishedSince] does: it needs a filter
-	// of only dead tasks, only canceled tasks, or both. Zero means no lower
-	// bound.
-	FinishedSince time.Time
-
-	// FinishedBefore limits the action to the tasks that finished before
-	// this time, under the rules of FinishedSince. Zero means no upper
-	// bound.
-	FinishedBefore time.Time
-
 	// Cursor continues an action that stopped early, from its
-	// [BulkResult.Next], with the filter and the range that it came from.
-	// Empty means from the oldest task.
+	// [BulkResult.Next], with the filter that it came from. Empty means from
+	// the oldest task.
 	Cursor string
 }
 
@@ -353,35 +373,15 @@ func match(filter *TaskFilter, states []State) (*filterArgs, error) {
 // CountParams selects the tasks that [Client.Count] counts. A field outside
 // its limits is an error that wraps [ErrInvalidArgument].
 type CountParams struct {
-	// Filter selects the tasks. Empty means every task.
+	// Filter selects the tasks. Empty means every task. With the filter of
+	// a bulk action, the counts say what that action would change.
 	Filter TaskFilter
-
-	// CreatedSince limits the count to the tasks created at this time or
-	// later, as [ListParams.CreatedSince] limits a list, under its rules.
-	// With the range of a bulk action, the counts say what that action
-	// would change. Zero means no lower bound.
-	CreatedSince time.Time
-
-	// CreatedBefore limits the count to the tasks created before this time,
-	// as [ListParams.CreatedBefore] does. Zero means no upper bound.
-	CreatedBefore time.Time
-
-	// FinishedSince limits the count to the tasks that finished at this
-	// time or later, as [ListParams.FinishedSince] does: it needs a filter
-	// of only dead tasks, only canceled tasks, or both. Zero means no lower
-	// bound.
-	FinishedSince time.Time
-
-	// FinishedBefore limits the count to the tasks that finished before
-	// this time, under the rules of FinishedSince. Zero means no upper
-	// bound.
-	FinishedBefore time.Time
 }
 
 // Count counts the tasks that params select. params may be nil, which
 // counts every task. It counts at most 10,000 tasks per state. Like
 // [Client.List], the query is canceled after 5 seconds.
-func (c *Client) Count(ctx context.Context, params *CountParams) (*TaskCounts, error) {
+func (c *Client) Count(ctx context.Context, params *CountParams) (*CountResult, error) {
 	if params == nil {
 		params = &CountParams{}
 	}
@@ -389,12 +389,12 @@ func (c *Client) Count(ctx context.Context, params *CountParams) (*TaskCounts, e
 	if err != nil {
 		return nil, err
 	}
-	r, err := checkRanges(f, params.CreatedSince, params.CreatedBefore, params.FinishedSince, params.FinishedBefore)
+	r, err := checkRanges(f, &params.Filter)
 	if err != nil {
 		return nil, err
 	}
 
-	out := &TaskCounts{States: make(map[State]TaskCount, len(f.states)+1)}
+	out := &CountResult{States: make(map[State]TaskCount, len(f.states)+1)}
 	sql := c.sql.countTasks.choose(rangeWithoutQueue(f, r))
 	err = c.readAlone(ctx, countSettings, sql, countArgs(f, r), func(r pgx.Rows) error {
 		var state string
@@ -428,7 +428,7 @@ func countArgs(f *filterArgs, r timeRanges) []any {
 
 // add counts the n tasks read in state s, of which unflagged were not asked
 // to stop. n is one more than the cap if counting stopped there.
-func (c *TaskCounts) add(s State, n, unflagged int64) {
+func (c *CountResult) add(s State, n, unflagged int64) {
 	count := TaskCount{N: min(n, countCap), Capped: n > countCap}
 	c.States[s] = count
 
@@ -452,9 +452,9 @@ func (c *TaskCount) plus(other TaskCount) {
 }
 
 // RetryMatching retries the dead and canceled tasks that params select, as
-// [Client.Retry] retries each one: those that match its filter, in its range
-// of times if it has one. The filter must not be empty: to retry every dead
-// task, set its States.
+// [Client.Retry] retries each one: those that match its filter. The filter
+// must set Queues, States, Kinds, or GroupKeys: to retry every dead task,
+// set its States.
 //
 // It goes through the tasks enqueued before it started, oldest first, in
 // batches of 1,000, each in a short transaction of its own. It reads each
@@ -532,13 +532,13 @@ func checkBulk(params *BulkParams, states []State) (*bulkRun, error) {
 	}
 
 	// The ranges follow the rules of a list of the filter's tasks, so that
-	// Count and List take the same params: a range of finish times needs a
+	// Count and List take the same filter: a range of finish times needs a
 	// filter of only dead and canceled tasks, not only an action on them.
 	selected, err := match(&params.Filter, allStates)
 	if err != nil {
 		return nil, err
 	}
-	r, err := checkRanges(selected, params.CreatedSince, params.CreatedBefore, params.FinishedSince, params.FinishedBefore)
+	r, err := checkRanges(selected, &params.Filter)
 	if err != nil {
 		return nil, err
 	}

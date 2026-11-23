@@ -261,25 +261,25 @@ func TestCountAndBulkActionsTakeARangeOfTimes(t *testing.T) {
 	charges := taskmill.TaskFilter{Kinds: []string{"charge"}}
 	queue := taskmill.TaskFilter{Queues: []string{"q"}}
 
-	counts, err := e.client.Count(ctx, &taskmill.CountParams{Filter: finished, FinishedSince: since, FinishedBefore: before})
+	counts, err := e.client.Count(ctx, &taskmill.CountParams{Filter: inRange(finished, taskmill.TaskFilter{FinishedSince: since, FinishedBefore: before})})
 	if err != nil || counts.Retry != (taskmill.TaskCount{N: 3}) || counts.States[taskmill.StateDead].N != 2 {
 		t.Fatalf("count of the tasks that finished in the range: %+v, %v; want 3 to retry, 2 of them dead", counts, err)
 	}
-	counts, err = e.client.Count(ctx, &taskmill.CountParams{Filter: charges, CreatedSince: since, CreatedBefore: before})
+	counts, err = e.client.Count(ctx, &taskmill.CountParams{Filter: inRange(charges, taskmill.TaskFilter{CreatedSince: since, CreatedBefore: before})})
 	if err != nil || counts.Cancel.N != 2 || counts.Delete.N != 2 {
 		t.Fatalf("count of the tasks created in the range: %+v, %v; want 2 to cancel and 2 to delete", counts, err)
 	}
 
-	res, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: finished, FinishedSince: since, FinishedBefore: before})
+	res, err := e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: inRange(finished, taskmill.TaskFilter{FinishedSince: since, FinishedBefore: before})})
 	if err != nil || res.Changed != 3 {
 		t.Fatalf("retry of the tasks that finished in the range: %+v, %v; want 3", res, err)
 	}
-	res, err = e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: charges, CreatedSince: since, CreatedBefore: before})
+	res, err = e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: inRange(charges, taskmill.TaskFilter{CreatedSince: since, CreatedBefore: before})})
 	if err != nil || res.Changed != 2 {
 		t.Fatalf("cancel of the tasks created in the range: %+v, %v; want 2", res, err)
 	}
 	completed := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}}
-	res, err = e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: completed, CreatedSince: since, CreatedBefore: before})
+	res, err = e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: inRange(completed, taskmill.TaskFilter{CreatedSince: since, CreatedBefore: before})})
 	if err != nil || res.Changed != 1 {
 		t.Fatalf("delete of the completed tasks created in the range: %+v, %v; want 1", res, err)
 	}
@@ -299,13 +299,13 @@ func TestCountAndBulkActionsTakeARangeOfTimes(t *testing.T) {
 	// only for a filter of only dead and canceled tasks, as Count takes it,
 	// and bounds that are a range.
 	for name, err := range map[string]error{
-		"retry in both ranges":                            errOf(e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: finished, CreatedSince: since, FinishedSince: since})),
-		"retry by finish time, of every state":            errOf(e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: queue, FinishedSince: since})),
-		"cancel by finish time":                           errOf(e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: queue, FinishedSince: since})),
-		"delete by finish time, completed tasks too":      errOf(e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: queue, FinishedBefore: before})),
-		"count by finish time, of every task":             errOf(e.client.Count(ctx, &taskmill.CountParams{FinishedSince: since})),
-		"count in a range that ends before it starts":     errOf(e.client.Count(ctx, &taskmill.CountParams{CreatedSince: before, CreatedBefore: since})),
-		"retry after a time that PostgreSQL cannot store": errOf(e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: finished, FinishedSince: lastTimestamp.AddDate(1, 0, 0)})),
+		"retry in both ranges":                            errOf(e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: inRange(finished, taskmill.TaskFilter{CreatedSince: since, FinishedSince: since})})),
+		"retry by finish time, of every state":            errOf(e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: inRange(queue, taskmill.TaskFilter{FinishedSince: since})})),
+		"cancel by finish time":                           errOf(e.client.CancelMatching(ctx, &taskmill.BulkParams{Filter: inRange(queue, taskmill.TaskFilter{FinishedSince: since})})),
+		"delete by finish time, completed tasks too":      errOf(e.client.DeleteMatching(ctx, &taskmill.BulkParams{Filter: inRange(queue, taskmill.TaskFilter{FinishedBefore: before})})),
+		"count by finish time, of every task":             errOf(e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{FinishedSince: since}})),
+		"count in a range that ends before it starts":     errOf(e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{CreatedSince: before, CreatedBefore: since}})),
+		"retry after a time that PostgreSQL cannot store": errOf(e.client.RetryMatching(ctx, &taskmill.BulkParams{Filter: inRange(finished, taskmill.TaskFilter{FinishedSince: lastTimestamp.AddDate(1, 0, 0)})})),
 	} {
 		if !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Errorf("%s: got %v, want ErrInvalidArgument", name, err)
@@ -353,16 +353,16 @@ func TestRangesOfCountAndBulkActionsReadOnlyTheirRows(t *testing.T) {
 		params taskmill.BulkParams
 		count  bool // the count of the filter holds about the 2,000 tasks too
 	}{
-		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead, Kinds: []string{"charge"}}, FinishedSince: since, FinishedBefore: before}, true},
-		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"charge"}}, CreatedSince: since, CreatedBefore: before}, true},
-		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead}, FinishedSince: since, FinishedBefore: before}, true},
-		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead}, CreatedSince: since, CreatedBefore: before}, true},
-		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, States: dead}, FinishedSince: since, FinishedBefore: before}, true},
-		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}}, CreatedSince: since, CreatedBefore: before}, true},
-		{"history", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}}, CreatedSince: since, CreatedBefore: before}, true},
-		{"cancel", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"mail"}}, CreatedSince: since, CreatedBefore: before}, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead, Kinds: []string{"charge"}, FinishedSince: since, FinishedBefore: before}}, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"charge"}, CreatedSince: since, CreatedBefore: before}}, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead, FinishedSince: since, FinishedBefore: before}}, true},
+		{"retry", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: dead, CreatedSince: since, CreatedBefore: before}}, true},
+		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, States: dead, FinishedSince: since, FinishedBefore: before}}, true},
+		{"delete", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, CreatedSince: since, CreatedBefore: before}}, true},
+		{"history", taskmill.BulkParams{Filter: taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCompleted}, CreatedSince: since, CreatedBefore: before}}, true},
+		{"cancel", taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"q"}, Kinds: []string{"mail"}, CreatedSince: since, CreatedBefore: before}}, true},
 		// Its count also counts the 2,000 completed tasks of the range.
-		{"cancel", taskmill.BulkParams{Filter: taskmill.TaskFilter{Kinds: []string{"mail"}}, CreatedSince: since, CreatedBefore: before}, false},
+		{"cancel", taskmill.BulkParams{Filter: taskmill.TaskFilter{Kinds: []string{"mail"}, CreatedSince: since, CreatedBefore: before}}, false},
 	} {
 		n, err := taskmill.BulkRowsRead(t.Context(), e.client, c.action, &c.params, 0, false)
 		if err != nil {
@@ -375,10 +375,7 @@ func TestRangesOfCountAndBulkActionsReadOnlyTheirRows(t *testing.T) {
 			continue
 		}
 
-		count := taskmill.CountParams{
-			Filter: c.params.Filter, CreatedSince: c.params.CreatedSince, CreatedBefore: c.params.CreatedBefore,
-			FinishedSince: c.params.FinishedSince, FinishedBefore: c.params.FinishedBefore,
-		}
+		count := taskmill.CountParams{Filter: c.params.Filter}
 		n, err = taskmill.CountRowsRead(t.Context(), e.client, &count)
 		if err != nil {
 			t.Fatal(err)
@@ -430,7 +427,7 @@ func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
 	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
 	day := 24 * time.Hour
 	since := time.Now().Add(-11 * day)
-	created := &taskmill.BulkParams{Filter: dead, CreatedSince: since, CreatedBefore: since.Add(day)}
+	created := &taskmill.BulkParams{Filter: inRange(dead, taskmill.TaskFilter{CreatedSince: since, CreatedBefore: since.Add(day)})}
 
 	for name, c := range map[string]struct {
 		action  func(context.Context, *taskmill.Client) (taskmill.BulkResult, error)
@@ -446,10 +443,10 @@ func TestRangeActionsReadAboutTheirTasks(t *testing.T) {
 		}, "created_at >= $1 AND created_at < $1 + interval '1 day'", 5 * 2000},
 		// 2,000 tasks among all 80,000.
 		"retry died far apart": {func(ctx context.Context, c *taskmill.Client) (taskmill.BulkResult, error) {
-			return c.RetryMatching(ctx, &taskmill.BulkParams{Filter: dead, FinishedSince: since.Add(10 * day)})
+			return c.RetryMatching(ctx, &taskmill.BulkParams{Filter: inRange(dead, taskmill.TaskFilter{FinishedSince: since.Add(10 * day)})})
 		}, "finalized_at >= $1::timestamptz + interval '10 days'", 5 * 2000},
 		"delete died far apart": {func(ctx context.Context, c *taskmill.Client) (taskmill.BulkResult, error) {
-			return c.DeleteMatching(ctx, &taskmill.BulkParams{Filter: dead, FinishedSince: since.Add(10 * day)})
+			return c.DeleteMatching(ctx, &taskmill.BulkParams{Filter: inRange(dead, taskmill.TaskFilter{FinishedSince: since.Add(10 * day)})})
 		}, "finalized_at >= $1::timestamptz + interval '10 days'", 5 * 2000},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -494,8 +491,8 @@ func TestARangeBatchThatRunsOutOfTimeGoesOnInWindows(t *testing.T) {
 		params taskmill.BulkParams
 		first  string // what the first batch sends: q a pick by queue, r one that reads a range of finish times
 	}{
-		"created":  {taskmill.BulkParams{Filter: dead, CreatedSince: since}, "q"},
-		"finished": {taskmill.BulkParams{Filter: dead, FinishedSince: since}, "r"},
+		"created":  {taskmill.BulkParams{Filter: inRange(dead, taskmill.TaskFilter{CreatedSince: since})}, "q"},
+		"finished": {taskmill.BulkParams{Filter: inRange(dead, taskmill.TaskFilter{FinishedSince: since})}, "r"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -546,7 +543,7 @@ func TestADenseRangeOfFinishTimesGoesOnInIDOrder(t *testing.T) {
 	e.exec(t, "ANALYZE {s}.tasks")
 
 	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
-	got, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: dead, FinishedSince: time.Now().Add(-time.Hour)})
+	got, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: inRange(dead, taskmill.TaskFilter{FinishedSince: time.Now().Add(-time.Hour)})})
 	if err != nil || got != (taskmill.BulkResult{Changed: 51000}) {
 		t.Fatalf("retry: %+v, %v; want each of the 51,000 tasks of the range retried once", got, err)
 	}
@@ -601,8 +598,8 @@ func TestAWideRangeOfFinishTimesIsReadAgainWhereThatPaysOff(t *testing.T) {
 			e.exec(t, "ANALYZE {s}.tasks")
 			inRange := fmt.Sprintf("id <= 50000 OR (id - 50000) %% %d = 0", 420000/c.left)
 
-			dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
-			got, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: dead, FinishedSince: time.Now().Add(-time.Hour)})
+			dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}, FinishedSince: time.Now().Add(-time.Hour)}
+			got, err := e.client.RetryMatching(t.Context(), &taskmill.BulkParams{Filter: dead})
 			if want := (taskmill.BulkResult{Changed: int64(50000 + c.left)}); err != nil || got != want {
 				t.Fatalf("retry: %+v, %v; want %+v, each task of the range retried once", got, err, want)
 			}
@@ -939,7 +936,7 @@ func TestRetryKeepsTheOrderOfGroups(t *testing.T) {
 
 	for name, params := range map[string]taskmill.BulkParams{
 		"without a range":            {Filter: g},
-		"in a range of finish times": {Filter: canceled, FinishedSince: time.Now().Add(-time.Hour)},
+		"in a range of finish times": {Filter: inRange(canceled, taskmill.TaskFilter{FinishedSince: time.Now().Add(-time.Hour)})},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -1425,7 +1422,7 @@ func TestRetryGoesOnInGroupOrder(t *testing.T) {
 
 	for name, params := range map[string]taskmill.BulkParams{
 		"without a range":            {Filter: all},
-		"in a range of finish times": {Filter: all, FinishedSince: time.Now().Add(-time.Hour)},
+		"in a range of finish times": {Filter: inRange(all, taskmill.TaskFilter{FinishedSince: time.Now().Add(-time.Hour)})},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -1917,7 +1914,7 @@ func TestCount(t *testing.T) {
 
 	n := func(n int64) taskmill.TaskCount { return taskmill.TaskCount{N: n} }
 	got, err := e.client.Count(ctx, nil)
-	want := &taskmill.TaskCounts{
+	want := &taskmill.CountResult{
 		States: map[taskmill.State]taskmill.TaskCount{
 			taskmill.StateScheduled: n(0), taskmill.StatePending: n(0), taskmill.StateAvailable: n(3), taskmill.StateRunning: n(2),
 			taskmill.StateRetryable: n(0), taskmill.StateCompleted: n(1), taskmill.StateDead: n(1), taskmill.StateCanceled: n(0),
@@ -1932,7 +1929,7 @@ func TestCount(t *testing.T) {
 	got, err = e.client.Count(ctx, &taskmill.CountParams{Filter: taskmill.TaskFilter{
 		Kinds: []string{"email.send"}, States: []taskmill.State{taskmill.StateAvailable, taskmill.StateCompleted},
 	}})
-	want = &taskmill.TaskCounts{
+	want = &taskmill.CountResult{
 		States: map[taskmill.State]taskmill.TaskCount{taskmill.StateAvailable: n(2), taskmill.StateCompleted: n(1)},
 		Cancel: n(2), Delete: n(3),
 	}

@@ -101,7 +101,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE shop IN SCHEMA taskmill
 | Role | What it can do | What it cannot do |
 |---|---|---|
 | `shop`, the owner | Everything: `Migrate`, workers, enqueue calls, the dashboard | — |
-| `shop_web` | Every enqueue call, `outbox.Store`, the operations API, and every action in the dashboard | Migrate an outdated schema. A worker with this role runs tasks, but loses the history of completed ones |
+| `shop_web` | Every enqueue call, `outbox.StoreTx`, the operations API, and every action in the dashboard | Migrate an outdated schema. A worker with this role runs tasks, but loses the history of completed ones |
 | `taskmill_viewer` | Show every page of a dashboard with `ReadOnly`, payloads included | Enqueue, change, cancel, or delete a task |
 
 - **Use the viewer role only with `ReadOnly`.** Otherwise the dashboard

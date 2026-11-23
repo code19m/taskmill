@@ -174,7 +174,8 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f, since, before, order := sel.filter, sel.since, sel.before, sel.order
+	f, order := sel.filter, sel.order
+	since, before := sel.bounds()
 	ranged := !since.IsZero() || !before.IsZero()
 	first = withRange(first, since, before)
 
@@ -183,9 +184,8 @@ func (s *server) taskList(w http.ResponseWriter, r *http.Request) {
 	// order without a start starts at the earliest time, which puts it in
 	// that order for the client too.
 	params := &taskmill.ListParams{Filter: f, Cursor: q.Get("cursor"), Limit: limit, Summary: true}
-	params.CreatedSince, params.CreatedBefore, params.FinishedSince, params.FinishedBefore = sel.ranges()
 	if order.Column == "created" && since.IsZero() {
-		params.CreatedSince = earliest
+		params.Filter.CreatedSince = earliest
 	}
 
 	res, err := s.client.List(r.Context(), params)
@@ -510,8 +510,8 @@ type workerRow struct {
 	taskmill.WorkerInfo
 
 	// ScheduleList holds the worker's schedules, and the maintainer's that
-	// it lacks, those that differ first. It is empty for a worker that
-	// stores none.
+	// it lacks, those that differ first. It is empty for a worker that is
+	// no candidate for maintainer.
 	ScheduleList []scheduleItem
 	Differs      bool // its schedules differ from the maintainer's, by name
 }
@@ -527,12 +527,12 @@ type scheduleItem struct {
 // each live worker compared with the maintainer's, as the maintainer
 // compares them. The page compares their names alone: the definitions are
 // only in the workers' table, and the maintainer's log names those that
-// differ. A worker that stores no schedules, or a maintainer that stores
-// none, compares with nothing.
+// differ. A worker that is no candidate, or a maintainer that is none, as
+// one of an old release, compares with nothing.
 func workerRows(workers []taskmill.WorkerInfo) []workerRow {
-	var lead map[string]bool // the maintainer's schedules; nil if it stores none
+	var lead map[string]bool // the maintainer's schedules; nil if it is no candidate
 	for _, w := range workers {
-		if w.Maintainer && w.Schedules != nil {
+		if w.Maintainer && w.Candidate {
 			lead = make(map[string]bool, len(w.Schedules))
 			for _, name := range w.Schedules {
 				lead[name] = true
@@ -543,7 +543,7 @@ func workerRows(workers []taskmill.WorkerInfo) []workerRow {
 	rows := make([]workerRow, len(workers))
 	for i, w := range workers {
 		rows[i] = workerRow{WorkerInfo: w}
-		if w.Schedules == nil {
+		if !w.Candidate {
 			continue
 		}
 

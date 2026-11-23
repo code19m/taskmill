@@ -115,7 +115,8 @@ func enqueueEveryWay(ctx context.Context, client *taskmill.Client, pool *pgxpool
 		_, one := client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, tagged)
 		_, more := client.EnqueueManyTx(ctx, taskmill.Pgx(tx), many)
 		message := outbox.Message{Topic: "orders", Key: []byte("customer"), Value: []byte("placed")}
-		return errors.Join(one, more, outbox.New(client).Store(ctx, taskmill.Pgx(tx), message))
+		_, stored := outbox.New(client).StoreTx(ctx, taskmill.Pgx(tx), message)
+		return errors.Join(one, more, stored)
 	}))
 
 	db := stdlib.OpenDB(*pool.Config().ConnConfig)

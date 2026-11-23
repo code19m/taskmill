@@ -150,7 +150,7 @@ func TestStoreCommitsWithTheTransaction(t *testing.T) {
 	ctx := t.Context()
 
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if err := ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "orders", Key: []byte("1"), Value: []byte("rolled back")}); err != nil {
+		if _, err := ob.StoreTx(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "orders", Key: []byte("1"), Value: []byte("rolled back")}); err != nil {
 			return err
 		}
 		return errors.New("roll back")
@@ -160,9 +160,10 @@ func TestStoreCommitsWithTheTransaction(t *testing.T) {
 	}
 
 	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{
+		_, err := ob.StoreTx(ctx, taskmill.Pgx(tx), outbox.Message{
 			Topic: "orders", Key: []byte("1"), Value: []byte("committed"), Headers: map[string][]byte{"type": []byte("order.paid")},
 		})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +194,8 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 			for k := range keys {
 				msgs[k] = outbox.Message{Topic: "accounts", Key: []byte(strconv.Itoa(k)), Value: fmt.Appendf(nil, "%d-%02d", k, i)}
 			}
-			return ob.Store(ctx, taskmill.Pgx(tx), msgs...)
+			_, err := ob.StoreTx(ctx, taskmill.Pgx(tx), msgs...)
+			return err
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -231,7 +233,8 @@ func TestStoreRejectsMessagesWithoutAValidTopic(t *testing.T) {
 		"a header name that is not UTF-8": {Topic: "orders", Headers: map[string][]byte{"trace\xff": nil}},
 	} {
 		err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
-			return ob.Store(t.Context(), taskmill.Pgx(tx), m)
+			_, err := ob.StoreTx(t.Context(), taskmill.Pgx(tx), m)
+			return err
 		})
 		if !errors.Is(err, taskmill.ErrInvalidArgument) {
 			t.Errorf("%s: got %v, want ErrInvalidArgument", name, err)
@@ -264,7 +267,8 @@ func TestStoreOfNoMessagesDoesNothing(t *testing.T) {
 	}
 
 	err = pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
-		return outbox.New(client).Store(t.Context(), taskmill.Pgx(tx))
+		_, err := outbox.New(client).StoreTx(t.Context(), taskmill.Pgx(tx))
+		return err
 	})
 	if err != nil || called {
 		t.Fatalf("got %v, and the middleware ran: %v; want nothing", err, called)
@@ -306,9 +310,10 @@ func TestDeadMessageHaltsItsKeyUntilRetried(t *testing.T) {
 	}), nil)
 
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return ob.Store(ctx, taskmill.Pgx(tx),
+		_, err := ob.StoreTx(ctx, taskmill.Pgx(tx),
 			outbox.Message{Topic: "orders", Key: []byte("7"), Value: []byte("first")},
 			outbox.Message{Topic: "orders", Key: []byte("7"), Value: []byte("second")})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -395,7 +400,10 @@ func TestRelayHonorsItsBatchSize(t *testing.T) {
 		msgs[i] = outbox.Message{Topic: "events", Value: []byte(strconv.Itoa(i))}
 	}
 
-	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error { return ob.Store(t.Context(), taskmill.Pgx(tx), msgs...) })
+	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+		_, err := ob.StoreTx(t.Context(), taskmill.Pgx(tx), msgs...)
+		return err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +442,8 @@ func TestRelayHonorsItsTimeout(t *testing.T) {
 	client, ob, pool := setup(t)
 
 	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
-		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{Topic: "events", Value: []byte("v")})
+		_, err := ob.StoreTx(t.Context(), taskmill.Pgx(tx), outbox.Message{Topic: "events", Value: []byte("v")})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -487,7 +496,8 @@ func TestDeliveryWithoutAResultFails(t *testing.T) {
 	ctx := t.Context()
 
 	err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		return ob.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "events", Value: []byte("v")})
+		_, err := ob.StoreTx(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "events", Value: []byte("v")})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -555,9 +565,10 @@ func TestBinaryKeysAndHeadersArriveIntact(t *testing.T) {
 	key := []byte{0xff, 0x00, 0x1f, 0x80} // not UTF-8, with a NUL byte
 	header := []byte{0x00, 0xfe}
 	err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
-		return ob.Store(t.Context(), taskmill.Pgx(tx), outbox.Message{
+		_, err := ob.StoreTx(t.Context(), taskmill.Pgx(tx), outbox.Message{
 			Topic: "events", Key: key, Value: []byte("v"), Headers: map[string][]byte{"trace": header},
 		})
+		return err
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -40,10 +40,11 @@ lines:
 			}
 			// Store the order's events. Messages with the same key stay in order.
 			key := []byte(strconv.FormatInt(orderID, 10))
-			return ob.Store(ctx, taskmill.Pgx(tx),
+			_, err = ob.StoreTx(ctx, taskmill.Pgx(tx),
 				outbox.Message{Topic: "orders", Key: key, Value: []byte("order.placed")},
 				outbox.Message{Topic: "orders", Key: key, Value: []byte("order.paid")},
 			)
+			return err
 ```
 
 Start the shop, and place an order:
@@ -141,7 +142,7 @@ also after a failure. Events of different orders can mix.
 | In the code | taskmill calls it |
 |---|---|
 | `outbox.New(client)` | the [outbox](../concepts/glossary.md#outbox) |
-| `ob.Store(ctx, taskmill.Pgx(tx), …)` | messages that are saved with your transaction, or not at all |
+| `ob.StoreTx(ctx, taskmill.Pgx(tx), …)` | messages that are saved with your transaction, or not at all |
 | `Key` | what keeps messages in order: the same topic and key means one at a time |
 | `ob.AddRelay(…)` | the [relay](../concepts/glossary.md#relay), which calls your publisher |
 | `errs[i] = errors.New(…)` | a failed delivery, which the relay tries again |

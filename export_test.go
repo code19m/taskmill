@@ -567,7 +567,7 @@ func CountRowsRead(ctx context.Context, c *Client, params *CountParams) (int64, 
 	if err != nil {
 		return 0, err
 	}
-	r, err := checkRanges(m, params.CreatedSince, params.CreatedBefore, params.FinishedSince, params.FinishedBefore)
+	r, err := checkRanges(m, &params.Filter)
 	if err != nil {
 		return 0, err
 	}

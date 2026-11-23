@@ -379,7 +379,7 @@ func TestQueuesAndWorkers(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(workers) != 1 || workers[0].ID == "" || !slices.Equal(workers[0].Queues, []string{"mail"}) ||
-			!slices.Equal(workers[0].Kinds, []string{"email.send"}) {
+			!slices.Equal(workers[0].Kinds, []string{"email.send"}) || !workers[0].Candidate {
 			t.Fatalf("got workers %+v", workers)
 		}
 		return workers[0].Maintainer

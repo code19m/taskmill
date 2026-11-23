@@ -40,7 +40,7 @@ These settings bind every worker of the
 |---|---|---|
 | A task's queue, priority, run time, attempts, FIFO group, dedupe key, and metadata | [`EnqueueOptions`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueOptions) | The enqueue calls. Also a kind's `EnqueueDefaults`, and `Schedule.Options` |
 | One task of a batch enqueue | [`EnqueueParams`](https://pkg.go.dev/github.com/code19m/taskmill#EnqueueParams) | `Client.EnqueueMany`, `Client.EnqueueManyTx` |
-| A message's topic, key, value, and headers | [`outbox.Message`](https://pkg.go.dev/github.com/code19m/taskmill/outbox#Message) | `Outbox.Store` |
+| A message's topic, key, value, and headers | [`outbox.Message`](https://pkg.go.dev/github.com/code19m/taskmill/outbox#Message) | `Outbox.StoreTx` |
 | Which tasks a list, a count, or a bulk action selects | [`TaskFilter`](https://pkg.go.dev/github.com/code19m/taskmill#TaskFilter) | `ListParams`, `CountParams`, and `BulkParams` |
 | A page of tasks | [`ListParams`](https://pkg.go.dev/github.com/code19m/taskmill#ListParams) | `Client.List` |
 | The tasks that a count counts | [`CountParams`](https://pkg.go.dev/github.com/code19m/taskmill#CountParams) | `Client.Count` |

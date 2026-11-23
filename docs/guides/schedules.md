@@ -62,9 +62,14 @@ which schedule made a task.
 
 `ScheduledFor` returns the zero time when no schedule enqueued the task,
 such as a task that you enqueue by hand. So fall back to `t.RunAt`, as the
-handler above does. To test a handler as a scheduled run, enqueue its task
-with a time such as `2026-11-12T03:00:00+01:00` in its `Metadata`, under
-`taskmill.MetadataScheduledFor`.
+handler above does. To test a handler as a scheduled run, give its task a
+time such as `2026-11-12T03:00:00+01:00` in its `Metadata`, under
+`taskmill.MetadataScheduledFor`:
+
+```go
+when := map[string]string{taskmill.MetadataScheduledFor: "2026-11-12T03:00:00+01:00"}
+info, err := taskmilltest.Run(t, client, &ReportBuilder{}, BuildReport{}, &taskmill.EnqueueOptions{Metadata: when})
+```
 
 ## Write the timetable
 

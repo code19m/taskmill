@@ -376,10 +376,11 @@ func (s *shop) placeOrder(ctx context.Context, n int64) error {
 		// publishes them later, in order per key.
 		placed, _ := json.Marshal(orderEvent{Type: "order.placed", OrderID: id, Cents: cents}) // a struct of numbers and strings always encodes
 		paid, _ := json.Marshal(orderEvent{Type: "order.paid", OrderID: id})
-		return s.outbox.Store(ctx, taskmill.Pgx(tx),
+		_, err := s.outbox.StoreTx(ctx, taskmill.Pgx(tx),
 			outbox.Message{Topic: "orders", Key: []byte(key), Value: placed},
 			outbox.Message{Topic: "orders", Key: []byte(key), Value: paid},
 		)
+		return err
 	})
 }
 

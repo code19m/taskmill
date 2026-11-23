@@ -212,13 +212,14 @@ ORDER BY n.name`
 
 // $1 how long a worker without a stored lease may be silent, in microseconds.
 //
-// listWorkersSQL lists the workers, each with whether it is stale: it
+// listWorkersSQL lists the workers, each with whether it is a candidate
+// for maintainer, which stores its schedules, and whether it is stale: it
 // made no check-in for its whole lease, by the database's clock. A
 // worker of a release that stores no lease is stale after $1
 // microseconds.
 const listWorkersSQL = `
 SELECT w.id, w.hostname, w.version, w.queues, w.kinds, w.schedules, w.started_at, w.heartbeat_at, l.worker_id IS NOT NULL,
-       w.heartbeat_at < now() - coalesce(w.lease_duration, $1 * interval '1 microsecond')
+       w.schedules IS NOT NULL, w.heartbeat_at < now() - coalesce(w.lease_duration, $1 * interval '1 microsecond')
 FROM {s}.workers w
 LEFT JOIN {s}.leader l ON l.name = 'maintainer' AND l.worker_id = w.id AND l.expires_at > now()
 ORDER BY w.id`
