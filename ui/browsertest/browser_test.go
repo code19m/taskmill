@@ -18,10 +18,12 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/log"
 	cdppage "github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/kb"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill"
@@ -346,6 +348,34 @@ func (p *page) click(selector string) {
 	p.t.Helper()
 	x, y := p.middle(selector)
 	p.do(chromedp.MouseClickXY(x, y))
+}
+
+// press presses and releases a key, such as kb.Enter, as a keyboard does:
+// its keydown and its keypress come in one event, so no task of the page
+// runs between them. chromedp.KeyEvent sends the keypress as an event of
+// its own, and an answer that comes before it can move the focus: Enter on
+// a link that opens the dialog would also press the dialog's button.
+func (p *page) press(key string) {
+	p.t.Helper()
+	p.do(chromedp.Func(func(ctx context.Context, t *chromedp.Target) error {
+		for _, r := range key {
+			var events []*input.DispatchKeyEventParams
+			for _, e := range kb.Encode(r) {
+				if e.Type == kb.KeyChar { // the text of the keydown before it
+					down := events[len(events)-1]
+					down.Text, down.UnmodifiedText = e.Text, e.UnmodifiedText
+					continue
+				}
+				events = append(events, e)
+			}
+			for _, e := range events {
+				if _, err := cdp.Call(ctx, t, input.DispatchKeyEvent, *e); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}))
 }
 
 // hover moves the mouse over the element that selector finds.

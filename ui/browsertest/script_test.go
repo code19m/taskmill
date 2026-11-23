@@ -191,7 +191,7 @@ func TestDialogConfirmsAnAction(t *testing.T) {
 		t.Errorf("the dialog says %q", got)
 	}
 
-	p.do(chromedp.KeyEvent(kb.Escape))
+	p.press(kb.Escape)
 	p.waitFor(`!document.getElementById("confirm-dialog").open`, "Escape")
 	p.waitFor(`document.activeElement === document.querySelector(`+js(button)+`)`, "the focus going back to the button")
 	if _, err := s.client.Get(t.Context(), id); err != nil {
@@ -232,7 +232,7 @@ func TestActionKeepsTheFocusInItsRow(t *testing.T) {
 	s.exec(t, `INSERT INTO {s}.schedules (name, queue, kind, cron, next_run_at) VALUES ('nightly', 'default', 'report', '0 3 * * *', now() + interval '1 hour')`)
 	act := func(p *page, notice, row, want string) {
 		t.Helper()
-		p.do(chromedp.KeyEvent(kb.Enter))
+		p.press(kb.Enter)
 		p.waitFor(`document.querySelector(".toast")?.textContent === `+js(notice), "the notice of the action")
 		p.waitFor(`!document.querySelector("[data-js-pending]")`, "the end of the action")
 		if got := eval[string](p, `document.activeElement.matches('tr[data-key=`+js(row)+`] .actions-col :is(a, button)') ? document.activeElement.textContent : document.activeElement.localName`); got != want {
@@ -252,7 +252,7 @@ func TestActionKeepsTheFocusInItsRow(t *testing.T) {
 
 	p = s.open(t, "/schedules")
 	p.run(`document.querySelector('tr[data-key="nightly"] a[href*="/pause"]').focus()`)
-	p.do(chromedp.KeyEvent(kb.Enter))
+	p.press(kb.Enter)
 	p.waitFor(`document.getElementById("confirm-dialog").open`, "the dialog")
 	p.run(`document.querySelector("[data-confirm-button]").focus()`)
 	act(p, "Schedule paused.", "nightly", "Resume")
