@@ -7,7 +7,7 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
-## [0.17.0] - 2026-11-23
+## [0.17.0] - 2026-11-24
 
 ### Added
 

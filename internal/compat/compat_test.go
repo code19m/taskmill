@@ -129,7 +129,8 @@ func (r *release) enqueue(t *testing.T) {
 				return err
 			}
 		}
-		return r.box.Store(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "compat", Value: []byte("message")})
+		_, err := r.box.StoreTx(ctx, taskmill.Pgx(tx), outbox.Message{Topic: "compat", Value: []byte("message")})
+		return err
 	}); err != nil {
 		t.Fatalf("the release's EnqueueTx: %v", err)
 	}
