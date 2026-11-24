@@ -56,10 +56,10 @@ kos:
       org.opencontainers.image.version: "{{ .Version }}"
       org.opencontainers.image.revision: "{{ .FullCommit }}"
 
-changelog:
-  disable: true # the notes come from CHANGELOG.md
-
 release:
+  # The notes are the version's CHANGELOG.md section, which `make release`
+  # passes with --release-notes. GoReleaser reads that flag in its changelog
+  # step, so disabling the changelog would drop the notes.
   prerelease: auto
   # The release workflow publishes the draft once the attestations exist.
   draft: true

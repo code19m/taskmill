@@ -72,6 +72,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+      # GoReleaser leaves the notes empty without an error when it skips
+      # them, as it did from v0.2.0 to v0.17.0: check them before publishing.
+      - name: Check the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          notes=$(make release-notes)
+          body=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+          [ "$body" = "$notes" ] || { echo "::error::The draft's notes are not the CHANGELOG section of $TAG."; exit 1; }
       - name: Find the image digest
         id: image
         run: |

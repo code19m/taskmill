@@ -112,7 +112,8 @@ The workflow runs these steps in order:
 
 ```mermaid
 flowchart LR
-    A["GoReleaser: archives to a draft release,<br/>image pushed as X.Y.Z"] --> B["Attest the archives,<br/>SBOMs, and image"]
+    A["GoReleaser: archives to a draft release,<br/>image pushed as X.Y.Z"] --> N["Check that the draft's notes<br/>are the CHANGELOG section"]
+    N --> B["Attest the archives,<br/>SBOMs, and image"]
     B --> C["Tag the image latest<br/>(not for a pre-release)"]
     C --> D["Publish the release"]
 ```

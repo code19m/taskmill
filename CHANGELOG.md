@@ -7,6 +7,13 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Each GitHub release has its version's section of this changelog as its
+  notes, as [Releasing](docs/design/releasing.md) says. From v0.2.0 to
+  v0.17.0 the notes were empty, and they are now filled in. The release
+  workflow checks the notes before it publishes a release.
+
 ## [0.17.0] - 2026-11-24
 
 ### Added
