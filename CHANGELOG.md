@@ -7,12 +7,140 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `GroupParams.Keys` reads FIFO groups by their exact keys, up to 100. With
+  `Queues`, a page reads only the groups that it names, through the primary
+  key.
+
+### Changed
+
+- A client notifies the workers of the tasks that its own writes made
+  available once those writes commit, in batches: one transaction that
+  writes nothing, for all queues, at most every 50 ms. Before, each write
+  notified in its own transaction, at most once per queue per 50 ms. A
+  notifying transaction holds a lock of the whole server while its commit is
+  flushed, and wakes every listening worker of the database, so a client
+  that enqueued into many queues sent a notification with nearly every
+  enqueue. While a client keeps writing, a task can wait up to 50 ms for its
+  notification, as one could before in a queue that was just notified.
+  Writes in your transaction, such as `EnqueueTx`, still notify in it, at
+  most once per queue per 50 ms. The line `notification failed` names its
+  queues in `queues`, not `queue`.
+- `Client.Close` sends the notifications that the client held back, within
+  5 seconds, instead of dropping them: the tasks of a client's last writes
+  start right away, not when the maintainer next wakes their queues. Call it
+  before the pool's `Close`.
+- A worker records the failures, snoozes, and releases of tasks outside
+  FIFO groups in batches, as it records completions: those that end within
+  2 ms of each other, up to 500, share one statement, which skips the rows
+  that other transactions hold. So handlers that fail fast, as in an outage
+  of what they call, cost the database little more than handlers that
+  succeed, where each failure took a statement of its own, and a batch
+  handler's failed batch one per task. Each attempt keeps its slot until its
+  outcome is recorded, as before.
+- Under a backlog, a worker fetches once a few slots are free, not after
+  each one: once a quarter of a queue's slots are free, or after a
+  twentieth of the time that a task holds its slot, and 2 ms at most. A
+  fetch costs the database a transaction however many tasks it takes, and
+  one task per fetch cost about 15 times the database's time per task of 32.
+  Room that a completion makes, for a FIFO group's next task or under a
+  `MaxRunning` limit, still starts a fetch right away.
+- The polls every `PollInterval`, while the maintainer's heartbeats do not
+  arrive, are a tenth longer or shorter at random, as the polls once a
+  minute already were, so that workers that noticed together that the
+  heartbeats stopped poll apart.
+
 ### Fixed
 
+- A FIFO group into which short transactions enqueue one after another
+  completes its tasks as fast as they are enqueued. A completion that found
+  the group's row held tried again later, up to a second apart, and rarely
+  found the row free: with 70 enqueues a second that each held the row for
+  5 ms, 2 to 4 of 100 tasks completed while they were enqueued, and the
+  group's backlog grew without bound. Now up to 4 completions of a worker
+  at a time also wait for their groups' rows, up to 100 ms each, and 1 to
+  4 of the 100 were left, and 3 to 9 of 300 in three such groups. Each
+  such completion costs a transaction more, so a worker keeps up with a
+  few busy groups: more take more workers.
+- `CompleteTx` takes back the dedupe key that a cancel freed before it
+  takes the row of the task's FIFO group, as an enqueue and `Retry` do. It
+  took the group's row first, so it could deadlock with an enqueue of the
+  key into the group, and one of the two failed with SQLSTATE 40P01. The
+  doc of `CompleteTx` says when it can still meet such an error.
+- `CancelTx` and `CompleteTx` accept a type that wraps a `pgx.Tx` with its
+  `Commit` and `Rollback` methods, as they accept a `*sqlx.Tx`, and an
+  enqueue counts it as a transaction: taskmill tells a pgx transaction by
+  those two methods, as it does for `database/sql`. Such a wrapper that
+  lacked the rest of `pgx.Tx` was refused, and an enqueue on it could
+  return `ErrStoredWithoutIDs` where one in a transaction could not.
+- A stopping worker with a `DrainTimeout` of the largest `time.Duration`
+  records the results of the tasks that it drained. The sum of its
+  deadlines overflowed, so it gave up recording right away: the tasks ran
+  again once their leases ran out, and the maintainer did not resign.
+- The maintainer rescues tasks whose leases ran out in a loop of its own,
+  apart from the schedules' runs: a schedule whose enqueue waited for a
+  FIFO group's row, or for a slow enqueue middleware, delayed the rescue
+  past the second that the guarantees give.
+- A list of only running tasks reads the running tasks of its queues from
+  their index, and sorts them. Across all queues, it read the primary key
+  backward through every newer task, once running tasks were a small share
+  of the table: 428 ms for 11,500 running tasks among 2.6 million, at
+  every update of the dashboard's Running list. It takes 10 ms now.
+- The dashboard's page of a dead task finds the FIFO group that it halts by
+  the group's exact key. It searched the first 1,000 halted groups of the
+  task's queue whose keys contained the task's key, and past those said
+  that the task's place in its group could not be read.
+- The results of a bulk action that continues one that stopped early add
+  up: `BulkResult` of the call that stopped counts only the skips and
+  conflicts before `Next`, since the call that continues goes through the
+  tasks after it again. The dashboard's notice after a bulk action that
+  took several requests counts the tasks of all of them, and a retry's
+  conflicts too: it no longer drops those of a request that ran out of
+  time.
+- The doc of `Activity` says that a worker's write of its counts, whose
+  commit outlasts its 10 seconds, as when a synchronous standby lags that
+  long, can add them twice. [Log messages](docs/reference/log-messages.md)
+  lists `completed tasks could not take back the dedupe keys that their
+  cancels freed`, which it missed, and tests keep it and
+  [Metrics](docs/reference/metrics.md) in step with the code.
 - Each GitHub release has its version's section of this changelog as its
   notes, as [Releasing](docs/design/releasing.md) says. From v0.2.0 to
   v0.17.0 the notes were empty, and they are now filled in. The release
   workflow checks the notes before it publishes a release.
+
+### Security
+
+- `NewClient` warns, with `every role may create objects in a schema on the
+  search path`, of a schema on its search path in which every role may
+  create objects. taskmill's statements find PostgreSQL's functions and
+  operators through the path, so such a role could replace one, with the
+  rights of the role that runs it. Databases created before PostgreSQL 15
+  have that grant on `public`: [Security](docs/production/security.md#know-who-can-reach-the-database)
+  says how to remove it.
+- **Breaking:** `Migrate`, and version 0 of `Migrations`, fill a schema only
+  if they trust its owner, which can drop or replace every table in it, and
+  the owner of its migrations table, which could have created objects there
+  first: such objects run with the rights of the role that runs `Migrate`.
+  They trust a superuser, and a role that has the rights of the role that
+  the pool connects as. `pg_database_owner`, which owns `public`, stands for
+  the database's owner. A role set on the connection, with `SET ROLE`,
+  `SET SESSION AUTHORIZATION` or the `role` parameter, does not count, and
+  must be trusted too, since it would own what `Migrate` creates. Otherwise
+  they fail with SQLSTATE 42501 before they change anything, and name the
+  role to connect as. Of a schema that is up to date, a superuser, or a
+  member of one, reads only a migrations table whose owners it trusts, and
+  other roles one of the schema's owner or of a role that they trust. These
+  jobs worked before and fail now: a superuser's on a schema that your app's
+  role owns or filled, or, with a migration pending, with your app's role
+  set on its connection; a member's of that role with a migration pending;
+  one with a migration pending on a schema that your app's role filled but
+  another role owns now; and one of a role that owns nothing on a schema
+  that your app's role filled but does not own, such as `public` in a
+  database that a superuser owns. Run the job that calls `Migrate` connected
+  as the role that owns taskmill's tables, and make that role the schema's
+  owner with `ALTER SCHEMA ... OWNER TO`. Give the CREATE privilege on the
+  database only to roles that you trust.
 
 ## [0.17.0] - 2026-11-24
 

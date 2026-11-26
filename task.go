@@ -269,7 +269,13 @@ func (t *Task[A]) CancelRequested() bool {
 // error, so that the transaction rolls back. If a cancel of the task was
 // requested while it ran, CompleteTx also takes back the dedupe key that the
 // cancel freed, unless another task took it, and like an enqueue of the key,
-// it waits for a transaction that claims it.
+// it waits for a transaction that claims it. It claims the key before it
+// takes the row of the task's FIFO group, as an enqueue and [Client.Retry]
+// do. So a transaction of the caller that takes the group's row first, with
+// an enqueue into the group, and then enqueues the key, can wait for it
+// while it waits for that transaction: PostgreSQL then ends one of the two
+// with a deadlock error (SQLSTATE 40P01). The transaction that got the error
+// can be run again.
 //
 // After CompleteTx, the handler should commit and return nil. If the handler
 // returns an error after its transaction committed, the task stays completed
@@ -294,15 +300,13 @@ func (t *Task[A]) CompleteTx(ctx context.Context, tx Executor) error {
 	}
 
 	a := t.attempt
-	done, err := a.client.complete(ctx, a.logger, q, []completion{{id: a.id, token: a.token, discard: a.discard}})
+	regain := func(done []completedTask) error { return a.client.regainKeys(ctx, q, done) }
+	done, err := a.client.completeThen(ctx, a.logger, q, []completion{{id: a.id, token: a.token, discard: a.discard}}, regain)
 	if err != nil {
 		return err
 	}
 	if len(done) == 0 {
 		return fmt.Errorf("%w: task %d", ErrLeaseLost, a.id)
-	}
-	if err := a.client.regainKeys(ctx, q, done); err != nil {
-		return fmt.Errorf("taskmill: complete: %w", err)
 	}
 
 	a.completedInTx.Store(true)

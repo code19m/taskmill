@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -168,9 +169,11 @@ type EnqueueTask struct {
 // If the options set a DedupeKey that is taken, Enqueue creates no task: the
 // result holds the ID of the existing task, and its Duplicate is true.
 //
-// The [ClientConfig.EnqueueMiddleware] runs around the enqueue. The enqueue
-// notifies the workers of a task that may start now, so a worker with a free
-// slot usually starts it within milliseconds.
+// The [ClientConfig.EnqueueMiddleware] runs around the enqueue. Once the
+// task is committed, the client notifies the workers of a task that may
+// start now, so a worker with a free slot usually starts it within
+// milliseconds. The client sends its notifications together, once per 50
+// ms, so while it enqueues more, a task can wait up to 50 ms for its own.
 //
 // It returns an error that wraps [ErrInvalidArgument] for nil args, also a
 // nil pointer, for an option outside its limits, and for a payload that
@@ -184,7 +187,7 @@ type EnqueueTask struct {
 // the try before was saved. [Client.EnqueueTx] cannot do that in the
 // caller's transaction, and returns the error.
 func (c *Client) Enqueue(ctx context.Context, args Args, opts *EnqueueOptions) (EnqueueResult, error) {
-	res, err := c.enqueue(ctx, pgxExecutor{q: c.pool}, true, []EnqueueParams{{Args: args, Options: opts}})
+	res, err := c.enqueue(ctx, c.own(c.pool), true, []EnqueueParams{{Args: args, Options: opts}})
 	if err != nil {
 		return EnqueueResult{}, err
 	}
@@ -228,7 +231,7 @@ func (c *Client) EnqueueTx(ctx context.Context, tx Executor, args Args, opts *En
 //
 // Like [Client.Enqueue], it runs again by itself after a deadlock.
 func (c *Client) EnqueueMany(ctx context.Context, params []EnqueueParams) ([]EnqueueResult, error) {
-	return c.enqueue(ctx, pgxExecutor{q: c.pool}, true, params)
+	return c.enqueue(ctx, c.own(c.pool), true, params)
 }
 
 // EnqueueManyTx is [Client.EnqueueMany] in the caller's transaction. tx may
@@ -431,13 +434,8 @@ func (c *Client) insertWithRetry(ctx context.Context, q querier, own bool, b *en
 // says, and returns the results with the rows of the duplicates whose
 // existing task the statement could not see.
 func (c *Client) insertBatch(ctx context.Context, q querier, own bool, b *enqueueBatch) (results []EnqueueResult, missing []int, err error) {
-	notify := make([]string, 0, len(b.due))
-	for queue := range b.due {
-		if c.notifier.allow(ctx, queue) {
-			notify = append(notify, queue)
-		}
-	}
-
+	due := slices.Collect(maps.Keys(b.due))
+	notify := c.notifiable(q, due)
 	for try := 1; ; try++ {
 		results, missing, err = c.insertTasks(ctx, q, b, notify)
 		// PostgreSQL may end the statement to end a deadlock that other
@@ -454,6 +452,7 @@ func (c *Client) insertBatch(ctx context.Context, q querier, own bool, b *enqueu
 	if err != nil {
 		return nil, nil, enqueueError(err)
 	}
+	madeAvailable(q, due...)
 	return results, missing, nil
 }
 

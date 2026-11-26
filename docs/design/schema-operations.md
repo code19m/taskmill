@@ -86,13 +86,12 @@ transaction of its own.
   times out, the batch rolls back, and the action stops with a cursor to
   continue.
 - **No lock timeout at the commit.** The timeout is for the batch's
-  statements, and the batch lifts it as its last one. A transaction that
-  sent a notification takes one more lock when it commits: the lock that
-  every notifying transaction of the server takes in turn, and holds until
-  its commit is done. With synchronous replication, that includes the wait
-  for the standby. Under the timeout, a batch whose work was done failed
-  there. A schedule's run, which waits at most a second for a group's row,
-  lifts its timeout the same way.
+  statements, and the batch lifts it as its last one. A batch that cancels
+  running tasks notifies their workers in its transaction, which then takes
+  one more lock when it commits: the lock that every notifying transaction
+  of the server takes in turn, and holds until its commit is done, with
+  synchronous replication until the standby confirms. Under the timeout, a
+  batch whose work was done failed there.
 - **Counts, and continuing.** A batch whose statements ran commits even if
   the caller's context ends meanwhile, so the action counts it. The count is
   exact for a call that returns no error. A commit is bounded by the batch's
@@ -194,8 +193,8 @@ of its window. If another task took the key during the run, that task keeps
 it, since it stands for the work too. The Complete statement returns the
 stored key. The worker claims it once the completion has committed, in a
 transaction of its own that waits 100 ms at most for the key's row; then it
-logs a warning, and the task stays without its key. `CompleteTx` claims the
-key in the caller's transaction, which may wait, as an enqueue does.
+logs a warning, and the task stays without its key. `CompleteTx` claims it
+in the caller's transaction, which may wait, in the order of a `Retry`.
 
 | Decision | Why |
 |---|---|

@@ -179,7 +179,9 @@ log.Printf("retried %d tasks, skipped %d", res.Changed, res.Skipped)
   change them.
 - **If your context ends,** they stop after the current batch. They return
   what they did, an error, and `Next`: pass it as `BulkParams.Cursor` to
-  continue from there.
+  continue from there. The counts of the calls add up: the call that
+  continues goes through the tasks after `Next` again, so the call that
+  stopped counts none of them as skipped or as conflicts.
 - **After an error, the count can be one batch short.** If the database
   does not confirm the last batch in time, it may still commit it. Running
   the action again is safe: the tasks that it changed no longer match.
@@ -227,8 +229,10 @@ or a dead task that halts them, one page at a time. Each `GroupInfo` has
 the group's `Queue` and `Key`, how many `Tasks` it has, and `HaltedBy`: the
 ID of the dead task that halts it, or 0.
 
-In `GroupParams`, set `Halted: true` for only the halted groups, and
-`Search` to find groups by a part of their key. To list the tasks of a
+In `GroupParams`, set `Halted: true` for only the halted groups, `Keys`
+to read groups by their exact keys, and `Search` to find groups by a part
+of their key. With `Queues` too, `Keys` reads only the groups it names. To
+list the tasks of a
 group, use `List` with `TaskFilter.GroupKeys`. To fix a halted group, see
 [Fix a halted group](ordering.md#fix-a-halted-group).
 

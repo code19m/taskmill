@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -120,6 +121,57 @@ func TestMaintenanceDoesNotWaitForHeldGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 	rescued(grouped)
+}
+
+// The rescue runs in a loop of its own: a run of a schedule that takes
+// long, such as one whose enqueue middleware calls out over the network, or
+// waits for a group's row, does not delay it.
+func TestASlowScheduleDoesNotDelayTheRescue(t *testing.T) {
+	t.Parallel()
+	pool := newEnv(t).pool
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	inRun := make(chan struct{}, 1)
+	var returned atomic.Bool // the run's middleware returned: the pass is over
+	slow := func(ctx context.Context, tasks []*taskmill.EnqueueTask, next func(context.Context) error) error {
+		if tasks[0].Queue != "scheduled" {
+			return next(ctx)
+		}
+		defer returned.Store(true)
+		select {
+		case inRun <- struct{}{}:
+		default:
+		}
+		select {
+		case <-release:
+			return next(ctx)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	e := newEnvWith(t, pool, &taskmill.ClientConfig{EnqueueMiddleware: []taskmill.EnqueueMiddleware{slow}})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Schedules: []taskmill.Schedule{{
+			Name: "s", Cron: "* * * * *", Args: sendEmail{},
+			Options: &taskmill.EnqueueOptions{Queue: "scheduled"},
+		}},
+	})
+	waitFor(t, "the schedule to be stored", func() bool {
+		return e.count(t, "SELECT count(*) FROM {s}.schedules") == 1
+	})
+	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('minute', now())")
+	recv(t, inRun, "the schedule's run to start")
+
+	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "unserved"})
+	e.exec(t, `UPDATE {s}.tasks SET state = 'running', attempt = 1, lease_token = 1, attempted_at = now(), attempted_by = 'crashed',
+	           lease_expires_at = now() - interval '1 second' WHERE id = $1`, id)
+	waitFor(t, "the rescue", func() bool {
+		info := e.get(t, id)
+		return info.State != taskmill.StateRunning && len(info.Errors) == 1 && info.Errors[0].Code == taskmill.CodeLeaseLost
+	})
+	if returned.Load() {
+		t.Fatal("the rescue waited for the schedule's run")
+	}
 }
 
 // A rescue ends the attempts of a lost worker for many groups in one
@@ -633,7 +685,8 @@ func TestMaintainerWakesQueuesWhoseTasksWait(t *testing.T) {
 	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
 	           SELECT q, 'email.send', 'available', now() - interval '1 minute', '{}', 1
 	           FROM unnest(ARRAY['waiting', 'paused']) q`)
-	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "fresh"})
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           VALUES ('fresh', 'email.send', 'available', now(), '{}', 1)`)
 	if err := e.client.PauseQueue(ctx, "paused"); err != nil {
 		t.Fatal(err)
 	}

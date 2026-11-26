@@ -845,11 +845,11 @@ func TestBulkActionsWorkInBatches(t *testing.T) {
 
 // A transaction that sent a notification waits at its commit for the lock
 // that every notifying transaction of the server takes there. The lock
-// timeout of a bulk action's batch, or of a schedule's run, is for its
-// statements: at the commit it would fail a transaction whose work is done.
-// That lock belongs to the whole server, so the test does not hold it: a
-// deferred trigger runs inside each commit, and refuses one that still has a
-// lock timeout.
+// timeout of a bulk action's batch, which may notify of a running task's
+// cancellation, is for its statements: at the commit it would fail a
+// transaction whose work is done. That lock belongs to the whole server, so
+// the test does not hold it: a deferred trigger runs inside each commit, and
+// refuses one that still has a lock timeout.
 func TestALockTimeoutEndsBeforeTheCommit(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -882,16 +882,6 @@ DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION {s}.commit_without_l
 		if res, err := step.do(ctx, all); err != nil || res.Changed != 2 {
 			t.Fatalf("%s: %d tasks, %v; want 2", step.name, res.Changed, err)
 		}
-	}
-
-	// The first pass stores the schedule, and the second enqueues its run.
-	w := newWorker(t, e, &taskmill.WorkerConfig{Schedules: []taskmill.Schedule{{Name: "digest", Cron: "@hourly", Args: sendEmail{}}}})
-	taskmill.RunSchedules(ctx, w)
-	e.exec(t, "UPDATE {s}.schedules SET next_run_at = date_trunc('second', now()) - interval '1 second'")
-	taskmill.RunSchedules(ctx, w)
-
-	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
-		t.Errorf("the schedule's run enqueued %d tasks, want 1", n)
 	}
 }
 
@@ -1171,6 +1161,56 @@ func TestRetryMatchingLeavesTasksWhoseDedupeKeyIsTaken(t *testing.T) {
 	if res, err := e.client.RetryMatching(ctx, canceled); err != nil || res != want {
 		t.Fatalf("once the keys are free: %+v, %v; want %+v", res, err, want)
 	}
+}
+
+// A retry that stops counts no skip or conflict after its cursor: the call
+// that continues goes through those tasks again, and counts them. So the
+// results of the two calls add up.
+func TestRetryMatchingThatStopsCountsOnlyTheTasksBeforeItsCursor(t *testing.T) {
+	t.Parallel()
+	sent := &bulkStatements{}
+	e := newTracedEnv(t, sent)
+
+	refused := func(key string) int64 {
+		opts := &taskmill.EnqueueOptions{DedupeKey: key}
+		id := e.keyed(t, opts).ID
+		e.cancel(t, id)
+		e.keyed(t, opts) // the task that holds the key
+		return id
+	}
+
+	// A conflict, a task that another transaction holds, a conflict after
+	// it, and enough tasks for a second batch.
+	first := refused("first")
+	held := e.enqueue(t, sendEmail{}, nil)
+	e.cancel(t, held)
+	later := refused("later")
+	e.exec(t, `INSERT INTO {s}.tasks (queue, run_at, kind, finalized_at, state, cancel_requested_at, payload, max_attempts)
+	           SELECT 'default', now(), 'email.send', now(), 'canceled', now(), '{}', 3 FROM generate_series(1, 1500)`)
+
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", held)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	sent.atBatch(1, cancel)
+	params := bulk(&taskmill.TaskFilter{States: []taskmill.State{taskmill.StateCanceled}})
+	stopped, err := e.client.RetryMatching(ctx, params)
+	if !errors.Is(err, context.Canceled) || stopped.Next == "" ||
+		stopped != (taskmill.BulkResult{Changed: 997, Conflicts: 1, Next: stopped.Next}) {
+		t.Fatalf("first run: %+v, %v; want 997 retried, the conflict before the held task, and a cursor", stopped, err)
+	}
+	if err := tx.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	params.Cursor = stopped.Next
+	want := taskmill.BulkResult{Changed: 504, Conflicts: 1}
+	if rest, err := e.client.RetryMatching(t.Context(), params); err != nil || rest != want {
+		t.Fatalf("then %+v, %v; want %+v", rest, err, want)
+	}
+	wantStates(t, e, map[int64]taskmill.State{
+		first: taskmill.StateCanceled, held: taskmill.StateAvailable, later: taskmill.StateCanceled,
+	})
 }
 
 // A retry that must take a dedupe key back, while an open transaction claims
@@ -1875,6 +1915,9 @@ func TestBulkActionsCheckTheFilter(t *testing.T) {
 		"retry": e.client.RetryMatching, "cancel": e.client.CancelMatching, "delete": e.client.DeleteMatching,
 	}
 	dead := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateDead}}
+	id := e.enqueue(t, sendEmail{}, nil)
+	e.die(t, id)
+	hour := time.Now().Add(-time.Hour)
 
 	for _, params := range []*taskmill.BulkParams{
 		nil,
@@ -1884,6 +1927,12 @@ func TestBulkActionsCheckTheFilter(t *testing.T) {
 		{Filter: dead, Cursor: "%%%"},
 		{Filter: dead, Cursor: "LTE"},                        // -1
 		{Filter: dead, Cursor: "OTIyMzM3MjAzNjg1NDc3NTgwOA"}, // 2^63
+		// A range alone says when, not which tasks: it would act on every
+		// task of the time, in every queue and state.
+		{Filter: taskmill.TaskFilter{CreatedSince: hour}},
+		{Filter: taskmill.TaskFilter{CreatedBefore: time.Now().Add(time.Hour)}},
+		{Filter: taskmill.TaskFilter{FinishedSince: hour}},
+		{Filter: taskmill.TaskFilter{FinishedBefore: time.Now().Add(time.Hour)}},
 	} {
 		for name, do := range actions {
 			if _, err := do(t.Context(), params); !errors.Is(err, taskmill.ErrInvalidArgument) {
@@ -1891,6 +1940,7 @@ func TestBulkActionsCheckTheFilter(t *testing.T) {
 			}
 		}
 	}
+	e.wantState(t, id, taskmill.StateDead)
 
 	if _, err := e.client.Count(t.Context(), &taskmill.CountParams{Filter: taskmill.TaskFilter{States: []taskmill.State{"lost"}}}); !errors.Is(err, taskmill.ErrInvalidArgument) {
 		t.Errorf("count with an unknown state: got %v, want ErrInvalidArgument", err)

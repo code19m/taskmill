@@ -61,16 +61,54 @@ func TestMigrateIsIdempotentAndConcurrencySafe(t *testing.T) {
 	}
 }
 
+// Migrate only reads a schema that is up to date, as on a read-only
+// replica, also as a superuser, which checks the schema's owners first: it
+// writes nothing, and takes no lock of the migrations table, which a replica
+// would refuse, while another transaction holds a lock that conflicts with
+// it.
+func TestMigrateOnlyReadsASchemaThatIsUpToDate(t *testing.T) {
+	t.Parallel()
+	admin := testdb.Pool(t) // a superuser
+	schema := testdb.Schema(t, admin)
+	if err := taskmill.Migrate(t.Context(), admin, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t)) // a proxy refuses the parameter
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
+	readOnly, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	lock, err := admin.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = lock.Rollback(context.Background()) }()
+	if _, err := lock.Exec(t.Context(), "LOCK TABLE "+schema+".migrations IN SHARE MODE"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second) // Migrate tries the lock until then
+	defer cancel()
+	if err := taskmill.Migrate(ctx, readOnly, &taskmill.MigrateConfig{Schema: schema}); err != nil {
+		t.Fatalf("Migrate on a read-only connection: %v", err)
+	}
+}
+
 func TestMigrateWithARoleThatOnlyOwnsItsSchema(t *testing.T) {
 	t.Parallel()
 	admin := testdb.Pool(t)
 	schema := testdb.Schema(t, admin)
-	role := schema + "_owner"
+	role := schema + "_Owner@example.com" // named as a cloud's IAM user, which SQL must quote
 	ctx := t.Context()
 
 	// The role may connect, but not create schemas: an administrator
 	// created its schema for it.
-	pool := newRole(t, admin, role, "CREATE SCHEMA "+schema+" AUTHORIZATION "+role)
+	pool := newRole(t, admin, role, "CREATE SCHEMA "+schema+" AUTHORIZATION "+pgx.Identifier{role}.Sanitize())
 
 	// The schema exists and its migrations are due, as on install and on
 	// every release with a new migration.
@@ -79,6 +117,35 @@ func TestMigrateWithARoleThatOnlyOwnsItsSchema(t *testing.T) {
 	}
 	if _, err := taskmill.NewClient(ctx, pool, &taskmill.ClientConfig{Schema: schema}); err != nil {
 		t.Fatalf("new client: %v", err)
+	}
+}
+
+// A role that owns nothing, as a web process's may, can call Migrate on a
+// schema that is up to date: it reads the owner's migrations table, which
+// it does not check. With migrations due, it is refused, and told whom to
+// connect as, or to make it the schema's owner, by a name that SQL can use.
+func TestMigrateWithARoleThatOwnsNothing(t *testing.T) {
+	t.Parallel()
+	admin := testdb.Pool(t)
+	schema := testdb.Schema(t, admin)
+	owner, web := schema+"_owner", schema+"_Web"
+	ownerPool := newRole(t, admin, owner, "CREATE SCHEMA "+schema+" AUTHORIZATION "+owner)
+	pool := newRole(t, admin, web, "GRANT USAGE ON SCHEMA "+schema+" TO "+pgx.Identifier{web}.Sanitize())
+	cfg := &taskmill.MigrateConfig{Schema: schema}
+
+	err := taskmill.Migrate(t.Context(), pool, cfg)
+	want := "connect as role " + owner + " to migrate it, or make role " + pgx.Identifier{web}.Sanitize() + " its owner"
+	if !refusedOwner(err) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("Migrate as a role that owns nothing, with migrations due: %v; want it refused with %q", err, want)
+	}
+	if err := taskmill.Migrate(t.Context(), ownerPool, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.Exec(t.Context(), "GRANT SELECT ON "+schema+".migrations TO "+pgx.Identifier{web}.Sanitize()); err != nil {
+		t.Fatal(err)
+	}
+	if err := taskmill.Migrate(t.Context(), pool, cfg); err != nil {
+		t.Errorf("Migrate as a role that owns nothing: %v", err)
 	}
 }
 
@@ -789,11 +856,14 @@ func applyUpTo(t *testing.T, pool *pgxpool.Pool, schema string, version int) {
 // connects as the role. The role is dropped when the test ends.
 func newRole(t *testing.T, admin *pgxpool.Pool, role string, setup ...string) *pgxpool.Pool {
 	t.Helper()
-	if _, err := admin.Exec(t.Context(), "CREATE ROLE "+role+" LOGIN PASSWORD 'role'"); err != nil {
+	ident := pgx.Identifier{role}.Sanitize()
+	if _, err := admin.Exec(t.Context(), "CREATE ROLE "+ident+" LOGIN PASSWORD 'role'"); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		_, _ = admin.Exec(context.Background(), "DROP OWNED BY "+role+"; DROP ROLE "+role)
+		if _, err := admin.Exec(context.Background(), "DROP OWNED BY "+ident+"; DROP ROLE "+ident); err != nil {
+			t.Errorf("drop role %s: %v", role, err)
+		}
 	})
 
 	for _, sql := range setup {
@@ -801,12 +871,25 @@ func newRole(t *testing.T, admin *pgxpool.Pool, role string, setup ...string) *p
 			t.Fatal(err)
 		}
 	}
+	return connectAs(t, role, "")
+}
 
-	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+// connectAs returns a pool that connects as a role that newRole created, to
+// database, or to the test database if database is empty.
+func connectAs(t *testing.T, role, database string) *pgxpool.Pool {
+	t.Helper()
+	url := testdb.URL(t)
+	if database != "" {
+		url = testdb.DirectURL(t) // a proxy serves only the test database
+	}
+	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg.ConnConfig.User, cfg.ConnConfig.Password = role, "role"
+	if database != "" {
+		cfg.ConnConfig.Database = database
+	}
 
 	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	if err != nil {

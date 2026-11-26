@@ -7,20 +7,20 @@ import (
 	"log/slog"
 	"slices"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // completer records successful attempts in batches, on record, until ctx
 // ends: it gathers the results that arrive within a moment of each other and
 // completes them together, so a busy worker needs far fewer statements,
-// while an idle one adds only that moment. It keeps completions whose rows,
-// or the rows of their FIFO groups, other transactions hold, and tries them
-// again shortly, so that the completions of a batch never wait for one such
-// row. While it runs, only regainKeys, once a batch has committed, waits
-// for another transaction's lock while holding a connection, and for
-// keyLockTimeout at most. At shutdown, completeWaiting waits for the rows of
-// the groups still held, until Run stops recording results.
+// while an idle one adds only that moment. A batch never waits for a row
+// that another transaction holds: the completer keeps those completions and
+// tries them again shortly. A few completions whose FIFO groups' rows were
+// held wait for those rows, each on a goroutine of its own, for
+// groupLockTimeout at most: see waitForGroup. On the completer's goroutine,
+// only regainKeys, once a batch has committed, waits for another
+// transaction's lock while holding a connection, and for keyLockTimeout at
+// most. At shutdown, completeWaiting waits for the rows still held, until
+// Run stops recording results.
 func (w *Worker) completer(ctx, record context.Context) {
 	defer close(w.completerDone)
 	var blocked []*liveAttempt // completions whose rows other transactions held
@@ -36,18 +36,27 @@ func (w *Worker) completer(ctx, record context.Context) {
 		case <-retryBlocked.C:
 		case <-ctx.Done():
 			// Record what finished before shutdown, then stop: every attempt
-			// has returned, so nothing more arrives. Completions whose groups
-			// are still held wait for the locks now: there is no later try.
-			for len(w.completions) > 0 {
-				batch = append(batch, <-w.completions)
+			// has returned, so nothing more arrives but the completions that
+			// completeHeld gives back, each before it empties its place in
+			// groupWait. Completions whose rows are still held wait for the
+			// locks now: there is no later try.
+			batch = drain(w.completions, batch)
+			for range groupWaits {
+				w.groupWait <- struct{}{}
 			}
-			w.completeWaiting(record, w.completeBatch(record, batch))
+			for range groupWaits {
+				<-w.groupWait
+			}
+			blocked, groupHeld := w.completeBatch(record, drain(w.completions, batch))
+			w.completeWaiting(record, append(blocked, groupHeld...))
 			return
 		}
 
 		// Retry blocked completions soon, then less often while they stay blocked.
 		wasBlocked := len(blocked) > 0
-		blocked = w.completeBatch(record, w.gather(batch))
+		var groupHeld []*liveAttempt
+		blocked, groupHeld = w.completeBatch(record, gather(w.completions, batch))
+		blocked = append(blocked, w.waitForGroup(record, groupHeld)...)
 		w.warnBlocked(record, blocked)
 		switch {
 		case len(blocked) == 0:
@@ -59,6 +68,14 @@ func (w *Worker) completer(ctx, record context.Context) {
 			retryBlocked.Reset(delay)
 		}
 	}
+}
+
+// drain adds to batch the results that ch holds.
+func drain[T any](ch <-chan T, batch []T) []T {
+	for len(ch) > 0 {
+		batch = append(batch, <-ch)
+	}
+	return batch
 }
 
 // warnBlocked warns once of each completion of blocked that other
@@ -81,14 +98,14 @@ func (w *Worker) warnBlocked(ctx context.Context, blocked []*liveAttempt) {
 	}
 }
 
-// gather adds to batch the completions that are ready, then those that
-// arrive within completionLinger, so that a worker whose attempts finish one
-// at a time still records them in batches.
-func (w *Worker) gather(batch []*liveAttempt) []*liveAttempt {
+// gather adds to batch the results from ch that are ready, then those that
+// arrive within completionLinger, up to completionBatch in all, so that a
+// worker whose attempts finish one at a time still records them in batches.
+func gather[T any](ch <-chan T, batch []T) []T {
 ready:
 	for len(batch) < completionBatch {
 		select {
-		case t := <-w.completions:
+		case t := <-ch:
 			batch = append(batch, t)
 		default:
 			break ready
@@ -99,7 +116,7 @@ ready:
 	defer linger.Stop()
 	for len(batch) < completionBatch {
 		select {
-		case t := <-w.completions:
+		case t := <-ch:
 			batch = append(batch, t)
 		case <-linger.C:
 			return batch
@@ -120,7 +137,7 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*liveAttempt) []compl
 
 	var done []completedTask
 	err := w.whileLeased(ctx, ts, func(ctx context.Context) error {
-		return w.client.inTx(ctx, func(q querier) error {
+		return w.client.inTx(ctx, w.client.pool, func(q querier) error {
 			var err error
 			done, err = w.client.complete(ctx, w.logger, q, completionsOf(ts))
 			return err
@@ -138,12 +155,12 @@ func (w *Worker) completeWaiting(ctx context.Context, ts []*liveAttempt) []compl
 // complete in one statement, which skips the rows that other transactions
 // hold. Grouped tasks complete in one transaction, which first locks their
 // groups' rows and then their own, skipping rows that other transactions
-// hold. It returns the tasks whose rows or groups' rows were held, for
-// example by a transaction that cancels a task or enqueues into a group, so
-// that the completer tries them again later instead of waiting for those
-// locks; they stay tracked, so their leases are renewed once the rows are
-// free.
-func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (blocked []*liveAttempt) {
+// hold. It returns the tasks whose rows were held, for example by a
+// transaction that cancels a task, and the tasks whose groups' rows were
+// held, for example by a transaction that enqueues into the group, so that
+// the completer tries them again instead of waiting for those locks; they
+// stay tracked, so their leases are renewed once the rows are free.
+func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (blocked, groupHeld []*liveAttempt) {
 	var plain, grouped []*liveAttempt
 	for _, t := range batch {
 		if t.info.GroupKey == "" {
@@ -173,64 +190,153 @@ func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (block
 	}
 
 	if len(grouped) == 0 {
-		return blocked
+		return blocked, nil
 	}
 	var done []completedTask
-	var heldGroups []*liveAttempt
+	var taskHeld []*liveAttempt
 	err := w.whileLeased(ctx, grouped, func(ctx context.Context) error {
 		conn, err := w.acquire(ctx)
 		if err != nil {
 			return err
 		}
 		defer conn.Release()
-		return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+		return w.client.inTx(ctx, conn, func(q querier) error {
 			var err error
-			heldGroups, done, err = w.completeLocked(ctx, pgxExecutor{q: tx}, grouped)
+			groupHeld, taskHeld, done, err = w.completeLocked(ctx, q, w.client.sql.lockGroups, grouped)
 			return err
 		})
 	})
 	if err != nil {
 		w.afterComplete(ctx, grouped, nil, err)
-		return blocked
+		return blocked, nil
 	}
 
-	w.afterComplete(ctx, slices.DeleteFunc(grouped, func(t *liveAttempt) bool { return slices.Contains(heldGroups, t) }), done, nil)
-	return append(blocked, heldGroups...)
+	held := make(map[*liveAttempt]bool, len(groupHeld)+len(taskHeld))
+	for _, t := range slices.Concat(groupHeld, taskHeld) {
+		held[t] = true
+	}
+	w.afterComplete(ctx, slices.DeleteFunc(grouped, func(t *liveAttempt) bool { return held[t] }), done, nil)
+	return append(blocked, taskHeld...), groupHeld
+}
+
+// waitForGroup starts completeHeld for the completions of groupHeld, whose
+// groups' rows other transactions held, that may wait for their groups'
+// rows now, while fewer than groupWaits wait, and returns the others. A
+// completion that waited before in vain, for its group's row or its own,
+// waits only while no other does. So
+// busy groups, whose holders hand their rows over within moments, get
+// several waits at a time, while a transaction that holds the rows of many
+// groups for long soon ties up one connection of the worker, which waits
+// for one of them at a time.
+func (w *Worker) waitForGroup(ctx context.Context, groupHeld []*liveAttempt) []*liveAttempt {
+	now := time.Now()
+	return slices.DeleteFunc(groupHeld, func(t *liveAttempt) bool {
+		waitedBefore := !t.waitAfter.IsZero()
+		if now.Before(t.waitAfter) || waitedBefore && len(w.groupWait) > 0 {
+			return false
+		}
+		select {
+		case w.groupWait <- struct{}{}:
+			go w.completeHeld(ctx, t)
+			return true
+		default:
+			return false
+		}
+	})
+}
+
+// groupLockTimeout bounds the wait of completeHeld for a FIFO group's row:
+// long enough for a short transaction that enqueues into the group to
+// commit, as keyLockTimeout is for a dedupe key's row, and far shorter than
+// a lease, whose renewal skips the task's row while completeHeld holds it.
+const groupLockTimeout = "100ms"
+
+// completeHeld completes t, whose FIFO group's row other transactions held,
+// in a transaction of its own that waits for that row, for groupLockTimeout
+// at most, and then empties its place in w.groupWait. PostgreSQL hands a
+// row to those who wait for it in turn. So a group into which short
+// transactions enqueue one after another, holding its row most of the time,
+// still completes its tasks as fast as they are enqueued, while tries that
+// skip the held row rarely find it free, and its backlog would grow without
+// bound: see "Completing a batch" in docs/design/schema-groups.md.
+//
+// The transaction waits for the group's row while it holds no other, and
+// only then locks the task's row, skipping it if another transaction holds
+// it, as completeLocked does for a batch: it writes nothing before it holds
+// both, and never waits for a running task's row while it holds a group's.
+// If the wait runs out, as it does for a transaction that holds the row for
+// longer, or the task's own row is held, or the transaction fails,
+// completeHeld gives t back to the completer, which tries it with its
+// batches, skipping the rows while they are held, and lets it wait again a
+// blockedRetryMax later at the soonest. The completer never waits for it.
+func (w *Worker) completeHeld(ctx context.Context, t *liveAttempt) {
+	defer func() { <-w.groupWait }()
+	ts := []*liveAttempt{t}
+
+	var groupHeld, taskHeld []*liveAttempt
+	var done []completedTask
+	err := func() error {
+		ctx, cancel := context.WithTimeout(ctx, min(w.cfg.LeaseDuration/3, recordTimeout))
+		defer cancel()
+		conn, err := w.acquire(ctx)
+		if err != nil {
+			return err
+		}
+		defer conn.Release()
+		return w.client.inTx(ctx, conn, func(q querier) error {
+			// The transaction notifies nobody, so the timeout may last
+			// until its commit: see liftLockTimeout.
+			if _, err := q.exec(ctx, lockTimeoutSQL, groupLockTimeout); err != nil {
+				return err
+			}
+			var err error
+			groupHeld, taskHeld, done, err = w.completeLocked(ctx, q, w.client.sql.lockGroupWaiting, ts)
+			return err
+		})
+	}()
+	if err != nil || len(groupHeld)+len(taskHeld) > 0 {
+		t.waitAfter = time.Now().Add(blockedRetryMax)
+		w.completions <- t // before groupWait empties: see completer
+		return
+	}
+	w.afterComplete(ctx, ts, done, nil)
 }
 
 // completeLocked completes, in q's transaction, the grouped tasks whose
-// group rows and task rows it can lock without waiting. It returns the
-// others, which other transactions hold, and the tasks it completed. A task
-// whose group has no row, which should not happen, completes all the same,
-// and leaveGroups reports it.
-func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*liveAttempt) (blocked []*liveAttempt, done []completedTask, err error) {
+// group rows lockGroups locks, and whose own rows it can lock without
+// waiting. It locks them before it writes anything. It returns the others:
+// those whose group rows other transactions hold, and those whose own rows
+// they hold. It also returns the tasks it completed. A task whose group has
+// no row, which should not happen, completes all the same, and leaveGroups
+// reports it.
+func (w *Worker) completeLocked(ctx context.Context, q querier, lockGroups string, ts []*liveAttempt) (groupHeld, taskHeld []*liveAttempt, done []completedTask, err error) {
 	queues := make([]string, len(ts))
 	groups := make([]string, len(ts))
 	for i, t := range ts {
 		queues[i], groups[i] = t.info.Queue, t.info.GroupKey
 	}
 
-	groupLocked, groupExists, err := lockedRows(ctx, q, w.client.sql.lockGroups, func(r rows) (groupID, bool, error) {
+	groupLocked, groupExists, err := lockedRows(ctx, q, lockGroups, func(r rows) (groupID, bool, error) {
 		var key groupID
 		var locked bool
 		err := r.Scan(&key.queue, &key.group, &locked)
 		return key, locked, err
 	}, queues, groups)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	var mine []*liveAttempt
 	for _, t := range ts {
 		key := groupID{t.info.Queue, t.info.GroupKey}
 		if groupExists[key] && !groupLocked[key] {
-			blocked = append(blocked, t)
+			groupHeld = append(groupHeld, t)
 		} else {
 			mine = append(mine, t)
 		}
 	}
 	if len(mine) == 0 {
-		return blocked, nil, nil
+		return groupHeld, nil, nil, nil
 	}
 
 	ids := make([]int64, len(mine))
@@ -246,7 +352,7 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*liveAttemp
 		return id, locked, err
 	}, ids, tokens)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// Tasks no longer owned lost their leases, and are left out; the
@@ -257,16 +363,16 @@ func (w *Worker) completeLocked(ctx context.Context, q querier, ts []*liveAttemp
 		case taskLocked[t.att.id]:
 			ready = append(ready, t)
 		case owned[t.att.id]:
-			blocked = append(blocked, t)
+			taskHeld = append(taskHeld, t)
 		}
 	}
 
 	if len(ready) > 0 {
 		if done, err = w.client.complete(ctx, w.logger, q, completionsOf(ready)); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
-	return blocked, done, nil
+	return groupHeld, taskHeld, done, nil
 }
 
 // lockedRows runs a statement that returns rows of a key and whether that
@@ -345,7 +451,7 @@ func (w *Worker) regainKeys(ctx context.Context, done []completedTask) {
 
 	ctx, cancel := context.WithTimeout(ctx, recordTimeout)
 	defer cancel()
-	err := w.client.inTx(ctx, func(q querier) error {
+	err := w.client.inTx(ctx, w.client.pool, func(q querier) error {
 		if _, err := q.exec(ctx, lockTimeoutSQL, keyLockTimeout); err != nil {
 			return err
 		}
@@ -385,7 +491,7 @@ func (w *Worker) madeRoom(done []completedTask) {
 	for _, t := range done {
 		// A task of RunTask may be of a queue that Run does not serve.
 		if q := w.queues[t.queue]; q != nil && (t.group != "" || q.maxRunning.Load() > 0) {
-			signal(q.freed)
+			signal(q.room)
 		}
 	}
 }
@@ -427,10 +533,25 @@ func (t completedTask) freed() bool {
 // transaction if any task belongs to a FIFO group. It logs to the logger of
 // the worker that completes.
 func (c *Client) complete(ctx context.Context, logger *slog.Logger, q querier, cs []completion) ([]completedTask, error) {
+	return c.completeThen(ctx, logger, q, cs, nil)
+}
+
+// completeThen is complete, with then run on the completed tasks after
+// their rows and before their groups' rows: CompleteTx takes back the
+// dedupe keys that their cancels freed there, since a key's row comes
+// before a group's row.
+func (c *Client) completeThen(ctx context.Context, logger *slog.Logger, q querier, cs []completion,
+	then func([]completedTask) error,
+) ([]completedTask, error) {
 	fail := func(err error) error { return fmt.Errorf("taskmill: complete: %w", err) }
 	done, _, err := c.completeTasks(ctx, logger, q, c.sql.complete, cs)
 	if err != nil {
 		return nil, fail(err)
+	}
+	if then != nil {
+		if err := then(done); err != nil {
+			return nil, fail(err)
+		}
 	}
 
 	var heads []groupLeave
@@ -523,10 +644,10 @@ func (c *Client) regainKeys(ctx context.Context, q querier, done []completedTask
 
 // sortedByGroup returns the grouped tasks in the order of queue and group in
 // which an enqueue takes the rows of several groups. It serves the one
-// caller that waits for such rows, completeWaiting. Where the plan of the
-// recount follows its arrays, as the nested loop over a large table does,
-// the rows are then taken in the order of an enqueue, and the two cannot
-// deadlock. No plan must follow them: see leaveGroups.
+// caller that waits for the rows of several groups, completeWaiting. Where
+// the plan of the recount follows its arrays, as the nested loop over a
+// large table does, the rows are then taken in the order of an enqueue, and
+// the two cannot deadlock. No plan must follow them: see leaveGroups.
 func sortedByGroup(ts []completedTask) []completedTask {
 	var grouped []completedTask
 	for _, t := range ts {

@@ -238,6 +238,12 @@ linters:
       - path: ^internal/cmd/
         linters:
           - forbidigo # commands print their reports to stdout
+      # contextcheck reads a //nolint:contextcheck on a function's doc
+      # itself, and then checks neither the function nor its callers, so
+      # golangci-lint never sees the directive suppress an issue.
+      - linters:
+          - nolintlint
+        text: is unused for linter "contextcheck"
 
 formatters:
   enable:

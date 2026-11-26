@@ -39,10 +39,12 @@ const (
 	cleanupTimeout    = 5 * time.Second        // bound on best-effort cleanup, such as closing a connection
 	minFetchTimeout   = 5 * time.Second        // shortest bound on a fetch: see fetchTimeout
 	maxFetch          = 1000                   // most tasks one fetch leases
+	fetchLinger       = 2 * time.Millisecond   // longest wait for more free slots before a fetch under a backlog: see linger
 	completionBatch   = 500                    // most completions recorded in one statement
 	completionLinger  = 2 * time.Millisecond   // wait for more completions to batch with
 	blockedRetryDelay = 20 * time.Millisecond  // first wait before retrying completions whose rows other transactions held
 	blockedRetryMax   = time.Second            // longest wait before retrying them
+	groupWaits        = 4                      // most completions that wait for their FIFO groups' rows at a time: see waitForGroup
 	hintCooldown      = 20 * time.Millisecond  // pause after a read of cancel requests or settings that notifications asked for
 	errorMessageLimit = 4096                   // bytes of an error message that are kept
 )
@@ -163,8 +165,11 @@ type Worker struct {
 
 	renewFailed chan struct{} // a renewal of leases failed: renewAgain tries again
 
-	completions   chan *liveAttempt // successful attempts of Run, for the completer
-	completerDone chan struct{}     // closed when the current Run's completer returns
+	completions   chan *liveAttempt    // successful attempts of Run, for the completer
+	completerDone chan struct{}        // closed when the current Run's completer returns
+	groupWait     chan struct{}        // a place for each completion that waits for its FIFO group's row: see waitForGroup
+	outcomes      chan *outcomeRequest // other outcomes of Run's ungrouped attempts, for the recorder
+	recorderDone  chan struct{}        // closed when the current Run's recorder returns
 
 	counts     counters     // what Stats reports
 	reserve    reserve      // the connection that Run keeps for renewals and check-ins that find the pool full
@@ -225,8 +230,8 @@ type WorkerConfig struct {
 	LeaseDuration time.Duration
 
 	// PollInterval is how often the worker checks an idle queue while the
-	// maintainer's heartbeats do not reach it. It must not be negative.
-	// Default: 1 second.
+	// maintainer's heartbeats do not reach it, ±10%, so that workers poll
+	// apart. It must not be negative. Default: 1 second.
 	//
 	// The maintainer sends a heartbeat every 5 seconds. While heartbeats
 	// arrive, notifications wake the worker, and the maintainer wakes each
@@ -360,6 +365,8 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		queueHints:  make(chan struct{}, 1),
 		renewFailed: make(chan struct{}, 1),
 		completions: make(chan *liveAttempt, completionBatch),
+		groupWait:   make(chan struct{}, groupWaits),
+		outcomes:    make(chan *outcomeRequest, completionBatch),
 	}
 	w.reserve = reserve{w: w, turn: make(chan struct{}, 1)}
 
@@ -382,6 +389,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 			slots:     make(chan struct{}, o.Concurrency),
 			wake:      make(chan struct{}, 1),
 			freed:     make(chan struct{}, 1),
+			room:      make(chan struct{}, 1),
 			fetchMost: maxFetch,
 		}
 	}
@@ -495,7 +503,9 @@ type queueState struct {
 	name       string
 	slots      chan struct{} // one per running attempt or batch
 	wake       chan struct{} // nudges the fetch loop: tasks may be available
-	freed      chan struct{} // nudges the fetch loop: a slot was freed, or a recorded completion made room
+	freed      chan struct{} // nudges the fetch loop: a slot was freed
+	room       chan struct{} // nudges the fetch loop: a recorded completion made room
+	held       atomic.Int64  // how long a unit holds its slot, as a moving average in nanoseconds: see linger
 	paused     atomic.Bool   // the queue is paused, or Run has not read its settings yet
 	maxRunning atomic.Int32  // installation-wide limit; 0 means none
 	stuck      atomic.Int32  // slots whose handlers did not return shutdownGrace after their context ended
@@ -520,11 +530,13 @@ type liveAttempt struct {
 	// completedDirectly is set once RunTask recorded the completion.
 	completedDirectly bool
 
-	// Only the completer uses these: since when the completion has found the
-	// task's row, or its group's, held by other transactions, and whether
-	// it warned of that.
+	// Only the completer uses these, and completeHeld while it has the
+	// attempt: since when the completion has found the task's row, or its
+	// group's, held by other transactions, whether it warned of that, and
+	// when it may wait for its group's row again, after a wait that ran out.
 	blockedSince  time.Time
 	blockedWarned bool
+	waitAfter     time.Time
 
 	mu         sync.Mutex
 	cancel     context.CancelCauseFunc // set once a single attempt starts
@@ -658,9 +670,10 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	w.released.Store(0)
-	w.completerDone = make(chan struct{})
+	w.completerDone, w.recorderDone = make(chan struct{}), make(chan struct{})
 	completerCtx, stopCompleter := context.WithCancel(base)
 	go w.completer(completerCtx, recordCtx)
+	go w.recorder(completerCtx, recordCtx)
 
 	loopsCtx, stopLoops := context.WithCancel(base)
 	var loops sync.WaitGroup
@@ -695,8 +708,9 @@ func (w *Worker) Run(ctx context.Context) error {
 	// rescued when its lease runs out. The deadline comes cleanupTimeout
 	// after the drain, but no later than the bound that DrainTimeout's doc
 	// gives: a fetch under way can hold the drain up until cleanupTimeout
-	// after ctx ended.
-	latest := time.Until(stopped.Add(w.cfg.DrainTimeout + w.timing.shutdownGrace + cleanupTimeout))
+	// after ctx ended. A time holds that bound where a sum of Durations
+	// would overflow: DrainTimeout may be the largest Duration.
+	latest := time.Until(stopped.Add(w.cfg.DrainTimeout).Add(w.timing.shutdownGrace + cleanupTimeout))
 	stop := time.AfterFunc(min(cleanupTimeout, latest), stopRecording)
 	defer stop.Stop()
 	w.release(recordCtx, abandoned)
@@ -704,6 +718,7 @@ func (w *Worker) Run(ctx context.Context) error {
 
 	stopCompleter()
 	<-w.completerDone
+	<-w.recorderDone
 	stopLoops()
 	loops.Wait()
 
@@ -773,14 +788,17 @@ func (w *Worker) drain(ctx context.Context, r *runState, stopAttempts context.Ca
 	return abandoned
 }
 
-// release gives tasks back to their queues while the worker stops. The
-// deadline of ctx bounds all of it: a database that does not answer then
-// delays the shutdown once, and not once for each task. A task that is not
-// released by then is rescued when its lease runs out.
+// release gives tasks back to their queues while the worker stops, all at
+// the same time, so that the recorder releases them together. The deadline
+// of ctx bounds all of it: a database that does not answer then delays the
+// shutdown once, and not once for each task. A task that is not released by
+// then is rescued when its lease runs out.
 func (w *Worker) release(ctx context.Context, ts []*liveAttempt) {
+	var releasing sync.WaitGroup
 	for _, t := range ts {
-		w.record(ctx, t, outcome{kind: outcomeRelease})
+		releasing.Go(func() { w.record(ctx, t, outcome{kind: outcomeRelease}) })
 	}
+	releasing.Wait()
 }
 
 // runningTasks returns how many tasks the handlers of Run are running.

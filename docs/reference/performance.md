@@ -34,7 +34,8 @@ Read them as rough sizes, not as a promise for your hardware.
 
 | Scenario | Result |
 |---|---|
-| An idle worker starts a new task | About 2 ms after the commit (p99: 3 ms) |
+| An idle worker starts a new task | About 2 ms after the commit (p99: 3 ms), if the client sent no such notification in the last 50 ms |
+| The same, while the client keeps writing | Up to 50 ms later: a client notifies of its own writes, such as those of `Enqueue`, once per 50 ms, and of writes in your transactions once per queue per 50 ms |
 | The same, at 10,000 tasks a second | p99: about 47 ms |
 | An `Enqueue` call, one task | p99: 0.4 ms |
 | A delayed task, retry, or schedule run starts after its time | p99: about 0.3 s; at most 1 s |

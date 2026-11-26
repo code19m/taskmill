@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -960,6 +961,60 @@ func TestTaskPagesReadOnlyTheirRows(t *testing.T) {
 	}
 }
 
+// A page of running tasks reads the running tasks of its queues only,
+// however many newer tasks wait: the concurrency of the workers bounds them.
+// Here the running tasks are the oldest, as where workers drain a backlog
+// from its old end, and the statistics expect them among the newest too.
+func TestPagesOfRunningTasksReadOnlyTheirRows(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+
+	const running, waiting, limit = 1000, 4000, 50
+	for _, queue := range []string{"default", "other"} {
+		e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, attempted_at, lease_expires_at, lease_token)
+		           SELECT $2, 'email.send', 'running', now(), '{}', 1, 1, now(), now() + interval '1 hour', 1
+		           FROM generate_series(1, $1)`, running, queue)
+	}
+	e.exec(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts)
+	           SELECT 'default', 'email.send', 'available', now(), '{}', 1 FROM generate_series(1, $1)`, waiting)
+	e.exec(t, "ANALYZE {s}.tasks")
+
+	filter := taskmill.TaskFilter{States: []taskmill.State{taskmill.StateRunning}}
+	oneQueue := filter
+	oneQueue.Queues = []string{"default"}
+	for _, f := range []taskmill.TaskFilter{filter, oneQueue} {
+		first, err := e.client.List(t.Context(), &taskmill.ListParams{Filter: f, Limit: limit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, cursor := range []string{"", first.Next} {
+			checkRowsRead(t, e.client, fmt.Sprintf("queues %q, cursor %q", f.Queues, cursor),
+				&taskmill.ListParams{Filter: f, Limit: limit, Cursor: cursor}, 2*running)
+		}
+	}
+
+	// List plans each page for its queues, which a generic plan does not
+	// know: a page of one queue then reads that queue's running tasks only.
+	read, err := taskmill.ListRowsRead(t.Context(), e.client, &taskmill.ListParams{Filter: oneQueue, Limit: limit}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read > running {
+		t.Errorf("a page of one queue read %d rows of tasks, want at most its %d running", read, running)
+	}
+
+	// The pages hold the running tasks, newest first.
+	got, _ := listed(t, e.client, taskmill.ListParams{Filter: filter, Limit: 400, Summary: true}, 2*running/400+1)
+	r, err := e.pool.Query(t.Context(), replaceSchema("SELECT id FROM {s}.tasks WHERE state = 'running' ORDER BY id DESC", e.schema))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := pgx.CollectRows(r, pgx.RowTo[int64])
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("the pages hold %d tasks, want the %d running, newest first", len(got), len(want))
+	}
+}
+
 // A page of dead or canceled tasks reads about its own rows, whatever the
 // planner expects: a range of the index of finished tasks for each queue
 // and state, which ends with the page. It holds for one queue and for all,
@@ -1280,6 +1335,7 @@ func TestReadsTakeOneRoundTrip(t *testing.T) {
 
 	ctx := t.Context()
 	id := e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	e.client.Close() // sends the enqueue's notification, which would count as a read's round trip
 
 	for name, read := range map[string]func() error{
 		"Get":       func() error { _, err := e.client.Get(ctx, id); return err },
@@ -1429,24 +1485,14 @@ func TestGroups(t *testing.T) {
 		{taskmill.GroupParams{Queues: []string{"other"}}, all[3:]},
 		{taskmill.GroupParams{Halted: true}, all[3:]},
 		{taskmill.GroupParams{Halted: true, Search: "solo"}, all[4:]},
+		// Keys match exactly, case and all.
+		{taskmill.GroupParams{Keys: []string{"order-9", "account-1"}}, all[2:4]},
+		{taskmill.GroupParams{Keys: []string{"order-9"}, Queues: []string{"other"}, Halted: true}, all[3:4]},
+		{taskmill.GroupParams{Keys: []string{"order-9", "solo"}, Limit: 1}, all[2:]},
 		// Pages of 2 go through every group, in order.
 		{taskmill.GroupParams{Limit: 2}, all},
 	} {
-		var got []taskmill.GroupInfo
-		params := c.params
-		for {
-			page, err := e.client.Groups(t.Context(), &params)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got = append(got, page.Groups...)
-			if page.Next == "" {
-				break
-			}
-			params.Cursor = page.Next
-		}
-
-		if !slices.Equal(got, c.want) {
+		if got := allGroups(t, e, c.params); !slices.Equal(got, c.want) {
 			t.Fatalf("%+v: got %+v, want %+v", c.params, got, c.want)
 		}
 	}
@@ -1472,8 +1518,31 @@ func TestGroups(t *testing.T) {
 	if _, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Queues: queues[:100]}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.client.Groups(t.Context(), &taskmill.GroupParams{Queues: queues}); !errors.Is(err, taskmill.ErrInvalidArgument) {
-		t.Fatalf("101 queues: got %v, want ErrInvalidArgument", err)
+	for name, params := range map[string]taskmill.GroupParams{
+		"101 queues":   {Queues: queues},
+		"101 keys":     {Keys: queues},
+		"an empty key": {Keys: []string{""}},
+	} {
+		if _, err := e.client.Groups(t.Context(), &params); !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Fatalf("%s: got %v, want ErrInvalidArgument", name, err)
+		}
+	}
+}
+
+// allGroups reads every page of the groups that params selects.
+func allGroups(t *testing.T, e *env, params taskmill.GroupParams) []taskmill.GroupInfo {
+	t.Helper()
+	var got []taskmill.GroupInfo
+	for {
+		page, err := e.client.Groups(t.Context(), &params)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, page.Groups...)
+		if page.Next == "" {
+			return got
+		}
+		params.Cursor = page.Next
 	}
 }
 
@@ -1510,5 +1579,12 @@ func TestGroupPagesReadOnlyTheirRows(t *testing.T) {
 		if most := int64(max(1, len(params.Queues)) * (params.Limit + 1)); read > most {
 			t.Errorf("%+v: read %d rows of groups, want at most %d", params, read, most)
 		}
+	}
+
+	// A group named by its queue and key is read alone, whatever comes
+	// before it, as a dead task's page reads the group it halts.
+	exact := taskmill.GroupParams{Queues: []string{"h"}, Keys: []string{"key-1000"}, Halted: true, Limit: 1}
+	if read, err := taskmill.GroupRowsRead(t.Context(), e.client, &exact); err != nil || read > 1 {
+		t.Errorf("%+v: read %d rows of groups, %v; want at most 1", exact, read, err)
 	}
 }

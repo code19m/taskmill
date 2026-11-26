@@ -29,6 +29,7 @@ const (
 	logKeyQueues             = "queues"
 	logKeyReleased           = "released"
 	logKeyRetryIn            = "retry_in"
+	logKeySchemas            = "schemas"
 	logKeyTaskID             = "task_id"
 	logKeyTaskIDs            = "task_ids"
 	logKeyTasks              = "tasks"

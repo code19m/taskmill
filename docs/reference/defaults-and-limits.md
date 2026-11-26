@@ -38,13 +38,16 @@ It is in the doc comment of that identifier.
 | Reads that notifications ask for: cancel requests, and queue settings | At most one of each kind per 20 ms |
 | Warning that the pool is full | Logged when every connection of the pool is in use, and a statement of the worker waits 1 second or longer for one (`LeaseDuration` / 30). At most once a minute |
 | A fetch | Two thirds of `LeaseDuration` in all, at least 5 seconds and at most 30: 20 seconds by default. A fetch cut short at that time may have leased tasks that never reached the worker: they are [rescued](../concepts/glossary.md#rescue) when their leases run out, at the cost of an attempt. After a fetch that was cut short, or whose tasks took longer than a third of `LeaseDuration` to arrive, not counting a wait for a connection of the pool, the worker renews their leases right away, and the next fetch takes at most half as many tasks. A fetch that brought that many within a sixth of `LeaseDuration` doubles it |
+| A fetch under a backlog | After a fetch that took as many tasks as the queue had free slots, a freed slot starts the next fetch once a quarter of the slots are free, or after a twentieth of the time that a task holds its slot, and 2 ms at most. Room that a recorded completion makes starts it right away |
+| Results that a worker records together | Completions, and the failures, snoozes, and releases of tasks outside FIFO groups: those ready, and those that end within 2 ms more, up to 500. They take one statement, and the completions of FIFO groups' tasks one transaction |
 | A try to take an idle connection of the pool | A thirtieth of `LeaseDuration`, 1 second by default. The pool pings a connection that was idle for over a second, and closes one that does not answer by then: the worker takes another. So keep `LeaseDuration` above 30 round trips to the database, or the pool closes healthy connections, and opens new ones |
 | A renewal of leases that failed | Tried again every thirtieth of `LeaseDuration`, 1 second by default, until a try succeeds or no lease is left to renew. A try has that much time, or twice as long as the one before if that one got no answer, up to a third of `LeaseDuration`. The check-ins continue every third of `LeaseDuration` meanwhile |
 | A result that the worker cannot record | Tried again after 0.1 to 2 seconds, until the task's lease would run out. The first try has the time left on the lease, and at least a third of `LeaseDuration`. A try without an answer is followed by one with twice as long, and moves that end to the lease's end as check-ins renewed it by then. A try of 30 seconds, the longest, moves it no more |
 | The failure, snooze, or release of a grouped task waits for a row that another transaction holds | At most 1 second at a time, then tried again, for as long as the row is held |
+| A completion whose task's row, or its FIFO group's, another transaction holds | Tried again with the worker's next batch, or after 20 ms, then twice as long each time while rows stay held, up to 1 second. Up to 4 completions of a worker at a time also wait for their groups' rows, up to 100 ms each. One whose wait ran out, or whose task's row was held, waits again a second later at the soonest, and only while no other does. A warning once it waited longer than `LeaseDuration` |
 | A handler that ignores its context | Abandoned 5 seconds after its context was canceled by its `Timeout`, a cancel, or a lost lease; a batch handler only after its `Timeout`, which alone cancels its context. Its goroutine keeps its slot until it returns. In a queue with `MaxRunning`, not abandoned: its task stays running until it returns, and the worker warns |
 | What a stopping worker does after the drain | 5 seconds in all, to record what is left, give back the tasks whose handlers ignored the shutdown, and sign off. 5 seconds also for the tasks of a fetch that it could not start. A task that is not given back by then is [rescued](../concepts/glossary.md#rescue) when its lease runs out |
-| "Tasks available" notifications | At most one per queue per 50 ms from each client |
+| "Tasks available" notifications | From a client's own writes: one batch per 50 ms, for all queues. From writes in your transaction: at most one per queue per 50 ms from each client |
 | Notification connection: time to connect, and to answer when heartbeats stop | 10 seconds each |
 | Notification connection: reconnect | After 1 second, then twice as long each time, up to 30 seconds |
 | No history partition for today | Completions skip history for 1 minute, then try again |
@@ -58,7 +61,7 @@ by election, that does the shared work.
 |---|---|
 | Wake queues whose next task waited over 1 second | Every second |
 | Send its [heartbeat](../concepts/glossary.md#heartbeat) to the workers | Every 5 seconds, and right away when a new maintainer starts |
-| Workers notice that the heartbeats stopped | After 15 seconds without one. Idle queues then poll every `PollInterval` |
+| Workers notice that the heartbeats stopped | After 15 seconds without one. Idle queues then poll every `PollInterval`, ±10% |
 | [Promote](../concepts/glossary.md#promote) due tasks: delayed tasks, retries, and snoozed tasks | As they come due, at most 20 times a second. So a task becomes available within about 1 second of its [run time](../concepts/glossary.md#run-time) |
 | [Rescue](../concepts/glossary.md#rescue) tasks whose leases ran out | Every second |
 | One statement of the maintainer's work, or one transaction | Ends after 10 seconds (the maintainer's lease), so a connection that stops answering holds it no longer. The detach and the drop of a history partition have 30 seconds |
@@ -87,7 +90,6 @@ by election, that does the shared work.
 | The dashboard marks a worker as stale | After one `LeaseDuration` of that worker without a check-in: 30 seconds by default |
 | Values per filter | Up to 100 |
 | FIFO groups that a filter lists | The first 100. Its search finds the others |
-| Halted FIFO groups that a dead task's page reads to find its own | The first 1,000 of its queue whose keys contain its key. Past those, the page says that the task's place in its group could not be read |
 | Filter choices (kinds and FIFO groups) | Read again at most every 30 seconds, or 5 seconds after a read that failed |
 | Charts | The last hour, 6 hours, or day, with one point per 1, 5, or 15 minutes. The 6 hours and the day read their history again at most every 30 seconds, and when a point becomes complete |
 

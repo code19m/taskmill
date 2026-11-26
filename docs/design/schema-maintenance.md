@@ -10,7 +10,7 @@ maintainer counts the queues.
 | Step | What it does |
 |---|---|
 | Promote | Makes up to 1,000 due `scheduled` and `retryable` tasks `available` per statement, through `tasks_due_idx`, and notifies their queues in the same statement. It runs on its own, so a slow step never delays it. |
-| Rescue | Every second, in a loop of its own with the schedules' runs, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, and caps the exponent so that a task with thousands of attempts cannot overflow it. Then, in the same transaction, one more statement sets the run times of the tasks whose kinds the maintainer has a handler for with another retry policy, from the delays that the policies chose: a policy is code, which no statement can run. |
+| Rescue | Every second, in a loop of its own, so that a schedule's run that waits for a group's row never delays it, fails up to 1,000 attempts per statement whose leases expired. It uses the default backoff, and caps the exponent so that a task with thousands of attempts cannot overflow it. Then, in the same transaction, one more statement sets the run times of the tasks whose kinds the maintainer has a handler for with another retry policy, from the delays that the policies chose: a policy is code, which no statement can run. |
 | Retention | Every minute, in a loop of its own, deletes old dead and canceled tasks, expired dedupe keys, and activity older than a day in batches of 1,000, skipping locked rows. Dead heads that halt their groups are kept. Also deletes workers that made no check-in for 5 minutes, or for twice their `LeaseDuration` if that is longer, and schedules that no maintainer has defined for a day. |
 | History | Every minute, keeps partitions for today and the next 6 days, and drops up to 10 partitions whose whole day is older than the retention period (see [Operational notes](schema.md#operational-notes)). |
 | Statistics | Every 10 seconds, in a loop of its own, so that a long retention pass never delays it, counts each queue's tasks per state, finds each count's oldest due task, counts each queue's halted groups, finds the most failures of its retryable tasks, and stores all of these in `queue_stats` and the counts in the current minute of `activity`. [Queue statistics and health](schema-statistics.md) says how. |
@@ -60,9 +60,9 @@ maintainer counts the queues.
   few minutes, which needs no person. A new term counts again from its
   first comparison. The dashboard compares the names alone, which
   `WorkerInfo` lists with `Candidate`, which says if they count: the
-  hashes are no API. We rejected one hash for all
-  the schedules, which cannot say which one differs, and a mark on the
-  dashboard alone, which nobody watches.
+  hashes are no API. We rejected one hash for all the schedules, which
+  cannot say which one differs, and a mark on the dashboard alone, which
+  nobody watches.
 - **The database's clock decides the history's days:** which days need a
   partition, and which partitions have expired, in UTC.
 - **No statement reads the session's time zone.** Each one compares moments,
@@ -101,17 +101,13 @@ maintainer counts the queues.
   it holds one, as after a renewal whose answer was lost. The same statement
   clears the schedules that it stored: it checks in while it drains its
   tasks, which can take long, but no longer takes part in the election.
-- **It waits for its election first.** A worker that is told to stop gives
-  up the statements that it has sent, and the database may still run one of
-  them later. An election that ran after the lease was deleted would give
-  the role to a worker that has stopped, and nobody would lead until that
-  lease ran out. So the election does not end when the worker stops: the
-  worker waits for its answer, starts no other election, and then deletes
-  the lease. It waits up to 5 seconds, as long as the deletion itself may
-  take, so that a database that does not answer cannot hold the stop up
-  for longer. Then it gives the election up. Should the database run it
-  only after that, the lease lasts until it runs out, as a crashed
-  worker's does.
+- **It waits for its election first.** The database may still run an
+  election that a stopping worker gave up, and one that ran after the lease
+  was deleted would make a stopped worker lead until that lease ran out. So
+  the worker waits for its election's answer, starts no other, and then
+  deletes the lease. It waits up to 5 seconds, as long as the deletion
+  itself may take. Should the database run the election only after that,
+  the lease lasts until it runs out, as a crashed worker's does.
 - **A worker's silence is judged by its own lease.** A worker checks in
   every third of its `LeaseDuration`, and stores the lease in its row. After
   one lease without a check-in it is stale: its tasks' leases have run out.
@@ -147,11 +143,9 @@ never reads the database where it receives them:
   Each loop pauses 20 ms after a read. So a flood of notifications costs a
   worker about 50 reads of each kind a second, and `Cancel` still stops a
   running task within that time.
-- **`r|` only moves a worker's next election try forward.** A worker that
-  leads ignores it. Another worker follows it at most once per election
-  interval of 2 seconds. So a flood adds at most one try per interval to
-  the one that each worker makes anyway, and a try writes nothing while the
-  maintainer's lease lasts.
+- **`r|` only moves a worker's next election try forward,** at most once
+  per election interval of 2 seconds, and a leader ignores it. A try writes
+  nothing while the maintainer's lease lasts.
 - **Only an ID in its canonical form counts.** PostgreSQL delivers equal
   notifications of one transaction once, and other ways to write the same
   number, such as `+7` or `007`, would get around that.
@@ -159,41 +153,52 @@ never reads the database where it receives them:
   attempt cancel the task only if its row has the request. If the read after
   a `c|` fails, the next check-in reads the requests.
 
-**At most one notification per queue per 50 ms.** Each notifying transaction
-takes a global lock at commit. At high commit rates this lock becomes a
-bottleneck: in a pgbench test before taskmill had any Go code, a `NOTIFY` in
-every enqueue capped throughput near 10,000 tasks per second. So a client
-sends the first notification in its own transaction, and one for the rest
-when the 50 ms end.
+**A client sends its notifications in batches.** Each notifying transaction
+takes a lock of the whole server at its commit, and holds it while the
+commit flushes, with synchronous replication until the standby confirms:
+with a 127 µs flush, 16 producers committed 9,000 to 12,000 inserts a
+second, and 3,100 to 4,500 with a `NOTIFY` in each. A transaction that only
+notifies flushes nothing. And each notifying transaction wakes every
+listener of the database once, however many notifications it carries.
+
+- **The client's own writes notify after their commit,** in one
+  transaction for all their queues: right away if the client sent none in
+  the last 50 ms, and else when those end. So while a client enqueues all
+  the time, a task waits up to 50 ms for its notification, not about 2 ms
+  (L1 in [Benchmarks](benchmarks.md#latency)).
+- **Writes in your transaction notify in it,** the only way to arrive at
+  its commit: `EnqueueTx`, `CompleteTx`, and `CancelTx`, at most once per
+  queue per 50 ms from each client. A later one goes with the client's
+  next batch, after its queue's 50 ms.
+- **`Close` sends what the client held back,** so a deploy delays no task.
 
 **A notification wakes every worker of its queue, and that stays.**
 `LISTEN` delivers each notification to every connection on the channel, so
 every idle worker of the queue fetches, and all but the first few find
 nothing. Waking one worker would need a coordinator that knows which
-workers are idle: a new part, with its own failures. An empty fetch is
-one round trip and one probe of the queue's index, and the limits above
-bound the wakes: one notification per queue per 50 ms from each client, and
-a worker that found nothing waits 20 ms. The cost grows with the workers of
-one queue: S3 in [Benchmarks](benchmarks.md#scalability) ran 50 processes
-on 100 queues at 1,000 tasks a second, on 4 CPUs shared with the database,
-and the maintainer's slowest loop took 3.2 seconds. So on one queue, a few
-workers with more concurrency cost the database less than many small ones.
+workers are idle: a new part, with its own failures. An empty fetch is one
+round trip and one probe of the queue's index, and the limits above bound
+the wakes. The cost grows with the workers of one queue: S3 in
+[Benchmarks](benchmarks.md#scalability) ran 50 processes on 100 queues at
+1,000 tasks a second, on 4 CPUs shared with the database, and the
+maintainer's slowest loop took 3.2 seconds. So on one queue, a few workers
+with more concurrency cost the database less than many small ones.
 
-**The maintainer wakes the queues that were missed.** That last notification
-can arrive before the transactions it stands for commit, and a producer can
-crash before sending it. So once a second, the maintainer also notifies
-every queue that is not paused and whose next task has waited longer than a
-second, in one statement with one index probe per queue. A queue whose tasks
-start right away gets nothing, and one whose workers are all busy gets a
-notification that changes nothing.
+**The maintainer wakes the queues that were missed.** A notification held
+back for a write in your transaction can arrive before that transaction
+commits, and a producer can crash before it sends a batch. So once a
+second, the maintainer also notifies every queue that is not paused and
+whose next task has waited longer than a second, in one statement with one
+index probe per queue. A queue whose tasks start right away gets nothing,
+and one whose workers are all busy gets a notification that changes
+nothing.
 
 **The heartbeat shows that this works.** Every 5 seconds, the same statement
 sends `h|`, which shows workers that the wake ran and that notifications
-reach them. A new maintainer sends one right away. PostgreSQL wakes every
-connection that listens in a database for each notification, on any
-channel, so schemas that share a database pay for each other's: E7 in
-[Benchmarks](benchmarks.md#resource-use) measures what heartbeats cost then.
-Hence a heartbeat every 5 seconds, not with every wake.
+reach them. A new maintainer sends one right away. The heartbeat wakes
+every listener of the database, on any channel, so schemas that share a
+database pay for each other's (E7 in [Benchmarks](benchmarks.md#resource-use)):
+hence one every 5 seconds, not with every wake.
 
 ### Polling
 
@@ -203,8 +208,8 @@ heartbeats:
 | Situation | An idle queue polls | A task whose notification was lost starts within |
 |---|---|---|
 | Heartbeats arrive | Once a minute | About 2 seconds: the maintainer wakes its queue |
-| No heartbeat came for 15 seconds, three missed | Every `PollInterval`, starting right away | About 16 seconds after the last heartbeat. From then on, `PollInterval` |
-| A `MaxRunning` limit blocked the queue's last fetch | Every `PollInterval` | `PollInterval`, when another worker's task made the room: finishing a task sends no notification |
+| No heartbeat came for 15 seconds, three missed | Every `PollInterval`, ±10% so that workers drift apart, starting right away | About 16 seconds after the last heartbeat. From then on, `PollInterval` |
+| A `MaxRunning` limit blocked the queue's last fetch | Every `PollInterval`, ±10% | `PollInterval`, when another worker's task made the room: finishing a task sends no notification |
 
 - **While heartbeats arrive,** notifications reach the worker, and the
   maintainer wakes every queue whose task waits. The poll once a minute only
@@ -216,9 +221,8 @@ heartbeats:
   does not.
 - **A maintainer that stops hands over without such a gap.** It resigns with
   `r|`, and another worker takes over and sends its heartbeat.
-- **A new connection makes every queue fetch right away,** since
-  notifications may have been missed meanwhile. The worker also reads its
-  queues' settings again then: it may have missed a pause.
+- **A new connection makes every queue fetch right away,** and read its
+  settings again: notifications, and a pause, may have been missed.
 
 ### The notification connection
 

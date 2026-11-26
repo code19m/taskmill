@@ -55,7 +55,7 @@ a backup, so a lost notification delays a task, but never loses it.
 
 | Situation | The task starts within |
 |---|---|
-| A worker has a free slot | a few milliseconds |
+| A worker has a free slot | a few milliseconds, or up to 50 ms more while your client keeps enqueuing |
 | A delayed task or a retry reaches its [run time](glossary.md#run-time) | about 1 second |
 | The notification was lost | about 2 seconds |
 | The maintainer, or a worker's connection for notifications, failed silently | about 16 seconds |

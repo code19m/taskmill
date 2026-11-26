@@ -17,9 +17,9 @@ text, which lets prepared statements be reused.
 Every batch goes through one of two statements. Batches with dedupe keys or
 FIFO groups go through one that also claims the keys and counts the groups
 (see [FIFO groups](schema-groups.md#fifo-groups) and
-[Deduplication](schema-groups.md#deduplication)). All
-other batches go through a lean one. Both reserve IDs from the
-`tasks_id_seq` identity sequence first, so results map back to their inputs.
+[Deduplication](schema-groups.md#deduplication)). All other batches go
+through a lean one. Both reserve IDs from the `tasks_id_seq` identity
+sequence first, so results map back to their inputs.
 
 **A second statement finds a duplicate's task.** It reads the task of a
 dedupe key that another transaction took while the first statement waited
@@ -94,16 +94,27 @@ ends there, with one read. Otherwise a transaction locks the queue's row in
 `queues`, counts the running tasks again through `tasks_running_idx`, and
 fetches at most the remaining capacity. This serializes fetches for limited
 queues only. The worker sends the transaction in one round trip, up to its
-commit, so the row is held while the database works, not while the
-network carries answers: with four round trips under the lock, a network
-of 4 ms bounded a queue to about 500 tasks a second. So the fetch cannot
-wait for the count's answer: it counts again in its own `LIMIT`. Each runs
-as a statement of its own after the lock, and sees what the fetches before
+commit, so the row is held while the database works, not while the network
+carries answers: with four round trips under the lock, a network of 4 ms
+bounded a queue to about 500 tasks a second. So the fetch cannot wait for
+the count's answer: it counts again in its own `LIMIT`. Each runs as a
+statement of its own after the lock, and sees what the fetches before
 committed. Only to fill batches does the commit wait for a second round
-trip. The transaction waits at most 1 second for the queue's row.
-Then the fetch gives up, with only a Debug line, and the worker fetches
-again when the queue is next woken or polled: the queue's fetches take the
-row in turn, and with many workers the turns alone can take a second.
+trip. The transaction waits at most 1 second for the queue's row. Then the
+fetch gives up, with only a Debug line, and the worker fetches again when
+the queue is next woken or polled: the queue's fetches take the row in turn,
+and with many workers the turns alone can take a second.
+
+**Under a backlog, a fetch waits for a few free slots.** A fetch costs the
+database a transaction whatever it takes: one task per fetch cost about 15
+times the database's CPU per task of 32 per fetch. Under a backlog, every
+fetch fills every slot, and each handler that returns would free one slot
+for the next fetch. So after a fetch that filled its slots, a freed slot
+starts a fetch only once a quarter of the slots are free, or after a
+twentieth of the time that a task holds its slot, and at most 2 ms. The
+slots that wait meanwhile cost about 0.7 of that twentieth in throughput,
+at most 3.5%. Room that a recorded completion makes, for a FIFO group's
+next task or under a `MaxRunning` limit, starts a fetch right away.
 
 A worker fetches one task per free slot. If the fetched tasks include kinds
 that have a batch handler, a second statement fills each batch up to its
@@ -163,9 +174,9 @@ the pool closes it, and the statement runs again, once, on a new
 connection, if one comes within the renewal's time: at a check-in, a third
 of the lease. The pool gives the broken one's place to whoever waited
 first, often a handler, so while handlers hold the pool a broken reserve
-may not be replaced. A server or a proxy that ends sessions idle for less than a third
-of the lease, as `idle_session_timeout` can, ends the reserve between
-check-ins every time, and leaves the worker none when it is needed.
+may not be replaced. A server or a proxy that ends sessions idle for less
+than a third of the lease, as `idle_session_timeout` can, ends the reserve
+between check-ins every time, and leaves the worker none when it is needed.
 
 Completions, fetches, and the records of failed attempts use the pool
 alone. A completion that waits for a connection keeps its lease, because
@@ -203,24 +214,31 @@ behind a newer one's. Locked in ID order, a completion that waits for a task
 holds only tasks with lower IDs. So it cannot deadlock with a transaction
 that takes tasks in that order too, such as one that cancels several.
 
-Ungrouped tasks complete with this one statement, without a transaction of
-its own. Grouped tasks complete in one transaction per batch, which also
-updates their groups (see [FIFO groups](schema-groups.md#fifo-groups)). If
-the database is unreachable, the worker retries a completion with backoff
-until the attempt's lease would expire.
+Ungrouped tasks complete with this one statement alone. Grouped tasks
+complete in one transaction per batch, which also updates their groups (see
+[FIFO groups](schema-groups.md#fifo-groups)).
 
 ## Fail, snooze, and release
 
-A failure is one `UPDATE` that checks the lease token, sets the state that
-the kind's retry policy chose (`retryable` with a new run time, or `dead`),
-and appends the error, dropping the oldest once there are 20. A snooze and a
-release are similar updates that also give the attempt back
-(`attempt = attempt - 1`). From a worker that has a handler for the task,
-they also remove the note of a wait for one. All three cancel the task
-instead if its row has a cancellation request, and only then: a request
-whose notification was missed still takes effect when the attempt ends, and
-a notification alone cancels nothing. For a grouped task, the update runs in
-a transaction that also updates the group if the task finished.
+One `UPDATE` records failures, snoozes, and releases, for each task whose
+attempt still holds its lease token. A failure sets the state that the
+kind's retry policy chose (`retryable` with a new run time, or `dead`), and
+appends the error, dropping the oldest once there are 20. A snooze and a
+release also give the attempt back (`attempt = attempt - 1`). From a worker
+that has a handler for the task, they also remove the note of a wait for
+one. All three cancel the task instead if its row has a cancellation
+request, and only then: a request whose notification was missed still
+takes effect when the attempt ends, and a notification alone cancels
+nothing.
+
+Ungrouped outcomes are gathered as completions are: those that end within
+2 ms of each other, up to 500, share one statement, which skips the rows
+that other transactions hold. So handlers that fail fast, as in an outage
+of what they call, cost the database little more than handlers that
+succeed. Each attempt keeps its slot until its outcome is recorded, as a
+`MaxRunning` limit and the shutdown count on. An outcome whose row was held
+waits for it alone. So does a grouped task's, in a transaction that also
+updates the group: a cancel request can turn a retry into a cancel.
 
 ## See also
 

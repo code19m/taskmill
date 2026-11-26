@@ -438,22 +438,25 @@ func TestIdleWorkerFindsATaskCommittedAfterItsNotification(t *testing.T) {
 	w, started := startIdleWorker(t, e, nil)
 	waitFor(t, "heartbeats to arrive", func() bool { return taskmill.Notifying(w) })
 
-	// The first enqueue notifies; the second, within the throttle's 50 ms,
-	// leaves its notification to the end of that window, which comes before
-	// its transaction commits. The maintainer then wakes the queue.
-	e.enqueue(t, sendEmail{}, nil)
+	// Two enqueues in the caller's transactions. The first notifies in its
+	// own; the second, within the throttle's 50 ms, holds its notification
+	// back to the end of that window, which comes before its transaction
+	// commits. The maintainer then wakes the queue.
+	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(e.pool), sendEmail{}, nil); err != nil {
+		t.Fatal(err)
+	}
 	sent := counted.notified.Load()
 	tx := e.begin(t)
 	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err != nil {
 		t.Fatal(err)
 	}
 	// On a slow machine the window can end before the second enqueue, which
-	// then notifies in its own transaction.
-	trailing := taskmill.TrailingNotification(e.client, "a")
+	// then notifies in its transaction.
+	held := taskmill.HeldNotification(e.client, "a")
 
 	recv(t, started, "the first task to start")
-	if trailing {
-		waitFor(t, "the trailing notification", func() bool { return counted.notified.Load() > sent })
+	if held {
+		waitFor(t, "the held notification", func() bool { return counted.notified.Load() > sent })
 	}
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
@@ -594,7 +597,7 @@ func (c *fetchCounter) TraceQueryStart(ctx context.Context, conn *pgx.Conn, d pg
 	if strings.Contains(d.SQL, "pg_notify($1, 'h|')") && slices.Contains(d.Args, any(true)) {
 		c.heartbeats.Add(1)
 	}
-	if d.SQL == "SELECT pg_notify($1, $2)" && conn.PgConn().TxStatus() == 'I' {
+	if d.SQL == taskmill.NotifyQueuesSQL && conn.PgConn().TxStatus() == 'I' {
 		return context.WithValue(ctx, alone{}, true)
 	}
 	return ctx

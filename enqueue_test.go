@@ -849,13 +849,19 @@ func TestEnqueueMiddlewareThatFailsAfterNext(t *testing.T) {
 		t.Fatal("the middleware's error was not logged")
 	}
 
-	// In the caller's transaction, the error lets the caller roll back.
-	tx := e.begin(t)
-	if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, nil); err == nil {
-		t.Fatal("the enqueue in a transaction hid the middleware's error")
-	}
-	if err := tx.Rollback(t.Context()); err != nil {
-		t.Fatal(err)
+	// In the caller's transaction, the error lets the caller roll back, also
+	// through a type that wraps the transaction with its Commit and Rollback.
+	for name, wrap := range map[string]func(pgx.Tx) taskmill.PgxQuerier{
+		"pgx.Tx":  func(tx pgx.Tx) taskmill.PgxQuerier { return tx },
+		"wrapped": func(tx pgx.Tx) taskmill.PgxQuerier { return wrappedPgxTx{tx} },
+	} {
+		tx := e.begin(t)
+		if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(wrap(tx)), sendEmail{}, nil); err == nil {
+			t.Fatalf("%s: the enqueue in a transaction hid the middleware's error", name)
+		}
+		if err := tx.Rollback(t.Context()); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if n := e.count(t, "SELECT count(*) FROM {s}.tasks"); n != 1 {
@@ -895,6 +901,72 @@ func TestEnqueueNotifiesListeners(t *testing.T) {
 		t.Fatalf("trailing notification: %v, %v", n, err)
 	}
 }
+
+// A client's own enqueues notify once they commit, in batches: a
+// transaction of its own per window, which writes nothing, for the queues
+// of all the enqueues in that window. No enqueue notifies in its own
+// transaction, whose commit would hold the server's notify lock while it
+// flushes.
+func TestOwnEnqueuesNotifyInBatches(t *testing.T) {
+	t.Parallel()
+	notifies := &notifyCounter{}
+	e := newTracedEnv(t, notifies)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close(t.Context()) }()
+	if _, err := conn.Exec(ctx, "LISTEN "+e.schema); err != nil {
+		t.Fatal(err)
+	}
+
+	const queues = 50
+	missing := map[string]bool{}
+	start := time.Now()
+	for i := range queues {
+		queue := "q-" + strconv.Itoa(i)
+		missing["a|"+queue] = true
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: queue})
+	}
+	elapsed := time.Since(start)
+
+	for len(missing) > 0 {
+		n, err := conn.WaitForNotification(ctx)
+		if err != nil {
+			t.Fatalf("%d queues were not notified: %v", len(missing), err)
+		}
+		delete(missing, n.Payload)
+	}
+	if n := notifies.inline.Load(); n > 0 {
+		t.Errorf("%d enqueues notified in their own transaction", n)
+	}
+	if n, most := notifies.batches.Load(), int64(elapsed/taskmill.NotifyWindow)+2; n > most {
+		t.Errorf("%d enqueues over %v sent %d batches, want at most %d", queues, elapsed, n, most)
+	}
+}
+
+// notifyCounter counts the batches of notifications that a pool sends, and
+// the enqueue statements that notify themselves.
+type notifyCounter struct {
+	batches, inline atomic.Int64
+}
+
+func (c *notifyCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	switch {
+	case d.SQL == taskmill.NotifyQueuesSQL:
+		c.batches.Add(1)
+	case strings.Contains(d.SQL, "INSERT INTO") && strings.Contains(d.SQL, "pg_notify($11"):
+		if notify, _ := d.Args[11].([]string); len(notify) > 0 {
+			c.inline.Add(1)
+		}
+	}
+	return ctx
+}
+
+func (*notifyCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 // PostgreSQL ends one transaction of a deadlock, and it may be an enqueue
 // that did nothing wrong: it waited for a dedupe key, or for the row of a

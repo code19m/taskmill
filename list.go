@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -97,8 +98,9 @@ type ListResult struct {
 //     every newer task, of any queue and state, until its page is full.
 //     Indexes hold every task, the completed tasks of one queue or of all,
 //     and the pending tasks of one queue's FIFO group, in ID order. They do
-//     not hold, for example, one unfinished state, or dead tasks mixed with
-//     other states.
+//     not hold, for example, one waiting state, or dead tasks mixed with
+//     other states. A list of only running tasks reads every running task
+//     of its queues instead, and sorts them.
 //   - A list in creation or finish order with no queue named reads up to a
 //     page of each queue that holds such tasks: with hundreds of queues,
 //     name the queue.
@@ -199,7 +201,12 @@ func (c *Client) taskPage(p *ListParams) (*taskPage, error) {
 			}
 		}
 
-		page.args = append(listArgs(f, page.limit, p.Summary, before),
+		page.args = listArgs(f, page.limit, p.Summary, before)
+		if slices.Equal(f.states, []string{string(StateRunning)}) && !f.history {
+			page.settings, page.sql = runningSettings, c.sql.listRunning
+			return &page, nil
+		}
+		page.args = append(page.args,
 			len(f.states) > 0, // $8
 			f.history,         // $9
 		)
@@ -369,6 +376,11 @@ type GroupParams struct {
 	// queues. Maximum: 100 names.
 	Queues []string
 
+	// Keys limits the result to the groups with these keys, exactly as
+	// [GroupInfo.Key] holds them. With Queues, a page reads only the
+	// groups it names. Maximum: 100 keys. Empty means all groups.
+	Keys []string
+
 	// Search limits the result to groups whose keys contain it, ignoring
 	// case. At most 256 characters. Empty means all groups.
 	Search string
@@ -413,8 +425,8 @@ type GroupInfo struct {
 // be nil, for the first page of every group. Each queue named in
 // [GroupParams.Queues] reads up to a page, so it takes at most 100 names.
 // Like [Client.List], each page's query is canceled after 5 seconds; a
-// search that matches few of very many groups can reach that limit and
-// return an error.
+// search, or keys without queues, that match few of very many groups can
+// reach that limit and return an error.
 func (c *Client) Groups(ctx context.Context, params *GroupParams) (*GroupsResult, error) {
 	p := GroupParams{}
 	if params != nil {
@@ -460,6 +472,10 @@ func (c *Client) groupsQuery(p *GroupParams) (sql string, args []any, err error)
 	if err != nil {
 		return "", nil, err
 	}
+	keys, err := checkFilter("group key", p.Keys, maxGroupKeyLength)
+	if err != nil {
+		return "", nil, err
+	}
 	if p.Search != "" {
 		if err := checkName("search", p.Search, maxGroupKeyLength); err != nil {
 			return "", nil, err
@@ -479,6 +495,7 @@ func (c *Client) groupsQuery(p *GroupParams) (sql string, args []any, err error)
 		p.Halted,    // $3
 		afterQueue,  // $4
 		afterKey,    // $5
+		keys,        // $6
 	}
 	if len(queues) == 0 {
 		return c.sql.listGroups, args, nil

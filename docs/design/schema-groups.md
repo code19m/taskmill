@@ -40,20 +40,18 @@ the group's unfinished tasks.
 
 **Why a separate statement.** The promotion must see tasks that were enqueued
 while the decrement waited for the group's lock. At READ COMMITTED, each
-statement sees the data as of its own start. One combined statement therefore
-misses a task whose enqueue committed while it waited, and that task stays
-`pending` forever. A second statement starts after the lock was acquired, so
-it sees the task. We reproduced the failure of the one-statement version, and
-the correctness of the two-statement version, on both PostgreSQL versions.
-This is one reason taskmill's own transactions require READ COMMITTED.
+statement sees the data as of its own start, so one combined statement misses
+a task whose enqueue committed while it waited, and that task stays `pending`
+forever. A second statement starts after the lock was acquired, and sees it:
+one reason why taskmill's own transactions require READ COMMITTED.
 
 **One way out.** A counted task leaves its group when it completes, is
 canceled, or is deleted, alone or in a batch. Every such change runs the
 same three statements, in one function (`leaveGroups`): the decrement,
 which also ends a halt that names a leaving task, the delete of the empty
-groups, and the promotion. A `pending` task that leaves was not the head,
-so nothing is promoted for it. A group that has no row, which should never
-happen, is logged as `fifo group missing`, and the task still ends.
+groups, and the promotion, which a leaving `pending` task does not need. A
+group that has no row, which should never happen, is logged as `fifo group
+missing`, and the task still ends.
 
 **Completing a batch.** A worker completes the grouped tasks of a batch in one
 transaction, with a few statements for the whole batch rather than a few per
@@ -68,46 +66,54 @@ FOR UPDATE OF g SKIP LOCKED;
 ```
 
 Then it completes the tasks of the locked groups with the
-[Complete](schema-statements.md#complete) statement,
-decrements each group's count, deletes the groups whose count reached zero,
-and promotes the oldest `pending` task of every other group, with a
-`LATERAL` subquery per group through `tasks_pending_idx`.
+[Complete](schema-statements.md#complete) statement, decrements each
+group's count, deletes the groups whose count reached zero, and promotes the
+oldest `pending` task of every other group, with a `LATERAL` subquery per
+group through `tasks_pending_idx`. That is 7 round trips. Sending the last
+three together would take a second copy of `leaveGroups`, the one way out
+of a group, which is worth more than the milliseconds that it would save.
 
 `SKIP LOCKED` here means a batch never waits for, or deadlocks with,
-another transaction. A task whose group row another transaction holds, for
-example an open `EnqueueTx` into that group, stays with the worker, which
-keeps renewing its lease and tries it again in a later batch. So one busy
-group never blocks the batch, and a waiting completion never keeps a
-database connection busy. Maintenance works the same way: it skips group rows
-that other transactions hold and retries them in its next cycle, so a long
-application transaction cannot stall it.
+another transaction. A task whose group row another transaction holds, as an
+open `EnqueueTx` into that group does, stays with the worker, which renews
+its lease and tries it again in a later batch. Maintenance skips held group
+rows until its next cycle too, so a long transaction stalls neither.
 
-**The next task starts without a notification.** The promotion notifies the
-queue, but a client sends at most one notification per queue per 50 ms (see
-[Notifications](schema-maintenance.md#notifications)). A group whose every
-task waited for one ran 20 tasks a second. So the worker that completed the
-head fetches the queue again when its batch commits. Only that worker does:
-the others still wake at the pace of the notifications. Measured with one
+**A busy group's head waits for the row.** Retries that skip a held row
+rarely find it free when short transactions enqueue into the group one after
+another. Measured: with 70 enqueues a second, each holding the row for 5 ms,
+2 to 4 of 100 tasks completed meanwhile. So up to 4 completions of a worker
+also wait for their groups' rows, up to 100 ms, each in a transaction that
+writes nothing and holds no other row before; it then locks the task's row
+if it is free. PostgreSQL hands the row to those who wait in turn: 1 to 4 of
+the 100 were left, and 3 to 9 of 300 in 3 such groups. Each wait costs a
+transaction, so a worker keeps up with a few busy groups, and more take more
+workers. A wait that ran out is tried again a second later at the soonest,
+and only while no other waits: a long transaction soon costs one connection.
+
+**The next task starts without a notification.** The promotion's
+notification goes out with the client's next batch, at most one per 50 ms
+(see [Notifications](schema-maintenance.md#notifications)): a group whose
+every task waited for one ran 20 tasks a second. So the worker that
+completed the head fetches the queue again when its batch commits. With one
 worker and tasks that take no time, 200 tasks of one group ran at about 220
-a second. What remains is the 2 ms for which the completer gathers a batch,
-and the statements of the completion and of the fetch.
+a second: what remains is the completer's 2 ms, the completion, and the
+fetch.
 
-The wake-up comes with the commit because the fetch that follows a freed
-slot comes too early. A slot is free as soon as its handler returns, and the
-completer records the result a few milliseconds later, in a batch. A fetch
-in between finds the group's next task still `pending`. It also still counts
+The fetch that follows a freed slot comes too early: a slot is free as soon
+as its handler returns, a few milliseconds before the completer records the
+result. That fetch finds the group's next task still `pending`, and counts
 the task as running, so a queue at its `MaxRunning` limit looks full: a
-committed batch wakes the fetch of such a queue too, and the queue runs at
-its limit without a poll. The worker's own notification of the promotion
-comes back to it, and its fetch finds nothing. The 20 ms that follow hold
-back notifications only, not these wake-ups.
+committed batch wakes such a queue's fetch too. The worker's own
+notification of the promotion comes back to it later, and finds nothing.
 
 **Lock order.** An enqueue, and a bulk retry that creates groups, take the
 rows of several groups in bytewise order of queue and group key
 (`COLLATE "C"`). The decrement takes rows in the order of its plan. So
-completions, bulk actions, and rescues first lock their groups' rows and
-skip the held ones: their decrement never waits. Only the last completions
-of a stopping worker wait for several groups, and run again after a deadlock.
+batches of completions, bulk actions, and rescues lock their groups' rows
+first and skip the held ones, and a busy group's head waits for one group.
+Only a stopping worker's last completions wait for several groups, and run
+again after a deadlock.
 
 A `pending` task's row is locked only after its group's row: promotion
 takes them in that order, and `Cancel` and `Delete` lock a pending task's
@@ -118,11 +124,11 @@ locked before its group's row, as a worker that records a failure and a
 transaction that holds a group's row never waits for the row of a task that
 is not pending.
 
-A dedupe key's row comes before a group's row. An enqueue claims its keys
-first and counts its groups after, in one statement. A `Retry` locks its
-task, then takes the task's key back, and only then takes the group's row.
-So a retry that waits for a transaction that claims the same key holds no
-group, and that transaction can continue into the group.
+A dedupe key's row comes before a group's row. An enqueue claims its keys,
+then counts its groups. `Retry` and `CompleteTx` lock the task, take back
+the key that a cancel freed, then take the group's row: while they wait for
+a transaction that claims the key, they hold no group. A claim skips a key
+that another task holds, whose pending holder's cancel takes group, then key.
 
 `Cancel` and `Delete` cannot know which order applies before they hold a
 lock: a `Retry`, a promotion, or the task's own enqueue may commit between
@@ -136,38 +142,36 @@ continue with the locks they hold, and PostgreSQL's deadlock detection is
 the last resort.
 
 `CancelTx` cannot do this. It runs in the caller's transaction, which it
-may not roll back, and a savepoint there costs more than it saves. Each
-savepoint that writes is a subtransaction, and past 64 of them in one
-transaction, every session's visibility checks slow down until that
-transaction ends. A released savepoint also makes whoever waits for a row
-that it locked wait for the caller's whole transaction. So `CancelTx`
-continues with the locks as it took them, which may be the wrong order. Then
-it can deadlock with another transaction that changes the same task or its
-group at the same moment: a retry of the task, the end of the group's head,
-which promotes the task while a cancel or a delete of it comes in, or an
-enqueue that commits between the two statements of `CancelTx`. PostgreSQL
-ends one of the transactions with a deadlock error (SQLSTATE 40P01), which
-may hit the other one, or a third that only waits between the two, such
-as an enqueue into the group. `Cancel`, `Delete`, and `Retry` run again
-when it hits them, within their five tries. So do `Enqueue` and
-`EnqueueMany`: on the client's pool, the enqueue statement is a transaction
-of its own, so nothing of a try that PostgreSQL ended was saved. Any other
-transaction that got the error can be run again by its caller.
+may not roll back, and a savepoint there costs more than it saves: past 64
+subtransactions in one transaction, every session's visibility checks slow
+down until it ends, and a released savepoint makes whoever waits for a row
+that it locked wait for the caller's whole transaction. So `CancelTx` keeps
+the locks as it took them, perhaps in the wrong order, and can deadlock with
+a transaction that changes the same task or its group at that moment: a
+retry of the task, the end of the group's head, which promotes the task as a
+cancel or a delete of it comes in, or an enqueue that commits between the
+two statements of `CancelTx`. PostgreSQL ends one of them with a deadlock
+error (SQLSTATE 40P01), which may also hit a third that only waits between
+the two, such as an enqueue into the group. `Cancel`, `Delete`, and `Retry`
+run again when it hits them, within their five tries, and so do `Enqueue`
+and `EnqueueMany`, whose statement on the client's pool is a transaction of
+its own. A caller can run any other such transaction again.
 
 **Halting.** When a group's head becomes dead, the count is not decremented
 and `halted_task_id` is set. The group waits until an operator retries the
 dead head, which resumes the group, or deletes it, which promotes the next
-task. Halting is always on: groups exist to keep an order, and skipping a
-dead task would break it. A canceled head leaves its group like a completed
-one, because cancellation is an explicit choice.
+task. Halting is always on: groups exist to keep an order, which skipping a
+dead task breaks. A canceled head leaves like a completed one: a cancel is
+an explicit choice.
 
 **Costs.** A grouped enqueue writes two rows instead of one, and finishing a
 grouped task writes up to two more: the group's row, and the next task it
 promotes. Ungrouped tasks pay nothing. Producers that enqueue into the same
-group wait for each other's transactions to commit, so transactions that
-enqueue grouped tasks should be short. Two transactions that enqueue into the
-same groups in opposite orders can deadlock; PostgreSQL detects this and
-aborts one of them, and batch enqueues sort their groups to avoid it.
+group wait for each other's transactions to commit, and so does its head's
+completion: keep transactions that enqueue grouped tasks short. Two
+transactions that enqueue into the same groups in opposite orders can
+deadlock; PostgreSQL aborts one of them, and batch enqueues sort their
+groups to avoid it.
 
 ## Deduplication
 
@@ -197,44 +201,40 @@ other's writes: a final `UPDATE` that tries to store the new task's ID in the
 key finds no key row, which leaves the key without its task.
 
 A duplicate's row reports the task that holds the key, found in the same
-statement. If that task's transaction committed while the statement waited
-for the key, the statement cannot see it, and the client reads the key again
-in a [second statement](schema-statements.md#enqueue). It does the same when
-the holder it sees is one whose window ended: the statement did not get that
-key, so another enqueue claimed it meanwhile, and its task is the one to
-report. Two concurrent enqueues of the same key cannot both succeed: the
+statement. The client reads the key again in a
+[second statement](schema-statements.md#enqueue) if the statement cannot
+see that task, whose transaction committed while it waited for the key, or
+sees a holder whose window ended, so that another enqueue claimed the key
+meanwhile. Two concurrent enqueues of the same key cannot both succeed: the
 second waits on the first's key and then finds it taken.
 
 **A duplicate writes nothing.** A claim that fails still locks the key's
 row: it takes a transaction ID and writes WAL, and its transaction commits
 as a write. So the real statement first looks: a task whose key it sees as
-held gets no ID from the sequence, and is left out of the claim. It is
-reported as a duplicate of the holder it saw. One duplicate enqueue read 43
-pages and wrote 1 to 3 WAL records before, and reads 17 pages and writes
-nothing now. A new key costs one more index lookup, 4 pages.
+held gets no ID, is left out of the claim, and is reported as a duplicate
+of the holder it saw. One duplicate enqueue read 43 pages and wrote 1 to 3
+WAL records before, and reads 17 pages and writes nothing now. A new key
+costs one more index lookup, 4 pages.
 
 Deduplication stays exact, because the claim alone still decides who gets a
 key: every task that is created went through it. Leaving a key out only
-gives the claim's answer early, and the two answers can differ in one case.
-The row of a held key changes in one way only: the cancel or the delete of
-its task removes it. An enqueue and a retry claim only a key whose window
-has ended. If such a removal is not committed when the statement begins,
-the claim would wait for it, and then take the key. The statement reports
-the duplicate instead: the answer of an enqueue that ran just before the
-removal, which is a correct order of the two.
+gives the claim's answer early, and the two can differ in one case. A held
+key's row changes only when the cancel or the delete of its task removes it:
+enqueues and retries claim only keys whose window ended. If such a removal
+is not committed when the statement begins, the claim would wait for it and
+take the key, while the statement reports the duplicate: the answer of an
+enqueue that ran just before the removal, a correct order of the two.
 
-This holds only if the statement sees the keys as they are when it begins,
-as at READ COMMITTED. A caller's transaction at REPEATABLE READ or
-SERIALIZABLE sees them as they were when it began, so a key that it sees as
-held may be free. There the statement leaves no key out, and the claim,
-which looks at the rows as they are now, decides alone.
+This holds only at READ COMMITTED, where the statement sees the keys as
+they are when it begins. A caller's transaction at REPEATABLE READ or
+SERIALIZABLE sees them as they were when it began, so there the statement
+leaves no key out, and the claim, which reads the rows as they are now,
+decides alone.
 
 `Cancel` and `Delete` delete the task's key, through the index on `task_id`,
 so the same key can be enqueued again right away. A completed or dead task
 keeps its key until the window ends: an inbox relies on that, so that a
-redelivered message does not run again after its task failed. Uniqueness
-among unfinished tasks only ("at most one queued refresh per product") can be
-added later as a new option, without a disruptive migration.
+redelivered message does not run again after its task failed.
 
 **A retry takes the key back.** A cancel stores the key that it frees with
 the task, and a retry of the canceled task claims it again: see

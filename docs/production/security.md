@@ -66,6 +66,32 @@ each role may do.
 - **Let only code that you trust connect to the database.** Services that
   must not affect each other's load belong in separate databases:
   notifications never leave their database.
+- **Let no role you don't trust create objects on the search path.**
+  taskmill's statements name their own tables, but they find PostgreSQL's
+  functions and operators, such as `unnest` and `=`, through the search
+  path, as your own statements do. A role that can create objects in a
+  schema on that path can add a function that a statement calls in place
+  of PostgreSQL's, with the rights of the role that runs it: for workers,
+  the owner of taskmill's tables. In a database created with PostgreSQL 15
+  or newer, only the database's owner can do that in `public`. A database
+  created before 15 keeps the old grant through `pg_upgrade` or a dump and
+  restore: `NewClient` then logs `every role may create objects in a schema
+  on the search path`. Remove the grant with
+  `REVOKE CREATE ON SCHEMA public FROM PUBLIC;`
+- **Create taskmill's schema before anyone else can.** The owner of a schema
+  can drop or replace every table in it, whoever owns the tables, and the
+  objects of a table's owner, such as its triggers, run with the rights of
+  the role that uses the table. So `Migrate` fills a schema only if it
+  trusts the schema's owner and the owner of its migrations table: a
+  superuser, or a role that has your role's rights, such as your role
+  itself. `pg_database_owner`, which owns `public`, stands for the
+  database's owner. A role set on the connection, with `SET ROLE`,
+  `SET SESSION AUTHORIZATION` or the `role` parameter, does not count, since
+  code that runs as that role can switch back to yours, and must be trusted
+  too, since it would own what `Migrate` creates. So run `Migrate` connected
+  as the role that owns taskmill's tables. A schema that another role
+  created and filled first looks like yours to `Migrate`: give the CREATE
+  privilege on the database only to roles that you trust.
 - **Encrypt the connection.** Payloads travel over it. Add
   `sslmode=verify-full` to every connection URL, so that pgx uses TLS and
   checks the server's certificate.

@@ -1,5 +1,7 @@
 package taskmill
 
+import "strings"
+
 // This file holds the statements that change the rows of FIFO groups. The
 // invariants that they keep are in
 // https://github.com/code19m/taskmill/blob/main/docs/design/schema-groups.md.
@@ -27,13 +29,21 @@ WHERE queue = $1 AND group_key = $2`
 // existing group with false, so a group it does not return has no row.
 // Skipping held rows means a batch never waits for another
 // transaction.
-const lockGroupsSQL = `
+var lockGroupsSQL = strings.ReplaceAll(lockGroupsTemplate, "{wait}", "SKIP LOCKED")
+
+// lockGroupWaitingSQL is lockGroupsSQL for one group, whose row it waits
+// for: see completeHeld.
+var lockGroupWaitingSQL = strings.ReplaceAll(lockGroupsTemplate, "{wait}", "")
+
+// lockGroupsTemplate is lockGroupsSQL, with {wait} for how its lock treats
+// a row that another transaction holds.
+const lockGroupsTemplate = `
 WITH wanted AS (
     SELECT DISTINCT queue, group_key FROM unnest($1::text[], $2::text[]) AS u(queue, group_key)
 ), locked AS (
     SELECT g.queue, g.group_key FROM {s}.groups g
     JOIN wanted w ON g.queue = w.queue AND g.group_key = w.group_key
-    FOR UPDATE OF g SKIP LOCKED
+    FOR UPDATE OF g {wait}
 )
 SELECT queue, group_key, true FROM locked
 UNION ALL
@@ -79,10 +89,10 @@ WHERE g.queue = u.queue AND g.group_key = u.group_key AND g.tasks = 0`
 // $1 queues, $2 group keys, $3 channel, $4 queues to notify.
 //
 // promoteGroupsSQL makes the oldest pending task of each group ($1, $2)
-// its head, and notifies channel $3 of the queues in $4 that got an
-// available task. It must run as its own statement after
-// recountGroups, so that it sees tasks enqueued while recountGroups
-// waited for a group's lock.
+// its head, and returns the queues that got an available task. It
+// notifies channel $3 of those in $4. It must run as its own statement
+// after recountGroups, so that it sees tasks enqueued while
+// recountGroups waited for a group's lock.
 const promoteGroupsSQL = `
 WITH next AS (
     SELECT p.id FROM unnest($1::text[], $2::text[]) AS u(queue, group_key)
@@ -99,9 +109,12 @@ WITH next AS (
     FROM next
     WHERE t.id = next.id
     RETURNING t.queue, t.state
+), ready AS (
+    SELECT DISTINCT queue FROM promoted WHERE state = 'available'
+), notified AS (
+    SELECT count(pg_notify($3, '{available}' || queue)) AS n FROM ready WHERE queue = ANY($4)
 )
-SELECT count(pg_notify($3, '{available}' || queue))
-FROM (SELECT DISTINCT queue FROM promoted WHERE state = 'available' AND queue = ANY($4)) q`
+SELECT queue FROM ready CROSS JOIN notified`
 
 // $1 task ID.
 //

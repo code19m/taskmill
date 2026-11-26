@@ -50,6 +50,25 @@ const defaultMaxBlockingIndexRows = 1_000_000
 // is left as it is, so Migrate then needs no privilege to change it, and a
 // failure to prepare partitions is only logged. cfg may be nil.
 //
+// Migrate fills an existing schema only if it trusts the role that owns the
+// schema, which can drop or replace every table in it, and the role that
+// owns its migrations table, which could have created objects there first:
+// their objects would run with the rights of the role that the pool connects
+// as. It trusts a superuser, and a role that has the rights of the pool's
+// role, such as that role itself. pg_database_owner, which owns the schema
+// public, stands for the database's owner. A role set on the connection,
+// with SET ROLE, SET SESSION AUTHORIZATION or the role parameter, does not
+// count, since code that runs as that role can switch back, and must be
+// trusted too, since it would own what Migrate creates. Otherwise Migrate
+// fails with PostgreSQL's insufficient_privilege, before it changes
+// anything. Of a schema that is up to date, it only reads the migrations
+// table: a superuser, or a member of one, only one whose owners it trusts,
+// and other roles one of a role that they trust or of the schema's owner, so
+// that roles that own nothing can call it too. So run Migrate connected as
+// the role that owns taskmill's tables, and give the CREATE privilege on the
+// database only to roles that you trust: one could create taskmill's schema
+// first, and fill it.
+//
 // A migration that builds an index does so online, without blocking writes,
 // which can take minutes on a large table. Meanwhile Migrate keeps a second
 // connection of the pool, so the pool needs at least 2, and its connections
@@ -136,14 +155,49 @@ func (m *migrator) run(ctx context.Context) error {
 	return nil
 }
 
-// schemaVersion returns the schema's migration version, or 0 if it has none.
+// schemaVersion returns the schema's migration version, or 0 if it has
+// none, or if the bootstrap must first check who owns its migrations table.
+//
+// Reading a relation can run code of its owner's, as a view's condition
+// does, with the rights of the role that reads it. So a superuser session
+// reads only a migrations table whose owners the bootstrap would accept, and
+// another session one that belongs to the schema's owner or to a role that
+// it trusts. So a role that owns nothing reads a schema that is up to date:
+// its owner can run code as that role anyway, whenever it uses taskmill's
+// tables, which that owner can replace. schemaVersion leaves the rest to the
+// bootstrap, also a table that the current role may not read, so that the
+// bootstrap names the role to connect as if it does not trust an owner. One
+// statement checks the owners, so that no table appears between two checks;
+// only those owners could replace the table before the read.
 func schemaVersion(ctx context.Context, pool *pgxpool.Pool, schema string) (int, error) {
-	version, err := readVersion(ctx, pool, schema)
-	if pgCode(err) == codeUndefinedTable {
+	var version int
+	err := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, safeSearchPathSQL); err != nil {
+			return err
+		}
+		var readable bool
+		err := tx.QueryRow(ctx, "SELECT EXISTS (SELECT FROM pg_catalog.pg_namespace n "+
+			"JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid AND c.relname = 'migrations' WHERE n.nspname = $1 AND "+
+			"pg_catalog.has_schema_privilege(n.oid, 'USAGE') AND pg_catalog.has_table_privilege(c.oid, 'SELECT') AND "+
+			"CASE WHEN "+superuserSQL+" THEN "+trustedSQL(roleSQL("n.nspowner"))+" AND "+trustedSQL(roleSQL("c.relowner"))+
+			" ELSE "+roleSQL("c.relowner")+" = "+roleSQL("n.nspowner")+" OR "+trustedSQL(roleSQL("c.relowner"))+" END)",
+			unprepared, schema).Scan(&readable)
+		if err != nil || !readable {
+			return err
+		}
+		version, err = readVersion(ctx, tx, schema)
+		return err
+	})
+	if pgCode(err) == codeUndefinedTable { // dropped since the check
 		return 0, nil
 	}
 	return version, err
 }
+
+// safeSearchPathSQL makes the statements after it in the transaction find
+// PostgreSQL's functions and operators, and no other role's, whatever the
+// session's search path.
+const safeSearchPathSQL = "SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)"
 
 // readVersion reads the version of the latest migration that the schema's
 // migrations table records, on q, a pool or a transaction. NewClient reads
@@ -153,7 +207,7 @@ func readVersion(ctx context.Context, q interface {
 }, schema string,
 ) (int, error) {
 	var version int
-	err := q.QueryRow(ctx, "SELECT coalesce(max(version), 0) FROM "+schema+".migrations", unprepared).Scan(&version)
+	err := q.QueryRow(ctx, "SELECT coalesce(pg_catalog.max(version), 0) FROM "+schema+".migrations", unprepared).Scan(&version)
 	return version, err
 }
 
@@ -169,26 +223,23 @@ const unprepared = pgx.QueryExecModeSimpleProtocol
 // default level: only NewClient checks it, later.
 var readCommitted = pgx.TxOptions{IsoLevel: pgx.ReadCommitted}
 
-// createMigrationsTable creates the schema and the table that records
-// migrations, unless they exist, in a transaction of its own. Processes that
-// do this at the same time need no lock: the one that comes second waits
-// until the first commits, and then finds both or fails because one exists,
-// with an error that depends on the moment. So after an error, the table
-// decides: if it exists, another process created it.
+// createMigrationsTable runs the bootstrap, which creates the schema and
+// the table that records migrations, unless they exist, in a transaction of
+// its own. Processes that do this at the same time need no lock: the one
+// that comes second waits until the first commits, and then finds both or
+// fails because one exists. So after an error it runs the bootstrap once
+// more, which then finds both, and checks their owners.
 func createMigrationsTable(ctx context.Context, pool *pgxpool.Pool, schema string) error {
-	createErr := pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, bootstrapSQL(schema))
-		return err
-	})
-	if createErr == nil {
+	bootstrap := func() error {
+		return pgx.BeginTxFunc(ctx, pool, readCommitted, func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, bootstrapSQL(schema))
+			return err
+		})
+	}
+	if bootstrap() == nil {
 		return nil
 	}
-
-	var created bool
-	if err := pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", schema+".migrations").Scan(&created); err != nil || !created {
-		return createErr
-	}
-	return nil
+	return bootstrap()
 }
 
 // step applies the pending migrations up to the next online step, or that
@@ -371,7 +422,7 @@ func (m *migrator) applyOnline(ctx context.Context, tx pgx.Tx, mig migrations.Mi
 	}
 	if timeouts != "" {
 		return fail(invalidArgument("it builds an index online, which can take minutes, and the connections have %s, "+
-			"which would cancel the build and leave an invalid index: run Migrate as a role without them, "+
+			"which would cancel the build and leave an invalid index: run Migrate on connections without them, "+
 			"as after ALTER ROLE ... SET statement_timeout = 0", timeouts))
 	}
 
@@ -498,27 +549,88 @@ func (m *migrator) awaitIndex(ctx context.Context, mig migrations.Migration, st 
 	}
 }
 
-// bootstrapSQL creates the schema and the table that records migrations,
-// unless they exist, for Migrate and for other tools.
+// bootstrapSQL returns a DO block that creates the schema and the table
+// that records migrations, unless they exist, for Migrate and for other
+// tools. It finds only PostgreSQL's functions and operators, whatever the
+// session's search path.
+//
+// It refuses a schema whose owner the session does not trust, since that
+// owner can drop or replace every table in it, or whose migrations table
+// belongs to a role that the session does not trust, which could have
+// created objects there first. It refuses a current role that the session
+// does not trust as well, which would own what Migrate creates. The block
+// reads both owners in one statement, so that no schema or table appears
+// between two reads.
 //
 // CREATE SCHEMA IF NOT EXISTS would not do: PostgreSQL checks the CREATE
 // privilege on the database before it checks whether the schema exists, and
-// a role that owns its schema may lack it. The block stays on one line,
-// since goose splits a file at each line that ends in a semicolon.
+// a role that owns its schema may lack it. Nor would CREATE TABLE IF NOT
+// EXISTS: it would accept a table that another role created after the
+// check. The block stays on one line, since goose splits a file at each
+// line that ends in a semicolon.
 func bootstrapSQL(schema string) string {
-	return fmt.Sprintf(`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_catalog.pg_namespace WHERE nspname = '%[1]s') THEN CREATE SCHEMA %[1]s; END IF; END $$;
-CREATE TABLE IF NOT EXISTS %[1]s.migrations (
-    version    integer PRIMARY KEY,
-    name       text NOT NULL,
-    applied_at timestamptz NOT NULL DEFAULT now()
-);
-`, schema)
+	block := `DO $$ DECLARE o pg_catalog.oid; m pg_catalog.oid; p pg_catalog.text := pg_catalog.current_setting('search_path'); BEGIN ` +
+		`PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true); ` +
+		`SELECT {role(n.nspowner)}, {role(c.relowner)} INTO o, m FROM pg_namespace n ` +
+		`LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = 'migrations' WHERE n.nspname = '{s}'; ` +
+		`IF NOT {trusted(current)} THEN ` +
+		`RAISE EXCEPTION 'the role set on the connection would own what Migrate creates in schema {s}: connect as role % to migrate it', ` +
+		`current_user USING ERRCODE = 'insufficient_privilege'; ` +
+		`ELSIF o IS NULL THEN CREATE SCHEMA {s}; ` +
+		`ELSIF NOT {trusted(o)} THEN ` +
+		`RAISE EXCEPTION 'schema {s} belongs to a role that can drop or replace every table in it: connect as role % to migrate it%', ` +
+		`pg_get_userbyid(o), CASE WHEN {super} THEN '' ELSE format(', or make role %I its owner', pg_get_userbyid({login})) END USING ERRCODE = 'insufficient_privilege'; ` +
+		`ELSIF m IS NOT NULL AND NOT {trusted(m)} THEN ` +
+		`RAISE EXCEPTION 'table {s}.migrations belongs to a role that could run code as role % through it: connect as role % to migrate the schema', ` +
+		`pg_get_userbyid({login}), pg_get_userbyid(m) USING ERRCODE = 'insufficient_privilege'; ` +
+		`END IF; ` +
+		`IF m IS NULL THEN CREATE TABLE {s}.migrations (version integer PRIMARY KEY, name text NOT NULL, applied_at timestamptz NOT NULL DEFAULT now()); END IF; ` +
+		`PERFORM pg_catalog.set_config('search_path', p, true); END $$;` + "\n"
+	return strings.NewReplacer("{s}", schema, "{super}", superuserSQL, "{login}", loginSQL,
+		"{role(n.nspowner)}", roleSQL("n.nspowner"), "{role(c.relowner)}", roleSQL("c.relowner"),
+		"{trusted(current)}", trustedSQL("(SELECT oid FROM pg_roles WHERE rolname = current_user)"), "{trusted(o)}", trustedSQL("o"), "{trusted(m)}", trustedSQL("m"),
+	).Replace(block)
 }
+
+// trustedSQL reports whether the session trusts the role whose OID the
+// expression owner holds, whose objects would run with the rights of the
+// role that the session logged in as: a superuser, or a role that has those
+// rights already, such as the login role itself.
+//
+// It measures the login role, not the session user or the current role:
+// code that runs as a role that the session set, with SET ROLE or SET
+// SESSION AUTHORIZATION, can switch back to the login role. Nor does it
+// trust a role that the login role is a member of: a role that may create
+// roles can grant one that it created to anyone.
+func trustedSQL(owner string) string {
+	return strings.ReplaceAll(`(EXISTS (SELECT FROM pg_catalog.pg_roles WHERE oid = {owner} AND rolsuper) `+
+		`OR pg_catalog.pg_has_role({owner}, `+loginSQL+`, 'USAGE'))`, "{owner}", owner)
+}
+
+// loginSQL is the OID of the role that the session logged in as, which SET
+// SESSION AUTHORIZATION does not change, unlike session_user. A session
+// may always read its own activity.
+const loginSQL = `(SELECT usesysid FROM pg_catalog.pg_stat_get_activity(pg_catalog.pg_backend_pid()))`
+
+// roleSQL returns the OID of the role that the owner OID owner stands for:
+// the database's owner for pg_database_owner, which owns the schema public,
+// and whose only member the database's owner is.
+func roleSQL(owner string) string {
+	return "CASE WHEN " + owner + " = 'pg_database_owner'::pg_catalog.regrole " +
+		"THEN (SELECT datdba FROM pg_catalog.pg_database WHERE datname = pg_catalog.current_database()) ELSE " + owner + " END"
+}
+
+// superuserSQL reports whether the session can act as a superuser: its
+// login role is one, or a member of one.
+const superuserSQL = `EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolsuper AND pg_catalog.pg_has_role(` + loginSQL + `, oid, 'MEMBER'))`
 
 // Migration is one versioned schema change, for teams that apply migrations
 // with their own tools. [Migrations] returns them in order: first the
 // bootstrap, version 0, which creates the schema and the migrations table,
-// then every versioned migration. Apply them in order, each in a
+// then every versioned migration. The bootstrap refuses what [Migrate]
+// refuses, with PostgreSQL's insufficient_privilege: a schema or a
+// migrations table whose owner it does not trust, or a role set on the
+// connection that it does not trust. Apply them in order, each in a
 // transaction unless it is Online, and record every version above 0, so
 // that [NewClient] finds the schema up to date:
 //
@@ -552,7 +664,8 @@ func (m Migration) Statements() []string {
 }
 
 // Migrations returns every migration for schema, in order. Teams that use
-// their own migration tools apply these instead of calling [Migrate]. They
+// their own migration tools apply these instead of calling [Migrate]. Their
+// bootstrap refuses the schemas that Migrate refuses: see [Migration]. They
 // create no history partitions: each worker creates them when it starts, and
 // the maintainer keeps them ready, which needs the workers' role to own the
 // taskmill tables. An empty schema means "taskmill". A name that does not

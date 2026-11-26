@@ -137,7 +137,8 @@ These choices come on top:
   transaction, and runs `SET LOCAL search_path` to the tenant's schema
   first. Quote the name with `pgx.Identifier{name}.Sanitize()`. taskmill's
   statements name their own schema, so the search path does not change
-  them.
+  which tables they use. They find PostgreSQL's functions through it, as
+  yours do: let only roles you trust create objects in a tenant's schema.
 
 ## Other options
 

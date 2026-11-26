@@ -47,13 +47,13 @@ type statements struct {
 	completeSkipping string
 	regainKeys       string
 	lockLeased       string
-	fail             string
-	snooze           string
-	release          string
+	record           string
+	recordSkipping   string
 
 	// sql_groups.go: change the rows of FIFO groups.
 	haltGroup         string
 	lockGroups        string
+	lockGroupWaiting  string
 	recountGroups     string
 	deleteEmptyGroups string
 	promoteGroups     string
@@ -116,6 +116,7 @@ type statements struct {
 	// sql_lists.go: read tasks, groups, queues, workers, and schedules.
 	getTask         string
 	listTasks       string
+	listRunning     string
 	listFinished    string
 	listCreated     string
 	countTasks      forms
@@ -198,12 +199,12 @@ func newStatements(schema string) *statements {
 		completeSkipping: q(completeSkippingSQL),
 		regainKeys:       q(regainKeysSQL),
 		lockLeased:       q(lockLeasedSQL),
-		fail:             q(failSQL),
-		snooze:           q(snoozeSQL),
-		release:          q(releaseSQL),
+		record:           q(recordSQL),
+		recordSkipping:   q(recordSkippingSQL),
 
 		haltGroup:         q(haltGroupSQL),
 		lockGroups:        q(lockGroupsSQL),
+		lockGroupWaiting:  q(lockGroupWaitingSQL),
 		recountGroups:     q(recountGroupsSQL),
 		deleteEmptyGroups: q(deleteEmptyGroupsSQL),
 		promoteGroups:     q(promoteGroupsSQL),
@@ -263,6 +264,7 @@ func newStatements(schema string) *statements {
 
 		getTask:         q(getTaskSQL),
 		listTasks:       q(listTasksSQL),
+		listRunning:     q(listRunningSQL),
 		listFinished:    q(listFinishedSQL),
 		listCreated:     q(listCreatedSQL),
 		countTasks:      forms{q(countTasksSQL(false)), q(countTasksSQL(true))},
@@ -283,10 +285,17 @@ func newStatements(schema string) *statements {
 	}
 }
 
-// schemaVersionSQL reads the version of the schema, and the isolation level
-// that the pool's transactions start with.
+// schemaVersionSQL reads the version of the schema, the isolation level
+// that the pool's transactions start with, and the schemas on the search path
+// in which every role may create objects. It names pg_catalog's functions
+// and types itself, so that an object in such a schema cannot hide them:
+// an operator, for one, whose types match its operands more closely.
 const schemaVersionSQL = `
-SELECT coalesce(max(version), 0), current_setting('default_transaction_isolation') FROM {s}.migrations`
+SELECT coalesce(pg_catalog.max(version), 0), pg_catalog.current_setting('default_transaction_isolation'),
+       (SELECT pg_catalog.array_agg(n.nspname ORDER BY n.nspname)
+        FROM pg_catalog.pg_namespace n, pg_catalog.aclexplode(n.nspacl) a
+        WHERE n.nspname = ANY (pg_catalog.current_schemas(false)) AND a.privilege_type = 'CREATE' AND a.grantee = 0::pg_catalog.oid)
+FROM {s}.migrations`
 
 // keptErrors is how many of a task's most recent attempt errors are kept.
 const keptErrors = 20

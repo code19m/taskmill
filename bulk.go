@@ -163,7 +163,9 @@ type BulkResult struct {
 	// Next continues the action, as [BulkParams.Cursor], if it stopped
 	// before it went through every task: at the first task it skipped, if it
 	// skipped any, so that a group it left comes back in order. Empty if it
-	// went through every task.
+	// went through every task. The call that continues goes through the
+	// tasks after Next again, so Skipped and Conflicts count none of those:
+	// the results of the calls that continue one another add up.
 	Next string
 }
 
@@ -560,7 +562,7 @@ func checkBulk(params *BulkParams, states []State) (*bulkRun, error) {
 type step struct {
 	end              int64    // the batch went through the tasks up to this one
 	changed, skipped int      // tasks
-	conflicts        int      // tasks that a retry left because other tasks hold their dedupe keys
+	conflicts        []int64  // the tasks that a retry left because other tasks hold their dedupe keys
 	firstSkipped     int64    // the first task it skipped, or 0
 	left             groupSet // groups that a retry left
 
@@ -577,15 +579,17 @@ type batchFunc func(ctx context.Context, q querier, run *bulkRun) (step, error)
 // for at most batchTimeout, so that the result counts it.
 func (c *Client) inBatches(ctx context.Context, run *bulkRun, batch batchFunc) (BulkResult, error) {
 	var res BulkResult
-	var firstSkipped int64
+	var firstSkipped, conflictsBefore int64 // the first task it skipped, and the conflicts before it
 
 	// stop returns what the action did when it stops early, with where to
 	// continue: before the first task it skipped, so that the next run takes that
-	// task first, or else after the last task it went through.
+	// task first, or else after the last task it went through. The next run
+	// counts the skips and conflicts from there.
 	stop := func(err error) (BulkResult, error) {
 		res.Next = encodeCursor(run.after)
 		if firstSkipped > 0 {
 			res.Next = encodeCursor(firstSkipped - 1)
+			res.Skipped, res.Conflicts = 0, conflictsBefore
 		}
 		return res, err
 	}
@@ -609,9 +613,14 @@ func (c *Client) inBatches(ctx context.Context, run *bulkRun, batch batchFunc) (
 		run.left.queues, run.left.groups = append(run.left.queues, s.left.queues...), append(run.left.groups, s.left.groups...)
 		res.Changed += int64(s.changed)
 		res.Skipped += int64(s.skipped)
-		res.Conflicts += int64(s.conflicts)
-		if firstSkipped == 0 {
-			firstSkipped = s.firstSkipped
+		res.Conflicts += int64(len(s.conflicts))
+		if firstSkipped == 0 && s.firstSkipped > 0 {
+			firstSkipped, conflictsBefore = s.firstSkipped, res.Conflicts
+			for _, id := range s.conflicts {
+				if id > firstSkipped {
+					conflictsBefore--
+				}
+			}
 		}
 	}
 	return res, nil
@@ -733,8 +742,9 @@ func (c *Client) runBulkBatch(ctx context.Context, run *bulkRun, batch batchFunc
 	defer cancel()
 
 	var s step
+	var available []string
 	if _, err = tx.Exec(ctx, settings); err == nil {
-		s, err = batch(ctx, pgxExecutor{q: tx}, run)
+		s, err = batch(ctx, ownQuerier{pgxExecutor: pgxExecutor{q: tx}, notifier: c.notifier, available: &available}, run)
 	}
 	if err == nil {
 		_, err = tx.Exec(ctx, liftLockTimeout)
@@ -743,7 +753,11 @@ func (c *Client) runBulkBatch(ctx context.Context, run *bulkRun, batch batchFunc
 		_ = tx.Rollback(ctx) // err says what went wrong
 		return step{}, err
 	}
-	return s, tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return s, err
+	}
+	c.notifier.after(available)
+	return s, nil
 }
 
 // bulkTask is a task that a bulk action read.
@@ -979,13 +993,17 @@ func (c *Client) retryBatch(ctx context.Context, q querier, run *bulkRun) (step,
 	}
 
 	_, err = q.exec(ctx, c.sql.retryTasks,
-		idsOf(retried),               // $1
-		pending,                      // $2
-		c.schema,                     // $3
-		c.notifiable(ctx, available), // $4
+		idsOf(retried),             // $1
+		pending,                    // $2
+		c.schema,                   // $3
+		c.notifiable(q, available), // $4
 	)
+	if err != nil {
+		return step{}, err
+	}
+	madeAvailable(q, available...)
 	s.changed = len(retried)
-	return s, err
+	return s, nil
 }
 
 // leaveOut skips the tasks of locked that are not among retried: those that
@@ -1047,7 +1065,7 @@ func (c *Client) takeKeysBack(ctx context.Context, q querier, ts []bulkTask, s *
 			s.skip(t, left)
 			leftNow[group] = true
 		case refused[t.id]:
-			s.conflicts++
+			s.conflicts = append(s.conflicts, t.id)
 		default:
 			out = append(out, t)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -59,6 +60,34 @@ func TestWorkerDrainsRunningTasksOnShutdown(t *testing.T) {
 	recv(t, started, "a handler to start")
 
 	stop()
+	e.wantState(t, id, taskmill.StateCompleted)
+	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
+		t.Fatalf("stopped worker is still registered")
+	}
+}
+
+// A DrainTimeout of the largest Duration, to wait as long as it takes, does
+// not cut the recording of the results short: the bound of Run's last steps
+// counts from the stop, and the sum must not overflow.
+func TestTheLargestDrainTimeoutRecordsTheDrainedTasks(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	started := make(chan struct{}, 1)
+
+	stop := runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			time.Sleep(300 * time.Millisecond)
+			return nil
+		}, nil),
+		Queues:       defaultQueue(1),
+		DrainTimeout: math.MaxInt64,
+	})
+
+	id := e.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "a handler to start")
+
+	stop() // the handler returns during the drain
 	e.wantState(t, id, taskmill.StateCompleted)
 	if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
 		t.Fatalf("stopped worker is still registered")
@@ -292,6 +321,62 @@ func TestTasksFetchedWhileTheWorkerStopsGoBack(t *testing.T) {
 	}
 }
 
+// The worker gives tasks that it fetched while it stopped back within 5
+// seconds, also when the database does not answer: the recorder, which
+// records on Run's context, does not hold the release, and Run returns
+// DrainTimeout plus 10 seconds after its context ended at most.
+func TestTasksFetchedWhileTheWorkerStopsGoBackInTime(t *testing.T) {
+	t.Parallel()
+	gate := &fetchGate{}
+	e := newTracedEnv(t, gate)
+
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers:     handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil),
+		Queues:       defaultQueue(1),
+		DrainTimeout: 50 * time.Millisecond,
+		NoMaintainer: true,
+	})
+	e.enqueue(t, sendEmail{}, nil)
+
+	e.exec(t, `
+CREATE FUNCTION {s}.slow_release() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM pg_sleep(60);
+    RETURN NEW;
+END $$`)
+	e.exec(t, `
+CREATE TRIGGER slow_release BEFORE UPDATE ON {s}.tasks
+FOR EACH ROW WHEN (NEW.state = 'available') EXECUTE FUNCTION {s}.slow_release()`)
+	t.Cleanup(func() { // ends a release that the worker gave up on, so that the schema can be dropped
+		_, _ = e.pool.Exec(context.Background(), `SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+WHERE pid <> pg_backend_pid() AND strpos(query, $1) > 0`, e.schema+".tasks")
+	})
+
+	held, release := gate.holdNext()
+	defer release()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	recv(t, held, "the worker's first fetch")
+	cancel()
+	stopped := time.Now()
+	release()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("Run did not return within a minute")
+	}
+	if took := time.Since(stopped); took > 10*time.Second {
+		t.Fatalf("Run returned %v after its context ended, want DrainTimeout plus 10 seconds at most", took)
+	}
+}
+
 // Run returns only when the results of its attempts are recorded. That
 // holds also when the drain gives up: an attempt whose handler returned in
 // time is not abandoned then, and its result may still be on its way to a
@@ -446,6 +531,47 @@ func TestRunTwiceFails(t *testing.T) {
 	cancel()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Run may be called again after it returned: each run registers the worker,
+// handles tasks, and is healthy while it runs, and the counts of Stats go on
+// from the run before.
+func TestRunAgainAfterItReturned(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ran := make(chan int64, 1)
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			ran <- task.ID
+			return nil
+		}, nil),
+		Queues: defaultQueue(1),
+	})
+
+	for run := int64(1); run <= 2; run++ {
+		stop := startWorker(t, w)
+		id := e.enqueue(t, sendEmail{}, nil)
+		if got := recv(t, ran, "the task to run"); got != id {
+			t.Fatalf("run %d: task %d ran, want %d", run, got, id)
+		}
+		e.waitState(t, id, taskmill.StateCompleted)
+		waitFor(t, "the worker to be healthy", func() bool { return w.Health() == nil })
+		if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 1 {
+			t.Fatalf("run %d: %d workers registered, want 1", run, n)
+		}
+
+		stop()
+		if err := w.Health(); err == nil {
+			t.Fatalf("run %d: a stopped worker is healthy", run)
+		}
+		if n := e.count(t, "SELECT count(*) FROM {s}.workers"); n != 0 {
+			t.Fatalf("run %d: the stopped worker is still registered", run)
+		}
+		if s := w.Stats(); s.AttemptsStarted != run || s.AttemptsSucceeded != run {
+			t.Fatalf("after run %d: %d attempts started and %d succeeded, want %d of each",
+				run, s.AttemptsStarted, s.AttemptsSucceeded, run)
+		}
 	}
 }
 

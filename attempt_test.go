@@ -1151,3 +1151,128 @@ func TestTaskKeepsItsLast20Errors(t *testing.T) {
 		}
 	}
 }
+
+// Attempts that fail at about the same time record their failures together,
+// in one statement for many, as completions do: workers whose handlers fail
+// fast, as in an outage of what they call, then cost the database little
+// more than when the handlers succeed.
+func TestFailuresAtTheSameTimeShareStatements(t *testing.T) {
+	t.Parallel()
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	const tasks = 64
+
+	started, fail := make(chan struct{}, tasks), make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-fail
+			return errors.New("the API is down")
+		}, nil),
+		Queues:       defaultQueue(tasks),
+		NoMaintainer: true,
+	})
+
+	params := make([]taskmill.EnqueueParams, tasks)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}, Options: &taskmill.EnqueueOptions{MaxAttempts: 1}}
+	}
+	res, err := e.client.EnqueueMany(t.Context(), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range tasks {
+		recv(t, started, "a handler to start")
+	}
+
+	sent.reset()
+	close(fail)
+	for _, r := range res {
+		e.waitState(t, r.ID, taskmill.StateDead)
+	}
+	if n := sent.count("recorded AS"); n > tasks/8 {
+		t.Errorf("%d failures at the same time took %d statements, want at most %d", tasks, n, tasks/8)
+	}
+}
+
+// A batch handler's failures are recorded together, in one statement, or a
+// few on a slow machine, as a stopping worker's releases of the tasks that
+// it fetched and did not start are.
+func TestABatchFailsInOneStatement(t *testing.T) {
+	t.Parallel()
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+	const tasks = 50
+
+	params := make([]taskmill.EnqueueParams, tasks)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{UserID: int64(i)}, Options: &taskmill.EnqueueOptions{MaxAttempts: 1}}
+	}
+	res, err := e.client.EnqueueMany(t.Context(), params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler(&hs, taskmill.BatchHandlerFunc[sendEmail](func(_ context.Context, ts []*taskmill.Task[sendEmail]) []error {
+		errs := make([]error, len(ts))
+		for i := range errs {
+			errs[i] = errors.New("the broker is down")
+		}
+		return errs
+	}), &taskmill.HandlerOptions{BatchSize: tasks})
+	sent.reset()
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1), NoMaintainer: true})
+
+	for _, r := range res {
+		e.waitState(t, r.ID, taskmill.StateDead)
+	}
+	if n := sent.count("recorded AS"); n > 3 {
+		t.Errorf("a batch of %d failures took %d statements, want at most 3", tasks, n)
+	}
+}
+
+// A failure whose task's row another transaction holds, as a CancelTx that
+// has not committed does, waits for it alone: the failures recorded with it
+// do not wait.
+func TestHeldTaskDoesNotHoldUpOtherFailures(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	started, fail := make(chan struct{}, 10), make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-fail
+			return errors.New("fails")
+		}, nil),
+		Queues:       defaultQueue(10),
+		NoMaintainer: true,
+	})
+
+	var ids []int64
+	for range 5 {
+		ids = append(ids, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{MaxAttempts: 1}))
+	}
+	for range ids {
+		recv(t, started, "a handler to start")
+	}
+
+	held := ids[2]
+	tx := e.begin(t)
+	e.txExec(t, tx, "SELECT FROM {s}.tasks WHERE id = $1 FOR UPDATE", held)
+
+	close(fail)
+	for _, id := range ids {
+		if id != held {
+			e.waitState(t, id, taskmill.StateDead)
+		}
+	}
+	e.wantState(t, held, taskmill.StateRunning)
+
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if info := e.waitState(t, held, taskmill.StateDead); len(info.Errors) != 1 {
+		t.Fatalf("the held task's failure was recorded with %d errors, want 1", len(info.Errors))
+	}
+}

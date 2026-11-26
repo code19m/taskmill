@@ -118,6 +118,8 @@ when:
 | Field tables | A page has a table of a struct's fields with a column for their type, default, or limits |
 | Indexes | [Configuration](../reference/configuration.md) misses a config struct, or [Errors](../reference/errors.md) misses an error or a code |
 | The command | [The `taskmill-ui` command](../reference/taskmill-ui.md) misses an environment variable that the command reads, or lists one that it does not read |
+| Log messages | [Log messages](../reference/log-messages.md) misses a message or an operation that a package logs, or lists one that no package logs |
+| Metrics | [Metrics](../reference/metrics.md) misses a metric or attribute that the `otel` module reports, or names one that it does not report |
 | `llms.txt` | The file differs from what the package comments and the rows of the sections' `README.md` files give. It is generated: `go test ./internal/docs/ -run TestLLMs -update` writes it |
 
 The linters check that every exported name has a comment that starts with

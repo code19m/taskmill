@@ -21,15 +21,20 @@ import (
 func (w *Worker) fetchLoop(ctx context.Context, r *runState, q *queueState) {
 	fetches := newIncidentLog(w, "fetch tasks", slog.String(logKeyQueue, q.name))
 
-	// notified reports that a notification caused the last fetch, and
-	// atLimit that the queue's MaxRunning limit held tasks back. Until
-	// quietUntil, the loop leaves notifications waiting.
-	notified, atLimit := false, false
+	// notified reports that a notification caused the last fetch, more
+	// that it took all it could, and atLimit that the queue's MaxRunning
+	// limit held tasks back. Until quietUntil, the loop leaves notifications
+	// waiting.
+	notified, more, atLimit := false, false, false
 	var quietUntil time.Time
 
 	wait := func() (ok bool) {
-		ok, notified = waitForWork(ctx, q, w.pollWait(atLimit), quietUntil)
-		return ok
+		woke := waitForWork(ctx, q, w.pollWait(atLimit), quietUntil)
+		if woke == wokeByFreedSlot && more {
+			linger(ctx, q)
+		}
+		notified = woke == wokeByNudge
+		return woke != wokeByEnd
 	}
 
 	for ctx.Err() == nil {
@@ -42,7 +47,6 @@ func (w *Worker) fetchLoop(ctx context.Context, r *runState, q *queueState) {
 		}
 
 		var tasks []*liveAttempt
-		var more bool
 		var err error
 		tasks, more, atLimit, err = w.fetch(ctx, q, free)
 		fetches.observe(ctx, err)
@@ -62,55 +66,102 @@ func (w *Worker) fetchLoop(ctx context.Context, r *runState, q *queueState) {
 
 // pollWait returns how long an idle queue waits before it fetches again,
 // unless a notification or a freed slot wakes it first. While the
-// maintainer's heartbeats arrive, it polls every idlePoll, plus or minus a
-// tenth so that workers started together poll apart: the maintainer wakes
-// each queue whose tasks wait in the same statement that sends the
+// maintainer's heartbeats arrive, it polls every idlePoll: the maintainer
+// wakes each queue whose tasks wait in the same statement that sends the
 // heartbeat, so this poll only bounds the harm of a fault in that. Otherwise
 // it polls every PollInterval, and so does a queue whose installation-wide
 // limit held tasks back: no notification says when another worker's task of
 // that queue ends. The end of this worker's own task wakes the queue (see
-// madeRoom).
+// madeRoom). Each wait is a tenth longer or shorter at random, so that
+// workers that started together, or that noticed together that the
+// heartbeats stopped, poll apart.
 func (w *Worker) pollWait(atLimit bool) time.Duration {
-	if atLimit || !w.notifying.Load() {
-		return w.cfg.PollInterval
+	d := w.cfg.PollInterval
+	if !atLimit && w.notifying.Load() {
+		d = max(w.timing.idlePoll, d)
 	}
-	d := max(w.timing.idlePoll, w.cfg.PollInterval)
+	d = min(d, math.MaxInt64/2) // the spread cannot overflow
 	if spread := d / 5; spread > 0 {
 		d += rand.N(spread) - spread/2 //nolint:gosec // spreads polls, no security role
 	}
 	return d
 }
 
-// waitForWork waits for a nudge, a freed slot, or the poll. It reports false
-// if ctx ends first, and whether a nudge woke it. Until quietUntil, it
-// leaves nudges waiting, which gathers those that arrive meanwhile into one
-// fetch. A freed slot wakes it at any time: that is the worker's own news,
-// not a hint, and it comes no more often than the worker's tasks end.
-func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUntil time.Time) (ok, nudged bool) {
+// woke is what ended a wait of the fetch loop.
+type woke int
+
+const (
+	wokeByEnd       woke = iota // ctx ended
+	wokeByNudge                 // a notification, or a nudge of the worker's own
+	wokeByFreedSlot             // a unit of the queue gave its slot back
+	wokeByRoom                  // a recorded completion made room: see madeRoom
+	wokeByPoll                  // the poll's time came
+)
+
+// waitForWork waits for a nudge, a freed slot, room, or the poll, and
+// returns which came first. Until quietUntil, it leaves nudges waiting,
+// which gathers those that arrive meanwhile into one fetch. A freed slot or
+// room wakes it at any time: that is the worker's own news, not a hint, and
+// it comes no more often than the worker's tasks end.
+func waitForWork(ctx context.Context, q *queueState, poll time.Duration, quietUntil time.Time) woke {
 	timer := time.NewTimer(poll)
 	defer timer.Stop()
 
 	if quiet := time.Until(quietUntil); quiet > 0 {
 		select {
 		case <-ctx.Done():
-			return false, false
+			return wokeByEnd
 		case <-q.freed:
-			return true, false
+			return wokeByFreedSlot
+		case <-q.room:
+			return wokeByRoom
 		case <-timer.C:
-			return true, false
+			return wokeByPoll
 		case <-time.After(quiet):
 		}
 	}
 
 	select {
 	case <-ctx.Done():
-		return false, false
+		return wokeByEnd
 	case <-q.wake:
-		return true, true
+		return wokeByNudge
 	case <-q.freed:
-		return true, false
+		return wokeByFreedSlot
+	case <-q.room:
+		return wokeByRoom
 	case <-timer.C:
-		return true, false
+		return wokeByPoll
+	}
+}
+
+// linger waits, after a slot was freed while a backlog fills every slot,
+// until a quarter of the queue's slots are free, for at most a twentieth of
+// the time that a unit holds its slot, and at most fetchLinger. Without it,
+// each freed slot under a backlog costs a fetch of one task, a transaction
+// whose fixed cost is many times what a task adds to a larger fetch. The
+// slots that wait meanwhile cost about 0.7 of the linger's share of a
+// unit's time in throughput: at most 3.5%, and none until the first units
+// end, when the average is still 0. Room that a completion made ends it, as
+// it ends no wait: a FIFO group's next task waits for it.
+func linger(ctx context.Context, q *queueState) {
+	d := min(fetchLinger, time.Duration(q.held.Load())/20)
+	if d <= 0 {
+		return
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	for quarter := (cap(q.slots) + 3) / 4; cap(q.slots)-len(q.slots) < quarter; {
+		select {
+		case <-q.freed:
+		case <-q.room:
+			return
+		case <-timer.C:
+			return
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
@@ -553,7 +604,7 @@ func (w *Worker) dispatch(ctx context.Context, r *runState, q *queueState, tasks
 		}
 
 		r.inflight.Go(func() {
-			defer q.freeSlot()
+			defer q.freeSlot(time.Now())
 			if len(unit) == 1 && (unit[0].reg == nil || unit[0].reg.run != nil) {
 				w.runOne(r.attemptCtx, r.recordCtx, unit[0])
 			} else {
@@ -577,13 +628,18 @@ func (q *queueState) takeSlot(ctx context.Context) bool {
 	}
 }
 
-// freeSlot gives a slot back and tells the fetch loop.
-func (q *queueState) freeSlot() {
-	<-q.slots
-	select {
-	case q.freed <- struct{}{}:
-	default:
+// freeSlot gives back a slot that a unit took at start, adds how long it
+// held it to the queue's average, and tells the fetch loop.
+func (q *queueState) freeSlot(start time.Time) {
+	held := int64(time.Since(start))
+	for {
+		old := q.held.Load()
+		if q.held.CompareAndSwap(old, old+(held-old)/8) {
+			break
+		}
 	}
+	<-q.slots
+	signal(q.freed)
 }
 
 // units splits fetched tasks into what runs together: each task alone, or

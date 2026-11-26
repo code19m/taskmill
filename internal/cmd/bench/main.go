@@ -193,6 +193,16 @@ func benchEnqueue(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 	})
 	fmt.Printf("| T1 | Enqueue one task per transaction, 16 producers | %s tasks/s |\n", rate(one, d))
 
+	var next atomic.Int64
+	spread := timed(ctx, 16, d, func(ctx context.Context) int {
+		queue := "q" + strconv.FormatInt(next.Add(1)%50, 10)
+		if _, err := c.Enqueue(ctx, noop{}, &taskmill.EnqueueOptions{Queue: queue}); err != nil {
+			fail(err)
+		}
+		return 1
+	})
+	fmt.Printf("| T1 | The same, into 50 queues in turn | %s tasks/s |\n", rate(spread, d))
+
 	batch := make([]taskmill.EnqueueParams, 100)
 	for i := range batch {
 		batch[i] = taskmill.EnqueueParams{Args: noop{N: i}}
@@ -276,7 +286,51 @@ func benchThroughput(ctx context.Context, pool *pgxpool.Pool, n int) {
 		commas(int64(n)), rate(int64(n), elapsed))
 	fmt.Printf("| E1 | SQL statements per task while processing | %.2f |\n", float64(stmts)/float64(n))
 	fmt.Printf("| E2 | WAL written per task, fetch to history | %.2f KiB |\n", float64(wal)/float64(n)/1024)
+	for _, d := range []time.Duration{20 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond} {
+		fmt.Printf("| E1 | The same, handlers of %v ± 50%% | %.2f |\n", d, statementsPerTask(ctx, pool, d))
+	}
 	fmt.Println()
+}
+
+// statementsPerTask returns the statements per task while one worker with
+// concurrency 64 processes a backlog of tasks whose handlers take d ± 50%.
+// Each slot runs 100 tasks.
+func statementsPerTask(ctx context.Context, pool *pgxpool.Pool, d time.Duration) float64 {
+	const n = 64 * 100
+	c := fresh(ctx, pool)
+	enqueueNoop(ctx, c, n)
+
+	var completed atomic.Int64
+	var hs taskmill.Handlers
+	taskmill.AddHandler(&hs, taskmill.HandlerFunc[noop](func(context.Context, *taskmill.Task[noop]) error {
+		time.Sleep(d/2 + rand.N(d)) //nolint:gosec // spreads the handlers' times, no security role
+		completed.Add(1)
+		return nil
+	}), nil)
+	w, err := taskmill.NewWorker(c, &taskmill.WorkerConfig{
+		Handlers: &hs,
+		Queues:   map[string]taskmill.QueueOptions{taskmill.DefaultQueue: {Concurrency: 64}},
+	})
+	if err != nil {
+		fail(err)
+	}
+
+	start := statements.n.Load()
+	wctx, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- w.Run(wctx) }()
+	for completed.Load() < n && ctx.Err() == nil {
+		time.Sleep(10 * time.Millisecond)
+	}
+	for history(ctx, pool) < n && ctx.Err() == nil { // the last completions are recorded
+		time.Sleep(10 * time.Millisecond)
+	}
+	stmts := statements.n.Load() - start
+	cancel()
+	if err := <-done; err != nil {
+		fail(err)
+	}
+	return float64(stmts) / n
 }
 
 // enqueueNoop enqueues n tasks that do nothing, in batches of 1,000.
