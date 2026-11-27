@@ -31,8 +31,10 @@ import (
 // arrive, leaves less of the lease as far as the worker knows. So RunTask
 // renews a lease with less than two thirds left before any middleware or
 // handler runs, as Run does after a slow fetch. If the lease ended on its
-// way, and the renewal finds the task rescued, or fails, the task may run
-// on another worker already: RunTask runs nothing then, and returns it.
+// way, as far as the worker knows, and the renewal does not extend it, as
+// when the task was rescued, its row is locked, or the renewal fails, the
+// task may run on another worker already: RunTask runs nothing then, and
+// returns it.
 //
 // It returns the task afterwards. It returns [ErrNotFound] if no task has the
 // ID, and [ErrInvalidState] if the task is running, waits behind its FIFO
@@ -74,7 +76,6 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 // t: the timer of track would count t lost right away if its lease seemed
 // over already.
 func (w *Worker) runDirect(ctx context.Context, t *liveAttempt) {
-	defer w.stopIdleCheck()
 	renewCtx, stopRenewing := context.WithCancel(context.WithoutCancel(ctx))
 	var renewing sync.WaitGroup
 	defer renewing.Wait()

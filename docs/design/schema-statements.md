@@ -152,9 +152,9 @@ failed renewal the next check-in can come too late. The worker tries it
 again every thirtieth of the lease, until one succeeds, with twice the
 time after a try that got no answer, up to a third of the lease. A try
 that runs out costs its connection, which pgx holds in the pool while it
-closes it. One that ran out on an idle connection has all the idle ones
-pinged, at most once per third of the lease, and those that do not answer
-closed: after a failover, the connections left behind go together.
+closes it, and has all the idle ones pinged, and those that do not answer
+closed: after a failover, the connections left behind go together. After
+a check that closed some, the client checks none for a third of the lease.
 
 Check-ins continue meanwhile, with a third of the lease, so two renewals
 of a lease can overlap, and the first sent can commit last: the statement

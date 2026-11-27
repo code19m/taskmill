@@ -168,7 +168,6 @@ type Worker struct {
 	queueHints  chan struct{} // settings of the worker's queues changed
 
 	renewFailed chan struct{} // a renewal of leases failed: renewAgain tries again
-	idle        idleCheck     // the checks of the pool's idle connections
 
 	completions   chan *liveAttempt    // successful attempts of Run, for the completer
 	completerDone chan struct{}        // closed when the current Run's completer returns
@@ -224,8 +223,10 @@ type WorkerConfig struct {
 	// the maintainer may rescue the task, and another worker run it. Keep
 	// it above 30 round trips to the database: a thirtieth of it bounds the
 	// ping of an idle connection, and one that runs out closes it, and has
-	// the pool's other idle connections pinged too, at most once per third
-	// of the lease. Minimum: 100 milliseconds. Default: 30 seconds.
+	// the pool's other idle connections pinged too, for as long. While round
+	// trips take longer, that check closes healthy connections too, so after
+	// one that closed connections, the client's workers start none for a
+	// third of the lease. Minimum: 100 milliseconds. Default: 30 seconds.
 	//
 	// The worker stores it when it registers, and the installation judges
 	// by it how long the worker may make no check-in. After one
@@ -628,7 +629,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	defer w.running.Store(false)
 	defer w.reached.Store(nil)
-	defer w.stopIdleCheck()
 
 	// Work that must finish during shutdown runs on base, which keeps ctx's
 	// values but not its cancellation.
