@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"slices"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // completer records successful attempts in batches, on record, until ctx
@@ -200,11 +203,8 @@ func (w *Worker) completeBatch(ctx context.Context, batch []*liveAttempt) (block
 			return err
 		}
 		defer conn.Release()
-		return w.client.inTx(ctx, conn, func(q querier) error {
-			var err error
-			groupHeld, taskHeld, done, err = w.completeLocked(ctx, q, w.client.sql.lockGroups, grouped)
-			return err
-		})
+		groupHeld, taskHeld, done, err = w.completeGrouped(ctx, conn, false, grouped)
+		return err
 	})
 	if err != nil {
 		w.afterComplete(ctx, grouped, nil, err)
@@ -262,8 +262,7 @@ const groupLockTimeout = "100ms"
 //
 // The transaction waits for the group's row while it holds no other, and
 // only then locks the task's row, skipping it if another transaction holds
-// it, as completeLocked does for a batch: it writes nothing before it holds
-// both, and never waits for a running task's row while it holds a group's.
+// it: see completeGrouped.
 // If the wait runs out, as it does for a transaction that holds the row for
 // longer, or the task's own row is held, or the transaction fails,
 // completeHeld gives t back to the completer, which tries it with its
@@ -283,16 +282,8 @@ func (w *Worker) completeHeld(ctx context.Context, t *liveAttempt) {
 			return err
 		}
 		defer conn.Release()
-		return w.client.inTx(ctx, conn, func(q querier) error {
-			// The transaction notifies nobody, so the timeout may last
-			// until its commit: see liftLockTimeout.
-			if _, err := q.exec(ctx, lockTimeoutSQL, groupLockTimeout); err != nil {
-				return err
-			}
-			var err error
-			groupHeld, taskHeld, done, err = w.completeLocked(ctx, q, w.client.sql.lockGroupWaiting, ts)
-			return err
-		})
+		groupHeld, taskHeld, done, err = w.completeGrouped(ctx, conn, true, ts)
+		return err
 	}()
 	if err != nil || len(groupHeld)+len(taskHeld) > 0 {
 		t.waitAfter = time.Now().Add(blockedRetryMax)
@@ -302,100 +293,99 @@ func (w *Worker) completeHeld(ctx context.Context, t *liveAttempt) {
 	w.afterComplete(ctx, ts, done, nil)
 }
 
-// completeLocked completes, in q's transaction, the grouped tasks whose
-// group rows lockGroups locks, and whose own rows it can lock without
-// waiting. It locks them before it writes anything. It returns the others:
-// those whose group rows other transactions hold, and those whose own rows
-// they hold. It also returns the tasks it completed. A task whose group has
-// no row, which should not happen, completes all the same, and leaveGroups
-// reports it.
-func (w *Worker) completeLocked(ctx context.Context, q querier, lockGroups string, ts []*liveAttempt) (groupHeld, taskHeld []*liveAttempt, done []completedTask, err error) {
+// completeGrouped completes grouped tasks ts on conn, in one transaction of
+// two round trips. The first locks the rows of their groups, and completes
+// the tasks whose groups' rows it holds, or whose groups have no row, if it
+// can lock their own rows without waiting. With waitGroup, as for
+// completeHeld, it waits for the groups' rows, for groupLockTimeout at most;
+// else it skips those that other transactions hold. So it writes nothing
+// before it holds both rows of a task, and never waits for a task's row
+// while it holds a group's. The second takes the completed tasks off their
+// groups and commits: see groupLeaving. A grouped completion thus holds its
+// groups' rows for a round trip, not for the six of a statement each.
+//
+// It returns the tasks whose groups' rows other transactions held, those
+// whose own rows they held, and the tasks that it completed. A task whose
+// attempt no longer owns it lost its lease, and is in none of them. A task
+// whose group has no row, which should not happen, completes all the same,
+// and the recount logs it.
+func (w *Worker) completeGrouped(ctx context.Context, conn *pgxpool.Conn, waitGroup bool, ts []*liveAttempt) (groupHeld, taskHeld []*liveAttempt, done []completedTask, err error) {
 	queues := make([]string, len(ts))
 	groups := make([]string, len(ts))
 	for i, t := range ts {
 		queues[i], groups[i] = t.info.Queue, t.info.GroupKey
 	}
 
-	groupLocked, groupExists, err := lockedRows(ctx, q, lockGroups, func(r rows) (groupID, bool, error) {
-		var key groupID
-		var locked bool
-		err := r.Scan(&key.queue, &key.group, &locked)
-		return key, locked, err
-	}, queues, groups)
-	if err != nil {
+	lock := w.client.sql.lockGroups
+	b := &pgx.Batch{}
+	b.Queue("BEGIN")
+	if waitGroup {
+		// The transaction notifies nobody, so the timeout may last until
+		// its commit: see liftLockTimeout.
+		b.Queue(lockTimeoutSQL, groupLockTimeout)
+		lock = w.client.sql.lockGroupWaiting
+	}
+	groupLocked, groupExists := map[groupID]bool{}, map[groupID]bool{}
+	b.Queue(lock, queues, groups).Query(func(r pgx.Rows) error {
+		for r.Next() {
+			var key groupID
+			var locked bool
+			if err := r.Scan(&key.queue, &key.group, &locked); err != nil {
+				return err
+			}
+			groupExists[key] = true
+			groupLocked[key] = groupLocked[key] || locked
+		}
+		return r.Err()
+	})
+	var held map[int64]bool
+	b.Queue(w.client.sql.completeGrouped, w.client.completeArgs(completionsOf(ts))...).Query(func(r pgx.Rows) error {
+		done, held, err = scanCompleted(r)
+		return err
+	})
+	if err := conn.SendBatch(ctx, b).Close(); err != nil {
+		w.client.noteMissingHistory(ctx, w.logger, err)
+		// The transaction may still be open, after a failed statement: the
+		// connection goes back to the pool without it.
+		_, _ = conn.Exec(ctx, "ROLLBACK")
 		return nil, nil, nil, err
 	}
 
-	var mine []*liveAttempt
+	completed := make(map[int64]bool, len(done))
+	for _, t := range done {
+		completed[t.id] = true
+	}
 	for _, t := range ts {
 		key := groupID{t.info.Queue, t.info.GroupKey}
-		if groupExists[key] && !groupLocked[key] {
-			groupHeld = append(groupHeld, t)
-		} else {
-			mine = append(mine, t)
-		}
-	}
-	if len(mine) == 0 {
-		return groupHeld, nil, nil, nil
-	}
-
-	ids := make([]int64, len(mine))
-	tokens := make([]int32, len(mine))
-	for i, t := range mine {
-		ids[i], tokens[i] = t.att.id, t.att.token
-	}
-
-	taskLocked, owned, err := lockedRows(ctx, q, w.client.sql.lockLeased, func(r rows) (int64, bool, error) {
-		var id int64
-		var locked bool
-		err := r.Scan(&id, &locked)
-		return id, locked, err
-	}, ids, tokens)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	// Tasks no longer owned lost their leases, and are left out; the
-	// complete statement would skip them anyway.
-	var ready []*liveAttempt
-	for _, t := range mine {
 		switch {
-		case taskLocked[t.att.id]:
-			ready = append(ready, t)
-		case owned[t.att.id]:
+		case completed[t.att.id], !held[t.att.id]: // it completed, or lost its lease
+		case groupExists[key] && !groupLocked[key]:
+			groupHeld = append(groupHeld, t)
+		default:
 			taskHeld = append(taskHeld, t)
 		}
 	}
-
-	if len(ready) > 0 {
-		if done, err = w.client.complete(ctx, w.logger, q, completionsOf(ready)); err != nil {
-			return nil, nil, nil, err
-		}
+	if len(done) == 0 {
+		// It wrote nothing. A connection whose rollback failed is closed
+		// when it goes back to the pool, which ends the transaction.
+		_, _ = conn.Exec(ctx, "ROLLBACK")
+		return groupHeld, taskHeld, nil, nil
 	}
+
+	var available []string
+	l := w.client.leaving(w.logger, ownQuerier{pgxExecutor: pgxExecutor{q: conn}, notifier: w.client.notifier, available: &available}, headsLeaving(done))
+	b = &pgx.Batch{}
+	sql, args := l.recount()
+	b.Queue(sql, args...).Query(func(r pgx.Rows) error { return l.readRecount(ctx, r) })
+	sql, args = l.settle(l.asked, l.heads) // the recount is not read yet
+	b.Queue(sql, args...).Query(func(r pgx.Rows) error { return l.readSettle(r) })
+	b.Queue("COMMIT")
+	if err := conn.SendBatch(ctx, b).Close(); err != nil {
+		_, _ = conn.Exec(ctx, "ROLLBACK")
+		return nil, nil, nil, err
+	}
+	w.client.notifier.after(available)
 	return groupHeld, taskHeld, done, nil
-}
-
-// lockedRows runs a statement that returns rows of a key and whether that
-// key's row was locked, and returns the keys locked and the keys seen.
-func lockedRows[K comparable](ctx context.Context, q querier, sql string, scan func(rows) (K, bool, error), args ...any) (locked, seen map[K]bool, err error) {
-	r, err := q.query(ctx, sql, args...)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer r.Close()
-	locked, seen = map[K]bool{}, map[K]bool{}
-
-	for r.Next() {
-		key, isLocked, err := scan(r)
-		if err != nil {
-			return nil, nil, err
-		}
-		seen[key] = true
-		if isLocked {
-			locked[key] = true
-		}
-	}
-	return locked, seen, r.Err()
 }
 
 // afterComplete stops tracking completed attempts, counts the tasks that their
@@ -554,14 +544,20 @@ func (c *Client) completeThen(ctx context.Context, logger *slog.Logger, q querie
 		}
 	}
 
+	if err := c.leaveGroups(ctx, logger, q, headsLeaving(done)); err != nil {
+		return nil, fail(err)
+	}
+	return done, nil
+}
+
+// headsLeaving returns the grouped tasks of done, which leave their groups
+// as their heads, sorted by group.
+func headsLeaving(done []completedTask) []groupLeave {
 	var heads []groupLeave
 	for _, t := range sortedByGroup(done) {
 		heads = append(heads, groupLeave{id: t.id, queue: t.queue, group: t.group, head: true})
 	}
-	if err := c.leaveGroups(ctx, logger, q, heads); err != nil {
-		return nil, fail(err)
-	}
-	return done, nil
+	return heads
 }
 
 // completeSkipping completes the attempts cs of tasks outside FIFO groups,
@@ -580,6 +576,20 @@ func (c *Client) completeSkipping(ctx context.Context, logger *slog.Logger, q qu
 // attempts cs, and returns the tasks that it completed, and those that it
 // skipped because other transactions held them.
 func (c *Client) completeTasks(ctx context.Context, logger *slog.Logger, q querier, sql string, cs []completion) (done []completedTask, held map[int64]bool, err error) {
+	r, err := q.query(ctx, sql, c.completeArgs(cs)...)
+	if err == nil {
+		done, held, err = scanCompleted(r)
+		r.Close()
+	}
+	if err != nil {
+		c.noteMissingHistory(ctx, logger, err)
+		return nil, nil, err
+	}
+	return done, held, nil
+}
+
+// completeArgs returns the arguments of the statements that complete cs.
+func (c *Client) completeArgs(cs []completion) []any {
 	ids := make([]int64, len(cs))
 	tokens := make([]int32, len(cs))
 	discard := make([]int64, 0) // not nil: the statement compares with every element
@@ -590,14 +600,14 @@ func (c *Client) completeTasks(ctx context.Context, logger *slog.Logger, q queri
 			discard = append(discard, x.id)
 		}
 	}
+	return []any{ids, tokens, discard}
+}
 
-	r, err := q.query(ctx, sql, ids, tokens, discard)
-	if err != nil {
-		c.noteMissingHistory(ctx, logger, err)
-		return nil, nil, err
-	}
-	defer r.Close()
-
+// scanCompleted reads the rows of a statement that completes tasks: those
+// it completed, and the others that their attempts still own, which other
+// transactions held: their rows, or, for completeGroupedSQL, their groups'
+// rows. A task in neither lost its lease.
+func scanCompleted(r rows) (done []completedTask, held map[int64]bool, err error) {
 	for r.Next() {
 		var t completedTask
 		var completed bool
@@ -614,7 +624,6 @@ func (c *Client) completeTasks(ctx context.Context, logger *slog.Logger, q queri
 		held[t.id] = true
 	}
 	if err := r.Err(); err != nil {
-		c.noteMissingHistory(ctx, logger, err)
 		return nil, nil, err
 	}
 	return done, held, nil

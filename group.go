@@ -11,7 +11,7 @@ import (
 // https://github.com/code19m/taskmill/blob/main/docs/design/schema-groups.md.
 //
 // The callers keep the lock order, not this file: see takeTask in client.go,
-// completeLocked in complete.go, and the pick statements in sql_operations.go.
+// completeGrouped in complete.go, and the pick statements in sql_operations.go.
 
 // groupLeave is a counted task that left its FIFO group.
 type groupLeave struct {
@@ -52,81 +52,166 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 		return nil
 	}
 
-	// Each group goes to the recount once, with all its tasks that left: an
-	// UPDATE changes a row once.
-	type leave struct {
-		tasks int   // how many of the group's tasks left
-		id    int64 // one of them: the task, if only one left
-		head  bool  // its head was among them: the next task becomes the head
+	l := c.leaving(logger, q, left)
+	sql, args := l.recount()
+	if err := readAll(ctx, q, func(r rows) error { return l.readRecount(ctx, r) }, sql, args...); err != nil {
+		return err
 	}
-
-	var asked groupSet
-	ids := make([]int64, len(left))
-	leaves := make(map[groupID]leave, len(left)) // by group, until its row is read back
-	for i, l := range left {
-		ids[i] = l.id
-		key := groupID{l.queue, l.group}
-		g, seen := leaves[key]
-		if !seen {
-			asked.add(l.queue, l.group)
-		}
-		leaves[key] = leave{tasks: g.tasks + 1, id: l.id, head: g.head || l.head}
+	if !l.settles() {
+		return nil
 	}
+	sql, args = l.settle(l.emptied, l.next)
+	return readAll(ctx, q, l.readSettle, sql, args...)
+}
 
-	counts := make([]int, len(asked.queues))
-	for i := range counts {
-		counts[i] = -leaves[groupID{asked.queues[i], asked.groups[i]}].tasks
-	}
-
-	r, err := q.query(ctx, c.sql.recountGroups,
-		asked.queues, // $1
-		asked.groups, // $2
-		counts,       // $3
-		ids,          // $4
-	)
+// readAll runs a statement on q, and read on its rows.
+func readAll(ctx context.Context, q querier, read func(rows) error, sql string, args ...any) error {
+	r, err := q.query(ctx, sql, args...)
 	if err != nil {
 		return err
 	}
+	defer r.Close()
+	if err := read(r); err != nil {
+		return err
+	}
+	return r.Err()
+}
 
-	var empty, next groupSet
+// groupLeaving is what leaveGroups does, as two statements: the recount,
+// and the settling, which needs nothing that the recount returns. So
+// leaveGroups runs the settling only if the recount says that it has work,
+// while a worker's completion of grouped tasks sends both in one round trip
+// with its commit: see Worker.completeGrouped.
+type groupLeaving struct {
+	c      *Client
+	logger *slog.Logger
+	q      querier // where the statements run, for their notifications
+
+	asked  groupSet           // each group that tasks left, once: an UPDATE changes a row once
+	counts []int              // the change of each asked group's count
+	ids    []int64            // the tasks that left
+	heads  groupSet           // the groups whose heads left
+	leaves map[groupID]leaves // by group, until the recount reads its row back
+
+	// What the recount read.
+	emptied groupSet // the groups that count no task now
+	next    groupSet // the groups whose heads left that the settling promotes
+}
+
+// leaves are the tasks that left one group.
+type leaves struct {
+	tasks int   // how many
+	id    int64 // one of them: the task, if only one left
+	head  bool  // the group's head was among them
+}
+
+// leaving returns the statements by which left leave their groups, which
+// run in q's transaction.
+func (c *Client) leaving(logger *slog.Logger, q querier, left []groupLeave) *groupLeaving {
+	l := &groupLeaving{c: c, logger: logger, q: q, ids: make([]int64, len(left)), leaves: make(map[groupID]leaves, len(left))}
+	for i, t := range left {
+		l.ids[i] = t.id
+		key := groupID{t.queue, t.group}
+		g, seen := l.leaves[key]
+		if !seen {
+			l.asked.add(t.queue, t.group)
+		}
+		l.leaves[key] = leaves{tasks: g.tasks + 1, id: t.id, head: g.head || t.head}
+	}
+
+	l.counts = make([]int, len(l.asked.queues))
+	for i := range l.counts {
+		key := groupID{l.asked.queues[i], l.asked.groups[i]}
+		l.counts[i] = -l.leaves[key].tasks
+		if l.leaves[key].head {
+			l.heads.add(key.queue, key.group)
+		}
+	}
+	return l
+}
+
+// recount returns the statement that takes the tasks off their groups'
+// counts.
+func (l *groupLeaving) recount() (string, []any) {
+	return l.c.sql.recountGroups, []any{
+		l.asked.queues, // $1
+		l.asked.groups, // $2
+		l.counts,       // $3
+		l.ids,          // $4
+	}
+}
+
+// readRecount reads the rows of the recount, and logs the groups that have
+// no row.
+func (l *groupLeaving) readRecount(ctx context.Context, r rows) error {
 	for r.Next() {
 		var queue, group string
 		var remaining int
 		var halted bool
 		if err := r.Scan(&queue, &group, &remaining, &halted); err != nil {
-			r.Close()
 			return err
 		}
 
 		key := groupID{queue, group}
-		head := leaves[key].head
-		delete(leaves, key)
+		head := l.leaves[key].head
+		delete(l.leaves, key)
 		switch {
 		case remaining == 0:
-			empty.add(queue, group)
+			l.emptied.add(queue, group)
 		case head && !halted:
-			next.add(queue, group)
+			l.next.add(queue, group)
 		}
 	}
-	r.Close()
 	if err := r.Err(); err != nil {
 		return err
 	}
 
-	for key, g := range leaves { // not read back: the group has no row
-		groupMissing(ctx, logger, key.queue, key.group, g.tasks, g.id)
+	for key, g := range l.leaves { // not read back: the group has no row
+		groupMissing(ctx, l.logger, key.queue, key.group, g.tasks, g.id)
 	}
+	return nil
+}
 
-	if len(empty.queues) > 0 {
-		if _, err := q.exec(ctx, c.sql.deleteEmptyGroups, empty.queues, empty.groups); err != nil {
+// settles reports whether the settling has work, once the recount was read.
+func (l *groupLeaving) settles() bool {
+	return len(l.emptied.queues) > 0 || len(l.next.queues) > 0
+}
+
+// settle returns the statement that deletes the groups among emptied that
+// count no task, and promotes the next task of each group among promoted
+// that counts tasks and is not halted. Once the recount is read, those are
+// the groups that it read as such; a caller that sends both statements at
+// once passes every group that tasks left, and every group whose head left.
+// It notifies, in the caller's transaction, the queues of the groups that
+// the recount read as about to get a head: before the recount is read,
+// none, which only the client's own transactions may send it with, since
+// they leave their notifications to the notifier.
+func (l *groupLeaving) settle(emptied, promoted groupSet) (string, []any) {
+	return l.c.sql.settleGroups, []any{
+		emptied.queues,                     // $1
+		emptied.groups,                     // $2
+		promoted.queues,                    // $3
+		promoted.groups,                    // $4
+		l.c.schema,                         // $5
+		l.c.notifiable(l.q, l.next.queues), // $6
+	}
+}
+
+// readSettle reads the queues in which the settling made tasks available.
+func (l *groupLeaving) readSettle(r rows) error {
+	var available []string
+	for r.Next() {
+		var queue string
+		if err := r.Scan(&queue); err != nil {
 			return err
 		}
+		available = append(available, queue)
 	}
-
-	if len(next.queues) == 0 {
-		return nil
+	if err := r.Err(); err != nil {
+		return err
 	}
-	return c.promoteGroups(ctx, q, next)
+	madeAvailable(l.q, available...)
+	return nil
 }
 
 // leaveAll updates the FIFO groups of the tasks among ts that leave them,
@@ -193,34 +278,6 @@ func (c *Client) releaseHalts(ctx context.Context, q querier, ts []bulkTask) (ma
 		halting[id] = true
 	}
 	return halting, r.Err()
-}
-
-// promoteGroups makes the oldest pending task of every group in s its head.
-func (c *Client) promoteGroups(ctx context.Context, q querier, s groupSet) error {
-	r, err := q.query(ctx, c.sql.promoteGroups,
-		s.queues,                  // $1
-		s.groups,                  // $2
-		c.schema,                  // $3
-		c.notifiable(q, s.queues), // $4
-	)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-
-	var available []string
-	for r.Next() {
-		var queue string
-		if err := r.Scan(&queue); err != nil {
-			return err
-		}
-		available = append(available, queue)
-	}
-	if err := r.Err(); err != nil {
-		return err
-	}
-	madeAvailable(q, available...)
-	return nil
 }
 
 // rejoinGroup counts a retried task back into its FIFO group, and reports

@@ -7,6 +7,32 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A worker completes the tasks of FIFO groups in two round trips, where it
+  took seven: the first locks the groups' rows and completes the tasks, and
+  the second takes them off their groups' counts, deletes the groups that
+  count no task, promotes the next tasks, and commits. So it holds the
+  groups' rows, which an enqueue into those groups waits for, for one round
+  trip, not six. Every other way out of a group, such as `Cancel` or
+  `Delete`, takes one or two statements, where it took up to three.
+- This release has a schema migration, `0010_activity_writes`. It creates
+  the table `activity_writes`, with a row per worker, and locks no other
+  table. The previous release's code keeps working on the new schema, so a
+  rolling deploy is safe, as always.
+
+### Fixed
+
+- A worker adds its counts of ended attempts to the activity once, also
+  when a write of them failed but committed all the same, as one whose
+  commit outlasted its deadline while it waited for a synchronous standby.
+  It added them again. Now each write has a number, stored with the counts
+  in the worker's row of `activity_writes`, and a write tried again adds
+  its counts only if its first try did not commit, also after a failover.
+- Completing a batch of 500 tasks took up to twice as long as it needs
+  when PostgreSQL planned the statement for that batch, as it does for
+  every statement with pgx's `QueryExecModeExec`.
+
 ## [0.18.0] - 2026-11-27
 
 ### Added

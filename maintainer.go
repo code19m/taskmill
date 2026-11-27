@@ -485,7 +485,8 @@ func collectRescued(r rows) ([]rescuedTask, error) {
 
 // retain applies retention: it keeps the next week's history partitions
 // ready, drops expired ones, and deletes old dead and canceled tasks, expired
-// dedupe keys, old activity, and workers that stopped without unregistering.
+// dedupe keys, old activity with the write numbers of workers that wrote
+// none for as long, and workers that stopped without unregistering.
 func (m *maintainer) retain(ctx context.Context) {
 	m.retentionFailures.observe(ctx, m.applyRetention(ctx))
 }
@@ -510,6 +511,9 @@ func (m *maintainer) applyRetention(ctx context.Context) error {
 	}
 	if err := m.deleteInBatches(ctx, m.c.sql.deleteActivity, activityRetention.Seconds()); err != nil {
 		errs = append(errs, fmt.Errorf("delete old activity: %w", err))
+	}
+	if err := m.deleteInBatches(ctx, m.c.sql.deleteActivityWrites, activityRetention.Seconds()); err != nil {
+		errs = append(errs, fmt.Errorf("delete old activity write numbers: %w", err))
 	}
 	if err := m.deleteWorkers(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("delete stale workers: %w", err))

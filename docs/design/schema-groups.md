@@ -46,17 +46,19 @@ forever. A second statement starts after the lock was acquired, and sees it:
 one reason why taskmill's own transactions require READ COMMITTED.
 
 **One way out.** A counted task leaves its group when it completes, is
-canceled, or is deleted, alone or in a batch. Every such change runs the
-same three statements, in one function (`leaveGroups`): the decrement,
-which also ends a halt that names a leaving task, the delete of the empty
-groups, and the promotion, which a leaving `pending` task does not need. A
-group that has no row, which should never happen, is logged as `fifo group
-missing`, and the task still ends.
+canceled, or is deleted. Every such change runs the same statements, built
+in one place (`groupLeaving`): the decrement, which also ends a halt that
+names a leaving task, then the settling, which deletes the groups that
+count no task and promotes the next task of each group whose head left.
+The settling reads the counts that the decrement left, not what it
+returned, so a worker sends both in one round trip. Other callers read the
+decrement first, and skip the settling when it has nothing to do, as when
+a `pending` task leaves. A group that has no row, which should never
+happen, is logged as `fifo group missing`, and the task still ends.
 
-**Completing a batch.** A worker completes the grouped tasks of a batch in one
-transaction, with a few statements for the whole batch rather than a few per
-task. First it locks the rows of the batch's groups that no other
-transaction holds:
+**Completing a batch.** A worker completes the grouped tasks of a batch in
+one transaction of two round trips. The first begins it, and locks the
+rows of the batch's groups that no other transaction holds:
 
 ```sql
 SELECT g.queue, g.group_key FROM taskmill.groups g
@@ -65,13 +67,11 @@ JOIN unnest($1::text[], $2::text[]) AS u(queue, group_key)
 FOR UPDATE OF g SKIP LOCKED;
 ```
 
-Then it completes the tasks of the locked groups with the
-[Complete](schema-statements.md#complete) statement, decrements each
-group's count, deletes the groups whose count reached zero, and promotes the
-oldest `pending` task of every other group, with a `LATERAL` subquery per
-group through `tasks_pending_idx`. That is 7 round trips. Sending the last
-three together would take a second copy of `leaveGroups`, the one way out
-of a group, which is worth more than the milliseconds that it would save.
+and completes, with the [Complete](schema-statements.md#complete)
+statement, the tasks whose groups' rows it holds and whose own rows are
+free. The second decrements the groups' counts, settles them, and commits.
+So a batch holds its groups' rows, which an enqueue into one of those
+groups waits for, for about one round trip, not one for each statement.
 
 `SKIP LOCKED` here means a batch never waits for, or deadlocks with,
 another transaction. A task whose group row another transaction holds, as an

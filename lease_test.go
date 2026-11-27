@@ -1149,13 +1149,13 @@ func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The lock reads each task twice, the renewal three times and returns
-	// it, the read of cancel requests once, each of the two completions
-	// reads it to lock it and to delete it, and returns it, and the failures
-	// read it to lock it and to change it, and return it. The statements
-	// that skip held rows look up only the tasks that they skipped again.
-	if n > 16*attempts {
-		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 16*attempts)
+	// The renewal reads each task three times and returns it, the read of
+	// cancel requests once, each of the three completions reads it to lock
+	// it and to delete it, and returns it, and the failures read it to lock
+	// it and to change it, and return it. The statements that skip held rows
+	// look up only the tasks that they skipped again.
+	if n > 17*attempts {
+		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 17*attempts)
 	}
 }
 
@@ -1227,18 +1227,18 @@ func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The lock and the renewal return each task they find twice: as locked
-	// or renewed, and as owned. The others return it once. An attempt
-	// listed twice changes none of this. The failure, the snooze, and the
-	// release run once for each attempt of the list, so they find the task
-	// of the attempt that is listed twice both times.
+	// The renewal returns each task it finds twice: as renewed, and as
+	// owned. The others return it once. An attempt listed twice changes none
+	// of this. The failure, the snooze, and the release run once for each
+	// attempt of the list, so they find the task of the attempt that is
+	// listed twice both times.
 	twice := []int64{owned, owned, alsoOwned, alsoOwned}
 	each := []int64{owned, owned, alsoOwned}
 	statements := []string{
-		"the lock", "the renewal", "the read of cancel requests", "the completion that skips held rows",
+		"the grouped completion", "the renewal", "the read of cancel requests", "the completion that skips held rows",
 		"the failures that skip held rows", "the completion", "the failure", "the snooze", "the release",
 	}
-	for i, want := range [][]int64{twice, twice, {alsoOwned}, {owned, alsoOwned}, {owned, alsoOwned}, {owned, alsoOwned}, each, each, each} {
+	for i, want := range [][]int64{{owned, alsoOwned}, twice, {alsoOwned}, {owned, alsoOwned}, {owned, alsoOwned}, {owned, alsoOwned}, each, each, each} {
 		if !slices.Equal(found[i], want) {
 			t.Errorf("%s found the tasks %v, want %v", statements[i], found[i], want)
 		}

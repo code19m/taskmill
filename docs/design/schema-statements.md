@@ -215,8 +215,8 @@ holds only tasks with lower IDs. So it cannot deadlock with a transaction
 that takes tasks in that order too, such as one that cancels several.
 
 Ungrouped tasks complete with this one statement alone. Grouped tasks
-complete in one transaction per batch, which also updates their groups (see
-[FIFO groups](schema-groups.md#fifo-groups)).
+complete in one transaction of two round trips per batch, which also
+updates their groups (see [FIFO groups](schema-groups.md#fifo-groups)).
 
 ## Fail, snooze, and release
 

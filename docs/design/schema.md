@@ -11,7 +11,7 @@ tables and indexes, and why each was chosen. Eight more pages cover the rest:
 | [Operator actions](schema-operations.md) | The statements that retry, cancel, and delete tasks, one or many |
 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
-| [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
+| [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, what probes and autoscalers read, and how workers add the activity |
 | [Rows that taskmill did not write](schema-rows.md) | Which rows taskmill supports, which values the tables refuse, and which guards contain the others |
 
 The exact definitions are in [`internal/migrations`](../../internal/migrations),
@@ -62,7 +62,8 @@ configurable, so several schemas can share a database. It must match
 | `workers` | Running worker processes, with the schedules that [the maintainer compares](schema-maintenance.md#maintenance) | Cold: a check-in per process every third of `LeaseDuration`, 10 s by default |
 | `leader` | The elected maintainer | Cold |
 | `queue_stats` | Task counts per queue and state, with each count's oldest due task, and each queue's halted groups and most failures in a row, refreshed by the maintainer | Cold |
-| `activity` | Task counts and ended attempts per minute and queue, for a day | Cold: a few rows every 10 s |
+| `activity` | Task counts and ended attempts per minute and queue, for a day: see [Activity per minute](schema-statistics.md#activity-per-minute) | Cold: a few rows every 10 s |
+| `activity_writes` | The number of each worker's last write to `activity`, so that a write tried again adds its counts once | Cold: a row per worker, updated every 10 s |
 | `migrations` | Applied schema migrations | Cold |
 
 ### `tasks`
@@ -145,28 +146,6 @@ and `freed_key_expires_at` for a [retry](schema-operations.md#a-retry-takes-its-
 - `leader` elects the maintainer with a lease row rather than an advisory
   lock. Session advisory locks need a dedicated connection and do not work
   behind poolers in transaction mode. A lease row works everywhere.
-
-### `activity`
-
-One row per minute and queue, kept for 24 hours, behind `Client.Activity` and
-the dashboard's charts. Two writers share a row, each with its own columns:
-
-- **The maintainer** copies the counts it stores in `queue_stats` into the
-  current minute, every 10 seconds, with zeros for known queues without
-  tasks. A minute keeps the most that it counted in each state. One with
-  `NULL` counts had no maintainer: a chart shows a gap, not an empty queue.
-- **Each worker** counts the attempts it ends, completed and failed, in
-  memory, and adds them to their minutes every 10 seconds, in a loop of its
-  own so that a slow write never delays a check-in. Counting in the
-  statements that record attempts would make every worker update the same
-  row with every result; adding them every 10 seconds costs one small upsert
-  per worker. A worker that crashes loses the counts of its last few
-  seconds, and one that stops writes them before it returns.
-
-Both writers lock rows in the order of minute, then queue name in byte
-order, so they cannot deadlock. `fillfactor = 70` keeps the repeated updates
-HOT, and the primary key leads with the minute, which serves both reading a
-period and deleting old rows.
 
 ## Indexes on `tasks`
 

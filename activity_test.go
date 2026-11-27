@@ -3,6 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -49,6 +50,215 @@ func TestActivityCountsAttempts(t *testing.T) {
 	if completed != 2 || failed != 1 {
 		t.Fatalf("got %d completed and %d failed attempts, want 2 and 1: %+v", completed, failed, points)
 	}
+}
+
+// A worker adds its counts to the activity once, also when it cannot tell
+// whether a write of them committed: a write that runs out of time may
+// commit all the same, as one whose commit waits for a standby, or not.
+// Here a trigger delays the first write that adds completed attempts past
+// the write's deadline, before or at its commit, and records in
+// slow_writes whether that write committed.
+func TestActivityCountsAWriteInDoubtOnce(t *testing.T) {
+	t.Parallel()
+	const (
+		atCommit = "CONSTRAINT TRIGGER slow_write AFTER INSERT OR UPDATE ON {s}.activity DEFERRABLE INITIALLY DEFERRED"
+		// The trigger goes on through cancels, the worker's at its deadline
+		// or others that a pooler sends, as a commit that waits for a
+		// standby does. Only a cancel in the microseconds between two steps
+		// ends it, so a step does not divide the worker's deadline: its
+		// cancel lands well inside one.
+		committing = `FOR i IN 1..29 LOOP
+            BEGIN
+                PERFORM pg_sleep(0.07);
+            EXCEPTION WHEN query_canceled THEN
+            END;
+        END LOOP;`
+	)
+	for _, c := range []struct {
+		name      string
+		trigger   string // the trigger, and when it runs
+		slow      string // what it does: it takes longer than the write's deadline
+		committed bool   // whether the slow write commits
+	}{
+		{"a commit that ends after the deadline", atCommit, committing, true},
+		{"a commit that fails after the deadline", atCommit, committing + " RAISE EXCEPTION 'no';", false},
+		{"a statement that the deadline cancels", "TRIGGER slow_write BEFORE INSERT OR UPDATE ON {s}.activity", "PERFORM pg_sleep(1);", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			e.exec(t, `CREATE TABLE {s}.slow_writes (at timestamptz)`)
+			e.exec(t, `CREATE SEQUENCE {s}.slow_once`)
+			e.exec(t, `
+CREATE FUNCTION {s}.slow_write() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.completed > coalesce(OLD.completed, 0) AND nextval('{s}.slow_once') = 1 THEN
+        INSERT INTO {s}.slow_writes VALUES (now());
+        `+c.slow+`
+    END IF;
+    RETURN NEW;
+END $$`)
+			e.exec(t, `CREATE `+c.trigger+` FOR EACH ROW EXECUTE FUNCTION {s}.slow_write()`)
+
+			w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(5)})
+			taskmill.SetTiming(w, taskmill.Timing{Activity: 300 * time.Millisecond})
+			ids := make([]int64, 5)
+			for i := range ids {
+				ids[i] = e.enqueue(t, sendEmail{}, nil)
+			}
+			stop := startWorker(t, w)
+			for _, id := range ids {
+				e.waitState(t, id, taskmill.StateCompleted)
+			}
+			waitFor(t, "the counts of the 5 tasks", func() bool { return completedAttempts(t, e) >= 5 })
+			stop()
+
+			if n := completedAttempts(t, e); n != 5 {
+				t.Errorf("the activity counts %d completed attempts, want 5", n)
+			}
+			if e.count(t, `SELECT count(*) FROM {s}.slow_once WHERE is_called`) == 0 {
+				t.Fatal("no write was slow")
+			}
+			if got := e.count(t, `SELECT count(*) FROM {s}.slow_writes`) == 1; got != c.committed {
+				t.Errorf("the slow write committed: %t, want %t", got, c.committed)
+			}
+		})
+	}
+}
+
+// A write that the worker tries again adds its counts once: if the first
+// try was lost, as in a failover to a standby that lacks it, and not again
+// if the first try committed. The same flush then writes the counts made
+// meanwhile, under a number of their own, so that they count also when the
+// first try committed. The next write adds its own counts, except those
+// that the worker could not write for an hour.
+func TestActivityWriteTriedAgainAddsItsCountsOnce(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+
+	for _, c := range []struct {
+		how       string
+		number    int64
+		age       time.Duration
+		meanwhile int // attempts counted while the write failed
+		want      int
+	}{
+		{"a write whose first try was lost", 1, 0, 0, 3},
+		{"the same write, whose first try committed, with counts made meanwhile", 1, 0, 2, 5},
+		{"the next write, with counts made meanwhile", 3, 0, 2, 10},
+		{"a write of counts from over an hour ago", 5, 61 * time.Minute, 0, 10},
+	} {
+		taskmill.Tally(w, taskmill.DefaultQueue, c.meanwhile)
+		taskmill.FlushActivityAgain(t.Context(), w, c.number, taskmill.DefaultQueue, 3, c.age)
+		if n := e.count(t, "SELECT coalesce(sum(completed), 0) FROM {s}.activity"); n != c.want {
+			t.Fatalf("after %s, the activity counts %d completed attempts, want %d", c.how, n, c.want)
+		}
+	}
+}
+
+// A write that fails is tried again before any other: the counts made
+// meanwhile wait, so that a later write cannot take the number that the
+// failed write must still claim. Here a transaction holds activity_writes,
+// and the writes fail at their deadline.
+func TestActivityWriteThatFailedGoesFirst(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+
+	busy := e.begin(t)
+	e.txExec(t, busy, "LOCK TABLE {s}.activity_writes")
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	taskmill.FlushActivityAgain(ctx, w, 1, taskmill.DefaultQueue, 3, 0)
+	cancel()
+	taskmill.Tally(w, taskmill.DefaultQueue, 2)
+	ctx, cancel = context.WithTimeout(t.Context(), 200*time.Millisecond)
+	taskmill.FlushActivity(ctx, w)
+	cancel()
+	if err := busy.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	taskmill.FlushActivity(t.Context(), w) // the failed write, then the counts made meanwhile
+	if n := e.count(t, "SELECT coalesce(sum(completed), 0) FROM {s}.activity"); n != 5 {
+		t.Fatalf("the activity counts %d completed attempts, want 5", n)
+	}
+}
+
+// A worker that could not write its counts for an hour drops them, and
+// still tries the write, so that its log of the failed writes ends once the
+// database answers, and not before, also when it counts nothing more. Here
+// a transaction holds activity_writes while the write fails, and again an
+// hour later, when its counts have aged out.
+func TestActivityRecoveryIsLoggedAfterTheCountsAgeOut(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+
+	busy := e.begin(t)
+	e.txExec(t, busy, "LOCK TABLE {s}.activity_writes")
+	for _, age := range []time.Duration{0, 61 * time.Minute} {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		taskmill.FlushActivityAgain(ctx, w, 1, taskmill.DefaultQueue, 3, age)
+		cancel()
+	}
+	// pgx cancels a statement after its deadline, from another connection:
+	// one that waits for the lock when it ends could still commit.
+	waitFor(t, "the failed writes to stop waiting", func() bool {
+		return e.count(t, "SELECT count(*) FROM pg_locks WHERE relation = '{s}.activity_writes'::regclass AND NOT granted") == 0
+	})
+	if err := busy.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := logs.count("operation failed"); n != 1 {
+		t.Fatalf("got %d lines of a failed write, want 1", n)
+	}
+	if n := logs.count("operation recovered"); n != 0 {
+		t.Fatal("a recovery was logged while the write still failed")
+	}
+
+	taskmill.FlushActivity(t.Context(), w)
+	if n := logs.count("operation recovered"); n != 1 {
+		t.Errorf("got %d lines of a recovery, want 1", n)
+	}
+	if n := e.count(t, "SELECT coalesce(sum(completed), 0) FROM {s}.activity"); n != 0 {
+		t.Errorf("the activity counts %d completed attempts, want none", n)
+	}
+}
+
+// Each worker numbers its writes in a row of its own, under a random key: a
+// worker that got the ID of a worker from the last day, as one of the same
+// host name and process ID can, still adds its counts, though its writes
+// have lower numbers.
+func TestActivityOfAWorkerWithAnEarlierWorkersID(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var total int
+	for _, number := range []int64{5, 1} { // the earlier worker's write, then the later one's
+		w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+		taskmill.SetWorkerID(w, "host-1-abcdef")
+		taskmill.FlushActivityAgain(t.Context(), w, number, taskmill.DefaultQueue, 3, 0)
+		total += 3
+		if n := e.count(t, "SELECT coalesce(sum(completed), 0) FROM {s}.activity"); n != total {
+			t.Fatalf("after write %d of a worker, the activity counts %d completed attempts, want %d", number, n, total)
+		}
+	}
+}
+
+// completedAttempts returns the completed attempts that the activity of the
+// last hour counts.
+func completedAttempts(t *testing.T, e *env) int64 {
+	t.Helper()
+	points, err := e.client.Activity(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	for _, p := range points {
+		n += p.Completed
+	}
+	return n
 }
 
 func TestActivitySteps(t *testing.T) {
@@ -174,8 +384,22 @@ func TestActivityIsKeptForADay(t *testing.T) {
 	e.exec(t, insert, "25 hours")
 	e.exec(t, insert, "23 hours")
 
+	// So are the numbers of the workers' last writes: a write tried again
+	// carries only counts from the last hour, so its first try was within
+	// the hour.
+	writes := `INSERT INTO {s}.activity_writes (writer, last_write, written_at) VALUES ($1, 1, now() - $2::interval)`
+	const gone, idle = "00000000-0000-7000-8000-000000000001", "00000000-0000-7000-8000-000000000002"
+	e.exec(t, writes, gone, "25 hours")
+	e.exec(t, writes, idle, "23 hours")
+
 	taskmill.RunRetention(t.Context(), newWorker(t, e, &taskmill.WorkerConfig{}))
 	if n := e.count(t, "SELECT count(*) FROM {s}.activity"); n != 1 {
 		t.Fatalf("got %d minutes of activity, want the one from 23 hours ago", n)
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.activity_writes WHERE writer = $1", gone); n != 0 {
+		t.Error("the number of a worker that wrote 25 hours ago was kept")
+	}
+	if n := e.count(t, "SELECT count(*) FROM {s}.activity_writes WHERE writer = $1", idle); n != 1 {
+		t.Error("the number of a worker that wrote 23 hours ago was deleted")
 	}
 }

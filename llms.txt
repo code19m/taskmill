@@ -117,7 +117,7 @@ teach, and hold what has no identifier. Their paths start at the module's root.
 - [Operator actions](docs/design/schema-operations.md): The statements that retry, cancel, and delete tasks, one or many
 - [FIFO groups and deduplication](docs/design/schema-groups.md): How a group keeps its order, and how a dedupe key admits one task
 - [Maintenance and notifications](docs/design/schema-maintenance.md): What the maintainer runs, and how workers are woken
-- [Queue statistics and health](docs/design/schema-statistics.md): How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read
+- [Queue statistics and health](docs/design/schema-statistics.md): How the maintainer counts the queues, what lag leaves out, what probes and autoscalers read, and how workers add the activity
 - [Rows that taskmill did not write](docs/design/schema-rows.md): Which rows taskmill supports, which values the tables refuse, and which guards contain the others
 - [Schema migrations](docs/design/schema-migrations.md): How `Migrate` changes a busy schema: one process at a time, indexes built online, and a guard for the older migrations that block writes
 - [The API's shape](docs/design/api-shape.md): Why each point of the API has its shape, and when we look at it again

@@ -78,27 +78,30 @@ FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
 WHERE g.queue = u.queue AND g.group_key = u.group_key
 RETURNING g.queue, g.group_key, g.tasks, g.halted_task_id IS NOT NULL`
 
-// $1 queues, $2 group keys.
+// $1 queues and $2 group keys of groups that may count no task, $3 queues
+// and $4 group keys of groups whose heads left, $5 channel, $6 queues to
+// notify.
 //
-// deleteEmptyGroupsSQL deletes the rows of the groups ($1, $2) that count no
-// task.
-const deleteEmptyGroupsSQL = `
-DELETE FROM {s}.groups g USING unnest($1::text[], $2::text[]) AS u(queue, group_key)
-WHERE g.queue = u.queue AND g.group_key = u.group_key AND g.tasks = 0`
-
-// $1 queues, $2 group keys, $3 channel, $4 queues to notify.
-//
-// promoteGroupsSQL makes the oldest pending task of each group ($1, $2)
-// its head, and returns the queues that got an available task. It
-// notifies channel $3 of those in $4. It must run as its own statement
-// after recountGroups, so that it sees tasks enqueued while
-// recountGroups waited for a group's lock.
-const promoteGroupsSQL = `
-WITH next AS (
-    SELECT p.id FROM unnest($1::text[], $2::text[]) AS u(queue, group_key)
+// settleGroupsSQL ends what tasks leaving groups started: it deletes the
+// rows of the groups ($1, $2) that count no task, and makes the oldest
+// pending task of each group ($3, $4) that still counts tasks and is not
+// halted its head. It returns the queues that got an available task, and
+// notifies channel $5 of those in $6. It must run as its own statement
+// after recountGroupsSQL, so that it sees the counts and the halts that it
+// left, and the tasks enqueued while it waited for a group's lock. So it
+// needs nothing that recountGroupsSQL returns, and may go in one round trip
+// with it. Its two parts change rows of different groups, and it takes a
+// pending task's row only for a group that it promotes.
+const settleGroupsSQL = `
+WITH emptied AS (
+    DELETE FROM {s}.groups g USING unnest($1::text[], $2::text[]) AS u(queue, group_key)
+    WHERE g.queue = u.queue AND g.group_key = u.group_key AND g.tasks = 0
+), next AS (
+    SELECT p.id FROM unnest($3::text[], $4::text[]) AS u(queue, group_key)
+    JOIN {s}.groups g ON g.queue = u.queue AND g.group_key = u.group_key AND g.tasks > 0 AND g.halted_task_id IS NULL
     CROSS JOIN LATERAL (
         SELECT id FROM {s}.tasks
-        WHERE queue = u.queue AND group_key = u.group_key AND state = 'pending'
+        WHERE queue = g.queue AND group_key = g.group_key AND state = 'pending'
         ORDER BY id
         LIMIT 1
         FOR UPDATE
@@ -112,7 +115,7 @@ WITH next AS (
 ), ready AS (
     SELECT DISTINCT queue FROM promoted WHERE state = 'available'
 ), notified AS (
-    SELECT count(pg_notify($3, '{available}' || queue)) AS n FROM ready WHERE queue = ANY($4)
+    SELECT count(pg_notify($5, '{available}' || queue)) AS n FROM ready WHERE queue = ANY($6)
 )
 SELECT queue FROM ready CROSS JOIN notified`
 

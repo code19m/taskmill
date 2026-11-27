@@ -51,12 +51,10 @@ type Activity struct {
 	// Completed and Failed are the attempts that succeeded and failed during
 	// the step. Failed counts every failed attempt, whether its task is
 	// retried or dead, including attempts whose workers lost their leases.
-	// Workers write their counts every 10 seconds; a worker that crashes
-	// loses its last few seconds of them, and a worker drops the counts
-	// that it could not write for 1 hour. If a write's commit outlasts its
-	// 10 seconds, as when a synchronous standby lags that long, its counts
-	// can be added twice: the worker cannot tell it from a write that
-	// failed, and keeps the counts rather than lose them.
+	// Workers write their counts every 10 seconds, and add each once. A
+	// worker that crashes, or that stops while it cannot write, loses the
+	// counts that it has not written, and a worker drops the counts that it
+	// could not write for 1 hour.
 	Completed, Failed int64
 }
 
@@ -201,28 +199,6 @@ func (t *tally) take() map[tallyKey]tallyCount {
 	return counts
 }
 
-// restore puts back counts that could not be written, except those too old
-// to be worth keeping, so that a long outage cannot grow them without bound.
-func (t *tally) restore(counts map[tallyKey]tallyCount) {
-	oldest := time.Now().Add(-tallyMaxAge).Unix()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.counts == nil {
-		t.counts = map[tallyKey]tallyCount{}
-	}
-
-	for key, c := range counts {
-		if key.minute < oldest {
-			continue
-		}
-		now := t.counts[key]
-		now.completed += c.completed
-		now.failed += c.failed
-		t.counts[key] = now
-	}
-}
-
 // countCompleted adds completed tasks to the worker's tally.
 func (w *Worker) countCompleted(done []completedTask) {
 	for _, d := range done {
@@ -249,21 +225,59 @@ func (w *Worker) activityLoop(ctx context.Context) {
 }
 
 // flushActivity adds the attempts counted since the last flush to the
-// activity table. Counts it cannot write are kept for the next try.
-//
-// A write that runs out of time was usually undone: the deadline cancels
-// the statement. Only a commit that is already under way, waiting for a
-// standby or a disk, outlives the cancel, and the next try then adds its
-// counts twice. Telling the two apart would take a marker of each write in
-// the database, a cost that counts for a chart do not justify: a lost count
-// would hide an incident, a doubled one only exaggerates it.
+// activity table. A write that fails is tried again, with the same counts,
+// before any other: it may have committed all the same, as a commit that
+// outlasts the deadline does when it waits for a synchronous standby. So
+// each write has a number, one more than the worker's last, and adds its
+// counts only if it raises the number that the worker's row of
+// activity_writes holds: a write tried again adds them once. The number
+// commits with the counts, so it holds after a failover too, and a write
+// tried again while the first try is still under way waits for its end.
+// At most one write is unwritten at a time, so a standby that lags does
+// not pile up connections that wait for it, and the counts made meanwhile
+// wait in the tally.
 func (w *Worker) flushActivity(ctx context.Context) {
+	if w.unwritten != nil && !w.writeActivity(ctx) {
+		return
+	}
+
 	counts := w.tally.take()
 	if len(counts) == 0 {
 		return
 	}
+	w.writes++
+	w.unwritten = &activityWrite{number: w.writes, counts: counts}
+	w.writeActivity(ctx)
+}
 
-	keys := slices.SortedFunc(maps.Keys(counts), func(a, b tallyKey) int {
+// activityWrite is a write of counts to the activity table.
+type activityWrite struct {
+	number int64 // the worker's writes so far, this one included
+	counts map[tallyKey]tallyCount
+}
+
+// writeActivity writes w.unwritten, and reports whether it succeeded. It
+// drops the counts too old to be worth keeping, so that a long outage
+// cannot keep them without bound. A write left with none still runs: its
+// outcome tells whether the database answers again, so that the failures
+// logged end with it, also on an idle worker.
+func (w *Worker) writeActivity(ctx context.Context) bool {
+	oldest := time.Now().Add(-tallyMaxAge).Unix()
+	maps.DeleteFunc(w.unwritten.counts, func(k tallyKey, _ tallyCount) bool { return k.minute < oldest })
+
+	err := w.addActivity(ctx, w.unwritten)
+	w.activityFailures.observe(ctx, err)
+	if err != nil {
+		return false
+	}
+	w.unwritten = nil
+	return true
+}
+
+// addActivity adds the counts of write to the activity table, unless an
+// earlier try of it committed.
+func (w *Worker) addActivity(ctx context.Context, write *activityWrite) error {
+	keys := slices.SortedFunc(maps.Keys(write.counts), func(a, b tallyKey) int {
 		return cmp.Or(cmp.Compare(a.minute, b.minute), cmp.Compare(a.queue, b.queue))
 	})
 
@@ -272,19 +286,18 @@ func (w *Worker) flushActivity(ctx context.Context) {
 	completed := make([]int32, len(keys))
 	failed := make([]int32, len(keys))
 	for i, k := range keys {
-		c := counts[k]
+		c := write.counts[k]
 		minutes[i], queues[i] = time.Unix(k.minute, 0), k.queue
 		completed[i], failed[i] = int32(min(c.completed, 1<<31-1)), int32(min(c.failed, 1<<31-1)) //nolint:gosec // capped
 	}
 
 	_, err := w.client.pool.Exec(ctx, w.client.sql.addActivity,
-		minutes,   // $1
-		queues,    // $2
-		completed, // $3
-		failed,    // $4
+		minutes,      // $1
+		queues,       // $2
+		completed,    // $3
+		failed,       // $4
+		w.writer,     // $5
+		write.number, // $6
 	)
-	w.activityFailures.observe(ctx, err)
-	if err != nil {
-		w.tally.restore(counts)
-	}
+	return err
 }
