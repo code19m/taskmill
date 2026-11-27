@@ -166,12 +166,13 @@ export function placeMenu(sel) {
   sel.dataset.jsPlaced = "";
 }
 
-// placeOpen places the menus that the reader opened while the script
-// loaded, which had no toggle event that the script heard, and draws a
-// range's calendar. The focus, and which menus are open, stay as the reader
-// left them.
+// placeOpen readies the menus that the reader opened while the script
+// loaded, which had no toggle event that the script heard: it runs a search
+// typed meanwhile, draws a range's calendar, and places them. The focus, and
+// which menus are open, stay as the reader left them.
 export function placeOpen() {
   for (const sel of openMenus()) {
+    refine(sel);
     if (sel.matches(".sel-range")) openCalendar(sel);
     placeMenu(sel);
   }

@@ -185,17 +185,19 @@ func TestMenuShowsOnceItIsPlaced(t *testing.T) {
 }
 
 // Menus that the reader opens while the script loads show as before. Once
-// the script starts, they are placed, and the range's calendar shows the
-// month of the range's end; the focus, and the menus that are open, stay as
-// the reader left them, here in the kind search with "em" typed.
+// the script starts, they are placed, the kind search runs what was typed,
+// and the range's calendar shows the month of the range's end; the focus,
+// and the menus that are open, stay as the reader left them, here in the
+// kind search with "zz" typed.
 func TestMenusOpenedWhileTheScriptLoads(t *testing.T) {
 	s := newSite(t)
+	s.enqueue(t, 2)
 	release := s.hold(t, "app.js")
 	p := s.start(t, "/tasks?since=2025-08-03T00:00:00Z&before=2025-08-10T00:00:00Z")
 	p.click(".sel-range > summary")
 	p.click(`.sel[data-name="kind"] > summary`)
 	p.click(`.sel[data-name="kind"] [data-sel-search]`)
-	p.press("em")
+	p.press("zz") // a search that finds no kind
 	const shown = `[...document.querySelectorAll("details.sel[open] > .pop")].map((pop) => pop.checkVisibility({ visibilityProperty: true }) && pop.getBoundingClientRect().right <= innerWidth)`
 	if got := eval[[]bool](p, shown); len(got) != 2 {
 		t.Fatalf("got %d open menus while the script loads, want 2", len(got))
@@ -209,8 +211,12 @@ func TestMenusOpenedWhileTheScriptLoads(t *testing.T) {
 	if got := eval[string](p, `document.getElementById("cal-title").textContent`); !strings.Contains(got, "2025") {
 		t.Errorf("the calendar shows %q, want a month of 2025", got)
 	}
-	if !eval[bool](p, `document.activeElement.matches('.sel[data-name="kind"] [data-sel-search]') && document.activeElement.value === "em"`) {
+	if !eval[bool](p, `document.activeElement.matches('.sel[data-name="kind"] [data-sel-search]') && document.activeElement.value === "zz"`) {
 		t.Error("the kind search lost the focus, or its text")
+	}
+	const kind = `document.querySelector('.sel[data-name="kind"]')`
+	if !eval[bool](p, `!`+kind+`.querySelector("[data-sel-add]").hidden && [...`+kind+`.querySelectorAll(".pop-list .pop-opt")].every((row) => row.hidden)`) {
+		t.Error("the kind search did not run what was typed while the script loaded")
 	}
 }
 
@@ -231,12 +237,18 @@ func TestPageComesBackWithItsMenusClosed(t *testing.T) {
 
 	p.history(-1)
 	p.waitFor(`location.pathname === "/"`, "the back button")
+	// The menu as the forward button shows it, before the live update that
+	// follows can mend it: this listener runs right after the script's own.
+	p.run(`addEventListener("popstate", () => {
+		const sel = ` + kind + `;
+		window.cameBack = sel.querySelector("[data-sel-add]").hidden && sel.querySelectorAll(".pop-list .pop-opt[hidden]").length === 0;
+	}, { once: true })`)
 	p.history(1)
 	p.waitFor(`location.pathname === "/tasks" && `+kind, "the forward button")
 	if !eval[bool](p, `!document.querySelector("details.sel[open], details.sel[data-js-placed]") && document.activeElement === document.getElementById("main")`) {
 		t.Error("a menu came back open, or took the focus")
 	}
-	if !eval[bool](p, kind+`.querySelector("[data-sel-add]").hidden && `+kind+`.querySelectorAll(".pop-list .pop-opt[hidden]").length === 0`) {
+	if !eval[bool](p, `window.cameBack`) {
 		t.Error("the menu came back with its search")
 	}
 }
