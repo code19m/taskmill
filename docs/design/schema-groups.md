@@ -71,7 +71,7 @@ and completes, with the [Complete](schema-statements.md#complete)
 statement, the tasks whose groups' rows it holds and whose own rows are
 free. The second decrements the groups' counts, settles them, and commits.
 So a batch holds its groups' rows, which an enqueue into one of those
-groups waits for, for about one round trip: it held them for six before.
+groups waits for, for about one round trip, not one for each statement.
 
 `SKIP LOCKED` here means a batch never waits for, or deadlocks with,
 another transaction. A task whose group row another transaction holds, as an

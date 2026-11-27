@@ -228,15 +228,15 @@ DELETE FROM {s}.activity a USING old WHERE a.minute = old.minute AND a.queue = o
 
 // $1 age in seconds.
 //
-// deleteActivityWritesSQL deletes a batch of the rows of activity_writes of
-// workers that wrote nothing for $1 seconds, skipping locked rows: a row
-// that a write locks is in use.
+// deleteActivityWritesSQL deletes a batch of the rows of activity_writes
+// that no write updated for $1 seconds, skipping locked rows: a row that a
+// write locks is in use.
 const deleteActivityWritesSQL = `
 WITH old AS (
-    SELECT worker FROM {s}.activity_writes WHERE written_at < now() - $1 * interval '1 second'
+    SELECT writer FROM {s}.activity_writes WHERE written_at < now() - $1 * interval '1 second'
     LIMIT {batch} FOR UPDATE SKIP LOCKED
 )
-DELETE FROM {s}.activity_writes w USING old WHERE w.worker = old.worker`
+DELETE FROM {s}.activity_writes w USING old WHERE w.writer = old.writer`
 
 // $1 most partitions, $2 the comment that marks a detached partition to drop.
 //

@@ -117,6 +117,11 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.activity, t.Activity)
 }
 
+// SetWorkerID gives w the ID id before it runs, as workerID would if it
+// drew the random bytes of another worker on a host of the same name, in a
+// process of the same PID.
+func SetWorkerID(w *Worker, id string) { w.id = id }
+
 // Tally counts completed attempts of queue in w's tally, as attempts that
 // end do.
 func Tally(w *Worker, queue string, completed int) {
@@ -130,7 +135,14 @@ func FlushActivityAgain(ctx context.Context, w *Worker, number int64, queue stri
 	w.unwritten = &activityWrite{number: number, counts: map[tallyKey]tallyCount{
 		{minute: time.Now().Add(-age).Truncate(time.Minute).Unix(), queue: queue}: {completed: completed},
 	}}
-	w.activityFailures = newIncidentLog(w, "record activity") // as Run sets it
+	FlushActivity(ctx, w)
+}
+
+// FlushActivity flushes w's activity, as Run does every 10 seconds.
+func FlushActivity(ctx context.Context, w *Worker) {
+	if w.activityFailures == nil {
+		w.activityFailures = newIncidentLog(w, "record activity") // as Run sets it
+	}
 	w.flushActivity(ctx)
 }
 

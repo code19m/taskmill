@@ -4,17 +4,21 @@
 -- worker tries again, because it could not tell whether the first try
 -- committed, adds them once. The number commits with the counts, so it
 -- holds on a standby that a failover promotes too. See
--- docs/design/schema.md.
+-- docs/design/schema-statistics.md.
 --
--- One row per worker, updated with each of its writes, every 10 seconds at
--- most. Retention deletes the rows of workers that wrote nothing for a day.
+-- A row belongs to one worker, under a random key of its own: a worker's
+-- ID, which only 3 random bytes keep apart from an earlier worker's on the
+-- same host, would refuse the writes of a worker that got the ID of one
+-- from the last day. It is updated with each of the worker's writes, every
+-- 10 seconds at most. Retention deletes the rows that no write updated for
+-- a day.
 --
 -- The migration creates a table, and locks no other.
 
 SET LOCAL lock_timeout = '5s';
 
 CREATE TABLE __SCHEMA__.activity_writes (
-    worker     text PRIMARY KEY,
+    writer     uuid PRIMARY KEY,
     last_write bigint NOT NULL,
     written_at timestamptz NOT NULL DEFAULT now()
 ) WITH (fillfactor = 50);

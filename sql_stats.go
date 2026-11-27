@@ -155,7 +155,7 @@ SET scheduled = greatest(a.scheduled, excluded.scheduled), pending = greatest(a.
     canceled = greatest(a.canceled, excluded.canceled)`
 
 // $1 minutes, $2 queues, $3 completed attempts, $4 failed attempts, $5 the
-// worker's ID, $6 the write's number.
+// worker's key in activity_writes, $6 the write's number.
 //
 // addActivitySQL adds a worker's counts of ended attempts to their minutes,
 // if write $6 raises the number of the worker's last write: see
@@ -165,8 +165,8 @@ SET scheduled = greatest(a.scheduled, excluded.scheduled), pending = greatest(a.
 // that concurrent flushes lock rows in one order.
 const addActivitySQL = `
 WITH claimed AS (
-    INSERT INTO {s}.activity_writes AS w (worker, last_write) VALUES ($5, $6)
-    ON CONFLICT (worker) DO UPDATE SET last_write = excluded.last_write, written_at = now()
+    INSERT INTO {s}.activity_writes AS w (writer, last_write) VALUES ($5, $6)
+    ON CONFLICT (writer) DO UPDATE SET last_write = excluded.last_write, written_at = now()
     WHERE w.last_write < excluded.last_write
     RETURNING 1
 )

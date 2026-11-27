@@ -19,7 +19,7 @@ New to taskmill? Read [How it works](../concepts/how-it-works.md) and
 | 6 | [Operator actions](schema-operations.md) | The statements that retry, cancel, and delete tasks, one or many |
 | 7 | [FIFO groups and deduplication](schema-groups.md) | How a group keeps its order, and how a dedupe key admits one task |
 | 8 | [Maintenance and notifications](schema-maintenance.md) | What the maintainer runs, and how workers are woken |
-| 9 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, and what probes and autoscalers read |
+| 9 | [Queue statistics and health](schema-statistics.md) | How the maintainer counts the queues, what lag leaves out, what probes and autoscalers read, and how workers add the activity |
 | 10 | [Rows that taskmill did not write](schema-rows.md) | Which rows taskmill supports, which values the tables refuse, and which guards contain the others |
 | 11 | [Schema migrations](schema-migrations.md) | How `Migrate` changes a busy schema: one process at a time, indexes built online, and a guard for the older migrations that block writes |
 | 12 | [The API's shape](api-shape.md) | Why each point of the API has its shape, and when we look at it again |

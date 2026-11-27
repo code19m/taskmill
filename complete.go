@@ -604,7 +604,9 @@ func (c *Client) completeArgs(cs []completion) []any {
 }
 
 // scanCompleted reads the rows of a statement that completes tasks: those
-// it completed, and those whose rows other transactions held.
+// it completed, and the others that their attempts still own, which other
+// transactions held: their rows, or, for completeGroupedSQL, their groups'
+// rows. A task in neither lost its lease.
 func scanCompleted(r rows) (done []completedTask, held map[int64]bool, err error) {
 	for r.Next() {
 		var t completedTask
