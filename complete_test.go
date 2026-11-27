@@ -738,9 +738,15 @@ func TestHeldGroupsAreWaitedForFewAtATime(t *testing.T) {
 	if _, err := tx.Exec(t.Context(), replaceSchema("SELECT FROM {s}.groups FOR UPDATE", e.schema)); err != nil {
 		t.Fatal(err)
 	}
-	waits.mu.Lock()
-	migrated := waits.history // the migrations insert into history too
-	waits.mu.Unlock()
+	// A sequence counts the rows written to history, also by a transaction
+	// that rolls back.
+	e.exec(t, `CREATE SEQUENCE {s}.history_writes`)
+	e.exec(t, `CREATE FUNCTION {s}.count_history_write() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM nextval('{s}.history_writes');
+    RETURN NEW;
+END $$`)
+	e.exec(t, `CREATE TRIGGER count_history_write BEFORE INSERT ON {s}.task_history FOR EACH ROW EXECUTE FUNCTION {s}.count_history_write()`)
 	close(release)
 	waitFor(t, "every completion to wait for its group, and three to wait again", func() bool {
 		waits.mu.Lock()
@@ -749,8 +755,9 @@ func TestHeldGroupsAreWaitedForFewAtATime(t *testing.T) {
 	})
 
 	waits.mu.Lock()
-	first, mostAgain, history := waits.first, waits.mostAgain, waits.history-migrated
+	first, mostAgain := waits.first, waits.mostAgain
 	waits.mu.Unlock()
+	history := e.count(t, `SELECT count(*) FROM {s}.history_writes WHERE is_called`)
 	if first < 2 || first > 4 {
 		t.Errorf("%d completions waited for their groups at a time at first, want 2 to 4", first)
 	}
@@ -758,7 +765,7 @@ func TestHeldGroupsAreWaitedForFewAtATime(t *testing.T) {
 		t.Errorf("%d completions waited again at a time, want 1", mostAgain)
 	}
 	if history > 0 {
-		t.Errorf("%d statements moved tasks to history while their groups were held", history)
+		t.Error("a completion wrote its task to history while its group was held")
 	}
 
 	if err := tx.Commit(t.Context()); err != nil {
@@ -769,8 +776,102 @@ func TestHeldGroupsAreWaitedForFewAtATime(t *testing.T) {
 	}
 }
 
-// groupWaitLog follows the statements with which completions wait for their
-// FIFO groups' rows, and counts the statements that move tasks to history.
+// A worker completes the grouped tasks of a batch in one transaction of two
+// round trips: the first locks the groups' rows and completes the tasks,
+// the second recounts and settles the groups and commits. So it holds the
+// groups' rows for one round trip.
+func TestGroupedCompletionsTakeTwoRoundTrips(t *testing.T) {
+	t.Parallel()
+	trips := &groupedTrips{}
+	e := newTracedEnv(t, trips)
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(4)})
+
+	var ids []int64
+	for i := range 12 {
+		ids = append(ids, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: strconv.Itoa(i % 4)}))
+	}
+	for _, id := range ids {
+		e.waitState(t, id, taskmill.StateCompleted)
+	}
+
+	trips.mu.Lock()
+	defer trips.mu.Unlock()
+	if len(trips.other) > 0 {
+		t.Fatalf("statements of a grouped completion went in other round trips: %q", trips.other)
+	}
+	if trips.first == 0 || trips.second != trips.first {
+		t.Fatalf("%d round trips locked and completed, and %d settled and committed, want as many, and some", trips.first, trips.second)
+	}
+}
+
+// groupedTrips counts the round trips of grouped completions, and keeps the
+// statements of one that went in a round trip of another shape.
+type groupedTrips struct {
+	mu            sync.Mutex
+	first, second int        // round trips that lock the groups and complete, and that settle them and commit
+	other         [][]string // the statements of round trips of another shape
+}
+
+// groupedStep names the statements of a grouped completion, and returns ""
+// for the others, except BEGIN and COMMIT.
+func groupedStep(sql string) string {
+	switch {
+	case sql == "BEGIN" || sql == "COMMIT":
+		return sql
+	case strings.Contains(sql, "FOR UPDATE OF g SKIP LOCKED"):
+		return "lock"
+	case strings.Contains(sql, "task_history") && strings.Contains(sql, "FOR UPDATE SKIP LOCKED"): // a completion that locks groups
+		return "complete"
+	case strings.Contains(sql, "SET tasks = greatest(g.tasks + u.n, 0)"):
+		return "recount"
+	case strings.Contains(sql, "WITH emptied AS"):
+		return "settle"
+	}
+	return ""
+}
+
+func (g *groupedTrips) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	if step := groupedStep(d.SQL); step != "" && step != "BEGIN" && step != "COMMIT" {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.other = append(g.other, []string{step})
+	}
+	return ctx
+}
+
+func (*groupedTrips) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (g *groupedTrips) TraceBatchStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceBatchStartData) context.Context {
+	var steps []string
+	grouped := false
+	for _, q := range d.Batch.QueuedQueries {
+		step := groupedStep(q.SQL)
+		steps = append(steps, step)
+		grouped = grouped || step != "" && step != "BEGIN" && step != "COMMIT"
+	}
+	if !grouped {
+		return ctx
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	switch strings.Join(steps, ",") {
+	case "BEGIN,lock,complete":
+		g.first++
+	case "recount,settle,COMMIT":
+		g.second++
+	default:
+		g.other = append(g.other, steps)
+	}
+	return ctx
+}
+
+func (*groupedTrips) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+
+func (*groupedTrips) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
+
+// groupWaitLog follows the round trips in which completions wait for their
+// FIFO groups' rows.
 type groupWaitLog struct {
 	groups int // the groups whose rows are held
 
@@ -780,31 +881,39 @@ type groupWaitLog struct {
 	first     int             // most waits at a time until every group's completion waited
 	again     int             // waits that began after that
 	mostAgain int             // most waits at a time among them, and those under way
-	history   int             // statements that move tasks to history
 }
 
 type groupWaitKey struct{}
 
-func (l *groupWaitLog) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	switch {
-	case strings.Contains(d.SQL, "INSERT INTO") && strings.Contains(d.SQL, "task_history"):
-		l.history++
-	case strings.Contains(d.SQL, "FOR UPDATE OF g") && !strings.Contains(d.SQL, "SKIP LOCKED"):
-		l.running++
-		if len(l.waited) < l.groups {
-			l.first = max(l.first, l.running)
-		} else {
-			l.again++
-			l.mostAgain = max(l.mostAgain, l.running)
-		}
-		return context.WithValue(ctx, groupWaitKey{}, fmt.Sprint(d.Args...))
-	}
+func (*groupWaitLog) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
 	return ctx
 }
 
-func (l *groupWaitLog) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+func (*groupWaitLog) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (l *groupWaitLog) TraceBatchStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceBatchStartData) context.Context {
+	i := slices.IndexFunc(d.Batch.QueuedQueries, func(q *pgx.QueuedQuery) bool {
+		return strings.Contains(q.SQL, "FOR UPDATE OF g") && !strings.Contains(q.SQL, "SKIP LOCKED")
+	})
+	if i < 0 {
+		return ctx
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.running++
+	if len(l.waited) < l.groups {
+		l.first = max(l.first, l.running)
+	} else {
+		l.again++
+		l.mostAgain = max(l.mostAgain, l.running)
+	}
+	return context.WithValue(ctx, groupWaitKey{}, fmt.Sprint(d.Batch.QueuedQueries[i].Arguments...))
+}
+
+func (*groupWaitLog) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {}
+
+func (l *groupWaitLog) TraceBatchEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchEndData) {
 	if group, ok := ctx.Value(groupWaitKey{}).(string); ok {
 		l.mu.Lock()
 		defer l.mu.Unlock()
@@ -812,16 +921,6 @@ func (l *groupWaitLog) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.Tra
 		l.waited[group] = true
 	}
 }
-
-func (*groupWaitLog) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
-	return ctx
-}
-
-func (l *groupWaitLog) TraceBatchQuery(ctx context.Context, c *pgx.Conn, d pgx.TraceBatchQueryData) {
-	l.TraceQueryStart(ctx, c, pgx.TraceQueryStartData{SQL: d.SQL, Args: d.Args})
-}
-
-func (*groupWaitLog) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
 
 // A completion waits for the row of a task that another transaction holds.
 // It locks the rows in the order of their IDs before it deletes any, so that

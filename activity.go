@@ -53,10 +53,7 @@ type Activity struct {
 	// retried or dead, including attempts whose workers lost their leases.
 	// Workers write their counts every 10 seconds; a worker that crashes
 	// loses its last few seconds of them, and a worker drops the counts
-	// that it could not write for 1 hour. If a write's commit outlasts its
-	// 10 seconds, as when a synchronous standby lags that long, its counts
-	// can be added twice: the worker cannot tell it from a write that
-	// failed, and keeps the counts rather than lose them.
+	// that it could not write for 1 hour.
 	Completed, Failed int64
 }
 
@@ -251,18 +248,71 @@ func (w *Worker) activityLoop(ctx context.Context) {
 // flushActivity adds the attempts counted since the last flush to the
 // activity table. Counts it cannot write are kept for the next try.
 //
-// A write that runs out of time was usually undone: the deadline cancels
-// the statement. Only a commit that is already under way, waiting for a
-// standby or a disk, outlives the cancel, and the next try then adds its
-// counts twice. Telling the two apart would take a marker of each write in
-// the database, a cost that counts for a chart do not justify: a lost count
-// would hide an incident, a doubled one only exaggerates it.
+// A write that runs out of time may still commit: its commit can outlast
+// the deadline, as when it waits for a synchronous standby, and the server
+// finishes it although the worker no longer waits for the answer. So a
+// write learns its transaction's ID before it commits, and when its commit
+// fails, the next flush asks PostgreSQL what became of it, and writes
+// nothing else until it knows: the counts are added again only if the
+// write did not commit. At most one write is in doubt at a time, so a
+// standby that lags does not pile up connections that wait for it.
 func (w *Worker) flushActivity(ctx context.Context) {
+	if w.unsure != nil && !w.settleUnsure(ctx) {
+		return
+	}
+
 	counts := w.tally.take()
 	if len(counts) == 0 {
 		return
 	}
 
+	xid, err := w.addActivity(ctx, counts)
+	w.activityFailures.observe(ctx, err)
+	switch {
+	case err == nil:
+	case xid != 0: // the commit failed: the write may have committed all the same
+		w.unsure = &unsureWrite{xid: xid, counts: counts}
+	default: // nothing was committed
+		w.tally.restore(counts)
+	}
+}
+
+// unsureWrite is a write of counts to the activity table whose commit
+// failed, so that it may or may not have committed.
+type unsureWrite struct {
+	xid    uint64 // its transaction's ID
+	counts map[tallyKey]tallyCount
+}
+
+// settleUnsure asks PostgreSQL whether the transaction of w.unsure
+// committed, and reports whether it knows now. If the transaction did not
+// commit, it puts the counts back in the tally. A transaction that the
+// server does not know yet, as after a failover to a standby that lacks it,
+// did not commit there.
+func (w *Worker) settleUnsure(ctx context.Context) bool {
+	var status *string
+	err := w.client.pool.QueryRow(ctx, xactStatusSQL, w.unsure.xid).Scan(&status)
+	switch {
+	case pgCode(err) == codeInvalidParameterValue: // the ID is in the future
+	case err != nil:
+		w.activityFailures.observe(ctx, err)
+		return false
+	case status == nil: // so old that the server no longer knows: cannot happen within tallyMaxAge
+	case *status == "committed":
+		w.unsure = nil
+		return true
+	case *status == "in progress": // its commit still waits, as for a standby
+		return false
+	}
+	w.tally.restore(w.unsure.counts)
+	w.unsure = nil
+	return true
+}
+
+// addActivity adds counts to the activity table, in a transaction that
+// returns its ID before it commits. It returns the ID if the commit
+// failed, and 0 if the transaction failed before it.
+func (w *Worker) addActivity(ctx context.Context, counts map[tallyKey]tallyCount) (xid uint64, err error) {
 	keys := slices.SortedFunc(maps.Keys(counts), func(a, b tallyKey) int {
 		return cmp.Or(cmp.Compare(a.minute, b.minute), cmp.Compare(a.queue, b.queue))
 	})
@@ -277,14 +327,27 @@ func (w *Worker) flushActivity(ctx context.Context) {
 		completed[i], failed[i] = int32(min(c.completed, 1<<31-1)), int32(min(c.failed, 1<<31-1)) //nolint:gosec // capped
 	}
 
-	_, err := w.client.pool.Exec(ctx, w.client.sql.addActivity,
+	conn, err := w.client.pool.Acquire(ctx)
+	if err != nil {
+		return 0, err
+	}
+	// A connection released inside the transaction is closed, and the
+	// server rolls the transaction back: it never got a COMMIT.
+	defer conn.Release()
+
+	b := &pgx.Batch{}
+	b.Queue("BEGIN")
+	b.Queue(w.client.sql.addActivity,
 		minutes,   // $1
 		queues,    // $2
 		completed, // $3
 		failed,    // $4
-	)
-	w.activityFailures.observe(ctx, err)
-	if err != nil {
-		w.tally.restore(counts)
+	).QueryRow(func(r pgx.Row) error { return r.Scan(&xid) })
+	if err := conn.SendBatch(ctx, b).Close(); err != nil {
+		return 0, err
 	}
+	if _, err := conn.Exec(ctx, "COMMIT"); err != nil {
+		return xid, err
+	}
+	return 0, nil
 }

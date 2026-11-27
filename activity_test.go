@@ -51,6 +51,105 @@ func TestActivityCountsAttempts(t *testing.T) {
 	}
 }
 
+// A worker adds its counts to the activity once, also when it cannot tell
+// whether a write of them committed: a write that runs out of time may
+// commit all the same, as one whose commit waits for a standby, or not.
+// Here a trigger delays the first write that adds completed attempts past
+// the write's deadline, before or at its commit, and records in
+// slow_writes whether that write committed.
+func TestActivityCountsAWriteInDoubtOnce(t *testing.T) {
+	t.Parallel()
+	const atCommit = "CONSTRAINT TRIGGER slow_write AFTER INSERT OR UPDATE ON {s}.activity DEFERRABLE INITIALLY DEFERRED"
+	for _, c := range []struct {
+		name      string
+		trigger   string // the trigger, and when it runs
+		fail      string // what it does after its delay
+		committed bool   // whether the slow write commits
+	}{
+		{"a commit that ends after the deadline", atCommit, "", true},
+		{"a commit that fails after the deadline", atCommit, "RAISE EXCEPTION 'no';", false},
+		{"a statement that ends after the deadline", "TRIGGER slow_write BEFORE INSERT OR UPDATE ON {s}.activity", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			e.exec(t, `CREATE TABLE {s}.slow_writes (at timestamptz)`)
+			e.exec(t, `CREATE SEQUENCE {s}.slow_once`)
+			e.exec(t, `
+CREATE FUNCTION {s}.slow_write() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.completed > coalesce(OLD.completed, 0) AND nextval('{s}.slow_once') = 1 THEN
+        BEGIN
+            PERFORM pg_sleep(1);
+        EXCEPTION WHEN query_canceled THEN -- the worker gave up: go on, as a commit that waits for a standby does
+            PERFORM pg_sleep(1);
+        END;
+        INSERT INTO {s}.slow_writes VALUES (now());
+        `+c.fail+`
+    END IF;
+    RETURN NEW;
+END $$`)
+			e.exec(t, `CREATE `+c.trigger+` FOR EACH ROW EXECUTE FUNCTION {s}.slow_write()`)
+
+			w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(5)})
+			taskmill.SetTiming(w, taskmill.Timing{Activity: 300 * time.Millisecond})
+			ids := make([]int64, 5)
+			for i := range ids {
+				ids[i] = e.enqueue(t, sendEmail{}, nil)
+			}
+			stop := startWorker(t, w)
+			for _, id := range ids {
+				e.waitState(t, id, taskmill.StateCompleted)
+			}
+			waitFor(t, "the counts of the 5 tasks", func() bool { return completedAttempts(t, e) >= 5 })
+			stop()
+
+			if n := completedAttempts(t, e); n != 5 {
+				t.Errorf("the activity counts %d completed attempts, want 5", n)
+			}
+			if e.count(t, `SELECT count(*) FROM {s}.slow_once WHERE is_called`) == 0 {
+				t.Fatal("no write was slow")
+			}
+			if got := e.count(t, `SELECT count(*) FROM {s}.slow_writes`) == 1; got != c.committed {
+				t.Errorf("the slow write committed: %t, want %t", got, c.committed)
+			}
+		})
+	}
+}
+
+// A write in doubt whose transaction the server never assigned, as after a
+// failover to a standby that lacks it, did not commit there: the worker
+// adds its counts again.
+func TestActivityCountsAWriteLostInAFailover(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+
+	var next uint64
+	if err := e.pool.QueryRow(t.Context(), `SELECT pg_snapshot_xmax(pg_current_snapshot())::text::bigint`).Scan(&next); err != nil {
+		t.Fatal(err)
+	}
+	taskmill.FlushActivityInDoubt(t.Context(), w, next+1_000_000, taskmill.DefaultQueue, 3)
+	if n := completedAttempts(t, e); n != 3 {
+		t.Fatalf("the activity counts %d completed attempts, want 3", n)
+	}
+}
+
+// completedAttempts returns the completed attempts that the activity of the
+// last hour counts.
+func completedAttempts(t *testing.T, e *env) int64 {
+	t.Helper()
+	points, err := e.client.Activity(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	for _, p := range points {
+		n += p.Completed
+	}
+	return n
+}
+
 func TestActivitySteps(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

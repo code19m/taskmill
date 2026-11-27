@@ -85,6 +85,7 @@ type Timing struct {
 	ScheduleCheck  time.Duration
 	ScheduleGrace  time.Duration
 	ScheduleReport time.Duration
+	Activity       time.Duration
 }
 
 // SetTiming applies t to w before it runs.
@@ -113,6 +114,17 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.scheduleCheck, t.ScheduleCheck)
 	set(&w.timing.scheduleGrace, t.ScheduleGrace)
 	set(&w.timing.scheduleReport, t.ScheduleReport)
+	set(&w.timing.activity, t.Activity)
+}
+
+// FlushActivityInDoubt flushes w's activity after a write of completed
+// attempts to queue, in transaction xid, whose commit failed.
+func FlushActivityInDoubt(ctx context.Context, w *Worker, xid uint64, queue string, completed int) {
+	w.unsure = &unsureWrite{xid: xid, counts: map[tallyKey]tallyCount{
+		{minute: time.Now().Truncate(time.Minute).Unix(), queue: queue}: {completed: completed},
+	}}
+	w.activityFailures = newIncidentLog(w, "record activity") // as Run sets it
+	w.flushActivity(ctx)
 }
 
 // Fetch runs one fetch from queue, which w serves, with slots free, as the
@@ -267,12 +279,12 @@ type statement struct {
 }
 
 // leased returns the statements that find a batch of tasks by their attempts
-// (ids, tokens): the lock of a grouped completion, the lease renewal, the
+// (ids, tokens): the grouped completion, the lease renewal, the
 // read of cancel requests, the completion that skips held rows, the
 // failures that skip held rows, and the completion.
 func leased(c *Client, ids []int64, tokens []int32) []statement {
 	return []statement{
-		{c.sql.lockLeased, []any{ids, tokens}},
+		{c.sql.completeGrouped, []any{ids, tokens, []int64{}}},
 		{c.sql.renewLeases, []any{ids, tokens, time.Hour.Microseconds()}},
 		{c.sql.cancelRequest, []any{ids, tokens}},
 		{c.sql.completeSkipping, []any{ids, tokens, []int64{}}},
@@ -350,7 +362,7 @@ func LeasedRowsRead(ctx context.Context, c *Client, ids []int64, tokens []int32)
 }
 
 // LeasedFound runs the same statements in one transaction, in that order,
-// the completion last. The completion and the failures that skip held rows
+// the completion last. The completions and the failures that skip held rows
 // run in savepoints that they roll back, so that the completion finds the
 // tasks too.
 // It returns the IDs of the rows that each one returned, sorted.
@@ -367,7 +379,7 @@ func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (f
 		copy(found[6:], one[:])
 
 		for i, s := range leased(c, ids, tokens) {
-			if s.sql != c.sql.completeSkipping && s.sql != c.sql.recordSkipping {
+			if s.sql != c.sql.completeGrouped && s.sql != c.sql.completeSkipping && s.sql != c.sql.recordSkipping {
 				found[i], err = foundIDs(ctx, tx, s)
 			} else if err = pgx.BeginFunc(ctx, tx, func(undo pgx.Tx) error { // a savepoint
 				found[i], err = foundIDs(ctx, undo, s)

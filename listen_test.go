@@ -842,6 +842,55 @@ func TestFIFOGroupRunsWhileNotificationsWait(t *testing.T) {
 	}
 }
 
+// The completion of a FIFO group's head notifies the queue of the task that
+// it promotes, for the other workers. Here the worker that completes the
+// head is stopping, so it does not fetch the next task itself.
+func TestGroupHeadCompletionWakesOtherWorkers(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	group := &taskmill.EnqueueOptions{GroupKey: "g"}
+	head := e.enqueue(t, sendEmail{}, group)
+	next := e.enqueue(t, sendEmail{}, group)
+
+	idle := func(fn func(context.Context, *taskmill.Task[sendEmail]) error) *taskmill.WorkerConfig {
+		return &taskmill.WorkerConfig{Handlers: handlers(fn, nil), Queues: defaultQueue(1), NoMaintainer: true, PollInterval: time.Hour}
+	}
+
+	started, release := make(chan int64, 1), make(chan struct{})
+	stopping := newWorker(t, e, idle(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+		started <- task.ID
+		<-release
+		return nil
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan error, 1)
+	go func() { stopped <- stopping.Run(ctx) }()
+	t.Cleanup(func() {
+		close(release)
+		cancel()
+		if err := <-stopped; err != nil {
+			t.Errorf("worker run: %v", err)
+		}
+	})
+	if got := recv(t, started, "the head to start"); got != head {
+		t.Fatalf("task %d started, want the head %d", got, head)
+	}
+
+	ran := make(chan int64, 1)
+	runWorker(t, e, idle(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+		ran <- task.ID
+		return nil
+	}))
+	waitFor(t, "both workers to listen", func() bool { return len(e.listenerPIDs(t)) == 2 })
+	time.Sleep(200 * time.Millisecond) // a wait for the new worker's first fetches to pass, not for a result
+
+	cancel()
+	release <- struct{}{} // the head completes while its worker stops
+	if got := recv(t, ran, "a notification to wake the other worker"); got != next {
+		t.Fatalf("task %d ran, want the group's next task %d", got, next)
+	}
+}
+
 func TestNotificationsWakeIdleWorkers(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

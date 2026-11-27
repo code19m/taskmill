@@ -194,12 +194,25 @@ SELECT id, queue, coalesce(group_key, ''), true, freed_key, freed_key_expires_at
 // false, after the tasks it finished. A batch of completions thus
 // never waits for one row, and the worker tries the skipped ones
 // again later. Only the attempts that it skipped are looked up again.
-const completeSkippingSQL = `
+var completeSkippingSQL = strings.ReplaceAll(completeSkippingTemplate, "{group}", "")
+
+// $1 task IDs, $2 lease tokens, $3 task IDs to delete without history.
+//
+// completeGroupedSQL is completeSkippingSQL for tasks in FIFO groups,
+// after lockGroupsSQL in the same transaction: it completes a task only if
+// the transaction holds its group's row, or its group has no row, and
+// returns each other task with false too. So a completion never takes a
+// task's row while another transaction holds its group's.
+var completeGroupedSQL = strings.ReplaceAll(completeSkippingTemplate, "{group}", " AND "+groupFreeSQL)
+
+// completeSkippingTemplate is completeSkippingSQL, with {group} for what
+// else a task must match to complete.
+const completeSkippingTemplate = `
 WITH attempts AS (
     SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
 ), held AS (
     SELECT t.id FROM attempts JOIN {s}.tasks t USING (id, lease_token)
-    WHERE ` + leasedSQL + `
+    WHERE ` + leasedSQL + `{group}
     FOR UPDATE OF t SKIP LOCKED
 ), ` + completeHeldSQL + `
 SELECT id, queue, coalesce(group_key, ''), true, freed_key, freed_key_expires_at FROM done
@@ -249,26 +262,6 @@ WHERE expires_at > now()
 ORDER BY key, id
 ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
     WHERE d.expires_at <= now()`
-
-// $1 task IDs, $2 lease tokens.
-//
-// lockLeasedSQL locks the rows of the attempts ($1, $2) that still own
-// their tasks, skipping rows that other transactions hold. It returns
-// each locked task with true, and each owned task with false. Taken
-// after lockGroups, it keeps a batch from ever waiting while it holds
-// group rows.
-const lockLeasedSQL = `
-WITH attempts AS (
-    SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
-), locked AS (
-    SELECT t.id FROM attempts JOIN {s}.tasks t USING (id, lease_token)
-    WHERE ` + leasedSQL + `
-    FOR UPDATE OF t SKIP LOCKED
-)
-SELECT id, true FROM locked
-UNION ALL
-SELECT t.id, false FROM attempts JOIN {s}.tasks t USING (id, lease_token)
-WHERE ` + leasedSQL
 
 // $1 task IDs, $2 lease tokens, $3 outcomes, $4 delays in microseconds,
 // $5 errors or notes, each NULL or a JSON object, $6 whether the worker

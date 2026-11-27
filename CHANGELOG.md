@@ -7,6 +7,24 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- A worker completes the tasks of FIFO groups in two round trips, where it
+  took seven: the first locks the groups' rows and completes the tasks, and
+  the second takes them off their groups' counts, deletes the groups that
+  count no task, promotes the next tasks, and commits. So it holds the
+  groups' rows, which an enqueue into those groups waits for, for one round
+  trip, not six. Every other way out of a group, such as `Cancel` or
+  `Delete`, takes two statements, where it took up to three.
+
+### Fixed
+
+- A worker adds its counts of ended attempts to the activity once, also
+  when a write of them ran out of time but committed all the same, as one
+  whose commit waited for a synchronous standby: it asks PostgreSQL whether
+  the write committed, where it added the counts again. While it cannot
+  tell, it writes no more counts.
+
 ## [0.18.0] - 2026-11-27
 
 ### Added

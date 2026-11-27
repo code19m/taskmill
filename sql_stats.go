@@ -156,14 +156,25 @@ SET scheduled = greatest(a.scheduled, excluded.scheduled), pending = greatest(a.
 
 // $1 minutes, $2 queues, $3 completed attempts, $4 failed attempts.
 //
-// addActivitySQL adds a worker's counts of ended attempts to their minutes.
-// The caller sorts the rows by minute, then by the bytes of the queue name,
-// so that concurrent flushes lock rows in one order.
+// addActivitySQL adds a worker's counts of ended attempts to their minutes,
+// and returns the ID of its transaction: see flushActivity. The caller
+// sorts the rows by minute, then by the bytes of the queue name, so that
+// concurrent flushes lock rows in one order.
 const addActivitySQL = `
-INSERT INTO {s}.activity AS a (minute, queue, completed, failed)
-SELECT m, q, c, f FROM unnest($1::timestamptz[], $2::text[], $3::integer[], $4::integer[]) AS u(m, q, c, f)
-ON CONFLICT (minute, queue) DO UPDATE
-SET completed = a.completed + excluded.completed, failed = a.failed + excluded.failed`
+WITH added AS (
+    INSERT INTO {s}.activity AS a (minute, queue, completed, failed)
+    SELECT m, q, c, f FROM unnest($1::timestamptz[], $2::text[], $3::integer[], $4::integer[]) AS u(m, q, c, f)
+    ON CONFLICT (minute, queue) DO UPDATE
+    SET completed = a.completed + excluded.completed, failed = a.failed + excluded.failed
+)
+SELECT pg_current_xact_id()`
+
+// $1 a transaction's ID.
+//
+// xactStatusSQL returns whether transaction $1 committed, was aborted, or
+// is still in progress, or NULL if it is too old for the server to know.
+// It fails with SQLSTATE 22023 if the server never assigned the ID.
+const xactStatusSQL = `SELECT pg_xact_status($1::xid8)`
 
 // $1 since, $2 before, $3 step in seconds, $4 queues.
 //
