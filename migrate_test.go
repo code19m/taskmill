@@ -258,7 +258,11 @@ func TestMigrateGivesUpOnBusyTables(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Pool(t)
 	schema := testdb.Schema(t, pool)
-	applyWithoutMigrate(t, pool, schema, 1) // as before a deploy that brings a migration
+	ms, err := taskmill.Migrations(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apply(t, pool, schema, ms[:2]) // the initial schema: some later migration locks a table, whichever the latest is
 	e := &env{pool: pool, schema: schema}
 	version := e.count(t, "SELECT max(version) FROM {s}.migrations")
 

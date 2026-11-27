@@ -46,20 +46,19 @@ forever. A second statement starts after the lock was acquired, and sees it:
 one reason why taskmill's own transactions require READ COMMITTED.
 
 **One way out.** A counted task leaves its group when it completes, is
-canceled, or is deleted, alone or in a batch. Every such change runs the
-same two statements, built in one place (`groupLeaving`): the decrement,
-which also ends a halt that names a leaving task, and the settling, which
-deletes the groups that count no task and promotes the next task of each
-group whose head left, unless another task halts it. A leaving `pending`
-task needs no promotion. The settling reads the counts and halts that the
-decrement left, not what it returned, so the two can go in one round trip.
-A group that has no row, which should never happen, is logged as `fifo
-group missing`, and the task still ends.
+canceled, or is deleted. Every such change runs the same statements, built
+in one place (`groupLeaving`): the decrement, which also ends a halt that
+names a leaving task, then the settling, which deletes the groups that
+count no task and promotes the next task of each group whose head left.
+The settling reads the counts that the decrement left, not what it
+returned, so a worker sends both in one round trip. Other callers read the
+decrement first, and skip the settling when it has nothing to do, as when
+a `pending` task leaves. A group that has no row, which should never
+happen, is logged as `fifo group missing`, and the task still ends.
 
-**Completing a batch.** A worker completes the grouped tasks of a batch in one
-transaction of two round trips, with a few statements for the whole batch
-rather than a few per task. The first round trip begins the transaction,
-locks the rows of the batch's groups that no other transaction holds:
+**Completing a batch.** A worker completes the grouped tasks of a batch in
+one transaction of two round trips. The first begins it, and locks the
+rows of the batch's groups that no other transaction holds:
 
 ```sql
 SELECT g.queue, g.group_key FROM taskmill.groups g
@@ -69,12 +68,10 @@ FOR UPDATE OF g SKIP LOCKED;
 ```
 
 and completes, with the [Complete](schema-statements.md#complete)
-statement, the tasks whose groups' rows the transaction holds and whose own
-rows are free. The second decrements the groups' counts, settles them, with
-a `LATERAL` subquery per promoted group through `tasks_pending_idx`, and
-commits. So a batch holds its groups' rows for about one round trip, which
-an enqueue into one of those groups waits for: with its statements sent one
-by one, a batch held them for six.
+statement, the tasks whose groups' rows it holds and whose own rows are
+free. The second decrements the groups' counts, settles them, and commits.
+So a batch holds its groups' rows, which an enqueue into one of those
+groups waits for, for about one round trip: it held them for six before.
 
 `SKIP LOCKED` here means a batch never waits for, or deadlocks with,
 another transaction. A task whose group row another transaction holds, as an

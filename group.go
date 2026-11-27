@@ -60,7 +60,7 @@ func (c *Client) leaveGroups(ctx context.Context, logger *slog.Logger, q querier
 	if !l.settles() {
 		return nil
 	}
-	sql, args = l.settle()
+	sql, args = l.settle(l.emptied, l.next)
 	return readAll(ctx, q, l.readSettle, sql, args...)
 }
 
@@ -94,7 +94,7 @@ type groupLeaving struct {
 	leaves map[groupID]leaves // by group, until the recount reads its row back
 
 	// What the recount read.
-	emptied bool     // a group counts no task now
+	emptied groupSet // the groups that count no task now
 	next    groupSet // the groups whose heads left that the settling promotes
 }
 
@@ -157,7 +157,7 @@ func (l *groupLeaving) readRecount(ctx context.Context, r rows) error {
 		delete(l.leaves, key)
 		switch {
 		case remaining == 0:
-			l.emptied = true
+			l.emptied.add(queue, group)
 		case head && !halted:
 			l.next.add(queue, group)
 		}
@@ -174,21 +174,24 @@ func (l *groupLeaving) readRecount(ctx context.Context, r rows) error {
 
 // settles reports whether the settling has work, once the recount was read.
 func (l *groupLeaving) settles() bool {
-	return l.emptied || len(l.next.queues) > 0
+	return len(l.emptied.queues) > 0 || len(l.next.queues) > 0
 }
 
-// settle returns the statement that deletes the groups that count no task,
-// and promotes the next task of the groups whose heads left. It notifies,
-// in the caller's transaction, the queues of the groups that the recount
-// read as about to get a head: before the recount is read, none, which
-// only the client's own transactions may send it with, since they leave
-// their notifications to the notifier.
-func (l *groupLeaving) settle() (string, []any) {
+// settle returns the statement that deletes the groups among emptied that
+// count no task, and promotes the next task of each group among promoted
+// that counts tasks and is not halted. Once the recount is read, those are
+// the groups that it read as such; a caller that sends both statements at
+// once passes every group that tasks left, and every group whose head left.
+// It notifies, in the caller's transaction, the queues of the groups that
+// the recount read as about to get a head: before the recount is read,
+// none, which only the client's own transactions may send it with, since
+// they leave their notifications to the notifier.
+func (l *groupLeaving) settle(emptied, promoted groupSet) (string, []any) {
 	return l.c.sql.settleGroups, []any{
-		l.asked.queues,                     // $1
-		l.asked.groups,                     // $2
-		l.heads.queues,                     // $3
-		l.heads.groups,                     // $4
+		emptied.queues,                     // $1
+		emptied.groups,                     // $2
+		promoted.queues,                    // $3
+		promoted.groups,                    // $4
 		l.c.schema,                         // $5
 		l.c.notifiable(l.q, l.next.queues), // $6
 	}

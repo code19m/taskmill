@@ -154,27 +154,27 @@ SET scheduled = greatest(a.scheduled, excluded.scheduled), pending = greatest(a.
     retryable = greatest(a.retryable, excluded.retryable), dead = greatest(a.dead, excluded.dead),
     canceled = greatest(a.canceled, excluded.canceled)`
 
-// $1 minutes, $2 queues, $3 completed attempts, $4 failed attempts.
+// $1 minutes, $2 queues, $3 completed attempts, $4 failed attempts, $5 the
+// worker's ID, $6 the write's number.
 //
 // addActivitySQL adds a worker's counts of ended attempts to their minutes,
-// and returns the ID of its transaction: see flushActivity. The caller
-// sorts the rows by minute, then by the bytes of the queue name, so that
-// concurrent flushes lock rows in one order.
+// if write $6 raises the number of the worker's last write: see
+// flushActivity. It locks the worker's row of activity_writes first, so a
+// write tried again waits for a first try that is still under way. The
+// caller sorts the rows by minute, then by the bytes of the queue name, so
+// that concurrent flushes lock rows in one order.
 const addActivitySQL = `
-WITH added AS (
-    INSERT INTO {s}.activity AS a (minute, queue, completed, failed)
-    SELECT m, q, c, f FROM unnest($1::timestamptz[], $2::text[], $3::integer[], $4::integer[]) AS u(m, q, c, f)
-    ON CONFLICT (minute, queue) DO UPDATE
-    SET completed = a.completed + excluded.completed, failed = a.failed + excluded.failed
+WITH claimed AS (
+    INSERT INTO {s}.activity_writes AS w (worker, last_write) VALUES ($5, $6)
+    ON CONFLICT (worker) DO UPDATE SET last_write = excluded.last_write, written_at = now()
+    WHERE w.last_write < excluded.last_write
+    RETURNING 1
 )
-SELECT pg_current_xact_id()`
-
-// $1 a transaction's ID.
-//
-// xactStatusSQL returns whether transaction $1 committed, was aborted, or
-// is still in progress, or NULL if it is too old for the server to know.
-// It fails with SQLSTATE 22023 if the server never assigned the ID.
-const xactStatusSQL = `SELECT pg_xact_status($1::xid8)`
+INSERT INTO {s}.activity AS a (minute, queue, completed, failed)
+SELECT m, q, c, f FROM unnest($1::timestamptz[], $2::text[], $3::integer[], $4::integer[]) AS u(m, q, c, f)
+WHERE EXISTS (SELECT FROM claimed)
+ON CONFLICT (minute, queue) DO UPDATE
+SET completed = a.completed + excluded.completed, failed = a.failed + excluded.failed`
 
 // $1 since, $2 before, $3 step in seconds, $4 queues.
 //

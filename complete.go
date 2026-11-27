@@ -308,7 +308,7 @@ func (w *Worker) completeHeld(ctx context.Context, t *liveAttempt) {
 // whose own rows they held, and the tasks that it completed. A task whose
 // attempt no longer owns it lost its lease, and is in none of them. A task
 // whose group has no row, which should not happen, completes all the same,
-// and leaveGroups reports it.
+// and the recount logs it.
 func (w *Worker) completeGrouped(ctx context.Context, conn *pgxpool.Conn, waitGroup bool, ts []*liveAttempt) (groupHeld, taskHeld []*liveAttempt, done []completedTask, err error) {
 	queues := make([]string, len(ts))
 	groups := make([]string, len(ts))
@@ -358,10 +358,10 @@ func (w *Worker) completeGrouped(ctx context.Context, conn *pgxpool.Conn, waitGr
 	for _, t := range ts {
 		key := groupID{t.info.Queue, t.info.GroupKey}
 		switch {
-		case completed[t.att.id]:
+		case completed[t.att.id], !held[t.att.id]: // it completed, or lost its lease
 		case groupExists[key] && !groupLocked[key]:
 			groupHeld = append(groupHeld, t)
-		case held[t.att.id]:
+		default:
 			taskHeld = append(taskHeld, t)
 		}
 	}
@@ -377,7 +377,7 @@ func (w *Worker) completeGrouped(ctx context.Context, conn *pgxpool.Conn, waitGr
 	b = &pgx.Batch{}
 	sql, args := l.recount()
 	b.Queue(sql, args...).Query(func(r pgx.Rows) error { return l.readRecount(ctx, r) })
-	sql, args = l.settle()
+	sql, args = l.settle(l.asked, l.heads) // the recount is not read yet
 	b.Queue(sql, args...).Query(func(r pgx.Rows) error { return l.readSettle(r) })
 	b.Queue("COMMIT")
 	if err := conn.SendBatch(ctx, b).Close(); err != nil {

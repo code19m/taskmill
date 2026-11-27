@@ -92,25 +92,26 @@ type statements struct {
 	pauseSchedule    string
 
 	// sql_maintenance.go: the maintainer's work, and the workers' rows.
-	upsertWorker     string
-	checkInWorker    string
-	deleteWorker     string
-	electMaintainer  string
-	resignMaintainer string
-	promoteDue       string
-	wakeQueues       string
-	rescue           string
-	rescueBackoff    string
-	deleteFinished   string
-	deleteDedupeKeys string
-	deleteWorkers    string
-	deleteActivity   string
-	expiredHistory   string
-	pruneSchedules   string
-	otherSchedules   string
-	loadSchedules    string
-	upsertSchedule   string
-	advanceSchedule  string
+	upsertWorker         string
+	checkInWorker        string
+	deleteWorker         string
+	electMaintainer      string
+	resignMaintainer     string
+	promoteDue           string
+	wakeQueues           string
+	rescue               string
+	rescueBackoff        string
+	deleteFinished       string
+	deleteDedupeKeys     string
+	deleteWorkers        string
+	deleteActivity       string
+	deleteActivityWrites string
+	expiredHistory       string
+	pruneSchedules       string
+	otherSchedules       string
+	loadSchedules        string
+	upsertSchedule       string
+	advanceSchedule      string
 
 	// sql_lists.go: read tasks, groups, queues, workers, and schedules.
 	getTask         string
@@ -240,25 +241,26 @@ func newStatements(schema string) *statements {
 		runSchedule:      q(runScheduleSQL),
 		pauseSchedule:    q(pauseScheduleSQL),
 
-		upsertWorker:     q(upsertWorkerSQL),
-		checkInWorker:    q(checkInWorkerSQL),
-		deleteWorker:     q(deleteWorkerSQL),
-		electMaintainer:  q(electMaintainerSQL),
-		resignMaintainer: q(resignMaintainerSQL),
-		promoteDue:       q(promoteDueSQL),
-		wakeQueues:       q(wakeQueuesSQL),
-		rescue:           q(rescueSQL),
-		rescueBackoff:    q(rescueBackoffSQL),
-		deleteFinished:   q(deleteFinishedSQL),
-		deleteDedupeKeys: q(deleteDedupeKeysSQL),
-		deleteWorkers:    q(deleteWorkersSQL),
-		deleteActivity:   q(deleteActivitySQL),
-		expiredHistory:   q(expiredHistorySQL),
-		pruneSchedules:   q(pruneSchedulesSQL),
-		otherSchedules:   q(otherSchedulesSQL),
-		loadSchedules:    q(loadSchedulesSQL),
-		upsertSchedule:   q(upsertScheduleSQL),
-		advanceSchedule:  q(advanceScheduleSQL),
+		upsertWorker:         q(upsertWorkerSQL),
+		checkInWorker:        q(checkInWorkerSQL),
+		deleteWorker:         q(deleteWorkerSQL),
+		electMaintainer:      q(electMaintainerSQL),
+		resignMaintainer:     q(resignMaintainerSQL),
+		promoteDue:           q(promoteDueSQL),
+		wakeQueues:           q(wakeQueuesSQL),
+		rescue:               q(rescueSQL),
+		rescueBackoff:        q(rescueBackoffSQL),
+		deleteFinished:       q(deleteFinishedSQL),
+		deleteDedupeKeys:     q(deleteDedupeKeysSQL),
+		deleteWorkers:        q(deleteWorkersSQL),
+		deleteActivity:       q(deleteActivitySQL),
+		deleteActivityWrites: q(deleteActivityWritesSQL),
+		expiredHistory:       q(expiredHistorySQL),
+		pruneSchedules:       q(pruneSchedulesSQL),
+		otherSchedules:       q(otherSchedulesSQL),
+		loadSchedules:        q(loadSchedulesSQL),
+		upsertSchedule:       q(upsertScheduleSQL),
+		advanceSchedule:      q(advanceScheduleSQL),
 
 		getTask:         q(getTaskSQL),
 		listTasks:       q(listTasksSQL),

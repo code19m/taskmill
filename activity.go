@@ -51,9 +51,10 @@ type Activity struct {
 	// Completed and Failed are the attempts that succeeded and failed during
 	// the step. Failed counts every failed attempt, whether its task is
 	// retried or dead, including attempts whose workers lost their leases.
-	// Workers write their counts every 10 seconds; a worker that crashes
-	// loses its last few seconds of them, and a worker drops the counts
-	// that it could not write for 1 hour.
+	// Workers write their counts every 10 seconds, and add each once. A
+	// worker that crashes, or that stops while it cannot write, loses the
+	// counts that it has not written, and a worker drops the counts that it
+	// could not write for 1 hour.
 	Completed, Failed int64
 }
 
@@ -198,28 +199,6 @@ func (t *tally) take() map[tallyKey]tallyCount {
 	return counts
 }
 
-// restore puts back counts that could not be written, except those too old
-// to be worth keeping, so that a long outage cannot grow them without bound.
-func (t *tally) restore(counts map[tallyKey]tallyCount) {
-	oldest := time.Now().Add(-tallyMaxAge).Unix()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.counts == nil {
-		t.counts = map[tallyKey]tallyCount{}
-	}
-
-	for key, c := range counts {
-		if key.minute < oldest {
-			continue
-		}
-		now := t.counts[key]
-		now.completed += c.completed
-		now.failed += c.failed
-		t.counts[key] = now
-	}
-}
-
 // countCompleted adds completed tasks to the worker's tally.
 func (w *Worker) countCompleted(done []completedTask) {
 	for _, d := range done {
@@ -246,18 +225,19 @@ func (w *Worker) activityLoop(ctx context.Context) {
 }
 
 // flushActivity adds the attempts counted since the last flush to the
-// activity table. Counts it cannot write are kept for the next try.
-//
-// A write that runs out of time may still commit: its commit can outlast
-// the deadline, as when it waits for a synchronous standby, and the server
-// finishes it although the worker no longer waits for the answer. So a
-// write learns its transaction's ID before it commits, and when its commit
-// fails, the next flush asks PostgreSQL what became of it, and writes
-// nothing else until it knows: the counts are added again only if the
-// write did not commit. At most one write is in doubt at a time, so a
-// standby that lags does not pile up connections that wait for it.
+// activity table. A write that fails is tried again, with the same counts,
+// before any other: it may have committed all the same, as a commit that
+// outlasts the deadline does when it waits for a synchronous standby. So
+// each write has a number, one more than the worker's last, and adds its
+// counts only if it raises the number that the worker's row of
+// activity_writes holds: a write tried again adds them once. The number
+// commits with the counts, so it holds after a failover too, and a write
+// tried again while the first try is still under way waits for its end.
+// At most one write is unwritten at a time, so a standby that lags does
+// not pile up connections that wait for it, and the counts made meanwhile
+// wait in the tally.
 func (w *Worker) flushActivity(ctx context.Context) {
-	if w.unsure != nil && !w.settleUnsure(ctx) {
+	if w.unwritten != nil && !w.writeActivity(ctx) {
 		return
 	}
 
@@ -265,55 +245,37 @@ func (w *Worker) flushActivity(ctx context.Context) {
 	if len(counts) == 0 {
 		return
 	}
-
-	xid, err := w.addActivity(ctx, counts)
-	w.activityFailures.observe(ctx, err)
-	switch {
-	case err == nil:
-	case xid != 0: // the commit failed: the write may have committed all the same
-		w.unsure = &unsureWrite{xid: xid, counts: counts}
-	default: // nothing was committed
-		w.tally.restore(counts)
-	}
+	w.writes++
+	w.unwritten = &activityWrite{number: w.writes, counts: counts}
+	w.writeActivity(ctx)
 }
 
-// unsureWrite is a write of counts to the activity table whose commit
-// failed, so that it may or may not have committed.
-type unsureWrite struct {
-	xid    uint64 // its transaction's ID
+// activityWrite is a write of counts to the activity table.
+type activityWrite struct {
+	number int64 // the worker's writes so far, this one included
 	counts map[tallyKey]tallyCount
 }
 
-// settleUnsure asks PostgreSQL whether the transaction of w.unsure
-// committed, and reports whether it knows now. If the transaction did not
-// commit, it puts the counts back in the tally. A transaction that the
-// server does not know yet, as after a failover to a standby that lacks it,
-// did not commit there.
-func (w *Worker) settleUnsure(ctx context.Context) bool {
-	var status *string
-	err := w.client.pool.QueryRow(ctx, xactStatusSQL, w.unsure.xid).Scan(&status)
-	switch {
-	case pgCode(err) == codeInvalidParameterValue: // the ID is in the future
-	case err != nil:
-		w.activityFailures.observe(ctx, err)
-		return false
-	case status == nil: // so old that the server no longer knows: cannot happen within tallyMaxAge
-	case *status == "committed":
-		w.unsure = nil
-		return true
-	case *status == "in progress": // its commit still waits, as for a standby
+// writeActivity writes w.unwritten, and reports whether it succeeded. It
+// drops the counts too old to be worth keeping, so that a long outage
+// cannot keep them without bound.
+func (w *Worker) writeActivity(ctx context.Context) bool {
+	oldest := time.Now().Add(-tallyMaxAge).Unix()
+	maps.DeleteFunc(w.unwritten.counts, func(k tallyKey, _ tallyCount) bool { return k.minute < oldest })
+
+	err := w.addActivity(ctx, w.unwritten)
+	w.activityFailures.observe(ctx, err)
+	if err != nil {
 		return false
 	}
-	w.tally.restore(w.unsure.counts)
-	w.unsure = nil
+	w.unwritten = nil
 	return true
 }
 
-// addActivity adds counts to the activity table, in a transaction that
-// returns its ID before it commits. It returns the ID if the commit
-// failed, and 0 if the transaction failed before it.
-func (w *Worker) addActivity(ctx context.Context, counts map[tallyKey]tallyCount) (xid uint64, err error) {
-	keys := slices.SortedFunc(maps.Keys(counts), func(a, b tallyKey) int {
+// addActivity adds the counts of write to the activity table, unless an
+// earlier try of it committed.
+func (w *Worker) addActivity(ctx context.Context, write *activityWrite) error {
+	keys := slices.SortedFunc(maps.Keys(write.counts), func(a, b tallyKey) int {
 		return cmp.Or(cmp.Compare(a.minute, b.minute), cmp.Compare(a.queue, b.queue))
 	})
 
@@ -322,32 +284,18 @@ func (w *Worker) addActivity(ctx context.Context, counts map[tallyKey]tallyCount
 	completed := make([]int32, len(keys))
 	failed := make([]int32, len(keys))
 	for i, k := range keys {
-		c := counts[k]
+		c := write.counts[k]
 		minutes[i], queues[i] = time.Unix(k.minute, 0), k.queue
 		completed[i], failed[i] = int32(min(c.completed, 1<<31-1)), int32(min(c.failed, 1<<31-1)) //nolint:gosec // capped
 	}
 
-	conn, err := w.client.pool.Acquire(ctx)
-	if err != nil {
-		return 0, err
-	}
-	// A connection released inside the transaction is closed, and the
-	// server rolls the transaction back: it never got a COMMIT.
-	defer conn.Release()
-
-	b := &pgx.Batch{}
-	b.Queue("BEGIN")
-	b.Queue(w.client.sql.addActivity,
-		minutes,   // $1
-		queues,    // $2
-		completed, // $3
-		failed,    // $4
-	).QueryRow(func(r pgx.Row) error { return r.Scan(&xid) })
-	if err := conn.SendBatch(ctx, b).Close(); err != nil {
-		return 0, err
-	}
-	if _, err := conn.Exec(ctx, "COMMIT"); err != nil {
-		return xid, err
-	}
-	return 0, nil
+	_, err := w.client.pool.Exec(ctx, w.client.sql.addActivity,
+		minutes,      // $1
+		queues,       // $2
+		completed,    // $3
+		failed,       // $4
+		w.id,         // $5
+		write.number, // $6
+	)
+	return err
 }

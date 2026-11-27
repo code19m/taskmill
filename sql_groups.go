@@ -78,11 +78,12 @@ FROM unnest($1::text[], $2::text[], $3::integer[]) AS u(queue, group_key, n)
 WHERE g.queue = u.queue AND g.group_key = u.group_key
 RETURNING g.queue, g.group_key, g.tasks, g.halted_task_id IS NOT NULL`
 
-// $1 queues, $2 group keys, $3 queues and $4 group keys of groups whose
-// heads left, $5 channel, $6 queues to notify.
+// $1 queues and $2 group keys of groups that may count no task, $3 queues
+// and $4 group keys of groups whose heads left, $5 channel, $6 queues to
+// notify.
 //
-// settleGroupsSQL ends what tasks leaving groups ($1, $2) started: it
-// deletes the rows of the groups that count no task, and makes the oldest
+// settleGroupsSQL ends what tasks leaving groups started: it deletes the
+// rows of the groups ($1, $2) that count no task, and makes the oldest
 // pending task of each group ($3, $4) that still counts tasks and is not
 // halted its head. It returns the queues that got an available task, and
 // notifies channel $5 of those in $6. It must run as its own statement

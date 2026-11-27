@@ -1,8 +1,8 @@
 # Queue statistics and health
 
 This page explains how the maintainer counts the queues, how the counts
-show lag and stuck work, and why dashboards, gauges, autoscalers, and
-health probes never count the tasks themselves.
+show lag and stuck work, why dashboards, gauges, autoscalers, and health
+probes never count the tasks themselves, and how workers add activity.
 [Maintenance and notifications](schema-maintenance.md) has the maintainer's
 other work.
 
@@ -207,9 +207,42 @@ The cost: an application without an HTTP server must add one, or a few
 lines to an existing one, to expose health.
 [Kubernetes](../production/kubernetes.md) shows those lines.
 
+## Activity per minute
+
+`activity` has a row per minute and queue, kept for 24 hours, behind
+`Client.Activity` and the dashboard's charts. Two writers share a row,
+each with its own columns:
+
+- **The maintainer** copies the counts it stores in `queue_stats` into the
+  current minute, every 10 seconds, with zeros for known queues without
+  tasks. A minute keeps the most that it counted in each state. One with
+  `NULL` counts had no maintainer: a chart shows a gap, not an empty queue.
+- **Each worker** counts the attempts it ends, completed and failed, in
+  memory, and adds them to their minutes every 10 seconds, in a loop of its
+  own so that a slow write never delays a check-in. Counting in the
+  statements that record attempts would make every worker update the same
+  row with every result; adding them every 10 seconds costs one small upsert
+  per worker. A worker that crashes loses the counts of its last few
+  seconds, and one that stops tries to write them before it returns.
+
+Both writers lock rows in the order of minute, then queue name in byte
+order, so they cannot deadlock. `fillfactor = 70` keeps the repeated updates
+HOT, and the primary key leads with the minute, which serves both reading a
+period and deleting old rows.
+
+**A write tried again adds its counts once.** A write that fails may have
+committed all the same, as a commit that outlasts its deadline while it
+waits for a synchronous standby does. So a worker tries it again, with the
+same counts, before any other. Each write has a number, one more than the
+worker's last, and adds its counts only if it raises the number in the
+worker's row of `activity_writes`. The number commits with the counts, so
+it holds after a failover, where a transaction ID would not: a promoted
+standby hands out the same IDs again. A try made while the first still
+commits waits for that row.
+
 ## See also
 
-- [Storage schema](schema.md): the tables `queue_stats` and `activity`
+- [Storage schema](schema.md): the tables `queue_stats`, `activity`, and `activity_writes`
 - [Monitoring](../production/monitoring.md): the alerts on these values, and the limits of each signal
 - [Metrics and traces](../reference/metrics.md): the gauges that report them
 - [`QueueInfo` on pkg.go.dev](https://pkg.go.dev/github.com/code19m/taskmill#QueueInfo): what `Client.Queues` returns

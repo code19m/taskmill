@@ -784,12 +784,14 @@ func TestGroupedCompletionsTakeTwoRoundTrips(t *testing.T) {
 	t.Parallel()
 	trips := &groupedTrips{}
 	e := newTracedEnv(t, trips)
-	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(4)})
 
+	// The tasks are enqueued before the worker starts: a completion whose
+	// group's row an enqueue holds waits for it, in round trips of their own.
 	var ids []int64
 	for i := range 12 {
 		ids = append(ids, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: strconv.Itoa(i % 4)}))
 	}
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(4)})
 	for _, id := range ids {
 		e.waitState(t, id, taskmill.StateCompleted)
 	}

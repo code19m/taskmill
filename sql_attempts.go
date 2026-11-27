@@ -206,7 +206,9 @@ var completeSkippingSQL = strings.ReplaceAll(completeSkippingTemplate, "{group}"
 var completeGroupedSQL = strings.ReplaceAll(completeSkippingTemplate, "{group}", " AND "+groupFreeSQL)
 
 // completeSkippingTemplate is completeSkippingSQL, with {group} for what
-// else a task must match to complete.
+// else a task must match to complete. NOT IN reads held into a hash table:
+// NOT EXISTS can plan as a loop over held for each attempt, which took
+// twice as long for a batch of 500.
 const completeSkippingTemplate = `
 WITH attempts AS (
     SELECT DISTINCT id, lease_token FROM unnest($1::bigint[], $2::integer[]) AS u(id, lease_token)
@@ -218,7 +220,7 @@ WITH attempts AS (
 SELECT id, queue, coalesce(group_key, ''), true, freed_key, freed_key_expires_at FROM done
 UNION ALL
 SELECT t.id, '', '', false, NULL, NULL FROM attempts a JOIN {s}.tasks t USING (id, lease_token)
-WHERE NOT EXISTS (SELECT FROM held WHERE held.id = a.id) AND ` + leasedSQL
+WHERE a.id NOT IN (SELECT id FROM held) AND ` + leasedSQL
 
 // completeHeldSQL is the part of completeSQL and completeSkippingSQL
 // that finishes the tasks held: it deletes them, and copies those that

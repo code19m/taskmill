@@ -201,7 +201,6 @@ func (e *SnoozeError) Error() string {
 // language.
 const (
 	codeDataException         = "22" // a class: every code that starts with it
-	codeInvalidParameterValue = "22023"
 	codeCheckViolation        = "23514"
 	codeDeadlockDetected      = "40P01"
 	codeInsufficientPrivilege = "42501"

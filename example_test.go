@@ -424,6 +424,7 @@ func ExampleMigrations() {
 	// 0007_created_order
 	// 0008_worker_schedules
 	// 0009_group_heads
+	// 0010_activity_writes
 }
 
 // This example retries every dead task of one queue, once the cause of their

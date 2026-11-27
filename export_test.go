@@ -117,11 +117,18 @@ func SetTiming(w *Worker, t Timing) {
 	set(&w.timing.activity, t.Activity)
 }
 
-// FlushActivityInDoubt flushes w's activity after a write of completed
-// attempts to queue, in transaction xid, whose commit failed.
-func FlushActivityInDoubt(ctx context.Context, w *Worker, xid uint64, queue string, completed int) {
-	w.unsure = &unsureWrite{xid: xid, counts: map[tallyKey]tallyCount{
-		{minute: time.Now().Truncate(time.Minute).Unix(), queue: queue}: {completed: completed},
+// Tally counts completed attempts of queue in w's tally, as attempts that
+// end do.
+func Tally(w *Worker, queue string, completed int) {
+	w.tally.add(queue, completed, 0)
+}
+
+// FlushActivityAgain flushes w's activity after write number failed, which
+// adds completed attempts to queue, in the minute age ago.
+func FlushActivityAgain(ctx context.Context, w *Worker, number int64, queue string, completed int, age time.Duration) {
+	w.writes = max(w.writes, number)
+	w.unwritten = &activityWrite{number: number, counts: map[tallyKey]tallyCount{
+		{minute: time.Now().Add(-age).Truncate(time.Minute).Unix(), queue: queue}: {completed: completed},
 	}}
 	w.activityFailures = newIncidentLog(w, "record activity") // as Run sets it
 	w.flushActivity(ctx)

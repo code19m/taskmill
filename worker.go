@@ -153,7 +153,8 @@ type Worker struct {
 	resigned  chan struct{}             // the maintainer resigned: this worker's maintainer tries to take over now
 	silent    atomic.Bool               // the worker logged that heartbeats do not arrive, and none has since
 	tally     tally                     // ended attempts not yet added to the activity
-	unsure    *unsureWrite              // a write of the tally whose commit failed: see flushActivity
+	unwritten *activityWrite            // a write of the tally that failed, to try again: see flushActivity
+	writes    int64                     // the worker's writes of the tally so far
 	recording sync.WaitGroup            // Run's attempts whose results are being recorded
 
 	mu       sync.Mutex
