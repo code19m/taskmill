@@ -29,8 +29,8 @@ All notable changes to taskmill are recorded here. The format follows
   idle connections one at a time, each for a thirtieth of the lease, so
   with many of them the leases could run out first, and the tasks run
   twice. Now, once one does not answer, the worker pings all of the pool's
-  idle connections at once, and the pool closes those that do not answer
-  either.
+  idle connections at the same time, and the pool closes those that do not
+  answer either.
 - A worker adds its counts of ended attempts to the activity once, also
   when a write of them failed but committed all the same, as one whose
   commit outlasted its deadline while it waited for a synchronous standby.

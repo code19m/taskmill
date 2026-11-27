@@ -488,11 +488,11 @@ const poolFull = "the pool was full, so the worker waited for a connection; " +
 // may never answer, so while the pool has idle connections, each try has a
 // thirtieth of the lease: the pool closes a connection whose ping ran out,
 // and the next try takes another, or opens one. The other idle connections
-// may have stopped answering too, so a try that ran out has them checked
-// all at once: see checkIdle. A slow ping of a healthy connection fails
-// too, so LeaseDuration's docs ask for a lease above 30 round trips: a
-// floor on the try's time would let stale connections outlast a short
-// lease after a failover instead.
+// may have stopped answering too, so a try that ran out has them all
+// checked at the same time: see checkIdle. A slow ping of a healthy
+// connection fails too, so LeaseDuration's docs ask for a lease above 30
+// round trips: a floor on the try's time would let stale connections
+// outlast a short lease after a failover instead.
 func (w *Worker) take(ctx context.Context, idle bool) (*pgxpool.Conn, error) {
 	for idle {
 		tryCtx, cancel := context.WithTimeout(ctx, w.cfg.LeaseDuration/30)
@@ -510,8 +510,8 @@ func (w *Worker) take(ctx context.Context, idle bool) (*pgxpool.Conn, error) {
 	return w.client.pool.Acquire(ctx)
 }
 
-// checkIdle pings every idle connection of the pool at once, in the
-// background, unless such a check is under way. The pool closes those
+// checkIdle pings every idle connection of the pool at the same time, in
+// the background, unless such a check is under way. The pool closes those
 // that do not answer within a thirtieth of the lease, and keeps the
 // others. A pool keeps many connections idle, and after a failover that
 // left them behind, tries that took them one at a time, a thirtieth of the
