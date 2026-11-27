@@ -186,9 +186,10 @@ func TestActivityWriteThatFailedGoesFirst(t *testing.T) {
 }
 
 // A worker that could not write its counts for an hour drops them, and
-// still writes once the database answers again, so that its log of the
-// failed writes ends, also when it counts nothing more. Here the failed
-// write's counts are over an hour old when the database answers.
+// still tries the write, so that its log of the failed writes ends once the
+// database answers, and not before, also when it counts nothing more. Here
+// a transaction holds activity_writes while the write fails, and again an
+// hour later, when its counts have aged out.
 func TestActivityRecoveryIsLoggedAfterTheCountsAgeOut(t *testing.T) {
 	t.Parallel()
 	logs := &logRecorder{}
@@ -197,17 +198,27 @@ func TestActivityRecoveryIsLoggedAfterTheCountsAgeOut(t *testing.T) {
 
 	busy := e.begin(t)
 	e.txExec(t, busy, "LOCK TABLE {s}.activity_writes")
-	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
-	taskmill.FlushActivityAgain(ctx, w, 1, taskmill.DefaultQueue, 3, 0)
-	cancel()
+	for _, age := range []time.Duration{0, 61 * time.Minute} {
+		ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+		taskmill.FlushActivityAgain(ctx, w, 1, taskmill.DefaultQueue, 3, age)
+		cancel()
+	}
+	// pgx cancels a statement after its deadline, from another connection:
+	// one that waits for the lock when it ends could still commit.
+	waitFor(t, "the failed writes to stop waiting", func() bool {
+		return e.count(t, "SELECT count(*) FROM pg_locks WHERE relation = '{s}.activity_writes'::regclass AND NOT granted") == 0
+	})
 	if err := busy.Rollback(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if n := logs.count("operation failed"); n != 1 {
 		t.Fatalf("got %d lines of a failed write, want 1", n)
 	}
+	if n := logs.count("operation recovered"); n != 0 {
+		t.Fatal("a recovery was logged while the write still failed")
+	}
 
-	taskmill.FlushActivityAgain(t.Context(), w, 1, taskmill.DefaultQueue, 3, 61*time.Minute) // the same write, an hour later
+	taskmill.FlushActivity(t.Context(), w)
 	if n := logs.count("operation recovered"); n != 1 {
 		t.Errorf("got %d lines of a recovery, want 1", n)
 	}
