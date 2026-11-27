@@ -12,7 +12,7 @@ import { say, trace, traced, untrace } from "./charts.js";
 import { assets, assetsOf, inflight, load, loadWhole, notify, page, progress, SLOW_MS } from "./core.js";
 import { dialog, release, showDialogPart } from "./dialog.js";
 import { livePage, schedule, showLiveStatus, startUpdates } from "./live.js";
-import { openMenus, refine, shut } from "./menus.js";
+import { openMenus, placeMenu, refine, shut } from "./menus.js";
 import { highlight, morph, syncAttributes } from "./morph.js";
 import { count, localise } from "./times.js";
 import { describe, hint, placeHint, tipFor, undescribe } from "./tips.js";
@@ -78,8 +78,12 @@ export function apply(result, fresh = false) {
   if (hint?.matches(":popover-open")) placeHint();
 
   // The newer copy lists every option of a menu, and none that a search
-  // found on the server: an open menu shows its search again.
-  for (const sel of openMenus()) refine(sel);
+  // found on the server: an open menu shows its search again. Its copy has
+  // none of the classes that placed it: it is placed again.
+  for (const sel of openMenus()) {
+    refine(sel);
+    placeMenu(sel);
+  }
   if (about?.isConnected) describe(about);
 }
 

@@ -154,14 +154,25 @@ export function refine(sel) {
   findMore(sel, field.value);
 }
 
-// placeMenu opens a menu toward the side with room, and shows it.
-function placeMenu(sel) {
+// placeMenu opens a menu toward the side with room, and shows it: a page
+// that morphs takes away the classes that place it, and the "/" key focuses
+// its search before its toggle event.
+export function placeMenu(sel) {
   const pop = sel.querySelector(".pop");
   pop.classList.remove("pop-end", "pop-up");
   const box = pop.getBoundingClientRect();
   if (box.right > innerWidth - 8) pop.classList.add("pop-end");
   if (box.bottom > innerHeight - 8 && sel.getBoundingClientRect().top > box.height + 16) pop.classList.add("pop-up");
   sel.dataset.jsPlaced = "";
+}
+
+// opened readies a menu that opened: the others close, a range draws its
+// calendar, and the menu is placed and takes the focus.
+function opened(sel) {
+  for (const other of openMenus()) if (other !== sel) other.open = false;
+  if (sel.matches(".sel-range")) openCalendar(sel);
+  placeMenu(sel);
+  if (!coarse.matches) (sel.querySelector("[data-sel-search]") || boxes(sel)[0])?.focus({ preventScroll: true });
 }
 
 // listen listens to the menus: they open, close, search, and apply as the
@@ -185,11 +196,11 @@ export function listen() {
       return;
     }
 
-    for (const other of openMenus()) if (other !== sel) other.open = false;
-    if (sel.matches(".sel-range")) openCalendar(sel);
-    placeMenu(sel);
-    if (!coarse.matches) (field || boxes(sel)[0])?.focus({ preventScroll: true });
+    opened(sel);
   }, true);
+  // A menu that the reader opened while the script loaded had no toggle
+  // event that the script heard. The first one readied closes the others.
+  for (const sel of openMenus()) if (sel.open) opened(sel);
 
   // A press outside a menu closes it.
   on("pointerdown", (event) => {

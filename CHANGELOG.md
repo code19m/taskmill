@@ -32,9 +32,13 @@ All notable changes to taskmill are recorded here. The format follows
 - Completing a batch of 500 tasks took up to twice as long as it needs
   when PostgreSQL planned the statement for that batch, as it does for
   every statement with pgx's `QueryExecModeExec`.
-- A menu of the dashboard that opens toward the left, such as the range of
-  time at the end of the filters, no longer shows for a frame where it does
-  not fit before it moves, which could also send a quick click past it.
+- The dashboard's menus show only where they stay. One that opens toward
+  the left, such as the range of time at the end of the filters, showed for
+  a frame where it does not fit, which could also send a quick click past
+  it. One that stayed open while its list showed anew, as after adding a
+  value that was typed, moved back past the edge of the window. And one
+  opened while the page's script loaded was not placed, and the range of
+  time had no calendar.
 
 ## [0.18.0] - 2026-11-27
 

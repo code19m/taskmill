@@ -86,6 +86,9 @@ type site struct {
 	// missing names a static file that the site answers 404 for, as a
 	// server of 0.15 does for every module during a rolling deploy.
 	missing atomic.Value // string
+	// held is a static file that the site answers only once it is
+	// released, as a slow network delivers it late.
+	held atomic.Pointer[heldFile]
 
 	mu    sync.Mutex
 	live  []liveRequest // the requests of the script for a page, in the order of their answers
@@ -144,6 +147,9 @@ func newSiteWith(t *testing.T, cfg *ui.Config) *site {
 				http.NotFound(w, r)
 				return
 			}
+			if held := s.held.Load(); held != nil && strings.HasSuffix(r.URL.Path, "/"+held.name) {
+				<-held.released
+			}
 		} else if s.old.Load() && r.Header.Get("X-Taskmill-Live") == "" {
 			serveOld(h, w, r)
 			return
@@ -180,6 +186,23 @@ func serveOld(h http.Handler, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.Itoa(len(page)))
 	w.WriteHeader(rec.Code)
 	_, _ = w.Write(page)
+}
+
+// heldFile is a static file that the site answers once released closes.
+type heldFile struct {
+	name     string
+	released chan struct{}
+}
+
+// hold has the site answer for the static file name only once release is
+// called, or the test ends.
+func (s *site) hold(t *testing.T, name string) (release func()) {
+	t.Helper()
+	held := &heldFile{name: name, released: make(chan struct{})}
+	s.held.Store(held)
+	release = sync.OnceFunc(func() { close(held.released) })
+	t.Cleanup(release) // before the server closes, which waits for the answer
+	return release
 }
 
 // staticFiles returns the paths of the static files that the browser asked
@@ -290,6 +313,18 @@ func (s *site) open(t *testing.T, path string) *page {
 	t.Helper()
 	p := newTab(t)
 	p.do(chromedp.Navigate(s.url + path))
+	return p
+}
+
+// start opens path in a new tab, and returns once the browser has the page,
+// before it loads: its scripts may still load.
+func (s *site) start(t *testing.T, path string) *page {
+	t.Helper()
+	p := newTab(t)
+	p.do(chromedp.Func(func(ctx context.Context, target *chromedp.Target) error {
+		_, err := cdp.Call(ctx, target, cdppage.Navigate, cdppage.NavigateParams{URL: s.url + path})
+		return err
+	}))
 	return p
 }
 

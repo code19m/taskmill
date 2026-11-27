@@ -52,6 +52,7 @@ on("keydown", (event) => {
   if (sel) {
     event.preventDefault();
     sel.open = true;
+    menus.placeMenu(sel); // its search shows now, so that it takes the focus and the keys that follow
     sel.querySelector("[data-sel-search]")?.focus();
   }
 });

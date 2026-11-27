@@ -164,6 +164,75 @@ func TestRangePresetShowsItsListInPlace(t *testing.T) {
 	}
 }
 
+// A menu shows only once the script has placed it, toward the side with
+// room: in the task that opens it, it is hidden, so that no frame shows it
+// where it does not fit, and no press lands where it was. The range menu
+// ends the filters, and opens toward the left.
+func TestMenuShowsOnceItIsPlaced(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/tasks")
+	if !eval[bool](p, `(() => {
+		const sel = document.querySelector(".sel-range");
+		sel.open = true;
+		return !sel.querySelector(".pop").checkVisibility({ visibilityProperty: true });
+	})()`) {
+		t.Error("the menu showed before the script placed it")
+	}
+	p.waitFor(`document.querySelector(".sel-range[data-js-placed] > .pop")?.checkVisibility({ visibilityProperty: true })`, "the menu showing")
+	if !eval[bool](p, `document.querySelector(".sel-range > .pop").getBoundingClientRect().right <= innerWidth`) {
+		t.Error("the menu runs past the window")
+	}
+}
+
+// A menu that the reader opens while the script loads shows as before, and
+// once the script starts, it is readied as one that opens then: placed,
+// with its calendar drawn.
+func TestMenuOpenedWhileTheScriptLoads(t *testing.T) {
+	s := newSite(t)
+	release := s.hold(t, "app.js")
+	p := s.start(t, "/tasks")
+	p.waitFor(`document.querySelector(".sel-range > summary")`, "the page")
+	p.click(".sel-range > summary")
+	const shows = `document.querySelector(".sel-range[open] > .pop")?.checkVisibility({ visibilityProperty: true })`
+	p.waitFor(shows, "the menu opening")
+
+	release()
+	p.waitFor(`document.documentElement.classList.contains("js-started")`, "the script starting")
+	if !eval[bool](p, shows+` && document.querySelector(".sel-range > .pop").getBoundingClientRect().right <= innerWidth`) {
+		t.Error("the menu is hidden, or runs past the window")
+	}
+	if !eval[bool](p, `document.querySelector(".sel-range .cal-grid").children.length > 0`) {
+		t.Error("the menu has no calendar")
+	}
+}
+
+// A menu that stays open while its page shows anew, as one that adds the
+// value that the reader typed, keeps its place: the newer copy lacks the
+// classes that placed it. On a phone, the queue menu opens toward the left.
+func TestOpenMenuKeepsItsPlaceWhenItsPageShowsAnew(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/tasks")
+	p.do(chromedp.EmulateViewport(390, 844))
+	const sel = `document.querySelector('.sel[data-name="queue"]')`
+	p.click(`.sel[data-name="queue"] > summary`)
+	p.waitFor(sel+`.matches("[open][data-js-placed]")`, "the menu opening")
+	p.press("mail" + kb.Enter)
+	p.waitFor(`new URLSearchParams(location.search).get("queue") === "mail"`, "the list of mail")
+	if !eval[bool](p, sel+`.open && `+sel+`.querySelector(".pop").getBoundingClientRect().right <= innerWidth`) {
+		t.Error("the menu closed, or runs past the window")
+	}
+}
+
+// "/" opens the kind filter with its search focused: the keys typed right
+// after it search.
+func TestSlashSearchesTheKinds(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/tasks")
+	p.press("/email")
+	p.waitFor(`document.activeElement.matches('.sel[data-name="kind"] [data-sel-search]') && document.activeElement.value === "email"`,
+		"a search for email")
+}
+
 // An action that asks first asks in a dialog, which shows the page that
 // asks. Escape closes the dialog, sends nothing, and gives the focus back to
 // the button that opened it. Confirm sends the action, and the page that
