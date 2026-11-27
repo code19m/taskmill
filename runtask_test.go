@@ -239,13 +239,13 @@ func TestRunTaskRenewsALeaseThatEndedOnItsWay(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			e := newEnvWith(t, slowPool(t, 1<<19, nil), nil) // 512 KiB a second from the database
+			e := newEnvWith(t, slowPool(t, 1<<18, nil), nil) // 256 KiB a second from the database
 			if rescued {
 				direct := e.direct(t)
 				runWorker(t, direct, &taskmill.WorkerConfig{}) // the maintainer, which rescues
 				waitFor(t, "a maintainer", func() bool { return direct.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
 			}
-			id := e.enqueue(t, report{Name: strings.Repeat("x", 1_000_000)}, nil) // about 2 seconds on the way
+			id := e.enqueue(t, report{Name: strings.Repeat("x", 1_000_000)}, nil) // about 4 seconds on the way
 
 			var runs atomic.Int32
 			var hs taskmill.Handlers
@@ -256,7 +256,9 @@ func TestRunTaskRenewsALeaseThatEndedOnItsWay(t *testing.T) {
 					runs.Add(1)
 					return next(ctx)
 				}},
-				LeaseDuration: 500 * time.Millisecond,
+				// Renewals of half a second, which a busy machine needs, and
+				// ended long before the task arrives.
+				LeaseDuration: 1500 * time.Millisecond,
 				NoMaintainer:  true,
 			})
 
