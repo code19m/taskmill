@@ -151,7 +151,8 @@ func TestRangePresetShowsItsListInPlace(t *testing.T) {
 	entries := eval[int](p, `history.length`)
 
 	p.click(".sel-range > summary")
-	p.waitFor(`document.querySelector(".sel-range").open`, "the range's menu opening")
+	p.waitFor(`document.querySelector(".sel-range[open][data-js-placed] > .pop")?.checkVisibility({ visibilityProperty: true })`,
+		"the range's menu opening, placed")
 	p.click(".range-presets > a")
 	p.waitFor(`new URLSearchParams(location.search).has("since") && !document.querySelector(".range-presets > a[aria-current]")`,
 		"the list of the preset showing")
@@ -161,6 +162,122 @@ func TestRangePresetShowsItsListInPlace(t *testing.T) {
 	if !eval[bool](p, `window.loaded === true && history.length === `+strconv.Itoa(entries)) {
 		t.Error("the preset loaded the page anew, or added an entry to the history")
 	}
+}
+
+// A menu shows only once the script has placed it, toward the side with
+// room: in the task that opens it, it is hidden, so that no frame shows it
+// where it does not fit, and no press lands where it was. The range menu
+// ends the filters, and opens toward the left.
+func TestMenuShowsOnceItIsPlaced(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/tasks")
+	if !eval[bool](p, `(() => {
+		const sel = document.querySelector(".sel-range");
+		sel.open = true;
+		return !sel.querySelector(".pop").checkVisibility({ visibilityProperty: true });
+	})()`) {
+		t.Error("the menu showed before the script placed it")
+	}
+	p.waitFor(`document.querySelector(".sel-range[data-js-placed] > .pop")?.checkVisibility({ visibilityProperty: true })`, "the menu showing")
+	if !eval[bool](p, `document.querySelector(".sel-range > .pop").getBoundingClientRect().right <= innerWidth`) {
+		t.Error("the menu runs past the window")
+	}
+}
+
+// Menus that the reader opens while the script loads show as before. Once
+// the script starts, they are placed, the kind search runs what was typed,
+// and the range's calendar shows the month of the range's end; the focus,
+// and the menus that are open, stay as the reader left them, here in the
+// kind search with "zz" typed.
+func TestMenusOpenedWhileTheScriptLoads(t *testing.T) {
+	s := newSite(t)
+	s.enqueue(t, 2)
+	release := s.hold(t, "app.js")
+	p := s.start(t, "/tasks?since=2025-08-03T00:00:00Z&before=2025-08-10T00:00:00Z")
+	p.click(".sel-range > summary")
+	p.click(`.sel[data-name="kind"] > summary`)
+	p.click(`.sel[data-name="kind"] [data-sel-search]`)
+	p.press("zz") // a search that finds no kind
+	const shown = `[...document.querySelectorAll("details.sel[open] > .pop")].map((pop) => pop.checkVisibility({ visibilityProperty: true }) && pop.getBoundingClientRect().right <= innerWidth)`
+	if got := eval[[]bool](p, shown); len(got) != 2 {
+		t.Fatalf("got %d open menus while the script loads, want 2", len(got))
+	}
+
+	release()
+	p.waitFor(`document.documentElement.classList.contains("js-started")`, "the script starting")
+	if got := eval[[]bool](p, shown); !slices.Equal(got, []bool{true, true}) {
+		t.Errorf("of the open menus, these show within the window: %v, want both", got)
+	}
+	if got := eval[string](p, `document.getElementById("cal-title").textContent`); !strings.Contains(got, "2025") {
+		t.Errorf("the calendar shows %q, want a month of 2025", got)
+	}
+	if !eval[bool](p, `document.activeElement.matches('.sel[data-name="kind"] [data-sel-search]') && document.activeElement.value === "zz"`) {
+		t.Error("the kind search lost the focus, or its text")
+	}
+	const kind = `document.querySelector('.sel[data-name="kind"]')`
+	if !eval[bool](p, `!`+kind+`.querySelector("[data-sel-add]").hidden && [...`+kind+`.querySelectorAll(".pop-list .pop-opt")].every((row) => row.hidden)`) {
+		t.Error("the kind search did not run what was typed while the script loaded")
+	}
+}
+
+// A page that the back or forward button brings back comes without the
+// menu that was open on it, as the browser brings a page back: the menu is
+// closed, has forgotten its search, and the focus is on the page.
+func TestPageComesBackWithItsMenusClosed(t *testing.T) {
+	s := newSite(t)
+	s.enqueue(t, 2)
+	p := s.open(t, "/")
+	p.click(`.nav-item[href="/tasks"]`)
+	const kind = `document.querySelector('.sel[data-name="kind"]')`
+	p.waitFor(`location.pathname === "/tasks" && `+kind, "the tasks")
+	p.click(`.sel[data-name="kind"] > summary`)
+	p.waitFor(kind+`.matches("[open][data-js-placed]")`, "the menu opening")
+	p.press("zz") // a search that finds no kind
+	p.waitFor(`!`+kind+`.querySelector("[data-sel-add]").hidden`, "the search")
+
+	p.history(-1)
+	p.waitFor(`location.pathname === "/"`, "the back button")
+	// The menu as the forward button shows it, before the live update that
+	// follows can mend it: this listener runs right after the script's own.
+	p.run(`addEventListener("popstate", () => {
+		const sel = ` + kind + `;
+		window.cameBack = sel.querySelector("[data-sel-add]").hidden && sel.querySelectorAll(".pop-list .pop-opt[hidden]").length === 0;
+	}, { once: true })`)
+	p.history(1)
+	p.waitFor(`location.pathname === "/tasks" && `+kind, "the forward button")
+	if !eval[bool](p, `!document.querySelector("details.sel[open], details.sel[data-js-placed]") && document.activeElement === document.getElementById("main")`) {
+		t.Error("a menu came back open, or took the focus")
+	}
+	if !eval[bool](p, `window.cameBack`) {
+		t.Error("the menu came back with its search")
+	}
+}
+
+// A menu that stays open while its page shows anew, as one that adds the
+// value that the reader typed, keeps its place: the newer copy lacks the
+// classes that placed it. On a phone, the queue menu opens toward the left.
+func TestOpenMenuKeepsItsPlaceWhenItsPageShowsAnew(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/tasks")
+	p.do(chromedp.EmulateViewport(390, 844))
+	const sel = `document.querySelector('.sel[data-name="queue"]')`
+	p.click(`.sel[data-name="queue"] > summary`)
+	p.waitFor(sel+`.matches("[open][data-js-placed]")`, "the menu opening")
+	p.press("mail" + kb.Enter)
+	p.waitFor(`new URLSearchParams(location.search).get("queue") === "mail"`, "the list of mail")
+	if !eval[bool](p, sel+`.open && `+sel+`.querySelector(".pop").getBoundingClientRect().right <= innerWidth`) {
+		t.Error("the menu closed, or runs past the window")
+	}
+}
+
+// "/" opens the kind filter with its search focused: the keys typed right
+// after it search.
+func TestSlashSearchesTheKinds(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/tasks")
+	p.press("/email")
+	p.waitFor(`document.activeElement.matches('.sel[data-name="kind"] [data-sel-search]') && document.activeElement.value === "email"`,
+		"a search for email")
 }
 
 // An action that asks first asks in a dialog, which shows the page that

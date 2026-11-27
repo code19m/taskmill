@@ -139,9 +139,9 @@ What follows:
   dialogs, show a chart's values under the pointer and a tooltip without a
   wait, and show times in the reader's time zone. Every page also works
   without them. Nothing needs a JavaScript build step or third-party code.
-- **The script is native ES modules: about a dozen files of up to 280
-  lines.** We rejected one file: about 1,850 lines in one scope, with about
-  30 shared variables, were hard to change safely. A module adds no
+- **The script is native ES modules: about a dozen files of up to about
+  300 lines.** We rejected one file: about 1,850 lines in one scope, with
+  about 30 shared variables, were hard to change safely. A module adds no
   listener as it loads. `app.js` starts every module, so one file shows the
   order in which the listeners of an event run. It adds the listener that
   follows links last, so that a listener before it can take a click by

@@ -453,6 +453,10 @@ form { display: inline; margin: 0; }
   backdrop-filter: blur(32px) saturate(140%); -webkit-backdrop-filter: blur(32px) saturate(140%);
   box-shadow: var(--shadow-modal); animation: modal-in var(--motion-fast) var(--ease-out);
 }
+/* Once the script runs, it places a menu on its toggle event, which can
+   come after the browser has drawn it open. Until then the menu is hidden,
+   so that it never shows, or takes a press, where it does not stay. */
+.js-started .sel[open]:not([data-js-placed]) > .pop { visibility: hidden; }
 .pop.pop-end { left: auto; right: 0; }
 .pop.pop-up { top: auto; bottom: calc(100% + 6px); }
 .pop-list { overflow-y: auto; overscroll-behavior: contain; min-height: 0; }

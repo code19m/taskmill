@@ -12,7 +12,7 @@ import { say, trace, traced, untrace } from "./charts.js";
 import { assets, assetsOf, inflight, load, loadWhole, notify, page, progress, SLOW_MS } from "./core.js";
 import { dialog, release, showDialogPart } from "./dialog.js";
 import { livePage, schedule, showLiveStatus, startUpdates } from "./live.js";
-import { openMenus, refine, shut } from "./menus.js";
+import { forget, openMenus, placeMenu, refine, shut } from "./menus.js";
 import { highlight, morph, syncAttributes } from "./morph.js";
 import { count, localise } from "./times.js";
 import { describe, hint, placeHint, tipFor, undescribe } from "./tips.js";
@@ -78,8 +78,12 @@ export function apply(result, fresh = false) {
   if (hint?.matches(":popover-open")) placeHint();
 
   // The newer copy lists every option of a menu, and none that a search
-  // found on the server: an open menu shows its search again.
-  for (const sel of openMenus()) refine(sel);
+  // found on the server: an open menu shows its search again. Its copy has
+  // none of the classes that placed it: it is placed again.
+  for (const sel of openMenus()) {
+    refine(sel);
+    placeMenu(sel);
+  }
   if (about?.isConnected) describe(about);
 }
 
@@ -105,17 +109,26 @@ function inPlace(main, place) {
 
 // leave keeps the page on screen, before another one takes its place:
 // its title, its content, and the parts around it that an update changes.
-// What the script put there stays out: a chart's guide, and a hint's
-// place, in its style attribute. A page that does not update itself, such
-// as one at the address of the page whose action it refused, is not kept:
-// the browser loads the address again.
+// What the script put there stays out: a chart's guide, a hint's place, in
+// its style attribute, and an open menu, which the page comes back without,
+// as a page that the browser brings back does. A page that does not update
+// itself, such as one at the address of the page whose action it refused,
+// is not kept: the browser loads the address again.
 function leave() {
   untrace();
   undescribe(); // the page is kept with its titles
   pages.delete(entry);
   if (!livePage()) return;
   for (const pop of document.querySelectorAll(".hint-pop[style]")) pop.removeAttribute("style");
-  const parts = [document.getElementById("main"), ...document.querySelectorAll("[data-live-part]")];
+  const parts = [document.getElementById("main"), ...document.querySelectorAll("[data-live-part]")].map((part) => {
+    if (!part.querySelector("details.sel[open]")) return part;
+    const copy = part.cloneNode(true);
+    for (const sel of copy.querySelectorAll("details.sel[open]")) {
+      sel.open = false;
+      forget(sel);
+    }
+    return copy;
+  });
   pages.set(entry, { title: document.title, html: parts.map((part) => part.outerHTML).join(""), y: scrollY });
   if (pages.size > KEEP_PAGES) pages.delete(pages.keys().next().value);
 }

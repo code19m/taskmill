@@ -154,13 +154,44 @@ export function refine(sel) {
   findMore(sel, field.value);
 }
 
-// placeMenu opens a menu toward the side with room.
-function placeMenu(sel) {
+// placeMenu opens a menu toward the side with room, and shows it: a page
+// that morphs takes away the classes that place it, and the "/" key focuses
+// its search before its toggle event.
+export function placeMenu(sel) {
   const pop = sel.querySelector(".pop");
   pop.classList.remove("pop-end", "pop-up");
   const box = pop.getBoundingClientRect();
   if (box.right > innerWidth - 8) pop.classList.add("pop-end");
   if (box.bottom > innerHeight - 8 && sel.getBoundingClientRect().top > box.height + 16) pop.classList.add("pop-up");
+  sel.dataset.jsPlaced = "";
+}
+
+// placeOpen readies the menus that the reader opened while the script
+// loaded, which had no toggle event that the script heard: it runs a search
+// typed meanwhile, draws a range's calendar, and places them. The focus, and
+// which menus are open, stay as the reader left them.
+export function placeOpen() {
+  for (const sel of openMenus()) {
+    refine(sel);
+    if (sel.matches(".sel-range")) openCalendar(sel);
+    placeMenu(sel);
+  }
+}
+
+// forget clears what a closed menu does not keep: its place, its search,
+// and a range that was picked or typed and not applied. It works on a copy
+// of the page too.
+export function forget(sel) {
+  delete sel.dataset.jsPlaced;
+  const field = sel.querySelector("[data-sel-search]");
+  if (field?.value) {
+    field.value = "";
+    search(sel, "");
+  }
+  for (const input of sel.querySelectorAll("[data-bound]")) {
+    input.value = input.defaultValue;
+    input.setCustomValidity("");
+  }
 }
 
 // listen listens to the menus: they open, close, search, and apply as the
@@ -169,24 +200,15 @@ export function listen() {
   on("toggle", (event) => {
     const sel = event.target;
     if (!(sel instanceof HTMLDetailsElement) || !sel.matches(".sel")) return;
-    const field = sel.querySelector("[data-sel-search]");
     if (!sel.open) {
-      if (field?.value) {
-        field.value = "";
-        search(sel, "");
-      }
-      // A closed menu forgets a range that was picked or typed and not applied.
-      for (const input of sel.querySelectorAll("[data-bound]")) {
-        input.value = input.defaultValue;
-        input.setCustomValidity("");
-      }
+      forget(sel);
       return;
     }
 
     for (const other of openMenus()) if (other !== sel) other.open = false;
     if (sel.matches(".sel-range")) openCalendar(sel);
     placeMenu(sel);
-    if (!coarse.matches) (field || boxes(sel)[0])?.focus({ preventScroll: true });
+    if (!coarse.matches) (sel.querySelector("[data-sel-search]") || boxes(sel)[0])?.focus({ preventScroll: true });
   }, true);
 
   // A press outside a menu closes it.
