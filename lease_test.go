@@ -1245,9 +1245,7 @@ func leaveIdle(t *testing.T, pool *pgxpool.Pool, n int) []uint32 {
 // each connection that a check takes, but on one that a statement takes
 // only after its ping answered, or without a ping, if it was idle for less
 // than a second: so it sees a connection that stopped answering, and was
-// idle for longer, only if a check took it. pgx alone may close such
-// connections, without a ping, once a try's deadline passed before its
-// timer fired.
+// idle for longer, only if a check took it.
 type checked struct {
 	mu   sync.Mutex
 	pids map[uint32]bool
@@ -1255,6 +1253,13 @@ type checked struct {
 
 // checkedBy has cfg's pool record in the returned checked the connections
 // that checks take.
+//
+// It also keeps the pool from pinging a connection once the deadline of the
+// try that takes it has passed, until the try's context ends. pgx pings it
+// with that deadline, which fails at once, closes it, and takes the next
+// idle connection while the context's timer has not fired: on a busy
+// machine, one try can close every idle connection that way, without a
+// ping, and the test could not see what the check does.
 func checkedBy(cfg *pgxpool.Config) *checked {
 	c := &checked{pids: map[uint32]bool{}}
 	cfg.PrepareConn = func(_ context.Context, conn *pgx.Conn) (bool, error) {
@@ -1262,6 +1267,12 @@ func checkedBy(cfg *pgxpool.Config) *checked {
 		c.pids[conn.PgConn().PID()] = true
 		c.mu.Unlock()
 		return true, nil
+	}
+	cfg.ShouldPing = func(ctx context.Context, p pgxpool.ShouldPingParams) bool {
+		if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+			<-ctx.Done()
+		}
+		return p.IdleDuration > time.Second // pgx's default
 	}
 	return c
 }
