@@ -23,6 +23,31 @@ All notable changes to taskmill are recorded here. The format follows
 
 ### Fixed
 
+- A worker keeps its tasks' leases when the database stops answering on
+  the pool's open connections, as after a failover that leaves them
+  behind, also when the pool kept many of them idle, if it has room for new
+  connections. Its statements tried the idle connections one at a time,
+  each for a thirtieth of the lease, so with many of them the leases could
+  run out first, and the tasks run twice. Now the first try that runs out
+  has all of the pool's idle connections pinged at the same time, for a
+  thirtieth of the shortest lease of the client's workers: those that
+  answer go back to the pool, and the others are closed. Meanwhile,
+  handlers that share the pool open new connections, or wait if it is
+  full. While round trips to the database take longer than that, as when
+  it slows down for a moment, a check closes nearly every idle connection,
+  and the pool opens new ones. So the workers of a client check its pool
+  one at a time, and after a check that closed connections, each waits a
+  third of its own lease before it starts another. `Client.Close` ends a
+  check under way, and no check starts after it.
+- `Worker.RunTask` no longer cancels its handler as if the task's lease had
+  run out after it waited for the task's row, as while the transaction of
+  `Client.CancelTx` holds it. The database counts a lease from when it
+  takes the task, and the worker from when it asked: after a wait of over
+  two thirds of the lease, the worker saw it end before its first renewal.
+  Now `RunTask` renews such a lease before the handler starts, as `Run`
+  does after a slow fetch. So it also runs a task whose lease ended on its
+  way, if no maintainer rescued the task meanwhile, where it ran nothing,
+  and the task waited for a rescue, at the cost of an attempt.
 - A worker adds its counts of ended attempts to the activity once, also
   when a write of them failed but committed all the same, as one whose
   commit outlasted its deadline while it waited for a synchronous standby.

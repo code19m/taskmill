@@ -226,32 +226,53 @@ func TestRunTaskRefuses(t *testing.T) {
 
 // RunTask counts a lease from before it asks for the task, as Run does: the
 // database starts the lease later. A task whose row took longer than the
-// lease to arrive, as over a slow link, may already run on another worker,
-// so no middleware or handler runs it here: RunTask returns it, running.
-func TestRunTaskRunsNoTaskWhoseLeaseEndedOnItsWay(t *testing.T) {
+// lease to arrive, as over a slow link, may have been rescued on its way,
+// and run on another worker already. So RunTask renews the lease before
+// any middleware or handler runs, as Run does after a slow fetch: it runs
+// the task if it still holds it, and else nothing.
+func TestRunTaskRenewsALeaseThatEndedOnItsWay(t *testing.T) {
 	t.Parallel()
-	e := newEnvWith(t, slowPool(t, 1<<20, nil), nil)                      // 1 MiB a second from the database
-	id := e.enqueue(t, report{Name: strings.Repeat("x", 1_000_000)}, nil) // about a second on the way
+	for _, rescued := range []bool{false, true} {
+		name := "kept"
+		if rescued {
+			name = "rescued"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnvWith(t, slowPool(t, 1<<18, nil), nil) // 256 KiB a second from the database
+			if rescued {
+				direct := e.direct(t)
+				runWorker(t, direct, &taskmill.WorkerConfig{}) // the maintainer, which rescues
+				waitFor(t, "a maintainer", func() bool { return direct.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+			}
+			id := e.enqueue(t, report{Name: strings.Repeat("x", 1_000_000)}, nil) // about 4 seconds on the way
 
-	var runs atomic.Int32
-	var hs taskmill.Handlers
-	taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
-	w := newWorker(t, e, &taskmill.WorkerConfig{
-		Handlers: &hs,
-		Middleware: []taskmill.Middleware{func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
-			runs.Add(1)
-			return next(ctx)
-		}},
-		LeaseDuration: 500 * time.Millisecond,
-		NoMaintainer:  true,
-	})
+			var runs atomic.Int32
+			var hs taskmill.Handlers
+			taskmill.AddHandler(&hs, taskmill.HandlerFunc[report](func(context.Context, *taskmill.Task[report]) error { return nil }), nil)
+			w := newWorker(t, e, &taskmill.WorkerConfig{
+				Handlers: &hs,
+				Middleware: []taskmill.Middleware{func(ctx context.Context, _ *taskmill.TaskInfo, next func(context.Context) error) error {
+					runs.Add(1)
+					return next(ctx)
+				}},
+				// Renewals of half a second, which a busy machine needs, and
+				// ended long before the task arrives.
+				LeaseDuration: 1500 * time.Millisecond,
+				NoMaintainer:  true,
+			})
 
-	info, err := w.RunTask(t.Context(), id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n := runs.Load(); n != 0 || info.State != taskmill.StateRunning {
-		t.Errorf("the task ran %d times, and is %s; want none, and running", n, info.State)
+			info, err := w.RunTask(t.Context(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch n := runs.Load(); {
+			case !rescued && (n != 1 || info.State != taskmill.StateCompleted):
+				t.Errorf("the task ran %d times, and is %s; want once, and completed", n, info.State)
+			case rescued && (n != 0 || len(info.Errors) != 1 || info.Errors[0].Code != taskmill.CodeLeaseLost):
+				t.Errorf("the task ran %d times, with errors %+v; want none, and the rescue's", n, info.Errors)
+			}
+		})
 	}
 }
 

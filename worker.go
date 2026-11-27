@@ -222,8 +222,13 @@ type WorkerConfig struct {
 	// worker cancels the task's handler with [ErrLeaseLost]: from then on,
 	// the maintainer may rescue the task, and another worker run it. Keep
 	// it above 30 round trips to the database: a thirtieth of it bounds the
-	// ping of an idle connection. Minimum: 100 milliseconds. Default: 30
-	// seconds.
+	// ping of an idle connection, and one that runs out closes it, and has
+	// the pool's other idle connections pinged too, for a thirtieth of the
+	// shortest lease of the client's workers. While round trips take
+	// longer, that check closes nearly every idle connection, so after one
+	// that closed connections, each worker of the client waits a third of
+	// its own lease before it starts another. Minimum: 100 milliseconds.
+	// Default: 30 seconds.
 	//
 	// The worker stores it when it registers, and the installation judges
 	// by it how long the worker may make no check-in. After one
@@ -410,6 +415,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		return nil, err
 	}
 	w.scheduleNames, w.scheduleHashes = scheduleSums(w.schedules)
+	client.idleCheck.enroll(c.LeaseDuration)
 	return w, nil
 }
 

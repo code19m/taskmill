@@ -1,11 +1,10 @@
 # Key statements
 
 This page explains the statements that enqueue tasks and that workers run,
-and why each is written the way it is.
-[Lists and counts](schema-lists.md) and
-[Operator actions](schema-operations.md) have the statements of the
-operations API. [Storage schema](schema.md) has the tables and indexes that
-they use, and [`sql_enqueue.go`](../../sql_enqueue.go) and
+and why each is written the way it is. [Lists and counts](schema-lists.md)
+and [Operator actions](schema-operations.md) have the statements of the
+operations API. [Storage schema](schema.md) has the tables and indexes
+that they use, and [`sql_enqueue.go`](../../sql_enqueue.go) and
 [`sql_attempts.go`](../../sql_attempts.go) have their exact text.
 
 The statements send batches as arrays and use `unnest`, so a batch, up to the
@@ -147,18 +146,19 @@ running and renews it at the next check-in. An attempt that completed its
 task with `CompleteTx` is never canceled as lost: its own transaction holds
 the row until it commits.
 
-A worker cancels an attempt once its lease may have ended. So after a
-renewal fails, the next check-in can come too late: as the lease ends, if
-an outage began just before the failed one. The worker tries a failed
-renewal again every thirtieth of the lease, until one succeeds. A try that
-gets no answer in its time is followed by one with twice as long, up to a
-third of the lease: on a slow database, each try that runs out of time
-costs a connection, which pgx holds in the pool while it closes it.
+A worker cancels an attempt once its lease may have ended, so after a
+failed renewal the next check-in can come too late. The worker tries it
+again every thirtieth of the lease, until one succeeds, with twice the
+time after a try that got no answer, up to a third of the lease. A try
+that runs out costs its connection, which pgx holds in the pool while it
+closes it. A wait for an idle one that runs out has all of them pinged, and
+those that do not answer closed: after a failover, those left behind go
+together. After a check that closed some, each worker starts none for a
+third of its own lease.
 
-The check-ins continue meanwhile with a third of the lease, which a slow
-database may need. So two renewals of a lease can overlap, and the one that
-started first can commit last: the statement never moves a lease's end
-back, and neither does the worker.
+Check-ins continue meanwhile, with a third of the lease, so two renewals
+of a lease can overlap, and the first sent can commit last: the statement
+never moves a lease's end back, and neither does the worker.
 
 Handlers that share the worker's pool can hold every connection for
 longer than a lease, and renewals that waited for one would let leases run

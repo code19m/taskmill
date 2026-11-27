@@ -56,8 +56,11 @@ type WorkerStats struct {
 	// of the worker's reserve. A connection that is still opening is not in
 	// use. Handlers that share the pool hold the connections, or the pool
 	// is too small, or statements wait for an answer, as behind a pooler
-	// whose own pool is full. A renewal or a check-in waits a thirtieth of
-	// the lease at most, and then uses the reserve, if the worker keeps
+	// whose own pool is full, or connections that stopped answering do, as
+	// after a failover: a check of the idle ones holds them for a thirtieth
+	// of the lease at most, and pgx keeps the place of each for up to 15
+	// seconds while it closes it. A renewal or a check-in waits a thirtieth
+	// of the lease at most, and then uses the reserve, if the worker keeps
 	// one: see [Worker]. Without one, it counts twice.
 	PoolWaits int64
 

@@ -25,10 +25,16 @@ import (
 // A task of a kind that the worker has no handler for is snoozed, with a
 // no_handler note in its errors, as Run does, and returned.
 //
-// A task whose lease ended on its way, as when its row took longer than the
-// lease to arrive, may run on another worker already: RunTask runs nothing
-// then, and returns the task, which stays running until the maintainer
-// rescues it.
+// The database starts a task's lease when it takes the task, and the
+// worker counts it from its request, so a wait for the task's row, as while
+// the transaction of [Client.CancelTx] holds it, or an answer slow to
+// arrive, leaves less of the lease as far as the worker knows. So RunTask
+// renews a lease with less than two thirds left before any middleware or
+// handler runs, as Run does after a slow fetch. If the lease ended on its
+// way, as far as the worker knows, and the renewal does not extend it, as
+// when the task was rescued, its row is locked, or the renewal fails, the
+// task may run on another worker already: RunTask runs nothing then, and
+// returns it.
 //
 // It returns the task afterwards. It returns [ErrNotFound] if no task has the
 // ID, and [ErrInvalidState] if the task is running, waits behind its FIFO
@@ -39,7 +45,6 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 		return nil, err
 	}
 	t.direct = true
-	w.track(ctx, t)
 	w.runDirect(ctx, t)
 
 	getCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
@@ -55,19 +60,35 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 	return info, err
 }
 
-// runDirect runs the attempt t of RunTask in the calling goroutine, and
-// renews its lease every third of it while the handler runs, and while its
-// result is recorded. It tries a renewal that failed again soon, as Run
-// does, also when Run does not run (see renewAgain). The cleanup is
-// deferred: a handler that ends the goroutine with runtime.Goexit, as
-// t.Fatal does in a test, stops the renewals all the same, and its task
-// goes back to its queue (see runOne).
+// runDirect tracks the attempt t of RunTask, runs it in the calling
+// goroutine, and renews its lease every third of it while the handler runs,
+// and while its result is recorded. It tries a renewal that failed again
+// soon, as Run does, also when Run does not run (see renewAgain). The
+// cleanup is deferred: a handler that ends the goroutine with
+// runtime.Goexit, as t.Fatal does in a test, stops the renewals all the
+// same, and its task goes back to its queue (see runOne).
+//
+// The worker counts a lease from when it sent the statement that took the
+// task, and the database from the take, which can come much later, after a
+// wait for the task's row. A lease with less than two thirds left, as far
+// as the worker knows, could end before the first renewal: runDirect renews
+// it before the handler starts, as a slow fetch does, and before it tracks
+// t: the timer of track would count t lost right away if its lease seemed
+// over already.
 func (w *Worker) runDirect(ctx context.Context, t *liveAttempt) {
 	renewCtx, stopRenewing := context.WithCancel(context.WithoutCancel(ctx))
 	var renewing sync.WaitGroup
 	defer renewing.Wait()
 	defer stopRenewing()
 	ts, failed := []*liveAttempt{t}, make(chan struct{}, 1)
+	if time.Until(w.leaseEnd(ts)) < 2*w.cfg.LeaseDuration/3 {
+		tryCtx, cancel := context.WithTimeout(renewCtx, w.cfg.LeaseDuration/3)
+		if w.tryRenewLeases(tryCtx, ts) != nil {
+			signal(failed)
+		}
+		cancel()
+	}
+	w.track(ctx, t)
 	renewing.Go(func() {
 		w.everyThirdOfLease(renewCtx, func(ctx context.Context) {
 			if w.tryRenewLeases(ctx, ts) != nil {
