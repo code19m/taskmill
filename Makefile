@@ -9,7 +9,7 @@ GOVULNCHECK_VERSION   := v1.9.0
 ACTIONLINT_VERSION    := v1.7.12
 GORELEASER_VERSION    := v2.20.3
 SYFT_VERSION          := v1.57.2
-GORELEASE_VERSION     := v0.0.0-20261121134650-e1094eeca1b5
+GORELEASE_VERSION     := v0.0.0-20261124000051-d6646c509b6d
 
 # The repository's modules: the core, the integrations that need modules of
 # their own, the examples that use other libraries, and the browser tests of
