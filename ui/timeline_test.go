@@ -117,8 +117,11 @@ func TestTaskTimeline(t *testing.T) {
 	}
 
 	// A completed task is read from the history, and one whose start came
-	// before its due time, by the clocks of two machines, has no wait.
+	// before its due time, by the clocks of two machines, has no wait. They
+	// finished minutes ago, which can be yesterday, and a new schema has no
+	// partition for yesterday: the default partition takes them.
 	if _, err := pool.Exec(t.Context(), `
+	    CREATE TABLE `+schema+`.task_history_default PARTITION OF `+schema+`.task_history DEFAULT;
 	    INSERT INTO `+schema+`.task_history (id, queue, kind, payload, metadata, errors, attempted_by, priority, attempt, max_attempts,
 	        created_at, run_at, attempted_at, finalized_at)
 	    OVERRIDING SYSTEM VALUE VALUES
