@@ -183,12 +183,12 @@ a longer failover, set `LeaseDuration` to more than 1.8 times as long.
 A lease under 30 seconds survives less, down to about a third of it, if
 connections stop answering in a pool with no room, as one that was full
 in its last `MaxConnIdleTime`: pgx holds the place of each up to 15 seconds.
+So keep `LeaseDuration` at 30 seconds or more if the pool can fill.
 
 A longer lease has costs, so keep it as short as your failover allows:
 
 - When a worker crashes, its tasks wait that long for another worker.
-- `Worker.Health` fails, and the dashboard marks the worker stale, that
-  much later.
+- `Worker.Health` fails, and the dashboard marks it stale, that much later.
 - A crashed worker stays listed for twice its lease, and at least 5 minutes.
 
 ## Keep or remove a day of old history

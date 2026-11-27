@@ -119,13 +119,14 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 }
 
 // Close stops the client's background work: it ends a check of the pool's
-// idle connections that a worker began, sends the notifications that the
-// client held back to wake workers less often, bounded by 5 seconds, and
-// waits for those being sent. Nothing of the client runs on the pool
-// afterwards, so call Close before the pool's Close. The client's methods
-// still work after Close, but hold back no notification any more: each
-// sends its own before it returns. Its workers check no idle connections
-// any more. Close may be called more than once.
+// idle connections that a worker began, and sends the notifications that
+// the client held back to wake workers less often. It waits for each up to
+// 5 seconds. Nothing of the client runs on the pool afterwards, as long as
+// the pool's statements end when their context does, so call Close before
+// the pool's Close. The client's methods still work after Close, but hold
+// back no notification any more: each sends its own before it returns. Its
+// workers check no idle connections any more. Close may be called more
+// than once.
 func (c *Client) Close() {
 	c.stopIdleCheck()
 	c.notifier.close()

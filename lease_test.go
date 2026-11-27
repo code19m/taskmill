@@ -1053,7 +1053,13 @@ func TestRenewalsHaveIdleConnectionsThatStopAnsweringChecked(t *testing.T) {
 func TestIdleChecksOfAClientHoldOffForAThirdOfEachLease(t *testing.T) {
 	t.Parallel()
 	db := newProxy(t, testdb.URL(t))
-	pool := proxiedPool(t, db, 30, nil)
+	cfg := proxiedConfig(t, db, 30)
+	// pgx ends a ping that ran out a second later, so a check stays under
+	// way for 1.2 seconds.
+	cfg.ConnConfig.BuildContextWatcherHandler = func(c *pgconn.PgConn) ctxwatch.Handler {
+		return &pgconn.CancelRequestContextWatcherHandler{Conn: c, DeadlineDelay: time.Second}
+	}
+	pool := openPool(t, cfg)
 	e := newEnvWith(t, pool, nil)
 	// Closing the frozen connections lets the test end.
 	t.Cleanup(func() {
@@ -1061,8 +1067,8 @@ func TestIdleChecksOfAClientHoldOffForAThirdOfEachLease(t *testing.T) {
 		pool.Reset()
 		db.cut(false)
 	})
-	long := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 30 * time.Second}) // pings of 1 second, a third of 10
-	short := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 6 * time.Second}) // a third of 2 seconds
+	long := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 30 * time.Second}) // a third of 10 seconds
+	short := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 6 * time.Second}) // pings of 200 ms, a third of 2 seconds
 
 	// took reports how many of the pool's idle connections a check of w
 	// took. Frozen ones hold the check until their pings run out, so it
@@ -1087,7 +1093,7 @@ func TestIdleChecksOfAClientHoldOffForAThirdOfEachLease(t *testing.T) {
 	leaveIdle(t, pool, 5)
 	db.freezeOpen()
 	if n := took(short); n != 0 {
-		t.Fatalf("another worker's check, right after one that closed connections, took %d connections, want none", n)
+		t.Fatalf("another worker's check, while a check was under way, took %d connections, want none", n)
 	}
 	time.Sleep(time.Until(closing.Add(2*time.Second + 50*time.Millisecond)))
 	if n := took(long); n != 0 {
@@ -1095,6 +1101,34 @@ func TestIdleChecksOfAClientHoldOffForAThirdOfEachLease(t *testing.T) {
 	}
 	if n := took(short); n == 0 {
 		t.Fatal("a check a third of the short lease after one that closed connections took none for the worker of the short lease")
+	}
+}
+
+// A check's pings last a thirtieth of the shortest lease of the client's
+// workers, whichever worker started it: while one is under way, no other
+// starts, and a worker of a short lease could meet connections that stopped
+// answering one at a time again, for longer than its lease.
+func TestIdleCheckPingsForAThirtiethOfTheShortestLease(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	pool := proxiedPool(t, db, 20, nil)
+	e := newEnvWith(t, pool, nil)
+	// Closing the frozen connections lets the test end.
+	t.Cleanup(func() {
+		db.cut(true)
+		pool.Reset()
+		db.cut(false)
+	})
+	long := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: time.Minute}) // a thirtieth of 2 seconds
+	newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 3 * time.Second})     // a thirtieth of 100 ms
+
+	leaveIdle(t, pool, 5)
+	db.freezeOpen()
+	start := time.Now()
+	taskmill.CheckIdle(t.Context(), long)
+	taskmill.WaitIdleCheck(e.client)
+	if took := time.Since(start); took >= time.Second {
+		t.Errorf("the check of the worker of the long lease took %s, want about 100 ms, a thirtieth of the short lease", took.Round(time.Millisecond))
 	}
 }
 
@@ -1120,9 +1154,6 @@ func TestClientCloseEndsTheCheckOfIdleConnections(t *testing.T) {
 		db.cut(false)
 	})
 	w := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 10 * time.Minute}) // pings of 20 seconds
-	// A worker whose third of the lease, which a check that closed
-	// connections holds off, has passed by the end of the test.
-	short := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 3 * time.Second})
 
 	pids := leaveIdle(t, pool, 5)
 	db.freezeOpen()
@@ -1145,6 +1176,9 @@ func TestClientCloseEndsTheCheckOfIdleConnections(t *testing.T) {
 		t.Errorf("the check gave back %d of %d connections before Close returned, want all", n, len(pids))
 	}
 
+	// A worker whose third of the lease, which a check that closed
+	// connections holds off, has passed by then.
+	short := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 3 * time.Second})
 	time.Sleep(time.Until(checked.Add(time.Second + 50*time.Millisecond)))
 	leaveIdle(t, pool, 5)
 	db.freezeOpen()
@@ -1155,9 +1189,58 @@ func TestClientCloseEndsTheCheckOfIdleConnections(t *testing.T) {
 	}
 }
 
+// Client.Close waits for the pings of a check at most 5 seconds, also for
+// pings that ignore their context, as with a context watcher handler that
+// sets no deadline.
+func TestClientCloseWaitsForPingsThatIgnoreTheirContextAtMost5Seconds(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	cfg := proxiedConfig(t, db, 20)
+	cfg.ConnConfig.BuildContextWatcherHandler = func(*pgconn.PgConn) ctxwatch.Handler { return ignoreCancel{} }
+	released := &releaseLog{pids: map[uint32]bool{}}
+	cfg.ConnConfig.Tracer = released
+	pool := openPool(t, cfg)
+	e := newEnvWith(t, pool, nil)
+	// Closing the frozen connections ends the pings, and lets the test end.
+	t.Cleanup(func() {
+		db.cut(true)
+		pool.Reset()
+		db.cut(false)
+	})
+	w := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 3 * time.Second}) // pings of 100 ms
+
+	pids := leaveIdle(t, pool, 5)
+	db.freezeOpen()
+	released.reset()
+	taskmill.CheckIdle(t.Context(), w)
+	time.Sleep(300 * time.Millisecond) // the pings ran out, and wait still
+
+	closed := make(chan struct{})
+	go func() {
+		e.client.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return within 10 seconds: it waits for pings that ignore their context")
+	}
+	if n := released.count(pids); n != 0 {
+		t.Errorf("the check gave back %d of %d connections before Close returned, want none: the pings did not wait", n, len(pids))
+	}
+}
+
+// ignoreCancel is a context watcher handler that sets no deadline: a
+// statement on a connection that stopped answering waits until the
+// connection breaks.
+type ignoreCancel struct{}
+
+func (ignoreCancel) HandleCancel(context.Context) {}
+func (ignoreCancel) HandleUnwatchAfterCancel()    {}
+
 // A check of idle connections ends also when the pool's PrepareConn hook
 // panics as the check takes them, as it would when the pool hands one out:
-// Client.Close, which waits for the check, would wait for good.
+// otherwise the client would start no check again.
 func TestIdleCheckEndsWhenAHookOfThePoolPanics(t *testing.T) {
 	t.Parallel()
 	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
@@ -1255,11 +1338,12 @@ type checked struct {
 // that checks take.
 //
 // It also keeps the pool from pinging a connection once the deadline of the
-// try that takes it has passed, until the try's context ends. pgx pings it
-// with that deadline, which fails at once, closes it, and takes the next
-// idle connection while the context's timer has not fired: on a busy
-// machine, one try can close every idle connection that way, without a
-// ping, and the test could not see what the check does.
+// try that takes it has passed, until the try's context ends, so that the
+// ping fails, and the try ends with it. pgx pings it with that deadline,
+// which fails, closes it, and takes the next idle connection while the
+// context's timer has not fired: on a busy machine, one try can close every
+// idle connection that way, without a ping, and the test could not see what
+// the check does.
 func checkedBy(cfg *pgxpool.Config) *checked {
 	c := &checked{pids: map[uint32]bool{}}
 	cfg.PrepareConn = func(_ context.Context, conn *pgx.Conn) (bool, error) {
@@ -1271,6 +1355,7 @@ func checkedBy(cfg *pgxpool.Config) *checked {
 	cfg.ShouldPing = func(ctx context.Context, p pgxpool.ShouldPingParams) bool {
 		if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
 			<-ctx.Done()
+			return true
 		}
 		return p.IdleDuration > time.Second // pgx's default
 	}
@@ -1286,8 +1371,10 @@ func (c *checked) reset() {
 }
 
 // within fails the test unless checks took all of the connections pids
-// within d, but for two at most, which statements may have held, or taken
-// without a ping, as they stopped answering.
+// within d, but for two at most, which pgx may close unrecorded: the one
+// whose ping ran out in the try that started a check, and one that a try
+// meets after its deadline (see checkedBy). A statement may also hold one
+// as they stop answering.
 func (c *checked) within(t *testing.T, pids []uint32, d time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(d)

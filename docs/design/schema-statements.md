@@ -153,8 +153,8 @@ time after a try that got no answer, up to a third of the lease. A try
 that runs out costs its connection, which pgx holds in the pool while it
 closes it. A wait for an idle one that runs out has all of them pinged, and
 those that do not answer closed: after a failover, those left behind go
-together. After a check that closed some, each worker waits a third of its
-lease.
+together. After a check that closed some, each worker starts none for a
+third of its own lease.
 
 Check-ins continue meanwhile, with a third of the lease, so two renewals
 of a lease can overlap, and the first sent can commit last: the statement

@@ -514,11 +514,22 @@ func (w *Worker) take(ctx context.Context, idle bool) (*pgxpool.Conn, error) {
 // idleCheck is the state of the checks of a client's idle connections: see
 // Client.checkIdle.
 type idleCheck struct {
-	mu      sync.Mutex
-	closing time.Time          // when the last check that closed connections started
-	stop    context.CancelFunc // ends the check under way
-	done    chan struct{}      // closed when the check under way ends; nil while none is
-	ended   bool               // the client was closed: no check starts any more
+	mu       sync.Mutex
+	closing  time.Time          // when the last check that closed connections started
+	stop     context.CancelFunc // ends the check under way
+	done     chan struct{}      // closed when the check under way ends; nil while none is
+	ended    bool               // the client was closed: no check starts any more
+	shortest time.Duration      // the shortest lease of the client's workers
+}
+
+// enroll counts lease, the lease of a new worker of the client, in the
+// shortest of the client's workers.
+func (s *idleCheck) enroll(lease time.Duration) {
+	s.mu.Lock()
+	if s.shortest == 0 || lease < s.shortest {
+		s.shortest = lease
+	}
+	s.mu.Unlock()
 }
 
 // checkIdle checks the idle connections of the client's pool, for a worker
@@ -530,8 +541,10 @@ type idleCheck struct {
 // could outlast the leases that they were to renew: the tasks would run
 // twice. So checkIdle takes them all from the pool before it returns, and
 // pings them at the same time, in the background, for a thirtieth of the
-// lease. Those that answer go back to the pool, and the others are closed.
-// Meanwhile, statements open connections, or take one that answered.
+// shortest lease of the client's workers: a check under way holds off the
+// others, so it ends within a try of any of them. Those that answer go back
+// to the pool, and the others are closed. Meanwhile, statements open
+// connections, or take one that answered.
 //
 // The pings have no longer than a try, because a pool with no room for new
 // connections needs the places of the dead ones for the renewals, and pgx
@@ -553,7 +566,7 @@ func (c *Client) checkIdle(ctx context.Context, lease time.Duration) {
 		s.mu.Unlock()
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), lease/30)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.shortest/30)
 	done := make(chan struct{})
 	s.stop, s.done = cancel, done
 	s.mu.Unlock()
@@ -602,7 +615,8 @@ func pingIdle(ctx context.Context, conns []*pgxpool.Conn) (closed bool) {
 // that did not answer by then are closed: pgx takes up to 15 seconds to
 // close each one whose ping it cut short, and a Close of the pool waits for
 // that. A ping that ignores its context, as with a context watcher handler
-// of the pool that sets no deadline, is not waited for longer.
+// of the pool that sets no deadline, is not waited for longer, but a Close
+// of the pool waits for it.
 func (c *Client) stopIdleCheck() {
 	s := &c.idleCheck
 	s.mu.Lock()
