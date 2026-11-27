@@ -1105,30 +1105,67 @@ func TestIdleChecksOfAClientHoldOffForAThirdOfEachLease(t *testing.T) {
 }
 
 // A check's pings last a thirtieth of the shortest lease of the client's
-// workers, whichever worker started it: while one is under way, no other
-// starts, and a worker of a short lease could meet connections that stopped
-// answering one at a time again, for longer than its lease.
+// workers, whichever worker started it, also of a worker created while it is
+// under way: while one is under way, no other starts, and a worker of a
+// short lease could meet connections that stopped answering one at a time
+// again, for longer than its lease. A NewWorker that failed does not count.
 func TestIdleCheckPingsForAThirtiethOfTheShortestLease(t *testing.T) {
 	t.Parallel()
-	db := newProxy(t, testdb.URL(t))
-	pool := proxiedPool(t, db, 20, nil)
-	e := newEnvWith(t, pool, nil)
-	// Closing the frozen connections lets the test end.
-	t.Cleanup(func() {
-		db.cut(true)
-		pool.Reset()
-		db.cut(false)
-	})
-	long := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: time.Minute}) // a thirtieth of 2 seconds
-	newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 3 * time.Second})     // a thirtieth of 100 ms
+	more := func(t *testing.T, e *env) {
+		t.Helper()
+		newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 3 * time.Second}) // pings of 100 ms
+		newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: 2 * time.Minute}) // neither the first nor the last counts
+	}
+	failed := func(t *testing.T, e *env) {
+		t.Helper()
+		_, err := taskmill.NewWorker(e.client, &taskmill.WorkerConfig{
+			LeaseDuration: 3 * time.Second,
+			Schedules:     []taskmill.Schedule{{Name: "without args"}},
+		})
+		if !errors.Is(err, taskmill.ErrInvalidArgument) {
+			t.Fatalf("NewWorker: %v, want ErrInvalidArgument", err)
+		}
+	}
+	for _, c := range []struct {
+		name           string
+		before, during func(*testing.T, *env)
+		short          bool // the pings last a thirtieth of 3 seconds, not of a minute
+	}{
+		{name: "workers created before", before: more, short: true},
+		{name: "workers created while it is under way", during: more, short: true},
+		{name: "a NewWorker that failed", before: failed},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			db := newProxy(t, testdb.URL(t))
+			pool := proxiedPool(t, db, 20, nil)
+			e := newEnvWith(t, pool, nil)
+			// Closing the frozen connections lets the test end.
+			t.Cleanup(func() {
+				db.cut(true)
+				pool.Reset()
+				db.cut(false)
+			})
+			long := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: time.Minute}) // pings of 2 seconds
+			if c.before != nil {
+				c.before(t, e)
+			}
 
-	leaveIdle(t, pool, 5)
-	db.freezeOpen()
-	start := time.Now()
-	taskmill.CheckIdle(t.Context(), long)
-	taskmill.WaitIdleCheck(e.client)
-	if took := time.Since(start); took >= time.Second {
-		t.Errorf("the check of the worker of the long lease took %s, want about 100 ms, a thirtieth of the short lease", took.Round(time.Millisecond))
+			leaveIdle(t, pool, 5)
+			db.freezeOpen()
+			start := time.Now()
+			taskmill.CheckIdle(t.Context(), long)
+			if c.during != nil {
+				c.during(t, e)
+			}
+			taskmill.WaitIdleCheck(e.client)
+			switch took := time.Since(start); {
+			case c.short && took >= time.Second:
+				t.Errorf("the check took %s, want about 100 ms, a thirtieth of the short lease", took.Round(time.Millisecond))
+			case !c.short && took < time.Second:
+				t.Errorf("the check took %s, want about 2 seconds, a thirtieth of the long lease", took.Round(time.Millisecond))
+			}
+		})
 	}
 }
 
@@ -1222,8 +1259,8 @@ func TestClientCloseWaitsForPingsThatIgnoreTheirContextAtMost5Seconds(t *testing
 	}()
 	select {
 	case <-closed:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Close did not return within 10 seconds: it waits for pings that ignore their context")
+	case <-time.After(6 * time.Second):
+		t.Fatal("Close did not return within 6 seconds: it waits for pings that ignore their context")
 	}
 	if n := released.count(pids); n != 0 {
 		t.Errorf("the check gave back %d of %d connections before Close returned, want none: the pings did not wait", n, len(pids))

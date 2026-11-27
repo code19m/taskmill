@@ -379,7 +379,6 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		outcomes:    make(chan *outcomeRequest, completionBatch),
 	}
 	w.reserve = reserve{w: w, turn: make(chan struct{}, 1)}
-	client.idleCheck.enroll(c.LeaseDuration)
 
 	if c.Handlers != nil {
 		for kind, reg := range c.Handlers.byKind {
@@ -416,6 +415,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		return nil, err
 	}
 	w.scheduleNames, w.scheduleHashes = scheduleSums(w.schedules)
+	client.idleCheck.enroll(c.LeaseDuration)
 	return w, nil
 }
 

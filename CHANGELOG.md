@@ -33,9 +33,9 @@ All notable changes to taskmill are recorded here. The format follows
   thirtieth of the shortest lease of the client's workers: those that
   answer go back to the pool, and the others are closed. Meanwhile,
   handlers that share the pool open new connections, or wait if it is
-  full. While round trips to the database take longer than a thirtieth of
-  the lease, as when it slows down for a moment, a check closes nearly
-  every idle connection, and the pool opens new ones. So the workers of a
+  full. While round trips to the database take longer than that, as when
+  it slows down for a moment, a check closes nearly every idle
+  connection, and the pool opens new ones. So the workers of a
   client check its pool one at a time, and after a check that closed
   connections, each waits a third of its own lease before it starts
   another. `Client.Close` ends a check under way, and no check starts
