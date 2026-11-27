@@ -215,22 +215,29 @@ func TestMenusOpenedWhileTheScriptLoads(t *testing.T) {
 }
 
 // A page that the back or forward button brings back comes without the
-// menu that was open on it, as the browser brings a page back, and the
-// focus is on the page.
+// menu that was open on it, as the browser brings a page back: the menu is
+// closed, has forgotten its search, and the focus is on the page.
 func TestPageComesBackWithItsMenusClosed(t *testing.T) {
 	s := newSite(t)
+	s.enqueue(t, 2)
 	p := s.open(t, "/")
 	p.click(`.nav-item[href="/tasks"]`)
-	p.waitFor(`location.pathname === "/tasks" && document.querySelector('.sel[data-name="state"]')`, "the tasks")
-	p.click(`.sel[data-name="state"] > summary`)
-	p.waitFor(`document.querySelector('.sel[data-name="state"][open][data-js-placed]')`, "the menu opening")
+	const kind = `document.querySelector('.sel[data-name="kind"]')`
+	p.waitFor(`location.pathname === "/tasks" && `+kind, "the tasks")
+	p.click(`.sel[data-name="kind"] > summary`)
+	p.waitFor(kind+`.matches("[open][data-js-placed]")`, "the menu opening")
+	p.press("zz") // a search that finds no kind
+	p.waitFor(`!`+kind+`.querySelector("[data-sel-add]").hidden`, "the search")
 
 	p.history(-1)
 	p.waitFor(`location.pathname === "/"`, "the back button")
 	p.history(1)
-	p.waitFor(`location.pathname === "/tasks" && document.querySelector('.sel[data-name="state"]')`, "the forward button")
+	p.waitFor(`location.pathname === "/tasks" && `+kind, "the forward button")
 	if !eval[bool](p, `!document.querySelector("details.sel[open], details.sel[data-js-placed]") && document.activeElement === document.getElementById("main")`) {
 		t.Error("a menu came back open, or took the focus")
+	}
+	if !eval[bool](p, kind+`.querySelector("[data-sel-add]").hidden && `+kind+`.querySelectorAll(".pop-list .pop-opt[hidden]").length === 0`) {
+		t.Error("the menu came back with its search")
 	}
 }
 

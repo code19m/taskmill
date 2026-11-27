@@ -12,7 +12,7 @@ import { say, trace, traced, untrace } from "./charts.js";
 import { assets, assetsOf, inflight, load, loadWhole, notify, page, progress, SLOW_MS } from "./core.js";
 import { dialog, release, showDialogPart } from "./dialog.js";
 import { livePage, schedule, showLiveStatus, startUpdates } from "./live.js";
-import { openMenus, placeMenu, refine, shut } from "./menus.js";
+import { forget, openMenus, placeMenu, refine, shut } from "./menus.js";
 import { highlight, morph, syncAttributes } from "./morph.js";
 import { count, localise } from "./times.js";
 import { describe, hint, placeHint, tipFor, undescribe } from "./tips.js";
@@ -121,10 +121,11 @@ function leave() {
   if (!livePage()) return;
   for (const pop of document.querySelectorAll(".hint-pop[style]")) pop.removeAttribute("style");
   const parts = [document.getElementById("main"), ...document.querySelectorAll("[data-live-part]")].map((part) => {
+    if (!part.querySelector("details.sel[open]")) return part;
     const copy = part.cloneNode(true);
     for (const sel of copy.querySelectorAll("details.sel[open]")) {
       sel.open = false;
-      delete sel.dataset.jsPlaced;
+      forget(sel);
     }
     return copy;
   });
