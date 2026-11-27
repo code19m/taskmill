@@ -25,12 +25,25 @@ All notable changes to taskmill are recorded here. The format follows
 
 - A worker keeps its tasks' leases when the database stops answering on
   the pool's open connections, as after a failover that leaves them
-  behind, also when the pool kept many of them idle. Its renewals tried the
-  idle connections one at a time, each for a thirtieth of the lease, so
-  with many of them the leases could run out first, and the tasks run
-  twice. Now, once one does not answer, the worker pings all of the pool's
-  idle connections at the same time, and the pool closes those that do not
-  answer either.
+  behind, also when the pool kept many of them idle, if it has room for new
+  connections. Its statements tried the idle connections one at a time,
+  each for a thirtieth of the lease, so with many of them the leases could
+  run out first, and the tasks run twice. Now the first try that runs out
+  has all of the pool's idle connections pinged at the same time, for as
+  long: those that answer go back to the pool, and the others are closed.
+  Meanwhile, handlers that share the pool open new connections, or wait if
+  it is full. A check runs at most once per third of the lease: with a
+  lease under 30 round trips to the database, which its docs advise
+  against, each check closes healthy connections too. `Run` and `RunTask`
+  end a check under way as they return, so `Run` still returns within
+  `DrainTimeout` plus 10 seconds.
+- `Worker.RunTask` no longer cancels its handler as if the task's lease had
+  run out after it waited for the task's row, as while the transaction of
+  `Client.CancelTx` holds it. The database counts a lease from when it
+  takes the task, and the worker from when it asked: after a wait of over
+  two thirds of the lease, the worker saw it end before its first renewal.
+  Now `RunTask` renews such a lease before the handler starts, as `Run`
+  does after a slow fetch.
 - A worker adds its counts of ended attempts to the activity once, also
   when a write of them failed but committed all the same, as one whose
   commit outlasted its deadline while it waited for a synchronous standby.

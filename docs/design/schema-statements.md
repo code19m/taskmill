@@ -147,18 +147,18 @@ running and renews it at the next check-in. An attempt that completed its
 task with `CompleteTx` is never canceled as lost: its own transaction holds
 the row until it commits.
 
-A worker cancels an attempt once its lease may have ended. So after a
-renewal fails, the next check-in can come too late: as the lease ends, if
-an outage began just before the failed one. The worker tries a failed
-renewal again every thirtieth of the lease, until one succeeds. A try that
-gets no answer in its time is followed by one with twice as long, up to a
-third of the lease: on a slow database, each try that runs out of time
-costs a connection, which pgx holds in the pool while it closes it.
+A worker cancels an attempt once its lease may have ended, so after a
+failed renewal the next check-in can come too late. The worker tries it
+again every thirtieth of the lease, until one succeeds, with twice the
+time after a try that got no answer, up to a third of the lease. A try
+that runs out costs its connection, which pgx holds in the pool while it
+closes it. One that ran out on an idle connection has all the idle ones
+pinged, at most once per third of the lease, and those that do not answer
+closed: after a failover, the connections left behind go together.
 
-The check-ins continue meanwhile with a third of the lease, which a slow
-database may need. So two renewals of a lease can overlap, and the one that
-started first can commit last: the statement never moves a lease's end
-back, and neither does the worker.
+Check-ins continue meanwhile, with a third of the lease, so two renewals
+of a lease can overlap, and the first sent can commit last: the statement
+never moves a lease's end back, and neither does the worker.
 
 Handlers that share the worker's pool can hold every connection for
 longer than a lease, and renewals that waited for one would let leases run

@@ -181,8 +181,8 @@ a check-in: 17 and 25 if connections stop answering instead of failing. For
 a longer failover, set `LeaseDuration` to more than 1.8 times as long.
 
 A lease under 30 seconds survives less, down to about a third of it, if
-connections stop answering in a pool of 6 connections: pgx keeps the place
-of each for up to 15 seconds while it closes it. A pool of 15 avoids that.
+connections stop answering in a pool with no room for new ones, as one of
+6: pgx keeps the place of each for up to 15 seconds while it closes it.
 
 A longer lease has costs, so keep it as short as your failover allows:
 

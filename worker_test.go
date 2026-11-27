@@ -679,6 +679,78 @@ func TestRunReturnsSoonWhenTheDatabaseStopsAnswering(t *testing.T) {
 	}
 }
 
+// Run keeps its bound also when a check of the pool's idle connections is
+// under way as it returns, with a lease so long that the check's pings
+// would outlast the bound: Run ends the check, and the connections that
+// did not answer by then are closed.
+func TestRunEndsTheCheckOfIdleConnections(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	pool := proxiedPool(t, db, 20, nil)
+	e := newEnvWith(t, pool, nil)
+	direct := e.direct(t)
+	// Closing the frozen connections lets the test end.
+	t.Cleanup(func() {
+		db.cut(true)
+		pool.Reset()
+		db.cut(false)
+	})
+
+	started, never := make(chan struct{}, 1), make(chan struct{})
+	t.Cleanup(func() { close(never) })
+	const drain = 100 * time.Millisecond
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-never // ignores its context: the worker gives its task back after the drain
+			return nil
+		}, nil),
+		Queues:        defaultQueue(1),
+		LeaseDuration: 135 * time.Second, // a try for an idle connection, and the check, have 4.5 seconds
+		DrainTimeout:  drain,
+		NoMaintainer:  true,
+	})
+	// The task goes back once its handler is abandoned, after the
+	// connections that the fetches used are idle for over a second: the pool
+	// pings them before it hands them out.
+	timing := testTiming
+	timing.ShutdownGrace = 2 * time.Second
+	taskmill.SetTiming(w, timing)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = w.Run(ctx)
+	}()
+	direct.enqueue(t, sendEmail{}, nil)
+	recv(t, started, "the handler to start")
+
+	// Idle connections, which the statement that gives the task back meets.
+	held := make([]*pgxpool.Conn, 10)
+	var err error
+	for i := range held {
+		if held[i], err = pool.Acquire(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range held {
+		c.Release()
+	}
+	db.freezeOpen()
+
+	cancel()
+	stopped := time.Now()
+	select {
+	case <-done:
+	case <-time.After(time.Minute):
+		t.Fatal("Run did not return within a minute")
+	}
+	if d, limit := time.Since(stopped), drain+10*time.Second; d > limit {
+		t.Fatalf("Run returned %s after its context ended, want DrainTimeout plus 10 seconds at most, %s", d.Round(time.Millisecond), limit)
+	}
+}
+
 func TestWorkerWarnsAboutUnservedKinds(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)

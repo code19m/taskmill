@@ -262,13 +262,15 @@ func TestFetchAtItsMostSaysThatMoreMayWait(t *testing.T) {
 
 // A wait for a row before a task is taken must not be taken off the task's
 // lease: the task would start with a lease that is almost over, and be
-// rescued while it runs.
+// rescued while it runs. Nor may the worker take it off: it would cancel
+// the handler as if the lease had run out.
 func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 	t.Parallel()
 	const lease, wait = time.Second, 700 * time.Millisecond
 
 	// measuring returns a handler that sends how much of its lease an attempt
-	// has left when it starts.
+	// has left when it starts, and then runs for half of the lease: past the
+	// end of a lease that counted the wait.
 	measuring := func(e *env, left chan<- time.Duration) *taskmill.Handlers {
 		query := replaceSchema("SELECT extract(epoch FROM lease_expires_at - clock_timestamp()) FROM {s}.tasks WHERE id = $1", e.schema)
 		return handlers(func(ctx context.Context, task *taskmill.Task[sendEmail]) error {
@@ -277,14 +279,19 @@ func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 				return err
 			}
 			left <- time.Duration(secs * float64(time.Second))
-			return nil
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-time.After(lease / 2):
+				return nil
+			}
 		}, nil)
 	}
 
 	// holdThenFree keeps tx's row lock for wait once a statement of the
 	// worker waits for it, then frees it, and checks the lease that the
-	// handler finds.
-	holdThenFree := func(t *testing.T, e *env, tx pgx.Tx, blocked string, left <-chan time.Duration) {
+	// handler finds, and that the handler completes the task.
+	holdThenFree := func(t *testing.T, e *env, tx pgx.Tx, blocked string, left <-chan time.Duration, id int64) {
 		t.Helper()
 		e.waitBlocked(t, blocked)
 		time.Sleep(wait)
@@ -295,6 +302,7 @@ func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 		if d := recv(t, left, "the handler to start"); d < lease/2 {
 			t.Fatalf("the handler started with %s of its %s lease left: the wait for the row was taken off the lease", d, lease)
 		}
+		e.waitState(t, id, taskmill.StateCompleted)
 	}
 
 	t.Run("fetch from a queue with a limit", func(t *testing.T) {
@@ -313,9 +321,9 @@ func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 		tx := e.begin(t)
 		e.txExec(t, tx, "SELECT FROM {s}.queues WHERE name = 'default' FOR UPDATE")
 
-		e.enqueue(t, sendEmail{}, nil)
+		id := e.enqueue(t, sendEmail{}, nil)
 		startWorker(t, w)
-		holdThenFree(t, e, tx, "SELECT max_running FROM {s}.queues", left)
+		holdThenFree(t, e, tx, "SELECT max_running FROM {s}.queues", left, id)
 	})
 
 	t.Run("RunTask", func(t *testing.T) {
@@ -336,7 +344,7 @@ func TestLeaseCountsFromWhenTheTaskIsTaken(t *testing.T) {
 			done <- err
 		}()
 
-		holdThenFree(t, e, tx, "{s}.tasks", left)
+		holdThenFree(t, e, tx, "{s}.tasks", left, id)
 		if err := recv(t, done, "RunTask to return"); err != nil {
 			t.Fatal(err)
 		}

@@ -156,6 +156,18 @@ func Fetch(ctx context.Context, w *Worker, queue string, slots int, maxRunning i
 	return len(tasks), more, atLimit, err
 }
 
+// PingIdle pings conn, an idle connection of the pool, and gives it back,
+// as a worker's check of the pool's idle connections does.
+var PingIdle = pingIdle
+
+// CheckIdle checks the idle connections of w's pool, as a try of w that ran
+// out does.
+func CheckIdle(ctx context.Context, w *Worker) { w.checkIdle(ctx) }
+
+// StopIdleCheck ends w's check of idle connections, as Run and RunTask do
+// as they return.
+func StopIdleCheck(w *Worker) { w.stopIdleCheck() }
+
 // KeepReserve makes w keep a reserve connection, as Run does when it starts
 // with a pool of the size that the docs ask for, until the test ends.
 func KeepReserve(ctx context.Context, tb testing.TB, w *Worker) {

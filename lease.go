@@ -489,10 +489,10 @@ const poolFull = "the pool was full, so the worker waited for a connection; " +
 // thirtieth of the lease: the pool closes a connection whose ping ran out,
 // and the next try takes another, or opens one. The other idle connections
 // may have stopped answering too, so a try that ran out has them all
-// checked at the same time: see checkIdle. A slow ping of a healthy
-// connection fails too, so LeaseDuration's docs ask for a lease above 30
-// round trips: a floor on the try's time would let stale connections
-// outlast a short lease after a failover instead.
+// checked: see checkIdle. A slow ping of a healthy connection fails too, so
+// LeaseDuration's docs ask for a lease above 30 round trips: a floor on the
+// try's time would let stale connections outlast a short lease after a
+// failover instead.
 func (w *Worker) take(ctx context.Context, idle bool) (*pgxpool.Conn, error) {
 	for idle {
 		tryCtx, cancel := context.WithTimeout(ctx, w.cfg.LeaseDuration/30)
@@ -510,41 +510,89 @@ func (w *Worker) take(ctx context.Context, idle bool) (*pgxpool.Conn, error) {
 	return w.client.pool.Acquire(ctx)
 }
 
-// checkIdle pings every idle connection of the pool at the same time, in
-// the background, unless such a check is under way. The pool closes those
-// that do not answer within a thirtieth of the lease, and keeps the
-// others. A pool keeps many connections idle, and after a failover that
-// left them behind, tries that took them one at a time, a thirtieth of the
-// lease each, could outlast the leases that they were to renew: the tasks
-// would run twice. checkIdle takes the connections from the pool before
-// it returns, so the next try takes one that answered, or opens one.
+// idleCheck is the state of a worker's checks of the pool's idle
+// connections: see checkIdle.
+type idleCheck struct {
+	mu   sync.Mutex
+	next time.Time          // when the next check may start
+	stop context.CancelFunc // ends the check under way
+	done chan struct{}      // closed when the check under way ends; nil while none is
+}
+
+// checkIdle checks the pool's idle connections, unless a check started in
+// the last third of the lease. After a failover that left the pool's
+// connections behind, none of them may answer, and tries that took them
+// one at a time, a thirtieth of the lease each, could outlast the leases
+// that they were to renew: the tasks would run twice. So checkIdle takes
+// them all from the pool before it returns, and pings them at the same
+// time, in the background, for a thirtieth of the lease. Those that answer
+// go back to the pool, and the others are closed. Meanwhile, the next try
+// opens a connection, or takes one that answered.
+//
+// The pool runs its PrepareConn hook on each connection, in the calling
+// goroutine, as when it hands one out. Its acquire tracer sees none of
+// them, but its release tracer sees each. On a slow database, whose round
+// trips take longer than a thirtieth of the lease, the check closes
+// healthy connections, and the pool opens new ones: hence the limit of one
+// check per third of the lease.
 func (w *Worker) checkIdle(ctx context.Context) {
-	select {
-	case w.idleCheck <- struct{}{}:
-	default:
+	c := &w.idle
+	c.mu.Lock()
+	now := time.Now()
+	if c.done != nil || now.Before(c.next) {
+		c.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), w.cfg.LeaseDuration/30)
-	conns := w.client.pool.AcquireAllIdle(ctx)
-	go func() {
-		defer func() { <-w.idleCheck }()
-		defer cancel()
-		var pings sync.WaitGroup
-		for _, conn := range conns {
-			pings.Go(func() {
-				_ = conn.Ping(ctx) // one that ran out is closed, and the pool drops it
-				conn.Release()
-			})
-		}
-		pings.Wait()
+	done := make(chan struct{})
+	c.next, c.stop, c.done = now.Add(w.cfg.LeaseDuration/3), cancel, done
+	c.mu.Unlock()
+
+	var conns []*pgxpool.Conn
+	defer func() { // also when a hook of the pool panicked: the check then ends without pings
+		go func() {
+			defer func() {
+				c.mu.Lock()
+				c.stop, c.done = nil, nil
+				c.mu.Unlock()
+				cancel()
+				close(done)
+			}()
+			var pings sync.WaitGroup
+			for _, conn := range conns {
+				pings.Go(func() { pingIdle(ctx, conn) })
+			}
+			pings.Wait()
+		}()
 	}()
+	conns = w.client.pool.AcquireAllIdle(ctx)
 }
 
-// waitIdleCheck waits until no check of the idle connections is under way,
-// so that none outlasts Run or RunTask.
-func (w *Worker) waitIdleCheck() {
-	w.idleCheck <- struct{}{}
-	<-w.idleCheck
+// pingIdle pings conn, an idle connection that checkIdle took from the
+// pool, and gives it back. One whose ping failed is closed, and the pool
+// drops it: pgx closes one whose ping ran out, and pingIdle the others, as
+// when ctx ended before the ping began. The pool would hand those out
+// again without a ping, as just used.
+func pingIdle(ctx context.Context, conn *pgxpool.Conn) {
+	if conn.Ping(ctx) != nil {
+		_ = conn.Conn().Close(ctx)
+	}
+	conn.Release()
+}
+
+// stopIdleCheck ends the check of idle connections under way, if any, and
+// waits for its pings: Run and RunTask call it as they return, so that it
+// holds no connection that a Close of the pool would wait for. Those that
+// did not answer by then are closed.
+func (w *Worker) stopIdleCheck() {
+	c := &w.idle
+	c.mu.Lock()
+	stop, done := c.stop, c.done
+	c.mu.Unlock()
+	if done != nil {
+		stop()
+		<-done
+	}
 }
 
 // leaseOver reports whether t lost its lease, or the lease may have ended as

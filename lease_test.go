@@ -890,9 +890,10 @@ func (r renewalTimes) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, d pgx.Trac
 // A failover can leave the old server's connections open without an
 // answer, while new connections reach the new server. A step of the worker
 // then waits on such a connection for a part of the lease, or 5 seconds for
-// a fetch, and tries again on another: the fetches continue, and the
-// results of finished tasks are saved before their leases end, so that none
-// runs twice.
+// a fetch, has the pool's idle connections checked, and tries again on one
+// that answered, or a new one: the fetches continue, and the results of
+// finished tasks are saved before their leases end, so that none runs
+// twice.
 func TestWorkerOutlastsConnectionsThatStopAnswering(t *testing.T) {
 	t.Parallel()
 	db := newProxy(t, testdb.URL(t))
@@ -980,6 +981,191 @@ func TestWorkerOutlastsConnectionsThatStopAnswering(t *testing.T) {
 	}
 	if n := w.Stats().LeasesLost; n != 0 {
 		t.Errorf("the worker lost %d leases, want none", n)
+	}
+}
+
+// RunTask's renewals are the only statements of its worker, so they meet
+// the pool's idle connections one after another. After a failover that
+// left them all behind, renewals that tried them one at a time, a
+// thirtieth of the lease each, would let the lease run out: the first try
+// that runs out has them all checked instead, and the next try opens a
+// connection.
+func TestRenewalsOutlastIdleConnectionsThatStopAnswering(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	pool := proxiedPool(t, db, 50, nil) // room beyond the frozen connections: see TestWorkerOutlastsConnectionsThatStopAnswering
+	e := newEnvWith(t, pool, nil)
+	// Closing the frozen connections lets the test end.
+	t.Cleanup(func() {
+		db.cut(true)
+		pool.Reset()
+		db.cut(false)
+	})
+
+	const lease = 3 * time.Second
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	w := newWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(ctx context.Context, _ *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-release:
+				return nil
+			}
+		}, nil),
+		LeaseDuration: lease,
+	})
+	id := e.enqueue(t, sendEmail{}, nil)
+	type result struct {
+		info *taskmill.TaskInfo
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		info, err := w.RunTask(context.Background(), id)
+		done <- result{info, err}
+	}()
+	recv(t, started, "the handler to start")
+
+	// So many idle connections that tries of a thirtieth of the lease each
+	// would take longer than the lease, idle for long enough that the pool
+	// pings them before it hands them out.
+	held := make([]*pgxpool.Conn, 30)
+	var err error
+	for i := range held {
+		if held[i], err = pool.Acquire(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range held {
+		c.Release()
+	}
+	time.Sleep(1100 * time.Millisecond)
+	db.freezeOpen()
+
+	// The handler runs on past the end of the lease that the last renewal
+	// before the freeze set.
+	time.Sleep(lease + lease/3)
+	close(release)
+	r := recv(t, done, "RunTask to return")
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	if r.info.State != taskmill.StateCompleted {
+		t.Errorf("the task is %s, want completed: its lease ran out while the renewals met frozen connections", r.info.State)
+	}
+}
+
+// A worker checks the pool's idle connections at most once per third of
+// the lease: on a slow database, whose pings run out too, a check closes
+// healthy connections.
+func TestIdleConnectionsAreCheckedOncePerThirdOfTheLease(t *testing.T) {
+	t.Parallel()
+	db := newProxy(t, testdb.URL(t))
+	pool := proxiedPool(t, db, 20, nil)
+	e := newEnvWith(t, pool, nil)
+	// Closing the frozen connections lets the test end.
+	t.Cleanup(func() {
+		db.cut(true)
+		pool.Reset()
+		db.cut(false)
+	})
+	const lease = 3 * time.Second
+	w := newWorker(t, e, &taskmill.WorkerConfig{LeaseDuration: lease})
+	t.Cleanup(func() { taskmill.StopIdleCheck(w) })
+
+	first := time.Now()
+	taskmill.CheckIdle(t.Context(), w)
+	taskmill.StopIdleCheck(w)
+
+	// Idle connections that do not answer: a check holds them until their
+	// pings run out.
+	held := make([]*pgxpool.Conn, 5)
+	var err error
+	for i := range held {
+		if held[i], err = pool.Acquire(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range held {
+		c.Release()
+	}
+	db.freezeOpen()
+	idle := pool.Stat().IdleConns()
+
+	taskmill.CheckIdle(t.Context(), w)
+	if n := pool.Stat().IdleConns(); n != idle {
+		t.Fatalf("a check right after the first took %d of %d idle connections, want none", idle-n, idle)
+	}
+	time.Sleep(time.Until(first.Add(lease/3 + 50*time.Millisecond)))
+	taskmill.CheckIdle(t.Context(), w)
+	if n := pool.Stat().IdleConns(); n != 0 {
+		t.Fatalf("a check a third of the lease after the first left %d of %d idle connections, want none", n, idle)
+	}
+}
+
+// A check of idle connections ends also when the pool's PrepareConn hook
+// panics as the check takes them, as it would when the pool hands one out:
+// Run and RunTask, which wait for the check as they return, would wait for
+// good.
+func TestIdleCheckEndsWhenAHookOfThePoolPanics(t *testing.T) {
+	t.Parallel()
+	cfg, err := pgxpool.ParseConfig(testdb.URL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var panics atomic.Bool
+	cfg.PrepareConn = func(context.Context, *pgx.Conn) (bool, error) {
+		if panics.Load() {
+			panic("a hook of the pool panicked")
+		}
+		return true, nil
+	}
+	// Not closed: pgx loses the connections that the panic left taken, and
+	// Close would wait for them.
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newEnvWith(t, pool, nil)
+	w := newWorker(t, e, &taskmill.WorkerConfig{})
+
+	panics.Store(true)
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the hook did not panic: the pool had no idle connection")
+			}
+		}()
+		taskmill.CheckIdle(t.Context(), w)
+	}()
+	panics.Store(false)
+
+	stopped := make(chan struct{})
+	go func() {
+		taskmill.StopIdleCheck(w)
+		close(stopped)
+	}()
+	recv(t, stopped, "the check to end")
+}
+
+// A connection whose ping failed goes, also when the ping failed without
+// a word with the server, as when its context had ended: the pool would
+// hand it out again without a ping, as just used.
+func TestIdleConnectionWhosePingFailedGoes(t *testing.T) {
+	t.Parallel()
+	pool := testdb.Pool(t)
+	conn, err := pool.Acquire(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := conn.Conn()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	taskmill.PingIdle(ctx, conn)
+	if !c.IsClosed() {
+		t.Error("the connection is open after its ping failed")
 	}
 }
 

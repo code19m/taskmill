@@ -436,7 +436,10 @@ func (e *env) hear(t *testing.T, payload string) <-chan time.Time {
 		for {
 			n, err := conn.WaitForNotification(t.Context())
 			if err != nil {
-				return // the test ended
+				if t.Context().Err() == nil {
+					t.Errorf("the test's listener failed: %v", err)
+				}
+				return
 			}
 			if n.Payload == payload {
 				heard <- time.Now()
@@ -739,8 +742,8 @@ func TestCancelNotificationAloneDoesNotCancel(t *testing.T) {
 // that came first, which takes PostgreSQL and pgx longer the busier the
 // machine is. So the cancel is timed from when a listener of the test,
 // which only reads, gets its notification. A worker that missed it would
-// learn of the cancel at its next check-in, up to a third of the lease
-// later: 10 seconds here.
+// learn of the cancel at its next check-in, a third of the lease later,
+// which the test's long lease puts out of reach.
 func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 	t.Parallel()
 	const flood = 20000
@@ -777,7 +780,8 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 						return nil
 					}
 				}, &taskmill.HandlerOptions{Timeout: time.Minute}),
-				Queues: defaultQueue(2),
+				Queues:        defaultQueue(2),
+				LeaseDuration: 10 * time.Minute,
 			})
 
 			// A second worker only takes part in the election, so one of the
@@ -806,7 +810,7 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 			if id := recv(t, ended, "the canceled task's context to end"); id != asked {
 				t.Fatalf("a notification alone ended the context of task %d", id)
 			}
-			if late := time.Since(recv(t, heard, "the test to hear the cancel")); late > 2*time.Second {
+			if late := time.Since(recv(t, heard, "the test to hear the cancel")); late > 5*time.Second {
 				t.Errorf("the cancellation took effect %s after its notification arrived, behind %d others", late.Round(time.Millisecond), flood)
 			}
 
