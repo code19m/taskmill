@@ -7,6 +7,8 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-27
+
 ### Added
 
 - `GroupParams.Keys` reads FIFO groups by their exact keys, up to 100. With
@@ -2638,7 +2640,8 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/code19m/taskmill/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/code19m/taskmill/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/code19m/taskmill/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/code19m/taskmill/compare/v0.15.0...v0.16.0
