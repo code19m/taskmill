@@ -257,15 +257,13 @@ type activityWrite struct {
 }
 
 // writeActivity writes w.unwritten, and reports whether it succeeded. It
-// drops the counts too old to be worth keeping, and the write when none
-// remain, so that a long outage cannot keep them without bound.
+// drops the counts too old to be worth keeping, so that a long outage
+// cannot keep them without bound. A write left with none still runs: its
+// outcome tells whether the database answers again, so that the failures
+// logged end with it, also on an idle worker.
 func (w *Worker) writeActivity(ctx context.Context) bool {
 	oldest := time.Now().Add(-tallyMaxAge).Unix()
 	maps.DeleteFunc(w.unwritten.counts, func(k tallyKey, _ tallyCount) bool { return k.minute < oldest })
-	if len(w.unwritten.counts) == 0 {
-		w.unwritten = nil
-		return true
-	}
 
 	err := w.addActivity(ctx, w.unwritten)
 	w.activityFailures.observe(ctx, err)

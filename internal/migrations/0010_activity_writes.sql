@@ -7,11 +7,11 @@
 -- docs/design/schema-statistics.md.
 --
 -- A row belongs to one worker, under a random key of its own: a worker's
--- ID, which only 3 random bytes keep apart from an earlier worker's on the
--- same host, would refuse the writes of a worker that got the ID of one
--- from the last day. It is updated with each of the worker's writes, every
--- 10 seconds at most. Retention deletes the rows that no write updated for
--- a day.
+-- ID, which only 3 random bytes keep apart from an earlier worker's of the
+-- same host name and process ID, would refuse the writes of a worker that
+-- got the ID of one from the last day. A write updates the row unless an
+-- earlier try of it did, about every 10 seconds. Retention deletes the rows
+-- that no write updated for a day.
 --
 -- The migration creates a table, and locks no other.
 

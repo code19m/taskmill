@@ -3,6 +3,7 @@ package taskmill_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -61,12 +62,14 @@ func TestActivityCountsAWriteInDoubtOnce(t *testing.T) {
 	t.Parallel()
 	const (
 		atCommit = "CONSTRAINT TRIGGER slow_write AFTER INSERT OR UPDATE ON {s}.activity DEFERRABLE INITIALLY DEFERRED"
-		// No cancel ends a commit: the trigger goes on, as a commit that
-		// waits for a standby does, whatever cancels arrive meanwhile, the
-		// worker's at its deadline or others that a pooler sends.
-		committing = `FOR i IN 1..20 LOOP
+		// The trigger goes on through cancels, the worker's at its deadline
+		// or others that a pooler sends, as a commit that waits for a
+		// standby does. Only a cancel in the microseconds between two steps
+		// ends it, so a step does not divide the worker's deadline: its
+		// cancel lands well inside one.
+		committing = `FOR i IN 1..29 LOOP
             BEGIN
-                PERFORM pg_sleep(0.1);
+                PERFORM pg_sleep(0.07);
             EXCEPTION WHEN query_canceled THEN
             END;
         END LOOP;`
@@ -126,8 +129,9 @@ END $$`)
 // A write that the worker tries again adds its counts once: if the first
 // try was lost, as in a failover to a standby that lacks it, and not again
 // if the first try committed. The same flush then writes the counts made
-// meanwhile, and the next write adds its own, except those that the worker
-// could not write for an hour.
+// meanwhile, under a number of their own, so that they count also when the
+// first try committed. The next write adds its own counts, except those
+// that the worker could not write for an hour.
 func TestActivityWriteTriedAgainAddsItsCountsOnce(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -141,9 +145,9 @@ func TestActivityWriteTriedAgainAddsItsCountsOnce(t *testing.T) {
 		want      int
 	}{
 		{"a write whose first try was lost", 1, 0, 0, 3},
-		{"the same write, whose first try committed", 1, 0, 0, 3},
-		{"the next write, with counts made meanwhile", 2, 0, 2, 8},
-		{"a write of counts from over an hour ago", 4, 61 * time.Minute, 0, 8},
+		{"the same write, whose first try committed, with counts made meanwhile", 1, 0, 2, 5},
+		{"the next write, with counts made meanwhile", 3, 0, 2, 10},
+		{"a write of counts from over an hour ago", 5, 61 * time.Minute, 0, 10},
 	} {
 		taskmill.Tally(w, taskmill.DefaultQueue, c.meanwhile)
 		taskmill.FlushActivityAgain(t.Context(), w, c.number, taskmill.DefaultQueue, 3, c.age)
@@ -181,10 +185,41 @@ func TestActivityWriteThatFailedGoesFirst(t *testing.T) {
 	}
 }
 
+// A worker that could not write its counts for an hour drops them, and
+// still writes once the database answers again, so that its log of the
+// failed writes ends, also when it counts nothing more. Here the failed
+// write's counts are over an hour old when the database answers.
+func TestActivityRecoveryIsLoggedAfterTheCountsAgeOut(t *testing.T) {
+	t.Parallel()
+	logs := &logRecorder{}
+	e := newEnv(t).withLogger(t, slog.New(logs))
+	w := newWorker(t, e, &taskmill.WorkerConfig{Handlers: noopHandlers(), Queues: defaultQueue(1)})
+
+	busy := e.begin(t)
+	e.txExec(t, busy, "LOCK TABLE {s}.activity_writes")
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	taskmill.FlushActivityAgain(ctx, w, 1, taskmill.DefaultQueue, 3, 0)
+	cancel()
+	if err := busy.Rollback(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if n := logs.count("operation failed"); n != 1 {
+		t.Fatalf("got %d lines of a failed write, want 1", n)
+	}
+
+	taskmill.FlushActivityAgain(t.Context(), w, 1, taskmill.DefaultQueue, 3, 61*time.Minute) // the same write, an hour later
+	if n := logs.count("operation recovered"); n != 1 {
+		t.Errorf("got %d lines of a recovery, want 1", n)
+	}
+	if n := e.count(t, "SELECT coalesce(sum(completed), 0) FROM {s}.activity"); n != 0 {
+		t.Errorf("the activity counts %d completed attempts, want none", n)
+	}
+}
+
 // Each worker numbers its writes in a row of its own, under a random key: a
-// worker that got the ID of a worker from the last day, which only 3 random
-// bytes keep apart, still adds its counts, though its writes have lower
-// numbers.
+// worker that got the ID of a worker from the last day, as one of the same
+// host name and process ID can, still adds its counts, though its writes
+// have lower numbers.
 func TestActivityOfAWorkerWithAnEarlierWorkersID(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
