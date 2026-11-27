@@ -434,20 +434,6 @@ func (p *proxy) freezeOpen() {
 	}
 }
 
-// frozenOpen counts the connections that freezeOpen froze and that are
-// still open.
-func (p *proxy) frozenOpen() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	frozen := map[*atomic.Bool]bool{}
-	for _, f := range p.conns {
-		if f.Load() {
-			frozen[f] = true // both ends of a connection share it
-		}
-	}
-	return len(frozen)
-}
-
 // cut closes every connection and refuses new ones, or accepts them again.
 func (p *proxy) cut(down bool) {
 	p.mu.Lock()

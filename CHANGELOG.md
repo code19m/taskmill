@@ -34,10 +34,11 @@ All notable changes to taskmill are recorded here. The format follows
   Meanwhile, handlers that share the pool open new connections, or wait if
   it is full. While round trips to the database take longer than a
   thirtieth of the lease, as when it slows down for a moment, a check
-  closes healthy connections too, and the pool opens new ones. So the
+  closes nearly every idle connection, and the pool opens new ones. So the
   workers of a client check its pool one at a time, and after a check that
-  closed connections, not again for a third of the lease. `Client.Close`
-  ends a check under way.
+  closed connections, each waits a third of its own lease before it starts
+  another. `Client.Close` ends a check under way, and no check starts
+  after it.
 - `Worker.RunTask` no longer cancels its handler as if the task's lease had
   run out after it waited for the task's row, as while the transaction of
   `Client.CancelTx` holds it. The database counts a lease from when it

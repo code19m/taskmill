@@ -224,9 +224,10 @@ type WorkerConfig struct {
 	// it above 30 round trips to the database: a thirtieth of it bounds the
 	// ping of an idle connection, and one that runs out closes it, and has
 	// the pool's other idle connections pinged too, for as long. While round
-	// trips take longer, that check closes healthy connections too, so after
-	// one that closed connections, the client's workers start none for a
-	// third of the lease. Minimum: 100 milliseconds. Default: 30 seconds.
+	// trips take longer, that check closes nearly every idle connection, so
+	// after one that closed connections, each worker of the client waits a
+	// third of its own lease before it starts another. Minimum: 100
+	// milliseconds. Default: 30 seconds.
 	//
 	// The worker stores it when it registers, and the installation judges
 	// by it how long the worker may make no check-in. After one
