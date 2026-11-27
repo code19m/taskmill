@@ -6,7 +6,7 @@ upgrade, see [Upgrading](../production/upgrading.md).
 
 ## Status
 
-- The latest release is **v0.18.0**.
+- The latest release is **v0.18.1**.
 - taskmill follows [Semantic Versioning](https://semver.org/). Before v1.0.0,
   it allows a minor release to break the API. If one does, the
   [changelog](../../CHANGELOG.md) marks the change with **Breaking:** and
