@@ -25,12 +25,14 @@ import (
 // A task of a kind that the worker has no handler for is snoozed, with a
 // no_handler note in its errors, as Run does, and returned.
 //
-// A wait for the task's row, as while the transaction of [Client.CancelTx]
-// holds it, does not count against the lease, which starts when the task is
-// taken. A task whose lease ended on its way, as when the database's answer
-// took longer than the lease to arrive, may run on another worker already:
-// RunTask runs nothing then, and returns the task, which stays running until
-// the maintainer rescues it.
+// The database starts a task's lease when it takes the task, and the
+// worker counts it from its request, so a wait for the task's row, as while
+// the transaction of [Client.CancelTx] holds it, or an answer slow to
+// arrive, leaves less of the lease as far as the worker knows. So RunTask
+// renews a lease with less than two thirds left before any middleware or
+// handler runs, as Run does after a slow fetch. If the lease ended on its
+// way, and the renewal finds the task rescued, or fails, the task may run
+// on another worker already: RunTask runs nothing then, and returns it.
 //
 // It returns the task afterwards. It returns [ErrNotFound] if no task has the
 // ID, and [ErrInvalidState] if the task is running, waits behind its FIFO

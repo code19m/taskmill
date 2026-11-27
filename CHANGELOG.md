@@ -43,7 +43,9 @@ All notable changes to taskmill are recorded here. The format follows
   takes the task, and the worker from when it asked: after a wait of over
   two thirds of the lease, the worker saw it end before its first renewal.
   Now `RunTask` renews such a lease before the handler starts, as `Run`
-  does after a slow fetch.
+  does after a slow fetch. So it also runs a task whose lease ended on its
+  way, if no maintainer rescued the task meanwhile, where it ran nothing,
+  and the task waited for a rescue, at the cost of an attempt.
 - A worker adds its counts of ended attempts to the activity once, also
   when a write of them failed but committed all the same, as one whose
   commit outlasted its deadline while it waited for a synchronous standby.
