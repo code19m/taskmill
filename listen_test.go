@@ -418,6 +418,39 @@ func (e *env) listenerPIDs(t *testing.T) []int {
 	return pids
 }
 
+// hear listens for the env's notifications on a connection of its own, which
+// only reads them, and sends when the first with payload arrives.
+func (e *env) hear(t *testing.T, payload string) <-chan time.Time {
+	t.Helper()
+	conn, err := pgx.Connect(t.Context(), testdb.DirectURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(t.Context(), "LISTEN "+e.schema); err != nil {
+		t.Fatal(err)
+	}
+
+	heard, done := make(chan time.Time, 1), make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			n, err := conn.WaitForNotification(t.Context())
+			if err != nil {
+				return // the test ended
+			}
+			if n.Payload == payload {
+				heard <- time.Now()
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		<-done
+		_ = conn.Close(context.Background())
+	})
+	return heard
+}
+
 func TestIdleWorkerFindsATaskWhoseNotificationWasLost(t *testing.T) {
 	t.Parallel()
 	e, _ := newCountedEnv(t)
@@ -701,6 +734,13 @@ func TestCancelNotificationAloneDoesNotCancel(t *testing.T) {
 // Any role can send notifications faster than a worker reads the database
 // for each: one statement commits thousands. They must neither hold up a
 // real cancellation nor cost a read each.
+//
+// No listener can see the cancel's notification before it reads the flood
+// that came first, which takes PostgreSQL and pgx longer the busier the
+// machine is. So the cancel is timed from when a listener of the test,
+// which only reads, gets its notification. A worker that missed it would
+// learn of the cancel at its next check-in, up to a third of the lease
+// later: 10 seconds here.
 func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 	t.Parallel()
 	const flood = 20000
@@ -751,6 +791,7 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 
 			waitFor(t, "both workers to listen", func() bool { return len(e.listenerPIDs(t)) == 2 })
 			waitFor(t, "a maintainer", func() bool { return e.count(t, "SELECT count(*) FROM {s}.leader") == 1 })
+			heard := e.hear(t, "c|"+strconv.FormatInt(asked, 10))
 			sent.reset()
 
 			// Each notification commits alone: PostgreSQL delivers equal ones
@@ -759,15 +800,14 @@ func TestFloodOfNotificationsDoesNotHoldUpACancel(t *testing.T) {
 			e.exec(t, "DO $$ BEGIN FOR i IN 1.."+strconv.Itoa(flood)+" LOOP PERFORM pg_notify('"+e.schema+"', '"+
 				tc.payload(running)+"'); COMMIT; END LOOP; END $$")
 
-			start := time.Now()
 			if err := e.client.Cancel(t.Context(), asked); err != nil {
 				t.Fatal(err)
 			}
 			if id := recv(t, ended, "the canceled task's context to end"); id != asked {
 				t.Fatalf("a notification alone ended the context of task %d", id)
 			}
-			if waited := time.Since(start); waited > 2*time.Second {
-				t.Errorf("the cancellation waited %s behind %d notifications", waited.Round(time.Millisecond), flood)
+			if late := time.Since(recv(t, heard, "the test to hear the cancel")); late > 2*time.Second {
+				t.Errorf("the cancellation took effect %s after its notification arrived, behind %d others", late.Round(time.Millisecond), flood)
 			}
 
 			// The workers read at their own pace, however long a slow database
