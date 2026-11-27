@@ -36,9 +36,11 @@ All notable changes to taskmill are recorded here. The format follows
   the left, such as the range of time at the end of the filters, showed for
   a frame where it does not fit, which could also send a quick click past
   it. One that stayed open while its list showed anew, as after adding a
-  value that was typed, moved back past the edge of the window. And one
-  opened while the page's script loaded was not placed, and the range of
-  time had no calendar.
+  value that was typed, moved back past the edge of the window. One opened
+  while the page's script loaded was not placed, and the range of time had
+  no calendar. And a page that the back or forward button brought back
+  came with the menu that was open on it, which took the focus from the
+  page and held its live updates; it comes with its menus closed.
 
 ## [0.18.0] - 2026-11-27
 

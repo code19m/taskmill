@@ -109,17 +109,25 @@ function inPlace(main, place) {
 
 // leave keeps the page on screen, before another one takes its place:
 // its title, its content, and the parts around it that an update changes.
-// What the script put there stays out: a chart's guide, and a hint's
-// place, in its style attribute. A page that does not update itself, such
-// as one at the address of the page whose action it refused, is not kept:
-// the browser loads the address again.
+// What the script put there stays out: a chart's guide, a hint's place, in
+// its style attribute, and an open menu, which the page comes back without,
+// as a page that the browser brings back does. A page that does not update
+// itself, such as one at the address of the page whose action it refused,
+// is not kept: the browser loads the address again.
 function leave() {
   untrace();
   undescribe(); // the page is kept with its titles
   pages.delete(entry);
   if (!livePage()) return;
   for (const pop of document.querySelectorAll(".hint-pop[style]")) pop.removeAttribute("style");
-  const parts = [document.getElementById("main"), ...document.querySelectorAll("[data-live-part]")];
+  const parts = [document.getElementById("main"), ...document.querySelectorAll("[data-live-part]")].map((part) => {
+    const copy = part.cloneNode(true);
+    for (const sel of copy.querySelectorAll("details.sel[open]")) {
+      sel.open = false;
+      delete sel.dataset.jsPlaced;
+    }
+    return copy;
+  });
   pages.set(entry, { title: document.title, html: parts.map((part) => part.outerHTML).join(""), y: scrollY });
   if (pages.size > KEEP_PAGES) pages.delete(pages.keys().next().value);
 }

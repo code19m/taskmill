@@ -81,6 +81,7 @@ on("click", async (event) => {
 highlight(document);
 localise(document);
 calendar.localiseRange(document);
+menus.placeOpen(); // after the range has its bounds: its calendar shows the last one
 for (const slider of document.querySelectorAll(".chart-step")) charts.say(slider);
 syncServerClock(document.getElementById("main"), performance.getEntriesByType("navigation")[0]?.responseStart || performance.now());
 live.start();

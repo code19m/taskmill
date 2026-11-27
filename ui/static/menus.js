@@ -166,13 +166,15 @@ export function placeMenu(sel) {
   sel.dataset.jsPlaced = "";
 }
 
-// opened readies a menu that opened: the others close, a range draws its
-// calendar, and the menu is placed and takes the focus.
-function opened(sel) {
-  for (const other of openMenus()) if (other !== sel) other.open = false;
-  if (sel.matches(".sel-range")) openCalendar(sel);
-  placeMenu(sel);
-  if (!coarse.matches) (sel.querySelector("[data-sel-search]") || boxes(sel)[0])?.focus({ preventScroll: true });
+// placeOpen places the menus that the reader opened while the script
+// loaded, which had no toggle event that the script heard, and draws a
+// range's calendar. The focus, and which menus are open, stay as the reader
+// left them.
+export function placeOpen() {
+  for (const sel of openMenus()) {
+    if (sel.matches(".sel-range")) openCalendar(sel);
+    placeMenu(sel);
+  }
 }
 
 // listen listens to the menus: they open, close, search, and apply as the
@@ -196,11 +198,11 @@ export function listen() {
       return;
     }
 
-    opened(sel);
+    for (const other of openMenus()) if (other !== sel) other.open = false;
+    if (sel.matches(".sel-range")) openCalendar(sel);
+    placeMenu(sel);
+    if (!coarse.matches) (field || boxes(sel)[0])?.focus({ preventScroll: true });
   }, true);
-  // A menu that the reader opened while the script loaded had no toggle
-  // event that the script heard. The first one readied closes the others.
-  for (const sel of openMenus()) if (sel.open) opened(sel);
 
   // A press outside a menu closes it.
   on("pointerdown", (event) => {

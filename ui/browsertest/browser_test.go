@@ -316,8 +316,8 @@ func (s *site) open(t *testing.T, path string) *page {
 	return p
 }
 
-// start opens path in a new tab, and returns once the browser has the page,
-// before it loads: its scripts may still load.
+// start opens path in a new tab, and returns once the browser has read the
+// page, without waiting for its scripts, which may still load.
 func (s *site) start(t *testing.T, path string) *page {
 	t.Helper()
 	p := newTab(t)
@@ -325,6 +325,7 @@ func (s *site) start(t *testing.T, path string) *page {
 		_, err := cdp.Call(ctx, target, cdppage.Navigate, cdppage.NavigateParams{URL: s.url + path})
 		return err
 	}))
+	p.waitFor(`location.href === `+js(s.url+path)+` && document.readyState !== "loading"`, "the page")
 	return p
 }
 

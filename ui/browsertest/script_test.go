@@ -184,25 +184,53 @@ func TestMenuShowsOnceItIsPlaced(t *testing.T) {
 	}
 }
 
-// A menu that the reader opens while the script loads shows as before, and
-// once the script starts, it is readied as one that opens then: placed,
-// with its calendar drawn.
-func TestMenuOpenedWhileTheScriptLoads(t *testing.T) {
+// Menus that the reader opens while the script loads show as before. Once
+// the script starts, they are placed, and the range's calendar shows the
+// month of the range's end; the focus, and the menus that are open, stay as
+// the reader left them, here in the kind search with "em" typed.
+func TestMenusOpenedWhileTheScriptLoads(t *testing.T) {
 	s := newSite(t)
 	release := s.hold(t, "app.js")
-	p := s.start(t, "/tasks")
-	p.waitFor(`document.querySelector(".sel-range > summary")`, "the page")
+	p := s.start(t, "/tasks?since=2025-08-03T00:00:00Z&before=2025-08-10T00:00:00Z")
 	p.click(".sel-range > summary")
-	const shows = `document.querySelector(".sel-range[open] > .pop")?.checkVisibility({ visibilityProperty: true })`
-	p.waitFor(shows, "the menu opening")
+	p.click(`.sel[data-name="kind"] > summary`)
+	p.click(`.sel[data-name="kind"] [data-sel-search]`)
+	p.press("em")
+	const shown = `[...document.querySelectorAll("details.sel[open] > .pop")].map((pop) => pop.checkVisibility({ visibilityProperty: true }) && pop.getBoundingClientRect().right <= innerWidth)`
+	if got := eval[[]bool](p, shown); len(got) != 2 {
+		t.Fatalf("got %d open menus while the script loads, want 2", len(got))
+	}
 
 	release()
 	p.waitFor(`document.documentElement.classList.contains("js-started")`, "the script starting")
-	if !eval[bool](p, shows+` && document.querySelector(".sel-range > .pop").getBoundingClientRect().right <= innerWidth`) {
-		t.Error("the menu is hidden, or runs past the window")
+	if got := eval[[]bool](p, shown); !slices.Equal(got, []bool{true, true}) {
+		t.Errorf("of the open menus, these show within the window: %v, want both", got)
 	}
-	if !eval[bool](p, `document.querySelector(".sel-range .cal-grid").children.length > 0`) {
-		t.Error("the menu has no calendar")
+	if got := eval[string](p, `document.getElementById("cal-title").textContent`); !strings.Contains(got, "2025") {
+		t.Errorf("the calendar shows %q, want a month of 2025", got)
+	}
+	if !eval[bool](p, `document.activeElement.matches('.sel[data-name="kind"] [data-sel-search]') && document.activeElement.value === "em"`) {
+		t.Error("the kind search lost the focus, or its text")
+	}
+}
+
+// A page that the back or forward button brings back comes without the
+// menu that was open on it, as the browser brings a page back, and the
+// focus is on the page.
+func TestPageComesBackWithItsMenusClosed(t *testing.T) {
+	s := newSite(t)
+	p := s.open(t, "/")
+	p.click(`.nav-item[href="/tasks"]`)
+	p.waitFor(`location.pathname === "/tasks" && document.querySelector('.sel[data-name="state"]')`, "the tasks")
+	p.click(`.sel[data-name="state"] > summary`)
+	p.waitFor(`document.querySelector('.sel[data-name="state"][open][data-js-placed]')`, "the menu opening")
+
+	p.history(-1)
+	p.waitFor(`location.pathname === "/"`, "the back button")
+	p.history(1)
+	p.waitFor(`location.pathname === "/tasks" && document.querySelector('.sel[data-name="state"]')`, "the forward button")
+	if !eval[bool](p, `!document.querySelector("details.sel[open], details.sel[data-js-placed]") && document.activeElement === document.getElementById("main")`) {
+		t.Error("a menu came back open, or took the focus")
 	}
 }
 
