@@ -155,6 +155,16 @@ gets no answer in its time is followed by one with twice as long, up to a
 third of the lease: on a slow database, each try that runs out of time
 costs a connection, which pgx holds in the pool while it closes it.
 
+Every statement of the worker takes an idle connection of the pool for a
+thirtieth of the lease at most: the pool pings one that was idle for more
+than a second, and closes it if the ping runs out. After a failover that
+left the pool's connections behind, all of its idle ones may never answer,
+and tries that met them one at a time could outlast the leases. So once a
+try runs out, the worker takes all the idle connections from the pool and
+pings them at once, in the background, as long as a try: the pool closes
+those that do not answer, and the next try takes one that did, or opens
+one. One such check runs at a time, and `Run` and `RunTask` wait for it.
+
 The check-ins continue meanwhile with a third of the lease, which a slow
 database may need. So two renewals of a lease can overlap, and the one that
 started first can commit last: the statement never moves a lease's end

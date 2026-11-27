@@ -63,6 +63,7 @@ func (w *Worker) RunTask(ctx context.Context, id int64) (*TaskInfo, error) {
 // t.Fatal does in a test, stops the renewals all the same, and its task
 // goes back to its queue (see runOne).
 func (w *Worker) runDirect(ctx context.Context, t *liveAttempt) {
+	defer w.waitIdleCheck()
 	renewCtx, stopRenewing := context.WithCancel(context.WithoutCancel(ctx))
 	var renewing sync.WaitGroup
 	defer renewing.Wait()

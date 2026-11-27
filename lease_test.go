@@ -899,7 +899,7 @@ func TestWorkerOutlastsConnectionsThatStopAnswering(t *testing.T) {
 	// pgx holds the place of a broken connection in the pool for up to 15
 	// seconds while it closes it, so the pool has room beyond the
 	// connections that the proxy freezes.
-	pool := proxiedPool(t, db, 30, nil)
+	pool := proxiedPool(t, db, 50, nil)
 	e := newEnvWith(t, pool, nil)
 	direct := e.direct(t)
 	listen, err := pgx.ParseConfig(testdb.DirectURL(t))
@@ -946,8 +946,10 @@ func TestWorkerOutlastsConnectionsThatStopAnswering(t *testing.T) {
 	}
 
 	// The pool keeps idle connections, which the proxy freezes with the
-	// others: the next steps of the worker meet them.
-	held := make([]*pgxpool.Conn, 8)
+	// others: the next steps of the worker meet them. So many that steps
+	// that tried them one at a time, a thirtieth of the lease each, would
+	// let the leases run out.
+	held := make([]*pgxpool.Conn, 30)
 	for i := range held {
 		if held[i], err = pool.Acquire(t.Context()); err != nil {
 			t.Fatal(err)

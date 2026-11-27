@@ -168,6 +168,7 @@ type Worker struct {
 	queueHints  chan struct{} // settings of the worker's queues changed
 
 	renewFailed chan struct{} // a renewal of leases failed: renewAgain tries again
+	idleCheck   chan struct{} // full while the pool's idle connections are pinged: see checkIdle
 
 	completions   chan *liveAttempt    // successful attempts of Run, for the completer
 	completerDone chan struct{}        // closed when the current Run's completer returns
@@ -369,6 +370,7 @@ func NewWorker(client *Client, cfg *WorkerConfig) (*Worker, error) {
 		cancelHints: make(chan struct{}, 1),
 		queueHints:  make(chan struct{}, 1),
 		renewFailed: make(chan struct{}, 1),
+		idleCheck:   make(chan struct{}, 1),
 		completions: make(chan *liveAttempt, completionBatch),
 		groupWait:   make(chan struct{}, groupWaits),
 		outcomes:    make(chan *outcomeRequest, completionBatch),
@@ -626,6 +628,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	defer w.running.Store(false)
 	defer w.reached.Store(nil)
+	defer w.waitIdleCheck()
 
 	// Work that must finish during shutdown runs on base, which keeps ctx's
 	// values but not its cancellation.
