@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"slices"
 	"strconv"
@@ -199,6 +200,41 @@ func TestFetchThatFillsABatchSaysThatMoreMayWait(t *testing.T) {
 			t.Errorf("limit %d: took %d tasks, more %v, at the limit %v, %v; want a batch of 10, and more",
 				limit, n, more, atLimit, err)
 		}
+	}
+}
+
+// Under a backlog, a worker whose handlers take a while lets a few slots
+// come free before it fetches again: a fetch for each freed slot would cost
+// the database a transaction for each task.
+func TestFetchesUnderABacklogTakeSeveralTasks(t *testing.T) {
+	t.Parallel()
+	sent := &statementLog{}
+	e := newTracedEnv(t, sent)
+
+	const tasks, concurrency = 640, 32
+	params := make([]taskmill.EnqueueParams, tasks)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: sendEmail{}}
+	}
+	if _, err := e.client.EnqueueMany(t.Context(), params); err != nil {
+		t.Fatal(err)
+	}
+
+	var ran atomic.Int32
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			time.Sleep(time.Duration(30+rand.IntN(20)) * time.Millisecond) //nolint:gosec // spreads the handlers' ends
+			ran.Add(1)
+			return nil
+		}, nil),
+		Queues:       defaultQueue(concurrency),
+		NoMaintainer: true,
+	})
+	waitFor(t, "every task to run", func() bool { return ran.Load() == tasks })
+
+	// One fetch per freed slot takes about 1.2 tasks each here.
+	if fetches := sent.count("WITH picked AS"); fetches > tasks*2/3 {
+		t.Errorf("%d fetches for %d tasks, want 1.5 tasks a fetch or more", fetches, tasks)
 	}
 }
 
@@ -893,12 +929,18 @@ func TestFetchThatWaitedForThePoolIsNotSlow(t *testing.T) {
 	if n := renewedBeforeStart.Load(); n != 0 {
 		t.Errorf("the worker renewed leases %d times before the tasks started, want none", n)
 	}
+	// A fetch that the 4 tasks' slots made smaller may be answered after
+	// they are free: the trace notes a fetch when its answer is read. So
+	// the test waits for a later fetch of all 10 slots, which a worker that
+	// halved its fetches would not send: it keeps the smaller size while
+	// fetches find fewer tasks.
 	waitFor(t, "the slots to be free", func() bool { return w.Stats().SlotsBusy == 0 })
 	fetched := trace.fetches()
-	waitFor(t, "the next fetch", func() bool { return trace.fetches() > fetched })
-	if got := trace.limit(fetched); got != 10 {
-		t.Errorf("the next fetch took up to %d tasks, want one for each of the 10 free slots", got)
-	}
+	waitFor(t, "a fetch of one task for each of the 10 free slots", func() bool {
+		trace.mu.Lock()
+		defer trace.mu.Unlock()
+		return slices.Contains(trace.limits[fetched:], 10)
+	})
 }
 
 // fetchTrace keeps the limit of each fetch from a queue without a

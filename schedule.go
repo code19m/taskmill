@@ -409,16 +409,17 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		key = due.UnixMicro()
 	}
 
-	return pgx.BeginFunc(ctx, m.c.pool, func(tx pgx.Tx) error {
-		// An enqueue into a FIFO group waits for the group's row. The election
-		// runs in the same loop, so give up after a moment, and try again in
-		// the next cycle.
-		if _, err := tx.Exec(ctx, lockTimeoutSQL, m.w.timing.lockTimeout()); err != nil {
+	return m.c.inTx(ctx, m.c.pool, func(q querier) error {
+		// An enqueue into a FIFO group waits for the group's row. The other
+		// schedules wait for this one, so give up after a moment, and try
+		// again in the next cycle. The transaction notifies nobody, so the
+		// timeout may last until its commit: see liftLockTimeout.
+		if _, err := q.exec(ctx, lockTimeoutSQL, m.w.timing.lockTimeout()); err != nil {
 			return err
 		}
 
-		tag, err := tx.Exec(ctx, m.c.sql.advanceSchedule, s.Name, next, due)
-		if err != nil || tag.RowsAffected() == 0 {
+		advanced, err := q.exec(ctx, m.c.sql.advanceSchedule, s.Name, next, due)
+		if err != nil || advanced == 0 {
 			return err // another maintainer ran it, or it was paused meanwhile
 		}
 
@@ -434,15 +435,7 @@ func (m *maintainer) enqueueRun(ctx context.Context, s *compiledSchedule, due, n
 		// The enqueue middleware sees taskmill's own metadata, and cannot
 		// change it: a handler must find the run's time whatever it does.
 		run.reservedMeta = s.reservedMetadata(s.scheduledFor(due))
-		if _, err = m.c.storeThrough(ctx, pgxExecutor{q: tx}, false, []*resolvedTask{run}); err != nil {
-			return err
-		}
-
-		// The timeout was for the group's row. At the commit, it would keep
-		// the schedule from running for as long as notifying transactions
-		// queue there for longer than that wait, while every other enqueue
-		// only waits its turn.
-		_, err = tx.Exec(ctx, liftLockTimeout)
+		_, err = m.c.storeThrough(ctx, q, false, []*resolvedTask{run})
 		return err
 	})
 }

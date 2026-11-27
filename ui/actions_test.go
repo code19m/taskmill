@@ -545,9 +545,81 @@ func TestBulkActionStopsInTime(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h := handler(t, client, nil)
+	hops := slowBulk(t, handler(t, client, nil), picks, "/tasks/bulk/cancel?queue=default")
+
+	// Each page on the way counts the tasks so far.
+	so := 0
+	for _, hop := range hops[:len(hops)-1] {
+		n, _ := strconv.Atoi(hop.to.Query().Get("count"))
+		if n <= so || !strings.Contains(hop.page, html.EscapeString(number(n)+" tasks canceled so far; more remain.")) {
+			t.Fatalf("after %d tasks, the page at %q:\n%s", so, hop.to, hop.page)
+		}
+		so = n
+	}
+
+	// The task list shows every task again, and the count of every request.
+	last := hops[len(hops)-1]
+	if q := last.to.Query(); len(hops) < 2 || last.to.Path != "/tasks" || q.Get("done") != "cancel-all" || q.Has("cursor") ||
+		!strings.Contains(last.page, "3,000 tasks canceled.") {
+		t.Fatalf("went to %q after %d requests; want the task list, and 3,000 tasks canceled in two or more:\n%s", last.to, len(hops), last.page)
+	}
+}
+
+// A bulk retry that runs out of time in the request that meets a task left
+// for its dedupe key still says so at the end.
+func TestBulkRetryCountsConflictsAcrossRequests(t *testing.T) {
+	t.Parallel()
+	picks := &pickHook{}
+	client, _, _ := setupTraced(t, picks)
+	ctx := t.Context()
+
+	// The oldest canceled task gave its key away, and another task holds it.
+	keyed := &taskmill.EnqueueOptions{DedupeKey: "order-42"}
+	refused, err := client.Enqueue(ctx, greet{Name: "a"}, keyed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Cancel(ctx, refused.ID); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := client.Enqueue(ctx, greet{Name: "b"}, keyed); err != nil || res.Duplicate {
+		t.Fatalf("enqueue of the key's new holder: %+v, %v", res, err)
+	}
+
+	// Three batches of canceled tasks after it.
+	params := make([]taskmill.EnqueueParams, 3000)
+	for i := range params {
+		params[i] = taskmill.EnqueueParams{Args: greet{Name: "x"}, Options: &taskmill.EnqueueOptions{Queue: "fill"}}
+	}
+	if _, err := client.EnqueueMany(ctx, params); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := client.CancelMatching(ctx, &taskmill.BulkParams{Filter: taskmill.TaskFilter{Queues: []string{"fill"}}}); err != nil || res.Changed != 3000 {
+		t.Fatalf("cancel: %+v, %v", res, err)
+	}
+
+	hops := slowBulk(t, handler(t, client, nil), picks, "/tasks/bulk/retry?state=canceled")
+	last := hops[len(hops)-1]
+	if q := last.to.Query(); len(hops) < 2 || q.Get("done") != "retry-conflicts" || q.Get("count") != "3000" || q.Get("conflicts") != "1" ||
+		!strings.Contains(last.page, "3,000 tasks retried; 1 task not, because another task holds the same dedupe key.") {
+		t.Fatalf("went to %q after %d requests; want 3,000 retried and 1 conflict in two or more:\n%s", last.to, len(hops), last.page)
+	}
+}
+
+// bulkHop is where one request of a bulk action led, and the page there.
+type bulkHop struct {
+	to   *url.URL
+	page string
+}
+
+// slowBulk sends a bulk action, and goes on from its page as a user does,
+// with each request out of time in its second batch, until the action ends.
+// It returns where each request led.
+func slowBulk(t *testing.T, h http.Handler, picks *pickHook, target string) []bulkHop {
+	t.Helper()
+	defer picks.at.Store(nil)
 	form := regexp.MustCompile(`<form class="bulk-actions" method="post" action="([^"]*)">`)
-	target, total, requests := "/tasks/bulk/cancel?queue=default", 0, 0
+	var hops []bulkHop
 	for range 200 {
 		// A request has 400 ms, so the action works for 200 ms of it. Its
 		// second batch starts only after those: the action then ends that
@@ -566,33 +638,23 @@ func TestBulkActionStopsInTime(t *testing.T) {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
 		cancel()
-		requests++
-		loc, _ := url.Parse(rec.Header().Get("Location"))
-		q := loc.Query()
-		n, _ := strconv.Atoi(q.Get("count"))
-		total += n
-		if q.Get("done") == "cancel-all" {
-			// The task list shows every task again.
-			if total != 3000 || requests < 2 || loc.Path != "/tasks" || q.Has("cursor") {
-				t.Fatalf("canceled %d tasks in %d requests, then went to %q; want 3,000 in two or more, and the task list",
-					total, requests, loc)
-			}
-			return
+
+		to, _ := url.Parse(rec.Header().Get("Location"))
+		_, page, _ := get(t, h, to.String())
+		hops = append(hops, bulkHop{to, page})
+		if !strings.HasSuffix(to.Query().Get("done"), "-more") {
+			return hops
 		}
+
 		// Its page goes on where it stopped.
-		if rec.Code != http.StatusSeeOther || loc.Path != "/tasks/bulk/cancel" || q.Get("done") != "cancel-more" || q.Get("cursor") == "" {
-			t.Fatalf("slow bulk cancel: %d to %q", rec.Code, loc)
-		}
-		_, body, _ := get(t, h, loc.String())
-		match := form.FindStringSubmatch(body)
-		if !strings.Contains(body, html.EscapeString(number(n)+" tasks canceled so far; more remain.")) || match == nil ||
-			!strings.Contains(match[1], "cursor=") {
-			t.Fatalf("the page after a partial cancel:\n%s", body)
+		match := form.FindStringSubmatch(page)
+		if rec.Code != http.StatusSeeOther || to.Path != strings.SplitN(target, "?", 2)[0] || match == nil || !strings.Contains(match[1], "cursor=") {
+			t.Fatalf("%d to %q, whose page:\n%s", rec.Code, to, page)
 		}
 		target = html.UnescapeString(match[1])
 	}
-
-	t.Fatal("the cancel did not end")
+	t.Fatal("the action did not end")
+	return nil
 }
 
 // number formats n as the interface does.

@@ -45,6 +45,26 @@ SELECT ` + taskColumns(`state::text`) + ` FROM (
 ) page(` + pageColumns + `)
 ORDER BY id DESC LIMIT $5`
 
+// $1 queues, $2 states, only running, $3 kinds, $4 group keys, $5 limit, $6 summary,
+// $7 below task ID.
+//
+// listRunningSQL pages through the running tasks as listTasksSQL does. It
+// reads every running task of the listed queues from their own index, by
+// queue, and sorts them: the concurrency of the workers bounds them. The
+// fence (OFFSET 0) keeps the planner from walking the primary key backward
+// instead, through every newer task, as it does when its statistics expect
+// running tasks among the newest.
+var listRunningSQL = `
+SELECT ` + taskColumns(`state::text`) + ` FROM (
+    SELECT ` + listColumns(`state::text`) + `
+    FROM (SELECT id, queue, kind, state, priority, attempt, max_attempts, group_key,
+                 metadata, payload, errors, created_at, run_at, attempted_at, finalized_at
+          FROM {s}.tasks WHERE state = 'running' AND ` + inList(`queue`, `$1::text[]`) + ` OFFSET 0) t
+    WHERE 'running' = ANY($2::text[]) AND ` + inList(`kind`, `$3::text[]`) + `
+      AND ` + inList(`group_key`, `$4::text[]`) + ` AND id < $7
+    ORDER BY id DESC LIMIT $5
+) page(` + pageColumns + `)`
+
 // $1 queues, $2 states, $3 kinds, $4 group keys, $5 limit, $6 summary, $7 below task ID,
 // $8 below finish time, $9 finished since or NULL, $10 finished before or NULL.
 //
@@ -156,7 +176,8 @@ WHERE '` + string(s) + `' = ANY($4::text[])`)
 	return b.String()
 }
 
-// $1 search, $2 limit, $3 halted only, $4 after queue, $5 after group key.
+// $1 search, $2 limit, $3 halted only, $4 after queue, $5 after group key,
+// $6 group keys, or none for all.
 //
 // listGroupsSQL reads a page of FIFO groups in the order of the primary
 // key, after group ($4, $5) where the last page ended, so a page with
@@ -167,25 +188,28 @@ SELECT queue, group_key, tasks, coalesce(halted_task_id, 0) FROM {s}.groups
 WHERE tasks > 0
   AND ($1 = '' OR strpos(lower(group_key), lower($1)) > 0)
   AND (NOT $3 OR halted_task_id IS NOT NULL)
+  AND (cardinality($6::text[]) = 0 OR group_key = ANY($6::text[]))
   AND (queue, group_key) > ($4, $5)
 ORDER BY queue, group_key
 LIMIT $2`
 
-// $1 to $5 as in listGroupsSQL, $6 queues.
+// $1 to $6 as in listGroupsSQL, $7 queues.
 //
-// listQueueGroupsSQL reads a page of listGroups in queues $6 only. Each
+// listQueueGroupsSQL reads a page of listGroups in queues $7 only. Each
 // queue from the cursor's on reads its own groups in key order, up to
 // a page, from where the last page ended, so a page reads no group
-// of an earlier one.
+// of an earlier one. Keys ($6) read their groups through the primary
+// key.
 const listQueueGroupsSQL = `
 SELECT g.queue, g.group_key, g.tasks, coalesce(g.halted_task_id, 0)
-FROM (SELECT DISTINCT unnest($6::text[])) AS u(q),
+FROM (SELECT DISTINCT unnest($7::text[])) AS u(q),
 LATERAL (
     SELECT g.queue, g.group_key, g.tasks, g.halted_task_id FROM {s}.groups g
     WHERE g.queue = u.q AND g.group_key > CASE WHEN u.q = $4 THEN $5 ELSE '' END
       AND g.tasks > 0
       AND ($1 = '' OR strpos(lower(g.group_key), lower($1)) > 0)
       AND (NOT $3 OR g.halted_task_id IS NOT NULL)
+      AND (cardinality($6::text[]) = 0 OR g.group_key = ANY($6::text[]))
     ORDER BY g.group_key
     LIMIT $2
 ) g

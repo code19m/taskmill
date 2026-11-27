@@ -46,6 +46,10 @@ const timeOrderSettings = pageSettings + `, set_config('enable_sort', 'off', tru
 // scans the whole table for them.
 const createdSettings = timeOrderSettings + `, set_config('enable_seqscan', 'off', true), set_config('enable_bitmapscan', 'off', true)`
 
+// runningSettings are pageSettings for a page of running tasks, which reads
+// them all from their own index: see createdSettings.
+const runningSettings = pageSettings + `, set_config('enable_seqscan', 'off', true), set_config('enable_bitmapscan', 'off', true)`
+
 // countSettings start a count. Custom plans leave out the branches of the
 // states not counted. With sequential and bitmap scans off, each branch reads
 // the index of its state and stops at its cap. Otherwise the planner, which

@@ -306,8 +306,9 @@ func (e *env) txExec(t *testing.T, tx pgx.Tx, sql string, args ...any) {
 	}
 }
 
-// waitBlocked waits until a statement that contains fragment, with {s} for
-// the schema, waits for a lock.
+// waitBlocked waits until a statement of the test's schema that contains
+// fragment, with {s} for the schema, waits for a lock. Tests in other
+// schemas wait for locks too.
 //
 // It does not see a statement that waits for a table's lock if the pool ran
 // that statement before, on another connection. A connection prepares a
@@ -322,8 +323,8 @@ func (e *env) waitBlocked(t *testing.T, fragment string) {
 		var pid int
 		err := e.pool.QueryRow(t.Context(), `
 SELECT pid FROM pg_stat_activity
-WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0
-LIMIT 1`, replaceSchema(fragment, e.schema)).Scan(&pid)
+WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0 AND strpos(query, $2) > 0
+LIMIT 1`, replaceSchema(fragment, e.schema), e.schema).Scan(&pid)
 		return err == nil
 	})
 }

@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/code19m/taskmill/internal/migrations"
@@ -118,14 +117,13 @@ func NewClient(ctx context.Context, pool *pgxpool.Pool, cfg *ClientConfig) (*Cli
 	return c, nil
 }
 
-// Close stops the client's background work: it drops the notifications
-// that the client held back to wake workers less often, and waits for one
-// that is being sent. A worker starts the task of a dropped notification
-// when it next polls its queue, instead of within milliseconds. Close does
-// not close the pool, so call it before the pool's Close. The client's
+// Close stops the client's background work: it sends the notifications
+// that the client held back to wake workers less often, bounded by 5
+// seconds, and waits for those being sent. Nothing of the client runs on
+// the pool afterwards, so call Close before the pool's Close. The client's
 // methods still work after Close, but hold back no notification any more:
-// each enqueue notifies at once or not at all. Close may be called more
-// than once.
+// each sends its own before it returns. Close may be called more than
+// once.
 func (c *Client) Close() {
 	c.notifier.close()
 }
@@ -134,10 +132,17 @@ func (c *Client) Close() {
 // this code needs, and that the pool uses READ COMMITTED. A newer schema is
 // accepted: migrations stay compatible with the previous release, so rolling
 // deploys work.
+//
+// It warns of a schema on the search path in which every role may create
+// objects: taskmill's statements find PostgreSQL's functions and operators
+// through the path, so such a role could replace one, with the rights of
+// the role that runs it. A warning, not an error, since databases created
+// before PostgreSQL 15 have that grant on public.
 func (c *Client) checkSchema(ctx context.Context) error {
 	var version int
 	var isolation string
-	err := c.pool.QueryRow(ctx, c.sql.schemaVersion, unprepared).Scan(&version, &isolation)
+	var open []string
+	err := c.pool.QueryRow(ctx, c.sql.schemaVersion, unprepared).Scan(&version, &isolation, &open)
 	if pgCode(err) == codeUndefinedTable {
 		return fmt.Errorf("%w: schema %q is not migrated", ErrSchemaOutdated, c.schema)
 	}
@@ -151,6 +156,10 @@ func (c *Client) checkSchema(ctx context.Context) error {
 	if isolation != "read committed" {
 		return fmt.Errorf("%w: the pool's default_transaction_isolation is %q, but taskmill needs "+
 			"\"read committed\"; set it in the pool's ConnConfig.RuntimeParams", ErrInvalidArgument, isolation)
+	}
+	if len(open) > 0 {
+		c.logger.LogAttrs(ctx, slog.LevelWarn, "every role may create objects in a schema on the search path",
+			slog.Any(logKeySchemas, open))
 	}
 	return nil
 }
@@ -299,24 +308,24 @@ func (c *Client) retry(ctx context.Context, q querier, id int64) error {
 		}
 	}
 
-	// The statement of a bulk retry, with one task: it also notifies the
-	// queue of a task that is available again.
+	// The statement of a bulk retry, with one task.
 	pendingIDs := []int64{} // the tasks that become pending: this one, or none
-	var notify []string
+	var available []string  // the queue of a task that is available again
 	if pending {
 		pendingIDs = append(pendingIDs, id)
 	} else {
-		notify = c.notifiable(ctx, []string{t.queue})
+		available = append(available, t.queue)
 	}
 	_, err = q.exec(ctx, c.sql.retryTasks,
-		[]int64{id}, // $1
-		pendingIDs,  // $2
-		c.schema,    // $3
-		notify,      // $4
+		[]int64{id},                // $1
+		pendingIDs,                 // $2
+		c.schema,                   // $3
+		c.notifiable(q, available), // $4
 	)
 	if err != nil {
 		return fail(err)
 	}
+	madeAvailable(q, available...)
 	return nil
 }
 
@@ -447,7 +456,7 @@ func (c *Client) inLockOrder(ctx context.Context, op string, id int64, fn func(q
 	for try := 1; ; try++ {
 		last := try == deadlockTries
 		var inFn error
-		err := c.inTx(ctx, func(q querier) error {
+		err := c.inTx(ctx, c.pool, func(q querier) error {
 			inFn = fn(q, !last)
 			return inFn
 		})
@@ -516,11 +525,4 @@ func (c *Client) stateError(ctx context.Context, q querier, id int64, op string)
 		return fmt.Errorf("%w: task %d", ErrNotFound, id)
 	}
 	return fmt.Errorf("%w: cannot %s task %d in state %s", ErrInvalidState, op, id, state)
-}
-
-// inTx runs fn in a transaction on the client's pool.
-func (c *Client) inTx(ctx context.Context, fn func(q querier) error) error {
-	return pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
-		return fn(pgxExecutor{q: tx})
-	})
 }

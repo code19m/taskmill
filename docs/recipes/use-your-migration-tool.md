@@ -61,8 +61,10 @@ step, the new version's `NewClient` fails with `ErrSchemaOutdated`.
 ## Why
 
 - **`Migrations` returns every change, in order.** Version 0 creates the
-  schema and its `migrations` table. Each later file records its version
-  there, and `NewClient` checks it.
+  schema and its `migrations` table. It refuses the roles that `Migrate`
+  refuses: run your tool connected as the role that owns taskmill's
+  tables. Each later file records its version there, and `NewClient`
+  checks it.
 - **The program writes each migration once,** and names new files after the
   current time. So your tool applies them after the files you already have.
 - **Each file runs in its own transaction,** which some migrations need.

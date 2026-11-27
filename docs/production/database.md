@@ -17,8 +17,7 @@ shows how to make pgx refuse one.
 
 ## Run workers as the owner of taskmill's tables
 
-**Run your workers as the owner of taskmill's tables,** or as a member of the
-owner role.
+**Run your workers as the owner of taskmill's tables,** or a member of it.
 
 Why: taskmill keeps completed tasks in a history table with one partition per
 day. Each worker creates the missing partitions of the next 7 days when it
@@ -40,16 +39,19 @@ from the first one.
 
 To create the schema, `Migrate` needs the CREATE privilege on the database.
 If your role does not have it, create the schema yourself, owned by that
-role. Then `Migrate`, or [your own tool](../recipes/use-your-migration-tool.md), only fills it:
+role: `Migrate` refuses [a schema whose owner it does not trust](security.md#know-who-can-reach-the-database).
+Then `Migrate`, or [your own tool](../recipes/use-your-migration-tool.md), only fills it:
 
 ```sql
 CREATE ROLE shop LOGIN PASSWORD '...';
 CREATE SCHEMA taskmill AUTHORIZATION shop;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC; -- a database created before PostgreSQL 15 has this grant
 ```
 
 | Who | Role |
 |---|---|
-| Workers, and whatever runs `Migrate` | The owner of taskmill's tables, or a member of the owner role |
+| Workers | The owner of taskmill's tables, or a member of the owner role |
+| Whatever runs `Migrate` | The owner of taskmill's tables, connected as that role |
 | Web processes that only enqueue, and a dashboard with actions | The same role is simplest. Or a role that reads and writes, but owns nothing |
 | A read-only dashboard | A role that may only read |
 
@@ -114,7 +116,6 @@ pool was full, so the worker waited for a connection`, and counted in
 
 Always set `pool_max_conns`. pgx's default is the larger of 4 and the number
 of CPUs it sees, and in a container that is the node's CPUs, not your limit.
-
 To add up the connections of all your pods, see
 [Count the database connections](kubernetes.md#count-the-database-connections).
 
@@ -223,9 +224,8 @@ server's clock in sync with NTP, because these use the app's clock:
   the database stored. A clock that is a minute ahead fires its alert for no
   reason.
 
-The daily history partitions follow the database's clock, in UTC: the
-database says which days need a partition, and which partitions have
-expired. So a worker whose clock is wrong cannot drop history too early.
+The daily history partitions follow the database's clock, in UTC. So a
+worker whose clock is wrong cannot drop history too early.
 
 ## Use any time zone
 

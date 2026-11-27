@@ -19,7 +19,7 @@ are set.
 |---|---|---|
 | Any tasks, in a range of creation times, which the dashboard sets on a list of a queue and no FIFO group, unless the list holds only dead or canceled tasks | By creation time, latest first, then by `id` | The two indexes of creation time: see [Lists by creation time](schema-creation-order.md) |
 | Only dead tasks, only canceled tasks, or both | By finish time, latest first, then by `id` | `tasks_finished_idx`, and no other task |
-| Anything else | By `id`, newest first | The index that holds its tasks in ID order. Without one, the primary key |
+| Anything else | By `id`, newest first | The index that holds its tasks in ID order. Without one, the primary key, or the running tasks of its queues for a list of them |
 
 ## Most lists page by ID
 
@@ -37,8 +37,10 @@ page in ID order:
 
 Where no index holds a list's tasks in ID order, a page reads the primary
 key backward: every newer task of any queue and state, until it is full. A
-list of one unfinished state across all queues is such a list, and so is
-one that mixes dead tasks with other states. The time limit bounds them.
+list of one waiting state across all queues is such a list, and so is one
+that mixes dead tasks with other states. The time limit bounds them. A list
+of only running tasks reads those of its queues from their index behind a
+fence (`OFFSET 0`), and sorts them: the workers' concurrency bounds them.
 
 ## Dead and canceled tasks page by finish time
 
@@ -78,9 +80,8 @@ other task, with no new index and no migration:
   the time as PostgreSQL stores it. Each order refuses the cursors of the
   others, as an invalid argument.
 
-The finish order is also the better order for this list. In ID order, a
-task that died a second ago can be many pages down, behind tasks enqueued
-later that died earlier. In finish order, it is on the first page.
+The finish order is also the better order for this list: in ID order, a
+task that died a second ago can be pages down, behind newer dead tasks.
 
 Measured on PostgreSQL 18 with 61,500 tasks, 10,000 of them dead and older
 than 10,000 other tasks, for a page of 50:
@@ -94,9 +95,8 @@ than 10,000 other tasks, for a page of 50:
 
 The finish order reads the same with fresh statistics, with statistics that
 know of no dead task, and with a plan that knows neither the filters nor
-the size of the page. PostgreSQL 15 reads the same rows, and
-`TestPagesOfFinishedTasksReadOnlyTheirRows` guards these bounds on every
-supported PostgreSQL version.
+the size of the page. `TestPagesOfFinishedTasksReadOnlyTheirRows` guards
+these bounds on every supported PostgreSQL version.
 
 ### What the finish order costs
 

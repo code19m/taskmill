@@ -55,9 +55,11 @@ func MigrationsWith(schema string, files ...string) ([]Migration, error) {
 	return publicMigrations(schema, all), nil
 }
 
-// NotifyWindow is the shortest gap between two notifications for one queue
-// from one client.
+// NotifyWindow is the throttle's window: see notifyWindow.
 const NotifyWindow = notifyWindow
+
+// NotifyQueuesSQL is the statement of a batch of notifications.
+const NotifyQueuesSQL = notifyQueuesSQL
 
 // HistoryDrops is the most history partitions that one retention pass drops.
 const HistoryDrops = historyDrops
@@ -156,12 +158,21 @@ func OnReserve(ctx context.Context, w *Worker, sql string) error {
 	})
 }
 
-// TrailingNotification reports whether c holds a notification of queue back,
-// to send it when the throttle's window ends.
-func TrailingNotification(c *Client, queue string) bool {
+// PendingNotification reports whether c holds a notification of queue for
+// its next batch.
+func PendingNotification(c *Client, queue string) bool {
 	c.notifier.mu.Lock()
 	defer c.notifier.mu.Unlock()
-	return c.notifier.trailing[queue] != nil
+	_, pending := c.notifier.pending[queue]
+	return pending
+}
+
+// HeldNotification reports whether c holds a notification of queue back,
+// to send it when the throttle's window ends.
+func HeldNotification(c *Client, queue string) bool {
+	c.notifier.mu.Lock()
+	defer c.notifier.mu.Unlock()
+	return c.notifier.held[queue] != nil
 }
 
 // Notifying reports whether the maintainer's heartbeats reach w.
@@ -257,14 +268,15 @@ type statement struct {
 
 // leased returns the statements that find a batch of tasks by their attempts
 // (ids, tokens): the lock of a grouped completion, the lease renewal, the
-// read of cancel requests, the completion that skips held rows, and the
-// completion.
+// read of cancel requests, the completion that skips held rows, the
+// failures that skip held rows, and the completion.
 func leased(c *Client, ids []int64, tokens []int32) []statement {
 	return []statement{
 		{c.sql.lockLeased, []any{ids, tokens}},
 		{c.sql.renewLeases, []any{ids, tokens, time.Hour.Microseconds()}},
 		{c.sql.cancelRequest, []any{ids, tokens}},
 		{c.sql.completeSkipping, []any{ids, tokens, []int64{}}},
+		{c.sql.recordSkipping, outcomeArgs(ids, tokens, outcomeRetry)},
 		{c.sql.complete, []any{ids, tokens, []int64{}}},
 	}
 }
@@ -272,11 +284,47 @@ func leased(c *Client, ids []int64, tokens []int32) []statement {
 // ended returns the statements that end the attempt (id, token) without
 // completing its task: the failure, the snooze, and the release.
 func ended(c *Client, id int64, token int32) []statement {
+	ids, tokens := []int64{id}, []int32{token}
 	return []statement{
-		{c.sql.fail, []any{id, token, "retryable", int64(1), `{"message": "m"}`}},
-		{c.sql.snooze, []any{id, token, int64(1), nil, true}},
-		{c.sql.release, []any{id, token, true}},
+		{c.sql.record, outcomeArgs(ids, tokens, outcomeRetry)},
+		{c.sql.record, outcomeArgs(ids, tokens, outcomeSnooze)},
+		{c.sql.record, outcomeArgs(ids, tokens, outcomeRelease)},
 	}
+}
+
+// RecordBatch records the outcomes of the attempts (ids, tokens) in one
+// statement, as the recorder records a batch. kinds holds each outcome:
+// "retry", "dead", "snooze", or "release", a second from now if it has a
+// delay. It returns the attempts that it recorded, each as "id/token",
+// sorted.
+func RecordBatch(ctx context.Context, c *Client, ids []int64, tokens []int32, kinds []string) ([]string, error) {
+	byName := map[string]outcomeKind{"retry": outcomeRetry, "dead": outcomeDead, "snooze": outcomeSnooze, "release": outcomeRelease}
+	var rows outcomeRows
+	for i, id := range ids {
+		att := &attempt{id: id, token: tokens[i]}
+		rows.add(&liveAttempt{att: att, reg: &registration{}}, outcome{kind: byName[kinds[i]], delay: time.Second, msg: kinds[i]})
+	}
+	found, err := recordOutcomes(ctx, pgxExecutor{q: c.pool}, c.sql.recordSkipping, &rows)
+	var recorded []string
+	for key, o := range found {
+		if o.recorded {
+			recorded = append(recorded, strconv.FormatInt(key.id, 10)+"/"+strconv.Itoa(int(key.token)))
+		}
+	}
+	slices.Sort(recorded)
+	return recorded, err
+}
+
+// outcomeArgs returns the arguments of recordSQL that end each attempt
+// (ids, tokens) with an outcome of kind, a second from now if it has a
+// delay, by a worker with a handler.
+func outcomeArgs(ids []int64, tokens []int32, kind outcomeKind) []any {
+	var rows outcomeRows
+	for i, id := range ids {
+		att := &attempt{id: id, token: tokens[i]}
+		rows.add(&liveAttempt{att: att, reg: &registration{}}, outcome{kind: kind, delay: time.Second, msg: "m"})
+	}
+	return []any{rows.ids, rows.tokens, rows.kinds, rows.delays, rows.notes, rows.handled}
 }
 
 // LeasedRowsRead runs the statements that find a batch of tasks by their
@@ -302,23 +350,24 @@ func LeasedRowsRead(ctx context.Context, c *Client, ids []int64, tokens []int32)
 }
 
 // LeasedFound runs the same statements in one transaction, in that order,
-// the completion last. The completion that skips held rows runs in a
-// savepoint that it rolls back, so that the completion finds the tasks too.
+// the completion last. The completion and the failures that skip held rows
+// run in savepoints that they roll back, so that the completion finds the
+// tasks too.
 // It returns the IDs of the rows that each one returned, sorted.
 //
 // Before them, it runs the statements that end one attempt: the failure, the
 // snooze, and the release. The IDs of the attempts for which each of these
 // found a task come after the others, sorted.
-func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (found [8][]int64, err error) {
+func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (found [9][]int64, err error) {
 	err = pgx.BeginFunc(ctx, c.pool, func(tx pgx.Tx) error {
 		one, err := endedFound(ctx, c, tx, ids, tokens)
 		if err != nil {
 			return err
 		}
-		copy(found[5:], one[:])
+		copy(found[6:], one[:])
 
 		for i, s := range leased(c, ids, tokens) {
-			if s.sql != c.sql.completeSkipping {
+			if s.sql != c.sql.completeSkipping && s.sql != c.sql.recordSkipping {
 				found[i], err = foundIDs(ctx, tx, s)
 			} else if err = pgx.BeginFunc(ctx, tx, func(undo pgx.Tx) error { // a savepoint
 				found[i], err = foundIDs(ctx, undo, s)
@@ -331,8 +380,8 @@ func LeasedFound(ctx context.Context, c *Client, ids []int64, tokens []int32) (f
 			}
 			slices.Sort(found[i])
 		}
-		for i := range found[5:] {
-			slices.Sort(found[5+i])
+		for i := range found[6:] {
+			slices.Sort(found[6+i])
 		}
 		return nil
 	})
@@ -370,7 +419,7 @@ func endedFound(ctx context.Context, c *Client, tx pgx.Tx, ids []int64, tokens [
 			if err != nil {
 				return found, err
 			}
-			ok, err := queryRow(ctx, pgxExecutor{q: undo}, s.sql, s.args, new(string), new(string), new(string))
+			ok, err := queryRow(ctx, pgxExecutor{q: undo}, s.sql, s.args, new(int64), new(int32), new(string), new(string), new(string), new(bool))
 			if err != nil {
 				return found, err
 			}

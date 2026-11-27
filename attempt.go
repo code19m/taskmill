@@ -14,8 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/code19m/taskmill/internal/recovered"
 )
 
@@ -95,11 +93,7 @@ func (w *Worker) runBatch(parent, record context.Context, tasks []*liveAttempt) 
 	defer cancelTimeout()
 	// As in runOne: tasks whose chain or batch handler ended its goroutine go
 	// back to their queue.
-	defer func() {
-		for _, t := range tasks {
-			w.finish(record, t, outcome{kind: outcomeRelease}, time.Time{})
-		}
-	}()
+	defer w.finishAll(record, tasks, func(int) outcome { return outcome{kind: outcomeRelease} }, time.Time{})
 
 	c := &batchChains{
 		arrivals: make(chan arrival, len(tasks)),
@@ -142,9 +136,7 @@ func (w *Worker) runBatch(parent, record context.Context, tasks []*liveAttempt) 
 	stopWatch()
 
 	cause := context.Cause(ctx)
-	for i, t := range tasks {
-		w.finish(record, t, outcomeOf(t, c.errs[i], cause), start)
-	}
+	w.finishAll(record, tasks, func(i int) outcome { return outcomeOf(tasks[i], c.errs[i], cause) }, start)
 }
 
 // batchChains are the middleware chains of the tasks of a batch.
@@ -591,19 +583,28 @@ func (w *Worker) record(ctx context.Context, t *liveAttempt, o outcome) {
 		w.released.Add(1)
 	}
 
+	// An ungrouped attempt of Run goes to the recorder. A grouped one, one
+	// of RunTask, and one whose row another transaction held record alone.
 	var ended attemptEnd
-	try := func(ctx context.Context) error {
-		var err error
-		ended, err = w.recordOnce(ctx, t, o)
-		return err
+	var err error
+	alone := t.info.GroupKey != "" || t.direct
+	if !alone {
+		ended, alone, err = w.recordGathered(ctx, t, o)
 	}
-	err := w.whileLeased(ctx, []*liveAttempt{t}, try)
-	for delay := blockedRetryDelay; pgCode(err) == codeLockNotAvailable; delay = min(2*delay, blockedRetryMax) {
-		select {
-		case <-ctx.Done(): // the next try fails at once
-		case <-time.After(delay):
+	if alone {
+		try := func(ctx context.Context) error {
+			var err error
+			ended, err = w.recordOnce(ctx, t, o)
+			return err
 		}
 		err = w.whileLeased(ctx, []*liveAttempt{t}, try)
+		for delay := blockedRetryDelay; pgCode(err) == codeLockNotAvailable; delay = min(2*delay, blockedRetryMax) {
+			select {
+			case <-ctx.Done(): // the next try fails at once
+			case <-time.After(delay):
+			}
+			err = w.whileLeased(ctx, []*liveAttempt{t}, try)
+		}
 	}
 	switch {
 	case err == nil && ended == endedFailed:
@@ -635,20 +636,16 @@ func (w *Worker) recordOnce(ctx context.Context, t *liveAttempt, o outcome) (att
 	defer conn.Release()
 
 	if t.info.GroupKey == "" {
-		return w.recordTx(ctx, pgxExecutor{q: conn}, t, o)
+		return w.recordTx(ctx, w.client.own(conn), t, o)
 	}
 	ended := endedOther
-	err = pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
-		q := pgxExecutor{q: tx}
+	err = w.client.inTx(ctx, conn, func(q querier) error {
+		// The transaction notifies nobody, so the timeout may last until
+		// its commit: see liftLockTimeout.
 		if _, err := q.exec(ctx, lockTimeoutSQL, w.timing.lockTimeout()); err != nil {
 			return err
 		}
-		if ended, err = w.recordTx(ctx, q, t, o); err != nil {
-			return err
-		}
-		// The timeout was for the rows. At the commit, a notification waits
-		// its turn, as every other one does: see liftLockTimeout.
-		_, err = q.exec(ctx, liftLockTimeout)
+		ended, err = w.recordTx(ctx, q, t, o)
 		return err
 	})
 	return ended, err
@@ -663,57 +660,26 @@ const (
 	endedCompleted            // the handler's transaction had completed its task
 )
 
+// recordTx records outcome o of t on q, which the worker owns: see
+// ownQuerier.
 func (w *Worker) recordTx(ctx context.Context, q querier, t *liveAttempt, o outcome) (attemptEnd, error) {
-	sql := w.client.sql
-	id, token := t.att.id, t.att.token
-	var queue, group string
-	var found bool
-	var err error
-
-	// fail, snooze, and release cancel the task instead if its cancellation
-	// was requested, so they return the state they left it in.
-	var state string
-	switch o.kind {
-	case outcomeRetry, outcomeDead:
-		want := StateRetryable
-		if o.kind == outcomeDead {
-			want = StateDead
-		}
-
-		args := []any{
-			id,                     // $1
-			token,                  // $2
-			string(want),           // $3
-			o.delay.Microseconds(), // $4
-			errorJSON(o),           // $5
-		}
-		found, err = queryRow(ctx, q, sql.fail, args, &queue, &group, &state)
-	case outcomeSnooze:
-		var note *string // an error to record, if the snooze has one
-		if o.msg != "" {
-			s := errorJSON(o)
-			note = &s
-		}
-
-		args := []any{
-			id,                     // $1
-			token,                  // $2
-			o.delay.Microseconds(), // $3
-			note,                   // $4
-			t.reg != nil,           // $5
-		}
-		found, err = queryRow(ctx, q, sql.snooze, args, &queue, &group, &state)
-	case outcomeCancel, outcomeRelease:
-		// The worker stopped the attempt. Only the task's row says whether
-		// that was a cancel request: without one, the task goes back to its
-		// queue, whatever the worker read before.
-		found, err = queryRow(ctx, q, sql.release, []any{id, token, t.reg != nil}, &queue, &group, &state)
-	case outcomeComplete, outcomeDiscard:
-		return endedOther, nil
-	}
-	switch {
-	case err != nil:
+	var rows outcomeRows
+	rows.add(t, o)
+	found, err := recordOutcomes(ctx, q, w.client.sql.record, &rows)
+	if err != nil {
 		return endedOther, err
+	}
+	row, ok := found[keyOf(t)]
+	return w.recorded(ctx, q, t, o, ok, row)
+}
+
+// recorded finishes the recording of outcome o of t, in q's transaction, if
+// it has one, once the statement that records it ran: found says whether
+// the attempt still held its task, and row is what the statement returned.
+// It says how the outcome ended the attempt, for the activity.
+func (w *Worker) recorded(ctx context.Context, q querier, t *liveAttempt, o outcome, found bool, row recordedOutcome) (attemptEnd, error) {
+	id := t.att.id
+	switch {
 	case !found && t.att.completedInTx.Load():
 		w.logger.LogAttrs(ctx, slog.LevelWarn, "handler failed after completing its task; it stays completed",
 			slog.Int64(logKeyTaskID, id), slog.String(logKeyKind, t.info.Kind), slog.Any(logKeyError, o.err))
@@ -729,13 +695,13 @@ func (w *Worker) recordTx(ctx context.Context, q querier, t *liveAttempt, o outc
 		ended = endedFailed
 	}
 
-	switch s := State(state); {
-	case s == StateDead && group != "":
-		return ended, w.client.haltGroup(ctx, w.logger, q, queue, group, id)
-	case s.Finished() && group != "":
-		return ended, w.client.leaveGroups(ctx, w.logger, q, []groupLeave{{id: id, queue: queue, group: group, head: true}})
+	switch s := State(row.state); {
+	case s == StateDead && row.group != "":
+		return ended, w.client.haltGroup(ctx, w.logger, q, row.queue, row.group, id)
+	case s.Finished() && row.group != "":
+		return ended, w.client.leaveGroups(ctx, w.logger, q, []groupLeave{{id: id, queue: row.queue, group: row.group, head: true}})
 	case s == StateAvailable:
-		return ended, w.client.notifyAvailable(ctx, w.logger, q, queue)
+		madeAvailable(q, row.queue)
 	}
 	return ended, nil
 }

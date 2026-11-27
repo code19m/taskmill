@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -188,13 +189,17 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 	// The fourth message of each key fails once. A second failure would
 	// prove no more, and costs a second: a retry waits for the maintainer.
 	const keys, perKey = 3, 10
+	stored := map[string]string{} // value -> the delivery ID that StoreTx returned
 	for i := range perKey {
 		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 			msgs := make([]outbox.Message, keys)
 			for k := range keys {
 				msgs[k] = outbox.Message{Topic: "accounts", Key: []byte(strconv.Itoa(k)), Value: fmt.Appendf(nil, "%d-%02d", k, i)}
 			}
-			_, err := ob.StoreTx(ctx, taskmill.Pgx(tx), msgs...)
+			ids, err := ob.StoreTx(ctx, taskmill.Pgx(tx), msgs...)
+			for k, id := range ids {
+				stored[string(msgs[k].Value)] = id
+			}
 			return err
 		})
 		if err != nil {
@@ -206,6 +211,12 @@ func TestRelayKeepsOrderPerKey(t *testing.T) {
 	waitFor(t, func() bool { return b.count() == keys*perKey })
 	b.mu.Lock()
 	defer b.mu.Unlock()
+
+	// StoreTx returns each message's delivery ID, in the order of the
+	// messages: the ID that its consumers deduplicate by.
+	if !maps.Equal(b.ids, stored) {
+		t.Fatalf("published deliveries %v, but StoreTx returned %v", b.ids, stored)
+	}
 
 	for k := range keys {
 		want := make([]string, perKey)

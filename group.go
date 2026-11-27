@@ -197,13 +197,30 @@ func (c *Client) releaseHalts(ctx context.Context, q querier, ts []bulkTask) (ma
 
 // promoteGroups makes the oldest pending task of every group in s its head.
 func (c *Client) promoteGroups(ctx context.Context, q querier, s groupSet) error {
-	_, err := q.exec(ctx, c.sql.promoteGroups,
-		s.queues,                    // $1
-		s.groups,                    // $2
-		c.schema,                    // $3
-		c.notifiable(ctx, s.queues), // $4
+	r, err := q.query(ctx, c.sql.promoteGroups,
+		s.queues,                  // $1
+		s.groups,                  // $2
+		c.schema,                  // $3
+		c.notifiable(q, s.queues), // $4
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	var available []string
+	for r.Next() {
+		var queue string
+		if err := r.Scan(&queue); err != nil {
+			return err
+		}
+		available = append(available, queue)
+	}
+	if err := r.Err(); err != nil {
+		return err
+	}
+	madeAvailable(q, available...)
+	return nil
 }
 
 // rejoinGroup counts a retried task back into its FIFO group, and reports

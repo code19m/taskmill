@@ -15,10 +15,11 @@ import (
 // The enqueue methods accept a transaction, a connection, or a pool.
 // [Client.CancelTx] and [Task.CompleteTx] run several statements that must
 // commit together, so they need a transaction: a [pgx.Tx], a [*sql.Tx], or a
-// type with Commit and Rollback methods, such as *sqlx.Tx. They return
-// [ErrInvalidArgument] for anything else. An enqueue counts every other
-// executor as outside a transaction, also a connection on which the caller
-// ran BEGIN, and a type that wraps a pgx.Tx with only Exec and Query. There,
+// type that wraps one with its Commit and Rollback methods, such as *sqlx.Tx.
+// They return [ErrInvalidArgument] for anything else. An enqueue counts every
+// other executor as outside a transaction, also a connection on which the
+// caller ran BEGIN, and a type that wraps a transaction without its Commit
+// and Rollback methods. There,
 // a failed second read of a dedupe key returns an error that wraps
 // [ErrStoredWithoutIDs] (see [EnqueueResult.ID]), and an [EnqueueMiddleware]
 // that fails after next has its error logged, not returned.
@@ -38,7 +39,8 @@ type Executor interface {
 // no other. [pgx.Tx], [*pgx.Conn], and [*pgxpool.Pool] implement it. An
 // application's own type that wraps one of them, for example to trace
 // statements, needs only these two methods to enqueue. For [Client.CancelTx]
-// and [Task.CompleteTx], it must also be a [pgx.Tx], as [Executor] says.
+// and [Task.CompleteTx], it must also have the Commit and Rollback methods of
+// [pgx.Tx], as [Executor] says.
 type PgxQuerier interface {
 	Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
 	Query(ctx context.Context, query string, args ...any) (pgx.Rows, error)
@@ -113,8 +115,14 @@ func (e pgxExecutor) query(ctx context.Context, query string, args ...any) (rows
 	return e.q.Query(ctx, query, args...) //nolint:sqlclosecheck // the caller closes the rows
 }
 
+// inTx reports whether q is a transaction: a pgx.Tx, or a type that wraps
+// one and has its Commit and Rollback methods. No pool or connection of pgx
+// has them.
 func (e pgxExecutor) inTx() bool {
-	_, ok := e.q.(pgx.Tx)
+	_, ok := e.q.(interface {
+		Commit(ctx context.Context) error
+		Rollback(ctx context.Context) error
+	})
 	return ok
 }
 

@@ -1150,11 +1150,42 @@ func TestLeasedTasksCostOneLookupPerAttempt(t *testing.T) {
 	}
 
 	// The lock reads each task twice, the renewal three times and returns
-	// it, the read of cancel requests once, and each of the two completions
-	// reads it to lock it and to delete it, and returns it. The completion
-	// that skips held rows looks up only the tasks that it skipped again.
-	if n > 13*attempts {
-		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 13*attempts)
+	// it, the read of cancel requests once, each of the two completions
+	// reads it to lock it and to delete it, and returns it, and the failures
+	// read it to lock it and to change it, and return it. The statements
+	// that skip held rows look up only the tasks that they skipped again.
+	if n > 16*attempts {
+		t.Fatalf("%d attempts read and compared %d rows, want at most %d", attempts, n, 16*attempts)
+	}
+}
+
+// A batch of outcomes can hold two attempts of one task: one that lost its
+// lease, whose outcome came late, and the attempt that took the task after
+// it. Only the outcome of the attempt that holds the task's lease token
+// applies, wherever the other comes in the batch.
+func TestABatchRecordsOnlyTheOutcomeOfTheAttemptThatOwnsTheTask(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+
+	for stale := range 2 {
+		id := int64(e.count(t, `INSERT INTO {s}.tasks (queue, kind, state, run_at, payload, max_attempts, attempt, lease_token,
+		                                              lease_expires_at, attempted_at, attempted_by)
+		                        VALUES ('default', 'email.send', 'running', now(), '{}', 5, 2, 6, now() + interval '1 minute', now(), 'w')
+		                        RETURNING id`))
+		tokens, kinds := []int32{6, 6}, []string{"snooze", "snooze"}
+		tokens[stale], kinds[stale] = 5, "dead"
+
+		got, err := taskmill.RecordBatch(t.Context(), e.client, []int64{id, id}, tokens, kinds)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{fmt.Sprintf("%d/6", id)}; !slices.Equal(got, want) {
+			t.Errorf("the stale attempt came %d: recorded %q, want %q", stale+1, got, want)
+		}
+		if info := e.get(t, id); info.State != taskmill.StateScheduled || info.Attempt != 1 {
+			t.Errorf("the stale attempt came %d: the task is %s after %d attempts, want it snoozed after 1",
+				stale+1, info.State, info.Attempt)
+		}
 	}
 }
 
@@ -1204,10 +1235,10 @@ func TestAttemptsFindOnlyTheTasksTheyOwn(t *testing.T) {
 	twice := []int64{owned, owned, alsoOwned, alsoOwned}
 	each := []int64{owned, owned, alsoOwned}
 	statements := []string{
-		"the lock", "the renewal", "the read of cancel requests", "the completion that skips held rows", "the completion",
-		"the failure", "the snooze", "the release",
+		"the lock", "the renewal", "the read of cancel requests", "the completion that skips held rows",
+		"the failures that skip held rows", "the completion", "the failure", "the snooze", "the release",
 	}
-	for i, want := range [][]int64{twice, twice, {alsoOwned}, {owned, alsoOwned}, {owned, alsoOwned}, each, each, each} {
+	for i, want := range [][]int64{twice, twice, {alsoOwned}, {owned, alsoOwned}, {owned, alsoOwned}, {owned, alsoOwned}, each, each, each} {
 		if !slices.Equal(found[i], want) {
 			t.Errorf("%s found the tasks %v, want %v", statements[i], found[i], want)
 		}

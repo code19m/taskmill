@@ -136,8 +136,8 @@ completions continue while the index builds.
   own pool must then let it use 2 server connections.
 - A `lock_timeout`, `statement_timeout`, or `transaction_timeout` would
   cancel the build, so `Migrate` refuses the step while the pool's
-  connections have one. Run it as a role without them, as after
-  `ALTER ROLE shop_migrate SET statement_timeout = 0`.
+  connections have one. Run it on connections without them, as after
+  `ALTER ROLE shop SET statement_timeout = 0`.
 - Both refusals come before the build, with an error that wraps
   `ErrInvalidArgument`: a deploy job should not try again until you change
   the pool or the role.

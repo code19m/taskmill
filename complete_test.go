@@ -303,6 +303,112 @@ func TestLockedGroupDoesNotHoldUpOtherCompletions(t *testing.T) {
 	}
 }
 
+// A group into which short transactions enqueue one after another, each
+// holding the group's row for a few milliseconds, completes its tasks as fast
+// as they are enqueued: a completion that finds the row held waits for it,
+// and PostgreSQL hands the row over between two of the transactions. Tries
+// that skip the held row rarely find it free: without the wait, 2 to 4 of
+// these 100 tasks completed while they were enqueued. With it, 1 to 4 were
+// left, and up to 42 on a busy machine.
+func TestBusyGroupKeepsUpWithItsProducer(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers:     handlers(func(context.Context, *taskmill.Task[sendEmail]) error { return nil }, nil),
+		Queues:       defaultQueue(4),
+		NoMaintainer: true,
+	})
+
+	const tasks, every, hold = 100, 14 * time.Millisecond, 5 * time.Millisecond
+	next := time.Now()
+	for range tasks {
+		time.Sleep(time.Until(next))
+		next = next.Add(every)
+		tx := e.begin(t)
+		if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "busy"}); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(hold)
+		if err := tx.Commit(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const busy = "SELECT count(*) FROM {s}.tasks WHERE group_key = 'busy'"
+	if left := e.count(t, busy); left > tasks/2 {
+		t.Errorf("%d of %d tasks were left when the producer ended, want at most %d", left, tasks, tasks/2)
+	}
+	waitFor(t, "the group to finish", func() bool { return e.count(t, busy) == 0 })
+}
+
+// A completion whose task's row another transaction holds, as an open
+// CancelTx does, in a group that short transactions keep holding, waits for
+// the group's row again a second later at the soonest: it does not wait
+// once for each of those transactions.
+func TestHeldTaskOfABusyGroupWaitsForItsGroupInTurn(t *testing.T) {
+	t.Parallel()
+	log := &statementLog{}
+	e := newTracedEnv(t, log)
+	started, release := make(chan int64, 1), make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(_ context.Context, task *taskmill.Task[sendEmail]) error {
+			if task.Args.UserID == 1 {
+				started <- task.ID
+				<-release
+			}
+			return nil
+		}, nil),
+		Queues:       defaultQueue(4),
+		NoMaintainer: true,
+	})
+
+	id := e.enqueue(t, sendEmail{UserID: 1}, &taskmill.EnqueueOptions{GroupKey: "busy"})
+	recv(t, started, "the head to start")
+	cancelTx := e.begin(t)
+	if err := e.client.CancelTx(t.Context(), taskmill.Pgx(cancelTx), id); err != nil {
+		t.Fatal(err)
+	}
+
+	// A producer holds the group's row for 11 of every 14 ms.
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for next := time.Now(); ; next = next.Add(14 * time.Millisecond) {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Until(next)):
+			}
+			tx := e.begin(t)
+			if _, err := e.client.EnqueueTx(t.Context(), taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "busy"}); err != nil {
+				t.Error(err)
+				return
+			}
+			time.Sleep(11 * time.Millisecond)
+			if err := tx.Commit(t.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+
+	close(release)
+	time.Sleep(200 * time.Millisecond) // the completion reaches the completer
+	log.reset()
+	time.Sleep(time.Second)
+	waits := log.count("set_config('lock_timeout'") // each wait for the group's row sets one
+	close(stop)
+	<-stopped
+	if err := cancelTx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the head to finish", func() bool { return e.get(t, id).State.Finished() })
+
+	if waits > 3 {
+		t.Errorf("the completion waited for its group's row %d times in a second, want a second apart", waits)
+	}
+}
+
 // A task's row that another transaction holds, as an open CancelTx does,
 // keeps only that task's completion waiting, not those of the tasks that
 // complete with it: their statement skips the row, and the worker tries it
@@ -584,11 +690,6 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 		return e.count(t, "SELECT count(*) FROM {s}.tasks WHERE lease_expires_at > $1", before) == len(grouped)
 	})
 
-	if n := e.count(t, `SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND strpos(query, $1) > 0`,
-		e.schema+".groups"); n != 0 {
-		t.Fatalf("%d statements wait for the held groups, each on a connection of the pool", n)
-	}
-
 	if err := tx.Commit(t.Context()); err != nil {
 		t.Fatal(err)
 	}
@@ -599,6 +700,128 @@ func TestHeldGroupsDoNotTieUpConnections(t *testing.T) {
 		}
 	}
 }
+
+// Completions whose FIFO groups' rows another transaction holds wait for
+// them, up to 4 at a time, each in a transaction that writes nothing before
+// it holds the group's row. Once each of them waited in vain, one at a time
+// waits again, so that a long transaction soon ties up one connection.
+func TestHeldGroupsAreWaitedForFewAtATime(t *testing.T) {
+	t.Parallel()
+	const groups = 8
+	waits := &groupWaitLog{groups: groups, waited: map[string]bool{}}
+	e := newTracedEnv(t, waits)
+
+	started := make(chan struct{}, groups)
+	release := make(chan struct{})
+	runWorker(t, e, &taskmill.WorkerConfig{
+		Handlers: handlers(func(context.Context, *taskmill.Task[sendEmail]) error {
+			started <- struct{}{}
+			<-release
+			return nil
+		}, nil),
+		Queues:       defaultQueue(groups),
+		NoMaintainer: true,
+	})
+	var ids []int64
+	for i := range groups {
+		ids = append(ids, e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: strconv.Itoa(i)}))
+	}
+	for range groups {
+		recv(t, started, "a handler to start")
+	}
+
+	tx, err := testdb.Pool(t).Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(t.Context(), replaceSchema("SELECT FROM {s}.groups FOR UPDATE", e.schema)); err != nil {
+		t.Fatal(err)
+	}
+	waits.mu.Lock()
+	migrated := waits.history // the migrations insert into history too
+	waits.mu.Unlock()
+	close(release)
+	waitFor(t, "every completion to wait for its group, and three to wait again", func() bool {
+		waits.mu.Lock()
+		defer waits.mu.Unlock()
+		return waits.again >= 3
+	})
+
+	waits.mu.Lock()
+	first, mostAgain, history := waits.first, waits.mostAgain, waits.history-migrated
+	waits.mu.Unlock()
+	if first < 2 || first > 4 {
+		t.Errorf("%d completions waited for their groups at a time at first, want 2 to 4", first)
+	}
+	if mostAgain > 1 {
+		t.Errorf("%d completions waited again at a time, want 1", mostAgain)
+	}
+	if history > 0 {
+		t.Errorf("%d statements moved tasks to history while their groups were held", history)
+	}
+
+	if err := tx.Commit(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range ids {
+		e.waitState(t, id, taskmill.StateCompleted)
+	}
+}
+
+// groupWaitLog follows the statements with which completions wait for their
+// FIFO groups' rows, and counts the statements that move tasks to history.
+type groupWaitLog struct {
+	groups int // the groups whose rows are held
+
+	mu        sync.Mutex
+	running   int             // waits under way
+	waited    map[string]bool // the groups whose completion waited, by the wait's arguments
+	first     int             // most waits at a time until every group's completion waited
+	again     int             // waits that began after that
+	mostAgain int             // most waits at a time among them, and those under way
+	history   int             // statements that move tasks to history
+}
+
+type groupWaitKey struct{}
+
+func (l *groupWaitLog) TraceQueryStart(ctx context.Context, _ *pgx.Conn, d pgx.TraceQueryStartData) context.Context {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	switch {
+	case strings.Contains(d.SQL, "INSERT INTO") && strings.Contains(d.SQL, "task_history"):
+		l.history++
+	case strings.Contains(d.SQL, "FOR UPDATE OF g") && !strings.Contains(d.SQL, "SKIP LOCKED"):
+		l.running++
+		if len(l.waited) < l.groups {
+			l.first = max(l.first, l.running)
+		} else {
+			l.again++
+			l.mostAgain = max(l.mostAgain, l.running)
+		}
+		return context.WithValue(ctx, groupWaitKey{}, fmt.Sprint(d.Args...))
+	}
+	return ctx
+}
+
+func (l *groupWaitLog) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if group, ok := ctx.Value(groupWaitKey{}).(string); ok {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.running--
+		l.waited[group] = true
+	}
+}
+
+func (*groupWaitLog) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	return ctx
+}
+
+func (l *groupWaitLog) TraceBatchQuery(ctx context.Context, c *pgx.Conn, d pgx.TraceBatchQueryData) {
+	l.TraceQueryStart(ctx, c, pgx.TraceQueryStartData{SQL: d.SQL, Args: d.Args})
+}
+
+func (*groupWaitLog) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
 
 // A completion waits for the row of a task that another transaction holds.
 // It locks the rows in the order of their IDs before it deletes any, so that
@@ -740,4 +963,171 @@ func TestCompletionWithoutHistoryPartition(t *testing.T) {
 	if logs.count("task history has no partition for today; completed tasks skip history") != 1 {
 		t.Fatal("the missing partition was not logged once")
 	}
+}
+
+// completeTxAfterCancel runs a worker whose batch handler completes the task
+// "late" with CompleteTx, in a transaction of its own, once proceed is
+// closed, and sends CompleteTx's error to result. A cancel does not end a
+// batch handler's context, so the task completes after its cancel, and
+// CompleteTx takes back the dedupe key that the cancel freed.
+func completeTxAfterCancel(t *testing.T, e *env) (started chan int64, proceed chan struct{}, result chan error) {
+	t.Helper()
+	started, proceed, result = make(chan int64, 1), make(chan struct{}), make(chan error, 1)
+	var hs taskmill.Handlers
+	taskmill.AddBatchHandler(&hs, taskmill.BatchHandlerFunc[sendEmail](func(ctx context.Context, tasks []*taskmill.Task[sendEmail]) []error {
+		errs := make([]error, len(tasks))
+		for i, task := range tasks {
+			if task.Args.To != "late" || task.Attempt > 1 {
+				continue
+			}
+			started <- task.ID
+			<-proceed
+			errs[i] = pgx.BeginFunc(ctx, e.pool, func(tx pgx.Tx) error {
+				return task.CompleteTx(ctx, taskmill.Pgx(tx))
+			})
+			result <- errs[i]
+		}
+		return errs
+	}), &taskmill.HandlerOptions{BatchSize: 1})
+	runWorker(t, e, &taskmill.WorkerConfig{Handlers: &hs, Queues: defaultQueue(1)})
+	return started, proceed, result
+}
+
+// enqueueLate enqueues the task that completeTxAfterCancel's handler
+// completes, with the dedupe key "k" in the group "g".
+func (e *env) enqueueLate(t *testing.T) taskmill.EnqueueResult {
+	t.Helper()
+	res, err := e.client.Enqueue(t.Context(), sendEmail{To: "late"}, &taskmill.EnqueueOptions{DedupeKey: "k", GroupKey: "g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// CompleteTx takes back the key that a cancel freed before it takes its
+// group's row, the order of an enqueue and of Retry. While it waits for a
+// transaction that claims the key, it holds no group, so that transaction
+// can continue into the task's group. In the other order, the two would
+// wait for each other, and PostgreSQL would end one of them.
+func TestCompleteTxTakesItsKeyBeforeItsGroup(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	started, proceed, result := completeTxAfterCancel(t, e)
+
+	x := e.enqueueLate(t)
+	recv(t, started, "the task to start")
+	e.cancel(t, x.ID) // frees k while the task runs on
+
+	tx := e.begin(t)
+	if res, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{DedupeKey: "k"}); err != nil || res.Duplicate {
+		t.Fatalf("claim of the freed key: %+v, %v", res, err)
+	}
+	close(proceed)
+	e.waitBlocked(t, "INSERT INTO {s}.dedupe_keys")
+
+	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(tx), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
+		t.Fatalf("enqueue into the group while CompleteTx waits for the key: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, result, "CompleteTx"); err != nil {
+		t.Fatalf("CompleteTx: %v", err)
+	}
+	e.waitState(t, x.ID, taskmill.StateCompleted)
+	e.checkGroups(t)
+}
+
+// The replacement of a canceled task, enqueued with the task's key and group
+// in one statement, takes the key, then the group. CompleteTx of the
+// canceled task takes them in the same order, so while a third transaction
+// holds the group, the replacement waits for CompleteTx, and finds the task
+// that CompleteTx gave the key back to.
+func TestCompleteTxAndAnEnqueueOfItsKeyAndGroup(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	started, proceed, result := completeTxAfterCancel(t, e)
+
+	x := e.enqueueLate(t)
+	recv(t, started, "the task to start")
+	e.cancel(t, x.ID)
+
+	holder := e.begin(t) // another producer's open transaction in the group
+	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(holder), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
+		t.Fatal(err)
+	}
+	close(proceed)
+	e.waitBlocked(t, "SET tasks = greatest(g.tasks + u.n, 0)") // CompleteTx holds k, and waits for g
+
+	replaced := make(chan taskmill.EnqueueResult, 1)
+	replace := make(chan error, 1)
+	go func() {
+		res, err := e.client.Enqueue(ctx, sendEmail{To: "replacement"}, &taskmill.EnqueueOptions{DedupeKey: "k", GroupKey: "g"})
+		replaced <- res
+		replace <- err
+	}()
+	e.waitBlockedCount(t, 2) // the replacement waits for k
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recv(t, result, "CompleteTx"); err != nil {
+		t.Fatalf("CompleteTx: %v", err)
+	}
+	if err := recv(t, replace, "the replacement's enqueue"); err != nil {
+		t.Fatalf("replacement: %v", err)
+	}
+	if res := recv(t, replaced, "the replacement's result"); !res.Duplicate || res.ID != x.ID {
+		t.Fatalf("replacement: got %+v, want a duplicate of task %d, which took its key back", res, x.ID)
+	}
+	e.checkGroups(t)
+}
+
+// CompleteTx leaves alone a key that another task holds: a claim of it
+// would lock the key's row, and a CancelTx of that task, while it waits
+// pending in the group, takes the group's row and then the key's. The two
+// would wait for each other.
+func TestCompleteTxSkipsAKeyThatAnotherTaskHolds(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	started, proceed, result := completeTxAfterCancel(t, e)
+
+	x := e.enqueueLate(t)
+	recv(t, started, "the task to start")
+	e.cancel(t, x.ID)
+	z := e.keyed(t, &taskmill.EnqueueOptions{DedupeKey: "k", GroupKey: "g"})
+	if z.Duplicate {
+		t.Fatalf("the replacement is a duplicate of task %d", z.ID)
+	}
+	e.wantState(t, z.ID, taskmill.StatePending) // behind x, with k
+
+	holder := e.begin(t)
+	if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(holder), sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"}); err != nil {
+		t.Fatal(err)
+	}
+	canceler := e.begin(t)
+	canceled := make(chan error, 1)
+	go func() { canceled <- e.client.CancelTx(ctx, taskmill.Pgx(canceler), z.ID) }()
+	e.waitBlockedCount(t, 1) // CancelTx waits for g
+	close(proceed)
+	e.waitBlockedCount(t, 2) // CompleteTx waits for g too
+	if err := holder.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recv(t, canceled, "CancelTx"); err != nil {
+		t.Fatalf("CancelTx: %v", err)
+	}
+	if err := canceler.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := recv(t, result, "CompleteTx"); err != nil {
+		t.Fatalf("CompleteTx: %v", err)
+	}
+	e.waitState(t, x.ID, taskmill.StateCompleted)
+	e.wantState(t, z.ID, taskmill.StateCanceled)
+	e.checkGroups(t)
 }

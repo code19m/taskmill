@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1074,7 +1076,26 @@ type wrappedTx struct {
 	*sql.Tx
 }
 
-func TestTxMethodsAcceptWrappedSQLTransactions(t *testing.T) {
+// wrappedPgxTx wraps a pgx.Tx as an application's type that traces
+// statements does: with the methods that it needs, not by embedding pgx.Tx.
+type wrappedPgxTx struct {
+	tx pgx.Tx
+}
+
+func (w wrappedPgxTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	return w.tx.Exec(ctx, sql, args...)
+}
+
+func (w wrappedPgxTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) { //nolint:ireturn // pgx's rows type is an interface
+	return w.tx.Query(ctx, sql, args...)
+}
+
+func (w wrappedPgxTx) Commit(ctx context.Context) error   { return w.tx.Commit(ctx) }
+func (w wrappedPgxTx) Rollback(ctx context.Context) error { return w.tx.Rollback(ctx) }
+
+// A type that wraps a transaction with its Commit and Rollback methods is a
+// transaction, for pgx as for database/sql.
+func TestTxMethodsAcceptWrappedTransactions(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	db := openSQL(t)
@@ -1090,6 +1111,15 @@ func TestTxMethodsAcceptWrappedSQLTransactions(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	e.wantState(t, id, taskmill.StateCanceled)
+
+	id = e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{GroupKey: "g"})
+	err = pgx.BeginFunc(t.Context(), e.pool, func(tx pgx.Tx) error {
+		return e.client.CancelTx(t.Context(), taskmill.Pgx(wrappedPgxTx{tx}), id)
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	e.wantState(t, id, taskmill.StateCanceled)
@@ -1254,6 +1284,59 @@ func TestNewClientRequiresReadCommitted(t *testing.T) {
 	}
 }
 
+// NewClient warns of a schema on the search path in which every role may
+// create objects, and of no other.
+func TestNewClientWarnsOfASchemaThatAnyRoleMayCreateIn(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	open, closed := testdb.Schema(t, e.pool), testdb.Schema(t, e.pool)
+	e.exec(t, "CREATE SCHEMA "+open)
+	e.exec(t, "CREATE SCHEMA "+closed)
+	e.exec(t, "GRANT CREATE ON SCHEMA "+open+" TO PUBLIC")
+	e.exec(t, "GRANT CREATE ON SCHEMA "+closed+" TO pg_database_owner") // a grant to a role, which is deliberate
+	// An operator that matches the check's comparison better than
+	// pg_catalog's, which any role could add to the open schema, hides nothing.
+	e.exec(t, "CREATE FUNCTION "+open+".no(oid, integer) RETURNS boolean LANGUAGE sql AS 'SELECT false'")
+	e.exec(t, "CREATE OPERATOR "+open+".= (LEFTARG = oid, RIGHTARG = integer, FUNCTION = "+open+".no)")
+
+	// warned returns the schemas that NewClient warns of on a connection
+	// whose search path is path.
+	warned := func(path string) []string {
+		cfg, err := pgxpool.ParseConfig(testdb.DirectURL(t)) // a proxy refuses the parameter
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.MaxConns = 1
+		cfg.ConnConfig.RuntimeParams["search_path"] = path
+		pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pool.Close()
+
+		logs := &logRecorder{}
+		if _, err := taskmill.NewClient(t.Context(), pool, &taskmill.ClientConfig{Schema: e.schema, Logger: slog.New(logs)}); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, r := range logs.all() {
+			r.Attrs(func(a slog.Attr) bool {
+				if r.Message == "every role may create objects in a schema on the search path" && a.Key == "schemas" {
+					got, _ = a.Value.Any().([]string)
+				}
+				return true
+			})
+		}
+		return got
+	}
+
+	for path, want := range map[string][]string{closed + ", public": nil, closed + ", " + open: {open}} {
+		if got := warned(path); !slices.Equal(got, want) {
+			t.Errorf("search path %s: warned of %q, want %q", path, got, want)
+		}
+	}
+}
+
 func TestNewClientRejectsANilEnqueueMiddleware(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -1265,11 +1348,27 @@ func TestNewClientRejectsANilEnqueueMiddleware(t *testing.T) {
 	}
 }
 
-// A client holds back the notification of an enqueue that comes soon after
-// another into the same queue, and sends it when the window ends. Close
-// drops it, so that nothing of the client runs on the pool afterwards, and
-// the client still enqueues.
-func TestCloseDropsTheNotificationsThatTheClientHeldBack(t *testing.T) {
+// inWindow calls try with 0, 1, and so on, until try reports that its two
+// enqueues into its queue ended within one notification window, and
+// returns that queue. A slow database can need a few tries.
+func inWindow(t *testing.T, try func(i int) (queue string, ok bool)) string {
+	t.Helper()
+	for i := range 20 {
+		if queue, ok := try(i); ok {
+			return queue
+		}
+	}
+	t.Fatal("no two enqueues ended within the window")
+	return ""
+}
+
+// A client holds notifications back: those of its own enqueues until the
+// window after its last batch ends, and those of enqueues in the caller's
+// transaction until the window after the queue's last notification ends.
+// Close sends both before it returns, and nothing of the client runs on the
+// pool afterwards. The client still enqueues, and each enqueue then
+// notifies right away.
+func TestCloseSendsTheNotificationsThatTheClientHeldBack(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -1283,42 +1382,52 @@ func TestCloseDropsTheNotificationsThatTheClientHeldBack(t *testing.T) {
 	if _, err := conn.Exec(ctx, "LISTEN "+e.schema); err != nil {
 		t.Fatal(err)
 	}
-
-	// Two enqueues into a queue: the first notifies at once. The second is
-	// held back if it comes within the window, which two enqueues that end
-	// within it surely did. A slow database can need a few tries.
-	held := ""
-	for i := 0; held == ""; i++ {
-		if i == 20 {
-			t.Fatal("no two enqueues ended within the window")
-		}
-		queue, start := fmt.Sprintf("mail-%d", i), time.Now()
-		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: queue})
-		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: queue})
-		if time.Since(start) < taskmill.NotifyWindow {
-			held = queue
+	// await waits for a notification, and counts the others in sent.
+	sent := map[string]int{}
+	await := func(payload string) {
+		t.Helper()
+		for {
+			n, err := conn.WaitForNotification(ctx)
+			if err != nil {
+				t.Fatalf("wait for %s: %v", payload, err)
+			}
+			if n.Payload == payload {
+				return
+			}
+			sent[n.Payload]++
 		}
 	}
+
+	// Two enqueues into a queue, the second within the window after the
+	// first one's notification, and two in the caller's transaction. A slow
+	// database can need a few tries.
+	held := inWindow(t, func(i int) (string, bool) {
+		queue := fmt.Sprintf("tx-%d", i)
+		for range 2 {
+			if _, err := e.client.EnqueueTx(ctx, taskmill.Pgx(e.pool), sendEmail{}, &taskmill.EnqueueOptions{Queue: queue}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return queue, taskmill.HeldNotification(e.client, queue)
+	})
+	pending := inWindow(t, func(i int) (string, bool) {
+		queue := fmt.Sprintf("own-%d", i)
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: queue})
+		await("a|" + queue)
+		e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: queue})
+		return queue, taskmill.PendingNotification(e.client, queue)
+	})
 	e.client.Close()
 	e.client.Close()
 
-	// The held-back notification was due long before this one.
+	// Had Close left a notification to its timer, it would arrive by now.
 	time.Sleep(4 * taskmill.NotifyWindow)
 	e.enqueue(t, sendEmail{}, &taskmill.EnqueueOptions{Queue: "after-close"})
-	sent := 0
-	for {
-		n, err := conn.WaitForNotification(ctx)
-		if err != nil {
-			t.Fatalf("wait for the notification after Close: %v", err)
-		}
-		if n.Payload == "a|after-close" {
-			break
-		}
-		if n.Payload == "a|"+held {
-			sent++
-		}
+	await("a|after-close")
+	if got := sent["a|"+pending]; got != 1 {
+		t.Errorf("after Close, queue %s got %d notifications, want the one held back", pending, got)
 	}
-	if sent != 1 {
-		t.Fatalf("queue %s got %d notifications, want the first one alone", held, sent)
+	if got := sent["a|"+held]; got != 2 {
+		t.Errorf("queue %s got %d notifications, want the first one and the one held back", held, got)
 	}
 }

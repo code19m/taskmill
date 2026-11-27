@@ -1239,12 +1239,11 @@ func TestTaskPagesSayHowTheTaskStandsInItsGroup(t *testing.T) {
 	}
 }
 
-// The page of a dead task finds the FIFO group that the task halts among the
-// halted groups of its queue whose keys contain the task's key, in one read
-// of up to 1,000 of them, as many round trips as for a key that no other
-// contains: an open page reads it at every update. Past those, the page says
-// that the task's place in its group could not be read.
-func TestTaskPageReadsBoundedHaltedGroups(t *testing.T) {
+// The page of a dead task reads the FIFO group that the task halts by its
+// queue and key, however many halted groups of its queue have keys that
+// contain the task's key and come first: as many round trips as for a key
+// that no other contains, and an open page reads it at every update.
+func TestTaskPageFindsItsHaltedGroupAmongMany(t *testing.T) {
 	t.Parallel()
 	client, pool, schema, _, trips := setupCounting(t)
 	ctx := t.Context()
@@ -1281,16 +1280,16 @@ func TestTaskPageReadsBoundedHaltedGroups(t *testing.T) {
 		t.Errorf("the page of a task behind 1,000 halted groups made %d round trips, want %d, as for a key that no other contains", past, found)
 	}
 
-	for target, want := range map[string]string{solo: "This task halts its FIFO group.", k: "Its place in its FIFO group could not be read."} {
-		if _, body, _ := get(t, h, target); !strings.Contains(body, want) {
-			t.Errorf("%s: want %q on the page", target, want)
+	for _, target := range []string{solo, k} {
+		if _, body, _ := get(t, h, target); !strings.Contains(body, "This task halts its FIFO group.") {
+			t.Errorf("%s: the page does not say that the task halts its group", target)
 		}
 	}
 
 	logs.mu.Lock()
 	defer logs.mu.Unlock()
-	if !slices.Contains(logs.messages, "read FIFO group failed") {
-		t.Errorf("logged %q, want why the group could not be read", logs.messages)
+	if len(logs.messages) > 0 {
+		t.Errorf("logged %q, want nothing", logs.messages)
 	}
 }
 

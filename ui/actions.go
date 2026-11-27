@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"slices"
@@ -230,10 +231,14 @@ func (s *server) bulkPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The form carries where a run that stopped early continues.
+	// The form carries where a run that stopped early continues, and what
+	// it did so far.
 	action := sel.query()
-	if cursor := r.URL.Query().Get("cursor"); cursor != "" {
-		action.Set("cursor", cursor)
+	if q := r.URL.Query(); q.Get("cursor") != "" {
+		action.Set("cursor", q.Get("cursor"))
+		for _, key := range []string{"count", "conflicts"} {
+			action.Set(key, strconv.FormatInt(queryNumber(q, key), 10))
+		}
 	}
 
 	s.render(w, r, http.StatusOK, "bulk.html", page{Title: a.Verb + " tasks", Nav: "tasks", Static: true, Dead: s.deadCount(r), Data: bulkData{
@@ -430,6 +435,12 @@ func queryNumber(q url.Values, key string) int64 {
 	return n
 }
 
+// plus adds two counts of tasks, at most up to the largest int64: a count
+// that a link carries may be any number.
+func plus(a, b int64) int64 {
+	return a + min(b, math.MaxInt64-a)
+}
+
 func (s *server) taskAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w, r) {
 		return
@@ -575,8 +586,9 @@ func (s *server) actionFailed(w http.ResponseWriter, r *http.Request, err error,
 // leads back to its page, which offers to try those again. Otherwise it
 // leads to the task list, and says how many tasks a retry left because
 // other tasks hold their dedupe keys: trying again does not help those.
-// Only its page carries where a run continues: the task list always shows
-// every task of the selection.
+// Only its page carries where a run continues, with the counts of the
+// requests before, which BulkResult lets it add up: the task list always
+// shows every task of the selection.
 func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	if s.refuseIfReadOnly(w, r) {
 		return
@@ -599,7 +611,8 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithDeadlineCause(r.Context(), time.Now().Add(time.Until(end)/2), errBudget)
 	defer cancel()
 
-	p := &taskmill.BulkParams{Filter: sel.filter, Cursor: r.URL.Query().Get("cursor")}
+	carried := r.URL.Query()
+	p := &taskmill.BulkParams{Filter: sel.filter, Cursor: carried.Get("cursor")}
 	res, err := a.do(s.client, ctx, p)
 	more := err != nil && errors.Is(context.Cause(ctx), errBudget)
 	if err == nil || more || res.Changed > 0 {
@@ -612,6 +625,13 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A run that continues adds the counts of the requests before. A run
+	// that tries skipped tasks again starts over, and carries none.
+	if p.Cursor != "" {
+		res.Changed = plus(res.Changed, queryNumber(carried, "count"))
+		res.Conflicts = plus(res.Conflicts, queryNumber(carried, "conflicts"))
+	}
+
 	q := sel.query()
 	q.Set("count", strconv.FormatInt(res.Changed, 10))
 	target := "/tasks?"
@@ -620,6 +640,7 @@ func (s *server) bulkAction(w http.ResponseWriter, r *http.Request) {
 		target = a.path + "?"
 		q.Set("done", name+"-more")
 		q.Set("cursor", res.Next)
+		q.Set("conflicts", strconv.FormatInt(res.Conflicts, 10))
 	case res.Skipped > 0:
 		target = a.path + "?"
 		q.Set("done", name+"-skipped")

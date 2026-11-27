@@ -18,9 +18,8 @@ import (
 )
 
 const (
-	pageSize     = 50   // tasks that the task list shows at first, and that "Load more" adds
-	maxShown     = 250  // most tasks that the task list shows on one page, which it reads at every update
-	haltedGroups = 1000 // most halted groups that a dead task's page reads to find its group: the largest page of Client.Groups
+	pageSize = 50  // tasks that the task list shows at first, and that "Load more" adds
+	maxShown = 250 // most tasks that the task list shows on one page, which it reads at every update
 
 	// staleCounts is how old the counts of the overview may be before the
 	// page warns about their age. The maintainer counts every 10 seconds:
@@ -465,26 +464,16 @@ func (s *server) groupOf(r *http.Request, t *taskmill.TaskInfo) (group, error) {
 
 // haltedBy returns the FIFO group that the dead task t halts, and whether it
 // halts one. A dead task halts its group whether or not tasks wait behind it:
-// a task added to the group later waits too. It searches the halted groups of
-// t's queue by t's key, which other keys can contain, in one read of up to
-// haltedGroups: an open page reads it at every update. Halted groups are
-// few, and t's key comes before every key that starts with it. Past that
-// read, it returns an error.
+// a task added to the group later waits too. It reads the one group of t's
+// queue and key, if it is halted.
 func (s *server) haltedBy(ctx context.Context, t *taskmill.TaskInfo) (taskmill.GroupInfo, bool, error) {
-	page, err := s.client.Groups(ctx, &taskmill.GroupParams{Queues: []string{t.Queue}, Search: t.GroupKey, Halted: true, Limit: haltedGroups})
-	if err != nil {
+	page, err := s.client.Groups(ctx, &taskmill.GroupParams{
+		Queues: []string{t.Queue}, Keys: []string{t.GroupKey}, Halted: true, Limit: 1,
+	})
+	if err != nil || len(page.Groups) == 0 || page.Groups[0].HaltedBy != t.ID {
 		return taskmill.GroupInfo{}, false, err
 	}
-
-	for _, g := range page.Groups {
-		if g.HaltedBy == t.ID {
-			return g, true, nil
-		}
-	}
-	if page.Next != "" {
-		return taskmill.GroupInfo{}, false, fmt.Errorf("task %d's group is not among the first %d halted groups of its queue whose keys contain its key", t.ID, haltedGroups)
-	}
-	return taskmill.GroupInfo{}, false, nil
+	return page.Groups[0], true, nil
 }
 
 func (s *server) schedules(w http.ResponseWriter, r *http.Request) {

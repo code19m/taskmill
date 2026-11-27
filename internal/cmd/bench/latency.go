@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,11 +17,16 @@ import (
 // loadRate is half of T3's target, the load at which L2 is measured.
 const loadRate = 10_000
 
+// besideRate is how many tasks a second the client of the second L1 enqueues
+// into other queues.
+const besideRate = 1_000
+
 // L1 to L3: how long an enqueued task waits for a worker, idle and under
 // load, and how long an enqueue takes.
 func benchLatency(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
-	idle := pickup(ctx, pool, d, 0)
-	busy := pickup(ctx, pool, d, loadRate)
+	idle := pickup(ctx, pool, d, 0, 0)
+	beside := pickup(ctx, pool, d, 0, besideRate)
+	busy := pickup(ctx, pool, d, loadRate, 0)
 	calls := enqueueCalls(ctx, pool, d)
 
 	fmt.Println("## Latency")
@@ -27,6 +34,8 @@ func benchLatency(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 	fmt.Println("| ID | Measure | Result |")
 	fmt.Println("|---|---|---|")
 	fmt.Printf("| L1 | Pickup latency of an idle worker, %s tasks | %s |\n", commas(int64(len(idle))), percentiles(idle))
+	fmt.Printf("| L1 | The same with `Enqueue`, while the client enqueues %s tasks/s into 50 other queues, %s tasks | %s |\n",
+		commas(besideRate), commas(int64(len(beside))), percentiles(beside))
 	fmt.Printf("| L2 | Pickup latency at %s tasks/s, 1 worker with concurrency 64, %s tasks | %s |\n",
 		commas(loadRate), commas(int64(len(busy))), percentiles(busy))
 	fmt.Printf("| L3 | `Enqueue` call latency, one task, no load, %s calls | %s |\n", commas(int64(len(calls))), percentiles(calls))
@@ -34,10 +43,10 @@ func benchLatency(ctx context.Context, pool *pgxpool.Pool, d time.Duration) {
 }
 
 // pickup measures the time from just before an enqueue's transaction to the
-// handler's start. With a rate of 0, it enqueues one task at a time, spaced
-// beyond the notification throttle window, so only notifications wake the
-// worker. Otherwise it enqueues rate tasks a second, in transactions of 10.
-func pickup(ctx context.Context, pool *pgxpool.Pool, d time.Duration, rate int) []time.Duration {
+// handler's start. With a rate of 0, it enqueues one task at a time (see
+// oneAtATime). Otherwise it enqueues rate tasks a second, in transactions of
+// 10.
+func pickup(ctx context.Context, pool *pgxpool.Pool, d time.Duration, rate, beside int) []time.Duration {
 	c := fresh(ctx, pool)
 	var mu sync.Mutex
 	var lat []time.Duration
@@ -66,11 +75,7 @@ func pickup(ctx context.Context, pool *pgxpool.Pool, d time.Duration, rate int) 
 	time.Sleep(time.Second) // let the worker connect
 
 	if rate == 0 {
-		end := time.Now().Add(d)
-		for time.Now().Before(end) && ctx.Err() == nil {
-			enqueueStamped(ctx, c, pool, 1)
-			time.Sleep(100 * time.Millisecond) // beyond the notification throttle window
-		}
+		oneAtATime(ctx, c, pool, d, beside)
 	} else {
 		paced(ctx, d, rate/10, func() { enqueueStamped(ctx, c, pool, 10) })
 	}
@@ -81,6 +86,38 @@ func pickup(ctx context.Context, pool *pgxpool.Pool, d time.Duration, rate int) 
 	mu.Lock()
 	defer mu.Unlock()
 	return lat
+}
+
+// oneAtATime enqueues one task at a time for d, spaced beyond the
+// notification throttle window, so only notifications wake the worker. With
+// a beside rate, the client also enqueues that many tasks a second, one per
+// call, into 50 queues that no worker reads, and enqueues the measured tasks
+// on its own too: their notifications go with the client's batches.
+func oneAtATime(ctx context.Context, c *taskmill.Client, pool *pgxpool.Pool, d time.Duration, beside int) {
+	var others sync.WaitGroup
+	if beside > 0 {
+		var next atomic.Int64
+		others.Go(func() {
+			paced(ctx, d, beside, func() {
+				queue := "other-" + strconv.FormatInt(next.Add(1)%50, 10)
+				if _, err := c.Enqueue(ctx, noop{}, &taskmill.EnqueueOptions{Queue: queue}); err != nil {
+					fail(err)
+				}
+			})
+		})
+	}
+	end := time.Now().Add(d)
+	for time.Now().Before(end) && ctx.Err() == nil {
+		if beside > 0 {
+			if _, err := c.Enqueue(ctx, noop{Sent: time.Now().UnixNano()}, nil); err != nil {
+				fail(err)
+			}
+		} else {
+			enqueueStamped(ctx, c, pool, 1)
+		}
+		time.Sleep(100 * time.Millisecond) // beyond the notification throttle window
+	}
+	others.Wait()
 }
 
 // enqueueStamped enqueues n tasks in one transaction, stamped with the time

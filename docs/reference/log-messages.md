@@ -43,7 +43,7 @@ The same key always means the same thing.
 | `tasks`, `task_ids` | How many tasks a line is about, and the IDs of up to 20 of them |
 | `retry_in` | The wait before the next attempt |
 | `released` | Tasks given back to their queue at shutdown |
-| `queues`, `kinds`, `group`, `partition` | Names of queues, kinds, a FIFO group, a history partition |
+| `queues`, `kinds`, `group`, `partition`, `schemas` | Names of queues, kinds, a FIFO group, a history partition, schemas |
 | `workers`, `missing_here`, `missing_there`, `defined_differently` | Workers whose schedules differ from the maintainer's, and the names of those schedules (see [The maintainer](#the-maintainer)) |
 | `max_conns`, `concurrency`, `timeout` | Settings named by the line |
 | `version`, `name` | A migration, or the version of `taskmill-ui` |
@@ -143,6 +143,7 @@ backticks.
 | `record attempt failed; the task is rescued when its lease runs out` | Warn | The result of the attempt could not be saved in time. Once the lease runs out, the maintainer rescues the task. | Check the database. |
 | `completion waits for a row that another transaction holds` | Warn | The task in `task_id` succeeded, but for longer than its lease (`duration`), another transaction has held its row, or its FIFO group's, such as an open `CancelTx`, or a transaction that enqueues into the group. The worker keeps trying; the completion goes through once the row is free, unless the maintainer has rescued the task by then. Logged once per task. | Find the long transaction in `pg_stat_activity`, and end it. |
 | `complete tasks failed; they are rescued when their leases run out` | Warn | `tasks` successful attempts could not be saved. Those tasks run again. `task_ids` names up to 20 of them. | Check the database. Check the work of those tasks, which runs twice. |
+| `completed tasks could not take back the dedupe keys that their cancels freed` | Warn | `tasks` tasks whose cancels were requested while they ran completed all the same, but could not take back the dedupe keys that the cancels freed: another transaction held a key's row for more than 100 ms, or the database failed. `error` says why. The tasks stay completed, without their keys, so an enqueue of one of those keys is not a duplicate. | Nothing, unless it repeats: then look for long transactions that enqueue with those keys. |
 | `handler failed after completing its task; it stays completed` | Warn | The handler returned an error after its `CompleteTx` transaction committed. | Return nil once the transaction has committed. |
 | `enqueue middleware failed after the tasks were enqueued` | Warn | An enqueue middleware returned `error` after `tasks` tasks committed. The enqueue succeeded, but the middleware's work, such as a span, may be missing. | Fix the middleware. |
 | `fifo group missing` | Error | A task left its FIFO group in `queue` and `group`, or halted it, and the group has no row. `task_id` names the task, unless several tasks left the group together. The task still ended as it should. This should never happen. | Please [report it](https://github.com/code19m/taskmill/issues). |
@@ -184,12 +185,13 @@ the others: [Run tasks on a schedule](../guides/schedules.md).
 | `notifications disabled; polling only` | Error | The worker cannot listen. `ListenConfig` was not created with `pgx.ParseConfig`, or the connection goes through a pooler in transaction mode, such as PgBouncer. The worker polls every `PollInterval` instead: tasks start later, and the database works more. | Point `ListenConfig` at a direct connection, made with `pgx.ParseConfig`. See [Connection poolers](../production/connection-poolers.md). |
 | `maintainer heartbeats arrive; idle queues poll once a minute` | Info | The maintainer's heartbeats reach this worker, at start or after a gap. | Nothing. |
 | `maintainer heartbeats do not arrive; idle queues poll every PollInterval` | Warn | No heartbeat came for 15 seconds, so idle queues poll every `PollInterval`. Either no maintainer runs, or notifications don't reach this worker: [Troubleshooting](../production/troubleshooting.md#the-log-says-maintainer-heartbeats-do-not-arrive) lists the causes. The worker logs it again only after the heartbeats came back. | Check that a maintainer runs: `Client.Workers`, or the `taskmill_stats_age_seconds` gauge. Point `ListenConfig` at the primary of the same database. |
-| `notification failed` | Warn | A notification for `queue` was not sent. Its tasks start a little later, when the maintainer wakes the queue or a worker polls. | Nothing, unless it repeats: then check the database. |
+| `notification failed` | Warn | The notifications for `queues` were not sent. Their tasks start a little later, when the maintainer wakes the queues or a worker polls. | Nothing, unless it repeats: then check the database. |
 
 ### History and migrations
 
 | Message | Level | What it means | What to do |
 |---|---|---|---|
+| `every role may create objects in a schema on the search path` | Warn | `NewClient` found that every role may create objects in `schemas`, which are on its connection's search path. A role could then replace a function that taskmill's statements call, with the rights of the role that runs them. Databases created before PostgreSQL 15 grant this on `public`. | Remove the grant: `REVOKE CREATE ON SCHEMA public FROM PUBLIC;`. See [Security](../production/security.md#know-who-can-reach-the-database). |
 | `task history has no partition for today; completed tasks skip history` | Error | Neither the workers, when they started, nor the maintainer could create today's history partition. Tasks still complete, but without history. | Make the role that runs workers own the taskmill tables. See [Database](../production/database.md). |
 | `applied migration` | Info | `Migrate` applied migration `version` (`name`) in `duration`. | Nothing. |
 | `waiting for another process to migrate` | Info | Another process holds the lock of the `migrations` table. `Migrate` tries it again at least every second, until its context ends. | Nothing. If it lasts, see [`Migrate` fails, or never returns](../production/troubleshooting.md#migrate-fails-or-never-returns). |

@@ -3,6 +3,7 @@ package taskmill
 import (
 	"math"
 	"strconv"
+	"strings"
 )
 
 // This file holds the statements that fetch tasks, renew their leases, and
@@ -232,11 +233,19 @@ const completeHeldSQL = `done AS (
 // task that took the key during the run keeps it. Like an enqueue, it
 // waits for a transaction that claims or holds the same key, so a worker
 // runs it once the completion has committed: see Worker.regainKeys.
+//
+// Like an enqueue, it skips a key that it sees held, at READ COMMITTED:
+// ON CONFLICT DO UPDATE would lock the holder's row although it claims
+// nothing. CompleteTx claims before it takes its group's row, and that
+// lock would make it wait in the group for a Cancel or a Delete of the
+// pending holder, which takes the group's row, then the key's.
 const regainKeysSQL = `
 INSERT INTO {s}.dedupe_keys AS d (key, task_id, expires_at)
 SELECT DISTINCT ON (key) key, id, expires_at
 FROM unnest($1::bytea[], $2::bigint[], $3::timestamptz[]) AS u(key, id, expires_at)
 WHERE expires_at > now()
+  AND (current_setting('transaction_isolation') IN ('repeatable read', 'serializable')
+       OR NOT EXISTS (SELECT FROM {s}.dedupe_keys k WHERE k.key = u.key AND k.expires_at > now()))
 ORDER BY key, id
 ON CONFLICT (key) DO UPDATE SET task_id = EXCLUDED.task_id, expires_at = EXCLUDED.expires_at
     WHERE d.expires_at <= now()`
@@ -261,71 +270,91 @@ UNION ALL
 SELECT t.id, false FROM attempts JOIN {s}.tasks t USING (id, lease_token)
 WHERE ` + leasedSQL
 
-// $1 task ID, $2 lease token, $3 retryable or dead, $4 delay in microseconds,
-// $5 error.
+// $1 task IDs, $2 lease tokens, $3 outcomes, $4 delays in microseconds,
+// $5 errors or notes, each NULL or a JSON object, $6 whether the worker
+// has a handler for each task.
 //
-// failSQL records a failed attempt: retryable after a delay of $4
-// microseconds, or dead. $5 is the error as a JSON object. A task
-// whose cancellation was requested is canceled instead.
-const failSQL = `
-UPDATE {s}.tasks
-SET state = CASE WHEN cancel_requested_at IS NOT NULL THEN 'canceled' ELSE $3::{s}.task_state END,
-    run_at = CASE WHEN cancel_requested_at IS NULL AND $3::{s}.task_state = 'retryable'
-                  THEN now() + $4 * interval '1 microsecond' ELSE run_at END,
-    finalized_at = CASE WHEN cancel_requested_at IS NOT NULL OR $3::{s}.task_state = 'dead' THEN now() END,
-    lease_expires_at = NULL,
-    errors = ` + errorsTrimmedSQL + ` || jsonb_build_array(jsonb_build_object('attempt', attempt, 'at', ` + nowRFC3339SQL + `) || $5::jsonb)
-WHERE id = $1 AND lease_token = $2 AND ` + leasedSQL + `
-RETURNING queue, coalesce(group_key, ''), state::text`
+// recordSQL records the outcomes other than completion of the attempts
+// ($1, $2) that still own their tasks. Outcome $3 is one of:
+//
+//   - retryable: run the task again after $4 microseconds, recording
+//     error $5;
+//   - dead: the task ran out of attempts, or failed for good, recording
+//     error $5;
+//   - snooze: run the task again after $4 microseconds, and give the
+//     attempt back, recording $5 as a note if it is not NULL; the note
+//     carries the number of attempts used;
+//   - release: give the task back, attempt included: the worker stopped
+//     the attempt, at a shutdown, or after it read a cancel request.
+//
+// A task whose cancellation was requested is canceled instead: the row
+// decides, so no statement cancels a running task whose row has no
+// request. If $6, the worker has a handler for the task, so a snooze or
+// a release ends its wait for one: its errors lose the note of that
+// wait. The cast makes $4 a bigint: compared with 0 alone, a delay would
+// be an integer, which holds only 35 minutes.
+//
+// It waits for the rows that other transactions hold, and takes them in
+// the order of their IDs. It returns each attempt that it recorded, with
+// its task's queue, FIFO group, and new state, and true.
+var recordSQL = strings.ReplaceAll(recordOutcomesSQL, "{wait}", "") + `
+SELECT id, lease_token, queue, group_key, state, true FROM recorded`
 
-// $1 task ID, $2 lease token, $3 delay in microseconds, $4 note or NULL,
-// $5 the worker has a handler.
+// $1 to $6 as in recordSQL.
 //
-// snoozeSQL runs the task again after $3 microseconds and gives the
-// attempt back, recording $4 as a note if it is not null; the note
-// carries the number of attempts used. If $5 is set, the worker has
-// a handler for the task, so the task's wait for one is over: its
-// errors lose the note of that wait. A task whose cancellation was
-// requested is canceled instead. The cast makes $3 a bigint: compared
-// with 0 alone, it would be an integer, which holds only 35 minutes.
-const snoozeSQL = `
-UPDATE {s}.tasks
-SET state = CASE
-            WHEN cancel_requested_at IS NOT NULL THEN 'canceled'
-            WHEN $3::bigint > 0 THEN 'scheduled'
+// recordSkippingSQL is recordSQL without the wait: it skips the rows
+// that other transactions hold, and returns the attempt of each such task
+// with false, after the attempts that it recorded. So the outcomes of a
+// batch never wait for one row, and the worker records the skipped ones
+// one by one.
+var recordSkippingSQL = strings.ReplaceAll(recordOutcomesSQL, "{wait}", "SKIP LOCKED") + `
+SELECT id, lease_token, queue, group_key, state, true FROM recorded
+UNION ALL
+SELECT t.id, t.lease_token, '', '', '', false FROM outcomes o JOIN {s}.tasks t USING (id, lease_token)
+WHERE NOT EXISTS (SELECT FROM locked l WHERE l.id = o.id) AND ` + leasedSQL
+
+// recordOutcomesSQL is the part of recordSQL and recordSkippingSQL that
+// locks the rows and records the outcomes. {wait} says how the lock
+// treats a row that another transaction holds. The update joins each
+// task to the outcome of its attempt by the lease token too: a batch can
+// hold the outcome of an attempt that lost the task, besides the outcome
+// of the attempt that took it after.
+const recordOutcomesSQL = `
+WITH outcomes AS (
+    SELECT u.id, u.lease_token, u.outcome, u.delay_us, u.note, u.handled
+    FROM unnest($1::bigint[], $2::integer[], $3::text[], $4::bigint[], $5::jsonb[], $6::boolean[])
+        AS u(id, lease_token, outcome, delay_us, note, handled)
+), locked AS (
+    SELECT t.id FROM outcomes JOIN {s}.tasks t USING (id, lease_token)
+    WHERE ` + leasedSQL + `
+    ORDER BY t.id
+    FOR UPDATE OF t {wait}
+), recorded AS (
+    UPDATE {s}.tasks t
+    SET state = CASE
+            WHEN t.cancel_requested_at IS NOT NULL THEN 'canceled'
+            WHEN o.outcome IN ('retryable', 'dead') THEN o.outcome
+            WHEN o.outcome = 'snooze' AND o.delay_us > 0 THEN 'scheduled'
             ELSE 'available'
         END::{s}.task_state,
-    run_at = CASE WHEN cancel_requested_at IS NULL THEN now() + $3 * interval '1 microsecond' ELSE run_at END,
-    attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
-    finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
-    lease_expires_at = NULL,
-    errors = CASE WHEN $4::jsonb IS NOT NULL
-                  THEN ` + errorsTrimmedSQL + ` || jsonb_build_array(jsonb_build_object('attempt', attempt - 1, 'at', ` + nowRFC3339SQL + `) || $4::jsonb)
-                  WHEN $5 THEN ` + errorsUnnotedSQL + `
-                  ELSE errors
-             END
-WHERE id = $1 AND lease_token = $2 AND ` + leasedSQL + `
-RETURNING queue, coalesce(group_key, ''), state::text`
-
-// $1 task ID, $2 lease token, $3 the worker has a handler.
-//
-// releaseSQL ends an attempt that the worker stopped: it cancels the
-// task if its cancellation was requested, and otherwise gives it
-// back, attempt included. It records a shutdown, and an attempt that
-// ended after the worker read a cancel request. So the task's row
-// decides, as in fail and snooze: no statement cancels a running
-// task whose row has no request. If $3 is set, the worker has a
-// handler for the task, and its errors lose the note of a wait for
-// one, as in snooze.
-const releaseSQL = `
-UPDATE {s}.tasks
-SET state = CASE WHEN cancel_requested_at IS NULL THEN 'available' ELSE 'canceled' END::{s}.task_state,
-    attempt = CASE WHEN cancel_requested_at IS NULL THEN attempt - 1 ELSE attempt END,
-    finalized_at = CASE WHEN cancel_requested_at IS NOT NULL THEN now() END,
-    lease_expires_at = NULL,
-    errors = CASE WHEN $3 THEN ` + errorsUnnotedSQL + ` ELSE errors END
-WHERE id = $1 AND lease_token = $2 AND ` + leasedSQL + `
-RETURNING queue, coalesce(group_key, ''), state::text`
+        run_at = CASE WHEN t.cancel_requested_at IS NULL AND o.outcome IN ('retryable', 'snooze')
+                      THEN now() + o.delay_us * interval '1 microsecond' ELSE t.run_at END,
+        attempt = CASE WHEN t.cancel_requested_at IS NULL AND o.outcome IN ('snooze', 'release')
+                       THEN t.attempt - 1 ELSE t.attempt END,
+        finalized_at = CASE WHEN t.cancel_requested_at IS NOT NULL OR o.outcome = 'dead' THEN now() END,
+        lease_expires_at = NULL,
+        errors = CASE
+            WHEN o.outcome IN ('retryable', 'dead')
+            THEN ` + errorsTrimmedSQL + ` || jsonb_build_array(jsonb_build_object('attempt', t.attempt, 'at', ` + nowRFC3339SQL + `) || o.note)
+            WHEN o.note IS NOT NULL
+            THEN ` + errorsTrimmedSQL + ` || jsonb_build_array(jsonb_build_object('attempt', t.attempt - 1, 'at', ` + nowRFC3339SQL + `) || o.note)
+            WHEN o.handled THEN ` + errorsUnnotedSQL + `
+            ELSE t.errors
+        END
+    FROM outcomes o
+    WHERE t.id = o.id AND t.lease_token = o.lease_token AND t.id = ANY(ARRAY(SELECT id FROM locked))
+    RETURNING t.id, t.lease_token, t.queue, coalesce(t.group_key, '') AS group_key, t.state::text AS state
+)`
 
 // leaseSet is what taking a task writes: worker by runs the task, its attempt
 // and its lease token count up, and its lease lasts us microseconds from the

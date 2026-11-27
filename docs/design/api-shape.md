@@ -28,7 +28,10 @@ So with them, every wrapper that a user writes, to trace statements or for
 a test, would carry a method that nothing calls.
 
 A pgx or `database/sql` value passes as it is, and a user's wrapper of a
-transaction needs two methods. The cost: the interfaces are not the type
+transaction needs two methods. taskmill tells a transaction by its
+`Commit` and `Rollback` methods, for pgx as for `database/sql`, and never
+calls them: a wrapper that has them too counts as a transaction, which
+`CancelTx` and `CompleteTx` need. The cost: the interfaces are not the type
 for a value of the caller's own that needs more of pgx. The `DBTX` that
 sqlc generates for pgx has `QueryRow`, for example. Such code passes the
 `pgx.Tx` or the pool itself there, or declares an interface of its own.
@@ -95,7 +98,7 @@ so `CountResult` follows `CountParams`, before v1.0.0.
 ## A task's finish has one name
 
 `TaskInfo.FinishedAt`, `State.Finished`, and the `FinishedSince` and
-`FinishedBefore` of `ListParams` all say "finished", as the comments and
+`FinishedBefore` of `TaskFilter` all say "finished", as the comments and
 the pages do. A range's `Since` starts a period, as in `ActivityParams`, and
 its `Before` leaves the end out, as `time.Time.Before` does. `CreatedSince`
 and `CreatedBefore` follow them, and `TaskInfo.CreatedAt`.

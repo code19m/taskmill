@@ -482,6 +482,35 @@ func TestDefaultTiming(t *testing.T) {
 	}
 }
 
+// Every poll waits a tenth longer or shorter at random, so that workers
+// that noticed together that the heartbeats stopped poll apart.
+func TestEveryPollIsSpread(t *testing.T) {
+	t.Parallel()
+	w := &Worker{cfg: WorkerConfig{PollInterval: time.Second}, timing: defaultTiming}
+	for _, tt := range []struct {
+		name            string
+		notifying, full bool
+		around          time.Duration
+	}{
+		{"heartbeats arrive", true, false, time.Minute},
+		{"no heartbeats", false, false, time.Second},
+		{"at the queue's limit", true, true, time.Second},
+	} {
+		w.notifying.Store(tt.notifying)
+		waits := map[time.Duration]bool{}
+		for range 100 {
+			d := w.pollWait(tt.full)
+			if d < tt.around*9/10 || d > tt.around*11/10 {
+				t.Fatalf("%s: waited %v, want %v ± 10%%", tt.name, d, tt.around)
+			}
+			waits[d] = true
+		}
+		if len(waits) < 50 {
+			t.Errorf("%s: %d different waits in 100, want them spread", tt.name, len(waits))
+		}
+	}
+}
+
 // A task can be due further away than a Duration holds, and in a row that
 // taskmill did not write, at no time at all. Converted first and limited
 // after, as before, such a number gave the shortest sleep on amd64, so the
@@ -745,7 +774,7 @@ func TestNotifierForgetsQueuesAfterTheirWindow(t *testing.T) {
 
 		for _, window := range []string{"first", "second", "third"} {
 			for i := range queues {
-				if queue := window + "-" + strconv.Itoa(i); !n.allow(t.Context(), queue) {
+				if queue := window + "-" + strconv.Itoa(i); !n.allow(queue) {
 					t.Fatalf("the first notification of queue %s was held back", queue)
 				}
 			}

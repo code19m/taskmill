@@ -53,7 +53,10 @@ type Activity struct {
 	// retried or dead, including attempts whose workers lost their leases.
 	// Workers write their counts every 10 seconds; a worker that crashes
 	// loses its last few seconds of them, and a worker drops the counts
-	// that it could not write for 1 hour.
+	// that it could not write for 1 hour. If a write's commit outlasts its
+	// 10 seconds, as when a synchronous standby lags that long, its counts
+	// can be added twice: the worker cannot tell it from a write that
+	// failed, and keeps the counts rather than lose them.
 	Completed, Failed int64
 }
 
@@ -247,6 +250,13 @@ func (w *Worker) activityLoop(ctx context.Context) {
 
 // flushActivity adds the attempts counted since the last flush to the
 // activity table. Counts it cannot write are kept for the next try.
+//
+// A write that runs out of time was usually undone: the deadline cancels
+// the statement. Only a commit that is already under way, waiting for a
+// standby or a disk, outlives the cancel, and the next try then adds its
+// counts twice. Telling the two apart would take a marker of each write in
+// the database, a cost that counts for a chart do not justify: a lost count
+// would hide an incident, a doubled one only exaggerates it.
 func (w *Worker) flushActivity(ctx context.Context) {
 	counts := w.tally.take()
 	if len(counts) == 0 {

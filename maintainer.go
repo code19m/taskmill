@@ -21,8 +21,10 @@ const (
 
 // maintainer does the installation-wide work of one elected worker. Its main
 // loop only takes or renews the leader's lease, so that no work delays the
-// renewal and lets the role change hands. Expired leases are rescued, and
-// due schedules enqueued, once per interval in a loop of their own. Queues
+// renewal and lets the role change hands. Expired leases are rescued once
+// per interval in a loop of their own, and due schedules enqueued in
+// another: a schedule's enqueue can wait for a group's row, or for enqueue
+// middleware, and the rescue must not wait for it. Queues
 // whose tasks wait are woken in another, which also sends the heartbeat
 // that workers count on, and due tasks are promoted in another, as they come
 // due. Statistics, retention, and the comparison of the workers' schedules
@@ -70,12 +72,8 @@ func (m *maintainer) run(ctx, stop context.Context) {
 	var loops sync.WaitGroup
 	loops.Go(func() { m.wakeLoop(ctx) })
 	loops.Go(func() { m.promoteLoop(ctx) })
-	loops.Go(func() {
-		m.every(ctx, m.w.timing.maintainer, func(ctx context.Context) {
-			m.rescue(ctx)
-			m.runSchedules(ctx)
-		})
-	})
+	loops.Go(func() { m.every(ctx, m.w.timing.maintainer, m.rescue) })
+	loops.Go(func() { m.every(ctx, m.w.timing.maintainer, m.runSchedules) })
 	loops.Go(func() { m.every(ctx, m.w.timing.stats, m.refreshStats) })
 	loops.Go(func() { m.every(ctx, m.w.timing.scheduleCheck, m.compareSchedules) })
 	loops.Go(func() {
@@ -177,7 +175,7 @@ func (m *maintainer) promoteLoop(ctx context.Context) {
 }
 
 // every calls work once per interval while this worker leads, until ctx
-// ends. The rescue with the schedules, statistics, retention, and the
+// ends. The rescue, the schedules, statistics, retention, and the
 // comparison of schedules each run in such a loop of their own: retention
 // can take long, when a detach waits for a transaction that reads the
 // history, or a backlog of old tasks takes many batches, and the
@@ -380,7 +378,7 @@ func (m *maintainer) rescue(ctx context.Context) {
 func (m *maintainer) rescueBatch(ctx context.Context) (batch []rescuedTask, err error) {
 	ctx, cancel := m.bound(ctx)
 	defer cancel()
-	err = m.c.inTx(ctx, func(q querier) error {
+	err = m.c.inTx(ctx, m.c.pool, func(q querier) error {
 		r, err := q.query(ctx, m.c.sql.rescue,
 			defaultBackoffBase.Seconds(), defaultBackoffMax.Seconds(), leaseExpired)
 		if err != nil {
