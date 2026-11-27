@@ -154,13 +154,14 @@ export function refine(sel) {
   findMore(sel, field.value);
 }
 
-// placeMenu opens a menu toward the side with room.
+// placeMenu opens a menu toward the side with room, and shows it.
 function placeMenu(sel) {
   const pop = sel.querySelector(".pop");
   pop.classList.remove("pop-end", "pop-up");
   const box = pop.getBoundingClientRect();
   if (box.right > innerWidth - 8) pop.classList.add("pop-end");
   if (box.bottom > innerHeight - 8 && sel.getBoundingClientRect().top > box.height + 16) pop.classList.add("pop-up");
+  sel.dataset.jsPlaced = "";
 }
 
 // listen listens to the menus: they open, close, search, and apply as the
@@ -171,6 +172,7 @@ export function listen() {
     if (!(sel instanceof HTMLDetailsElement) || !sel.matches(".sel")) return;
     const field = sel.querySelector("[data-sel-search]");
     if (!sel.open) {
+      delete sel.dataset.jsPlaced;
       if (field?.value) {
         field.value = "";
         search(sel, "");

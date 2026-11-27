@@ -151,7 +151,8 @@ func TestRangePresetShowsItsListInPlace(t *testing.T) {
 	entries := eval[int](p, `history.length`)
 
 	p.click(".sel-range > summary")
-	p.waitFor(`document.querySelector(".sel-range").open`, "the range's menu opening")
+	p.waitFor(`document.querySelector(".sel-range[open][data-js-placed] > .pop")?.checkVisibility({ visibilityProperty: true })`,
+		"the range's menu opening, placed")
 	p.click(".range-presets > a")
 	p.waitFor(`new URLSearchParams(location.search).has("since") && !document.querySelector(".range-presets > a[aria-current]")`,
 		"the list of the preset showing")
