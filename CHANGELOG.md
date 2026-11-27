@@ -7,8 +7,6 @@ All notable changes to taskmill are recorded here. The format follows
 
 ## [Unreleased]
 
-## [0.18.1] - 2026-11-27
-
 ### Changed
 
 - A worker completes the tasks of FIFO groups in two round trips, where it
@@ -2668,8 +2666,7 @@ Initial release.
   key, and the `taskmilltest` package, helpers to test your code against a
   real PostgreSQL.
 
-[Unreleased]: https://github.com/code19m/taskmill/compare/v0.18.1...HEAD
-[0.18.1]: https://github.com/code19m/taskmill/compare/v0.18.0...v0.18.1
+[Unreleased]: https://github.com/code19m/taskmill/compare/v0.18.0...HEAD
 [0.18.0]: https://github.com/code19m/taskmill/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/code19m/taskmill/compare/v0.16.1...v0.17.0
 [0.16.1]: https://github.com/code19m/taskmill/compare/v0.16.0...v0.16.1
